@@ -15,6 +15,9 @@ pub struct Rental {
     pub api_url: String,
     pub sandbox_id: String,
     pub token: String,
+    /// Fields a newer orx wrote, kept so an older supervisor's rewrite doesn't drop them.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 impl std::fmt::Debug for Rental {
@@ -55,7 +58,7 @@ impl Rental {
                 if let Err(error) = rental.operation("heartbeat").await {
                     eprintln!("rental heartbeat unavailable: {error}");
                 }
-                tokio::time::sleep(HEARTBEAT).await;
+                tokio::time::sleep(crate::config::paced(HEARTBEAT)).await;
             }
         }))
     }
@@ -174,10 +177,10 @@ fn remote_supervisor_command(binary: &str, directory: &str) -> String {
     )
 }
 
-fn cancel_probe_script(directory: &str) -> String {
+fn cancel_probe_script(directory: &str, attempts: u32) -> String {
     format!(
         "d=\"$HOME/{directory}\"; umask 077; mkdir -p \"$d\"; touch \"$d/cancel_requested\"; \
-         for ((i=0;i<40;i++)); do \
+         for ((i=0;i<{attempts};i++)); do \
          if [ -f \"$d/exit_code\" ]; then echo EXIT; exit 0; fi; \
          if [ -f \"$d/pid\" ]; then echo PID; exit 0; fi; sleep 0.25; done; \
          echo 'Waiting for remote supervisor to acknowledge cancellation' >&2; exit 1"
@@ -186,7 +189,7 @@ fn cancel_probe_script(directory: &str) -> String {
 
 pub async fn cancel(target: &super::ssh::SshTarget, directory: &str) -> Result<()> {
     use super::ssh::{sh_quote, ssh_run};
-    let script = cancel_probe_script(directory);
+    let script = cancel_probe_script(directory, 40);
     let state = ssh_run(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
     match state.trim() {
         "EXIT" => Ok(()),
@@ -316,7 +319,7 @@ mod tests {
         let temp = crate::local::git::TemporaryDirectory::new("orx-rental-cancel").unwrap();
         let invoke = || {
             crate::process::command("bash")
-                .args(["-c", &cancel_probe_script("run")])
+                .args(["-c", &cancel_probe_script("run", 1)])
                 .env("HOME", temp.path())
                 .output()
                 .unwrap()
@@ -356,6 +359,7 @@ mod tests {
             api_url: "https://example.invalid".into(),
             sandbox_id: "rental".into(),
             token: "secret".into(),
+            unknown: Default::default(),
         };
         assert!(!format!("{rental:?}").contains("secret"));
         assert_eq!(HEARTBEAT.as_secs(), 30);
@@ -423,6 +427,7 @@ mod tests {
                         api_url: format!("http://{addr}"),
                         sandbox_id: "rental".into(),
                         token: "capability".into(),
+                        unknown: Default::default(),
                     },
                 })
                 .unwrap(),

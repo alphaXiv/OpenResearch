@@ -1101,8 +1101,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       const baselineRun = baselineRunsRef.current.get(run.id);
       const newSinceBaseline =
         runsBaselineReadyRef.current &&
-        (!baselineRun ||
-          (baselineRun.status !== "running" && baselineRun.updatedAt <= run.updatedAt));
+        (!baselineRun || baselineRun.updatedAt <= run.updatedAt);
       if ((previouslyLive && previous) || newSinceBaseline) {
         if (streamingRunsRef.current.has(run.id)) openStreamingRun(run);
         else autoOpenRunsRef.current.set(run.id, run);

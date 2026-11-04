@@ -10,6 +10,9 @@ pub struct ContainerRun {
     pub id: String,
     pub started_at: String,
     pub run_dir: String,
+    /// Fields a newer orx wrote, kept so an older supervisor's rewrite doesn't drop them.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -106,6 +109,7 @@ printf '%s' "$HOME"
         id: found.id,
         started_at: found.started_at,
         run_dir: format!("{}/.orx/runs", home.trim_end_matches('/')),
+        unknown: Default::default(),
     })
 }
 

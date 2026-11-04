@@ -553,23 +553,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn stored_tokens_refresh_once_rotate_and_revoke() {
-        // Credentials and the config dir are process-global, so the test body
-        // runs in a child process with its own config dir.
-        if std::env::var("ORX_ALPHAXIV_TEST_CHILD").is_err() {
-            let root = std::env::temp_dir().join(format!("orx-alphaxiv-{}", uuid::Uuid::new_v4()));
-            let status = crate::process::tokio_command(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "alphaxiv::tests::stored_tokens_refresh_once_rotate_and_revoke",
-                    "--nocapture",
-                ])
-                .env("ORX_ALPHAXIV_TEST_CHILD", "1")
-                .env("XDG_CONFIG_HOME", &root)
-                .status()
-                .await
-                .unwrap();
-            let _ = std::fs::remove_dir_all(root);
-            assert!(status.success());
+        if !crate::config::in_test_child(&["ALPHAXIV_API_URL", "ALPHAXIV_WEB_URL"]) {
             return;
         }
 

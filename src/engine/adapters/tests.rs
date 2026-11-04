@@ -2395,6 +2395,7 @@ async fn paused_container_cancel_retries_until_unpause_or_removal() {
             id: "cid".into(),
             started_at: "generation".into(),
             run_dir: "/unused".into(),
+            unknown: Default::default(),
         };
         let mut intent = f.intent(id, "touch ready; sleep 60", "ssh_job");
         intent.launch.options = json!({"cancel_sh":container.engine_cancel_sh()});

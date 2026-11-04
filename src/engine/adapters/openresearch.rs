@@ -497,6 +497,7 @@ impl Backend for OpenResearch {
             api_url: creds.api_url,
             sandbox_id: created.sandbox.id,
             token: lease.token,
+            unknown: Default::default(),
         });
         Ok(Handle::Legacy {
             descriptor: Box::new(descriptor),

@@ -32,7 +32,9 @@ compute capabilities.
 **The config directory never moves**, which is why the settings that point
 at the data directory, the credentials for openresearch.sh, alphaXiv and
 Overleaf, and every cross-process lock live there. A lock inside the data
-directory could not guard a move of that directory.
+directory could not guard a move of that directory. Old and new binaries
+rewrite the same settings files, so each save keeps the fields its binary
+does not know.
 
 A desktop app launched from Finder inherits none of the user's shell
 environment, so app mode imports a short list of variables from the login
@@ -74,6 +76,9 @@ is still being indexed, and reads each result page from one database snapshot.
 Results follow newest stored messages first, with row-ID cursors that do not
 shift when a streaming reply changes. Scoped searches bound the full-text
 scan to their messages' row-ID range and check membership against session rows.
+
+`tests/contracts/store-schema.json` holds the last release's columns; a test
+checks the current schema against it.
 
 ## Code lives in Git
 

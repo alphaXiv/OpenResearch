@@ -1027,6 +1027,7 @@ pub async fn submit_supervised(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         source_path: None,
         source_size: None,
         remote_root: None,
+        unknown: Default::default(),
     };
     source.0.apply_to_descriptor(&mut descriptor);
     let now = crate::store::now_ms();
@@ -1412,10 +1413,12 @@ pub(crate) mod tests {
                         container: Some("research".into()),
                         remote_root: Some("/scratch/lab/orx".into()),
                         keep_remote_runs: false,
+                        ..Default::default()
                     },
                 ),
                 ("direct".into(), SshHostSettings::default()),
             ]),
+            ..Default::default()
         };
         let mut args = tinker_args();
         args.backend = Some("ssh".into());

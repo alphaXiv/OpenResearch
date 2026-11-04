@@ -8,7 +8,7 @@
 use std::io::{Seek as _, Write as _};
 use std::time::Duration;
 
-use crate::config::Credentials;
+use crate::config::{paced, Credentials};
 use crate::error::{anyhow, Result};
 use crate::jobs::huggingface as hf;
 use crate::jobs::kubernetes as k8s;
@@ -111,9 +111,12 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
+/// How long a finished job's final log pass may take.
+const LOG_DRAIN: Duration = Duration::from_secs(20);
+const LOG_RETRY: Duration = Duration::from_secs(2);
 
 fn should_report_monitoring_error(already_reported: bool, elapsed: Option<Duration>) -> bool {
-    already_reported || elapsed.is_some_and(|elapsed| elapsed >= MONITORING_GRACE)
+    already_reported || elapsed.is_some_and(|elapsed| elapsed >= paced(MONITORING_GRACE))
 }
 
 fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
@@ -298,7 +301,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -309,7 +312,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
         // complete local log.
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -341,7 +344,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
             request_backend_cancel(&token, &namespace, &job_id, &run_id, &mut cancel_sent).await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -433,7 +436,7 @@ async fn tail_logs(
         if draining && result.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -495,7 +498,7 @@ async fn run_k8s(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -504,7 +507,7 @@ async fn run_k8s(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -549,7 +552,7 @@ async fn run_k8s(
             .await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -595,7 +598,7 @@ async fn tail_logs_k8s(
         if draining && streamed.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -648,7 +651,7 @@ async fn run_modal(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -659,7 +662,7 @@ async fn run_modal(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -690,7 +693,7 @@ async fn run_modal(
             cancel_modal(&sandbox_id, &run_id, &mut cancel_sent).await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -731,7 +734,7 @@ async fn tail_logs_modal(
         if draining && result.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -778,7 +781,7 @@ async fn run_vercel(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -814,7 +817,7 @@ async fn run_vercel(
             cancel_vercel(&name, &run_id, &mut cancel_sent).await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -838,7 +841,7 @@ async fn drain_vercel_logs(
     let size = || std::fs::metadata(path).map(|m| m.len()).ok();
     let mut last = size();
     loop {
-        if tokio::time::timeout(VERCEL_DRAIN_STALL, &mut *log_task)
+        if tokio::time::timeout(paced(VERCEL_DRAIN_STALL), &mut *log_task)
             .await
             .is_ok()
         {
@@ -861,7 +864,7 @@ async fn drain_vercel_logs(
 /// the run is terminal no supervisor comes back for it, so a sandbox left here
 /// keeps billing until its session limit.
 async fn finish_vercel(name: &str, run_id: &str) {
-    let mut delay = Duration::from_secs(2);
+    let mut delay = paced(Duration::from_secs(2));
     for attempt in 1..=VERCEL_FINISH_ATTEMPTS {
         match vercel::finish_job(name).await {
             Ok(()) => return,
@@ -918,7 +921,7 @@ async fn tail_logs_vercel(
         if draining && result.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -1077,7 +1080,7 @@ pub(crate) async fn watch_ssh_job(
                 },
                 _ => {
                     missing_polls = 0;
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    tokio::time::sleep(paced(POLL_INTERVAL)).await;
                     continue;
                 }
             },
@@ -1086,7 +1089,7 @@ pub(crate) async fn watch_ssh_job(
         if job.message.as_deref() == Some(ssh::RUN_DIR_MISSING) {
             missing_polls += 1;
             if missing_polls < 3 {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         } else {
@@ -1110,7 +1113,7 @@ pub(crate) async fn watch_ssh_job(
                 if openresearch::box_deleted(creds, id).await {
                     job.stage = "LOST".into();
                 } else {
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    tokio::time::sleep(paced(POLL_INTERVAL)).await;
                     continue;
                 }
             }
@@ -1121,7 +1124,7 @@ pub(crate) async fn watch_ssh_job(
         if is_terminal_stage(stage) || stage == "LOST" {
             let _ = done_tx.send(true);
             let collected = matches!(
-                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                tokio::time::timeout(paced(LOG_DRAIN), &mut log_task).await,
                 Ok(Ok(true))
             );
             if !collected {
@@ -1204,7 +1207,7 @@ pub(crate) async fn watch_ssh_job(
             .await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -1258,7 +1261,7 @@ async fn tail_logs_ssh(
         if let Some(errors) = &errors {
             errors.send_replace(last_error.clone());
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -1372,12 +1375,12 @@ pub(crate) async fn run_openresearch_loop(
                     Ok(openresearch::WaitOutcome::TimedOut(reason)) if transport.is_some() => {
                         drop(bootstrap_heartbeat.take());
                         eprintln!("supervise {run_id}: provisioning unresolved: {reason}");
-                        tokio::time::sleep(POLL_INTERVAL).await;
+                        tokio::time::sleep(paced(POLL_INTERVAL)).await;
                     }
                     Err(error) if transport.is_some() => {
                         drop(bootstrap_heartbeat.take());
                         eprintln!("supervise {run_id}: provisioning unavailable: {error}");
-                        tokio::time::sleep(POLL_INTERVAL).await;
+                        tokio::time::sleep(paced(POLL_INTERVAL)).await;
                     }
                     Ok(openresearch::WaitOutcome::Failed(reason))
                     | Ok(openresearch::WaitOutcome::TimedOut(reason)) => {
@@ -1441,7 +1444,7 @@ pub(crate) async fn run_openresearch_loop(
                         )?;
                         return Ok(());
                     }
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 }
                 Err(_) => break false,
             }
@@ -1482,7 +1485,7 @@ pub(crate) async fn run_openresearch_loop(
             let mut launch_err = None;
             for backoff_secs in [0u64, 5, 10, 20, 30, 45] {
                 if backoff_secs > 0 {
-                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    tokio::time::sleep(paced(Duration::from_secs(backoff_secs))).await;
                 }
                 if local_cancel_requested(store, &run_id) {
                     eprintln!("supervise {run_id}: cancelled before launch");
@@ -1498,7 +1501,7 @@ pub(crate) async fn run_openresearch_loop(
                     if transport.is_some() {
                         drop(bootstrap_heartbeat.take());
                         store.transport_error(&run_id, &target, &err.to_string())?;
-                        tokio::time::sleep(POLL_INTERVAL).await;
+                        tokio::time::sleep(paced(POLL_INTERVAL)).await;
                         continue 'bootstrap;
                     }
                     launch_err = Some(err);
@@ -1528,7 +1531,7 @@ pub(crate) async fn run_openresearch_loop(
                         if transport.is_some() {
                             drop(bootstrap_heartbeat.take());
                             store.transport_error(&run_id, &target, &err.to_string())?;
-                            tokio::time::sleep(POLL_INTERVAL).await;
+                            tokio::time::sleep(paced(POLL_INTERVAL)).await;
                             continue 'bootstrap;
                         }
                         launch_err = Some(err);
@@ -1640,7 +1643,7 @@ async fn run_local(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -1676,7 +1679,7 @@ async fn run_local(
             cancel_local(&dir, &run_id, &mut cancel_sent);
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -1716,7 +1719,7 @@ async fn tail_logs_local(
         if draining && drained {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -1814,7 +1817,7 @@ async fn run_slurm(
             }
         }
         if status_error.is_some() {
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::time::sleep(paced(POLL_INTERVAL)).await;
             continue;
         }
         let job = observed?;
@@ -1824,7 +1827,7 @@ async fn run_slurm(
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
             let collected = matches!(
-                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                tokio::time::timeout(paced(LOG_DRAIN), &mut log_task).await,
                 Ok(Ok(true))
             );
             if !collected {
@@ -1852,7 +1855,7 @@ async fn run_slurm(
             last_status = status;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -1911,14 +1914,14 @@ async fn run_ray(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
         if job.stage == "GONE" {
             gone_polls += 1;
             if gone_polls < GONE_POLLS_TO_FAIL {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
             job = ray::JobInfo {
@@ -1937,7 +1940,7 @@ async fn run_ray(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -1973,7 +1976,7 @@ async fn run_ray(
             }
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -2042,7 +2045,7 @@ async fn tail_logs_ray(
         if draining && drained {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -2166,7 +2169,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn local_tail_keeps_its_log_until_replayed_and_finishes_partial_lines() {
         let temp = crate::local::git::TemporaryDirectory::new("orx-tail-test").unwrap();
         let (source, path) = (temp.path().join("run"), temp.path().join("run.log"));
@@ -2199,7 +2202,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_stalled_stream_pass_yields_to_the_final_drain() {
         let (tx, mut rx) = tokio::sync::watch::channel(false);
         let stalled = std::future::pending::<Result<()>>();

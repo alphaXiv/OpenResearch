@@ -153,7 +153,7 @@ fn opencode_config_json(
 const SYSTEM_PROMPT: &str = include_str!("../../SYSTEM_PROMPT.md");
 
 #[derive(Default)]
-struct ProjectState {
+pub(super) struct ProjectState {
     experiments: usize,
     runs: usize,
     active_runs: usize,
@@ -216,7 +216,7 @@ fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
     )
 }
 
-fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
+pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
     let id = &project.id;
     let name = &project.name;
     let publication_line = if project.github_enabled() {
@@ -1020,7 +1020,7 @@ impl AgentHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::agent_skills::{self, SkillSet};
+    use crate::local::agent_text::sample_project;
 
     #[test]
     fn alphaxiv_server_has_its_own_name_and_asks_before_writes() {
@@ -1416,206 +1416,22 @@ mod tests {
         assert!(host.stopping.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    fn sample_project() -> LocalProject {
-        LocalProject {
-            id: "proj_test".into(),
-            name: "Test Project".into(),
-            slug: "test-project".into(),
-            github_owner: "acme".into(),
-            github_repo: "widget".into(),
-            github_sync_enabled: true,
-            baseline_branch: "main".into(),
-            repo_path: "/tmp/nonexistent".into(),
-            run_command: None,
-            paper_id: None,
-            created_at: 0,
-            updated_at: 0,
-        }
-    }
-
-    fn sample_playbook() -> String {
-        playbook_md(&sample_project(), &ProjectState::default())
-    }
-
-    /// The playbook's runtime placeholders must all resolve.
     #[test]
-    fn playbook_has_no_unresolved_placeholders() {
-        let md = sample_playbook();
-        // Scanned, not listed: a NEWLY ADDED token playbook_md doesn't know
-        // about is exactly the case a hardcoded list cannot catch, and the
-        // agent would read the literal `{token}` as instruction.
-        let leftover: Vec<&str> = md
-            .lines()
-            .flat_map(|line| {
-                line.match_indices('{').filter_map(move |(i, _)| {
-                    let rest = &line[i + 1..];
-                    let end = rest.find('}')?;
-                    let token = &rest[..end];
-                    (!token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
-                        .then_some(&line[i..=i + end + 1])
-                })
-            })
-            .collect();
-        assert!(leftover.is_empty(), "unresolved placeholders: {leftover:?}");
-        for retired in [
-            "{files}",
-            "{memory}",
-            "{experiment_publish_clause}",
-            "{edit_step}",
-            "{compute_contract}",
-            "{launch_step}",
-            "{backends_intro}",
-            "{run_invocation}",
-            "{run_guidance}",
-            "{compute_guidance}",
-            "{skills_scope}",
-            "{max_spawns}",
-            "{skills_list}",
-        ] {
-            assert!(!md.contains(retired), "retired placeholder {retired}");
-        }
-        // The template's leading HTML comment (repo-reader documentation) must
-        // be stripped — the prompt starts at the title.
-        assert!(
-            md.starts_with("# OpenResearch agent"),
-            "template comment not stripped"
-        );
-        assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
-        assert!(md.contains("Use the available OpenResearch skills"));
-        assert!(md.contains("execute important user flows"));
-        assert!(!md.contains("orx skill <name>"));
-        assert!(md.contains("Native OpenResearch skills start with `orx-`"));
-        assert!(md.contains("Load the relevant skill before acting"));
-        for skill in agent_skills::skills(SkillSet::Local) {
-            assert!(!md.contains(&format!("- `{}`:", skill.name)));
-        }
-        assert!(md.contains("orx-compute"));
-        assert!(md.contains("helping the user across the research process"));
-        assert!(md.contains("The user's current project is **Test Project**"));
-        assert!(!md.contains("running inside `orx up`"));
-        assert!(!md.contains("## Memory"));
-        assert!(!md.contains("User memory"));
-        assert!(!md.contains("Project memory"));
-    }
-
-    #[test]
-    fn playbook_keeps_runtime_facts_and_delegates_procedures() {
+    fn project_state_summarizes_counts_and_the_run_command() {
         let mut project = sample_project();
-        project.github_owner.clear();
-        project.github_repo.clear();
-        let md = playbook_md(&project, &ProjectState::default());
-        assert!(md.contains("default target"));
-        assert!(md.contains("orx-compute"));
-        assert!(!md.contains("## Cardinal rules"));
-        assert!(!md.contains("## Command index"));
-        assert!(!md.contains("## The auto-research loop"));
-        assert!(!md.contains("## Compute backends"));
-    }
+        let fresh = project_state_md(&project, &ProjectState::default());
+        assert!(fresh.contains("**0 experiments and 0 runs**"));
+        assert!(fresh.contains("no fixed run command"));
 
-    #[test]
-    fn playbook_carries_python_environment_policy() {
-        let md = sample_playbook();
-        assert!(md.contains("## Python environments"));
-        assert!(md.contains("use `uv run --locked`"));
-        assert!(md.contains("Without uv"));
-    }
-
-    #[test]
-    fn playbook_short_circuits_orientation_for_a_fresh_project() {
-        let md = sample_playbook();
-        assert!(md.contains("## Project state"));
-        assert!(md.contains("fresh project: **0 experiments and 0 runs**"));
-        assert!(md.contains("experiment tree is empty and no fixed run command is configured"));
-        assert!(!md.contains("Do not inspect the tree"));
-
-        let mut project = sample_project();
-        project.run_command = Some("python train.py".into());
-        let configured = playbook_md(&project, &ProjectState::default());
-        assert!(
-            configured.contains("experiment tree is empty and the fixed run command is configured")
-        );
-    }
-
-    #[test]
-    fn playbook_summarizes_existing_project_state_without_inlining_the_tree() {
-        let mut project = sample_project();
         project.run_command = Some("python train.py".into());
         let state = ProjectState {
             experiments: 12,
             runs: 18,
             active_runs: 1,
         };
-        let md = playbook_md(&project, &state);
-        assert!(md.contains("**12 experiments**"));
-        assert!(md.contains("**18 runs** (1 run active)"));
-        assert!(md.contains("fixed run command is configured"));
-        assert!(md.contains("orientation snapshot"));
-        assert!(!md.contains("Experiment tree:"));
-    }
-
-    #[test]
-    fn compute_skill_explains_automatic_result_messages() {
-        let md = sample_playbook();
-        let compute = agent_skills::find("orx-compute", SkillSet::Local).unwrap();
-        assert!(compute.content.contains("`orx exp wake <expId>`"));
-        assert!(compute
-            .content
-            .contains("The launching chat is\nsubscribed automatically"));
-        assert!(!compute.content.contains("Wake-up is opt-in"));
-        assert!(!md.contains("`orx exp wake <expId>`"));
-        assert!(!md.contains("OpenResearch injects an `[orx]` message"));
-    }
-
-    #[test]
-    fn playbook_directs_figure_work_to_the_figures_skill() {
-        // Without this the agent plots with raw matplotlib and never loads the
-        // module, which is what shipped the first unusable figures.
-        let md = sample_playbook();
-        assert!(md.contains("`orx-figures` before writing plotting code"));
-    }
-
-    #[test]
-    fn reports_skill_owns_artifact_output_policy() {
-        let md = sample_playbook();
-        let reports = agent_skills::find("orx-reports", SkillSet::Local).unwrap();
-        assert!(md.contains("`orx-reports` before creating or organizing artifacts"));
-        assert!(reports.content.contains("Reuse the relevant folder"));
-        assert!(reports
-            .content
-            .contains("<file path=\"artifacts/transformer-sweep/figures/patch-size.svg\" />"));
-        assert!(!md.contains("PROJECT.md"));
-    }
-
-    #[test]
-    fn playbook_owns_clickable_references() {
-        let md = sample_playbook();
-        let results = agent_skills::find("orx-results", SkillSet::Local).unwrap();
-        let logs = agent_skills::find("orx-logs", SkillSet::Local).unwrap();
-        assert!(md.contains("## Evidence and links in chat"));
-        assert!(md.contains("<file path=\"relative/path.py\" />"));
-        assert!(md.contains("exp=\"<experimentId>\""));
-        assert!(md.contains("<run id=\"<runId>\" />"));
-        assert!(md.contains("<file path=\"artifacts/<relative-path>\" />"));
-        assert!(md.contains("Scholarly claims use the source links"));
-        assert!(md.contains("Use `$...$` for inline math"));
-        assert!(results.content.contains("Validate before reporting"));
-        assert!(logs
-            .content
-            .contains("Truncated output is not evidence of absence"));
-        assert!(!results.content.contains("<file path="));
-    }
-
-    #[test]
-    fn playbook_avoids_ui_navigation() {
-        let mut local_only = sample_project();
-        local_only.github_owner.clear();
-        local_only.github_repo.clear();
-
-        for md in [
-            sample_playbook(),
-            playbook_md(&local_only, &ProjectState::default()),
-        ] {
-            crate::local::assert_agent_guidance_is_ui_agnostic("playbook", &md);
-        }
+        let existing = project_state_md(&project, &state);
+        assert!(existing.contains("**12 experiments**"));
+        assert!(existing.contains("**18 runs** (1 run active)"));
+        assert!(existing.contains("fixed run command is configured"));
     }
 }

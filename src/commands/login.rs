@@ -483,23 +483,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn one_browser_trip_signs_in_or_links() {
-        // Credentials and the alphaXiv URL are process-global, so the test body
-        // runs in a child process with its own config dir.
-        if std::env::var("ORX_LOGIN_TEST_CHILD").is_err() {
-            let root = std::env::temp_dir().join(format!("orx-login-{}", uuid::Uuid::new_v4()));
-            let status = crate::process::tokio_command(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "commands::login::tests::one_browser_trip_signs_in_or_links",
-                    "--nocapture",
-                ])
-                .env("ORX_LOGIN_TEST_CHILD", "1")
-                .env("XDG_CONFIG_HOME", &root)
-                .status()
-                .await
-                .unwrap();
-            let _ = std::fs::remove_dir_all(root);
-            assert!(status.success());
+        if !crate::config::in_test_child(&["ALPHAXIV_API_URL", "ALPHAXIV_WEB_URL"]) {
             return;
         }
 

@@ -34,7 +34,7 @@ import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as
 import { markLiveUpdate } from "../queries/live";
 
 import { nativeOptions, sessionAcpHarness } from "../acp";
-import { resolveHarnessDefaultModel } from "../modelSelection";
+import { deriveComposerSelection, resolveHarnessDefaultModel } from "../modelSelection";
 
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
@@ -168,6 +168,7 @@ import {
   attachmentToken,
   citedAttachments,
   composerStashContent,
+  mergeFailedComposer,
   EMPTY_COMPOSER_STASH,
   nextAttachmentId,
   type ComposerAnnotation,
@@ -189,6 +190,7 @@ import { ChatImageScope, Md } from "./Md";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
+import { useComposerFocus } from "./useComposerFocus";
 import { ExperimentRunBanner } from "./ExperimentRunBanner";
 import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
@@ -5017,47 +5019,6 @@ const STARTER_TONES = [
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
-function mergeFailedComposer(current: ComposerStash, failed: ComposerStash): ComposerStash {
-  const annotations = [...current.annotations];
-  for (const annotation of failed.annotations) {
-    if (annotations.some((item) => item.id === annotation.id && item.text === annotation.text)) continue;
-    let id = annotation.id;
-    while (annotations.some((item) => item.id === id)) id += ":recovered";
-    annotations.unshift(id === annotation.id ? annotation : { ...annotation, id });
-  }
-  return {
-    draft: [failed.draft, current.draft].filter(Boolean).join("\n\n"),
-    attachments: [...failed.attachments.filter((item) => !current.attachments.includes(item)), ...current.attachments],
-    annotations,
-    unconfirmedSend: current.unconfirmedSend ?? failed.unconfirmedSend,
-    pendingClientTurn: current.pendingClientTurn ?? failed.pendingClientTurn,
-  };
-}
-
-/** Reconcile the settings attached to a selected model without treating the
- * catalog as an allowlist. The picker deliberately accepts free-form ids, so
- * replacing an unlisted id with the catalog's first entry changes both what
- * the composer displays and what the next request sends. Invalid ids should
- * reach the CLI and surface its real error instead. */
-export function deriveComposerSelection(
-  rawSelection: ModelSelection | null,
-  activeHarness: Harness | undefined,
-): ModelSelection | null {
-  if (!rawSelection) return null;
-  const model = (rawSelection.harness === "codex" || rawSelection.harness === "claude-code") && (rawSelection.model == null || rawSelection.model === "default")
-    ? resolveHarnessDefaultModel(activeHarness) ?? rawSelection.model ?? null
-    : rawSelection.model ?? null;
-  const readyHarness = activeHarness?.catalogPending || (activeHarness?.id === "codex" && !activeHarness.models.length)
-    ? undefined
-    : activeHarness;
-  return {
-    ...rawSelection,
-    model,
-    serviceTier: reconcileServiceTier(readyHarness, model, rawSelection.serviceTier),
-    reasoningLevel: reconcileReasoning(readyHarness, model, rawSelection.reasoningLevel),
-  };
-}
-
 export function ChatPanel({
   projectId,
   projectName,
@@ -6578,32 +6539,13 @@ export function ChatPanel({
     setSkillMenuDismissed(false);
     setComposerCursor(composerPrefill.length);
   }, [composerPrefill]);
-  const [newChatFocusProject, setNewChatFocusProject] = useState<string | null>(null);
-  const focusedComposerNonce = useRef(0);
-  useEffect(() => {
-    // The composer is inert while its chat is loading. Keep the
-    // request pending until it can take focus, and consume it only once.
-    const newChatPending = newChatFocusProject === projectId && activeId === null;
-    const composerPending = composerFocusNonce !== 0 && composerFocusNonce !== focusedComposerNonce.current;
-    if ((!newChatPending && !composerPending) || mainView !== "chat" || contentLoading || contentError || historyLoading) return;
-    // The welcome dialog restores its previous focus on unmount; run after that.
-    const frame = window.requestAnimationFrame(() => {
-      if (document.activeElement?.closest("[role=search]")) {
-        focusedComposerNonce.current = composerFocusNonce;
-        if (newChatPending) setNewChatFocusProject(null);
-        return;
-      }
-      const composer = composerRef.current;
-      if (!composer?.dom) return;
-      composer.focus();
-      if (!composer.dom.contains(document.activeElement)) return;
-      focusedComposerNonce.current = composerFocusNonce;
-      if (newChatPending) setNewChatFocusProject(null);
-      composer.focus("end");
-      composer.dom.scrollIntoView({ block: "nearest" });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [composerFocusNonce, newChatFocusProject, projectId, activeId, mainView, contentLoading, contentError, historyLoading]);
+  const requestNewChatFocus = useComposerFocus(
+    composerRef,
+    composerFocusNonce,
+    mainView === "chat" && !contentLoading && !contentError && !historyLoading,
+    projectId,
+    activeId,
+  );
   const demoHintId = useId();
   const unconfirmedSendId = useId();
   const demoHintVisible =
@@ -7388,7 +7330,7 @@ export function ChatPanel({
   const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
-    setNewChatFocusProject(projectId);
+    requestNewChatFocus(projectId);
     onActiveSessionChange(null);
   }, [onActiveSessionChange, projectId]);
   const startNewTask = useCallback(async () => {
@@ -7398,7 +7340,7 @@ export function ChatPanel({
         !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
       setSessionFilter("active");
       const targetProject = latest?.projectId ?? projectId;
-      setNewChatFocusProject(targetProject);
+      requestNewChatFocus(targetProject);
       onActiveSessionChange(null, { projectId: targetProject });
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");

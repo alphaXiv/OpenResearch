@@ -426,11 +426,13 @@ mod antigravity_tests {
 
     #[test]
     fn only_known_reads_inside_the_workspace_skip_approval() {
-        let root = std::env::current_dir().unwrap();
+        let root = crate::local::git::TemporaryDirectory::new("orx-agy-workspace").unwrap();
+        let root = root.path();
+        std::fs::write(root.join("notes.md"), "").unwrap();
         let payload = json!({"workspacePaths":[root]});
         assert!(workspace_read(
             "view_file",
-            &json!({"AbsolutePath":root.join("Cargo.toml")}),
+            &json!({"AbsolutePath":root.join("notes.md")}),
             &payload
         ));
         assert!(!workspace_read(
@@ -448,10 +450,12 @@ mod antigravity_tests {
 
     #[tokio::test]
     async fn bypass_env_var_allows_immediately() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
         std::env::set_var("ORX_AGY_GATE", "bypass");
         let res = antigravity_decision("invalid-json").await.unwrap();
         assert_eq!(res["decision"], "allow");
-        std::env::remove_var("ORX_AGY_GATE");
     }
 
     #[test]

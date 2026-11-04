@@ -111,7 +111,7 @@ Use before any web search for academic/research queries (paper, author, blog, mo
 | `orx discover openalex "<query>"` | Search the cross-disciplinary OpenAlex scholarly graph. |
 | `orx discover biorxiv "<query>"` | Search bioRxiv preprints through OpenAlex's bioRxiv index. |
 | `orx discover pubmed "<query>"` | Search PubMed biomedical literature through NCBI E-utilities. |
-| `orx paper <id\|url> [--source ...] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv/PubMed metadata+abstract. Source auto-detected from the id. |
+| `orx paper <id\|url> [--source <source>] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv/PubMed metadata+abstract. Source auto-detected from the id. |
 
 ### Skills & templates — module `orx-customize`
 | Command | What it does |
@@ -123,7 +123,7 @@ Use before any web search for academic/research queries (paper, author, blog, mo
 | Command | What it does |
 |---|---|
 | `orx skill [name[/resource]]` | Print this overview, one bundled module, or a lazily loaded module resource such as `compute/hf`. |
-| `orx feedback --kind <bug\|feature_request\|frustration> --summary ... --details ...` | Report a meaningful OpenResearch bug, feature request, or user frustration to its maintainers. See the `orx-feedback` module. |
+| `orx feedback --kind <bug\|feature_request\|frustration> --summary <summary> --details <details>` | Report a meaningful OpenResearch bug, feature request, or user frustration to its maintainers. See the `orx-feedback` module. |
 
 ## Modules
 

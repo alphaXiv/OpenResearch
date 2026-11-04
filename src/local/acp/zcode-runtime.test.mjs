@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import runtime from '../../src/local/acp/zcode-runtime.cjs';
+import runtime from './zcode-runtime.cjs';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -53,7 +53,7 @@ test('Windows npm launchers resolve to the package JavaScript entry and preserve
     const launcher = join(root, 'zcode-acp-server.cmd');
     writeFileSync(launcher, '@echo off');
     assert.equal(runtime.adapterEntry(launcher), entry);
-    const script = readFileSync(new URL('../../src/local/acp/zcode-runtime.cjs', import.meta.url), 'utf8');
+    const script = readFileSync(new URL('./zcode-runtime.cjs', import.meta.url), 'utf8');
     assert.equal(execFileSync(process.execPath, ['-e', script, launcher, '--orx-launch'], {encoding:'utf8'}), 'npm adapter ready');
   } finally {
     rmSync(root, {recursive:true});
@@ -102,7 +102,7 @@ test('launcher preserves the ACP adapter while repairing account snapshot and ru
         process.stdout.write('compatibility verified');
       }
     `);
-    const script = readFileSync(new URL('../../src/local/acp/zcode-runtime.cjs', import.meta.url), 'utf8');
+    const script = readFileSync(new URL('./zcode-runtime.cjs', import.meta.url), 'utf8');
     const env = {...process.env};
     delete env.ZCODE_PROVIDER;
     delete env.ZCODE_MODEL;

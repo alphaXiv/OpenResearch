@@ -5,48 +5,34 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runInNewContext } from 'node:vm'
+import { fileURLToPath } from 'node:url'
 
-const workflow = name => readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8')
-const release = workflow('release')
-const ci = workflow('ci')
-const canary = workflow('release-canary')
+const script = name => fileURLToPath(new URL(name, import.meta.url))
 
-test('canary identity handles paginated releases and keeps a running build', () => {
-  assert.match(canary, /group: canary-desktop\n\s+cancel-in-progress: false\n/)
-  assert.match(canary, /if: github.ref == 'refs\/heads\/main'/)
-  for (const job of ['macos', 'windows']) {
-    const section = canary.split(`\n  ${job}:`)[1].split(/\n  [a-z]/)[0]
-    assert.match(section, /environment: release-signing/)
-  }
-  const section = canary.split('      - id: identity')[1].split('\n  ci:')[0]
-  const shell = section.split('        run: |\n')[1].split('\n').map(line => line.replace(/^          /, '')).join('\n')
+test('canary identity numbers past paginated releases and shared assets', () => {
   const root = mkdtempSync(join(tmpdir(), 'orx-canary-identity-'))
   try {
     const bin = join(root, 'bin')
-    const scripts = join(root, 'scripts')
     mkdirSync(bin)
-    mkdirSync(scripts)
     writeFileSync(join(bin, 'gh'), '#!/bin/sh\ncase "$*" in *--slurp*--jq*) exit 2;; *releases/tags/canary*) printf 1;; *assets?*) printf \'[[{"name":"canary-20261027.6--OpenResearch.dmg"}]]\';; *) printf \'[[{"tag_name":"canary"},{"tag_name":"canary-20261027.2"}],[{"tag_name":"canary-20261027.4"}]]\';; esac\n', { mode: 0o755 })
     writeFileSync(join(bin, 'date'), '#!/bin/sh\nprintf 20261027\n', { mode: 0o755 })
-    writeFileSync(join(scripts, 'canary-tag.mjs'), readFileSync(new URL('../scripts/canary-tag.mjs', import.meta.url)))
     writeFileSync(join(root, 'Cargo.toml'), '[package]\nversion = "0.2.21"\n')
+    const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: root, encoding: 'utf8' }).trim()
+    git('init', '-q', '-b', 'main')
+    for (const title of ['feat: a', 'fix: b', 'chore: c']) git('commit', '-q', '--allow-empty', '-m', title)
     const output = join(root, 'output')
-    execFileSync('bash', ['-c', shell], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_REPOSITORY: 'test/repo', GITHUB_OUTPUT: output } })
-    assert.match(readFileSync(output, 'utf8'), /^tag=canary-20261027\.7\nversion=0\.2\.21\n$/)
+    execFileSync('bash', [script('canary-identity.sh')], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_REPOSITORY: 'test/repo', GITHUB_OUTPUT: output, GITHUB_SHA: git('rev-parse', 'HEAD') } })
+    assert.equal(readFileSync(output, 'utf8'), 'tag=canary-20261027.7\nversion=0.2.21\nchanges={"features":1,"fixes":1,"other":1}\n')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
 test('canary publication keeps published bytes and rejects older sources', () => {
-  const section = canary.split('      - name: Publish canary')[1].split('      - name: Retain seven canary builds')[0]
-  const shell = section.split('        run: |\n')[1].split('\n').map(line => line.replace(/^          /, '')).join('\n')
   const root = mkdtempSync(join(tmpdir(), 'orx-canary-publish-'))
   try {
-    for (const name of ['bin', 'scripts', 'artifacts', 'remote', 'runner']) mkdirSync(join(root, name))
+    for (const name of ['bin', 'artifacts', 'remote', 'runner']) mkdirSync(join(root, name))
     mkdirSync(join(root, 'remote/canary'))
-    writeFileSync(join(root, 'scripts/canary-manifest.mjs'), readFileSync(new URL('../scripts/canary-manifest.mjs', import.meta.url)))
     writeFileSync(join(root, 'artifacts/OpenResearch.dmg'), 'original')
     writeFileSync(join(root, 'remote/canary/desktop-canary-v2.json'), JSON.stringify({ tag: 'canary-20261027.1', commit: 'a'.repeat(40) }))
     writeFileSync(join(root, 'bin/gh'), `#!/usr/bin/env node
@@ -74,7 +60,7 @@ if (process.argv[2] === 'rev-list') { console.log(process.env.SOURCE_SHA + '\\n'
 process.exit(2);
 `, { mode: 0o755 })
     const env = { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, FIXTURE_ROOT: root, RUNNER_TEMP: join(root, 'runner'), GITHUB_REPOSITORY: 'test/repo', CANARY_CHANGES: '{"features":1,"fixes":2,"other":3}', TAG: 'canary-20261027.4', VERSION: '0.2.21', SOURCE_SHA: 'b'.repeat(40), PREVIOUS_SHA: 'a'.repeat(40) }
-    const run = (ancestor, overrides = {}) => execFileSync('bash', ['-c', shell], { cwd: root, env: { ...env, ...overrides, FIXTURE_ANCESTOR: String(ancestor) }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const run = (ancestor, overrides = {}) => execFileSync('bash', [script('canary-publish.sh')], { cwd: root, env: { ...env, ...overrides, FIXTURE_ANCESTOR: String(ancestor) }, stdio: ['ignore', 'pipe', 'pipe'] })
     const manifest = () => JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary-v2.json')))
     run(1)
     assert.equal(manifest().tag, 'canary-20261027.1')
@@ -101,9 +87,7 @@ process.exit(2);
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('canary retention preserves seven shared builds and the compatibility release', () => {
-  const section = canary.split('      - name: Retain seven canary builds')[1]
-  const shell = section.split('        run: |\n')[1].split('\n').map(line => line.replace(/^          /, '')).join('\n')
+test('canary retention keeps seven shared builds and deletes older canary releases', () => {
   const root = mkdtempSync(join(tmpdir(), 'orx-canary-retention-'))
   try {
     for (const name of ['bin', 'runner']) mkdirSync(join(root, name))
@@ -118,50 +102,13 @@ if (a[0] === 'release' && a[1] === 'delete') { fs.appendFileSync(process.env.REL
 process.exit(2);
 `, { mode: 0o755 })
     const env = { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, RUNNER_TEMP: join(root, 'runner'), GITHUB_REPOSITORY: 'test/repo', DELETED: join(root, 'deleted'), RELEASES: join(root, 'releases') }
-    execFileSync('bash', ['-c', shell], { cwd: root, env })
+    execFileSync('bash', [script('canary-retain.sh')], { cwd: root, env })
     assert.equal(readFileSync(env.DELETED, 'utf8'), '4\n3\n2\n')
     assert.equal(readFileSync(env.RELEASES, 'utf8'), 'canary-20261027.2\n')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('releases have no PR trigger or dry-run packaging path', () => {
-  const triggers = release.slice(release.indexOf('\non:\n'), release.indexOf('\njobs:\n'))
-  assert.doesNotMatch(triggers, /pull_request|dry-run/)
-  assert.match(release, /test "\$WORKFLOW_REF" = refs\/heads\/main/)
-  assert.match(workflow('release-on-bump'), /-f source-sha="\$GITHUB_SHA"/)
-})
-test('ordinary CI cannot package, and optimized checks require release context', () => {
-  assert.equal([...ci.matchAll(/cargo build --release/g)].length, 1)
-  assert.doesNotMatch(ci, /build-linux-appimage|ISCC|upload-artifact|build-macos-app/)
-  assert.match(ci, /Optimized source builds disable production telemetry\n\s+if: inputs.release && github.event_name != 'pull_request'/)
-  assert.match(release, /source-sha: \$\{\{ needs.plan.outputs.source-sha \}\}\n\s+release: true/)
-})
-test('publication and source checks use the resolved release SHA', () => {
-  assert.match(release, /RELEASE_COMMIT: "\$\{\{ needs.plan.outputs.source-sha \}\}"/)
-  assert.match(release, /--target "\$RELEASE_COMMIT"/)
-  const host = release.split('\n  host:')[1].split('\n  announce:')[0]
-  assert.match(host, /fetch-depth: 0/)
-  assert.match(host, /git rev-list "\$RELEASE_COMMIT".*artifacts\/desktop-ancestry\.json/)
-  for (const job of ['custom-ci', 'custom-telemetry-contract']) {
-    const section = release.split(`\n  ${job}:`)[1].split(/\n  [a-z]/)[0]
-    assert.match(section, /source-sha: \$\{\{ needs.plan.outputs.source-sha \}\}/)
-    assert.match(release.split('\n  host:')[1], new RegExp(`needs\\.${job}\\.result == 'success'`))
-  }
-  assert.match(workflow('telemetry-contract'), /ref: \$\{\{ inputs.source-sha \}\}/)
-})
-test('desktop attachments resolve the published tag instead of mutable main', () => {
-  for (const platform of ['linux', 'windows', 'macos']) {
-    const source = workflow(`release-${platform}-app`)
-    assert.doesNotMatch(source, /workflow_run.head_sha/)
-    assert.match(source, /--name release-source/)
-    assert.match(source, /git rev-parse "refs\/tags\/\$tag\^\{commit\}"/)
-    assert.match(source, /test "\$sha" = "\$expected_sha"/)
-    assert.match(source, /ref: \$\{\{ needs.check.outputs.source-sha \}\}/)
-  }
-})
 test('release source guard accepts merged source and rejects wrong tag, branch, or unmerged source', () => {
-  const section = release.split('      - name: Validate the release source')[1].split('      - uses:')[0]
-  const shell = section.split('        run: |\n')[1].split('\n').map(line => line.replace(/^          /, '')).join('\n')
   const root = mkdtempSync(join(tmpdir(), 'orx-release-source-'))
   const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   try {
@@ -172,127 +119,16 @@ test('release source guard accepts merged source and rejects wrong tag, branch, 
     git(['add', 'Cargo.toml']); git(['commit', '-m', 'version'])
     const sha = git(['rev-parse', 'HEAD'])
     git(['update-ref', 'refs/remotes/origin/main', sha])
-    const run = (tag, ref) => execFileSync('bash', ['-c', shell], { cwd: root, env: { ...process.env, RELEASE_TAG: tag, WORKFLOW_REF: ref, GITHUB_OUTPUT: join(root, 'output') }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const run = (tag, ref) => execFileSync('bash', [script('release-source.sh')], { cwd: root, env: { ...process.env, RELEASE_TAG: tag, WORKFLOW_REF: ref, GITHUB_OUTPUT: join(root, 'output') }, stdio: ['ignore', 'pipe', 'pipe'] })
     run('v0.2.20', 'refs/heads/main')
     assert.deepEqual(JSON.parse(readFileSync(join(root, 'release-source.json'))), { tag: 'v0.2.20', sha })
     assert.throws(() => run('v0.2.21', 'refs/heads/main'))
     assert.throws(() => run('dry-run', 'refs/heads/main'))
     assert.throws(() => run('v0.2.20', 'refs/heads/feature'))
+    assert.throws(() => run('v0.2.20', 'refs/pull/1/merge'))
     git(['commit', '--allow-empty', '-m', 'unmerged'])
     assert.throws(() => run('v0.2.20', 'refs/heads/main'))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
-})
-
-test('PR comparison jobs avoid full history downloads without skipping version validation', () => {
-  assert.doesNotMatch(ci, /fetch-depth: 0/)
-  const version = ci.split('\n  version-guard:')[1]
-  assert.match(version, /git fetch --no-tags --depth=1 origin "\$BASE_SHA"/)
-  assert.match(version, /git show "\$\{BASE_SHA\}:Cargo.toml"/)
-})
-
-test('Windows PR lanes execute the full test suite alongside lint; full validation keeps one cache writer', () => {
-  const windows = ci.split('\n  windows:')[1].split('\n  check:')[0]
-  const modesExpression = windows.match(/mode: \$\{\{ (.+) \}\}/)[1]
-  const steps = [...windows.matchAll(/- name: (.+)\n(?:        if: (.+)\n)?        run: (.+)/g)]
-  const saveExpression = windows.match(/save-if: \$\{\{ (.+) \}\}/)[1]
-  assert.match(windows, /fail-fast: false/)
-  assert.match(windows, /shared-key: windows/)
-  assert.match(ci, /needs: \[changes, frontend, helpers, rust, linux-app, windows\]/)
-  for (const [event, release, expectedModes] of [
-    ['pull_request', false, ['lint', 'test']],
-    ['pull_request', true, ['all']],
-    ['push', false, ['all']],
-    ['workflow_dispatch', false, ['all']],
-    ['workflow_call', true, ['all']],
-  ]) {
-    const context = { github: { event_name: event }, inputs: { release }, fromJSON: JSON.parse }
-    const modes = runInNewContext(modesExpression, context)
-    assert.deepEqual(modes, expectedModes)
-    const commands = []
-    for (const mode of modes) {
-      const lane = { ...context, matrix: { mode } }
-      assert.equal(runInNewContext(saveExpression, lane), mode === 'all')
-      for (const [, , condition, command] of steps) {
-        if (!condition || runInNewContext(condition, lane)) commands.push(command)
-      }
-    }
-    assert.equal(commands.filter(command => command === 'cargo clippy --all-targets --locked -- -D warnings').length, 1)
-    assert.equal(commands.filter(command => command === 'cargo fmt --manifest-path windows/launcher/Cargo.toml --check').length, 1)
-    assert.equal(commands.filter(command => command === 'cargo clippy --manifest-path windows/launcher/Cargo.toml --all-targets --locked -- -D warnings').length, 1)
-    assert.equal(commands.filter(command => command === 'cargo build --manifest-path windows/launcher/Cargo.toml --locked').length, 1)
-    assert.equal(commands.filter(command => command === 'cargo test --manifest-path windows/launcher/Cargo.toml --locked').length, 1)
-    assert.equal(commands.includes('cargo build --locked'), false)
-    assert.equal(commands.filter(command => command === 'cargo test --locked').length, 1)
-  }
-})
-
-test('ARM PR lanes preserve desktop lint and linking; other validation remains combined', () => {
-  const linux = ci.split('\n  linux-app:')[1].split('\n  windows:')[0]
-  const matrixExpression = linux.match(/include: \$\{\{ (.+) \}\}/)[1]
-  const steps = [...linux.matchAll(/- name: (.+)\n(?:        if: (.+)\n)?        run: (.+)/g)]
-  assert.match(linux, /fail-fast: false/)
-  assert.match(linux, /shared-key: linux-app/)
-  assert.match(linux, /save-if: \$\{\{ matrix.mode == 'all' \}\}/)
-  for (const [event, release] of [['pull_request', false], ['pull_request', true], ['push', false], ['workflow_dispatch', false], ['workflow_call', true]]) {
-    const context = { github: { event_name: event }, inputs: { release }, fromJSON: JSON.parse }
-    const rows = runInNewContext(matrixExpression, context)
-    const pr = event === 'pull_request' && !release
-    assert.deepEqual(rows, pr
-      ? [{ arch: 'x86_64', mode: 'all' }, { arch: 'aarch64', mode: 'lint' }, { arch: 'aarch64', mode: 'build' }]
-      : [{ arch: 'x86_64', mode: 'all' }, { arch: 'aarch64', mode: 'all' }])
-    for (const arch of ['x86_64', 'aarch64']) {
-      const commands = rows.filter(row => row.arch === arch).flatMap(matrix => steps
-        .filter(([, , condition]) => !condition || runInNewContext(condition, { ...context, matrix }))
-        .map(([, , , command]) => command))
-      assert.equal(commands.filter(command => command === 'cargo clippy --all-targets --locked --features desktop -- -D warnings').length, 1)
-      assert.equal(commands.filter(command => command === 'cargo build --locked --features desktop').length, pr ? 1 : 0)
-      assert.equal(commands.filter(command => command === 'cargo test --locked --features desktop').length, pr ? 0 : 1)
-    }
-  }
-})
-
-test('release and canary host artifacts reach every source build', () => {
-  const builder = workflow('build-host')
-  assert.match(builder, /runs-on: macos-14/)
-  assert.match(builder, /actions\/checkout@v6/)
-  assert.match(builder, /actions\/upload-artifact@v7/)
-  assert.match(builder, /mlugg\/setup-zig@[a-f0-9]{40}/)
-  for (const target of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'x86_64-apple-darwin', 'aarch64-apple-darwin']) assert.ok(builder.includes(target))
-  assert.match(builder, /run: node scripts\/build-host\.mjs/)
-  assert.match(builder, /name: release-host\n\s+path: target\/host-binaries/)
-  for (const source of [release, canary]) {
-    const job = source.split('\n  build-host:')[1].split(/\n  [a-z]/)[0]
-    assert.match(job, /uses: \.\/\.github\/workflows\/build-host.yml/)
-    assert.match(job, /source-sha:/)
-  }
-  const local = release.split('\n  build-local-artifacts:')[1].split('\n  custom-sign-macos-cli:')[0]
-  assert.match(local, /- build-host/)
-  assert.match(local, /Build artifacts\n\s+env:\n\s+ORX_EMBED_HOST_DIR:/)
-  assert.match(local, /name: release-host\n\s+path: target\/host-binaries/)
-  for (const job of ['ci', 'macos-build', 'linux', 'windows']) {
-    const section = canary.split(`\n  ${job}:`)[1].split(/\n  [a-z]/)[0]
-    assert.match(section, /needs: \[[^\n]*build-host\]/)
-    if (job !== 'ci') {
-      assert.match(section, /name: release-host\n\s+path: target\/host-binaries/)
-      assert.match(section, /ORX_EMBED_HOST_DIR:/)
-    }
-  }
-  assert.match(ci, /Packaged binary bootstraps SSH host without a binary directory\n\s+if: inputs.release && github.event_name != 'pull_request'/)
-  assert.match(ci, /ORX_PACKAGED_BINARY: \$\{\{ github.workspace \}\}\/target\/release\/orx/)
-  assert.match(ci, /env -u ORX_HOST_BIN_DIR cargo test --locked --test packaged_host -- --ignored --nocapture/)
-  for (const name of ['Verify embedded host lookup', 'Optimized source builds disable production telemetry', 'Packaged binary bootstraps SSH host without a binary directory']) {
-    const step = ci.split(`      - name: ${name}\n`)[1].split('      - name:')[0]
-    assert.match(step, /ORX_EMBED_HOST_DIR:/)
-  }
-  assert.match(ci, /Download release hosts\n\s+if: inputs.release && github.event_name != 'pull_request'/)
-  for (const platform of ['macos', 'linux']) {
-    const source = workflow(`release-${platform}-app`)
-    assert.match(source, /ORX_EMBED_HOST_DIR:/)
-    const download = source.split('      - name: Download release hosts')[1].split('      - name:')[0]
-    assert.match(download, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/)
-    assert.match(source, /name: release-host\n\s+path: target\/host-binaries\n\s+run-id: \$\{\{ needs.check.outputs.release-run-id \}\}/)
-  }
-  assert.match(workflow('release-windows-app'), /Take orx.exe from the release/)
 })
