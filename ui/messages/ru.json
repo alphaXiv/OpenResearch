@@ -1618,5 +1618,20 @@
   "library_empty": "Сохранённых статей пока нет.",
   "library_add_papers": "Добавить статьи",
   "library_selected": "Выбрано: {count}",
-  "library_open_alphaxiv": "Открыть alphaXiv"
+  "library_open_alphaxiv": "Открыть alphaXiv",
+  "share_publish": "Опубликовать ссылку",
+  "share_republish": "Обновить ссылку",
+  "share_publish_sign_in": "Войдите, чтобы опубликовать",
+  "share_publish_hint": "Публикация загружает этот файл на openresearch.sh. Открыть его может любой, у кого есть ссылка, а повторная публикация обновляет ту же ссылку.",
+  "share_link_label": "Публичная ссылка",
+  "share_copy_link": "Копировать ссылку",
+  "share_link_copied": "Ссылка скопирована",
+  "share_post_x": "Опубликовать в X",
+  "share_unpublish": "Снять с публикации",
+  "share_post_text": "{name}: откройте весь исследовательский проект в OpenResearch",
+  "open_shared_link_body": "Откройте «{name}», опубликованный на openresearch.sh, как новый проект.",
+  "open_shared_link_publisher": "Поделился(-ась): {name}",
+  "share_unpublish_title": "Снять ссылку с публикации?",
+  "share_unpublish_description": "Ссылка перестанет работать для всех, а её файл будет удалён. Повторная публикация создаст новую ссылку.",
+  "share_publish_remote_sign_in": "Чтобы публиковать с этой удалённой машины, выполните на ней `orx login`."
 }

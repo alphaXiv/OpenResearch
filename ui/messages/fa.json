@@ -1618,5 +1618,20 @@
   "library_empty": "هنوز مقاله‌ای ذخیره نشده است.",
   "library_add_papers": "افزودن مقاله‌ها",
   "library_selected": "{count} انتخاب شده",
-  "library_open_alphaxiv": "باز کردن alphaXiv"
+  "library_open_alphaxiv": "باز کردن alphaXiv",
+  "share_publish": "انتشار پیوند",
+  "share_republish": "به‌روزرسانی پیوند",
+  "share_publish_sign_in": "برای انتشار وارد شوید",
+  "share_publish_hint": "انتشار این فایل را در openresearch.sh بارگذاری می‌کند. هر کسی که پیوند را داشته باشد می‌تواند آن را باز کند و انتشار دوباره همان پیوند را به‌روز می‌کند.",
+  "share_link_label": "پیوند عمومی",
+  "share_copy_link": "کپی پیوند",
+  "share_link_copied": "پیوند کپی شد",
+  "share_post_x": "ارسال در X",
+  "share_unpublish": "لغو انتشار",
+  "share_post_text": "{name}: پروژهٔ پژوهشی کامل را در OpenResearch باز کنید",
+  "open_shared_link_body": "«{name}» منتشرشده در openresearch.sh را به‌عنوان پروژهٔ جدید باز کنید.",
+  "open_shared_link_publisher": "به اشتراک گذاشته‌شده توسط {name}",
+  "share_unpublish_title": "انتشار این پیوند لغو شود؟",
+  "share_unpublish_description": "پیوند برای همه از کار می‌افتد و فایل آن حذف می‌شود. انتشار دوباره پیوند تازه‌ای می‌سازد.",
+  "share_publish_remote_sign_in": "برای انتشار از این ماشین راه دور، روی آن `orx login` را اجرا کنید."
 }

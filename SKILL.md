@@ -89,8 +89,9 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 |---|---|
 | `orx up` | Open the local dashboard to import or create a local project. |
 | `orx project edit <localProjectId> [--name "<n>"] [--run-command "<cmd>"]` | Edit a local project's name or fixed run command. |
-| `orx project share <localProjectId> [--out <file>] [--chat <chatId>]... [--no-chats] [--no-logs] [--no-artifacts]` | Only when the user asks: save the project's code, experiment tree, finished runs, logs, artifacts and chats as a `.orx` file to send to a collaborator. `--chat` narrows it to the named chats. |
-| `orx project import <file.orx> [--path <dir>]` | Open a shared `.orx` file as a new local project with its tree, runs and chosen chats. |
+| `orx project share <localProjectId> [--out <file> \| --publish] [--chat <chatId>]... [--no-chats] [--no-logs] [--no-artifacts]` | Only when the user asks: save the project's code, experiment tree, finished runs, logs, artifacts and chats as a `.orx` file to send to a collaborator. `--chat` narrows it to the named chats. `--publish` (only when the user asks for a link) uploads it to openresearch.sh and prints a link anyone can open; publishing again updates the same link. |
+| `orx project unpublish <localProjectId>` | Delete the project's published link and its file. |
+| `orx project import <file.orx \| link> [--path <dir>]` | Open a shared `.orx` file or an `openresearch.sh/p/...` link as a new local project with its tree, runs and chosen chats. |
 | `orx create-experiment <localProjectId> --title "<t>" [...]` | Add a local experiment node; prints its Git branch. |
 | `orx compute status` / `show <backend>` / `test <backend>` | Inspect machine-wide compute configuration and readiness. |
 | `orx compute configure <backend> --help` / `default set <backend>` / `connect <backend>` | Configure compute or authenticate; load `orx-compute`. |

@@ -1618,5 +1618,20 @@
   "library_empty": "尚未保存论文。",
   "library_add_papers": "添加论文",
   "library_selected": "已选择 {count} 篇",
-  "library_open_alphaxiv": "打开 alphaXiv"
+  "library_open_alphaxiv": "打开 alphaXiv",
+  "share_publish": "发布链接",
+  "share_republish": "更新链接",
+  "share_publish_sign_in": "登录后发布",
+  "share_publish_hint": "发布会将此文件上传到 openresearch.sh。任何拥有链接的人都可以打开它，再次发布会更新同一个链接。",
+  "share_link_label": "公开链接",
+  "share_copy_link": "复制链接",
+  "share_link_copied": "链接已复制",
+  "share_post_x": "发布到 X",
+  "share_unpublish": "取消发布",
+  "share_post_text": "{name}：在 OpenResearch 中打开完整的研究项目",
+  "open_shared_link_body": "将发布在 openresearch.sh 上的“{name}”作为新项目打开。",
+  "open_shared_link_publisher": "由 {name} 分享",
+  "share_unpublish_title": "取消发布此链接？",
+  "share_unpublish_description": "该链接将对所有人失效，其文件也会被删除。再次发布会生成新的链接。",
+  "share_publish_remote_sign_in": "要从这台远程机器发布，请在其上运行 `orx login`。"
 }

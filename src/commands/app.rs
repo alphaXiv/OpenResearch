@@ -390,7 +390,8 @@ fn opens_in_browser(url: &str) -> bool {
 }
 
 /// The dashboard path an `openresearch://reproduce/<paper id>` link opens; the page validates the id.
-/// A `.orx` file opened with the app goes to the page that imports it.
+/// A `.orx` file opened with the app, or an `openresearch://p/<slug>` link from a
+/// published project's page, goes to the page that imports it.
 #[cfg_attr(not(desktop_app), allow(dead_code))]
 fn deep_link_path(url: &url::Url) -> Option<String> {
     if url.scheme() == "file" {
@@ -406,6 +407,11 @@ fn deep_link_path(url: &url::Url) -> Option<String> {
         });
     }
     let path = url.path();
+    if url.scheme() == "openresearch" && url.host_str() == Some("p") {
+        // Only the slug crosses over; the app fetches the file from its own API.
+        let slug = crate::client::published_project_slug(path.trim_start_matches('/'))?;
+        return Some(format!("/open?shared={slug}"));
+    }
     if url.scheme() != "openresearch" || url.host_str() != Some("reproduce") || path.len() < 2 {
         return None;
     }
@@ -1918,6 +1924,16 @@ mod tests {
             Some("/open?file=%2FUsers%2Fada%2FDownloads%2Ftiny%20lm.orx")
         );
         assert_eq!(link_path("file:///Users/ada/notes.txt"), None);
+        assert_eq!(
+            link_path("openresearch://p/a1B2c3D4e5F6").as_deref(),
+            Some("/open?shared=a1B2c3D4e5F6")
+        );
+        assert_eq!(
+            link_path("openresearch://p/a1B2c3D4e5F6/").as_deref(),
+            Some("/open?shared=a1B2c3D4e5F6")
+        );
+        assert_eq!(link_path("openresearch://p/../../etc"), None);
+        assert_eq!(link_path("openresearch://p/short"), None);
         assert_eq!(link_path("https://reproduce/x"), None);
         assert_eq!(link_path("not a link"), None);
         assert_eq!(

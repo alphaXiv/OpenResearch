@@ -1655,16 +1655,52 @@ export interface OpenedSharedProject {
   missingBranches: string[];
 }
 
-/** Open a `.orx` file as a new project in `path`: one picked in the page, or one already on this machine. */
-export const importSharedProject = (path: string, source: File | string) => {
+/** A published project link on openresearch.sh. */
+export interface PublishedProject {
+  id: string;
+  slug: string;
+  url: string;
+  name: string;
+  byteSize: number;
+  publishedAt: string;
+}
+
+/** What anyone with a published link sees before opening it. */
+export interface PublicProject {
+  slug: string;
+  url: string;
+  name: string;
+  byteSize: number;
+  publisher: string | null;
+}
+
+/** Where a shared project comes from: a picked file, a file on this machine, or a published link. */
+export type SharedSource = File | string | { link: string };
+
+/** Whether the machine running the project can publish, and the project's link if it has one. */
+export const getProjectLink = (projectId: string, signal?: AbortSignal) =>
+  get<{ signedIn: boolean; sharedProject: PublishedProject | null }>(`/api/projects/${projectId}/publish`, signal);
+
+/** Upload the project to openresearch.sh; publishing again updates the same link. */
+export const publishProject = (projectId: string, options: ShareChoice) =>
+  post<{ sharedProject: PublishedProject; skipped: string[] }>(`/api/projects/${projectId}/publish`, options);
+
+export const unpublishProject = (projectId: string) =>
+  writeResponse(`/api/projects/${projectId}/publish`, { method: "DELETE" }).then((r) => json<{ sharedProject: null }>(r));
+
+export const getPublicProject = (slug: string, signal?: AbortSignal) =>
+  get<{ sharedProject: PublicProject }>(`/api/shared-projects/${encodeURIComponent(slug)}`, signal);
+
+/** Open a shared project as a new project in `path`. */
+export const importSharedProject = (path: string, source: SharedSource) => {
   const query = `path=${encodeURIComponent(path)}`;
-  return typeof source === "string"
-    ? post<OpenedSharedProject>(`/api/projects/import?${query}&file=${encodeURIComponent(source)}`)
-    : writeResponse(`/api/projects/import?${query}`, {
-      method: "POST",
-      headers: { "content-type": "application/octet-stream" },
-      body: source,
-    }).then((r) => json<OpenedSharedProject>(r));
+  if (typeof source === "string") return post<OpenedSharedProject>(`/api/projects/import?${query}&file=${encodeURIComponent(source)}`);
+  if (!(source instanceof File)) return post<OpenedSharedProject>(`/api/projects/import?${query}&shared=${encodeURIComponent(source.link)}`);
+  return writeResponse(`/api/projects/import?${query}`, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: source,
+  }).then((r) => json<OpenedSharedProject>(r));
 };
 
 export interface TelemetrySettings {

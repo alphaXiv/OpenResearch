@@ -1618,5 +1618,20 @@
   "library_empty": "Nie ma jeszcze zapisanych publikacji.",
   "library_add_papers": "Dodaj publikacje",
   "library_selected": "Wybrano: {count}",
-  "library_open_alphaxiv": "Otwórz alphaXiv"
+  "library_open_alphaxiv": "Otwórz alphaXiv",
+  "share_publish": "Opublikuj link",
+  "share_republish": "Zaktualizuj link",
+  "share_publish_sign_in": "Zaloguj się, aby opublikować",
+  "share_publish_hint": "Publikacja przesyła ten plik do openresearch.sh. Każdy, kto ma link, może go otworzyć, a ponowna publikacja aktualizuje ten sam link.",
+  "share_link_label": "Link publiczny",
+  "share_copy_link": "Kopiuj link",
+  "share_link_copied": "Skopiowano link",
+  "share_post_x": "Opublikuj na X",
+  "share_unpublish": "Cofnij publikację",
+  "share_post_text": "{name}: otwórz cały projekt badawczy w OpenResearch",
+  "open_shared_link_body": "Otwórz „{name}”, opublikowany na openresearch.sh, jako nowy projekt.",
+  "open_shared_link_publisher": "Udostępnia: {name}",
+  "share_unpublish_title": "Cofnąć publikację tego linku?",
+  "share_unpublish_description": "Link przestanie działać dla wszystkich, a jego plik zostanie usunięty. Ponowna publikacja utworzy nowy link.",
+  "share_publish_remote_sign_in": "Aby publikować z tej zdalnej maszyny, uruchom na niej `orx login`."
 }

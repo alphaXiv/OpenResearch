@@ -1618,5 +1618,20 @@
   "library_empty": "No saved papers yet.",
   "library_add_papers": "Add papers",
   "library_selected": "{count} selected",
-  "library_open_alphaxiv": "Open alphaXiv"
+  "library_open_alphaxiv": "Open alphaXiv",
+  "share_publish": "Publish link",
+  "share_republish": "Update link",
+  "share_publish_sign_in": "Sign in to publish",
+  "share_publish_hint": "Publishing uploads this file to openresearch.sh. Anyone with the link can open it, and publishing again updates the same link.",
+  "share_link_label": "Public link",
+  "share_copy_link": "Copy link",
+  "share_link_copied": "Link copied",
+  "share_post_x": "Post on X",
+  "share_unpublish": "Unpublish",
+  "share_post_text": "{name}: open the full research project in OpenResearch",
+  "open_shared_link_body": "Open “{name}”, published on openresearch.sh, as a new project.",
+  "open_shared_link_publisher": "Shared by {name}",
+  "share_unpublish_title": "Unpublish this link?",
+  "share_unpublish_description": "The link stops working for everyone and its file is deleted. Publishing again makes a new link.",
+  "share_publish_remote_sign_in": "To publish from this remote machine, run `orx login` on it."
 }

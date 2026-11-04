@@ -1618,5 +1618,20 @@
   "library_empty": "저장한 논문이 없습니다.",
   "library_add_papers": "논문 추가",
   "library_selected": "{count}개 선택됨",
-  "library_open_alphaxiv": "alphaXiv 열기"
+  "library_open_alphaxiv": "alphaXiv 열기",
+  "share_publish": "링크 게시",
+  "share_republish": "링크 업데이트",
+  "share_publish_sign_in": "로그인하여 게시",
+  "share_publish_hint": "게시하면 이 파일이 openresearch.sh에 업로드됩니다. 링크가 있는 누구나 열 수 있으며, 다시 게시하면 같은 링크가 업데이트됩니다.",
+  "share_link_label": "공개 링크",
+  "share_copy_link": "링크 복사",
+  "share_link_copied": "링크를 복사했습니다",
+  "share_post_x": "X에 게시",
+  "share_unpublish": "게시 취소",
+  "share_post_text": "{name}: OpenResearch에서 전체 연구 프로젝트 열기",
+  "open_shared_link_body": "openresearch.sh에 게시된 “{name}”을(를) 새 프로젝트로 엽니다.",
+  "open_shared_link_publisher": "{name} 님이 공유함",
+  "share_unpublish_title": "이 링크의 게시를 취소할까요?",
+  "share_unpublish_description": "링크가 모두에게 더 이상 작동하지 않고 파일이 삭제됩니다. 다시 게시하면 새 링크가 만들어집니다.",
+  "share_publish_remote_sign_in": "이 원격 머신에서 게시하려면 그 머신에서 `orx login`을 실행하세요."
 }

@@ -80,6 +80,9 @@ What leaves the window:
 - A download asks where to save, as a browser does.
 - `openresearch:` links, from the system or a second launch, become in-page
   navigation, so the page's guards against losing unsaved work still apply.
+  `openresearch://p/<slug>`, from a published project's page, carries only
+  the slug: the app downloads the file from its own API, so a link can never
+  make it fetch from anywhere else.
 
 ## Updates
 

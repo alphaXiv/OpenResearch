@@ -1618,5 +1618,20 @@
   "library_empty": "保存した論文はまだありません。",
   "library_add_papers": "論文を追加",
   "library_selected": "{count} 件選択中",
-  "library_open_alphaxiv": "alphaXiv を開く"
+  "library_open_alphaxiv": "alphaXiv を開く",
+  "share_publish": "リンクを公開",
+  "share_republish": "リンクを更新",
+  "share_publish_sign_in": "サインインして公開",
+  "share_publish_hint": "公開するとこのファイルが openresearch.sh にアップロードされます。リンクを知っている人なら誰でも開けます。再度公開すると同じリンクが更新されます。",
+  "share_link_label": "公開リンク",
+  "share_copy_link": "リンクをコピー",
+  "share_link_copied": "リンクをコピーしました",
+  "share_post_x": "X に投稿",
+  "share_unpublish": "公開を停止",
+  "share_post_text": "{name}：OpenResearch で研究プロジェクト全体を開く",
+  "open_shared_link_body": "openresearch.sh で公開された「{name}」を新しいプロジェクトとして開きます。",
+  "open_shared_link_publisher": "{name} が共有",
+  "share_unpublish_title": "このリンクの公開を停止しますか？",
+  "share_unpublish_description": "リンクは誰も使えなくなり、ファイルは削除されます。再度公開すると新しいリンクになります。",
+  "share_publish_remote_sign_in": "このリモートマシンから公開するには、そこで `orx login` を実行してください。"
 }

@@ -1618,5 +1618,20 @@
   "library_empty": "अभी कोई पेपर सहेजा नहीं गया है।",
   "library_add_papers": "पेपर जोड़ें",
   "library_selected": "{count} चुने गए",
-  "library_open_alphaxiv": "alphaXiv खोलें"
+  "library_open_alphaxiv": "alphaXiv खोलें",
+  "share_publish": "लिंक प्रकाशित करें",
+  "share_republish": "लिंक अपडेट करें",
+  "share_publish_sign_in": "प्रकाशित करने के लिए साइन इन करें",
+  "share_publish_hint": "प्रकाशित करने से यह फ़ाइल openresearch.sh पर अपलोड होती है। लिंक वाला कोई भी इसे खोल सकता है, और फिर से प्रकाशित करने पर वही लिंक अपडेट होता है।",
+  "share_link_label": "सार्वजनिक लिंक",
+  "share_copy_link": "लिंक कॉपी करें",
+  "share_link_copied": "लिंक कॉपी हो गया",
+  "share_post_x": "X पर पोस्ट करें",
+  "share_unpublish": "प्रकाशन हटाएँ",
+  "share_post_text": "{name}: OpenResearch में पूरा शोध प्रोजेक्ट खोलें",
+  "open_shared_link_body": "openresearch.sh पर प्रकाशित “{name}” को नए प्रोजेक्ट के रूप में खोलें।",
+  "open_shared_link_publisher": "{name} द्वारा साझा किया गया",
+  "share_unpublish_title": "इस लिंक का प्रकाशन हटाएँ?",
+  "share_unpublish_description": "लिंक सभी के लिए काम करना बंद कर देगा और उसकी फ़ाइल हटा दी जाएगी। फिर से प्रकाशित करने पर नया लिंक बनेगा।",
+  "share_publish_remote_sign_in": "इस रिमोट मशीन से प्रकाशित करने के लिए उस पर `orx login` चलाएँ।"
 }

@@ -1618,5 +1618,20 @@
   "library_empty": "لا توجد أوراق محفوظة بعد.",
   "library_add_papers": "إضافة أوراق",
   "library_selected": "تم تحديد {count}",
-  "library_open_alphaxiv": "فتح alphaXiv"
+  "library_open_alphaxiv": "فتح alphaXiv",
+  "share_publish": "نشر رابط",
+  "share_republish": "تحديث الرابط",
+  "share_publish_sign_in": "سجّل الدخول للنشر",
+  "share_publish_hint": "يرفع النشر هذا الملف إلى openresearch.sh. يمكن لأي شخص لديه الرابط فتحه، والنشر مرة أخرى يحدّث الرابط نفسه.",
+  "share_link_label": "رابط عام",
+  "share_copy_link": "نسخ الرابط",
+  "share_link_copied": "تم نسخ الرابط",
+  "share_post_x": "انشر على X",
+  "share_unpublish": "إلغاء النشر",
+  "share_post_text": "{name}: افتح مشروع البحث الكامل في OpenResearch",
+  "open_shared_link_body": "افتح “{name}” المنشور على openresearch.sh كمشروع جديد.",
+  "open_shared_link_publisher": "شاركه {name}",
+  "share_unpublish_title": "إلغاء نشر هذا الرابط؟",
+  "share_unpublish_description": "سيتوقف الرابط عن العمل للجميع وسيُحذف ملفه. النشر مرة أخرى ينشئ رابطًا جديدًا.",
+  "share_publish_remote_sign_in": "للنشر من هذا الجهاز البعيد، شغّل `orx login` عليه."
 }
