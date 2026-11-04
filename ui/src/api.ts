@@ -2251,7 +2251,7 @@ export const releaseDelegate = (sessionId: string) =>
 
 /** The message an agent cited by ref: where it lives, the agent that wrote it if one did, and its first words. */
 export const citedMessage = (cited: string) =>
-  get<{ sessionId: string; messageId: string; harness: HarnessId | null; preview: string }>(
+  get<{ projectId: string | null; sessionId: string; messageId: string; harness: HarnessId | null; preview: string }>(
     `/api/chat/messages/${encodeURIComponent(cited)}`,
   );
 

@@ -12,7 +12,7 @@
 //! `--permission-mode` from the session's setting (`auto`/`bypassPermissions` — see
 //! `options`). AskUserQuestion / ExitPlanMode surface as interactive cards: the
 //! turn ends on them and the user's answer resumes the session — except in plan
-//! mode, where the mcp-gate bridge holds both open mid-turn and the answer
+//! mode, where the `orx mcp` bridge holds both open mid-turn and the answer
 //! continues the same turn.
 //!
 //! Detection: `claude auth status --json` is the readiness source of truth.
@@ -1127,7 +1127,7 @@ pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
 const PLAN_SETTINGS_REL: &str = ".openresearch/agent/claude-plan-settings.json";
 
 /// Directory (relative to the worktree) of the MCP configs wiring the
-/// `orx mcp-gate` bridge, one per chat: chats sharing a worktree spawn at once,
+/// `orx mcp` bridge, one per chat: chats sharing a worktree spawn at once,
 /// and each config names its own chat. Same git-excluded agent dir.
 const MCP_CONFIG_DIR_REL: &str = ".openresearch/agent";
 
@@ -1180,7 +1180,7 @@ pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathB
 }
 
 /// Write the chat's `--mcp-config` file and return its path: alphaXiv always,
-/// and with `gate` the `orx mcp-gate` bridge (this same binary), whose env
+/// and with `gate` the `orx mcp` bridge (this same binary), whose env
 /// block carries the `orx up` port, the session id, and a fresh per-child
 /// token minted at spawn — everything the resident bridge needs to relay
 /// requests back to the running server for the child's whole life.
@@ -1199,7 +1199,7 @@ pub(crate) fn write_mcp_config(
         config["mcpServers"]["orx"] = serde_json::json!({
             "type": "stdio",
             "command": orx,
-            "args": ["mcp-gate"],
+            "args": ["mcp"],
             // Orchestration tools are few and needed unprompted, so they
             // skip tool search.
             "alwaysLoad": true,
@@ -1467,7 +1467,7 @@ fn observe_turn_boundary(event: &Value, text: &str, saw_user_echo: &mut bool) ->
 /// the fixture tests.
 #[derive(Default)]
 struct TurnState {
-    /// Whether this child was spawned with the mcp-gate bridge active. With the
+    /// Whether this child was spawned with the `orx mcp` bridge active. With the
     /// bridge on, ExitPlanMode / AskUserQuestion come from the bridge (held,
     /// mid-turn-answerable), so their `tool_use` renders nothing.
     bridge_active: bool,

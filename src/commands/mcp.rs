@@ -1,4 +1,4 @@
-//! `orx mcp-gate` — the orx MCP server every agent harness is given.
+//! `orx mcp` — the orx MCP server every agent harness is given.
 //!
 //! Hidden from `--help`: it's not a user command, it's the stdio MCP server a
 //! harness spawns from orx's config — Claude via `--mcp-config`, Codex through

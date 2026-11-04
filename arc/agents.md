@@ -129,7 +129,7 @@ depends on the agent:
 - Agents that ask their client (Codex's app server, OpenCode's server, ACP)
   hold the request on the live connection until the user answers.
 - Claude Code in headless mode cannot prompt. For approvals mid-turn, orx
-  makes the `approve` tool of its own MCP server, `orx mcp-gate`, Claude's
+  makes the `approve` tool of its own MCP server, `orx mcp`, Claude's
   permission tool. It forwards each decision to the owning dashboard over
   loopback and blocks until the user answers. The dashboard accepts it only with the per-chat
   token the child was spawned with, a new token for each respawn, because the
@@ -174,7 +174,7 @@ forever.
 ## Sub-agents and new chats
 
 Every agent whose harness takes an MCP server gets orx's own, `orx
-mcp-gate`. It speaks stdio, the one transport every harness accepts (ACP
+mcp`. It speaks stdio, the one transport every harness accepts (ACP
 requires it), and relays to the owning dashboard, which knows the calling
 chat by a token derived from a key that lives only in that dashboard's
 process. Through it an agent delegates. It names a versioned model, and orx
@@ -187,8 +187,8 @@ on a canonical id derived from each spelling.
 same worktree, unless it asks for a worktree of its own and stands as an
 ordinary chat. It starts with only the task it was given, runs with a
 permission mode no broader than its delegator's, and records who delegated to
-it, which is how its depth is counted. Stopping a delegate stops every delegate
-below it. An agent can also start a chat it does not hear from: that chat is
+it, which is how its depth is counted. Stopping a chat, by the user's Stop or
+an agent's `cancel`, stops every delegate below it. An agent can also start a chat it does not hear from: that chat is
 no delegate and stands as the user's, as a delegate the user kept does. A
 retry of the same request finds the chat the first attempt started, by an id
 derived from the request.

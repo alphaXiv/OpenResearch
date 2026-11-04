@@ -1392,12 +1392,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [focusedMessage, setFocusedMessage] = useState<FocusedMessage | null>(null);
   const openMessage = useCallback((cited: string) => {
     const missing = () => showAlert(m.chat_cited_message_missing(), "error");
-    void citedMessage(cited).then(({ sessionId, messageId }) => {
-      if (!sessionsQuery.data?.some((session) => session.id === sessionId)) return missing();
-      openDelegate(sessionId);
+    void citedMessage(cited).then(({ projectId: owner, sessionId, messageId }) => {
+      if (owner && owner !== projectId) onActiveSessionChange(sessionId, { projectId: owner });
+      else if (sessionsQuery.data?.some((session) => session.id === sessionId)) openDelegate(sessionId);
+      else return missing();
       setFocusedMessage({ sessionId, messageId, nonce: Date.now() });
     }, missing);
-  }, [sessionsQuery.data, openDelegate]);
+  }, [projectId, sessionsQuery.data, openDelegate, onActiveSessionChange]);
 
   const forgetSideTab = useCallback(
     (tab: SideChatViewDef) => {

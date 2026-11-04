@@ -129,7 +129,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         restart: Arc::new(tokio::sync::Notify::new()),
         trackio: Arc::default(),
     };
-    // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
+    // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
     state.chat.resume_persisted_queues();
     {
@@ -847,11 +847,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
         )
         .route("/api/chat/sessions/{id}/respond", post(respond_chat))
-        // Internal: the `orx mcp-gate` permission bridge's long-poll (plan
+        // Internal: the `orx mcp` permission bridge's long-poll (plan
         // mode). Token-authenticated in the handler; blocks until the surfaced
         // card is answered.
         .route("/api/internal/permissions", post(bridge_permission))
-        // Internal: the orchestration tools `orx mcp-gate` relays for an agent,
+        // Internal: the orchestration tools `orx mcp` relays for an agent,
         // authenticated in the handler by that chat's agent token.
         .route("/api/internal/mcp", post(agent_tools::agent_tools))
         .route("/api/chat/attachments/{name}", get(chat_attachment))
@@ -8640,7 +8640,11 @@ async fn cited_chat_message(Path(cited): Path<String>) -> ApiResult {
         .map(|session| session.harness);
     let preview =
         local::chat::delegation::preview(&local::chat::delegation::message_text(&message));
+    let project_id = store
+        .get_chat_session(&message.session_id)?
+        .map(|session| session.project_id);
     Ok(Json(json!({
+        "projectId": project_id,
         "sessionId": message.session_id,
         "messageId": message.id,
         "harness": harness,
@@ -9108,7 +9112,7 @@ async fn respond_chat(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// The `orx mcp-gate` bridge relaying one blocked tool call from a plan-mode
+/// The `orx mcp` bridge relaying one blocked tool call from a plan-mode
 /// claude turn. The response body is the permission decision verbatim
 /// (`{"behavior":"allow",…}` / `{"behavior":"deny",…}`) — the bridge
 /// stringifies it into the MCP tool result unchanged. Deliberately long-held:

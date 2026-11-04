@@ -1,4 +1,4 @@
-//! The tools behind `orx mcp-gate`: the stdio MCP server every agent harness
+//! The tools behind `orx mcp`: the stdio MCP server every agent harness
 //! is given relays `tools/list` and `tools/call` here, authenticated as the
 //! chat that harness runs.
 
@@ -247,12 +247,8 @@ async fn call(
                     status: None,
                 },
             };
-            let client_turn_id = optional_text(args, "clientRequestId").map(|key| {
-                format!(
-                    "ct_{}",
-                    delegation::agent_token(&format!("{}:{key}", caller.id))
-                )
-            });
+            let client_turn_id = optional_text(args, "clientRequestId")
+                .map(|key| format!("ct_send_{}", delegation::request_key(&caller.id, key)));
             let sent = state
                 .chat
                 .steer_message(
@@ -330,21 +326,11 @@ async fn call(
                 );
             }
             let mut stopped = Vec::new();
-            let mut links = vec![(caller.id.clone(), target.id.clone())];
-            while let Some((parent, id)) = links.pop() {
-                // The stop is no news to whoever stopped it; an answer that
-                // came before it still is.
-                if state.chat.interrupt(&id).await? {
-                    stopped.push(id.clone());
-                    news::mark_told(&store, &parent, &id)?;
-                }
-                links.extend(
-                    store
-                        .chat_delegates_of(&id)?
-                        .into_iter()
-                        .map(|child| (id.clone(), child)),
-                );
+            if state.chat.interrupt(&target.id).await? {
+                stopped.push(target.id.clone());
+                news::mark_told(&store, &caller.id, &target.id)?;
             }
+            stopped.extend(state.chat.stop_delegates(&target.id).await?);
             Ok(if stopped.is_empty() {
                 format!("Chat `{}` and its delegates were not running.", target.id)
             } else {

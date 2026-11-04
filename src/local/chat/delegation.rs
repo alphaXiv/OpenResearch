@@ -39,7 +39,7 @@ pub fn agent_token(session_id: &str) -> String {
         .collect()
 }
 
-/// The orx MCP server one chat's agent spawns: this binary's `mcp-gate` over
+/// The orx MCP server one chat's agent spawns: this binary's `mcp` over
 /// stdio, with the env that names the chat to the `orx up` on `up_port`.
 pub struct McpServer {
     pub command: String,
@@ -52,7 +52,7 @@ pub fn mcp_server(session_id: &str, up_port: u16) -> Result<McpServer> {
         .map_err(|e| anyhow!("cannot resolve the orx binary for its MCP server: {e}"))?;
     Ok(McpServer {
         command: command.to_string_lossy().into_owned(),
-        args: ["mcp-gate"],
+        args: ["mcp"],
         env: [
             ("ORX_UP_PORT", up_port.to_string()),
             ("ORX_SESSION_ID", session_id.to_string()),
@@ -161,17 +161,21 @@ pub fn delegate_permission(parent: &StoredChatSession, harness_id: &str) -> Resu
 /// is fixed, so a retry finds the chat the first attempt started.
 pub fn started_chat_id(parent: &StoredChatSession, request: Option<&str>) -> String {
     let uuid = match request {
-        Some(request) => {
-            let digest = Sha256::digest(format!("{}:{request}", parent.id).as_bytes());
-            uuid::Uuid::from_bytes(
-                digest[..16]
-                    .try_into()
-                    .expect("a SHA-256 digest has 16 bytes"),
-            )
-        }
+        Some(request) => request_key(&parent.id, request),
         None => uuid::Uuid::new_v4(),
     };
     format!("chat_{uuid}")
+}
+
+/// What an agent's `clientRequestId` names: the same across retries and
+/// restarts, and its own to each calling chat.
+pub fn request_key(caller: &str, request: &str) -> uuid::Uuid {
+    let digest = Sha256::digest(format!("{caller}:{request}").as_bytes());
+    uuid::Uuid::from_bytes(
+        digest[..16]
+            .try_into()
+            .expect("a SHA-256 digest has 16 bytes"),
+    )
 }
 
 pub fn delegate_session(

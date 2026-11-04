@@ -2369,7 +2369,7 @@ mod initial_message_tests {
 
 // --- permission bridge ---------------------------------------------------------
 
-/// The decision returned to the `orx mcp-gate` permission bridge for one
+/// The decision returned to the `orx mcp` permission bridge for one
 /// blocked tool call. Serialized verbatim into Claude Code's
 /// permission-prompt-tool contract (the bridge stringifies it into the MCP
 /// tool result), so the wire shape is exactly
@@ -2397,7 +2397,7 @@ impl PermissionDecision {
 }
 
 /// One outstanding bridge request: the oneshot unblocks the long-poll handler
-/// in `request_permission` (and thereby the `orx mcp-gate` HTTP call and the
+/// in `request_permission` (and thereby the `orx mcp` HTTP call and the
 /// claude turn behind it).
 struct PendingPermission {
     session_id: String,
@@ -3544,7 +3544,7 @@ impl ChatHost {
     }
 
     /// Record the port `orx up` bound (once, at startup) so plan-mode turns can
-    /// hand it to the `orx mcp-gate` bridge.
+    /// hand it to the `orx mcp` bridge.
     pub fn set_up_port(&self, port: u16) {
         let _ = self.up_port.set(port);
         self.opencode.set_up_port(port);
@@ -3809,7 +3809,7 @@ impl ChatHost {
 
     /// Whether a bridge approval card of this session is still awaiting the
     /// user. The claude turn watchdog consults this: a child held on the
-    /// mcp-gate long-poll is silently blocked *by design* (user think-time is
+    /// `orx mcp` long-poll is silently blocked *by design* (user think-time is
     /// unbounded), so the no-output timeout must not kill it.
     pub fn has_pending_permission(&self, session_id: &str) -> bool {
         self.pending_permissions
@@ -6432,6 +6432,25 @@ impl ChatHost {
     /// consumers use it to distinguish a stopped turn from a silent one.
     /// Internal interrupts (plan-approval resume, session/project delete) stay
     /// markerless on purpose.
+    /// Stop `id`'s delegates and every delegate below them, returning those
+    /// that were running. A stop is no news to the chat that delegated; an
+    /// answer that came before it still is.
+    pub async fn stop_delegates(self: &Arc<Self>, id: &str) -> Result<Vec<String>> {
+        let store = Store::open()?;
+        let mut stopped = Vec::new();
+        let mut parents = vec![id.to_string()];
+        while let Some(parent) = parents.pop() {
+            for child in store.chat_delegates_of(&parent)? {
+                if self.interrupt(&child).await? {
+                    news::mark_told(&store, &parent, &child)?;
+                    stopped.push(child.clone());
+                }
+                parents.push(child);
+            }
+        }
+        Ok(stopped)
+    }
+
     pub async fn interrupt_by_user(self: &Arc<Self>, session_id: &str) -> Result<()> {
         // Stamped before the abort: a fast resend can claim the freed slot and
         // persist its user message before this runs, and a later timestamp
@@ -6444,6 +6463,10 @@ impl ChatHost {
         let durable_clear = self.clear_queue_inner(session_id, true);
         let interrupted = self.interrupt(session_id).await;
         self.release_queue_cancellation_if_idle(session_id);
+        // Best-effort like the marker below: this chat's turn is stopped either way.
+        if let Err(error) = self.stop_delegates(session_id).await {
+            eprintln!("orx up: delegates of {session_id} not stopped: {error}");
+        }
         if !interrupted? {
             return durable_clear;
         }

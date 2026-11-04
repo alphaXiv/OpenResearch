@@ -172,12 +172,12 @@ enum Command {
     #[command(name = "invocation-gate", hide = true)]
     InvocationGate,
 
-    /// Internal: the plan-mode permission bridge. A stdio MCP server Claude
-    /// Code spawns (`--mcp-config`) and consults (`--permission-prompt-tool`);
-    /// relays each permission request to the running `orx up`, which surfaces
-    /// an approval card and blocks until answered. Not a user command.
-    #[command(name = "mcp-gate", hide = true)]
-    McpGate,
+    /// Internal: orx's stdio MCP server, which every agent harness spawns:
+    /// Claude's permission bridge and the orchestration tools, relayed to the
+    /// running `orx up`. `mcp-gate`, its old name, stays for configs an older
+    /// `orx up` still writes. Not a user command.
+    #[command(name = "mcp", alias = "mcp-gate", hide = true)]
+    Mcp,
 
     #[command(name = "alphaxiv-mcp", hide = true)]
     AlphaxivMcp,
@@ -1097,11 +1097,11 @@ async fn main() {
         }
         return;
     }
-    // `mcp-gate` is Claude's stdio MCP child for the turn: stdout is the MCP
+    // `orx mcp` is the agent's stdio MCP child for the turn: stdout is the MCP
     // channel (nothing else may write to it) and startup must be instant or
     // Claude times the server out — skip the update check and telemetry.
     if matches!(command, Command::AntigravityGate) {
-        if let Err(error) = commands::mcp_gate::run_antigravity().await {
+        if let Err(error) = commands::mcp::run_antigravity().await {
             eprintln!("orx antigravity-gate: {error}");
             std::process::exit(1);
         }
@@ -1114,10 +1114,10 @@ async fn main() {
         }
         return;
     }
-    if matches!(command, Command::McpGate) {
-        if let Err(err) = commands::mcp_gate::run().await {
+    if matches!(command, Command::Mcp) {
+        if let Err(err) = commands::mcp::run().await {
             // stderr only; a failed bridge degrades plan mode, never the CLI.
-            eprintln!("orx mcp-gate: {err}");
+            eprintln!("orx mcp: {err}");
             std::process::exit(1);
         }
         return;
@@ -1351,7 +1351,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Feedback(_) => "feedback",
         Command::PlanGate => "plan-gate",
         Command::InvocationGate => "invocation-gate",
-        Command::McpGate => "mcp-gate",
+        Command::Mcp => "mcp",
         Command::AlphaxivMcp => "alphaxiv-mcp",
         Command::AntigravityGate => "antigravity-gate",
         Command::PublishBranch(_) => "publish-branch",
@@ -1413,8 +1413,8 @@ async fn dispatch(command: Command) -> error::Result<()> {
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
         Command::InvocationGate => commands::invocation_gate::run().await,
-        Command::McpGate => commands::mcp_gate::run().await,
-        Command::AntigravityGate => commands::mcp_gate::run_antigravity().await,
+        Command::Mcp => commands::mcp::run().await,
+        Command::AntigravityGate => commands::mcp::run_antigravity().await,
         Command::AlphaxivMcp => unreachable!("handled before dispatch"),
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
         Command::RemoteHost(_) => unreachable!("handled before dispatch"),
@@ -1437,7 +1437,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::PlanGate
             | Command::InvocationGate
             | Command::AlphaxivMcp
-            | Command::McpGate
+            | Command::Mcp
             | Command::AntigravityGate
             | Command::PublishBranch(_)
             | Command::RemoteHost(_)

@@ -127,7 +127,7 @@ impl TurnSlot {
 }
 
 /// What the resident child was spawned with. Any field that can only be applied
-/// at launch (permission mode, effort, the mcp-gate bridge) forces a respawn
+/// at launch (permission mode, effort, the `orx mcp` bridge) forces a respawn
 /// when it changes; `model` is the exception — it retunes live via `set_model`,
 /// so it is updated in place on a successful control request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,7 +211,7 @@ pub fn classify_line(line: &str) -> ClaudeLine {
             ClaudeLine::ControlResponse { request_id, result }
         }
         // A control_request FROM the child (e.g. a permission prompt) rides the
-        // mcp-gate bridge over HTTP, not this stream — we never answer it here.
+        // `orx mcp` bridge over HTTP, not this stream — we never answer it here.
         Some("control_request") | None => ClaudeLine::Junk,
         // Everything else is a stream-json output object: assistant/user/system/
         // result. The turn loop discriminates on `type`.

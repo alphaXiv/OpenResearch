@@ -32,7 +32,7 @@ pub mod library;
 pub mod login;
 pub mod logout;
 pub mod logs;
-pub mod mcp_gate;
+pub mod mcp;
 pub mod metrics;
 pub mod orgs;
 pub mod paper;
