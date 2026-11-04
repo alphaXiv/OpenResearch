@@ -1913,11 +1913,16 @@ mod tests {
         assert_eq!(link_path("openresearch://reproduce/"), None);
         assert_eq!(link_path("openresearch://reproduce"), None);
         assert_eq!(link_path("openresearch://settings/x"), None);
+        let shared = std::env::temp_dir().join("tiny lm.orx");
         assert_eq!(
-            link_path("file:///Users/ada/Downloads/tiny%20lm.orx").as_deref(),
-            Some("/open?file=%2FUsers%2Fada%2FDownloads%2Ftiny%20lm.orx")
+            link_path(url::Url::from_file_path(&shared).unwrap().as_str()),
+            Some(format!(
+                "/open?file={}",
+                urlencoding::encode(&shared.to_string_lossy())
+            ))
         );
-        assert_eq!(link_path("file:///Users/ada/notes.txt"), None);
+        let notes = url::Url::from_file_path(std::env::temp_dir().join("notes.txt")).unwrap();
+        assert_eq!(link_path(notes.as_str()), None);
         assert_eq!(link_path("https://reproduce/x"), None);
         assert_eq!(link_path("not a link"), None);
         assert_eq!(

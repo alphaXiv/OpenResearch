@@ -1300,10 +1300,10 @@ mod tests {
             Some(base.id.as_str())
         );
         assert_eq!(child.agent_status, "idle");
-        run_git(&target, &["checkout", "-q", "orx/lower-lr"]);
+        // The committed blob, since checkouts may convert line endings (Windows autocrlf).
         assert_eq!(
-            std::fs::read_to_string(target.join("train.py")).unwrap(),
-            "print('loss 0.9')\n"
+            git::git(Some(&target), &["show", "orx/lower-lr:train.py"]).unwrap(),
+            "print('loss 0.9')"
         );
 
         let runs = recipient
