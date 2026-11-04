@@ -9,7 +9,7 @@
   "workspace_terminal_exited": "शेल कोड {code} के साथ बंद हो गया।",
   "workspace_terminal_disconnected": "टर्मिनल डिस्कनेक्ट हो गया।",
   "workspace_terminal_restart": "शेल फिर से शुरू करें",
-  "chat_show_full_conversation": "पूरी बातचीत दिखाएं",
+  "chat_messages_feed": "संदेश",
   "settings_key_from": "की स्रोत",
   "settings_token_from": "टोकन स्रोत",
   "settings_environment_tab": "एनवायरनमेंट टैब",

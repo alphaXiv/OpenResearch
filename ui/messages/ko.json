@@ -9,7 +9,7 @@
   "workspace_terminal_exited": "셸이 코드 {code}로 종료되었습니다.",
   "workspace_terminal_disconnected": "터미널 연결이 끊어졌습니다.",
   "workspace_terminal_restart": "셸 다시 시작",
-  "chat_show_full_conversation": "전체 대화 보기",
+  "chat_messages_feed": "메시지",
   "settings_key_from": "키 발급처",
   "settings_token_from": "토큰 발급처",
   "settings_environment_tab": "환경 탭",

@@ -9,7 +9,7 @@
   "workspace_terminal_exited": "انتهى Shell برمز الخروج {code}.",
   "workspace_terminal_disconnected": "انقطعت الطرفية.",
   "workspace_terminal_restart": "إعادة تشغيل Shell",
-  "chat_show_full_conversation": "عرض المحادثة كاملة",
+  "chat_messages_feed": "الرسائل",
   "settings_key_from": "المفتاح من",
   "settings_token_from": "الرمز من",
   "settings_environment_tab": "تبويب البيئة",
