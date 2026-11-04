@@ -1,16 +1,25 @@
-import { AlphaXivNotConnectedError, OpenResearchAccountError } from "../api";
+import { AlphaXivNotConnectedError, OpenResearchAccountError, type RuntimeInfo } from "../api";
 import { Menu } from "@base-ui/react/menu";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { UserRound } from "lucide-react";
 import { showCustomDialog, type DialogContentProps } from "../dialog";
 import { invalidateFamilies } from "../queries/invalidation";
 import { queryClient, workspaceKey } from "../queries/client";
-import { useAlphaXivFolders, useOpenResearchAccount, useSignOutOpenResearch } from "../queries/settings";
+import { getRuntimeQuery, useAlphaXivFolders, useOpenResearchAccount, useSignOutOpenResearch } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
 import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
 
-import { Button, DialogContent, DialogTitle, MenuItem, Spinner } from "./ui";
+import { Button, DialogContent, DialogTitle, MenuItem, showAlert, Spinner } from "./ui";
+
+export function isRemoteSession(runtime?: RuntimeInfo | null): boolean {
+  if (runtime?.kind === "ssh") return true;
+  if (typeof location !== "undefined" && location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
+    return true;
+  }
+  return false;
+}
 
 function refreshAccount() {
   invalidateFamilies(["getOpenResearchAccount", "getOpenResearchSettings", "getComputeSettings"]);
@@ -19,11 +28,24 @@ function refreshAccount() {
 }
 
 /** Opens sign-in from anywhere; focus returns to `returnFocus` when the dialog closes. */
-export function openSignIn(connectOnly: boolean, returnFocus: HTMLElement | null, onSignedIn?: () => void) {
+export function openSignIn(
+  connectOnly: boolean,
+  returnFocus: HTMLElement | null,
+  onSignedIn?: () => void,
+  remote = isRemoteSession(queryClient.getQueryData<RuntimeInfo>(["gateway", "runtime"])),
+) {
+  const inDesktopApp = typeof window !== "undefined" && "__ORX_DESKTOP__" in window;
+  const placeholder = remote && !inDesktopApp ? window?.open?.("/remote-launch", "_blank") ?? null : null;
+  if (remote && !inDesktopApp && !placeholder) {
+    showAlert(m.remote_popup_blocked(), "error");
+  }
   showCustomDialog({
     component: SignInDialog,
-    props: { connectOnly, returnFocus },
-    onCancel: refreshAccount,
+    props: { connectOnly, returnFocus, initialPlaceholder: placeholder, remote },
+    onCancel: () => {
+      placeholder?.close();
+      refreshAccount();
+    },
     onConfirm: () => {
       window.ipc?.postMessage("window:focus");
       refreshAccount();
@@ -37,12 +59,14 @@ export function AccountChip({ onDetails }: { onDetails: () => void }) {
   const user = accountQuery.data?.user;
   const alphaXivNotConnected = useAlphaXivFolders().error instanceof AlphaXivNotConnectedError;
   const signOut = useSignOutOpenResearch();
+  const runtime = useQuery(getRuntimeQuery()).data;
+  const remote = isRemoteSession(runtime);
   const chipRef = useRef<HTMLButtonElement>(null);
   const focusAfterLogin = useRef(false);
   const name = user ? [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email : "";
 
   // Signing in swaps the plain button for the menu trigger, so focus moves to the new element.
-  const signIn = (connectOnly: boolean) => openSignIn(connectOnly, chipRef.current, () => { focusAfterLogin.current = true; });
+  const signIn = (connectOnly: boolean) => openSignIn(connectOnly, chipRef.current, () => { focusAfterLogin.current = true; }, remote);
 
   useEffect(() => {
     if (user && focusAfterLogin.current) { chipRef.current?.focus(); focusAfterLogin.current = false; }
@@ -71,26 +95,74 @@ export function AccountChip({ onDetails }: { onDetails: () => void }) {
 /** sysexits' EX_TEMPFAIL, which `orx login` exits with when OpenResearch couldn't reach alphaXiv. */
 const TRY_AGAIN_LATER = 75;
 
-function SignInDialog({ connectOnly, returnFocus, confirm, cancel }: DialogContentProps<void> & {
+function SignInDialog({ connectOnly, returnFocus, initialPlaceholder, remote: remoteProp, confirm, cancel }: DialogContentProps<void> & {
   connectOnly: boolean;
   returnFocus: HTMLElement | null;
+  initialPlaceholder?: Window | null;
+  remote?: boolean;
 }) {
+  const runtime = useQuery(getRuntimeQuery()).data;
+  const remote = remoteProp ?? isRemoteSession(runtime);
   const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const placeholderRef = useRef<Window | null>(initialPlaceholder ?? null);
+
   const fail = (exitCode?: number) => {
+    placeholderRef.current?.close();
+    placeholderRef.current = null;
     if (exitCode === TRY_AGAIN_LATER) setError(m.account_alphaxiv_unavailable());
     else setError(connectOnly ? m.account_alphaxiv_not_connected() : m.account_sign_in_failed());
   };
+
+  const retry = () => {
+    const inDesktopApp = typeof window !== "undefined" && "__ORX_DESKTOP__" in window;
+    const nextPlaceholder = remote && !inDesktopApp ? window?.open?.("/remote-launch", "_blank") ?? null : null;
+    if (remote && !inDesktopApp && !nextPlaceholder) {
+      showAlert(m.remote_popup_blocked(), "error");
+    }
+    placeholderRef.current = nextPlaceholder;
+    setError(null);
+    setAttempt((value) => value + 1);
+  };
+
+  const handleCancel = () => {
+    placeholderRef.current?.close();
+    placeholderRef.current = null;
+    cancel();
+  };
+
   return <DialogContent initialFocus={cancelRef} finalFocus={() => returnFocus} className="w-140 max-h-[calc(100vh_-_40px)] overflow-y-auto p-5 text-text">
     <DialogTitle className="mb-4">{connectOnly ? m.library_connect() : m.account_sign_in_alphaxiv()}</DialogTitle>
     {error ? <p role="alert" className="mt-0 mb-3 text-sm text-accent-red">{error}</p> : <div role="status" className="mb-3 flex items-center gap-2 text-sm text-subtext"><Spinner />{m.account_finish_browser()}</div>}
-    <LoginSession key={attempt} connectOnly={connectOnly} onComplete={() => confirm()} onError={fail} />
-    <div className="mt-4 flex justify-end gap-2">{error && <Button onClick={() => { setError(null); setAttempt((value) => value + 1); }}>{m.app_retry()}</Button>}<Button ref={cancelRef} onClick={cancel}>{m.settings_page_cancel()}</Button></div>
+    <LoginSession
+      key={attempt}
+      connectOnly={connectOnly}
+      remote={remote}
+      placeholderWindow={placeholderRef.current}
+      onComplete={() => confirm()}
+      onError={fail}
+    />
+    <div className="mt-4 flex justify-end gap-2">
+      {error && <Button onClick={retry}>{m.app_retry()}</Button>}
+      <Button ref={cancelRef} onClick={handleCancel}>{m.settings_page_cancel()}</Button>
+    </div>
   </DialogContent>;
 }
 
-export function LoginSession({ connectOnly, onComplete, onError }: { connectOnly: boolean; onComplete: () => void; onError: (exitCode?: number) => void }) {
+export function LoginSession({
+  connectOnly,
+  remote = isRemoteSession(queryClient.getQueryData<RuntimeInfo>(["gateway", "runtime"])),
+  placeholderWindow,
+  onComplete,
+  onError,
+}: {
+  connectOnly: boolean;
+  remote?: boolean;
+  placeholderWindow?: Window | null;
+  onComplete: () => void;
+  onError: (exitCode?: number) => void;
+}) {
   const [url, setUrl] = useState<string | null>(null);
   const callbacks = useRef({ onComplete, onError });
   callbacks.current = { onComplete, onError };
@@ -108,10 +180,17 @@ export function LoginSession({ connectOnly, onComplete, onError }: { connectOnly
           output += new TextDecoder().decode(event.data);
           const match = output.match(/https?:\/\/[^\s\x1b]+(?=\s)/);
           if (match) {
-            setUrl(match[0]);
+            const authUrl = match[0];
+            setUrl(authUrl);
             if (!opened.current) {
               opened.current = true;
-              window?.open?.(match[0], "_blank");
+              if (remote) {
+                if (placeholderWindow && !placeholderWindow.closed) {
+                  placeholderWindow.location.replace(authUrl);
+                } else {
+                  window?.open?.(authUrl, "_blank");
+                }
+              }
             }
           }
           return;
@@ -125,6 +204,6 @@ export function LoginSession({ connectOnly, onComplete, onError }: { connectOnly
       socket.onclose = () => { if (!complete) { setUrl(null); callbacks.current.onError(); } };
     }, 0);
     return () => { clearTimeout(timer); if (socket) { socket.onclose = null; socket.close(); } };
-  }, [connectOnly]);
+  }, [connectOnly, remote, placeholderWindow]);
   return url && <a href={url} target="_blank" rel="noreferrer" className="break-all text-sm text-text underline">{url}</a>;
 }
