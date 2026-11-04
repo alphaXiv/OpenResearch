@@ -9,7 +9,7 @@
   "workspace_terminal_exited": "Оболочка завершилась с кодом {code}.",
   "workspace_terminal_disconnected": "Терминал отключился.",
   "workspace_terminal_restart": "Перезапустить оболочку",
-  "chat_show_full_conversation": "Показать весь разговор",
+  "chat_messages_feed": "Сообщения",
   "settings_key_from": "Ключ из",
   "settings_token_from": "Токен из",
   "settings_environment_tab": "вкладки «Окружение»",

@@ -4129,6 +4129,8 @@ const Transcript = memo(function Transcript({
   onOpenDelegate,
   focusedMessageId,
   focusNonce,
+  assistantLabel,
+  onLeaveFeed,
 }: {
   /** The branch on screen, oldest first. */
   messages: ChatMessage[];
@@ -4160,6 +4162,10 @@ const Transcript = memo(function Transcript({
   onOpenDelegate?: (sessionId: string) => void;
   focusedMessageId?: string | null;
   focusNonce?: number;
+  /** Names each assistant article, as the Markdown export does. */
+  assistantLabel: string;
+  /** Ctrl+End and Ctrl+Home leave the feed, forward or back. */
+  onLeaveFeed: (forward: boolean) => void;
 }) {
   useLocale();
   const replies = useMemo(() => questionReplies(messages), [messages]);
@@ -4195,16 +4201,15 @@ const Transcript = memo(function Transcript({
   }, [messages, visibleMessages, allMessages]);
   // ponytail: interacted rows stay mounted for this visit; lift row state if retention becomes costly.
   const retainedRows = useRef(new Set<string>());
-  const [fullHistory, setFullHistory] = useState(false);
+  const [focusedRow, setFocusedRow] = useState<string | null>(null);
   const getItemKey = useCallback((index: number) => visibleMessages[index][0].id, [visibleMessages]);
   const rangeExtractor = useCallback((range: VirtualRange) => {
-    if (fullHistory) return visibleMessages.map((_, index) => index);
     const indexes = new Set(defaultRangeExtractor(range));
     visibleMessages.forEach((group, index) => {
-      if (retainedRows.current.has(group[0].id)) indexes.add(index);
+      if (group[0].id === focusedRow || retainedRows.current.has(group[0].id)) indexes.add(index);
     });
     return [...indexes].sort((a, b) => a - b);
-  }, [visibleMessages, fullHistory]);
+  }, [visibleMessages, focusedRow]);
   // Seed via the measurement cache, not estimateSize, so remembered rows count as measured for anchoring.
   const [initialMeasurementsCache] = useState(() => visibleMessages.flatMap((group, index) => {
     const remembered = transcriptRowSizes.get(group[0].id);
@@ -4292,22 +4297,54 @@ const Transcript = memo(function Transcript({
     const timer = window.setTimeout(() => setMarkedRowId(null), 1600);
     return () => window.clearTimeout(timer);
   }, [markedRowId]);
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const row = focusedRow ? scroll?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focusedRow)}"]`) : null;
+    if (!scroll || !row || row.contains(document.activeElement)) return;
+    row.focus({ preventScroll: true });
+    const viewport = scroll.getBoundingClientRect();
+    const bounds = row.getBoundingClientRect();
+    if (bounds.top >= viewport.top && bounds.bottom <= viewport.bottom) return;
+    virtualizer.scrollToIndex(Number(row.dataset.index), { align: bounds.height > viewport.height ? "start" : "auto" });
+  }, [focusedRow, scrollRef, virtualizer]);
   const activeMessage = messages.at(-1);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
+  const userLabel = m.chat_export_you();
+  const headingPrefix = useId();
   return (
     <>
       <span className="sr-only" role="status" aria-live="polite">
         <span key={transcriptAnnouncement.sequence}>{transcriptAnnouncement.text}</span>
       </span>
-      <button type="button" className="sr-only focus:not-sr-only" aria-pressed={fullHistory} onClick={() => setFullHistory((value) => !value)}>
-        {m.chat_show_full_conversation()}
-      </button>
-      <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
+      {/* The WAI-ARIA feed pattern: assistive technology moves focus between articles, and the virtualizer mounts around it. */}
+      <div
+        role="feed"
+        aria-label={m.chat_messages_feed()}
+        className="relative"
+        style={{ height: virtualizer.getTotalSize() }}
+        onKeyDown={(event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLElement) || target.isContentEditable || target.matches("input, textarea, select")) return;
+          if (event.altKey || event.metaKey || event.shiftKey) return;
+          if (event.ctrlKey && (event.key === "Home" || event.key === "End")) {
+            event.preventDefault();
+            onLeaveFeed(event.key === "End");
+            return;
+          }
+          const step = event.ctrlKey ? 0 : event.key === "PageDown" ? 1 : event.key === "PageUp" ? -1 : 0;
+          const article = target.closest<HTMLElement>("[role=article]");
+          const next = step && article ? visibleMessages[Number(article.dataset.index) + step] : undefined;
+          if (!next) return;
+          event.preventDefault();
+          setFocusedRow(next[0].id);
+        }}
+      >
       {virtualizer.getVirtualItems().map((item) => {
         const group = visibleMessages[item.index];
         const m = group[group.length - 1];
         const rowId = group[0].id;
+        const headingId = `${headingPrefix}${rowId}`;
 
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
@@ -4315,19 +4352,34 @@ const Transcript = memo(function Transcript({
         return (
           <div
             key={rowId}
+            role="article"
+            tabIndex={0}
+            aria-labelledby={headingId}
+            aria-posinset={item.index + 1}
+            aria-setsize={visibleMessages.length}
             data-index={item.index}
             data-message-id={rowId}
             ref={virtualizer.measureElement}
-            className={`absolute left-0 w-full pb-4 isolate before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
+            className={`absolute left-0 w-full pb-4 isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
             style={{ top: item.start }}
             onClickCapture={(event) => {
+              retainedRows.current.add(rowId);
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
               stickToBottom.current = false;
               virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
             }}
             onPointerDownCapture={() => retainedRows.current.add(rowId)}
-            onFocusCapture={() => retainedRows.current.add(rowId)}
+            onInputCapture={() => retainedRows.current.add(rowId)}
+            // Screen readers can move focus through every row as they read, so focus holds a row only while it lasts.
+            onFocusCapture={() => setFocusedRow(rowId)}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow((current) => current === rowId ? null : current);
+            }}
           >
+          {/* NVDA leaves article names unspoken by default, so a hidden heading names the author. A reply nests under its prompt. */}
+          {group[0].role === "user"
+            ? <h5 id={headingId} className="sr-only select-none">{userLabel}</h5>
+            : <h6 id={headingId} className="sr-only select-none">{assistantLabel}</h6>}
           <Message
             message={m}
             responseMessages={group}
@@ -5489,6 +5541,7 @@ export function ChatPanel({
   // The open session, if any (its harness is locked; its model/mode/reasoning
   // are what the composer should reflect and edit).
   const openSession = sessions.find((s) => s.id === activeId);
+  const assistantLabel = openSession ? harnessLabel(openSession.harness, openSession.harnessName) : m.chat_the_agent();
 
   // The selection the composer displays and edits:
   //  * with a session open — that session's stored settings, with any unsent
@@ -5866,7 +5919,7 @@ export function ChatPanel({
         const markdown = openSession
           ? transcriptMarkdown(title, messages, {
             user: m.chat_export_you(),
-            assistant: harnessLabel(openSession.harness, openSession.harnessName),
+            assistant: assistantLabel,
           })
           : null;
         if (markdown) downloadMarkdown(transcriptFileName(title), markdown);
@@ -6358,6 +6411,9 @@ export function ChatPanel({
     stickToBottom.current = true;
     setTranscriptAtBottom(true);
     scrollToEndRef.current?.();
+  }, []);
+  const leaveTranscriptFeed = useCallback((forward: boolean) => {
+    (forward ? composerRef.current : threadRef.current)?.focus();
   }, []);
   useEffect(() => {
     const el = threadRef.current;
@@ -7654,6 +7710,8 @@ export function ChatPanel({
                   onOpenDelegate={onOpenDelegate}
                   focusedMessageId={focusedMessage?.sessionId === activeId ? focusedMessage.messageId : null}
                   focusNonce={focusedMessage?.nonce}
+                  assistantLabel={assistantLabel}
+                  onLeaveFeed={leaveTranscriptFeed}
                 />
                 </ChatLinksContext>
               </ChatImageScope>
@@ -7729,9 +7787,7 @@ export function ChatPanel({
           {pendingPlan && !(revisingPlan && pendingPlan.promptId === revisingPlan.promptId) && (
             <PlanStrip
               synthesized={pendingPlan.synthesized}
-              agentLabel={
-                activeSession ? harnessLabel(activeSession.harness, activeSession.harnessName) : m.chat_the_agent()
-              }
+              agentLabel={assistantLabel}
               showResumeModes={activeSession?.harness === "claude-code"}
               onView={(intent) => openPlan?.(pendingPlan.plan, pendingPlan.promptId, intent)}
               onApprove={(resumeMode) =>

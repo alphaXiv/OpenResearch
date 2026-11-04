@@ -12,7 +12,7 @@
   "workspace_terminal_exited": "Powłoka zakończyła działanie z kodem {code}.",
   "workspace_terminal_disconnected": "Utracono połączenie z terminalem.",
   "workspace_terminal_restart": "Uruchom ponownie powłokę",
-  "chat_show_full_conversation": "Pokaż całą rozmowę",
+  "chat_messages_feed": "Wiadomości",
   "settings_key_from": "Klucz z",
   "settings_token_from": "Token z",
   "settings_environment_tab": "Karta środowiska",

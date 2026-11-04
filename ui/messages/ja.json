@@ -9,7 +9,7 @@
   "workspace_terminal_exited": "シェルがコード {code} で終了しました。",
   "workspace_terminal_disconnected": "ターミナルの接続が切れました。",
   "workspace_terminal_restart": "シェルを再起動",
-  "chat_show_full_conversation": "会話全体を表示",
+  "chat_messages_feed": "メッセージ",
   "settings_key_from": "キーの取得元",
   "settings_token_from": "トークンの取得元",
   "settings_environment_tab": "環境タブ",

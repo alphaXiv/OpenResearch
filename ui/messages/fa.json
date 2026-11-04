@@ -9,7 +9,7 @@
   "workspace_terminal_exited": "پوسته با کد {code} خارج شد.",
   "workspace_terminal_disconnected": "ارتباط ترمینال قطع شد.",
   "workspace_terminal_restart": "راه‌اندازی دوباره پوسته",
-  "chat_show_full_conversation": "نمایش کامل گفتگو",
+  "chat_messages_feed": "پیام‌ها",
   "settings_key_from": "کلید از",
   "settings_token_from": "توکن از",
   "settings_environment_tab": "زبانهٔ محیط",
