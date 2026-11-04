@@ -373,10 +373,7 @@ export function ModelPicker({
                 "composer-pill inline-flex h-8 min-w-0 max-w-full items-center gap-1 rounded-md px-2 text-sm text-text whitespace-nowrap transition-[background,color] duration-150 ease-standard hover:bg-surface",
                 className,
               )}
-              aria-label={m.a11y_chat_model({
-                label:
-                  effectiveServiceTier === "priority" ? `${m.model_picker_fast_speed()} ${label}` : label,
-              })}
+              aria-label={m.a11y_chat_model({ label })}
               onKeyDown={(event) => {
                 if (event.key === "ArrowDown") {
                   event.preventDefault();
@@ -386,9 +383,7 @@ export function ModelPicker({
                 }
               }}
             >
-              {effectiveServiceTier === "priority" ? (
-                <Zap size={14} fill="currentColor" aria-hidden="true" />
-              ) : value?.harness ? (
+              {value?.harness ? (
                 <HarnessLogo harness={value.harness} logo={selectedHarness?.logo} size={14} />
               ) : null}
               <span className="model-picker-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
@@ -620,12 +615,16 @@ export function ModelPicker({
           >
             <Menu.Trigger
               className="composer-pill inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-sm text-muted transition-[background,color] duration-150 ease-standard hover:bg-surface"
-              aria-label={
+              aria-label={[
                 reasoningLabel
                   ? `${m.settings_page_settings()}: ${reasoningLabel}`
-                  : m.settings_page_settings()
-              }
+                  : m.settings_page_settings(),
+                effectiveServiceTier === "priority" ? m.model_picker_fast_mode() : null,
+              ].filter(Boolean).join(" · ")}
             >
+              {effectiveServiceTier === "priority" && (
+                <Zap size={14} fill="currentColor" aria-hidden="true" />
+              )}
               {reasoningLabel ? <span>{reasoningLabel}</span> : <Settings size={14} aria-hidden="true" />}
               <ChevronDown size={14} className="shrink-0" />
             </Menu.Trigger>
