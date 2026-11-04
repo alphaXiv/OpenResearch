@@ -877,6 +877,13 @@ export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/setting
 export type InstallChannel = "installer" | "app-bundle" | "appimage" | "portable" | "cargo" | "homebrew" | "nix" | "unknown";
 export type ReleaseChannel = "stable" | "canary";
 
+/** Commit titles by conventional prefix. */
+export interface Changes {
+  features: number;
+  fixes: number;
+  other: number;
+}
+
 export interface UpdateStatus {
   current: string;
   /** Latest published release on the selected channel. */
@@ -893,6 +900,8 @@ export interface UpdateStatus {
   /** `autoUpdate` is off because of the environment, not the user's setting. */
   envDisabled: boolean;
   updateAvailable: boolean;
+  /** What the release an update or restart moves to adds over this build; null when either side published no totals. */
+  changes: Changes | null;
   /** The newer version already on disk. Distinct from `latest`: a release can
    *  land between the install and the restart. */
   installedVersion: string | null;
@@ -914,6 +923,15 @@ export interface InstalledCli {
 }
 
 export const getUpdateStatus = (signal?: AbortSignal) => get<UpdateStatus>("/api/update", signal);
+
+/** What a canary build holds beyond the latest stable release; null for any other build or when none were published. */
+export interface BuildNotes {
+  base: string;
+  /** Commit titles, newest first. */
+  commits: string[];
+}
+
+export const getBuildNotes = (signal?: AbortSignal) => get<BuildNotes | null>("/api/update/notes", signal);
 
 export const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
 

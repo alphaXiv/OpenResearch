@@ -130,6 +130,26 @@ fn http() -> &'static reqwest::Client {
 // Latest-version discovery (dist-manifest.json)
 // ---------------------------------------------------------------------------
 
+/// Commit titles by conventional prefix, counted cumulatively up to a release's
+/// commit. Each release publishes its own totals, so what an update brings is
+/// its totals minus the running build's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Changes {
+    pub features: u32,
+    pub fixes: u32,
+    pub other: u32,
+}
+
+impl Changes {
+    fn since(self, base: Changes) -> Option<Changes> {
+        Some(Changes {
+            features: self.features.checked_sub(base.features)?,
+            fixes: self.fixes.checked_sub(base.fixes)?,
+            other: self.other.checked_sub(base.other)?,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LatestRelease {
     pub version: Version,
@@ -158,6 +178,10 @@ struct CanaryManifest {
     commit: String,
     ancestors: Vec<String>,
     assets: HashMap<String, ReleaseAsset>,
+    #[serde(default)]
+    changes: Option<Changes>,
+    #[serde(default)]
+    notes: Option<ManifestNotes>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -167,26 +191,19 @@ pub(crate) struct ReleaseAsset {
 }
 
 async fn fetch_canary_manifest(timeout: Duration) -> Result<Option<CanaryManifest>> {
-    let base = format!("{REPO_URL}/releases/download/canary");
-    let mut response = http()
-        .get(format!("{base}/desktop-canary-v2.json"))
+    let response = http()
+        .get(format!(
+            "{REPO_URL}/releases/download/canary/desktop-canary-v2.json"
+        ))
         .header("user-agent", UA)
         .timeout(timeout)
         .send()
         .await?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
-        response = http()
-            .get(format!("{base}/desktop-canary.json"))
-            .header("user-agent", UA)
-            .timeout(timeout)
-            .send()
-            .await?;
-    }
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
     let manifest: CanaryManifest = response.error_for_status()?.json().await?;
-    if !valid_desktop_tag(crate::telemetry::update_channel(), &manifest.tag) {
+    if !valid_desktop_tag(ReleaseChannel::Canary, &manifest.tag) {
         return Err(anyhow!(
             "The app update belongs to a different release channel."
         ));
@@ -207,6 +224,8 @@ struct DistManifest {
     announcement_tag: String,
     #[serde(default)]
     releases: Vec<ManifestRelease>,
+    #[serde(default)]
+    orx_changes: Option<Changes>,
 }
 
 #[derive(Deserialize)]
@@ -287,11 +306,7 @@ pub async fn fetch_release_asset(tag: &str, asset: &str, timeout: Duration) -> R
 }
 
 fn release_asset_url(tag: &str, asset: &str) -> String {
-    let release = if tag.starts_with("canary-")
-        && asset
-            .strip_prefix(tag)
-            .is_some_and(|suffix| suffix.starts_with("--"))
-    {
+    let release = if tag.starts_with("canary-") {
         "canary"
     } else {
         tag
@@ -835,6 +850,9 @@ struct CheckCache {
     deferred_tag: String,
     #[serde(default)]
     compatible_releases: HashMap<String, String>,
+    /// Totals by release tag, for the latest, installed, deferred and running releases.
+    #[serde(default)]
+    changes: HashMap<String, Changes>,
 }
 
 fn compatible_with_current(cache: &CheckCache, tag: &str) -> bool {
@@ -878,6 +896,130 @@ fn cache_checked_release(cache: &mut CheckCache, latest: &LatestRelease, identit
     } else if latest.tag != cache.installed_tag && latest.tag != cache.deferred_tag {
         cache.compatible_releases.remove(&latest.tag);
     }
+}
+
+/// What a canary build holds beyond the latest stable release, newest first.
+#[derive(Debug, Serialize)]
+pub struct BuildNotes {
+    pub base: String,
+    pub commits: Vec<String>,
+}
+
+/// The canary manifest's list of commits between the latest stable release and
+/// the canary's own commit, newest first.
+#[derive(Debug, Deserialize)]
+struct ManifestNotes {
+    base: String,
+    commits: Vec<ManifestCommit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestCommit {
+    sha: String,
+    title: String,
+}
+
+/// The commit titles this canary build holds beyond stable, read from the
+/// canary manifest: the newest canary's list, cut back to this build's commit.
+/// `None` for any other build, or when the manifest's list doesn't reach this build's commit.
+pub async fn fetch_build_notes() -> Result<Option<BuildNotes>> {
+    let Some(head) = option_env!("ORX_DESKTOP_CANARY_SHA") else {
+        return Ok(None);
+    };
+    let Some(notes) = fetch_canary_manifest(Duration::from_secs(15))
+        .await?
+        .and_then(|manifest| manifest.notes)
+    else {
+        return Ok(None);
+    };
+    let Some(start) = notes.commits.iter().position(|commit| commit.sha == head) else {
+        return Ok(None);
+    };
+    Ok(Some(BuildNotes {
+        base: notes.base,
+        commits: notes
+            .commits
+            .into_iter()
+            .skip(start)
+            .map(|commit| commit.title)
+            .collect(),
+    }))
+}
+
+/// The totals a release published, if it did: canary builds only on the canary
+/// manifest's current build, stable ones in the release's own dist manifest.
+async fn fetch_changes(tag: &str, timeout: Duration) -> Result<Option<Changes>> {
+    if tag.starts_with("canary-") {
+        return Ok(fetch_canary_manifest(timeout)
+            .await?
+            .filter(|manifest| manifest.tag == tag)
+            .and_then(|manifest| manifest.changes));
+    }
+    let res = http()
+        .get(format!(
+            "{REPO_URL}/releases/download/{tag}/dist-manifest.json"
+        ))
+        .header("user-agent", UA)
+        .timeout(timeout)
+        .send()
+        .await?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let manifest: DistManifest = res.error_for_status()?.json().await?;
+    Ok(manifest.orx_changes)
+}
+
+/// Totals of the running build: stamped in at compile time for canary builds,
+/// which their release no longer publishes once a newer canary replaces it.
+fn current_changes(cache: &CheckCache) -> Option<Changes> {
+    match option_env!("ORX_DESKTOP_CANARY_CHANGES") {
+        Some(json) => serde_json::from_str(json).ok(),
+        None => cache
+            .changes
+            .get(&format!("v{}", current_version()))
+            .copied(),
+    }
+}
+
+/// Fill in the totals the cache is missing for the releases the dashboard
+/// compares. Best effort: a release without a published marker just has no summary.
+pub async fn refresh_changes() {
+    if opted_out() {
+        return;
+    }
+    let channel = crate::telemetry::update_channel();
+    let Some(cache) = read_cache() else {
+        return;
+    };
+    let mut tags = vec![
+        cache.latest_tag.clone(),
+        cache.installed_tag.clone(),
+        cache.deferred_tag.clone(),
+    ];
+    if option_env!("ORX_DESKTOP_CANARY_CHANGES").is_none() {
+        tags.push(format!("v{}", current_version()));
+    }
+    tags.retain(|tag| !tag.is_empty());
+    tags.sort();
+    tags.dedup();
+    let mut fetched = HashMap::new();
+    // Callers wait on this optional text, so a stalled request costs seconds, not minutes.
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        for tag in tags.iter().filter(|tag| !cache.changes.contains_key(*tag)) {
+            if let Ok(Some(changes)) = fetch_changes(tag, Duration::from_secs(5)).await {
+                fetched.insert(tag.clone(), changes);
+            }
+        }
+    })
+    .await;
+    if fetched.is_empty() {
+        return;
+    }
+    mutate_cache_for(channel, |cache| {
+        cache.changes.extend(fetched);
+        cache.changes.retain(|tag, _| tags.contains(tag));
+    });
 }
 
 pub(crate) fn record_checked_release(latest: &LatestRelease) {
@@ -1238,6 +1380,8 @@ pub struct UpdateStatus {
     /// actually the reason.
     pub env_disabled: bool,
     pub update_available: bool,
+    /// What the release a restart or update moves to adds over the running build.
+    pub changes: Option<Changes>,
     /// The version a restart of *this* process moves to: already on disk, or held
     /// back until this backend restarts. Named separately from `latest` because a
     /// release can land between the install and the restart.
@@ -1273,7 +1417,14 @@ pub fn status() -> UpdateStatus {
     let latest = cache.as_ref().and_then(|c| Version::parse(&c.latest).ok());
     let restart_target = cache.as_ref().and_then(|c| restart_target(c, &current));
     let desktop = channel.is_some_and(InstallChannel::has_release_channels);
+    let changes = cache.as_ref().and_then(|cache| {
+        let target = restart_target
+            .as_ref()
+            .map_or(cache.latest_tag.as_str(), |(_, tag)| *tag);
+        cache.changes.get(target)?.since(current_changes(cache)?)
+    });
     UpdateStatus {
+        changes,
         waiting_for_stable: desktop
             && option_env!("ORX_DESKTOP_CANARY_TAG").is_some()
             && crate::telemetry::update_channel() == ReleaseChannel::Stable
@@ -1760,6 +1911,7 @@ pub async fn apply_now() -> Result<()> {
             }
         ));
     }
+    refresh_changes().await;
     Ok(())
 }
 
@@ -1792,6 +1944,7 @@ pub async fn periodic_update_pass() {
     if selected != crate::telemetry::update_channel() {
         return;
     }
+    refresh_changes().await;
     if !auto_update_eligible() {
         return;
     }
@@ -2108,8 +2261,8 @@ mod tests {
         detect_channel, exe_matches_prefix, now_unix, package_manager_owns, parse_manifest,
         portable_dir, portable_outside_prefix, precedence, relaunch_args, release_asset_url,
         render, restart_target, retired_path, staged_release_in, target_lock_path, warning_for,
-        write_staged_release, BackendLock, CheckCache, InstallChannel, ReleaseChannel,
-        UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        write_staged_release, BackendLock, Changes, CheckCache, DistManifest, InstallChannel,
+        ReleaseChannel, UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -2117,12 +2270,40 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn canary_assets_are_pinned_in_their_publishing_release() {
-        let base = "https://github.com/alphaXiv/OpenResearch/releases/download";
+    fn changes_are_the_difference_of_cumulative_totals() {
+        let total = |features, fixes, other| Changes {
+            features,
+            fixes,
+            other,
+        };
         assert_eq!(
-            release_asset_url("canary-20261027.2", "OpenResearch.dmg"),
-            format!("{base}/canary-20261027.2/OpenResearch.dmg")
+            total(12, 30, 9).since(total(10, 30, 4)),
+            Some(total(2, 0, 5))
         );
+        assert_eq!(total(12, 30, 9).since(total(13, 30, 4)), None);
+    }
+
+    #[test]
+    fn dist_manifest_publishes_changes_only_when_marked() {
+        let marked =
+            r#"{"announcement_tag":"v1.0.0","orx_changes":{"features":3,"fixes":2,"other":1}}"#;
+        let manifest: DistManifest = serde_json::from_str(marked).unwrap();
+        assert_eq!(
+            manifest.orx_changes,
+            Some(Changes {
+                features: 3,
+                fixes: 2,
+                other: 1
+            })
+        );
+        let manifest: DistManifest =
+            serde_json::from_str(r#"{"announcement_tag":"v0.1.0"}"#).unwrap();
+        assert_eq!(manifest.orx_changes, None);
+    }
+
+    #[test]
+    fn canary_assets_live_in_the_shared_canary_release() {
+        let base = "https://github.com/alphaXiv/OpenResearch/releases/download";
         assert_eq!(
             release_asset_url("canary-20261027.3", "canary-20261027.3--OpenResearch.dmg"),
             format!("{base}/canary/canary-20261027.3--OpenResearch.dmg")

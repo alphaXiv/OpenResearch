@@ -39,7 +39,7 @@ test('canary identity handles paginated releases and keeps a running build', () 
   }
 })
 
-test('canary publication bridges old clients, keeps published bytes, and rejects older sources', () => {
+test('canary publication keeps published bytes and rejects older sources', () => {
   const section = canary.split('      - name: Publish canary')[1].split('      - name: Retain seven canary builds')[0]
   const shell = section.split('        run: |\n')[1].split('\n').map(line => line.replace(/^          /, '')).join('\n')
   const root = mkdtempSync(join(tmpdir(), 'orx-canary-publish-'))
@@ -48,7 +48,7 @@ test('canary publication bridges old clients, keeps published bytes, and rejects
     mkdirSync(join(root, 'remote/canary'))
     writeFileSync(join(root, 'scripts/canary-manifest.mjs'), readFileSync(new URL('../scripts/canary-manifest.mjs', import.meta.url)))
     writeFileSync(join(root, 'artifacts/OpenResearch.dmg'), 'original')
-    writeFileSync(join(root, 'remote/canary/desktop-canary.json'), JSON.stringify({ tag: 'canary-20261027.1', commit: 'a'.repeat(40) }))
+    writeFileSync(join(root, 'remote/canary/desktop-canary-v2.json'), JSON.stringify({ tag: 'canary-20261027.1', commit: 'a'.repeat(40) }))
     writeFileSync(join(root, 'bin/gh'), `#!/usr/bin/env node
 const fs = require('fs'), path = require('path');
 const a = process.argv.slice(2), [kind, action, tag] = a, remote = path.join(process.env.FIXTURE_ROOT, 'remote'), dir = path.join(remote, tag || '');
@@ -69,42 +69,35 @@ process.exit(2);
 `, { mode: 0o755 })
     writeFileSync(join(root, 'bin/git'), `#!/usr/bin/env node
 if (process.argv[2] === 'merge-base') process.exit(Number(process.env.FIXTURE_ANCESTOR));
+if (process.argv[2] === 'log') { console.log(process.env.SOURCE_SHA + '\\tfeat: a thing'); process.exit(0); }
 if (process.argv[2] === 'rev-list') { console.log(process.env.SOURCE_SHA + '\\n' + process.env.PREVIOUS_SHA); process.exit(0); }
 process.exit(2);
 `, { mode: 0o755 })
-    const env = { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, FIXTURE_ROOT: root, RUNNER_TEMP: join(root, 'runner'), GITHUB_REPOSITORY: 'test/repo', TAG: 'canary-20261027.4', VERSION: '0.2.21', SOURCE_SHA: 'b'.repeat(40), PREVIOUS_SHA: 'a'.repeat(40) }
+    const env = { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, FIXTURE_ROOT: root, RUNNER_TEMP: join(root, 'runner'), GITHUB_REPOSITORY: 'test/repo', CANARY_CHANGES: '{"features":1,"fixes":2,"other":3}', TAG: 'canary-20261027.4', VERSION: '0.2.21', SOURCE_SHA: 'b'.repeat(40), PREVIOUS_SHA: 'a'.repeat(40) }
     const run = (ancestor, overrides = {}) => execFileSync('bash', ['-c', shell], { cwd: root, env: { ...env, ...overrides, FIXTURE_ANCESTOR: String(ancestor) }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const manifest = () => JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary-v2.json')))
     run(1)
-    assert.equal(JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary.json'))).tag, 'canary-20261027.1')
+    assert.equal(manifest().tag, 'canary-20261027.1')
     rmSync(join(root, 'runner'), { recursive: true }); mkdirSync(join(root, 'runner'))
     assert.throws(() => run(128))
     rmSync(join(root, 'runner'), { recursive: true }); mkdirSync(join(root, 'runner'))
-    assert.throws(() => run(0))
-    assert.equal(JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary.json'))).tag, 'canary-20261027.1')
-    for (const asset of ['OpenResearch-Canary-orx.exe', 'OpenResearch-x86_64.AppImage', 'OpenResearch-aarch64.AppImage']) {
-      writeFileSync(join(root, 'artifacts', asset), asset)
-    }
-    rmSync(join(root, 'runner'), { recursive: true }); mkdirSync(join(root, 'runner'))
     run(0)
-    const old = JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary.json')))
-    const latest = JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary-v2.json')))
-    assert.equal(old.tag, env.TAG)
-    assert.equal(old.assets.macos.asset, 'OpenResearch.dmg')
+    const latest = manifest()
+    assert.equal(latest.tag, env.TAG)
     assert.equal(latest.assets.macos.asset, `${env.TAG}--OpenResearch.dmg`)
     assert.equal(latest.assets.macos.sha256, createHash('sha256').update('original').digest('hex'))
+    assert.deepEqual(latest.changes, { features: 1, fixes: 2, other: 3 })
+    assert.deepEqual(latest.notes.commits, [{ sha: env.SOURCE_SHA, title: 'feat: a thing' }])
     writeFileSync(join(root, 'artifacts/OpenResearch.dmg'), 'rebuilt')
     rmSync(join(root, 'runner'), { recursive: true }); mkdirSync(join(root, 'runner'))
     run(0)
-    const rerun = JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary-v2.json')))
+    const rerun = manifest()
     assert.equal(rerun.assets.macos.sha256, latest.assets.macos.sha256)
-    assert.deepEqual(JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary.json'))), old)
     rmSync(join(root, 'runner'), { recursive: true }); mkdirSync(join(root, 'runner'))
     run(0, { TAG: 'canary-20261027.5', SOURCE_SHA: 'c'.repeat(40), PREVIOUS_SHA: env.SOURCE_SHA, FAIL_TAG_UPDATE: 'yes' })
-    const next = JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary-v2.json')))
+    const next = manifest()
     assert.equal(next.tag, 'canary-20261027.5')
     assert.equal(next.assets.macos.asset, 'canary-20261027.5--OpenResearch.dmg')
-    assert.deepEqual(JSON.parse(readFileSync(join(root, 'remote/canary/desktop-canary.json'))), old)
-    assert.deepEqual(readFileSync(join(root, 'remote/canary-20261027.4/OpenResearch.dmg'), 'utf8'), 'original')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -116,7 +109,7 @@ test('canary retention preserves seven shared builds and the compatibility relea
     for (const name of ['bin', 'runner']) mkdirSync(join(root, name))
     writeFileSync(join(root, 'bin/gh'), `#!/usr/bin/env node
 const fs = require('fs'), path = require('path'), a = process.argv.slice(2);
-if (a[0] === 'release' && a[1] === 'download') { const dir = a[a.indexOf('--dir') + 1]; fs.writeFileSync(path.join(dir, 'desktop-canary.json'), JSON.stringify({tag:'canary-20261027.1'})); fs.writeFileSync(path.join(dir, 'desktop-canary-v2.json'), JSON.stringify({tag:'canary-20261027.1'})); process.exit(0); }
+if (a[0] === 'release' && a[1] === 'download') { const dir = a[a.indexOf('--dir') + 1]; fs.writeFileSync(path.join(dir, 'desktop-canary-v2.json'), JSON.stringify({tag:'canary-20261027.1'})); process.exit(0); }
 if (a[0] === 'api' && a[1].endsWith('/releases/tags/canary')) { console.log('1'); process.exit(0); }
 if (a[0] === 'api' && a.some(x => x.includes('/assets?'))) { console.log(JSON.stringify([Array.from({length:10}, (_,i) => ({id:i+1,name:'canary-20261027.'+(i+1)+'--OpenResearch.dmg'}))])); process.exit(0); }
 if (a[0] === 'api' && a[1] === '-X') { fs.appendFileSync(process.env.DELETED, a[3].split('/').pop()+'\\n'); process.exit(0); }
