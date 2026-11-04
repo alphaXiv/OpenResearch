@@ -148,3 +148,71 @@ test("sign-in started elsewhere returns focus to the control that started it", (
   app.openSignIn(false, opener);
   assert.equal(app.dialog().find((node) => node.type === "dialog-content").props.finalFocus(), opener);
 });
+
+test("LoginSession prompts browser window when authorization URL arrives", () => {
+  const opened = [];
+  let onMessage;
+  class MockWebSocket {
+    constructor(url) {
+      this.url = url;
+    }
+    set onmessage(handler) {
+      onMessage = handler;
+    }
+    close() {}
+  }
+  globalThis.WebSocket = MockWebSocket;
+  globalThis.location = { protocol: "http:", host: "127.0.0.1:4792" };
+
+  let capturedEffect;
+  const sessionMocks = {
+    react: {
+      ...React,
+      useState: (init) => [init, () => {}],
+      useRef: (init) => ({ current: init ?? null }),
+      useEffect: (fn) => { capturedEffect = fn; },
+    },
+    "../api": { AlphaXivNotConnectedError: NotConnected, OpenResearchAccountError: AccountError },
+    "@base-ui/react/menu": { Menu: {} },
+    "../dialog": {},
+    "../queries/settings": {},
+    "../queries/invalidation": {},
+    "../queries/client": {},
+    "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
+    "./confirmOpenResearchSignOut": {},
+    "./OpenResearchAccount": {},
+    "./ui": {},
+  };
+  const mockWindow = {
+    ipc: { postMessage() {} },
+    open: (url, target) => {
+      opened.push({ url, target });
+      return {};
+    },
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+  };
+  const sessionExports = {};
+  new Function("require", "exports", "window", code)(
+    (name) => sessionMocks[name] ?? require(name),
+    sessionExports,
+    mockWindow,
+  );
+
+  sessionExports.LoginSession({ connectOnly: true, onComplete() {}, onError() {} });
+  assert.ok(capturedEffect);
+  capturedEffect();
+
+  assert.ok(onMessage);
+  const authUrl = "https://api.alphaxiv.org/auth/oauth2/authorize?client_id=123&state=abc";
+  const output = `Opening your browser to sign in with alphaXiv…\nIf it doesn't open, visit:\n  ${authUrl}\n`;
+  onMessage({ data: new TextEncoder().encode(output).buffer });
+
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].url, authUrl);
+  assert.equal(opened[0].target, "_blank");
+
+  // A subsequent message does not prompt a second browser page
+  onMessage({ data: new TextEncoder().encode(output).buffer });
+  assert.equal(opened.length, 1);
+});

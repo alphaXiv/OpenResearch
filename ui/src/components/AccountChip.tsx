@@ -90,10 +90,11 @@ function SignInDialog({ connectOnly, returnFocus, confirm, cancel }: DialogConte
   </DialogContent>;
 }
 
-function LoginSession({ connectOnly, onComplete, onError }: { connectOnly: boolean; onComplete: () => void; onError: (exitCode?: number) => void }) {
+export function LoginSession({ connectOnly, onComplete, onError }: { connectOnly: boolean; onComplete: () => void; onError: (exitCode?: number) => void }) {
   const [url, setUrl] = useState<string | null>(null);
   const callbacks = useRef({ onComplete, onError });
   callbacks.current = { onComplete, onError };
+  const opened = useRef(false);
   useEffect(() => {
     let socket: WebSocket | undefined;
     let output = "";
@@ -106,7 +107,13 @@ function LoginSession({ connectOnly, onComplete, onError }: { connectOnly: boole
         if (event.data instanceof ArrayBuffer) {
           output += new TextDecoder().decode(event.data);
           const match = output.match(/https?:\/\/[^\s\x1b]+(?=\s)/);
-          if (match) setUrl(match[0]);
+          if (match) {
+            setUrl(match[0]);
+            if (!opened.current) {
+              opened.current = true;
+              window?.open?.(match[0], "_blank");
+            }
+          }
           return;
         }
         try {
