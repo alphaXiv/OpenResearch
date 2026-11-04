@@ -1005,6 +1005,7 @@ fn apply_tool_call(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
                 prompt: None,
                 phase: None,
                 children: Vec::new(),
+                orx: None,
             });
         }
         "completed" => {
@@ -1037,6 +1038,7 @@ fn apply_tool_call(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
                     prompt: None,
                     phase: None,
                     children: Vec::new(),
+                    orx: None,
                 });
             }
         }
@@ -1560,6 +1562,7 @@ ActionRequiredError: Named models unavailable Free plans can only use Auto. Swit
                     note: None,
                     resume_mode: None,
                     annotations: Vec::new(),
+                    from: None,
                 },
             )
             .await
@@ -1588,6 +1591,7 @@ ActionRequiredError: Named models unavailable Free plans can only use Auto. Swit
                     note: None,
                     resume_mode: None,
                     annotations: Vec::new(),
+                    from: None,
                 },
             )
             .await

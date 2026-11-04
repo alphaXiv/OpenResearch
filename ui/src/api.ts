@@ -235,6 +235,8 @@ export interface UiState {
   tourCompleted: boolean;
   preferredAgent: AgentSelection | null;
   preferredAutonomy: Autonomy | null;
+  /** Whether sub-agents may start their own unless a delegation says otherwise. */
+  nestedDelegation: boolean;
 }
 
 /** How much of the research the agent owns before checking in. */
@@ -256,6 +258,7 @@ export const updateUiState = (body: {
   tourCompleted?: boolean;
   preferredAgent?: AgentSelection;
   preferredAutonomy?: Autonomy;
+  nestedDelegation?: boolean;
 }) => post<UiState>("/api/settings/ui-state", body);
 
 export const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>
@@ -2076,6 +2079,8 @@ export interface ChatPrompt {
   approved?: boolean;
   note?: string;
   annotations?: ChatTextAnnotation[];
+  /** The chat whose agent answered for the user. */
+  answeredBy?: string;
   /** Backend resume routing id. Presence marks a HELD mid-turn card (the
    * turn is blocked open waiting on this answer); absent on end-turn cards. */
   nativeId?: string;
@@ -2094,6 +2099,15 @@ export interface ChatPart {
   /** Nested transcript of a sub-agent this part spawned (Codex `subagent`
    * tool). Streams live and recurses for sub-agents that spawn their own. */
   children?: ChatPart[];
+  /** Set on a message orx or another chat's agent wrote: what it is, and the chat or run it comes from. */
+  orx?: OrxSource;
+}
+
+export interface OrxSource {
+  kind: "task" | "message" | "answer" | "question" | "run" | "monitoring";
+  from?: string;
+  /** A run's status, or the state a chat's turn ended in. */
+  status?: string;
 }
 
 export interface ChatMessage {
@@ -2122,8 +2136,8 @@ export interface ChatSession {
   nativeConfiguration?: unknown;
   title: string | null;
   /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
-   * (harness auto-title), `"user"` (explicitly chosen — a rename, or an agent's
-   * `orx agent spawn --title`). Null on legacy sessions. */
+   * (harness auto-title), `"user"` (explicitly chosen — a rename, or the title a
+   * delegating agent gave). Null on legacy sessions. */
   titleSource?: string | null;
   model: string | null;
   serviceTier: string | null;
@@ -2139,6 +2153,17 @@ export interface ChatSession {
   /** Chat this side chat branched from. Side chats share its worktree and
    * stay out of top-level history; deleting the parent deletes its side chats. */
   sideParentSessionId?: string | null;
+  /** Set on a chat another chat delegated to: who delegated, how deep it is, whether it tells
+   * that chat when it finishes, how its latest turn ended, and what it waits on. */
+  delegate?: {
+    parentId: string;
+    depth: number;
+    notifies: boolean;
+    state: string | null;
+    answer: string | null;
+    error: string | null;
+    asking: "question" | "permission" | "plan" | null;
+  } | null;
   createdAt: number;
   updatedAt: number;
   busy: boolean;
@@ -2216,6 +2241,18 @@ export const deleteChatSession = (sessionId: string) =>
 export const setChatSessionArchived = (sessionId: string, archived: boolean) =>
   patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { archived }).then(
     (r) => r.session,
+  );
+
+/** Keep a delegate for the user: it stops telling the chat that started it and becomes a side chat. */
+export const releaseDelegate = (sessionId: string) =>
+  patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { notifyParent: false }).then(
+    (r) => r.session,
+  );
+
+/** The message an agent cited by ref: where it lives, the agent that wrote it if one did, and its first words. */
+export const citedMessage = (cited: string) =>
+  get<{ projectId: string | null; sessionId: string; messageId: string; harness: HarnessId | null; preview: string }>(
+    `/api/chat/messages/${encodeURIComponent(cited)}`,
   );
 
 /** Rename a session. The title is trimmed server-side; empty titles are rejected. */

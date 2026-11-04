@@ -858,7 +858,7 @@ mod tests {
         for step in [3, 5] {
             let payload = serde_json::json!({"conversationId": "c", "initialNumSteps": step,
                 "modelName": "gemini-3.8-flash-high", "transcriptPath": transcript});
-            crate::commands::mcp_gate::record_post_invocation(&store, &payload, Some("e")).unwrap();
+            crate::commands::mcp::record_post_invocation(&store, &payload, Some("e")).unwrap();
         }
         let samples: Vec<(String, Option<String>)> = store
             .conn

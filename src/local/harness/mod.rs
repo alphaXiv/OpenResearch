@@ -51,7 +51,7 @@ pub(crate) use detect::{
     ProbeTiming, ProbeTimingSink,
 };
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
-pub use options::{HarnessOptions, PermissionMode};
+pub use options::{HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
 pub use plan_gate::command_is_readonly;
 pub use plan_gate::decide as plan_gate_decide;
 

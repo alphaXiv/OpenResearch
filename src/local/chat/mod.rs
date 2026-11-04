@@ -8,6 +8,8 @@
 //! normalized parts into the per-turn assistant message; every flush persists
 //! the message and broadcasts it as a `chat.message` SSE event.
 
+pub mod delegation;
+pub mod news;
 pub(crate) mod subagent;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -826,6 +828,9 @@ pub struct WirePrompt {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<TextAnnotation>,
+    /// The chat whose agent answered for the user, through `answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -859,6 +864,49 @@ pub struct WirePart {
     /// byte-identical on the wire — no migration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<WirePart>,
+    /// Set on a message orx or another chat's agent wrote, which the
+    /// dashboard shows as theirs rather than the user's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orx: Option<OrxSource>,
+}
+
+/// What orx or another chat's agent wrote into a chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrxKind {
+    /// A delegate's task, from the chat that delegated it.
+    Task,
+    /// A `send` from another chat.
+    Message,
+    /// A subscribed chat finished its turn.
+    Answer,
+    /// A subscribed chat asks a question.
+    Question,
+    /// A run the chat asked to be woken for ended.
+    Run,
+    /// orx lost sight of runs the chat waits on.
+    Monitoring,
+}
+
+/// Who wrote a message into a chat when the user did not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrxSource {
+    pub kind: OrxKind,
+    /// The chat or run it comes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// A run's status, or the state a chat's turn ended in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// How the transcript shows a message orx or another chat's agent wrote. Its
+/// agent reads more: the sender's ids, cited messages and what to do next.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrxDisplay {
+    pub text: String,
+    pub source: OrxSource,
 }
 
 impl WirePart {
@@ -872,6 +920,7 @@ impl WirePart {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         }
     }
 
@@ -931,6 +980,7 @@ impl WirePart {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         }
     }
 
@@ -945,6 +995,7 @@ impl WirePart {
             prompt: Some(prompt),
             phase: None,
             children: Vec::new(),
+            orx: None,
         }
     }
 }
@@ -987,6 +1038,10 @@ pub struct SavedAttachment {
 }
 
 pub const ATTACHMENTS_DIR: &str = "chat-attachments";
+
+/// Opens what an agent reads from orx or another chat's agent, so it can tell
+/// those messages from the user's.
+pub const ORX_MESSAGE_PREFIX: &str = "[orx] ";
 
 pub fn attachments_dir() -> Result<std::path::PathBuf> {
     let dir = crate::store::data_dir().join(ATTACHMENTS_DIR);
@@ -1239,10 +1294,23 @@ pub fn import_native_chat(
 }
 
 pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
+    session_json_with(Store::open().ok().as_ref(), s, busy)
+}
+
+/// `session_json` for a caller that already holds the store, such as a list.
+pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: bool) -> Value {
+    let delegate = store
+        .map(|store| {
+            delegation::session_links(store, s).unwrap_or_else(|error| {
+                eprintln!("orx up: delegate of {}: {error}", s.id);
+                Value::Null
+            })
+        })
+        .unwrap_or_default();
     let acp = s
         .harness
         .starts_with("acp:")
-        .then(|| Store::open().ok()?.acp_session_state(&s.id).ok().flatten())
+        .then(|| store?.acp_session_state(&s.id).ok().flatten())
         .flatten();
     let context_usage = s
         .context_usage_json
@@ -1280,6 +1348,7 @@ pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
         "contextUsage": context_usage,
         "activeLeafId": s.active_leaf_id,
         "sideParentSessionId": s.side_parent_session_id,
+        "delegate": delegate,
         "goal": s.goal,
         "autonomy": Autonomy::from_stored(s.autonomy.as_deref()).id(),
     })
@@ -2300,7 +2369,7 @@ mod initial_message_tests {
 
 // --- permission bridge ---------------------------------------------------------
 
-/// The decision returned to the `orx mcp-gate` permission bridge for one
+/// The decision returned to the `orx mcp` permission bridge for one
 /// blocked tool call. Serialized verbatim into Claude Code's
 /// permission-prompt-tool contract (the bridge stringifies it into the MCP
 /// tool result), so the wire shape is exactly
@@ -2328,7 +2397,7 @@ impl PermissionDecision {
 }
 
 /// One outstanding bridge request: the oneshot unblocks the long-poll handler
-/// in `request_permission` (and thereby the `orx mcp-gate` HTTP call and the
+/// in `request_permission` (and thereby the `orx mcp` HTTP call and the
 /// claude turn behind it).
 struct PendingPermission {
     session_id: String,
@@ -2624,6 +2693,8 @@ struct QueuedMessage {
     request_hash: String,
     text: String,
     transcript_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    orx: Vec<OrxDisplay>,
     overrides: TurnOverrides,
     images: Vec<ImageAttachment>,
     annotations: Vec<TextAnnotation>,
@@ -2653,6 +2724,7 @@ pub(crate) fn legacy_opening_message(
         &TranscriptDisplay {
             text: transcript_text.clone(),
             annotations: None,
+            orx: Vec::new(),
             record_user_message: !brief_recorded,
         },
         &overrides,
@@ -2664,6 +2736,7 @@ pub(crate) fn legacy_opening_message(
         request_hash: request_hash.clone(),
         text,
         transcript_text,
+        orx: Vec::new(),
         overrides,
         images: Vec::new(),
         annotations: Vec::new(),
@@ -2753,6 +2826,8 @@ pub struct SteerMessage {
     pub display: String,
     pub text: String,
     pub client_turn_id: Option<String>,
+    /// Set when orx or another chat's agent wrote it.
+    pub orx: Option<OrxSource>,
 }
 
 #[derive(Clone)]
@@ -2764,6 +2839,9 @@ struct AnnotatedText {
 struct TranscriptDisplay {
     text: Option<String>,
     annotations: Option<Vec<TextAnnotation>>,
+    /// Messages orx or another chat's agent wrote, shown each under its
+    /// sender in place of `text`.
+    orx: Vec<OrxDisplay>,
     /// A re-sampled turn re-sends the anchor's attachments and annotations, which
     /// would otherwise build a stray duplicate bubble even with the text blanked.
     record_user_message: bool,
@@ -2894,14 +2972,23 @@ fn contextualize_messages(
         .join("\n\n")
 }
 
+/// The parts of a user message: its text, or each message orx wrote with its
+/// sender, then attachments and annotations.
 fn transcript_parts(
     display_text: &str,
+    orx: &[OrxDisplay],
     saved_images: &[SavedAttachment],
     annotations: &[TextAnnotation],
 ) -> Vec<WirePart> {
     let mut parts = Vec::new();
-    if !display_text.is_empty() {
+    if orx.is_empty() && !display_text.is_empty() {
         parts.push(WirePart::text("p0", display_text.to_string()));
+    }
+    for (i, message) in orx.iter().enumerate() {
+        parts.push(WirePart {
+            orx: Some(message.source.clone()),
+            ..WirePart::text(format!("p{i}"), message.text.clone())
+        });
     }
     for (i, attachment) in saved_images.iter().enumerate() {
         parts.push(WirePart::image(
@@ -3122,7 +3209,12 @@ fn new_queued_id() -> String {
 /// Chip label for a parked message: its text, or an attachment count for an
 /// image/file-only send (which carries no text to show).
 fn queued_label(m: &QueuedMessage) -> String {
-    let display_text = m.transcript_text.as_deref().unwrap_or(&m.text);
+    let display_text = m
+        .orx
+        .first()
+        .map(|orx| orx.text.as_str())
+        .or(m.transcript_text.as_deref())
+        .unwrap_or(&m.text);
     if !display_text.trim().is_empty() || m.images.is_empty() {
         return display_text.to_string();
     }
@@ -3240,7 +3332,7 @@ impl TurnGuard {
     }
 
     /// Reserve a wake-up turn only when no turn or queued user message exists.
-    async fn claim_hidden(host: &Arc<ChatHost>, session_id: &str) -> Option<Self> {
+    async fn claim_idle(host: &Arc<ChatHost>, session_id: &str) -> Option<Self> {
         if host.deleting_sessions.lock().unwrap().contains(session_id) {
             return None;
         }
@@ -3452,7 +3544,7 @@ impl ChatHost {
     }
 
     /// Record the port `orx up` bound (once, at startup) so plan-mode turns can
-    /// hand it to the `orx mcp-gate` bridge.
+    /// hand it to the `orx mcp` bridge.
     pub fn set_up_port(&self, port: u16) {
         let _ = self.up_port.set(port);
         self.opencode.set_up_port(port);
@@ -3659,6 +3751,8 @@ impl ChatHost {
             result_native_session_id: None,
         })?;
         self.emit("chat.message", message_json(&msg, session_id));
+        self.emit_session(Store::open()?.get_chat_session(session_id)?)
+            .await;
         // A question card answered mid-turn is NOT an exit recourse from plan
         // mode, so it must not count as "saw a prompt" — a turn that asks a
         // question and then ends with its plan as plain text still needs the
@@ -3715,7 +3809,7 @@ impl ChatHost {
 
     /// Whether a bridge approval card of this session is still awaiting the
     /// user. The claude turn watchdog consults this: a child held on the
-    /// mcp-gate long-poll is silently blocked *by design* (user think-time is
+    /// `orx mcp` long-poll is silently blocked *by design* (user think-time is
     /// unbounded), so the no-output timeout must not kill it.
     pub fn has_pending_permission(&self, session_id: &str) -> bool {
         self.pending_permissions
@@ -4096,13 +4190,30 @@ impl ChatHost {
         let id = new_queued_id();
         let client_turn_id = format!("ct_{}", uuid::Uuid::new_v4());
         let steer_client_turn_id = message.client_turn_id.clone();
+        // The raw text: the queue path expands slash-skills itself. What orx
+        // wrote is the agent's text, which no path expands, and keeps how it
+        // is shown.
+        let orx: Vec<OrxDisplay> = message
+            .orx
+            .iter()
+            .map(|source| OrxDisplay {
+                text: message.display.clone(),
+                source: source.clone(),
+            })
+            .collect();
+        let text = if orx.is_empty() {
+            message.display
+        } else {
+            message.text
+        };
         let messages = vec![AnnotatedText {
-            text: message.display.clone(),
+            text: text.clone(),
             annotations: Vec::new(),
         }];
         let transcript = TranscriptDisplay {
             text: None,
             annotations: None,
+            orx: orx.clone(),
             record_user_message: true,
         };
         let overrides = TurnOverrides::default();
@@ -4111,9 +4222,9 @@ impl ChatHost {
             id: id.clone(),
             client_turn_id: client_turn_id.clone(),
             request_hash: turn_request_hash(&messages, &transcript, &overrides, &images)?,
-            // The raw text: the queue path expands slash-skills itself.
-            text: message.display,
+            text,
             transcript_text: None,
+            orx,
             overrides,
             images: Vec::new(),
             annotations: Vec::new(),
@@ -4450,6 +4561,7 @@ impl ChatHost {
                         transcript: TranscriptDisplay {
                             text: item.transcript_text.clone(),
                             annotations: None,
+                            orx: item.orx.clone(),
                             record_user_message: true,
                         },
                         overrides,
@@ -4604,6 +4716,9 @@ impl ChatHost {
     /// parked queue when busy — whenever the live turn can't take it, notably
     /// attachments (they need the on-disk preamble only a full turn builds)
     /// and changed composer settings, which apply only at a turn boundary.
+    /// `orx` shows a message orx or another chat's agent wrote, whose agent
+    /// reads `text`.
+    #[expect(clippy::too_many_arguments)]
     pub async fn steer_message(
         self: &Arc<Self>,
         session_id: &str,
@@ -4612,6 +4727,7 @@ impl ChatHost {
         images: Vec<ImageAttachment>,
         annotations: Vec<TextAnnotation>,
         client_turn_id: Option<String>,
+        orx: Option<OrxDisplay>,
     ) -> Result<Option<SendMessageResult>> {
         let lock = self
             .submission_locks
@@ -4648,6 +4764,7 @@ impl ChatHost {
                         images,
                         annotations,
                         client_turn_id,
+                        orx,
                     )
                     .await
                     .map(Some);
@@ -4671,6 +4788,7 @@ impl ChatHost {
                 }
                 let message = SteerMessage {
                     text: project
+                        .filter(|_| orx.is_none())
                         .map(|project| {
                             expand_slash_skills(
                                 &project,
@@ -4680,8 +4798,11 @@ impl ChatHost {
                             )
                         })
                         .unwrap_or_else(|| text.clone()),
-                    display: text.clone(),
+                    display: orx
+                        .as_ref()
+                        .map_or_else(|| text.clone(), |orx| orx.text.clone()),
                     client_turn_id: id.map(str::to_string),
+                    orx: orx.as_ref().map(|orx| orx.source.clone()),
                 };
                 if send_live_steer(&store, session_id, id, &request_hash, &sink, message)? {
                     return Ok(None);
@@ -4695,12 +4816,14 @@ impl ChatHost {
             images,
             annotations,
             client_turn_id,
+            orx,
         )
         .await
         .map(Some)
     }
 
     /// Persist the user message and run one harness turn in the background.
+    #[expect(clippy::too_many_arguments)]
     pub async fn send_message(
         self: &Arc<Self>,
         session_id: &str,
@@ -4709,6 +4832,7 @@ impl ChatHost {
         images: Vec<ImageAttachment>,
         annotations: Vec<TextAnnotation>,
         client_turn_id: Option<String>,
+        orx: Option<OrxDisplay>,
     ) -> Result<SendMessageResult> {
         let lock = self
             .submission_locks
@@ -4725,10 +4849,12 @@ impl ChatHost {
             images,
             annotations,
             client_turn_id,
+            orx,
         )
         .await
     }
 
+    #[expect(clippy::too_many_arguments)]
     async fn send_message_locked(
         self: &Arc<Self>,
         session_id: &str,
@@ -4737,6 +4863,7 @@ impl ChatHost {
         images: Vec<ImageAttachment>,
         annotations: Vec<TextAnnotation>,
         client_turn_id: Option<String>,
+        orx: Option<OrxDisplay>,
     ) -> Result<SendMessageResult> {
         if let Some(id) = client_turn_id.as_deref().filter(|id| !id.trim().is_empty()) {
             if let Some((hash, _)) = Store::open()?.steer_receipt(session_id, id)? {
@@ -4748,7 +4875,10 @@ impl ChatHost {
                 ));
             }
         }
-        let transcript = message_transcript(&text, &annotations);
+        let transcript = TranscriptDisplay {
+            orx: orx.into_iter().collect(),
+            ..message_transcript(&text, &annotations)
+        };
         self.send_message_showing(
             session_id,
             SendTurnRequest {
@@ -5014,6 +5144,7 @@ impl ChatHost {
                             transcript: TranscriptDisplay {
                                 text: Some(String::new()),
                                 annotations: None,
+                                orx: Vec::new(),
                                 record_user_message: false,
                             },
                             overrides: settings,
@@ -5128,6 +5259,13 @@ impl ChatHost {
             ForkKind::Edit(_) => Vec::new(),
             ForkKind::Retry => replayed_attachments(&anchor_parts)?,
         };
+        // What orx wrote is re-sent as its agent first read it, not as shown.
+        let orx_input = match kind {
+            ForkKind::Retry if anchor_parts.iter().any(|part| part.orx.is_some()) => store
+                .chat_turn_for_user_message(session_id, &anchor.id)?
+                .map(|turn| turn.prepared_input),
+            _ => None,
+        };
         if text.is_empty() && annotations.is_empty() && attachments.is_empty() {
             return Err(anyhow!("nothing to re-sample"));
         }
@@ -5142,6 +5280,7 @@ impl ChatHost {
                 TranscriptDisplay {
                     text: Some(String::new()),
                     annotations: None,
+                    orx: Vec::new(),
                     record_user_message: false,
                 },
             ),
@@ -5150,6 +5289,7 @@ impl ChatHost {
                 TranscriptDisplay {
                     text: Some(text.clone()),
                     annotations: Some(annotations.clone()),
+                    orx: Vec::new(),
                     record_user_message: true,
                 },
             ),
@@ -5187,7 +5327,7 @@ impl ChatHost {
                 session_id,
                 SendTurnRequest {
                     messages: vec![AnnotatedText { text, annotations }],
-                    prepared_input: None,
+                    prepared_input: orx_input,
                     replace_settings: false,
                     transcript: display,
                     overrides,
@@ -5272,25 +5412,31 @@ impl ChatHost {
         Ok(())
     }
 
-    async fn send_hidden_message(
+    /// Starts a turn with messages orx writes, each shown under its sender.
+    async fn send_orx_messages(
         self: &Arc<Self>,
         session_id: &str,
-        text: String,
+        messages: Vec<(String, OrxDisplay)>,
         guard: TurnGuard,
     ) -> Result<TurnSubmission> {
+        let (texts, orx): (Vec<String>, Vec<OrxDisplay>) = messages.into_iter().unzip();
         self.send_message_showing(
             session_id,
             SendTurnRequest {
-                messages: vec![AnnotatedText {
-                    text,
-                    annotations: Vec::new(),
-                }],
+                messages: texts
+                    .into_iter()
+                    .map(|text| AnnotatedText {
+                        text,
+                        annotations: Vec::new(),
+                    })
+                    .collect(),
                 prepared_input: None,
                 replace_settings: false,
                 transcript: TranscriptDisplay {
-                    text: Some(String::new()),
+                    text: None,
                     annotations: None,
-                    record_user_message: false,
+                    orx,
+                    record_user_message: true,
                 },
                 overrides: TurnOverrides::default(),
                 images: TurnAttachments::Uploaded(Vec::new()),
@@ -5332,6 +5478,7 @@ impl ChatHost {
         let TranscriptDisplay {
             text: transcript_text,
             annotations: transcript_annotations,
+            orx,
             record_user_message,
         } = transcript;
         let text = messages
@@ -5507,6 +5654,7 @@ impl ChatHost {
                         request_hash: request_hash.clone(),
                         text,
                         transcript_text,
+                        orx,
                         overrides,
                         images,
                         annotations,
@@ -5697,7 +5845,11 @@ impl ChatHost {
             session.archived = false;
         }
         let saved_images = images.save()?;
-        let display_text = transcript_text.as_deref().unwrap_or(&text);
+        let display_text = orx
+            .first()
+            .map(|orx| orx.text.as_str())
+            .or(transcript_text.as_deref())
+            .unwrap_or(&text);
         // The input auto-titling runs on — set only on the first message.
         // Owned because the title carries what the user typed, not the expanded
         // harness prompt built from its selected slash skills.
@@ -5733,7 +5885,7 @@ impl ChatHost {
             }
         }
 
-        let parts = transcript_parts(display_text, &saved_images, &transcript_annotations);
+        let parts = transcript_parts(display_text, &orx, &saved_images, &transcript_annotations);
         // A resume whose transcript text is empty (e.g. a note-less plan
         // approval) records no user message: the resolved card already tells
         // that part of the story, and an empty bubble would just be noise.
@@ -5755,8 +5907,8 @@ impl ChatHost {
             session.active_leaf_id.as_deref(),
         )?);
         // Slash-skills: the transcript keeps the `/name` the user typed; the
-        // harness gets the expanded prompt.
-        if prepared_input.is_none() {
+        // harness gets the expanded prompt. What orx writes is never a command.
+        if prepared_input.is_none() && orx.is_empty() {
             for message in &messages {
                 prepare_project_slash_worktree(&project, &message.text, &session.id).await;
             }
@@ -5766,10 +5918,28 @@ impl ChatHost {
         } else {
             None
         };
+        // A command keeps its leading `/`, and what orx writes keeps its
+        // leading `[orx]`; any other message carries the ref an agent cites it by.
+        let message_ref = user_msg
+            .as_ref()
+            .filter(|_| {
+                orx.is_empty()
+                    && !messages
+                        .iter()
+                        .any(|m| m.text.trim_start().starts_with('/'))
+            })
+            .map(|message| delegation::message_ref(&message.id));
         let mut turn_text = prepared_input.unwrap_or_else(|| {
-            let expanded = contextualize_messages(messages, |text| {
-                expand_slash_skills(&project, text, Some(&session.harness), Some(&session.id))
+            let mut expanded = contextualize_messages(messages, |text| {
+                if orx.is_empty() {
+                    expand_slash_skills(&project, text, Some(&session.harness), Some(&session.id))
+                } else {
+                    text.to_string()
+                }
             });
+            if let Some(message_ref) = message_ref {
+                expanded = format!("{message_ref}\n{expanded}");
+            }
             with_turn_context(
                 session.native_session_id.as_deref(),
                 bootstrap.as_deref(),
@@ -6262,6 +6432,25 @@ impl ChatHost {
     /// consumers use it to distinguish a stopped turn from a silent one.
     /// Internal interrupts (plan-approval resume, session/project delete) stay
     /// markerless on purpose.
+    /// Stop `id`'s delegates and every delegate below them, returning those
+    /// that were running. A stop is no news to the chat that delegated; an
+    /// answer that came before it still is.
+    pub async fn stop_delegates(self: &Arc<Self>, id: &str) -> Result<Vec<String>> {
+        let store = Store::open()?;
+        let mut stopped = Vec::new();
+        let mut parents = vec![id.to_string()];
+        while let Some(parent) = parents.pop() {
+            for child in store.chat_delegates_of(&parent)? {
+                if self.interrupt(&child).await? {
+                    news::mark_told(&store, &parent, &child)?;
+                    stopped.push(child.clone());
+                }
+                parents.push(child);
+            }
+        }
+        Ok(stopped)
+    }
+
     pub async fn interrupt_by_user(self: &Arc<Self>, session_id: &str) -> Result<()> {
         // Stamped before the abort: a fast resend can claim the freed slot and
         // persist its user message before this runs, and a later timestamp
@@ -6274,6 +6463,10 @@ impl ChatHost {
         let durable_clear = self.clear_queue_inner(session_id, true);
         let interrupted = self.interrupt(session_id).await;
         self.release_queue_cancellation_if_idle(session_id);
+        // Best-effort like the marker below: this chat's turn is stopped either way.
+        if let Err(error) = self.stop_delegates(session_id).await {
+            eprintln!("orx up: delegates of {session_id} not stopped: {error}");
+        }
         if !interrupted? {
             return durable_clear;
         }
@@ -6446,6 +6639,7 @@ impl ChatHost {
                     }
                     _ => None,
                 };
+                let (text, shown) = req.as_written(text);
                 self.send_message_showing(
                     &req.session_id,
                     SendTurnRequest {
@@ -6458,6 +6652,7 @@ impl ChatHost {
                         transcript: TranscriptDisplay {
                             text: transcript,
                             annotations: Some(req.annotations.clone()),
+                            orx: shown.into_iter().collect(),
                             record_user_message: true,
                         },
                         overrides,
@@ -6480,6 +6675,24 @@ impl ChatHost {
                     self.set_plan_mode(&req.session_id, plan_mode).await?;
                 }
                 self.resolve_prompt_card(&req);
+                // A held reply reads as the user's own; say which chat gave it,
+                // where that can join the running turn rather than start one.
+                if prompt.native_id.is_some()
+                    && req.from.is_some()
+                    && crate::local::harness::supports_steering(&session.harness)
+                {
+                    let (text, shown) = req.as_written(req.plain_answer_text());
+                    self.steer_message(
+                        &req.session_id,
+                        text,
+                        TurnOverrides::default(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        shown,
+                    )
+                    .await?;
+                }
                 Ok(())
             }
             ResumeAction::Nothing => {
@@ -6521,6 +6734,15 @@ impl ChatHost {
         match resolved {
             Ok(msg) => self.emit("chat.message", message_json(&msg, &req.session_id)),
             Err(e) => eprintln!("orx up: answered prompt not marked resolved: {e}"),
+        }
+        // A delegate's card stops showing the question; the answered turn goes on.
+        if let Ok(Some(session)) =
+            Store::open().and_then(|store| store.get_chat_session(&req.session_id))
+        {
+            self.emit(
+                "chat.session",
+                json!({ "session": session_json(&session, true) }),
+            );
         }
     }
 
@@ -6889,9 +7111,32 @@ pub struct PromptAnswer {
     pub note: Option<String>,
     #[serde(default)]
     pub annotations: Vec<TextAnnotation>,
+    /// The chat whose agent answered for the user, through `answer`.
+    #[serde(skip)]
+    pub from: Option<String>,
 }
 
 impl PromptAnswer {
+    /// What the asking agent reads of an answer, and how the transcript shows
+    /// it: as the answering chat's message when the user did not answer.
+    pub(crate) fn as_written(&self, text: String) -> (String, Option<OrxDisplay>) {
+        let Some(from) = &self.from else {
+            return (text, None);
+        };
+        let shown = OrxDisplay {
+            text: self.plain_answer_text(),
+            source: OrxSource {
+                kind: OrxKind::Message,
+                from: Some(from.clone()),
+                status: None,
+            },
+        };
+        (
+            format!("{ORX_MESSAGE_PREFIX}Chat `{from}` answered for the user:\n\n{text}"),
+            Some(shown),
+        )
+    }
+
     pub(crate) fn plain_answer_text(&self) -> String {
         let note = self.note.as_deref().filter(|note| !note.trim().is_empty());
         let mut text = if self.answers.is_empty() {
@@ -7019,6 +7264,7 @@ fn stamp_resolved(prompt: &mut WirePrompt, answer: Option<&PromptAnswer>) {
         prompt.approved = Some(answer.approve);
         prompt.note = answer.note.clone().filter(|n| !n.trim().is_empty());
         prompt.annotations = answer.annotations.clone();
+        prompt.answered_by = answer.from.clone();
     }
 }
 
@@ -7237,6 +7483,7 @@ fn message_transcript(text: &str, annotations: &[TextAnnotation]) -> TranscriptD
             }
         }),
         annotations: None,
+        orx: Vec::new(),
         record_user_message: true,
     }
 }
@@ -7264,7 +7511,7 @@ fn turn_request_hash(
     overrides: &TurnOverrides,
     images: &TurnAttachments,
 ) -> Result<String> {
-    let value = json!({
+    let mut value = json!({
         "messages": messages.iter().map(|message| json!({
             "text": message.text,
             "annotations": message.annotations,
@@ -7274,6 +7521,10 @@ fn turn_request_hash(
         "settings": overrides,
         "images": images.hash_value(),
     });
+    // Only messages orx wrote hash it, so a retry from before it existed still matches.
+    if !transcript.orx.is_empty() {
+        value["orx"] = json!(transcript.orx);
+    }
     let mut digest = Sha256::new();
     digest.update(serde_json::to_vec(&value)?);
     Ok(format!("{:x}", digest.finalize()))
@@ -7366,6 +7617,9 @@ fn resolve_permission_change(
 pub struct TurnCtx {
     pub host: Arc<ChatHost>,
     pub turn_id: String,
+    /// What the turn's message last showed it waiting on, so the session
+    /// is re-sent when that changes.
+    asking: Option<String>,
     durable: bool,
     usage_execution_id: String,
     pub(crate) native_message_models: HashMap<String, crate::store::InvocationIdentity>,
@@ -7433,6 +7687,7 @@ fn turn_ctx_from_stored(
         retry_owner: None,
         retry_started_emitted: false,
         retry_exhausted: false,
+        asking: None,
         orx_retry_started: None,
         orx_retry_count: 0,
         terminal_error: None,
@@ -7820,6 +8075,7 @@ impl TurnCtx {
             retry_owner: None,
             retry_started_emitted: false,
             retry_exhausted: false,
+            asking: None,
             orx_retry_started: None,
             orx_retry_count: 0,
             terminal_error: None,
@@ -8016,10 +8272,10 @@ impl TurnCtx {
 
     /// Record a steer inline without waiting for the flush interval.
     pub fn record_steer(&mut self, steer: &SteerMessage, confirmed: bool) {
-        self.upsert_part(WirePart::steer(
-            format!("steer-{}", uuid::Uuid::new_v4()),
-            &steer.display,
-        ));
+        self.upsert_part(WirePart {
+            orx: steer.orx.clone(),
+            ..WirePart::steer(format!("steer-{}", uuid::Uuid::new_v4()), &steer.display)
+        });
         if self.flush().is_ok() && confirmed {
             if let Some(id) = steer.client_turn_id.as_deref() {
                 let _ = Store::open().and_then(|store| store.finish_steer(&self.session_id, id));
@@ -8162,6 +8418,23 @@ impl TurnCtx {
             })?;
             wire_assistant
         };
+        // A delegate's card shows what it waits on, so a card appearing or
+        // resolved mid-turn re-sends its session.
+        let asking = wire_assistant.parts.iter().find_map(|part| {
+            part.prompt
+                .as_ref()
+                .filter(|prompt| !prompt.resolved)
+                .map(|prompt| prompt.kind.clone())
+        });
+        if asking != self.asking {
+            self.asking = asking;
+            if let Some(session) = store.get_chat_session(&self.session_id)? {
+                self.host.emit(
+                    "chat.session",
+                    json!({ "session": session_json(&session, true) }),
+                );
+            }
+        }
         self.host.emit(
             "chat.message",
             message_json(&wire_assistant, &self.session_id),
@@ -8174,7 +8447,7 @@ impl TurnCtx {
     /// Merge the persisted resolution state of prompt parts into the in-memory
     /// assistant message, so a concurrent `respond` that resolved a card isn't
     /// clobbered by this turn's next flush. Only ever flips `false`→`true` and
-    /// fills an empty echo (`answers`/`approved`/`note`/`annotations`) — never the reverse —
+    /// fills an empty echo (`answers`/`approved`/`note`/`annotations`/`answered_by`) — never the reverse —
     /// so it's safe regardless of ordering: the in-memory copy normally never
     /// carries an echo of its own, and dropping the stored one here would
     /// erase the stamped outcome on the next flush.
@@ -8208,6 +8481,7 @@ impl TurnCtx {
                 prompt.approved = stored_prompt.approved;
                 prompt.note = stored_prompt.note.clone();
                 prompt.annotations = stored_prompt.annotations.clone();
+                prompt.answered_by = stored_prompt.answered_by.clone();
             }
         }
     }
@@ -8283,11 +8557,12 @@ fn active_path<'a>(
 }
 
 fn side_chat_context<'a>(
+    parent: &str,
     messages: impl IntoIterator<Item = &'a StoredChatMessage>,
 ) -> Option<String> {
     let snapshot = crate::local::harness::transcript_snapshot(messages);
     (!snapshot.is_empty()).then(|| format!(
-        "<orx-side-chat-context>\nThis is a side chat branched from another chat, which may still be running in this same worktree. Use this snapshot of that chat, taken when the side chat opened, to answer questions about its work. Do not modify files unless the user asks.\n{snapshot}\n</orx-side-chat-context>"
+        "<orx-side-chat-context>\nThis is a side chat branched from chat `{parent}`, which may still be running in this same worktree. Use this snapshot of that chat, taken when the side chat opened, to answer questions about its work. Do not modify files unless the user asks.\n{snapshot}\n</orx-side-chat-context>"
     ))
 }
 
@@ -8308,7 +8583,10 @@ fn effective_bootstrap_context(
     if !messages.iter().any(|message| &message.id == leaf) {
         return Err(anyhow!("side chat parent context is unavailable"));
     }
-    Ok(side_chat_context(active_path(&messages, Some(leaf))))
+    Ok(side_chat_context(
+        parent,
+        active_path(&messages, Some(leaf)),
+    ))
 }
 
 fn side_chat_session(
@@ -8321,7 +8599,7 @@ fn side_chat_session(
         .filter(|id| messages.iter().any(|m| &m.id == *id));
     // Legacy transcripts without a valid leaf keep their existing snapshot semantics.
     let bootstrap_context = if leaf.is_none() && !messages.is_empty() {
-        side_chat_context(messages.iter())
+        side_chat_context(&parent.id, messages.iter())
     } else {
         None
     };
@@ -8482,189 +8760,9 @@ fn materialize_unfinished_turns(
 
 // --- run watcher ----------------------------------------------------------------
 
-fn run_wakeup_text(run: &crate::store::StoredRun) -> Option<String> {
-    if run.status == "lost" {
-        return Some(format!(
-            "[orx] Run `{}` ended with **Outcome unavailable**. Its final outcome could not be \
-             collected. Inspect any partial logs using `orx logs {}`; do not assume success or failure.",
-            run.id, run.id
-        ));
-    }
-    matches!(run.status.as_str(), "done" | "failed").then(|| {
-        format!(
-            "[orx] Run `{}` finished with status **{}**. You can compare this result with other \
-             project runs using `orx runs {}` and inspect the file located by `orx logs {}`.",
-            run.id, run.status, run.project_id, run.id
-        )
-    })
-}
-
-// Only local identifiers here: the error text includes remote ssh stderr, so the agent reads it
-// as command output instead of inside an `[orx]` instruction.
-fn run_monitoring_text(runs: &[crate::store::StoredRun]) -> String {
-    let lines = runs
-        .iter()
-        .map(|run| {
-            format!(
-                "- run `{}` of experiment `{}` (still **{}**)",
-                run.id, run.experiment_id, run.status
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "[orx] orx can no longer monitor these live runs:\n{lines}\nRun `orx exp status <expId>` \
-         for the reason and tell the user so they can fix it. orx wakes you once it can see a run \
-         finish; until then each run keeps its current status."
-    )
-}
-
-fn first_wakeup_per_session(wakeups: Vec<crate::store::RunWakeup>) -> Vec<crate::store::RunWakeup> {
-    let mut seen_sessions = HashSet::new();
-    wakeups
-        .into_iter()
-        .filter(|wakeup| seen_sessions.insert(wakeup.chat_session_id.clone()))
-        .collect()
-}
-
-async fn process_run_wakeups(
-    chat: &Arc<ChatHost>,
-    store: Store,
-    data_dir_move_in_progress: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<()> {
-    if data_dir_move_in_progress.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-    {
-        return Ok(());
-    }
-    store.prune_run_wakeups()?;
-    for wakeup in first_wakeup_per_session(store.list_ready_run_wakeups()?) {
-        if wakeup.state != "pending" {
-            continue;
-        }
-        let Some(mut guard) = TurnGuard::claim_hidden(chat, &wakeup.chat_session_id).await else {
-            continue;
-        };
-        if data_dir_move_in_progress
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-        {
-            guard.release().await;
-            return Ok(());
-        }
-        let Some(token) = store.claim_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id)? else {
-            guard.release().await;
-            continue;
-        };
-        if !store.renew_run_wakeup_claim(&wakeup.run.id, &wakeup.chat_session_id, &token)? {
-            guard.release().await;
-            continue;
-        }
-        let Some(text) = run_wakeup_text(&wakeup.run) else {
-            store.release_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id, &token)?;
-            guard.release().await;
-            continue;
-        };
-        match chat
-            .send_hidden_message(&wakeup.chat_session_id, text, guard)
-            .await
-        {
-            Ok(TurnSubmission::Started(_)) => {
-                if !store.mark_run_wakeup_delivered(
-                    &wakeup.run.id,
-                    &wakeup.chat_session_id,
-                    &token,
-                )? {
-                    return Err(anyhow!(
-                        "run wake-up claim expired before delivery was recorded"
-                    ));
-                }
-            }
-            Ok(
-                TurnSubmission::Queued(_)
-                | TurnSubmission::QueuedExisting(_)
-                | TurnSubmission::Existing(_)
-                | TurnSubmission::NotStarted,
-            ) => {
-                store.release_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id, &token)?;
-            }
-            Err(err) => {
-                store.release_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id, &token)?;
-                if !chat.is_busy(&wakeup.chat_session_id).await {
-                    eprintln!("orx up: run watcher: {err}");
-                }
-            }
-        }
-    }
-    process_run_monitoring_alerts(chat, store, data_dir_move_in_progress).await
-}
-
-/// Tells each waiting session, once per outage, which of its live runs can no
-/// longer be monitored, leaving their terminal wake-ups pending.
-async fn process_run_monitoring_alerts(
-    chat: &Arc<ChatHost>,
-    store: Store,
-    data_dir_move_in_progress: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<()> {
-    let mut unalerted = Vec::new();
-    for wakeup in store.list_active_run_wakeups()? {
-        let unmonitored = crate::jobs::BackendDescriptor::parse(&wakeup.run.backend_json)
-            .is_ok_and(|descriptor| descriptor.monitoring_error.is_some());
-        if unmonitored && !wakeup.monitoring_alerted {
-            unalerted.push(wakeup);
-        } else if !unmonitored && wakeup.monitoring_alerted {
-            store.set_run_wakeup_monitoring_alerted(
-                &wakeup.run.id,
-                &wakeup.chat_session_id,
-                false,
-            )?;
-        }
-    }
-    let mut by_session: HashMap<String, Vec<crate::store::RunWakeup>> = HashMap::new();
-    for wakeup in unalerted {
-        by_session
-            .entry(wakeup.chat_session_id.clone())
-            .or_default()
-            .push(wakeup);
-    }
-    for (session_id, alerts) in by_session {
-        let Some(mut guard) = TurnGuard::claim_hidden(chat, &session_id).await else {
-            continue;
-        };
-        if data_dir_move_in_progress
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-        {
-            guard.release().await;
-            return Ok(());
-        }
-        let mut claimed = Vec::new();
-        for wakeup in alerts {
-            if store.set_run_wakeup_monitoring_alerted(&wakeup.run.id, &session_id, true)? {
-                claimed.push(wakeup.run);
-            }
-        }
-        if claimed.is_empty() {
-            guard.release().await;
-            continue;
-        }
-        let text = run_monitoring_text(&claimed);
-        let started = chat.send_hidden_message(&session_id, text, guard).await;
-        if !matches!(started, Ok(TurnSubmission::Started(_))) {
-            for run in &claimed {
-                store.set_run_wakeup_monitoring_alerted(&run.id, &session_id, false)?;
-            }
-            if let Err(err) = started {
-                if !chat.is_busy(&session_id).await {
-                    eprintln!("orx up: run watcher: {err}");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-// --- spawned agents -------------------------------------------------------------
-
-/// Resume explicitly subscribed agent sessions after a run finishes. Busy and
-/// draining sessions retain their durable wake-up until they become idle.
+/// Resume explicitly subscribed agent sessions after a run finishes or a chat
+/// they subscribe to has news. Busy and draining sessions keep their durable
+/// wake-up until idle.
 pub async fn watch_runs(
     chat: Arc<ChatHost>,
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
@@ -8684,9 +8782,9 @@ pub async fn watch_runs(
         }
         let Ok(store) = Store::open() else { continue };
         if let Err(err) =
-            process_run_wakeups(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
+            news::deliver_news(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
         {
-            eprintln!("orx up: run watcher: {err}");
+            eprintln!("orx up: news watcher: {err}");
         }
     }
 }
@@ -9603,6 +9701,7 @@ mod cap_tests {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         };
         // A spawn part whose sub-agent transcript (a child) has huge output.
         let mut spawn = bloated_tool("spawn");
@@ -9655,6 +9754,7 @@ mod cap_tests {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         }];
 
         cap_tool_parts(&mut parts);
@@ -9764,6 +9864,7 @@ mod cap_tests {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         }];
 
         assert!(!attach_target_event(
@@ -9799,6 +9900,7 @@ mod cap_tests {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         };
         let mut parts = vec![make_part("one"), make_part("two")];
         let claimed = HashSet::new();
@@ -9837,6 +9939,7 @@ mod cap_tests {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         };
         let mut parts = vec![make_part("one", "/one"), make_part("two", "/two")];
         let mut ids = attach_target_event(
@@ -9875,6 +9978,7 @@ mod cap_tests {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         }];
 
         settle_interrupted_tool_parts(&mut parts);
@@ -9904,6 +10008,7 @@ mod cap_tests {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         }];
         let replacement = WirePart {
             id: "logs".into(),
@@ -9920,6 +10025,7 @@ mod cap_tests {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         };
 
         upsert_preserving_children(&mut parts, replacement);
@@ -10078,6 +10184,7 @@ mod bridge_tests {
                     ..Default::default()
                 },
             )],
+            orx: None,
         }];
 
         assert!(resolve_stale_prompts_in_parts(&mut parts, true));
@@ -10145,6 +10252,7 @@ mod bridge_tests {
                 answers: Vec::new(),
                 note: Some("Keep the tests".into()),
                 annotations: Vec::new(),
+                from: None,
             }),
         );
         assert_eq!(plan.approved, Some(true));
@@ -10255,6 +10363,7 @@ mod bridge_tests {
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
             annotations: Vec::new(),
+            from: None,
         }
     }
 
@@ -10298,6 +10407,50 @@ mod bridge_tests {
         assert!(prompt.resolved);
         assert_eq!(prompt.approved, Some(false));
         assert_eq!(prompt.note, None);
+    }
+
+    #[test]
+    fn a_flush_keeps_the_answer_echo_another_path_stamped() {
+        let dir = std::env::temp_dir().join(format!("orx-adopt-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut ctx = TurnCtx::test_stub();
+        let card = |prompt: WirePrompt| {
+            let mut part = WirePart::text("card", "");
+            part.kind = "prompt".into();
+            part.prompt = Some(prompt);
+            part
+        };
+        let mut stamped = WirePrompt {
+            kind: "question".into(),
+            ..Default::default()
+        };
+        let mut answer = answer(&["A"], true, None);
+        answer.from = Some("chat_parent".into());
+        stamp_resolved(&mut stamped, Some(&answer));
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: ctx.assistant.id.clone(),
+                session_id: ctx.session_id.clone(),
+                role: "assistant".into(),
+                parts_json: serde_json::to_string(&[card(stamped)]).unwrap(),
+                created_at: 1,
+                completed_at: None,
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+            })
+            .unwrap();
+        ctx.assistant.parts = vec![card(WirePrompt {
+            kind: "question".into(),
+            ..Default::default()
+        })];
+
+        ctx.adopt_resolved_prompts(&store);
+        let adopted = ctx.assistant.parts[0].prompt.as_ref().unwrap();
+        assert!(adopted.resolved);
+        assert_eq!(adopted.answers, ["A"]);
+        assert_eq!(adopted.answered_by.as_deref(), Some("chat_parent"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -10710,54 +10863,91 @@ mod run_wakeup_tests {
     #[test]
     fn wakeup_messages_are_exact_and_exclude_cancellation() {
         assert_eq!(
-            run_wakeup_text(&run("done")).as_deref(),
+            news::run_wakeup_text(&run("done")).as_deref(),
             Some(
                 "[orx] Run `run_x` finished with status **done**. You can compare this result \
 with other project runs using `orx runs p1` and inspect the file located by `orx logs run_x`."
             )
         );
         assert_eq!(
-            run_wakeup_text(&run("failed")).as_deref(),
+            news::run_wakeup_text(&run("failed")).as_deref(),
             Some(
                 "[orx] Run `run_x` finished with status **failed**. You can compare this result \
 with other project runs using `orx runs p1` and inspect the file located by `orx logs run_x`."
             )
         );
-        assert!(run_wakeup_text(&run("cancelled")).is_none());
+        assert!(news::run_wakeup_text(&run("cancelled")).is_none());
         assert_eq!(
-            run_wakeup_text(&run("lost")).as_deref(),
+            news::run_wakeup_text(&run("lost")).as_deref(),
             Some("[orx] Run `run_x` ended with **Outcome unavailable**. Its final outcome could not be collected. Inspect any partial logs using `orx logs run_x`; do not assume success or failure.")
         );
     }
 
     #[test]
     fn hidden_transcript_override_creates_no_user_parts() {
-        assert!(transcript_parts("", &[], &[]).is_empty());
+        assert!(transcript_parts("", &[], &[], &[]).is_empty());
     }
 
     #[test]
-    fn only_earliest_wakeup_per_session_is_attempted_each_tick() {
-        let mut first = run("done");
-        first.id = "run_first".into();
-        let mut second = run("done");
-        second.id = "run_second".into();
-        let selected = first_wakeup_per_session(vec![
-            crate::store::RunWakeup {
-                run: first,
-                chat_session_id: "owner".into(),
-                state: "pending".into(),
-                monitoring_alerted: false,
+    fn each_message_orx_writes_shows_as_its_own_part_with_its_sender() {
+        let run = |id: &str, status: &str| OrxDisplay {
+            text: format!("Run {id} ended."),
+            source: OrxSource {
+                kind: OrxKind::Run,
+                from: Some(id.into()),
+                status: Some(status.into()),
             },
-            crate::store::RunWakeup {
-                run: second,
-                chat_session_id: "owner".into(),
-                state: "pending".into(),
-                monitoring_alerted: false,
-            },
-        ]);
+        };
+        let orx = [run("run_x", "done"), run("run_y", "failed")];
+        let parts = transcript_parts("what the agent reads", &orx, &[], &[]);
+        let shown: Vec<_> = parts
+            .iter()
+            .map(|part| {
+                (
+                    part.id.as_str(),
+                    part.text.as_deref().unwrap_or_default(),
+                    part.orx.as_ref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("p0", "Run run_x ended.", Some(&orx[0].source)),
+                ("p1", "Run run_y ended.", Some(&orx[1].source)),
+            ]
+        );
+    }
 
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].run.id, "run_first");
+    #[test]
+    fn each_run_that_ended_is_its_own_message() {
+        let (store, dir) = temp_store("batched");
+        let mut second = run("failed");
+        second.id = "run_y".into();
+        let news: Vec<news::News> = [run("done"), second]
+            .into_iter()
+            .map(|run| {
+                news::News::Run(Box::new(crate::store::RunWakeup {
+                    run,
+                    chat_session_id: "owner".into(),
+                    state: "pending".into(),
+                    monitoring_alerted: false,
+                }))
+            })
+            .collect();
+        let messages = news::messages(&store, &news).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0]
+            .0
+            .starts_with("[orx] Run `run_x` finished with status **done**"));
+        assert!(messages[1]
+            .0
+            .starts_with("[orx] Run `run_y` finished with status **failed**"));
+        let status = |i: usize| messages[i].1.source.status.as_deref();
+        assert_eq!((status(0), status(1)), (Some("done"), Some("failed")));
+        assert_eq!(messages[1].1.source.from.as_deref(), Some("run_y"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -10807,6 +10997,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
                 request_hash: "hash".into(),
                 text: "user first".into(),
                 transcript_text: None,
+                orx: Vec::new(),
                 overrides: TurnOverrides::default(),
                 images: Vec::new(),
                 annotations: Vec::new(),
@@ -10816,7 +11007,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
             }]),
         );
 
-        assert!(TurnGuard::claim_hidden(&host, "owner").await.is_none());
+        assert!(TurnGuard::claim_idle(&host, "owner").await.is_none());
     }
 
     #[test]
@@ -10827,6 +11018,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
             request_hash: "hash".into(),
             text: "retry me".into(),
             transcript_text: None,
+            orx: Vec::new(),
             overrides: TurnOverrides::default(),
             images: Vec::new(),
             annotations: Vec::new(),
@@ -10863,7 +11055,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         ));
 
         drop(store);
-        process_run_wakeups(&host, Store::open_at(dir.clone()).unwrap(), None)
+        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), None)
             .await
             .unwrap();
 
@@ -10885,7 +11077,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         let moving = std::sync::atomic::AtomicBool::new(true);
 
         drop(store);
-        process_run_wakeups(&host, Store::open_at(dir.clone()).unwrap(), Some(&moving))
+        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), Some(&moving))
             .await
             .unwrap();
 
@@ -10913,7 +11105,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
             .insert("owner".into(), TurnState::Draining);
 
         drop(store);
-        process_run_wakeups(&host, Store::open_at(dir.clone()).unwrap(), None)
+        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), None)
             .await
             .unwrap();
 
@@ -10940,7 +11132,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         };
         let mut second = run("running");
         second.id = "run_y".into();
-        let text = run_monitoring_text(&[first, second]);
+        let text = news::run_monitoring_text(&[first, second]);
         assert!(!text.contains("REMOTE_SENTINEL"));
         assert_eq!(
             text,
@@ -10969,7 +11161,7 @@ once it can see a run finish; until then each run keeps its current status."
             .insert("owner".into(), TurnState::Draining);
 
         drop(store);
-        process_run_wakeups(&host, Store::open_at(dir.clone()).unwrap(), None)
+        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), None)
             .await
             .unwrap();
 
@@ -10999,7 +11191,7 @@ once it can see a run finish; until then each run keeps its current status."
         ));
 
         drop(store);
-        process_run_wakeups(&host, Store::open_at(dir.clone()).unwrap(), None)
+        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), None)
             .await
             .unwrap();
 
@@ -11102,8 +11294,12 @@ mod transcript_tree_tests {
         let side = side_chat_session(&parent_session("codex"), &messages);
         assert_eq!(side.bootstrap_context, None);
         assert_eq!(side.side_parent_leaf_id.as_deref(), Some("a3"));
-        let context =
-            side_chat_context(active_path(&messages, side.side_parent_leaf_id.as_deref())).unwrap();
+        let context = side_chat_context(
+            "chat_parent",
+            active_path(&messages, side.side_parent_leaf_id.as_deref()),
+        )
+        .unwrap();
+        assert!(context.contains("branched from chat `chat_parent`"));
         assert!(context.contains("kept branch") && context.contains("loss is falling"));
         assert!(!context.contains("abandoned retry"));
         assert_eq!(side.side_parent_session_id.as_deref(), Some("chat_parent"));
@@ -11146,7 +11342,10 @@ mod transcript_tree_tests {
         }
         let side = side_chat_session(&parent, &messages);
         store.create_chat_session(&side).unwrap();
-        let expected = side_chat_context(active_path(&messages, parent.active_leaf_id.as_deref()));
+        let expected = side_chat_context(
+            &parent.id,
+            active_path(&messages, parent.active_leaf_id.as_deref()),
+        );
         assert_eq!(
             effective_bootstrap_context(&store, &side).unwrap(),
             expected
@@ -11216,7 +11415,10 @@ mod transcript_tree_tests {
         let expected = crate::local::harness::transcript_snapshot(messages.iter());
         assert!(expected.len() <= 32 * 1024);
         assert!(expected.ends_with('界'));
-        assert_eq!(side.bootstrap_context, side_chat_context(messages.iter()));
+        assert_eq!(
+            side.bootstrap_context,
+            side_chat_context(&parent.id, messages.iter())
+        );
         assert!(side.bootstrap_context.unwrap().contains(&expected));
     }
 
@@ -11344,6 +11546,7 @@ mod steering_tests {
             display: text.into(),
             text: text.into(),
             client_turn_id: None,
+            orx: None,
         }
     }
 
@@ -11364,6 +11567,7 @@ mod steering_tests {
                     vec![],
                     vec![],
                     Some("ct1".into()),
+                    None,
                 )
             };
             assert!(send().await.unwrap().is_none());
@@ -11381,7 +11585,8 @@ mod steering_tests {
                     TurnOverrides::default(),
                     vec![],
                     vec![],
-                    Some("ct1".into())
+                    Some("ct1".into()),
+                    None,
                 )
                 .await
                 .is_err());

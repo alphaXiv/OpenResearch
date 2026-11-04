@@ -967,7 +967,7 @@ impl Harness for Codex {
                 };
                 let auto_review_supported = config_supports_auto_review(&config)
                     && super::detect::api_key("OPENAI_BASE_URL").is_none();
-                let setup = codex_thread_setup(
+                let mut setup = codex_thread_setup(
                     &repo,
                     &playbook_md,
                     ctx.permission_mode,
@@ -976,6 +976,7 @@ impl Harness for Codex {
                     ctx.service_tier.as_deref(),
                     &config,
                 )?;
+                add_orx_server(&mut setup["config"], &ctx.session_id, ctx.host.up_port());
                 resume_for_compaction(&client, thread_id, &session.path, setup).await?;
                 client
             }
@@ -1190,7 +1191,7 @@ impl Harness for Codex {
                 if !answer.approve {
                     return Ok(ResumeAction::Handled { plan_mode: None });
                 }
-                let text = async_question_answer(prompt, answer)?;
+                let (text, shown) = answer.as_written(async_question_answer(prompt, answer)?);
                 ctx.host
                     .steer_message(
                         &ctx.session_id,
@@ -1199,6 +1200,7 @@ impl Harness for Codex {
                         Vec::new(),
                         Vec::new(),
                         None,
+                        shown,
                     )
                     .await?;
                 Ok(ResumeAction::Handled { plan_mode: None })
@@ -1781,6 +1783,7 @@ fn tool_part(
         prompt: None,
         phase: None,
         children: Vec::new(),
+        orx: None,
     }
 }
 
@@ -2816,6 +2819,29 @@ async fn codex_playbook(
     Ok((repo, playbook_md))
 }
 
+/// Add orx's MCP server to a thread's config. Native sub-agents are off while
+/// it is on: delegation goes through orx, which can reach any model.
+fn add_orx_server(config: &mut Value, session_id: &str, up_port: Option<u16>) {
+    let Some(server) =
+        up_port.and_then(|port| crate::local::chat::delegation::mcp_server(session_id, port).ok())
+    else {
+        return;
+    };
+    let env: serde_json::Map<String, Value> = server
+        .env
+        .iter()
+        .map(|(name, value)| (name.to_string(), Value::String(value.clone())))
+        .collect();
+    config["mcp_servers"]["orx"] = serde_json::json!({
+        "command": server.command,
+        "args": server.args,
+        "env": env,
+        "default_tools_approval_mode": "approve",
+        "tool_timeout_sec": crate::local::chat::delegation::TOOL_TIMEOUT_SECONDS as f64,
+    });
+    config["features"] = serde_json::json!({"multi_agent": false, "multi_agent_v2": false});
+}
+
 /// Both a normal turn and idle compaction restore the same thread settings.
 fn codex_thread_setup(
     repo: &Path,
@@ -2893,6 +2919,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         ctx.service_tier.as_deref(),
         &config,
     )?;
+    add_orx_server(
+        &mut thread_setup["config"],
+        &ctx.session_id,
+        ctx.host.up_port(),
+    );
     if ctx.reset_codex_model {
         // Codex keeps the old thread model when a turn omits its model override.
         append_native_recovery_context(ctx, &mut thread_setup);
@@ -4245,6 +4276,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
                     prompt: None,
                     phase: None,
                     children: Vec::new(),
+                    orx: None,
                 });
             }
             "exec_command_end" => {
@@ -4372,6 +4404,7 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
                 prompt: None,
                 phase: None,
                 children: Vec::new(),
+                orx: None,
             });
         }
         _ => {}
@@ -6239,6 +6272,7 @@ requires_openai_auth = false
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
             annotations: Vec::new(),
+            from: None,
         }
     }
 
