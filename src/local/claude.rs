@@ -136,6 +136,7 @@ pub struct SpawnConfig {
     pub effort: Option<String>,
     pub model: Option<String>,
     pub native_store: NativeStore,
+    pub alphaxiv_signed_in: bool,
     /// Whether the child has its input bridge; failed setup is retried on the next turn.
     pub bridge_active: bool,
 }
@@ -649,42 +650,51 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         cmd.args(["--resume", native_id]);
     }
 
-    // Record successful bridge setup so reconciliation retries failures next turn.
     let mut config = spec.config.clone();
-    config.bridge_active = false;
     let settings = write_settings(
         &spec.repo,
         spec.config.permission_mode == Some(PermissionMode::Plan),
     )?;
     cmd.arg("--settings").arg(settings);
-    if uses_permission_bridge(spec.config.permission_mode) {
-        // The gate token is minted HERE and ONLY here — once per child, riding
-        // the mcp-gate bridge for the child's whole life. Re-minting mid-child
-        // (e.g. per turn) would strand a live bridge: `request_permission`
-        // equality-checks the token with no expiry (chat/mod.rs), so a fresh
-        // token invalidates the resident bridge child's held requests.
-        if let Some(port) = spec.chat.up_port() {
+    // The gate token is minted only here, once per child: `request_permission`
+    // checks it without expiry, so re-minting would strand the bridge's held requests.
+    let gate = if uses_permission_bridge(spec.config.permission_mode) {
+        spec.chat.up_port().map(|port| {
             let token = spec.chat.mint_gate_token(
                 &spec.session_id,
                 spec.config.permission_mode == Some(PermissionMode::Plan),
                 spec.config.permission_mode == Some(PermissionMode::Bypass),
             );
-            match write_mcp_config(&spec.repo, port, &spec.session_id, &token) {
-                Ok(path) => {
-                    cmd.arg("--mcp-config").arg(path);
-                    cmd.args(["--permission-prompt-tool", "mcp__orx__approve"]);
-                    // Give a held approval an hour before the CLI abandons the
-                    // tool call; orx denies at 55 min, safely inside it.
-                    cmd.env("MCP_TOOL_TIMEOUT", "3600000");
-                    config.bridge_active = true;
-                }
-                Err(e) => {
-                    eprintln!(
-                        "orx up: mcp bridge not configured, gray-area tools will be denied: {e}"
-                    );
-                }
-            }
+            (port, token)
+        })
+    } else {
+        None
+    };
+    // Record successful bridge setup so reconciliation retries failures next turn.
+    config.bridge_active = false;
+    let gate_config = gate
+        .as_ref()
+        .map(|(port, token)| (*port, spec.session_id.as_str(), token.as_str()));
+    match write_mcp_config(&spec.repo, gate_config) {
+        Ok(path) => {
+            cmd.arg("--mcp-config").arg(path);
+            config.bridge_active = gate.is_some();
         }
+        Err(e) => eprintln!(
+            "orx up: MCP config not written, alphaXiv tools are unavailable and gray-area tools will be denied: {e}"
+        ),
+    }
+    // A held approval gets an hour before the CLI abandons the tool call; orx denies at 55 min.
+    cmd.env(
+        "MCP_TOOL_TIMEOUT",
+        if config.bridge_active {
+            "3600000"
+        } else {
+            "300000"
+        },
+    );
+    if config.bridge_active {
+        cmd.args(["--permission-prompt-tool", "mcp__orx__approve"]);
     }
     crate::local::chat::prepare_env(&mut cmd);
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
@@ -770,6 +780,7 @@ pub fn child_action(current: &SpawnConfig, wanted: &SpawnConfig) -> ChildAction 
     if current.permission_mode != wanted.permission_mode
         || current.effort != wanted.effort
         || current.bridge_active != wanted.bridge_active
+        || current.alphaxiv_signed_in != wanted.alphaxiv_signed_in
         || current.native_store != wanted.native_store
     {
         return ChildAction::Respawn;
@@ -1412,6 +1423,7 @@ mod tests {
             effort: effort.map(str::to_string),
             model: model.map(str::to_string),
             native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
             bridge_active: bridge,
         }
     }
@@ -1716,6 +1728,15 @@ mod tests {
             ),
             ChildAction::Respawn
         );
+    }
+
+    #[test]
+    fn alphaxiv_sign_in_changes_respawn_the_resident_child() {
+        let signed_out = cfg(Some(PermissionMode::Ask), None, None, true);
+        let mut signed_in = signed_out.clone();
+        signed_in.alphaxiv_signed_in = true;
+        assert_eq!(child_action(&signed_out, &signed_in), ChildAction::Respawn);
+        assert_eq!(child_action(&signed_in, &signed_out), ChildAction::Respawn);
     }
 
     #[test]

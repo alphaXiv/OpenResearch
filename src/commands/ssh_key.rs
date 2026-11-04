@@ -1,24 +1,26 @@
 //! `orx ssh-key` — register the public key this computer authenticates with.
 //!
 //! Boxes trust the keys registered on the account, so a machine whose key isn't
-//! registered can't reach any box it provisions. The dashboard has always
-//! pointed at this command; it lives here so the fix never requires a browser.
+//! registered can't reach any box it provisions. A key is only uploaded when the
+//! user asks: this command, `orx compute connect openresearch`, or the dashboard's
+//! OpenResearch compute settings, never at sign-in.
 
 use crate::client::{create_ssh_key, list_ssh_keys};
 use crate::config::Credentials;
 use crate::error::{anyhow, Result};
-use crate::local::ssh_identity::{self, fingerprint, key_comment, KeyStatus};
+use crate::local::ssh_identity::{self, fingerprint, key_comment};
 use crate::output::print_table;
 
-/// Where `add` looks when no path is given — the key `ssh-keygen -t ed25519`
-/// writes, which is also what the dashboard's copy-paste hint reads.
-const DEFAULT_KEY: &str = "~/.ssh/id_ed25519.pub";
+/// Where `add` looks when no path is given: the key `ssh-keygen -t ed25519`
+/// writes, which ssh offers by default.
+pub(crate) const DEFAULT_KEY: &str = "~/.ssh/id_ed25519.pub";
 
-/// The shared http client has no timeout, and `orx login` must not hang on the
-/// courtesy registration after it has already printed success.
+/// The shared http client has no timeout, and the settings page waits on this.
 const REGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
-async fn ensure_default_registered(creds: &Credentials) -> Result<()> {
+/// Registers [`DEFAULT_KEY`], creating the key pair if missing. `false` when the
+/// account already had it.
+pub(crate) async fn ensure_default_registered(creds: &Credentials) -> Result<bool> {
     tokio::time::timeout(REGISTER_TIMEOUT, async {
         let ssh_dir = dirs::home_dir()
             .ok_or_else(|| anyhow!("Couldn't locate your home directory."))?
@@ -50,15 +52,23 @@ async fn ensure_default_registered(creds: &Credentials) -> Result<()> {
             .iter()
             .any(|key| fingerprint(&key.public_key).as_deref() == Some(fp.as_str()))
         {
-            println!("\u{2713} {DEFAULT_KEY} is already registered.");
-            return Ok(());
+            return Ok(false);
         }
         create_ssh_key(creds, &device_name(&line), &line).await?;
-        println!("\u{2713} Registered {DEFAULT_KEY}. Your private key stays on this computer.");
-        Ok(())
+        Ok(true)
     })
     .await
     .map_err(|_| anyhow!("SSH key setup timed out. Try again."))?
+}
+
+/// The `SHA256:` fingerprint of [`DEFAULT_KEY`], or `None` while that file is
+/// missing or unreadable.
+pub(crate) async fn default_key_fingerprint() -> Option<String> {
+    let body = tokio::fs::read_to_string(expand(DEFAULT_KEY)).await.ok()?;
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .and_then(ssh_identity::sha256_fingerprint)
 }
 
 async fn ensure_default_public_key(ssh_dir: &std::path::Path) -> Result<String> {
@@ -141,7 +151,16 @@ pub async fn add(path: Option<String>) -> Result<()> {
     let creds = crate::error::require_credentials().await;
     match path {
         Some(path) => add_with_creds(&creds, path).await,
-        None => ensure_default_registered(&creds).await,
+        None => {
+            if ensure_default_registered(&creds).await? {
+                println!(
+                    "\u{2713} Registered {DEFAULT_KEY}. Your private key stays on this computer."
+                );
+            } else {
+                println!("\u{2713} {DEFAULT_KEY} is already registered.");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -178,9 +197,8 @@ async fn add_with_creds(creds: &Credentials, path: String) -> Result<()> {
         ));
     }
 
-    // The api has no uniqueness constraint and the login prompt offers this on
-    // every login, so without a check a repeat user accumulates a row per login
-    // and the same key lands in authorized_keys N times.
+    // The api has no uniqueness constraint, so without a check every repeat run
+    // adds a row and the same key lands in authorized_keys N times.
     let fp = fingerprint(line).ok_or_else(|| anyhow!("{shown} isn't an SSH public key."))?;
     if let Ok(existing) = list_ssh_keys(creds).await {
         if let Some(dup) = existing
@@ -203,7 +221,7 @@ async fn add_with_creds(creds: &Credentials, path: String) -> Result<()> {
     // Two causes, both 401: a server older than this command (cookie-only until
     // the api ships), or a box's own token, which is refused by design.
     let key = create_ssh_key(creds, &name, line).await.map_err(|err| {
-        if err.to_string().contains("Unauthorized") {
+        if err.is::<crate::client::Unauthorized>() {
             anyhow!(
                 "The server wouldn't register a key with this token.\n  \
                  • It may predate `orx ssh-key add` — add the key to your OpenResearch account instead.\n  \
@@ -250,55 +268,83 @@ pub async fn list() -> Result<()> {
     Ok(())
 }
 
-/// Post-login check: tell the user now, while they're at the keyboard, if the
-/// boxes they provision won't accept this computer. Consent-gated and
-/// best-effort, mirroring `install_skills::offer_install_after_login`.
-pub async fn verify_after_login(creds: &Credentials) {
-    use std::io::IsTerminal;
-
-    // Before any network work: a piped login must not block on a hung api. All
-    // three streams, since the prompt reads stdin, writes stdout, and reports
-    // failures on stderr — redirecting any of them means nobody sees this.
-    if !std::io::stdin().is_terminal()
-        || !std::io::stdout().is_terminal()
-        || !std::io::stderr().is_terminal()
-    {
-        return;
-    }
-
-    let registered = match ssh_identity::check(creds).await {
-        KeyStatus::Matched => return,
-        KeyStatus::Unknown { reason } => {
-            eprintln!("Couldn't check SSH keys: {reason}\nRetry with: orx ssh-key add");
-            return;
-        }
-        KeyStatus::NoLocalMatch { registered, .. } => registered,
-        KeyStatus::NoneRegistered { .. } => Vec::new(),
-    };
-
-    println!("\n{}", ssh_identity::diagnosis(&registered));
-
-    println!("Registering this computer's public SSH key lets it connect to OpenResearch");
-    println!("compute instances in your organizations, including ones already running.");
-    println!("We'll use {DEFAULT_KEY}, creating a key pair if needed.");
-    print!("Register this computer's public key with your OpenResearch account? [Y/n] ");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
-        return;
-    }
-    if !matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes") {
-        println!("Skipped. You can set it up any time with:\n  orx ssh-key add");
-        return;
-    }
-    if let Err(err) = ensure_default_registered(creds).await {
-        eprintln!("Couldn't set up SSH access: {err}\nRetry with: orx ssh-key add");
-    }
-}
-
 #[cfg(test)]
 mod setup_tests {
     use super::*;
+    use crate::local::ssh_identity::KeyStatus;
+    use axum::{routing::get, Json, Router};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn default_key_is_created_and_registered_once() {
+        // `~/.ssh` and the agent are per-process, so the body runs in a child
+        // with an empty home and no agent.
+        if std::env::var("ORX_SSH_KEY_TEST_CHILD").is_err() {
+            let home = std::env::temp_dir().join(format!("orx-ssh-key-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&home).unwrap();
+            let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::ssh_key::setup_tests::default_key_is_created_and_registered_once",
+                    "--nocapture",
+                ])
+                .env("ORX_SSH_KEY_TEST_CHILD", "1")
+                .env("HOME", &home)
+                .env_remove("SSH_AUTH_SOCK")
+                .status()
+                .await
+                .unwrap();
+            let _ = std::fs::remove_dir_all(home);
+            assert!(status.success());
+            return;
+        }
+
+        let registered = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let list = registered.clone();
+        let add = registered.clone();
+        let app = Router::new().route(
+            "/ssh-keys",
+            get(move || {
+                let keys = list.lock().unwrap().clone();
+                async move { Json(json!({ "sshKeys": keys })) }
+            })
+            .post(move |Json(body): Json<Value>| {
+                let key =
+                    json!({ "id": "key-1", "name": body["name"], "publicKey": body["publicKey"] });
+                add.lock().unwrap().push(key.clone());
+                async move { Json(json!({ "sshKey": key })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let creds = Credentials {
+            api_url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "pat".into(),
+        };
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        assert_eq!(default_key_fingerprint().await, None);
+        assert!(ensure_default_registered(&creds).await.unwrap());
+        assert!(!ensure_default_registered(&creds).await.unwrap());
+
+        let ssh = dirs::home_dir().unwrap().join(".ssh");
+        assert!(ssh.join("id_ed25519").is_file());
+        let public = std::fs::read_to_string(ssh.join("id_ed25519.pub")).unwrap();
+        let keys = registered.lock().unwrap().clone();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            fingerprint(keys[0]["publicKey"].as_str().unwrap()),
+            fingerprint(public.trim())
+        );
+        assert!(matches!(
+            ssh_identity::check(&creds).await,
+            KeyStatus::Matched
+        ));
+        assert_eq!(
+            default_key_fingerprint().await,
+            ssh_identity::sha256_fingerprint(public.trim())
+        );
+    }
 
     #[tokio::test]
     async fn default_key_setup_preserves_existing_keys() {

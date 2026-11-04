@@ -281,6 +281,7 @@ fn valid_location(location: &str) -> bool {
                             | "harnesses"
                             | "projects"
                             | "compute"
+                            | "openresearch"
                             | "instances"
                             | "environment"
                             | "git"
@@ -311,6 +312,11 @@ fn valid_location(location: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn openresearch_location_is_valid() {
+        assert!(valid_location("/projects/demo/settings/openresearch"));
+    }
 
     #[test]
     fn side_chat_drafts_and_saved_chats_have_valid_workspace_locations() {

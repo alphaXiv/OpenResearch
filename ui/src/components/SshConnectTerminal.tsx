@@ -90,24 +90,6 @@ export function SshConnectTerminal({
   />;
 }
 
-export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
-  login: boolean;
-  onComplete: () => void;
-  onError: (error: string) => void;
-}) {
-  return <CommandTerminal
-    path={login ? "/api/settings/openresearch/login" : "/api/settings/openresearch/ssh-key"}
-    label={login ? "orx login" : "orx ssh-key add"}
-    heightClass="h-96"
-    onError={onError}
-    onComplete={(value) => {
-      if (!isComplete(value)) return false;
-      onComplete();
-      return true;
-    }}
-  />;
-}
-
 type CommandStatus = "running" | "done" | "failed" | "closed";
 
 /** Runs a note's command in place (harness setup via `/api/harnesses/setup`,

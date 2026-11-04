@@ -6,16 +6,19 @@ export function Tooltip({
   children,
   className,
   interactive = false,
+  disabled = false,
 }: {
   content: string;
   children: ReactNode;
   className?: string;
   interactive?: boolean;
+  disabled?: boolean;
 }) {
   const triggerRef = useRef<HTMLSpanElement>(null);
   const tooltipRef = useRef<HTMLSpanElement>(null);
 
   function show() {
+    if (disabled) return;
     const trigger = triggerRef.current;
     const tooltip = tooltipRef.current;
     if (!trigger || !tooltip) return;
@@ -33,6 +36,10 @@ export function Tooltip({
     const trigger = triggerRef.current;
     if (!trigger?.matches(":hover, :focus-visible") && !trigger?.querySelector(":focus-visible")) tooltipRef.current?.hidePopover();
   }
+
+  useEffect(() => {
+    if (disabled) tooltipRef.current?.hidePopover();
+  }, [disabled]);
 
   useEffect(() => {
     const dismiss = () => tooltipRef.current?.hidePopover();

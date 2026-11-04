@@ -57,6 +57,7 @@ impl SessionIo {
 }
 
 pub struct Client {
+    alphaxiv_signed_in: bool,
     configuration_lock: tokio::sync::Mutex<()>,
     pub connection: ConnectionTo<Agent>,
     pub initialized: Value,
@@ -227,10 +228,15 @@ impl Client {
             bail!("The agent cannot restore this session. Send a message to continue with the saved transcript");
         };
         self.set_native_id(native_id);
+        let servers = super::alphaxiv_mcp_servers()?;
         let params = if method == "session/resume" {
-            serde_json::to_value(ResumeSessionRequest::new(native_id.to_owned(), cwd))?
+            serde_json::to_value(
+                ResumeSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(servers),
+            )?
         } else {
-            serde_json::to_value(LoadSessionRequest::new(native_id.to_owned(), cwd))?
+            serde_json::to_value(
+                LoadSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(servers),
+            )?
         };
         self.request(method, params).await
     }
@@ -391,9 +397,14 @@ impl Host {
             .or_default()
             .clone();
         let mut saved = slot.lock().await;
-        if let Some(client) = saved.as_ref().filter(|client| !*client.closed.borrow()) {
+        if let Some(client) = saved.as_ref().filter(|client| {
+            !*client.closed.borrow() && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+        }) {
             *client.idle_since.lock().unwrap() = None;
             return Ok(client.clone());
+        }
+        if let Some(client) = saved.take() {
+            client.shutdown().await;
         }
         let client = spawn(
             definition,
@@ -734,6 +745,7 @@ pub(super) async fn spawn(
         tokio::time::timeout(std::time::Duration::from_secs(15), ready_receiver).await;
     match initialized {
         Ok(Ok(Ok((connection, initialized)))) => Ok(Arc::new(Client {
+            alphaxiv_signed_in: crate::alphaxiv::signed_in(),
             configuration_lock: tokio::sync::Mutex::new(()),
             connection,
             initialized,
@@ -787,6 +799,27 @@ mod tests {
             .unwrap();
         client.set_native_id(response["sessionId"].as_str().unwrap());
         client
+    }
+
+    #[tokio::test]
+    async fn alphaxiv_server_reaches_new_loaded_and_resumed_sessions() {
+        use agent_client_protocol::schema::v1::NewSessionRequest;
+        for mode in ["alphaxiv-load", "alphaxiv-resume"] {
+            let host = Arc::new(Host::default());
+            let cwd = std::env::temp_dir();
+            let client = host.get(mode, &definition(mode), &cwd).await.unwrap();
+            let response = client
+                .request(
+                    "session/new",
+                    NewSessionRequest::new(&cwd)
+                        .mcp_servers(super::super::alphaxiv_mcp_servers().unwrap()),
+                )
+                .await
+                .unwrap();
+            let native_id = response["sessionId"].as_str().unwrap();
+            client.restore(native_id, &cwd).await.unwrap();
+            host.shutdown().await;
+        }
     }
 
     #[tokio::test]
