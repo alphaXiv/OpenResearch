@@ -1126,6 +1126,24 @@ async fn authenticated_health(
 fn gateway_router(session: Arc<RemoteSession>) -> Router {
     Router::new()
         .route("/_orx/runtime", get(gateway_runtime))
+        .route(
+            "/api/account/openresearch",
+            get(super::up::compute_settings::openresearch_account),
+        )
+        .route(
+            "/api/settings/openresearch/logout",
+            post(super::up::compute_settings::openresearch_logout),
+        )
+        .route(
+            "/api/settings/openresearch/login",
+            get(super::up::openresearch_login),
+        )
+        .route(
+            "/api/settings/alphaxiv/login",
+            get(super::up::alphaxiv_login),
+        )
+        .route("/api/alphaxiv/folders", get(super::up::alphaxiv_folders))
+        .route("/api/alphaxiv/papers", get(super::up::alphaxiv_papers))
         .route("/_orx/ssh/connect", get(gateway_ssh_connect))
         .route("/_orx/ssh/repair", get(gateway_ssh_repair))
         .route("/_orx/install", post(gateway_install))

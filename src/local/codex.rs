@@ -129,6 +129,7 @@ pub fn classify_line(line: &str) -> Line {
 ///
 /// * `Approval` — `{"decision": accept|acceptForSession|decline|cancel}` (the two
 ///   sandbox-escalation requests).
+/// * `McpApproval` — `{"action": accept|decline|cancel, "content": ...}`.
 /// * `UserInput` — `{"answers": {<qid>: {"answers": [...]}}}`; `{}` is tolerated.
 /// * `Other` — a reply schema we don't speak (e.g.
 ///   `item/permissions/requestApproval`, whose reply is a permission-profile
@@ -136,6 +137,7 @@ pub fn classify_line(line: &str) -> Line {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerReqKind {
     Approval,
+    McpApproval,
     UserInput,
     Other,
 }
@@ -148,6 +150,7 @@ pub fn server_req_kind(method: &str) -> ServerReqKind {
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
             ServerReqKind::Approval
         }
+        "mcpServer/elicitation/request" => ServerReqKind::McpApproval,
         "item/tool/requestUserInput" => ServerReqKind::UserInput,
         _ => ServerReqKind::Other,
     }
@@ -217,6 +220,7 @@ pub struct CodexClient {
     /// child (crash/restart replacement) — the DB signal covers that case.
     last_collab_mode: std::sync::Mutex<Option<&'static str>>,
     native_store: NativeStore,
+    alphaxiv_signed_in: bool,
     session_id: String,
     /// Each native (thread, turn)'s model, outliving any one orx turn: sub-agents do.
     turn_models: std::sync::Mutex<HashMap<(String, String), String>>,
@@ -287,10 +291,17 @@ impl CodexClient {
             .await
     }
 
-    /// Decline a server→client request — the fail-safe answer whenever no one
-    /// can (or should) decide, so the server is never left blocked on us.
+    pub fn approval_reply(&self, id: &Value, approve: bool) -> Value {
+        if self.unanswered.lock().unwrap().get(&id.to_string()) == Some(&ServerReqKind::McpApproval)
+        {
+            json!({"action":if approve {"accept"} else {"decline"}, "content":if approve {json!({})} else {Value::Null}, "_meta":null})
+        } else {
+            json!({"decision":if approve {"accept"} else {"decline"}})
+        }
+    }
+
     pub async fn respond_decline(&self, id: &Value) -> Result<()> {
-        self.respond(id, json!({ "decision": "decline" })).await
+        self.respond(id, self.approval_reply(id, false)).await
     }
 
     /// Reject a server→client request whose reply schema we don't speak (e.g.
@@ -327,6 +338,9 @@ impl CodexClient {
                 continue;
             };
             let msg = match kind {
+                ServerReqKind::McpApproval => {
+                    json!({"id":id,"result":{"action":"cancel","content":null,"_meta":null}})
+                }
                 ServerReqKind::Approval => json!({ "id": id, "result": { "decision": "cancel" } }),
                 ServerReqKind::UserInput => json!({ "id": id, "result": { "answers": {} } }),
                 ServerReqKind::Other => json!({
@@ -581,7 +595,7 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                     // server hanging on a request nobody will answer — each
                     // kind gets the reply shape its method can parse.
                     match kind {
-                        ServerReqKind::Approval => {
+                        ServerReqKind::Approval | ServerReqKind::McpApproval => {
                             let _ = client.respond_decline(&id).await;
                         }
                         ServerReqKind::UserInput => {
@@ -672,6 +686,33 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
     crate::local::harness::codex::close_unowned(&client.session_id);
 }
 
+pub(crate) fn alphaxiv_config(servers: &Value) -> Result<Value> {
+    let name = if servers.get("alphaxiv").is_some() {
+        "orx_alphaxiv"
+    } else {
+        "alphaxiv"
+    };
+    if name == "orx_alphaxiv" && servers.get(name).is_some() {
+        return Err(anyhow!("Codex's orx_alphaxiv server name is reserved for OpenResearch. Rename that server in your Codex configuration."));
+    }
+    let mut overrides = json!({});
+    if name == "orx_alphaxiv" {
+        overrides["alphaxiv"] = json!({"enabled":false});
+    }
+    let tools: serde_json::Map<_, _> = crate::commands::alphaxiv_mcp::WRITE_TOOLS
+        .iter()
+        .map(|name| ((*name).to_owned(), json!({"approval_mode":"prompt"})))
+        .collect();
+    overrides[name] = json!({
+        "command":crate::paths::spawnable_exe()?, "args":["alphaxiv-mcp"],
+        "env_vars":["XDG_CONFIG_HOME", "ALPHAXIV_API_URL"],
+        "tool_timeout_sec":300,
+        "default_tools_approval_mode":"approve",
+        "tools":tools
+    });
+    Ok(overrides)
+}
+
 /// Spawn `codex app-server` (no handshake yet — see `CodexHost::ensure`, which
 /// registers the client *before* the handshake so every kill path can reach
 /// the child even if the spawning turn task is aborted mid-handshake).
@@ -757,6 +798,7 @@ fn spawn_client(
         thread_model: std::sync::Mutex::new(None),
         last_collab_mode: std::sync::Mutex::new(None),
         native_store,
+        alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         session_id: session_id.to_string(),
         turn_models: std::sync::Mutex::new(HashMap::new()),
         last_active: std::sync::Mutex::new(Instant::now()),
@@ -945,6 +987,7 @@ impl CodexHost {
         let guard = self.inner.lock().await;
         let client = guard.get(session_id)?;
         if client.native_store() == native_store
+            && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
             && matches!(client.child.lock().await.try_wait(), Ok(None))
         {
             client.touch();
@@ -1319,6 +1362,7 @@ pub(crate) mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),
@@ -1371,6 +1415,7 @@ pub(crate) mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(last_active),
@@ -1383,6 +1428,42 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     pub(crate) async fn stop_test_client(client: &CodexClient) {
+        client.terminate().await;
+    }
+
+    #[test]
+    fn configured_alphaxiv_is_disabled_when_our_server_uses_the_reserved_name() {
+        let configured =
+            json!({"alphaxiv":{"url":"https://example.com/mcp"},"other":{"command":"other"}});
+        let overrides = alphaxiv_config(&configured).unwrap();
+        assert_eq!(overrides["alphaxiv"], json!({"enabled":false}));
+        assert_eq!(overrides["orx_alphaxiv"]["args"], json!(["alphaxiv-mcp"]));
+        assert!(overrides.get("other").is_none());
+        assert!(alphaxiv_config(&json!({"alphaxiv":{},"orx_alphaxiv":{}})).is_err());
+        assert!(alphaxiv_config(&Value::Null)
+            .unwrap()
+            .get("alphaxiv")
+            .is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_approval_accepts_and_declines_in_its_native_reply_shape() {
+        let client = idle_test_client(Instant::now());
+        let id = json!(0);
+        client
+            .unanswered
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), ServerReqKind::McpApproval);
+        assert_eq!(
+            client.approval_reply(&id, true),
+            json!({"action":"accept","content":{},"_meta":null})
+        );
+        assert_eq!(
+            client.approval_reply(&id, false),
+            json!({"action":"decline","content":null,"_meta":null})
+        );
         client.terminate().await;
     }
 
@@ -1614,6 +1695,7 @@ pub(crate) mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),

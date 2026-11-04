@@ -486,6 +486,7 @@
     background: var(--base);
   }
   .workspace-mobile-nav > * { flex: 1 1 0; min-width: 0; }
+  .workspace-mobile-nav > .workspace-side-chats { flex-grow: 1.5; }
   .workspace-mobile-nav > button, .workspace-mobile-nav > div > button {
     display: flex;
     flex-direction: column;

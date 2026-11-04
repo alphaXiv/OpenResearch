@@ -30,9 +30,9 @@ the new place. The directory is owner-only because the store holds scoped
 compute capabilities.
 
 **The config directory never moves**, which is why the settings that point
-at the data directory, the credentials for openresearch.sh and Overleaf, and
-every cross-process lock live there. A lock inside the data directory could
-not guard a move of that directory.
+at the data directory, the credentials for openresearch.sh, alphaXiv and
+Overleaf, and every cross-process lock live there. A lock inside the data
+directory could not guard a move of that directory.
 
 A desktop app launched from Finder inherits none of the user's shell
 environment, so app mode imports a short list of variables from the login
@@ -145,8 +145,28 @@ endpoints out of it. Other traffic:
 
 - **Compute.** Work the user launches goes, as a source snapshot, to the
   backend they chose; logs and metrics come back.
+- **The SSH public key.** Signing in uploads nothing. Only when the user adds
+  a key, from the OpenResearch compute settings,
+  `orx compute connect openresearch` or `orx ssh-key add`, does orx send a
+  public key to their account so OpenResearch boxes accept their SSH: by
+  default `~/.ssh/id_ed25519.pub`, creating the pair if it is missing. The
+  private key never leaves the machine.
 - **Paper search.** Queries go to the public alphaXiv, OpenAlex, bioRxiv and
   PubMed APIs, without credentials.
+- **alphaXiv.** Sign-in is a browser trip to alphaXiv, whose identity token
+  orx hands to openresearch.sh for its own token, or, with
+  `orx login --alphaxiv`, to link alphaXiv to the signed-in account. orx keeps
+  alphaXiv's tokens owner-only in the config directory, refreshing them under
+  a file lock since each refresh retires the last one, and reads the user's
+  folders and papers with them. The chat's library picker loads paper
+  thumbnails from alphaXiv's public asset CDN. Agents also send research tool
+  calls to alphaXiv while signed out, limited by IP. Signed-in agents read
+  library notes and highlights and, when requested, create folders and save
+  papers to them. Tool arguments (including research queries, paper and
+  researcher identifiers, GitHub repository paths, folder identifiers and
+  names) go to alphaXiv; tool results enter the agent's context and reach its
+  model provider. The MCP proxy sends no chat transcript, project files,
+  experiments or logs of its own.
 - **Telemetry.** Official builds send opt-out usage events to the first-party
   API under a random install ID that is not tied to an account: commands run,
   harness detection states, and the research profile chosen at onboarding.

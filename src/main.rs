@@ -9,6 +9,7 @@
 //! error's `Display` to stderr and exits 1 — matching the TS
 //! `main().catch(err => { console.error(err.message); process.exit(1) })`.
 
+mod alphaxiv;
 mod browser;
 mod editors;
 // DTOs faithfully mirror every API wire field; not all are read by the CLI yet.
@@ -66,6 +67,9 @@ enum Command {
 
     /// Remove the stored token.
     Logout,
+
+    /// Read your alphaXiv library.
+    Alphaxiv(AlphaXivArgs),
 
     /// List projects registered in the local orx store.
     Projects(ProjectsArgs),
@@ -178,6 +182,9 @@ enum Command {
     #[command(name = "mcp-gate", hide = true)]
     McpGate,
 
+    #[command(name = "alphaxiv-mcp", hide = true)]
+    AlphaxivMcp,
+
     #[command(name = "antigravity-gate", hide = true)]
     AntigravityGate,
 
@@ -203,6 +210,27 @@ pub struct LoginArgs {
     /// Override the API base URL (or set OPENRESEARCH_API_URL).
     #[arg(long = "api-url")]
     pub api_url: Option<String>,
+    /// The app's sign-in: skips the agent-skills offer.
+    #[arg(long, hide = true)]
+    pub non_interactive: bool,
+    /// Connect alphaXiv to an existing OpenResearch sign-in.
+    #[arg(long)]
+    pub alphaxiv: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AlphaXivArgs {
+    #[command(subcommand)]
+    command: AlphaXivCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum AlphaXivCommand {
+    /// List folders and papers.
+    Library {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -1151,6 +1179,13 @@ async fn main() {
         }
         return;
     }
+    if matches!(command, Command::AlphaxivMcp) {
+        if let Err(error) = commands::alphaxiv_mcp::run().await {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if matches!(command, Command::McpGate) {
         if let Err(err) = commands::mcp_gate::run().await {
             // stderr only; a failed bridge degrades plan mode, never the CLI.
@@ -1210,7 +1245,13 @@ async fn main() {
         // Match the TS: print only the message, exit 1.
         eprintln!("{}", err);
         show_error_dialog(&err.to_string());
-        std::process::exit(1);
+        // sysexits' EX_TEMPFAIL: the app's sign-in dialog says to try again in a moment.
+        let code = if err.is::<client::AlphaXivUnavailable>() {
+            75
+        } else {
+            1
+        };
+        std::process::exit(code);
     }
 }
 
@@ -1351,6 +1392,7 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Login(_) => "login",
         Command::Logout => "logout",
+        Command::Alphaxiv(_) => "alphaxiv",
         Command::Projects(_) => "projects",
         Command::Orgs(_) => "orgs",
         Command::Project(_) => "project",
@@ -1383,6 +1425,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::PlanGate => "plan-gate",
         Command::InvocationGate => "invocation-gate",
         Command::McpGate => "mcp-gate",
+        Command::AlphaxivMcp => "alphaxiv-mcp",
         Command::AntigravityGate => "antigravity-gate",
         Command::PublishBranch(_) => "publish-branch",
         Command::RemoteHost(_) => "remote-host",
@@ -1403,6 +1446,9 @@ async fn dispatch(command: Command) -> error::Result<()> {
     match command {
         Command::Login(args) => commands::login::run(args).await,
         Command::Logout => commands::logout::run().await,
+        Command::Alphaxiv(args) => match args.command {
+            AlphaXivCommand::Library { json } => alphaxiv::print_library(json).await,
+        },
         Command::Projects(args) => commands::projects::run(args).await,
         Command::Orgs(args) => commands::orgs::run(args).await,
         Command::Project(args) => commands::project::run(args).await,
@@ -1443,6 +1489,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::InvocationGate => commands::invocation_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
         Command::AntigravityGate => commands::mcp_gate::run_antigravity().await,
+        Command::AlphaxivMcp => unreachable!("handled before dispatch"),
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
         Command::RemoteHost(_) => unreachable!("handled before dispatch"),
     }
@@ -1453,6 +1500,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
         command,
         Command::Login(_)
             | Command::Logout
+            | Command::Alphaxiv(_)
             | Command::InstallSkills(_)
             | Command::Discover(_)
             | Command::Paper(_)
@@ -1462,6 +1510,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Feedback(_)
             | Command::PlanGate
             | Command::InvocationGate
+            | Command::AlphaxivMcp
             | Command::McpGate
             | Command::AntigravityGate
             | Command::PublishBranch(_)

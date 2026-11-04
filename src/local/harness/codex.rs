@@ -961,10 +961,9 @@ impl Harness for Codex {
                     .codex
                     .ensure(&ctx.session_id, session.store)
                     .await?;
-                let config = if ctx.permission_mode == Some(PermissionMode::Bypass) {
-                    Value::Null
-                } else {
-                    codex_turn_config(&client, &repo).await?
+                let config = match codex_turn_config(&client, &repo).await {
+                    Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
+                    config => config?,
                 };
                 let auto_review_supported = config_supports_auto_review(&config)
                     && super::detect::api_key("OPENAI_BASE_URL").is_none();
@@ -975,7 +974,8 @@ impl Harness for Codex {
                     auto_review_supported,
                     ctx.model.as_deref(),
                     ctx.service_tier.as_deref(),
-                );
+                    &config,
+                )?;
                 resume_for_compaction(&client, thread_id, &session.path, setup).await?;
                 client
             }
@@ -1219,22 +1219,19 @@ impl Harness for Codex {
                 // native_id is the JSON-RPC request id's raw text.
                 let rpc_id: Value = serde_json::from_str(native)
                     .map_err(|_| anyhow!("codex prompt reply id is invalid"))?;
-                // Build the reply BEFORE reaching the client, so a bad answer
-                // (a question with no selection/note) errs before delivery and
-                // leaves the card actionable.
-                let reply = if prompt.kind == "permission" {
-                    serde_json::json!({ "decision": approval_decision(answer.approve) })
-                } else {
-                    user_input_reply(prompt, answer)?
-                };
                 let client = ctx
                     .host
                     .codex
                     .client_for(&ctx.session_id)
                     .await
                     .ok_or_else(|| {
-                        anyhow!("codex app-server is not running — cannot deliver the reply")
+                        anyhow!("Codex app-server is not running — cannot deliver the reply")
                     })?;
+                let reply = if prompt.kind == "permission" {
+                    client.approval_reply(&rpc_id, answer.approve)
+                } else {
+                    user_input_reply(prompt, answer)?
+                };
                 client.respond(&rpc_id, reply).await?;
                 Ok(ResumeAction::Handled { plan_mode: None })
             }
@@ -2827,7 +2824,8 @@ fn codex_thread_setup(
     auto_review_supported: bool,
     model: Option<&str>,
     service_tier: Option<&str>,
-) -> Value {
+    config: &Value,
+) -> Result<Value> {
     let (sandbox_mode, approval_policy, approvals_reviewer) =
         codex_policies(permission_mode, auto_review_supported);
     let mut setup = serde_json::json!({
@@ -2836,6 +2834,7 @@ fn codex_thread_setup(
         "approvalPolicy": approval_policy,
         "approvalsReviewer": approvals_reviewer,
         "developerInstructions": playbook_md,
+        "config":{"mcp_servers":crate::local::codex::alphaxiv_config(&config["config"]["mcp_servers"])?},
     });
     if let Some(service_tier) = service_tier {
         setup["serviceTier"] = Value::String(service_tier.to_string());
@@ -2843,7 +2842,7 @@ fn codex_thread_setup(
     if let Some(model) = model {
         setup["model"] = Value::String(model.to_string());
     }
-    setup
+    Ok(setup)
 }
 
 async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
@@ -2869,10 +2868,10 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         .unwrap_or(NativeStore::Isolated);
     let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
     let config_client = client.clone();
-    let mut config = if ctx.permission_mode == Some(PermissionMode::Bypass) {
-        Value::Null
-    } else {
-        codex_turn_config(&client, &repo).await?
+    // Bypass needs the configuration only to avoid MCP server name collisions.
+    let mut config = match codex_turn_config(&client, &repo).await {
+        Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
+        config => config?,
     };
     let auto_review_supported =
         config_supports_auto_review(&config) && super::detect::api_key("OPENAI_BASE_URL").is_none();
@@ -2892,7 +2891,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         auto_review_supported,
         ctx.model.as_deref(),
         ctx.service_tier.as_deref(),
-    );
+        &config,
+    )?;
     if ctx.reset_codex_model {
         // Codex keeps the old thread model when a turn omits its model override.
         append_native_recovery_context(ctx, &mut thread_setup);
@@ -3236,7 +3236,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     settle_request(&client, &id, kind).await;
                 } else {
                     match kind {
-                        ServerReqKind::Approval => {
+                        ServerReqKind::Approval | ServerReqKind::McpApproval => {
                             let card = approval_card(turn_id.as_deref(), &method, &id, &params);
                             if let Some((part_id, part)) = card {
                                 if matches!(ctx.permission_mode, Some(PermissionMode::Bypass)) {
@@ -3244,14 +3244,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                     // if codex asks anyway, the user's chosen mode
                                     // answers for them. (Question cards are never
                                     // auto-answered — only approvals.)
-                                    let _ = client
-                                        .respond(
-                                            &id,
-                                            serde_json::json!({
-                                                "decision": approval_decision(true)
-                                            }),
-                                        )
-                                        .await;
+                                    let _ =
+                                        client.respond(&id, client.approval_reply(&id, true)).await;
                                 } else {
                                     // Surface the card and keep consuming events —
                                     // codex holds the command; the reply arrives
@@ -3334,7 +3328,7 @@ async fn sweep_open_requests(
 /// Other → a JSON-RPC method-not-found error.
 async fn settle_request(client: &CodexClient, id: &Value, kind: ServerReqKind) {
     match kind {
-        ServerReqKind::Approval => {
+        ServerReqKind::Approval | ServerReqKind::McpApproval => {
             let _ = client.respond_decline(id).await;
         }
         ServerReqKind::UserInput => {
@@ -3367,17 +3361,6 @@ fn event_turn_id(params: &Value) -> Option<&str> {
     })
 }
 
-/// PromptAnswer.approve → the codex decision string. Per-command `accept`
-/// (never `acceptForSession` — a single Allow must not silently widen future
-/// commands); `decline` lets the model continue and report the denial.
-fn approval_decision(approve: bool) -> &'static str {
-    if approve {
-        "accept"
-    } else {
-        "decline"
-    }
-}
-
 /// The WirePart id of a server-request card (approval OR question), a pure
 /// function of (turn, request id) — shared by `approval_card`, `user_input_card`,
 /// and the `serverRequest/resolved` reconciliation so none needs a reverse
@@ -3389,36 +3372,54 @@ fn request_part_id(turn: Option<&str>, id: &Value) -> String {
     format!("appr-{}-{id}", turn.unwrap_or("t"))
 }
 
-/// A server→client approval request → a permission card. Returns the WirePart
-/// id and the part; `native_id` carries the JSON-RPC request id's raw text —
-/// the reply target for `resume_from_prompt`. `None` for request methods we
-/// don't card (they get a JSON-RPC error reply instead — including
-/// `item/permissions/requestApproval`, whose reply is a permission-profile
-/// object, not a `{decision}`). The key list spans both carded schemas:
-/// command/cwd exist only on commandExecution; fileChange carries just
-/// reason/grantRoot, so its card leans on `reason`.
+/// Native approvals share transcript cards while retaining their own reply schemas.
 fn approval_card(
     turn: Option<&str>,
     method: &str,
     id: &Value,
     params: &Value,
 ) -> Option<(String, WirePart)> {
-    let tool = match method {
-        "item/commandExecution/requestApproval" => "bash",
-        "item/fileChange/requestApproval" => "edit",
-        _ => return None,
-    };
-    let mut input = serde_json::Map::new();
-    for key in ["command", "cwd", "reason", "grantRoot"] {
-        if let Some(v) = params.get(key).filter(|v| !v.is_null()) {
-            input.insert(key.to_string(), v.clone());
+    let (tool, input) = if method == "mcpServer/elicitation/request" {
+        if params
+            .pointer("/_meta/codex_approval_kind")
+            .and_then(Value::as_str)
+            != Some("mcp_tool_call")
+            || !params
+                .pointer("/requestedSchema/properties")
+                .and_then(Value::as_object)?
+                .is_empty()
+        {
+            return None;
         }
-    }
+        let server = params["serverName"].as_str()?;
+        // Codex supplies the tool's name only in its approval message.
+        let name = params["message"].as_str()?.split('"').nth(1)?;
+        (
+            format!("{server}:{name}"),
+            params
+                .pointer("/_meta/tool_params")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+    } else {
+        let tool = match method {
+            "item/commandExecution/requestApproval" => "bash",
+            "item/fileChange/requestApproval" => "edit",
+            _ => return None,
+        };
+        let mut input = serde_json::Map::new();
+        for key in ["command", "cwd", "reason", "grantRoot"] {
+            if let Some(v) = params.get(key).filter(|v| !v.is_null()) {
+                input.insert(key.to_string(), v.clone());
+            }
+        }
+        (tool.to_owned(), Value::Object(input))
+    };
     let part_id = request_part_id(turn, id);
     let prompt = WirePrompt {
         kind: "permission".into(),
-        tool: Some(tool.into()),
-        tool_input: Some(Value::Object(input)),
+        tool: Some(tool),
+        tool_input: Some(input),
         native_id: Some(id.to_string()),
         ..Default::default()
     };
@@ -4098,6 +4099,25 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
         cmd.args(["-c", &override_arg]);
     }
+    // Only for the server-name collision check; an unreadable file keeps the default name.
+    let configured: serde_json::Map<String, Value> = [
+        codex_home.join("config.toml"),
+        repo.join(".codex").join("config.toml"),
+    ]
+    .iter()
+    .filter_map(|path| {
+        std::fs::read_to_string(path)
+            .ok()?
+            .parse::<toml::Value>()
+            .ok()
+    })
+    .filter_map(|config| serde_json::to_value(config.get("mcp_servers")?).ok())
+    .filter_map(|servers| servers.as_object().cloned())
+    .flatten()
+    .collect();
+    let servers = crate::local::codex::alphaxiv_config(&Value::Object(configured))?;
+    let servers = toml::Value::try_from(servers)?;
+    cmd.args(["-c", &format!("mcp_servers={servers}")]);
     let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
     if ctx.native_session_id.is_some() && native_session.is_none() {
         if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") {
@@ -4388,7 +4408,9 @@ mod tests {
             false,
             Some("saved-model"),
             Some("priority"),
-        );
+            &Value::Null,
+        )
+        .unwrap();
         let restored = tokio::time::timeout(
             Duration::from_secs(2),
             resume_for_compaction(
@@ -4474,7 +4496,9 @@ mod tests {
                 automatic_review,
                 None,
                 None,
-            );
+                &Value::Null,
+            )
+            .unwrap();
             assert_eq!(setup["sandbox"], sandbox);
             assert_eq!(setup["approvalPolicy"], approval);
             assert_eq!(setup["approvalsReviewer"], reviewer);
@@ -5591,7 +5615,7 @@ requires_openai_auth = false
     }
 
     /// The live spike's approval request (trimmed) → a permission card whose
-    /// native_id round-trips the JSON-RPC id, plus the decision mapping.
+    /// native_id round-trips the JSON-RPC id.
     #[test]
     fn approval_request_becomes_a_permission_card() {
         let id = serde_json::json!(0);
@@ -5652,9 +5676,42 @@ requires_openai_auth = false
             &params
         )
         .is_none());
+    }
 
-        assert_eq!(approval_decision(true), "accept");
-        assert_eq!(approval_decision(false), "decline");
+    #[test]
+    fn mcp_write_approval_uses_native_arguments_and_declines_other_elicitations() {
+        let mut params = serde_json::json!({
+            "serverName":"orx_alphaxiv", "mode":"form",
+            "message":"Allow the orx_alphaxiv MCP server to run tool \"create_folder\"?",
+            "_meta":{"codex_approval_kind":"mcp_tool_call", "tool_params":{"folder_name":"Reading"}},
+            "requestedSchema":{"type":"object", "properties":{}}
+        });
+        let (_, part) = approval_card(
+            Some("turn"),
+            "mcpServer/elicitation/request",
+            &serde_json::json!(0),
+            &params,
+        )
+        .unwrap();
+        let prompt = part.prompt.unwrap();
+        assert_eq!(prompt.tool.as_deref(), Some("orx_alphaxiv:create_folder"));
+        assert_eq!(prompt.tool_input.unwrap()["folder_name"], "Reading");
+        params["requestedSchema"]["properties"]["secret"] = serde_json::json!({"type":"string"});
+        assert!(approval_card(
+            Some("turn"),
+            "mcpServer/elicitation/request",
+            &serde_json::json!(0),
+            &params
+        )
+        .is_none());
+        params["_meta"] = Value::Null;
+        assert!(approval_card(
+            Some("turn"),
+            "mcpServer/elicitation/request",
+            &serde_json::json!(0),
+            &params
+        )
+        .is_none());
     }
 
     /// Part ids are turn-scoped: codex request ids restart at 0 per child
@@ -6571,6 +6628,10 @@ requires_openai_auth = false
         assert_eq!(
             server_req_kind("item/tool/requestUserInput"),
             ServerReqKind::UserInput
+        );
+        assert_eq!(
+            server_req_kind("mcpServer/elicitation/request"),
+            ServerReqKind::McpApproval
         );
         // A reply schema we don't speak (permission-profile object).
         assert_eq!(

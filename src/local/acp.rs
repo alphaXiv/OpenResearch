@@ -346,6 +346,15 @@ pub async fn discover_models(definition: &Definition) -> Result<serde_json::Valu
     response.map_err(|_| crate::error::anyhow!("Loading the agent's models timed out"))?
 }
 
+pub(crate) fn alphaxiv_mcp_servers(
+) -> crate::error::Result<Vec<agent_client_protocol::schema::v1::McpServer>> {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    Ok(vec![McpServer::Stdio(
+        McpServerStdio::new("alphaxiv", crate::paths::spawnable_exe()?)
+            .args(vec!["alphaxiv-mcp".to_owned()]),
+    )])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
