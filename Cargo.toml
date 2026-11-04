@@ -1,6 +1,6 @@
 [package]
 name = "openresearch-cli"
-version = "0.2.23"
+version = "0.2.24"
 edition = "2021"
 description = "OpenResearch CLI (orx) — Rust port"
 repository = "https://github.com/alphaXiv/OpenResearch"
@@ -14,7 +14,7 @@ path = "src/main.rs"
 # The Linux desktop app: a glibc build linking WebKitGTK (see linux/). Off by
 # default so the static musl CLI builds stay free of GTK. macOS and Windows
 # always build the app.
-desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:png"]
+desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:webkit2gtk", "dep:png"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "fs", "process", "sync", "signal"] }
@@ -106,6 +106,7 @@ rfd = "0.17"
 tao = { version = "0.37", optional = true }
 wry = { version = "0.57", optional = true }
 gtk = { version = "0.18", optional = true }
+webkit2gtk = { version = "2.0", optional = true }
 png = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

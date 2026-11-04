@@ -254,7 +254,11 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
         if configuration.is_none() {
             created = true;
             let response = client
-                .request("session/new", NewSessionRequest::new(&cwd))
+                .request(
+                    "session/new",
+                    NewSessionRequest::new(&cwd)
+                        .mcp_servers(crate::local::acp::alphaxiv_mcp_servers()?),
+                )
                 .await?;
             let native_id = response["sessionId"]
                 .as_str()

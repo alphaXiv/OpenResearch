@@ -38,6 +38,7 @@ import { setThemePreference } from "./theme";
 import { Button, Input, showAlert, Spinner } from "./components/ui";
 import { showCustomDialog } from "./dialog";
 import { RemoteStopDialog } from "./components/RemoteStopDialog";
+import { ProgressBar } from "./components/ProgressBar";
 import { CommandTerminal, SshConnectTerminal, isComplete } from "./components/SshConnectTerminal";
 import { resetGlobalWorkspace } from "./workspacePersistence";
 import { clearProjectWorkspaceCache } from "./useProjectWorkspace";
@@ -302,12 +303,13 @@ function RemoteSetup({
       <main className={overlay ? "w-full max-w-2xl" : "app flex h-full items-center justify-center bg-background p-6"}>
         <section className="w-full max-w-2xl rounded-xl border border-border bg-background p-7 shadow-modal">
           <div className="flex items-start gap-3">
-            {working && <Spinner className="mt-2" />}
             <div className="min-w-0 flex-1">
               <h1 id="remote-setup-title" className="m-0 text-2xl font-semibold text-text">
                 {title}
               </h1>
-              {!showSshTerminal && <p className="mt-2 mb-0 text-base text-text">{description}</p>}
+              {!showSshTerminal && (working
+                ? <div role="status"><ProgressBar label={description} /></div>
+                : <p className="mt-2 mb-0 text-base text-text">{description}</p>)}
 
               {showRepair && (
                 <div className="mt-4">
@@ -554,7 +556,7 @@ export function RuntimeRoot() {
   if (launchPlaceholder) {
     return (
       <main className="app flex h-full items-center justify-center gap-3 bg-background text-base text-text">
-        <Spinner /> {m.remote_preparing()}
+        <div role="status" className="w-80 max-w-full px-6"><ProgressBar label={m.remote_preparing()} /></div>
       </main>
     );
   }

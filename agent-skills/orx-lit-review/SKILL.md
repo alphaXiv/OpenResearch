@@ -14,6 +14,18 @@ supplement successful retrieval with a web search for a familiar or preferred
 paper; use a focused connector query or `orx paper`. Opening a selected original
 PDF to extract evidence is source access; opening its abstract first is unnecessary.
 
+## Your library and researchers
+
+For "my papers", "my library", "my notes", highlights or folders, use the
+alphaXiv tools `list_library`, `list_annotated_papers` and `get_paper_notes`,
+under whatever server prefix this agent gives them. Library tools need alphaXiv
+sign-in on the computer running this chat. Without alphaXiv tools, read the
+library with `orx alphaxiv library --json`. Save papers or create folders only
+when requested, with `save_papers_to_folder` and `create_folder`.
+For researcher questions, use `find_researchers`, `resolve_researchers`,
+`get_researcher` and `get_researcher_papers`; these work signed out too.
+Keep the literature search and reading flow below for general paper retrieval.
+
 ## Explain with visual evidence
 
 - Prefer explaining through original figures, tables, and diagrams. For

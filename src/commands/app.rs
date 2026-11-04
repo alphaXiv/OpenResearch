@@ -400,7 +400,7 @@ fn deep_link_path(url: &url::Url) -> Option<String> {
 }
 
 /// [`deep_link_path`] for a link that arrived as text, on the command line or from a second launch.
-#[cfg_attr(not(all(desktop_app, not(target_os = "macos"))), allow(dead_code))]
+#[cfg_attr(not(desktop_app), allow(dead_code))]
 fn link_path(link: &str) -> Option<String> {
     deep_link_path(&url::Url::parse(link).ok()?)
 }
@@ -829,8 +829,7 @@ mod imp {
         MenuSpec(Vec<PageMenu>),
         #[cfg(target_os = "macos")]
         MenuState(HashMap<String, PageMenuState>),
-        /// A later launch, with the `openresearch:` link it was opened with.
-        #[cfg(not(target_os = "macos"))]
+        /// Bring the window forward, opening the `openresearch:` link a later launch carried.
         Focus(Option<String>),
         /// The dashboard page finished loading and can take `orx:open-path`.
         PageReady,
@@ -1014,11 +1013,36 @@ mod imp {
             )
             // Pop-ups go to the browser, dashboard pages included: a window wry
             // opens itself has none of this window's handlers.
-            .with_new_window_req_handler(|url, _features| {
-                if super::opens_in_browser(&url) {
-                    crate::browser::open_browser(&url);
+            .with_new_window_req_handler({
+                #[cfg(target_os = "linux")]
+                let window = window.clone();
+                move |url, _features| {
+                    if super::opens_in_browser(&url) {
+                        #[cfg(target_os = "linux")]
+                        let activation_token = {
+                            use gtk::{gio, prelude::*};
+                            use tao::platform::unix::WindowExtUnix;
+
+                            let context = window.gtk_window().display().app_launch_context();
+                            context.and_then(|context| {
+                                // Wayland needs the click's activation token to focus an existing browser.
+                                context.set_timestamp(gtk::current_event_time());
+                                gio::AppInfo::create_from_commandline(
+                                    "xdg-open",
+                                    None,
+                                    gio::AppInfoCreateFlags::NONE,
+                                )
+                                .ok()
+                                .and_then(|app| context.startup_notify_id(&app, &[]))
+                            })
+                        };
+                        #[cfg(not(target_os = "linux"))]
+                        let activation_token: Option<String> = None;
+
+                        crate::browser::open_browser(&url, activation_token.as_deref());
+                    }
+                    NewWindowResponse::Deny
                 }
-                NewWindowResponse::Deny
             })
             .with_download_started_handler({
                 let window = window.clone();
@@ -1081,6 +1105,10 @@ mod imp {
                     }
                     "page-zoom:reset" => {
                         let _ = proxy.send_event(UserEvent::Zoom(ZoomAction::Reset));
+                    }
+                    // The page finished a browser sign-in and asks to come back.
+                    "window:focus" => {
+                        let _ = proxy.send_event(UserEvent::Focus(None));
                     }
                     #[cfg(not(target_os = "linux"))]
                     "titlebar:drag" => {
@@ -1174,6 +1202,16 @@ mod imp {
                 return;
             }
         };
+        #[cfg(target_os = "linux")]
+        {
+            use webkit2gtk::{SettingsExt, WebViewExt};
+            use wry::WebViewExtUnix;
+
+            if let Some(settings) = webview.webview().settings() {
+                // Remote workspace pop-ups follow an async request, after the click's user gesture expires.
+                settings.set_javascript_can_open_windows_automatically(true);
+            }
+        }
         #[cfg(target_os = "macos")]
         add_confirm_panel(&webview);
         #[cfg(target_os = "macos")]
@@ -1329,7 +1367,6 @@ mod imp {
             }
             // Even before the page loads: a launch that brings nothing up looks
             // like a broken app. While quitting it must stay hidden.
-            #[cfg(not(target_os = "macos"))]
             Event::UserEvent(UserEvent::Focus(link)) if matches!(quit, Quit::No) => {
                 if let Some(path) = link.as_deref().and_then(super::link_path) {
                     links.open(path, &webview, &origin);
@@ -1364,16 +1401,16 @@ mod imp {
             }
             #[cfg(target_os = "macos")]
             Event::Opened { urls } if matches!(quit, Quit::No) => {
-                let Some(path) = urls.iter().find_map(super::deep_link_path) else {
-                    return;
-                };
-                links.open(path, &webview, &origin);
                 // Before the first page shows, the page-load handler reveals the window.
                 if shown.get() {
                     window.set_minimized(false);
                     window.set_visible(true);
                     window.set_focus();
                 }
+                let Some(path) = urls.iter().find_map(super::deep_link_path) else {
+                    return;
+                };
+                links.open(path, &webview, &origin);
             }
             _ => {}
         })

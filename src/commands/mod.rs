@@ -16,6 +16,7 @@
 //!   most of those usage guards are unnecessary in the Rust port).
 
 pub mod agent;
+pub mod alphaxiv_mcp;
 pub mod app;
 pub mod compute;
 pub mod create_experiment;

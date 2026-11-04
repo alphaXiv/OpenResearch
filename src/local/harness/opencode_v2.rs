@@ -428,7 +428,25 @@ fn projected_parts(message: &Value) -> Vec<(WirePart, &Value)> {
                     part["state"]["error"] = Value::Null;
                 }
             }
-            to_wire_part(&part).map(|part| (part, content))
+            let mut wire = to_wire_part(&part)?;
+            if content["name"] == "execute" {
+                wire.children = content
+                    .pointer("/state/metadata/toolCalls")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .filter_map(|(call_index, call)| {
+                        let tool = call["tool"].as_str()?.strip_prefix("orx_alphaxiv.")?;
+                        to_wire_part(&json!({
+                            "id":format!("{id}:{index}:alphaxiv:{call_index}"),
+                            "type":"tool", "tool":format!("orx_alphaxiv_{tool}"),
+                            "state":{"status":call["status"], "input":call["input"]}
+                        }))
+                    })
+                    .collect();
+            }
+            Some((wire, content))
         })
         .collect()
 }
@@ -1464,6 +1482,37 @@ mod tests {
         );
         assert!(field_answer(&json!({"type":"number"}), &["NaN".into()]).is_err());
     }
+    #[test]
+    fn code_mode_alphaxiv_calls_keep_inputs_without_duplicating_execute_output() {
+        let parts = wire_parts(&json!({"id":"message", "content":[{
+            "type":"tool", "name":"execute", "state":{
+                "status":"completed", "content":[{"type":"text","text":"library output"}],
+                "metadata":{"toolCalls":[
+                    {"tool":"orx_alphaxiv.list_library", "status":"completed", "input":{"include_papers":true}},
+                    {"tool":"other.read", "status":"completed", "input":{}},
+                    {"tool":"orx_alphaxiv.get_paper_notes", "status":"completed", "input":{"paper_id_or_url":"2502.16982"}}
+                ]}
+            }
+        }]}));
+        let execute = &parts[0];
+        assert_eq!(
+            execute.state.as_ref().unwrap().output.as_deref(),
+            Some("library output")
+        );
+        assert_eq!(execute.children.len(), 2);
+        let library = &execute.children[0];
+        assert_eq!(library.tool.as_deref(), Some("orx_alphaxiv_list_library"));
+        assert_eq!(
+            library.state.as_ref().unwrap().input.as_ref().unwrap()["include_papers"],
+            true
+        );
+        assert!(library.state.as_ref().unwrap().output.is_none());
+        assert_eq!(
+            execute.children[1].tool.as_deref(),
+            Some("orx_alphaxiv_get_paper_notes")
+        );
+    }
+
     #[test]
     fn dismissed_question_is_a_completed_interaction() {
         for (tool, message, status) in [

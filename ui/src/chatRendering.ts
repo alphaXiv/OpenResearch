@@ -250,10 +250,14 @@ export function splitResponseParts(messages: ChatMessage[], streaming: boolean, 
     const active = streaming && index === messages.length - 1;
     const split = splitTurnParts(message.parts, active);
     // A continuation's commentary belongs to activity until it has an answer.
+    // A message the user wrote into it stays visible with what follows.
     if (messages.length > 1 && active && !message.parts.some((part) =>
       (part.type === "text" && part.phase === "final_answer" && Boolean(part.text))
       || (part.type === "prompt" && !part.prompt?.resolved))) {
-      return { message, work: message.parts, answer: [] };
+      const steer = message.parts.findIndex((part) => part.type === "steer");
+      return steer < 0
+        ? { message, work: message.parts, answer: [] }
+        : { message, work: message.parts.slice(0, steer), answer: message.parts.slice(steer) };
     }
     return { message, ...split };
   });

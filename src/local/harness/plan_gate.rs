@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 /// subcommand can turn them into a write). Kept in lockstep with `main.rs`'s `Command`
 /// enum; `readonly_verbs_are_real_commands` guards against a rename.
 const WHOLE_VERB_READS: &[&str] = &[
+    "alphaxiv",
     "projects",
     "orgs",
     "runs",

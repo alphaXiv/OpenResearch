@@ -90,7 +90,11 @@ pub fn agent_log_path() -> PathBuf {
 }
 
 /// Chat-server config; native questions are answered through the dashboard.
-fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<&str>) -> String {
+fn opencode_config_json(
+    model: Option<&str>,
+    instructions: &str,
+    plugin: Option<&str>,
+) -> Result<String> {
     let mut cfg = json!({
         "$schema": "https://opencode.ai/config.json",
         "permission": {
@@ -108,6 +112,8 @@ fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<
             "external_directory": "allow",
         },
         "instructions": [instructions],
+        // A name of orx's own keeps a user's `alphaxiv` server from merging into this one.
+        "mcp":{"orx_alphaxiv":{"type":"local", "command":[crate::paths::spawnable_exe()?, "alphaxiv-mcp"], "timeout":300000}},
     });
     if let Some(plugin) = plugin {
         cfg["plugin"] = json!([plugin]);
@@ -115,7 +121,11 @@ fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<
     if let Some(model) = model {
         cfg["model"] = json!(model);
     }
-    serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string())
+    cfg["permission"]["orx_alphaxiv_*"] = json!("allow");
+    for tool in crate::commands::alphaxiv_mcp::WRITE_TOOLS {
+        cfg["permission"][format!("orx_alphaxiv_{tool}")] = json!("ask");
+    }
+    Ok(serde_json::to_string_pretty(&cfg)?)
 }
 
 /// The research playbook: durable project context and skill routing for `orx up`.
@@ -371,14 +381,14 @@ fn write_agent_files(
             .join("opencode.json");
         std::fs::write(
             &path,
-            opencode_config_json(model, &playbook.to_string_lossy(), plugin.as_deref()),
+            opencode_config_json(model, &playbook.to_string_lossy(), plugin.as_deref())?,
         )
         .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
         Some(path)
     } else {
         std::fs::write(
             repo.join("opencode.json"),
-            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref()),
+            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref())?,
         )
         .map_err(|e| anyhow!("Could not write opencode.json: {}", e))?;
         None
@@ -409,6 +419,7 @@ struct AgentChild {
     session_id: String,
     model: Option<String>,
     native_store: NativeStore,
+    alphaxiv_signed_in: bool,
     binary: ResolvedBinary,
     endpoint: AgentEndpoint,
     database: native_store::opencode_database::DatabaseLease,
@@ -489,6 +500,7 @@ async fn spawn_agent(
         session_id: session_id.to_string(),
         model: model.map(str::to_string),
         native_store,
+        alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         binary,
         endpoint,
         database,
@@ -882,6 +894,7 @@ impl AgentHost {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
                 if agent.project_id == project.id
+                    && agent.alphaxiv_signed_in == crate::alphaxiv::signed_in()
                     && agent.native_store == native_store
                     && agent.binary == binary
                     && agent.database.path() == database_path
@@ -978,6 +991,20 @@ mod tests {
     use crate::local::agent_skills::{self, SkillSet};
 
     #[test]
+    fn alphaxiv_server_has_its_own_name_and_asks_before_writes() {
+        let cfg: Value =
+            serde_json::from_str(&opencode_config_json(None, "p.md", None).unwrap()).unwrap();
+        assert!(cfg["mcp"].get("alphaxiv").is_none());
+        assert_eq!(cfg["mcp"]["orx_alphaxiv"]["command"][1], "alphaxiv-mcp");
+        assert_eq!(cfg["permission"]["orx_alphaxiv_*"], "allow");
+        assert_eq!(cfg["permission"]["orx_alphaxiv_create_folder"], "ask");
+        assert_eq!(
+            cfg["permission"]["orx_alphaxiv_save_papers_to_folder"],
+            "ask"
+        );
+    }
+
+    #[test]
     fn resident_selection_keeps_cloud_session_ahead_of_host_default() {
         let host = AgentHost::new(Some("host/default".into()));
         assert_eq!(
@@ -1060,6 +1087,7 @@ mod tests {
                 session_id: "chat".into(),
                 model: Some("cloud/selected".into()),
                 native_store: NativeStore::Isolated,
+                alphaxiv_signed_in: false,
                 binary: binary.clone(),
                 endpoint,
                 database,

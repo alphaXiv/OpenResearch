@@ -3,10 +3,12 @@ import { SlidersHorizontal, X } from "lucide-react";
 import { useRef, useState } from "react";
 import { createRemoteSession } from "../api";
 import type { DialogContentProps } from "../dialog";
+import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { getSshSettingsQuery, listRemoteSessionsQuery } from "../queries/settings";
 import { getThemePreference } from "../theme";
+import { ProgressBar } from "./ProgressBar";
 import { Button, DialogContent, DialogDescription, DialogTitle, IconButton, Input, showAlert, Spinner } from "./ui";
 
 export function RemoteHostDialog({
@@ -76,10 +78,14 @@ export function RemoteHostDialog({
           ref={searchRef}
           className="mt-4"
           value={query}
+          disabled={isDisabled}
           onChange={(event) => setQuery(event.target.value)}
           placeholder={m.remote_search_hosts()}
           aria-label={m.remote_search_hosts()}
         />
+        <div role="status">
+          {openingHost && <ProgressBar label={m.remote_connecting_title({ host: ltr(openingHost) })} />}
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto border-t border-border-variant p-2">
         {errorMessage && <p role="alert" className="m-3 text-sm text-accent-red">{errorMessage}</p>}
