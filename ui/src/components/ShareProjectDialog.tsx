@@ -91,13 +91,13 @@ export function ShareProjectDialog({ project, returnFocus, cancel, confirm, isDi
         </div>
       </div>}
     </section>
-    {(errorMessage || linkError) && <p role="alert" className="mt-3 whitespace-pre-line text-sm text-accent-red">{errorMessage ?? linkError?.message}</p>}
+    {(linkError || errorMessage) && <p role="alert" className="mt-3 whitespace-pre-line text-sm text-accent-red">{linkError?.message ?? errorMessage}</p>}
     <div className="mt-6 flex flex-wrap justify-end gap-2">
       <Button type="button" variant="ghost" disabled={busy} onClick={cancel}>{m.projects_home_cancel()}</Button>
       <Button ref={publishRef} type="button" disabled={busy || !ready || !linkQuery.data || (remote && !signedIn)} onClick={() => {
         if (signedIn) publish.mutate();
         else openSignIn(false, publishRef.current, () => { void linkQuery.refetch(); });
-      }}>{publish.isPending ? <Spinner /> : <Link2 size={16} />}{!signedIn ? m.share_publish_sign_in() : link ? m.share_republish() : m.share_publish()}</Button>
+      }}>{publish.isPending ? <Spinner /> : <Link2 size={16} />}{linkQuery.data && !signedIn ? m.share_publish_sign_in() : link ? m.share_republish() : m.share_publish()}</Button>
       <Button type="button" variant="primary" disabled={busy || !ready} onClick={() => { publish.reset(); confirm(choice); }}>{isPending ? <Spinner /> : <Download size={16} />}{m.share_save()}</Button>
     </div>
   </DialogContent>;

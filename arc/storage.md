@@ -193,8 +193,6 @@ traffic:
   `orx project share --publish`, uploads exactly the `.orx` file that "Save"
   would write, after the same credential scan, to openresearch.sh, which
   serves it to anyone with the link until the publisher deletes it. Nothing is
-  published unless the user asks for it there; the client test still keeps
-  every other research-state endpoint out of the client. The upload names the
-  local project id, so publishing again replaces the file behind the same
-  link. Opening a link downloads the file from the app's own API, without
+  published unless the user asks for it there. The upload names the local
+  project id, so publishing again replaces the file behind the same link. Opening a link downloads the file from the app's own API, without
   signing in.

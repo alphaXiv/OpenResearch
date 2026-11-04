@@ -2066,7 +2066,7 @@ fn export_shared_project(
         logs: req.logs,
         artifacts: req.artifacts,
     };
-    let scratch = local::git::TemporaryDirectory::new("orx-share-download")?;
+    let scratch = local::git::TemporaryDirectory::new("orx-share")?;
     // A fixed name: project names can outgrow a file name's length limit.
     let out = scratch.path().join("project.orx");
     let manifest = local::share::export(&Store::open()?, project, &options, &out)?;
@@ -2119,10 +2119,18 @@ async fn get_project_link(Path(id): Path<String>) -> ApiResult {
         return Ok(Json(json!({ "signedIn": false, "sharedProject": null })));
     };
     // Only a hint: an older or unreachable server must not stand in the way of saving a file.
-    let link = crate::client::find_published_project(&creds, &id)
-        .await
-        .unwrap_or(None);
-    Ok(Json(json!({ "signedIn": true, "sharedProject": link })))
+    match crate::client::find_published_project(&creds, &id).await {
+        Err(error)
+            if error
+                .downcast_ref::<crate::client::Unauthorized>()
+                .is_some() =>
+        {
+            Ok(Json(json!({ "signedIn": false, "sharedProject": null })))
+        }
+        link => Ok(Json(
+            json!({ "signedIn": true, "sharedProject": link.unwrap_or(None) }),
+        )),
+    }
 }
 
 async fn unpublish_project_link(Path(id): Path<String>) -> ApiResult {

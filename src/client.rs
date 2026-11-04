@@ -655,9 +655,7 @@ async fn shared_projects_request(
         .ok()
         .and_then(|body| body["error"]["message"].as_str().map(str::to_owned));
     Err(match (status.as_u16(), message) {
-        (401, _) => {
-            anyhow!("Unauthorized — your token is invalid or revoked. Run `orx login` again.")
-        }
+        (401, _) => Unauthorized.into(),
         (404, None) => anyhow!("{} can't publish projects yet.", creds.api_url),
         (_, Some(message)) => anyhow!("{message}"),
         _ => anyhow!("Request to {path} failed ({status})."),
@@ -837,8 +835,12 @@ pub async fn download_public_project(
     use tokio::io::AsyncWriteExt;
     // A whole-request timeout would cut off a large file; a stall is what to give up on.
     const STALL: std::time::Duration = std::time::Duration::from_secs(60);
-    let response =
-        public_project_response(api_url, &format!("/shared-projects/by-slug/{slug}/file")).await?;
+    let response = tokio::time::timeout(
+        STALL,
+        public_project_response(api_url, &format!("/shared-projects/by-slug/{slug}/file")),
+    )
+    .await
+    .map_err(|_| anyhow!("Downloading the project stalled."))??;
     let mut file = tokio::fs::File::create(out).await?;
     let mut received = 0u64;
     let mut stream = response.bytes_stream();
@@ -3103,7 +3105,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let blob: Blob = Arc::default();
-        let link = serde_json::json!({
+        let link = json!({
             "id": "link-1", "slug": "a1B2c3D4e5F6", "url": "https://openresearch.sh/p/a1B2c3D4e5F6",
             "sourceProjectId": "project-1", "name": "Tiny LM", "byteSize": 5,
             "publishedAt": "2026-11-03T00:00:00.000Z",
@@ -3117,7 +3119,7 @@ mod tests {
                     assert_eq!(body["sourceProjectId"], "project-1");
                     assert_eq!(body["name"], "Tiny LM");
                     assert_eq!(body["summary"]["experiments"], 0);
-                    axum::Json(serde_json::json!({
+                    axum::Json(json!({
                         "sharedProjectId": "link-1",
                         "uploadId": "upload-1",
                         "upload": { "url": upload_url, "headers": { "x-amz-meta-sha256": body["sha256"] } },
@@ -3144,7 +3146,7 @@ mod tests {
                         let (bytes, sha) = blob.lock().unwrap().clone().unwrap();
                         use sha2::Digest;
                         assert_eq!(format!("{:x}", sha2::Sha256::digest(&bytes)), sha);
-                        axum::Json(serde_json::json!({ "sharedProject": link }))
+                        axum::Json(json!({ "sharedProject": link }))
                     }
                 }),
             )

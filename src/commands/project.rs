@@ -106,7 +106,9 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
                     let downloaded = download.path().join("download.orx");
                     client::download_public_project(&api, slug, &downloaded).await?;
                     // The publisher picks the name, so it must not steer the folder elsewhere.
-                    let folder = public.name.replace(['/', '\\', ':'], "-");
+                    let folder = public
+                        .name
+                        .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-");
                     let folder = folder.trim().trim_matches(['.', '~']);
                     let folder = if folder.is_empty() { slug } else { folder };
                     (downloaded, folder.to_string(), Some(download))
