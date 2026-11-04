@@ -1354,9 +1354,10 @@ mod tests {
         assert!(messages
             .iter()
             .all(|m| m.result_native_session_id.is_none()));
+        // Windows paths carry backslashes, which JSON escapes.
         assert!(messages[1]
             .parts_json
-            .contains(&copied.to_string_lossy().into_owned()));
+            .contains(&json_text(&copied.to_string_lossy())));
 
         let occupied = import_into(
             &recipient,
