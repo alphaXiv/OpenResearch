@@ -261,8 +261,7 @@ pub(crate) async fn start_control_server(
 ) -> Result<ControlServer> {
     let data_dir = canonical_data_dir()?;
     let socket_path = control_socket_path(&data_dir)?;
-    if socket_path.exists() {
-        let metadata = std::fs::symlink_metadata(&socket_path)?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&socket_path) {
         if metadata.file_type().is_symlink() || metadata_uid(&metadata) != effective_uid() {
             return Err(anyhow!(
                 "Refusing to replace an unsafe remote-host control socket."
@@ -1144,6 +1143,171 @@ mod tests {
         assert!(control_socket_path(&data_dir)
             .unwrap()
             .starts_with(format!("/tmp/orx-{}", effective_uid())));
+    }
+
+    #[cfg(unix)]
+    fn descriptor() -> HostDescriptor {
+        HostDescriptor {
+            instance_id: "instance".into(),
+            hostname: "box".into(),
+            port: 1,
+            version: "0".into(),
+            dashboard_protocol: 0,
+            control_protocol: CONTROL_PROTOCOL,
+        }
+    }
+
+    #[cfg(unix)]
+    fn chat() -> Arc<ChatHost> {
+        Arc::new(ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_server_never_replaces_a_symlinked_socket() {
+        let socket = control_socket_path(&canonical_data_dir().unwrap()).unwrap();
+        let target =
+            std::env::temp_dir().join(format!("orx-socket-target-{}", uuid::Uuid::new_v4()));
+        for target_exists in [true, false] {
+            if target_exists {
+                std::fs::write(&target, "").unwrap();
+            }
+            std::os::unix::fs::symlink(&target, &socket).unwrap();
+            let (stop, _) = watch::channel(false);
+            let started = start_control_server(
+                descriptor(),
+                RemoteAuth::new("callback"),
+                chat(),
+                Default::default(),
+                stop,
+            )
+            .await;
+            let link_kept =
+                std::fs::symlink_metadata(&socket).is_ok_and(|m| m.file_type().is_symlink());
+            std::fs::remove_file(&socket).unwrap();
+            let _ = std::fs::remove_file(&target);
+            assert!(started.is_err(), "target exists: {target_exists}");
+            assert!(link_kept, "target exists: {target_exists}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_dir_must_be_a_private_directory_of_ours() {
+        let root = crate::local::git::TemporaryDirectory::new("orx-runtime-dir").unwrap();
+        let private = root.path().join("private");
+        ensure_private_dir(&private).unwrap();
+        ensure_private_dir(&private).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&private, &link).unwrap();
+        let shared = root.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        set_mode(&shared, 0o755).unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        set_mode(&file, 0o600).unwrap();
+        for unsafe_dir in [&link, &shared, &file] {
+            assert!(
+                ensure_private_dir(unsafe_dir).is_err(),
+                "{}",
+                unsafe_dir.display()
+            );
+        }
+
+        let foreign = Path::new("/root");
+        if std::fs::symlink_metadata(foreign).is_ok_and(|metadata| {
+            metadata.is_dir()
+                && metadata_mode(&metadata) & 0o077 == 0
+                && metadata_uid(&metadata) != effective_uid()
+        }) {
+            assert!(ensure_private_dir(foreign).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_attachment_token_dies_with_its_heartbeat() {
+        const TOKEN: &str = "abcdefghijklmnopqrstuvwxyz-attachment";
+        for last_line in [Some("pong"), None] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let auth = RemoteAuth::new("callback");
+            let (stop, _) = watch::channel(false);
+            let host = tokio::spawn(handle_control(
+                server,
+                descriptor(),
+                auth.clone(),
+                chat(),
+                Default::default(),
+                stop,
+                Default::default(),
+            ));
+            let mut client = BufReader::new(client);
+            write_request(
+                client.get_mut(),
+                &ControlRequest::Attach {
+                    expected_instance_id: descriptor().instance_id,
+                    token: TOKEN.into(),
+                },
+            )
+            .await
+            .unwrap();
+            let attached = read_bounded_line(&mut client).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str(&attached).unwrap(),
+                ControlResponse::Attached { .. }
+            ));
+            assert!(auth.matches_attachment(&digest(TOKEN)));
+
+            match last_line {
+                Some(line) => client
+                    .get_mut()
+                    .write_all(format!("{line}\n").as_bytes())
+                    .await
+                    .unwrap(),
+                // Nothing is left to arrive, so the paused clock jumps straight to the expiry.
+                None => tokio::time::pause(),
+            }
+            assert!(host.await.unwrap().is_err());
+            assert!(!auth.matches_attachment(&digest(TOKEN)), "{last_line:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn attaching_to_another_instance_registers_nothing() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let auth = RemoteAuth::new("callback");
+        let (stop, _) = watch::channel(false);
+        let host = tokio::spawn(handle_control(
+            server,
+            descriptor(),
+            auth.clone(),
+            chat(),
+            Default::default(),
+            stop,
+            Default::default(),
+        ));
+        let mut client = BufReader::new(client);
+        write_request(
+            client.get_mut(),
+            &ControlRequest::Attach {
+                expected_instance_id: "a previous instance".into(),
+                token: "abcdefghijklmnopqrstuvwxyz-attachment".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let response = read_bounded_line(&mut client).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str(&response).unwrap(),
+            ControlResponse::Error { .. }
+        ));
+        host.await.unwrap().unwrap();
+        assert_eq!(auth.attachment_count(), 0);
     }
 
     #[test]

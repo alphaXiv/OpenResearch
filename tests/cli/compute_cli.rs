@@ -396,6 +396,10 @@ fn ssh_config_conflict_and_execution_target_checks() {
         .contains("Host lab"));
 }
 
+/// Divides the supervisor's production waits (5 s polls, 60 s monitoring grace).
+#[cfg(unix)]
+const SUPERVISE_SPEEDUP: u32 = 20;
+
 #[cfg(unix)]
 #[test]
 fn slurm_supervisor_survives_connection_and_accounting_loss() {
@@ -454,6 +458,7 @@ exec python3 "$HOME/ssh-monitor-fixture.py" "$cmd"
         sandbox
             .command()
             .env("SSH_BACKEND", if ssh_backend { "1" } else { "0" })
+            .env("ORX_TEST_SPEEDUP", SUPERVISE_SPEEDUP.to_string())
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .args(["supervise", "00000000-0000-4000-8000-000000000001"])
             .stdout(std::process::Stdio::null())
@@ -484,13 +489,12 @@ exec python3 "$HOME/ssh-monitor-fixture.py" "$cmd"
         }
     };
     let wait = |condition: &dyn Fn() -> bool| wait_for(Duration::from_secs(15), condition);
-    // A missing scheduler record is reported only after about a minute, without failing the run.
+    // A missing scheduler record is reported only after the monitoring grace, without failing the run.
     wait(&|| {
         std::fs::read_to_string(sandbox.0.join("calls")).is_ok_and(|c| c.contains("exit_code"))
     });
-    std::thread::sleep(Duration::from_secs(10));
-    assert!(metadata()["monitoringError"].is_null());
-    wait_for(Duration::from_secs(75), &|| {
+    let missing_since = Instant::now();
+    wait(&|| {
         metadata()["monitoringError"].as_str().is_some_and(|s| {
             s.contains(if ssh_backend {
                 "unexpected inspect output"
@@ -499,6 +503,8 @@ exec python3 "$HOME/ssh-monitor-fixture.py" "$cmd"
             })
         })
     });
+    let grace = Duration::from_secs(60) / SUPERVISE_SPEEDUP;
+    assert!(missing_since.elapsed() >= grace - Duration::from_millis(500));
     std::fs::write(&phase, "outage").unwrap();
     wait(&|| {
         metadata()["monitoringError"]
@@ -710,6 +716,7 @@ esac
         Child(
             sandbox
                 .command()
+                .env("ORX_TEST_SPEEDUP", SUPERVISE_SPEEDUP.to_string())
                 .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
                 .args(["supervise", "00000000-0000-4000-8000-000000000001"])
                 .stdout(std::process::Stdio::null())

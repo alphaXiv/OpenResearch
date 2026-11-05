@@ -855,22 +855,6 @@ mod imp {
     #[cfg(target_os = "macos")]
     use wry::{WebViewBuilderExtMacos, WebViewExtMacOS};
 
-    #[cfg(target_os = "macos")]
-    const MACOS_ESCAPE_SCRIPT: &str = r#"
-        window.addEventListener("keydown", (event) => {
-            if (event.key !== "Escape" || event.defaultPrevented) return;
-            if (event.target?.matches?.("input[type=search]:enabled:not([readonly])")) return;
-            // WebKit resends Escape to AppKit after its own dialog/popover dismissal, so dismiss here instead.
-            event.preventDefault();
-            // shortcut: last open popover stands in for the topmost; revisit if nested popovers render out of DOM order.
-            const popover = CSS.supports("selector(:popover-open)") && [...document.querySelectorAll("[popover]:popover-open:not([popover=manual])")].pop();
-            if (popover) return popover.hidePopover();
-            // shortcut: old WebKit treats open dialogs as modal; revisit if non-modal dialogs are added.
-            const dialog = [...document.querySelectorAll(CSS.supports("selector(:modal)") ? "dialog:modal" : "dialog[open]")].pop();
-            if (dialog?.dispatchEvent(new Event("cancel", { cancelable: true }))) dialog.close();
-        });
-    "#;
-
     enum UserEvent {
         ServerReady,
         EngineBusy(bool),
@@ -1262,7 +1246,7 @@ mod imp {
         // Run after dashboard handlers; keep overlay dismissal, not WebKit's native fullscreen exit.
         let builder = builder
             .with_initialization_script("window.__ORX_MAC_TITLEBAR__ = true;")
-            .with_initialization_script_for_main_only(MACOS_ESCAPE_SCRIPT, false);
+            .with_initialization_script_for_main_only(include_str!("macos_escape.js"), false);
         #[cfg(target_os = "macos")]
         let builder = {
             let mtm = MainThreadMarker::new().expect("desktop app runs on the main thread");

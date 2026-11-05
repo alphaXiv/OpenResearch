@@ -669,10 +669,6 @@ mod tests {
 
     #[test]
     fn local_job_lifecycle() {
-        // The only test that touches ORX_DATA_DIR, so the global env is safe.
-        let base = std::env::temp_dir().join(format!("orx-localbox-test-{}", uuid::Uuid::new_v4()));
-        std::env::set_var("ORX_DATA_DIR", &base);
-
         let dir = run_job(&LocalJobSpec {
             run_id: "lifecycle".into(),
             script: "[ -n \"$TINKER_API_KEY\" ] && echo hello-$ORX_TEST_VAR-$HF_TOKEN".into(),
@@ -853,7 +849,7 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let stale = base.join("stale-pid");
+            let stale = crate::store::data_dir().join("stale-pid");
             std::fs::create_dir_all(&stale).unwrap();
             let mut unrelated = crate::process::command("sleep").arg("60").spawn().unwrap();
             std::fs::write(stale.join("pid"), unrelated.id().to_string()).unwrap();
@@ -872,8 +868,5 @@ mod tests {
             cancelled.unwrap();
             assert!(alive, "cancellation must not signal a reused PID");
         }
-
-        std::env::remove_var("ORX_DATA_DIR");
-        let _ = std::fs::remove_dir_all(&base);
     }
 }

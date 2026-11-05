@@ -52,8 +52,7 @@ const PRIMARY_LABEL: &str = "orx-primary";
 
 /// User-tunable k8s settings, stored at
 /// `$XDG_CONFIG_HOME/openresearch/k8s.json`. No secrets in here — kubectl
-/// holds all auth. (Older files may carry extra fields like `flavors`; they
-/// parse fine and are dropped on the next save.)
+/// holds all auth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct K8sSettings {
@@ -62,6 +61,9 @@ pub struct K8sSettings {
     pub context: Option<String>,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_namespace() -> String {
@@ -73,6 +75,7 @@ impl Default for K8sSettings {
         Self {
             context: None,
             namespace: default_namespace(),
+            unknown: Default::default(),
         }
     }
 }

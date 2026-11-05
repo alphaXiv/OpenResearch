@@ -1429,7 +1429,7 @@ mod tests {
         let Ok(python) =
             crate::jobs::managed_env::base_python(VERCEL_ENV.min_python, VERCEL_ENV.label).await
         else {
-            eprintln!("skipped: no Python 3.10+ on PATH");
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
             return;
         };
         for (probe, expected) in [
@@ -1493,7 +1493,7 @@ def get_sandbox(**kw): return Box()
         let Ok(python) =
             crate::jobs::managed_env::base_python(VERCEL_ENV.min_python, VERCEL_ENV.label).await
         else {
-            eprintln!("skipped: no Python 3.10+ on PATH");
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
             return;
         };
         let dir = std::env::temp_dir().join(format!("orx-vercel-{}", uuid::Uuid::new_v4()));
@@ -1576,7 +1576,7 @@ def get_sandbox(**kw): return Box()
         let Ok(python) =
             crate::jobs::managed_env::base_python(VERCEL_ENV.min_python, VERCEL_ENV.label).await
         else {
-            eprintln!("skipped: no Python 3.10+ on PATH");
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
             return;
         };
         for (status_code, deleted) in [(404, true), (500, false)] {
@@ -1623,7 +1623,7 @@ def get_sandbox(**kw): return Box()
         let Ok(python) =
             crate::jobs::managed_env::base_python(VERCEL_ENV.min_python, VERCEL_ENV.label).await
         else {
-            eprintln!("skipped: no Python 3.10+ on PATH");
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
             return;
         };
         let dir = std::env::temp_dir().join(format!("orx-vercel-{}", uuid::Uuid::new_v4()));

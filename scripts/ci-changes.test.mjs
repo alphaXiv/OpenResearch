@@ -24,14 +24,15 @@ test('platform files select corresponding checks', () => {
 })
 test('helper tests are independent and combine with other changes', () => {
   assert.deepEqual(enabled(['dev.ts']), ['dev'])
-  assert.deepEqual(enabled(['scripts/dev.test.ts', 'scripts/test_orx_chart.py', 'scripts/release_notes.py', 'ui/package.json']), ['frontend', 'dev', 'chart', 'release_notes'])
+  assert.deepEqual(enabled(['scripts/dev.test.ts', 'scripts/test_orx_chart.py', 'scripts/orx-chart.test.mjs', 'scripts/release_notes.py', 'ui/package.json']), ['frontend', 'dev', 'chart', 'release_notes'])
 })
 test('docs skip builds, workflow changes and unknown files select all', () => {
   assert.deepEqual(enabled(['README.md', 'docs/linux.md', 'LICENSE', '.github/readme-assets/banner.png', 'macos/DISTRIBUTION.md', 'windows/README.md', 'ui/README.md']), [])
-  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'scripts/build-host.mjs', 'scripts/build-host.test.mjs', 'new-build-input']) assert.equal(enabled([path]).length, 9)
+  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'scripts/build-host.mjs', 'scripts/build-host.test.mjs', 'new-build-input']) assert.equal(enabled([path]).length, 8)
 })
 test('embedded chart changes also run chart tests', () => {
   assert.equal(classifyChanges(['agent-skills/orx-figures/assets/orx_chart.py']).chart, true)
+  assert.equal(classifyChanges(['tests/contracts/locations.json']).frontend, true)
 })
 test('diff reports both deleted and added paths for renames', () => {
   const calls = []
@@ -50,24 +51,21 @@ test('unavailable comparisons and forced runs select everything', () => {
   }
 })
 const flags = Object.fromEntries(Object.entries(classifyChanges(['ui/src/App.tsx'])).map(([key, value]) => [key, String(value)]))
-const needs = { changes: { result: 'success' }, frontend: { result: 'success' }, rust: { result: 'skipped' }, windows: { result: 'skipped' }, 'linux-app': { result: 'skipped' }, helpers: { result: 'skipped' } }
+const needs = { changes: { result: 'success' }, frontend: { result: 'success' }, e2e: { result: 'success' }, rust: { result: 'skipped' }, windows: { result: 'skipped' }, 'linux-app': { result: 'skipped' }, helpers: { result: 'skipped' } }
 test('aggregate accepts intentional skips and successful selected jobs', () => checkResults(needs, flags))
 test('aggregate rejects failures, cancellations, missing and unexpectedly skipped jobs', () => {
   for (const result of ['failure', 'cancelled', 'skipped', undefined]) assert.throws(() => checkResults({ ...needs, frontend: { result } }, flags))
   assert.throws(() => checkResults({ ...needs, rust: { result: 'failure' } }, flags))
+  assert.throws(() => checkResults({ ...needs, e2e: { result: 'skipped' } }, flags))
   assert.throws(() => checkResults({ ...needs, changes: { result: 'failure' } }, flags))
   assert.throws(() => checkResults(needs, { ...flags, rust: undefined }))
 })
 
-test('backend and embedded JavaScript inputs run their suites without a frontend build', () => {
-  for (const path of ['src/local/acp/zcode-runtime.cjs', 'src/commands/app.rs', 'agent-skills/orx-figures/assets/orx-chart.html']) {
-    const checks = classifyChanges([path])
-    assert.equal(checks.javascript, true, path)
-    assert.equal(checks.frontend, false, path)
+test('embedded JavaScript selects the Rust job that runs its tests, without a frontend build', () => {
+  for (const path of ['src/commands/desktop_zoom.js', 'src/commands/macos_escape.js', 'src/local/acp/zcode-runtime.cjs']) {
+    assert.deepEqual(enabled([path]), ['rust', 'windows', 'linux', 'macos'], path)
   }
-  const selected = { ...flags, frontend: 'false', javascript: 'true' }
-  assert.throws(() => checkResults({ ...needs, frontend: { result: 'skipped' } }, selected))
-  checkResults({ ...needs, frontend: { result: 'skipped' }, helpers: { result: 'success' } }, selected)
+  assert.deepEqual(enabled(['agent-skills/orx-figures/assets/orx-chart.html']), ['rust', 'windows', 'linux', 'macos', 'chart'])
 })
 
 test('shallow checkouts fetch only the missing comparison commit', () => {

@@ -431,7 +431,7 @@ impl<A: Api + 'static> Backend for Adapter<A> {
             .into());
         }
         let log = self.log(run)?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + crate::config::paced(Duration::from_secs(2));
         loop {
             let _ = tokio::time::timeout(PAGE_STREAM_WAIT, self.drain_log(run)).await;
             let (len, error, path, complete) = {

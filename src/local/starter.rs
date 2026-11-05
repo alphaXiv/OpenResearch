@@ -866,6 +866,7 @@ mod tests {
             papers: vec![ProfilePaper {
                 paper_id: "2401.12345".into(),
                 title: Some("Fold it".into()),
+                unknown: Default::default(),
             }],
         };
         assert_eq!(

@@ -46,10 +46,7 @@ pub fn default_python_env(env: &HashMap<String, String>) -> HashMap<String, Stri
     env
 }
 
-/// Backend descriptor stored on the local run.
-/// `kind` discriminates. This is a fixed field list — a key absent here does
-/// NOT survive a parse → to_json round-trip, so anything a backend must keep
-/// needs its own (optional) field.
+/// Backend descriptor stored on the local run; `kind` discriminates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendDescriptor {
@@ -110,6 +107,9 @@ pub struct BackendDescriptor {
     /// The host's storage root at submit; Slurm derives its run dir from it, SSH keeps it for source-cache cleanup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_root: Option<String>,
+    /// Fields a newer orx wrote, kept so an older supervisor's rewrite doesn't drop them.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 impl BackendDescriptor {
@@ -316,6 +316,7 @@ mod tests {
             source_path: None,
             source_size: None,
             remote_root: None,
+            unknown: Default::default(),
         }
     }
 
@@ -387,6 +388,7 @@ mod tests {
             id: "immutable-id".into(),
             started_at: "2026-09-21T00:00:00Z".into(),
             run_dir: "/home/user/.orx/runs/r1".into(),
+            unknown: Default::default(),
         });
         let json = d.to_json();
         assert!(json.contains("sshContainer"));
@@ -394,6 +396,28 @@ mod tests {
             BackendDescriptor::parse(&json).unwrap().ssh_container,
             d.ssh_container
         );
+    }
+
+    /// One descriptor per backend as shipped versions wrote it. An older supervisor
+    /// reattaching to a newer run rewrites the descriptor, so a field it does not
+    /// know, at any level, must survive.
+    #[test]
+    fn shipped_descriptors_keep_fields_from_newer_versions() {
+        let shipped: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../tests/contracts/run-descriptors.json"))
+                .unwrap();
+        let newer = serde_json::json!({"nested": [1, 2]});
+        for mut descriptor in shipped {
+            for nested in descriptor.as_object_mut().unwrap().values_mut() {
+                if let Some(nested) = nested.as_object_mut() {
+                    nested.insert("fieldFromNewerOrx".into(), newer.clone());
+                }
+            }
+            descriptor["fieldFromNewerOrx"] = newer.clone();
+            let parsed = BackendDescriptor::parse(&descriptor.to_string()).unwrap();
+            let rewritten: serde_json::Value = serde_json::from_str(&parsed.to_json()).unwrap();
+            assert_eq!(rewritten, descriptor);
+        }
     }
 
     #[test]

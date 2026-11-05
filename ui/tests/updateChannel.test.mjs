@@ -1,106 +1,77 @@
-import { workspaceDom, mockWorkspace } from "./workspaceMocks.mjs";
-import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import test from "node:test";
-import React from "react";
-import ts from "typescript";
-import { dialogHarness } from "./dialogHarness.mjs";
+import { act } from "react";
+import { m } from "../src/paraglide/messages.js";
+import { find, press, renderApp, serveApp, settle } from "./render.mjs";
 
-const require = createRequire(import.meta.url);
-const source = readFileSync(new URL("../src/components/SettingsPage.tsx", import.meta.url), "utf8");
-const file = ts.createSourceFile("SettingsPage.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-const component = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "UpdatesTab");
-const compiled = ts.transpileModule(`export ${component.getText(file)}`, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-}).outputText;
-
-function elements(node) {
-  if (!React.isValidElement(node)) return [];
-  return [node, ...React.Children.toArray(node.props.children).flatMap(elements)];
-}
-
-function updates(initialChannel = "stable", fail = false) {
-  let status = { current: "0.2.21", channel: "app-bundle", releaseChannel: initialChannel, releaseChannelsAvailable: true, selfUpdates: true, autoUpdate: true };
-  const dialogs = dialogHarness();
-  const confirmations = [];
-  const state = [];
+/** Opens the settings page against a backend whose channel switches answer with `reply`. */
+async function updates(releaseChannel = "stable", reply = (status) => status) {
   const requests = [];
-  let cursor = 0;
-  const exports = {};
-  const bindings = {
-    useMutation: () => ({}), setAutoUpdateApi() {}, useRestartApp: () => ({ restarting: false }),
-    useUpdateStatus: () => ({ status, error: null, apply: (next) => { status = next; } }),
-    useState(initial) { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], (next) => { state[index] = next; }]; },
-    useRef(initial) { const index = cursor++; state[index] ??= { current: initial }; return state[index]; },
-    setReleaseChannel: async (channel) => {
-      requests.push(channel);
-      if (fail) throw new Error("Channel change failed");
-      return { ...status, releaseChannel: channel };
-    },
-    m: new Proxy({}, { get: (_, key) => () => key }), ltr: String,
-    CHANNEL_LABELS: { "app-bundle": () => "macOS app" }, MANUAL_UPDATE_HINT: {},
-    SETTINGS_CARD_CLASS_NAME: "card", KV_CLASS_NAME: "kv", PROJECT_DEFAULT_ROW_CLASS_NAME: "row", SEGMENTED_CLASS_NAME: "segmented",
-    showConfirmDialog(options) { confirmations.push(options); dialogs.showConfirmDialog(options); },
-    Button: "button", Switch: "switch", InstallCliRow: "install", LoadingRow: "loading", Spinner: "spinner",
+  let status = {
+    current: "0.2.21", latest: null, latestTag: null, channel: "app-bundle", releaseChannel, releaseChannelsAvailable: true,
+    waitingForStable: false, waitingForCanary: false, selfUpdates: true, autoUpdate: true, envDisabled: false,
+    updateAvailable: false, installedVersion: null, installedTag: null, restartRequired: false,
   };
-  bindings.useWorkspace = () => mockWorkspace(bindings);
-  bindings.useContext = () => workspaceDom;
-  bindings.WorkspaceDomContext = {};
-  new Function("require", "exports", ...Object.keys(bindings), compiled)(withWorkspaceMocks(require), exports, ...Object.values(bindings));
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
+    "GET /api/update": () => status,
+    "POST /api/update/channel": (init) => {
+      const { channel } = JSON.parse(init.body);
+      requests.push(channel);
+      const next = reply({ ...status, releaseChannel: channel });
+      if (!(next instanceof Response)) status = next;
+      return next;
+    },
+  });
+  await renderApp("/projects/p/settings/settings");
   return {
-    render() { cursor = 0; return elements(exports.UpdatesTab()); },
-    requests, dialogs, confirmations,
-    get channel() { return status.releaseChannel; },
+    requests,
+    channel: () => status.releaseChannel,
+    radio: (channel) => document.querySelector(`[data-channel="${channel}"]`),
+    dialog: () => document.querySelector('[role="dialog"]'),
   };
 }
 
-const radio = (tree, channel) => tree.find((element) => element.props["data-channel"] === channel);
-const dialog = (view) => view.dialogs.render().at(-1);
+const click = async (element) => {
+  await act(() => element.click());
+  await settle();
+};
 
 test("switching to canary requires confirmation for pointer and keyboard", async () => {
-  const view = updates();
-  radio(view.render(), "canary").props.onClick();
-  assert.equal(dialog(view).props.open, true);
+  const view = await updates();
+  await click(view.radio("canary"));
+  assert.match(view.dialog().textContent, new RegExp(m.settings_canary_confirm_title()));
   assert.deepEqual(view.requests, []);
-  assert.equal(view.confirmations[0].onCancel, "close");
-  dialog(view).props.onOpenChange(false);
-  await new Promise(setImmediate);
-  assert.equal(dialog(view).props.open, false);
-  assert.equal(view.channel, "stable");
+  await press("Escape");
+  await settle();
+  assert.equal(view.dialog(), null);
+  assert.equal(view.channel(), "stable");
 
-  let prevented = false;
-  view.render().find((element) => element.props.role === "radiogroup").props.onKeyDown({ key: "ArrowRight", preventDefault() { prevented = true; } });
-  assert.equal(prevented, true);
-  assert.equal(dialog(view).props.open, true);
+  const arrow = await press("ArrowRight", view.radio("stable"));
+  await settle();
+  assert.equal(arrow.defaultPrevented, true);
+  assert.notEqual(view.dialog(), null);
   assert.deepEqual(view.requests, []);
-  assert.equal(view.confirmations.at(-1).confirmLabel, "settings_canary_confirm_action");
-  dialog(view).props.children.props.confirm();
-  await new Promise(setImmediate);
+  await click(find('[role="dialog"] button', m.settings_canary_confirm_action()));
   assert.deepEqual(view.requests, ["canary"]);
-  assert.equal(view.channel, "canary");
-  assert.equal(dialog(view).props.open, false);
+  assert.equal(view.channel(), "canary");
+  assert.equal(view.dialog(), null);
 });
 
 test("switching back to stable does not require the canary confirmation", async () => {
-  const view = updates("canary");
-  radio(view.render(), "stable").props.onClick();
-  await new Promise(setImmediate);
+  const view = await updates("canary");
+  await click(view.radio("stable"));
   assert.deepEqual(view.requests, ["stable"]);
-  assert.equal(view.channel, "stable");
-  assert.equal(view.confirmations.length, 0);
+  assert.equal(view.channel(), "stable");
+  assert.equal(view.dialog(), null);
 });
 
 test("a failed switch keeps the selected channel and reports the error", async () => {
-  const view = updates("stable", true);
-  radio(view.render(), "canary").props.onClick();
-  assert.equal(view.confirmations.at(-1).confirmLabel, "settings_canary_confirm_action");
-  dialog(view).props.children.props.confirm();
-  await new Promise(setImmediate);
+  const view = await updates("stable", () => Response.json({ error: "Channel change failed" }, { status: 500 }));
+  await click(view.radio("canary"));
+  await click(find('[role="dialog"] button', m.settings_canary_confirm_action()));
   assert.deepEqual(view.requests, ["canary"]);
-  assert.equal(view.channel, "stable");
-  assert.equal(dialog(view).props.open, true);
-  assert.equal(dialog(view).props.children.props.errorMessage, "Channel change failed");
-  assert.equal(dialog(view).props.children.props.isDisabled, false);
+  assert.equal(view.channel(), "stable");
+  assert.match(view.dialog().textContent, /Channel change failed/);
+  assert.equal(find('[role="dialog"] button', m.settings_canary_confirm_action()).disabled, false);
 });

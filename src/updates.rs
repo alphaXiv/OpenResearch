@@ -853,6 +853,9 @@ struct CheckCache {
     /// Totals by release tag, for the latest, installed, deferred and running releases.
     #[serde(default)]
     changes: HashMap<String, Changes>,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 fn compatible_with_current(cache: &CheckCache, tag: &str) -> bool {

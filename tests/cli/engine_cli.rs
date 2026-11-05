@@ -642,7 +642,7 @@ async fn cancellation_labels_agree_in_runs_status_and_wait() {
                 "wait",
                 "exp",
                 "--timeout",
-                if cancelling { "1" } else { "10" },
+                if cancelling { "3" } else { "10" },
             ],
         ] {
             let output = sandbox

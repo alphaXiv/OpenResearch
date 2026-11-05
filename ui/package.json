@@ -11,7 +11,7 @@
     "typecheck": "pnpm routes:generate && tsc --noEmit",
     "lint:i18n": "node scripts/check-i18n.mjs",
     "lint:styles": "node scripts/check-styles.mjs",
-    "test": "node --test --experimental-strip-types tests/*.test.mjs",
+    "test": "paraglide-js compile --silent --outdir node_modules/.cache/paraglide && node --import ./tests/register.mjs --test tests/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -54,6 +54,7 @@
     "unified": "11.0.5"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "21.0.4",
     "@tailwindcss/vite": "4.3.3",
     "@tanstack/react-query-devtools": "^5.102.0",
     "@tanstack/router-cli": "^1.167.33",
@@ -62,6 +63,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^4.5.0",
+    "happy-dom": "21.0.4",
     "tailwindcss": "4.3.3",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
