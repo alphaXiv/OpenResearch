@@ -1315,23 +1315,31 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         .starts_with("acp:")
         .then(|| store?.acp_session_state(&s.id).ok().flatten())
         .flatten();
+    let pending_handoff = acp.is_some()
+        && store
+            .and_then(|store| handoff::pending_for(store, s).ok().flatten())
+            .is_some();
+    let native_configuration = acp
+        .as_ref()
+        .filter(|_| !pending_handoff)
+        .map(|state| &state.configuration);
     let context_usage = s
         .context_usage_json
         .as_deref()
         .and_then(|j| serde_json::from_str::<Value>(j).ok());
-    let native_model = acp.as_ref().and_then(|state| {
-        state.configuration["configOptions"]
+    let native_model = native_configuration.and_then(|configuration| {
+        configuration["configOptions"]
             .as_array()
             .and_then(|options| options.iter().find(|option| option["category"] == "model"))
             .and_then(|option| option["currentValue"].as_str())
-            .or_else(|| state.configuration["models"]["currentModelId"].as_str())
+            .or_else(|| configuration["models"]["currentModelId"].as_str())
     });
     json!({
         "id": s.id,
         "projectId": s.project_id,
         "harness": s.harness,
         "harnessName": acp.as_ref().map(|state| state.launch.name.as_str()),
-        "nativeConfiguration": acp.as_ref().map(|state| &state.configuration),
+        "nativeConfiguration": native_configuration,
         "title": s.title,
         // The UI animates the reveal of a harness-generated title, so it needs
         // to tell one from a placeholder or a user rename.
@@ -6065,15 +6073,11 @@ impl ChatHost {
                 prepare_project_slash_worktree(&project, &message.text, &session.id).await;
             }
         }
-        let history = store.list_chat_messages(&session.id)?;
-        let path = active_path(&history, session.active_leaf_id.as_deref());
-        let handoff = handoff::pending(
-            &session,
-            &path,
-            &store.undelivered_chat_replies(&session.id)?,
-        )
-        .map(|(since, window)| handoff::context(&store, &session, None, since, window))
-        .transpose()?;
+        let handoff = handoff::pending_for(&store, &session)?
+            .map(|(since, window)| {
+                handoff::context(&store, &session, None, since.as_deref(), window)
+            })
+            .transpose()?;
         let bootstrap =
             if prepared_input.is_none() && session.native_session_id.is_none() && handoff.is_none()
             {
@@ -10688,16 +10692,23 @@ mod bridge_tests {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 let host = Arc::new(test_host());
                 let store = Store::open().unwrap();
-                for source in ["claude-code", "codex", "opencode"] {
+                let acp = crate::local::acp::presets().remove(0).launch;
+                for source in ["claude-code", "codex", "opencode", acp.id.as_str()] {
                     for target in ["claude-code", "codex", "opencode"] {
                         if source == target {
                             continue;
                         }
                         let mut session = bare_session();
-                        session.id = format!("chat_{source}_{target}");
+                        session.id = format!("chat_{}", uuid::Uuid::new_v4());
                         session.harness = source.into();
                         session.native_session_id = Some(format!("native_{source}_{target}"));
+                        if source.starts_with("acp:") {
+                            session.model = Some("second".into());
+                        }
                         store.create_chat_session(&session).unwrap();
+                        if source.starts_with("acp:") {
+                            store.set_acp_configuration(&session.id, &json!({"configOptions":[{"id":"model", "type":"select", "category":"model", "currentValue":"first", "options":[{"value":"first", "name":"First"},{"value":"second", "name":"Second"}]}]})).unwrap();
+                        }
                         let request = StoredChatMessage {
                             id: format!("msg_{}", uuid::Uuid::new_v4()),
                             session_id: session.id.clone(),
@@ -10830,6 +10841,11 @@ mod bridge_tests {
                             .await
                             .unwrap();
                         assert_eq!(back.native_session_id, session.native_session_id);
+                        if source.starts_with("acp:") {
+                            let wire = session_json_with(Some(&store), &back, false);
+                            assert_eq!(wire["model"], "second");
+                            assert!(wire["nativeConfiguration"].is_null());
+                        }
                         let messages = store.list_chat_messages(&session.id).unwrap();
                         let path = active_path(&messages, back.active_leaf_id.as_deref());
                         let (since, window) = handoff::pending(

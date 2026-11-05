@@ -224,6 +224,21 @@ pub(super) fn pending<'a>(
     Some((seen.map(|index| path[index].id.as_str()), window))
 }
 
+pub(crate) fn pending_for(
+    store: &Store,
+    session: &StoredChatSession,
+) -> Result<Option<(Option<String>, Option<u64>)>> {
+    let messages = store.list_chat_messages(&session.id)?;
+    let path = active_path(&messages, session.active_leaf_id.as_deref());
+
+    Ok(pending(
+        session,
+        &path,
+        &store.undelivered_chat_replies(&session.id)?,
+    )
+    .map(|(since, window)| (since.map(str::to_owned), window)))
+}
+
 pub(crate) fn context(
     store: &Store,
     session: &StoredChatSession,
