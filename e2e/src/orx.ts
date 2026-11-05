@@ -1,7 +1,7 @@
 /**
  * The real `orx up` in a sandboxed home: its own config, data and cache directories, a PATH with
- * the system's tools and a signed-out Claude Code, and every request off the machine sent to the
- * outside server. @module
+ * the system's tools and signed-out `claude` and `gh`, and every request off the machine sent to
+ * the outside server. @module
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
@@ -25,11 +25,14 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
   mkdirSync(path.join(home, 'projects'), { recursive: true })
   mkdirSync(path.join(root, 'tmp'))
   writeFileSync(path.join(home, '.gitconfig'), '[user]\n\tname = E2E Researcher\n\temail = e2e@example.com\n')
-  // A signed-out Claude Code, so every host has an agent installed: macOS finds ChatGPT.app's Codex
-  // outside PATH, and with none at all onboarding skips its agent step to install OpenCode.
+  // Signed-out CLIs that shadow the host's, so every host looks the same. An agent must be installed:
+  // macOS finds ChatGPT.app's Codex outside PATH, and with none at all onboarding skips its agent
+  // step to install OpenCode. Linux runners ship a gh that would reach GitHub's API.
   const bin = path.join(root, 'bin')
   mkdirSync(bin)
-  writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n[ "$1" = --version ] && echo "2.1.0 (Claude Code)" && exit 0\nexit 1\n', { mode: 0o755 })
+  for (const [name, version] of [['claude', '2.1.0 (Claude Code)'], ['gh', 'gh version 2.80.0']]) {
+    writeFileSync(path.join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && echo "${version}" && exit 0\nexit 1\n`, { mode: 0o755 })
+  }
   const log = path.join(root, 'orx.log')
   const env = {
     HOME: home,
