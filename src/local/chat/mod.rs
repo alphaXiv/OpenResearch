@@ -8670,7 +8670,26 @@ fn effective_bootstrap_context(
     session: &StoredChatSession,
 ) -> Result<Option<String>> {
     if let Some(context) = &session.bootstrap_context {
-        return Ok(Some(context.clone()));
+        let messages = store.list_chat_messages(&session.id)?;
+        let compacted = messages.iter().rev().find(|message| {
+            stored_to_wire(message).parts.iter().any(|part| {
+                part.tool.as_deref() == Some(COMPACTED_TOOL)
+                    && part
+                        .state
+                        .as_ref()
+                        .is_some_and(|state| state.status == "completed")
+            })
+        });
+        let retained = compacted.is_none_or(|compacted| {
+            session.active_leaf_id.as_deref().is_some_and(|leaf| {
+                active_path(&messages, Some(leaf))
+                    .iter()
+                    .any(|message| message.id == compacted.id)
+            })
+        });
+        if retained {
+            return Ok(Some(context.clone()));
+        }
     }
     let (Some(parent), Some(leaf)) = (
         &session.side_parent_session_id,
@@ -8985,7 +9004,9 @@ async fn process_run_notices(
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
-        let Some(mut guard) = TurnGuard::claim_idle(chat, &session_id).await else {
+        let Some(mut guard) =
+            TurnGuard::claim_idle(chat, &session_id, TurnState::Reserved { turn_id: None }).await
+        else {
             continue;
         };
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
@@ -11814,7 +11835,10 @@ mod run_wakeup_tests {
 
             let frozen = store.run_notice_batch("owner").unwrap();
             assert_eq!(frozen.len(), 2);
-            let guard = TurnGuard::claim_idle(&host, "owner").await.unwrap();
+            let guard =
+                TurnGuard::claim_idle(&host, "owner", TurnState::Reserved { turn_id: None })
+                    .await
+                    .unwrap();
             let submitted = host
                 .send_message_showing("owner", run_notice_request(&frozen, guard))
                 .await
@@ -12398,6 +12422,7 @@ for line in sys.stdin:
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .unwrap();
             store.complete_chat_turn(&turn.id).unwrap();

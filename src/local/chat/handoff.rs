@@ -769,6 +769,66 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_summary_stays_on_its_branch_while_parent_context_survives() {
+        for side in [false, true] {
+            let dir =
+                crate::local::git::TemporaryDirectory::new("handoff-compacted-branch").unwrap();
+            let store = Store::open_at(dir.path().into()).unwrap();
+            let mut parent = session();
+            parent.id = "chat_parent".into();
+            store.create_chat_session(&parent).unwrap();
+            let mut parent_message = message("cafe0001", "user", "FROZEN_PARENT_FACT");
+            parent_message.session_id = parent.id.clone();
+            store
+                .upsert_chat_message_on_branch(&parent_message)
+                .unwrap();
+
+            let mut session = session();
+            session.bootstrap_context = Some("DISCARDED_COMPACTION_SUMMARY".into());
+            if side {
+                session.side_parent_session_id = Some(parent.id);
+                session.side_parent_leaf_id = Some(parent_message.id);
+            }
+            store.create_chat_session(&session).unwrap();
+            let request = message("cafe0002", "user", "DISCARDED_REQUEST");
+            store.upsert_chat_message_on_branch(&request).unwrap();
+            let mut compacted = message("cafe0003", "assistant", "");
+            compacted.parts_json = serde_json::to_string(&[WirePart::tool(
+                "compacted",
+                super::super::COMPACTED_TOOL,
+                "completed",
+                None,
+            )])
+            .unwrap();
+            store.upsert_chat_message_on_branch(&compacted).unwrap();
+
+            let saved = store.get_chat_session(&session.id).unwrap().unwrap();
+            assert!(context(&store, &saved, None, None, None)
+                .unwrap()
+                .contains("DISCARDED_COMPACTION_SUMMARY"));
+            for leaf in [None, Some(request.id.as_str())] {
+                store
+                    .set_chat_session_active_leaf(&session.id, leaf)
+                    .unwrap();
+                let rewound = store.get_chat_session(&session.id).unwrap().unwrap();
+                let handoff = context(&store, &rewound, None, None, None).unwrap();
+                assert!(!handoff.contains("DISCARDED_COMPACTION_SUMMARY"));
+                assert_eq!(handoff.contains("FROZEN_PARENT_FACT"), side);
+                if leaf.is_none() {
+                    assert!(!handoff.contains("DISCARDED_REQUEST"));
+                }
+            }
+            store
+                .set_chat_session_active_leaf(&session.id, Some(&compacted.id))
+                .unwrap();
+            let restored = store.get_chat_session(&session.id).unwrap().unwrap();
+            assert!(context(&store, &restored, None, None, None)
+                .unwrap()
+                .contains("DISCARDED_COMPACTION_SUMMARY"));
+        }
+    }
+
+    #[test]
     fn history_reads_page_the_active_branch_and_expand_complete_messages() {
         let dir = crate::local::git::TemporaryDirectory::new("handoff-read").unwrap();
         let store = Store::open_at(dir.path().into()).unwrap();

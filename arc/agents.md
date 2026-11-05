@@ -74,6 +74,8 @@ thread created before delivery does not count as having seen the request.
 Saved context stays available until the native thread confirms receipt.
 The replayable request excludes agent-specific context; each launch rebuilds
 the handoff for the selected agent. An empty branch carries no discarded history.
+Saved compaction context applies only to its branch; rewinding before it keeps
+the inherited parent context and rebuilds the selected conversation.
 
 The handoff is rendered when the next turn starts, so worktree changes made
 while the chat was idle are visible. The byte budget prioritizes user requests
