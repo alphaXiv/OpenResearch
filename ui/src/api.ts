@@ -1711,11 +1711,8 @@ export function createApi(
     nestedDelegation?: boolean;
   }) => post<UiState>("/api/settings/ui-state", body);
 
-  const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>
-    post<{ project: Project; selection: OnboardingSelection }>(
-      "/api/onboarding/complete",
-      { ...selection, ...profile },
-    );
+  const completeOnboarding = (selection: OnboardingSelection) =>
+    post<{ project: Project; selection: OnboardingSelection }>("/api/onboarding/complete", selection);
 
   const getProjectPathStatus = (path = "", signal?: AbortSignal) => {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -2203,6 +2200,7 @@ export function createApi(
     if (response.status === 401) throw new AlphaXivNotConnectedError();
     return json<T>(response);
   }
+  const getAlphaXivMe = (signal?: AbortSignal) => alphaXivGet<{ avatarUrl: string | null }>("/api/alphaxiv/me", signal);
   const getAlphaXivFolders = (signal?: AbortSignal) => alphaXivGet<AlphaXivFolder[]>("/api/alphaxiv/folders", signal);
   const getAlphaXivPapers = (folder: string | null, cursor: string | null, search?: string, signal?: AbortSignal) => {
     const params = new URLSearchParams();
@@ -2717,6 +2715,7 @@ export function createApi(
     getPublicNetwork,
     getOpenResearchSettings,
     getOpenResearchAccount,
+    getAlphaXivMe,
     getAlphaXivFolders,
     getAlphaXivPapers,
     logoutOpenResearch,

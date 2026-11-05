@@ -2,13 +2,17 @@ import type { DialogContentProps } from "../dialog";
 import { useContext, useEffect, useRef, useState } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
+import { useMachines } from "../machineSelection";
+import { useSignIn } from "./AccountChip";
+import { OpenResearchAccount } from "./OpenResearchAccount";
+import { LitSourceLogo } from "./LitSourceLogo";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Terminal as Xterm } from "@xterm/xterm";
 
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { AlertCircle, ArrowLeft, ArrowRight, Plus, RefreshCw, Terminal, TriangleAlert, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Plus, RefreshCw, Terminal, TriangleAlert } from "lucide-react";
 import { Wordmark } from "./Wordmark";
 
 import {
@@ -18,8 +22,6 @@ import {
   type Harness,
   type HarnessId,
   type OnboardingStep,
-  type LinkedPaper,
-  type PaperHit,
   type Project,
   type UiState,
 } from "../api";
@@ -32,7 +34,6 @@ import { HarnessSetupDialog } from "./HarnessSetupDialog";
 
 import { Hyperspace } from "./Hyperspace";
 import { Button, DialogContent, DialogTitle, LoadingRow, Spinner, StatusIndicator, Tooltip, type StatusTone } from "./ui";
-import { PaperTitle } from "./PaperTitle";
 
 const ONB_GATE_HINT_CLASS_NAME = [
   "onb-gate-hint text-base font-medium leading-normal text-text",
@@ -61,13 +62,6 @@ const FINISH_ERROR_CLASS_NAME = [
   "text-text",
 ].join(" ");
 
-const RESEARCH_AREAS = [
-  { id: "AI/ML", label: m.onboarding_area_ai_ml },
-  { id: "Biology", label: m.onboarding_area_biology },
-  { id: "Physics", label: m.onboarding_area_physics },
-  { id: "Other", label: m.onboarding_area_other },
-];
-
 /** In order — the API funnel keys on these names for all time, so renumbering
  * the screens must not redefine a historical step. */
 const ONBOARDING_STEP_NAMES: readonly OnboardingStep[] = ["welcome", "environment", "profile"];
@@ -92,13 +86,11 @@ export function Onboarding(props: OnboardingProps) {
     getProjectPathStatusQuery,
     getHarnessSetupCommandsQuery,
     refreshHarnesses,
-    getProfileQuery,
-    searchPapersQuery,
-    resolvePaperQuery,
   } = useWorkspace().queries;
   const { queryClient, workspaceScope, isCurrentScope } = useWorkspace();
+  const alphaXivLinked = !!useMachines().owner.queries.useOpenResearchAccount().data?.user;
 
-  const completeOnboardingMutation = useMutation({ mutationFn: (args: Parameters<typeof completeOnboarding>) => completeOnboarding(...args) });
+  const completeOnboardingMutation = useMutation({ mutationFn: completeOnboarding });
 
   const [step, setStep] = useState<0 | 1 | 2>(remote ? 1 : 0);
   useEffect(() => {
@@ -128,14 +120,6 @@ export function Onboarding(props: OnboardingProps) {
   const [finishErrorDetails, setFinishErrorDetails] = useState("");
   const [preferredHarness, setPreferredHarness] = useState<HarnessId | null>(null);
   const [checking, setChecking] = useState(false);
-  const [researchAreas, setResearchAreas] = useState<string[]>([]);
-  const [otherArea, setOtherArea] = useState("");
-  const [background, setBackground] = useState("");
-  const [papers, setPapers] = useState<LinkedPaper[]>([]);
-  const [paperQuery, setPaperQuery] = useState("");
-  const [paperHits, setPaperHits] = useState<PaperHit[]>([]);
-  const [searchingPapers, setSearchingPapers] = useState(false);
-  const paperSeq = useRef(0);
   // Per-probe, not one shared flag: a git failure must not put a connectivity
   // error on the harness gate it has nothing to do with — or worse, hide the
   // actionable "sign in" hint behind it.
@@ -199,72 +183,6 @@ export function Onboarding(props: OnboardingProps) {
   }, [harnesses, preferredAgent]);
   useEffect(() => setHarnessError(harnessQuery.isError), [harnessQuery.isError, harnessQuery.dataUpdatedAt]);
   useEffect(() => setGitError(!remote && pathQuery.isError), [remote, pathQuery.isError, pathQuery.dataUpdatedAt]);
-  // Prefill from any saved profile — best-effort, never gates the step. Once:
-  // effects rerun when a hidden machine is shown again, and that would erase edits.
-  const profilePrefilled = useRef(false);
-  useEffect(() => {
-    if (remote || profilePrefilled.current) return;
-    profilePrefilled.current = true;
-    void queryClient.fetchQuery(getProfileQuery())
-      .then((p) => {
-        setResearchAreas(p.researchAreas);
-        setOtherArea(p.otherArea ?? "");
-        setBackground(p.background ?? "");
-        setPapers(p.papers);
-      })
-      .catch(() => {});
-  }, []);
-
-  // Debounced title search; `paperSeq` drops superseded responses.
-  useEffect(() => {
-    const q = paperQuery.trim();
-    if (q.length < 3) {
-      setPaperHits([]);
-      setSearchingPapers(false);
-      return;
-    }
-    const seq = ++paperSeq.current;
-    setSearchingPapers(true);
-    const t = setTimeout(() => {
-      queryClient.fetchQuery(searchPapersQuery(q))
-        .then((res) => seq === paperSeq.current && setPaperHits(res))
-        .catch(() => seq === paperSeq.current && setPaperHits([]))
-        .finally(() => seq === paperSeq.current && setSearchingPapers(false));
-    }, 350);
-    return () => clearTimeout(t);
-  }, [paperQuery]);
-
-  const addPaper = (h: PaperHit) => {
-    const duplicate = papers.some((p) => p.paperId === h.paperId);
-    setPapers((cur) =>
-      cur.some((p) => p.paperId === h.paperId)
-        ? cur
-        : [...cur, { paperId: h.paperId, title: cleanPaperTitle(h.title) }],
-    );
-    setPaperQuery("");
-    setPaperHits([]);
-    // The search hit's title is a Google-scraped string — truncated, id-prefixed,
-    // sometimes reworded. Resolve the canonical title and correct it in place.
-    if (!duplicate) {
-      void queryClient.fetchQuery(resolvePaperQuery(h.paperId))
-        .then((r) => {
-          const title = r.title?.trim();
-          if (!title) return;
-          setPapers((cur) => cur.map((p) => (p.paperId === h.paperId ? { ...p, title } : p)));
-        })
-        .catch(() => {});
-    }
-  };
-  const removePaper = (id: string) => setPapers((cur) => cur.filter((p) => p.paperId !== id));
-  const toggleResearchArea = (area: string) => {
-    setResearchAreas((current) =>
-      current.includes(area) ? current.filter((item) => item !== area) : [...current, area],
-    );
-  };
-
-  const researchProfileValid =
-    researchAreas.length > 0 && (!researchAreas.includes("Other") || otherArea.trim().length > 0);
-
   const startAutomaticSetup = () => {
     if (setupTask.current) return setupTask.current;
     installOutput.current = "";
@@ -337,7 +255,7 @@ export function Onboarding(props: OnboardingProps) {
 
   const finishOnboarding = async (mode: "complete" | "setup" = "complete") => {
     if (props.remote) return;
-    if (finishing || (mode === "complete" && (!researchProfileValid || !gitReady))) return;
+    if (finishing || (mode === "complete" && !gitReady)) return;
     setFinishing(true);
     setFinishError(null);
     setFinishErrorDetails("");
@@ -348,12 +266,7 @@ export function Onboarding(props: OnboardingProps) {
       if (!harness) throw new Error(m.harness_setup_not_ready());
       if (mode === "setup") return;
       const selection = selectionFor(harness, harness.models[0]?.id ?? null);
-      const completion = await completeOnboardingMutation.mutateAsync([selection, {
-        researchAreas,
-        otherArea: researchAreas.includes("Other") ? otherArea : null,
-        background: background || null,
-        papers,
-      }]);
+      const completion = await completeOnboardingMutation.mutateAsync(selection);
       props.onDone(completion.project, completion.selection);
     } catch (error) {
       if (automaticSetup) setupTask.current = null;
@@ -448,12 +361,14 @@ export function Onboarding(props: OnboardingProps) {
       className={`home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-background onboarding ${
         step === 0
           ? "[&_.home-inner]:max-w-300 [&_.home-inner]:pt-0 [&_.home-inner]:pb-0"
-          : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
+          : step === 2
+            ? "[&_.home-inner]:max-w-180 [&_.home-inner]:pt-0 [&_.home-inner]:pb-0"
+            : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
         }`}
     >
       <div
         className={`home-inner max-w-155 my-0 mx-auto ${
-          step === 0 ? "px-8 sm:px-12" : "pt-12 px-6 pb-16"
+          step === 0 ? "px-8 sm:px-12" : step === 2 ? "px-6" : "pt-12 px-6 pb-16"
           }`}
       >
         {step === 0 ? (
@@ -553,112 +468,14 @@ export function Onboarding(props: OnboardingProps) {
             {continueHint && <p id={elementId("onboarding-continue-hint")} className="text-sm text-subtext">{continueHint}</p>}
           </>
         ) : (
-          <>
-            <div className="onb-eyebrow mb-4.5 flex items-center gap-2 text-xl font-medium text-muted">
+          <div className="flex min-h-dvh flex-col justify-center py-16">
+            <div className="onb-eyebrow mb-6 flex items-center gap-2 text-xl font-medium text-muted">
               <Wordmark />
               {!automaticSetup && <span>{m.onboarding_step_2_of_2()}</span>}
             </div>
-            <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-tight onb-profile-title mb-5.5">{m.onboarding_tell_us_about_your_research()}</h2>
-            <div className="onb-cards flex flex-col gap-2.5">
-              <div className={ONB_CARD_CLASS_NAME}>
-                <fieldset className="onb-fieldset border-0 mt-0 mx-0 mb-4.5 p-0 [&_legend]:text-base [&_legend]:font-medium [&_legend]:mb-1.5">
-                  <legend>{m.onboarding_what_areas_are_you_interested_in()}</legend>
-                  <p className="onb-field-hint text-muted text-sm leading-snug mt-0 mx-0 mb-2">{m.onboarding_choose_one_or_more()}</p>
-                  <div className="onb-area-options grid grid-cols-[repeat(2,_minmax(0,_1fr))] gap-2">
-                    {RESEARCH_AREAS.map((area) => (
-                      <label key={area.id} className="onb-area-option flex items-center gap-2 border border-border rounded-md cursor-pointer py-2 px-2.5 [&:has(input:checked)]:border-text [&:has(input:checked)]:bg-surface [&_input]:m-0">
-                        <input
-                          type="checkbox"
-                          checked={researchAreas.includes(area.id)}
-                          onChange={() => toggleResearchArea(area.id)}
-                          disabled={finishing}
-                        />
-                        <span>{area.label()}</span>
-                      </label>
-                    ))}
-                  </div>
-                  {researchAreas.includes("Other") && (
-                    <input
-                      className="onb-other-area w-full mt-2"
-                      value={otherArea}
-                      onChange={(event) => setOtherArea(event.target.value)}
-                      disabled={finishing}
-                      placeholder={m.onboarding_tell_us_your_other_research_area()}
-                      aria-label={m.onboarding_other_research_area()}
-                    />
-                  )}
-                </fieldset>
-                <label className="onb-field-label text-base font-medium mb-1.5" htmlFor={elementId("onb-background")}>
-                  {m.onboarding_research_background()}
-                </label>
-                <textarea
-                  id={elementId("onb-background")}
-                  className="onb-textarea w-full resize-y min-h-19.5 leading-normal text-base mb-3.5"
-                  value={background}
-                  onChange={(e) => setBackground(e.target.value)}
-                  disabled={finishing}
-                  rows={4}
-                  placeholder={m.onboarding_e_g_i_work_on_sample_efficient_rl()}
-                />
-                <label className="onb-field-label text-base font-medium mb-1.5" htmlFor={elementId("onb-paper-search")}>
-                  {m.onboarding_representative_papers()}
-                </label>
-                <p className="onb-field-hint text-muted text-sm leading-snug mt-0 mx-0 mb-2">
-                  {m.onboarding_add_papers_that_represent_your_research_interests_including()}
-                </p>
-                <div className="onb-paper-search flex flex-col gap-1.5 mt-3 [&_input]:w-full">
-                  <input
-                    id={elementId("onb-paper-search")}
-                    value={paperQuery}
-                    onChange={(e) => setPaperQuery(e.target.value)}
-                    disabled={finishing}
-                    placeholder={m.onboarding_search_alpha_xiv_by_title_to_link_a()}
-                  />
-                  {searchingPapers ? (
-                    <div className={ONB_CARD_META_CLASS_NAME}>{m.onboarding_searching_alpha_xiv()}</div>
-                  ) : paperHits.length > 0 ? (
-                    <div className="onb-paper-results flex flex-col border border-border rounded-md max-h-50 overflow-y-auto [&_button]:flex [&_button]:flex-col [&_button]:items-start [&_button]:gap-0.5 [&_button]:py-2 [&_button]:px-2.5 [&_button]:bg-none [&_button]:bg-transparent [&_button]:border-0 [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-start [&_button]:[font:inherit] [&_button]:text-text [&_button]:cursor-pointer [&_button:last-child]:border-b-0 [&_button:hover]:bg-surface [&_.title]:text-sm [&_.title]:font-medium [&_.id]:text-xs [&_.id]:text-muted">
-                      {paperHits.map((h) => (
-                        <button
-                          key={h.paperId}
-                          type="button"
-                          onClick={() => addPaper(h)}
-                          disabled={finishing}
-                        >
-                          <PaperTitle>{cleanPaperTitle(h.title)}</PaperTitle>
-                          <span className="id">{h.paperId}</span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-                {papers.length > 0 && (
-                  <div className="onb-paper-chips flex flex-wrap gap-1.5 mt-2.5">
-                    {papers.map((p) => (
-                      <span key={p.paperId} className="onb-paper-chip inline-flex items-center gap-1.5 pt-1 pe-1 pb-1 ps-2.5 border border-border rounded-sm bg-surface text-sm max-w-full [&_.title]:font-medium [&_.title]:overflow-hidden [&_.title]:text-ellipsis [&_.title]:whitespace-nowrap [&_.title]:max-w-60 [&_.id]:text-xs [&_.id]:text-muted [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:p-0.5 [&_button]:border-0 [&_button]:bg-none [&_button]:bg-transparent [&_button]:text-muted [&_button]:cursor-pointer [&_button]:rounded-xs [&_button:hover]:text-text [&_button:hover]:bg-panel">
-                        <PaperTitle>{p.title || p.paperId}</PaperTitle>
-                        <span className="id">{p.paperId}</span>
-                        <button
-                          type="button"
-                          aria-label={m.a11y_remove_item({ name: ltr(p.paperId) })}
-                          onClick={() => removePaper(p.paperId)}
-                          disabled={finishing}
-                        >
-                          <X size={12} />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-            {!researchProfileValid && (
-              <p className="onb-profile-hint text-accent-red text-sm mt-2 mx-0 mb-0">
-                {researchAreas.length === 0
-                  ? m.onboarding_choose_area_to_continue()
-                  : m.onboarding_describe_area_to_continue()}
-              </p>
-            )}
+            <h2 className="onb-title mt-0 mx-0 mb-3 text-5xl tracking-tight">{m.onboarding_alphaxiv_title()}</h2>
+            <p className="onb-sub text-text text-lg leading-normal mt-0 mx-0 mb-8 max-w-150">{m.onboarding_alphaxiv_description()}</p>
+            <AlphaXivAccountCard onSignedIn={() => void finishOnboarding()} />
             {automaticSetup && !gitReady && (
               <div className="mt-5" role="status">
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
@@ -679,7 +496,7 @@ export function Onboarding(props: OnboardingProps) {
               <div className="flex-1" />
               <Button variant="primary"
                 onClick={() => void finishOnboarding()}
-                disabled={finishing || !gitReady || (!automaticSetup && preferredHarness === null) || !researchProfileValid}
+                disabled={finishing || !gitReady || (!automaticSetup && preferredHarness === null)}
               >
                 {finishing ? (
                   <>
@@ -687,7 +504,7 @@ export function Onboarding(props: OnboardingProps) {
                   </>
                 ) : (
                   <>
-                    {m.onboarding_get_started()} <ArrowRight size={14} />
+                    {alphaXivLinked ? m.onboarding_get_started() : m.onboarding_skip()} <ArrowRight size={14} />
                   </>
                 )}
               </Button>
@@ -702,7 +519,7 @@ export function Onboarding(props: OnboardingProps) {
                 <AlertCircle size={16} className="shrink-0 text-accent-red" />
                 <p className="m-0 min-w-0 flex-1 text-sm text-text break-words">{finishError}</p>
                 {automaticSetup && (
-                  <Button size="small" onClick={() => void finishOnboarding(researchProfileValid && gitReady ? "complete" : "setup")} disabled={finishing}>
+                  <Button size="small" onClick={() => void finishOnboarding(gitReady ? "complete" : "setup")} disabled={finishing}>
                     {m.app_retry()}
                   </Button>
                 )}
@@ -719,17 +536,11 @@ export function Onboarding(props: OnboardingProps) {
                 </details>
               </div>
             )}
-          </>
+          </div>
         )}
       </div>
     </div>
   );
-}
-
-/** Fast-search titles carry scrape cruft: "[1706.03762] Title - arXiv".
- * Kept in sync with NewProjectForm's cleanTitle. */
-function cleanPaperTitle(title: string): string {
-  return title.replace(/^\[[^\]]*\]\s*/, "").replace(/\s*[-–|]\s*arXiv\s*$/i, "");
 }
 
 /** Agent notes carry the command to run in backticks (`claude auth login`) —
@@ -892,6 +703,34 @@ function GitInstallPrompt({
         {pending ? m.onboarding_installing_git() : m.onboarding_install_git()}
       </Button>
       {error && <p className="text-accent-red text-sm m-0">{error.message}</p>}
+    </div>
+  );
+}
+
+function AlphaXivAccountCard({ onSignedIn }: { onSignedIn: () => void }) {
+  const { useOpenResearchAccount, useAlphaXivMe } = useMachines().owner.queries;
+  const accountQuery = useOpenResearchAccount();
+  const avatarUrl = useAlphaXivMe().data?.avatarUrl;
+  const [avatarFailed, setAvatarFailed] = useState(false);
+  const openSignIn = useSignIn();
+  const card = useRef<HTMLDivElement>(null);
+  const user = accountQuery.data?.user;
+  const initial = user && ([user.firstName, user.lastName].filter(Boolean).join(" ") || user.email).trim().charAt(0).toLocaleUpperCase();
+  return (
+    <div ref={card} tabIndex={-1} className="outline-none">
+      {user ? (
+        <div className="flex items-center gap-4 rounded-lg border border-border bg-background px-5 py-4">
+          {avatarUrl && !avatarFailed
+            ? <img src={avatarUrl} alt="" className="size-12 shrink-0 rounded-full object-cover" onError={() => setAvatarFailed(true)} />
+            : <span className="flex size-12 shrink-0 items-center justify-center rounded-full bg-panel text-lg font-medium text-text" aria-hidden="true">{initial}</span>}
+          <span className="min-w-0 flex-1 text-base"><OpenResearchAccount user={user} /></span>
+          <StatusIndicator tone="success">{m.onboarding_signed_in()}</StatusIndicator>
+        </div>
+      ) : (
+        <Button size="large" className="h-16 w-full justify-center text-lg" disabled={accountQuery.isLoading} onClick={() => openSignIn(false, card.current, onSignedIn)} aria-haspopup="dialog">
+          <LitSourceLogo source="alphaxiv" size={24} decorative />{m.account_sign_in_alphaxiv()}
+        </Button>
+      )}
     </div>
   );
 }

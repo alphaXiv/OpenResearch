@@ -97,11 +97,22 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     }, queryClient);
   };
 
+  const useAlphaXivMe = () => {
+    const account = useOpenResearchAccount();
+    return useQuery({
+      queryKey: workspaceKey("alphaXivMe", account.data?.user?.id ?? null),
+      queryFn: ({ signal }) => api.getAlphaXivMe(signal),
+      enabled: !!account.data?.user,
+      retry: false,
+    }, queryClient);
+  };
+
   const useSignOutOpenResearch = () => useMutation({
     mutationFn: async () => {
       const key = workspaceKey("getOpenResearchAccount");
       await api.logoutOpenResearch();
       queryClient.removeQueries({ queryKey: workspaceKey("alphaXivFolders") });
+      queryClient.removeQueries({ queryKey: workspaceKey("alphaXivMe") });
       queryClient.removeQueries({ queryKey: workspaceKey("alphaXivPapers") });
       await queryClient.cancelQueries({ queryKey: key });
       if (!isCurrentScope(key)) return;
@@ -315,6 +326,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     getOpenResearchSettingsQuery,
     useOpenResearchAccount,
     useAlphaXivFolders,
+    useAlphaXivMe,
     useSignOutOpenResearch,
     useAddOpenResearchSshKey,
     getEnvVarsQuery,

@@ -152,11 +152,15 @@ impl Authorization {
 /// from alphaXiv's token endpoint (OIDC Core 3.1.3.7), and OpenResearch
 /// verifies it before trusting it.
 fn id_token_nonce(id_token: &str) -> Option<String> {
+    jwt_claim(id_token, "nonce")
+}
+
+fn jwt_claim(token: &str, name: &str) -> Option<String> {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(id_token.split('.').nth(1)?)
+        .decode(token.split('.').nth(1)?)
         .ok()?;
     let claims = serde_json::from_slice::<Value>(&payload).ok()?;
-    claims.get("nonce")?.as_str().map(str::to_owned)
+    claims.get(name)?.as_str().map(str::to_owned)
 }
 
 async fn token_request(api_url: &str, grant: &[(&str, &str)]) -> Result<TokenResponse> {
@@ -426,6 +430,82 @@ pub async fn papers(
     Ok(page)
 }
 
+async fn user_id() -> Result<String> {
+    let tokens = fresh_tokens(None).await?;
+    jwt_claim(&tokens.access_token, "sub")
+        .ok_or_else(|| anyhow!("alphaXiv sent an access token without a user."))
+}
+
+/// The signed-in user's avatar, preferring the thumbnail.
+pub async fn me() -> Result<Value> {
+    let user = get(&format!("/users/v3/{}", user_id().await?), &[]).await?;
+    let avatars = user.get("avatar").and_then(Value::as_array);
+    let url = |kind: &str| {
+        avatars?
+            .iter()
+            .find(|avatar| avatar.get("type").and_then(Value::as_str) == Some(kind))?
+            .get("url")?
+            .as_str()
+    };
+    Ok(serde_json::json!({ "avatarUrl": url("thumbnail").or_else(|| url("full_size")) }))
+}
+
+/// What the signed-in researcher shows publicly on alphaXiv: the token only
+/// reaches library routes, so this reads the public profile its `sub` names.
+pub async fn research_profile() -> Result<crate::telemetry::ResearchProfile> {
+    let id = user_id().await?;
+    let (user_path, topics_path) = (
+        format!("/users/v3/{id}"),
+        format!("/users/v3/{id}/following/topics"),
+    );
+    let (user, topics) = tokio::try_join!(get(&user_path, &[]), get(&topics_path, &[]))?;
+    let text = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    let card = match text(&user, "researcherSlug") {
+        Some(slug) => get(&format!("/researchers/v1/cards/{slug}"), &[])
+            .await
+            .ok(),
+        None => None,
+    };
+    let strings = |value: Option<&Value>, key: Option<&str>| {
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| key.map_or(Some(item), |key| item.get(key))?.as_str())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let mut research_areas = strings(card.as_ref().and_then(|c| c.get("researchAreas")), None);
+    for topic in strings(topics.get("topics"), Some("topic")) {
+        if !research_areas.contains(&topic) {
+            research_areas.push(topic);
+        }
+    }
+    let card_text = |key| card.as_ref().and_then(|card| text(card, key));
+    let background = [
+        card_text("headline"),
+        text(&user, "institution").or_else(|| card_text("affiliation")),
+        text(&user, "biography").or_else(|| card_text("bio")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n");
+    Ok(crate::telemetry::ResearchProfile {
+        research_areas,
+        other_area: None,
+        background: (!background.is_empty()).then_some(background),
+        papers: Vec::new(),
+    })
+}
+
 pub async fn print_library(json: bool) -> Result<()> {
     let mut folders = folders().await?;
     let items = folders
@@ -587,6 +667,20 @@ mod tests {
                 }),
             )
             .route("/folders/v3", get(folders))
+            .route(
+                "/users/v3/u1",
+                get(|| async {
+                    Json(json!({ "researcherSlug": "ada", "institution": "MIT", "biography": " " }))
+                }),
+            )
+            .route(
+                "/users/v3/u1/following/topics",
+                get(|| async { Json(json!({ "topics": [{ "id": "t", "topic": "RL" }, { "id": "t2", "topic": "Robotics" }] })) }),
+            )
+            .route(
+                "/researchers/v1/cards/ada",
+                get(|| async { Json(json!({ "researchAreas": ["Robotics"], "headline": "PhD student", "bio": "Learns to walk." })) }),
+            )
             .route("/forbidden", get(|| async { StatusCode::FORBIDDEN }))
             .route("/limited", get(|| async { (StatusCode::TOO_MANY_REQUESTS, "Try later") }))
             .with_state(upstream.clone());
@@ -650,6 +744,16 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS
         );
         assert!(limited.to_string().contains("Try later"));
+
+        // The profile is the public one the token's `sub` names.
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"u1"}"#);
+        save(&stored(&format!("h.{claims}.s"), "refresh-3", 3_600_000)).unwrap();
+        let profile = research_profile().await.unwrap();
+        assert_eq!(profile.research_areas, ["Robotics", "RL"]);
+        assert_eq!(
+            profile.background.as_deref(),
+            Some("PhD student\nMIT\nLearns to walk.")
+        );
 
         // Sign-out revokes the refresh token at alphaXiv and forgets both.
         sign_out().await.unwrap();
