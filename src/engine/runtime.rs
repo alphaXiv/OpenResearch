@@ -1410,10 +1410,11 @@ mod tests {
         runtime.tick().unwrap();
         assert!(!lock(&runtime.backends).contains_key(&key));
         assert!(weak.upgrade().is_none());
+        drop(runtime);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn round_one_rentals_collect_independently_of_stalled_staging() {
         struct Boxes(FakeBackend);
         #[async_trait]
@@ -1529,8 +1530,18 @@ mod tests {
             .unwrap()
             .log_collection_pending("finished")
             .unwrap());
-        lock(&runtime.watched).clear();
-        tokio::task::yield_now().await;
+        for (_, sender) in lock(&runtime.watched).drain() {
+            sender.send_replace(Vec::new());
+        }
+        let weak = Arc::downgrade(&runtime);
+        drop(runtime);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while weak.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rental observers must release the runtime");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
