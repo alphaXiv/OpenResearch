@@ -275,6 +275,8 @@ const composerTheme = EditorView.theme({
   "&": { color: "var(--text)", maxHeight: "calc(12em + 2 * var(--editor-pad-y))" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.5", overflow: "auto" },
+  // WebKit can retain an empty horizontal scrollbar gutter after the draft shrinks.
+  ".cm-scroller::-webkit-scrollbar": { height: "0" },
   // `minWidth` lets WebKit shrink the content below the placeholder's one-line width.
   ".cm-content": { padding: "var(--editor-pad-y) 0", caretColor: "var(--text)", minWidth: "0" },
   ".cm-line": { padding: "0 var(--editor-pad-x)" },
