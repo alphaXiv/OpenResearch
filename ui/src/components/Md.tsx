@@ -9,7 +9,7 @@ import { useLocale } from "../locale";
 // logs — so the agent can cite the code and the run behind a claim.
 
 import { Check, Copy, ScrollText, X, Download, Minus, Plus } from "lucide-react";
-import { createContext, memo, useContext, useEffect, useMemo, useState, type ImgHTMLAttributes, type ReactNode } from "react";
+import { createContext, memo, useContext, useEffect, useId, useMemo, useState, type ImgHTMLAttributes, type ReactNode } from "react";
 import { Markdown as StreamingMarkdown } from "@clo/react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -32,8 +32,10 @@ import { imageWheelZoom } from "../imageZoom";
 import { CITED_ID } from "../agentMessages";
 import { CitedRef } from "./ChatLinks";
 import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
+import { measureMermaidMath } from "../mermaidMath";
+import { resolveMermaidImages } from "../mermaidImages";
 
-const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
+export const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
 
 export function ChatImageScope({ projectId, sessionId, children }: {
   projectId: string;
@@ -419,11 +421,48 @@ function isFileHref(href: string): boolean {
  * highlighted CodeBlocks with a copy button; inline code stays a plain
  * <code> chip. The <pre> wrapper is handled inside CodeBlock, so
  * react-markdown's is unwrapped. Reused by the Artifacts markdown renderer. */
+export function MermaidBlock({ code, sourceToggle = true, imageResolver }: { code: string; sourceToggle?: boolean; imageResolver?: (src: string) => ImageCandidate[] }) {
+  const workspace = useWorkspace();
+  const { absoluteFileUrl } = workspace.api;
+  const apiPrefix = workspace.url("/api/");
+  const streaming = useContext(StreamingContext);
+  const contextualResolver = useContext(ImageResolverContext);
+  const resolve = imageResolver ?? contextualResolver;
+  const id = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const [result, setResult] = useState<{ code: string; svg: string } | null>(null);
+  const [source, setSource] = useState(false);
+  useEffect(() => {
+    if (streaming || !code.trim()) return;
+    let cancelled = false;
+    let worker: Worker | undefined;
+    let deadline: number | undefined;
+    const timer = window.setTimeout(() => {
+      worker = new Worker(new URL("../mermaid.worker.ts", import.meta.url), { type: "module" });
+      worker.onmessage = (event: MessageEvent<string | null>) => {
+        const svg = event.data && resolveMermaidImages(event.data, absoluteFileUrl, apiPrefix, resolve);
+        if (!cancelled) setResult(svg ? { code, svg } : null);
+        worker?.terminate();
+        window.clearTimeout(deadline);
+      };
+      worker.onerror = () => { if (!cancelled) setResult(null); worker?.terminate(); window.clearTimeout(deadline); };
+      deadline = window.setTimeout(() => { worker?.terminate(); if (!cancelled) setResult(null); }, 5000);
+      worker.postMessage({ code, id, math: measureMermaidMath(code) });
+    }, 250);
+    return () => { cancelled = true; window.clearTimeout(timer); window.clearTimeout(deadline); worker?.terminate(); };
+  }, [absoluteFileUrl, apiPrefix, code, id, resolve, streaming]);
+  if (streaming || result?.code !== code) return <CodeBlock code={code} lang={null} />;
+  return <div className="my-3 min-w-0 overflow-auto">
+    {sourceToggle && <Button onClick={() => setSource(!source)}>{source ? m.common_rendered_view() : m.common_view_source()}</Button>}
+    {source ? <CodeBlock code={code} lang={null} /> : <div className="pele" dangerouslySetInnerHTML={{ __html: result.svg }} />}
+  </div>;
+}
+
 export const mdCodeComponents: Record<string, (props: any) => ReactNode> = {
   code: ({ node: _node, className, children, ...rest }: any) => {
     const cls: string = className ?? "";
     const match = /language-(\w+)/.exec(cls);
     const raw = String(children ?? "").replace(/\n$/, "");
+    if (match?.[1]?.toLowerCase() === "mermaid") return <MermaidBlock code={raw} />;
     const isBlock = match != null || raw.includes("\n");
     if (!isBlock) {
       return (
@@ -547,12 +586,14 @@ export const Md = memo(function Md({
   return (
     <div dir="auto" data-streaming={predict || undefined} className="md min-w-0 wrap-anywhere text-text leading-relaxed [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-border-muted [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-sm [&_code]:font-normal [&_code]:text-text [&_code]:bg-surface [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-1 [&_.katex]:text-prose-emphasis [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-sm [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:min-w-0 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-subtext [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:text-prose-emphasis [&_h1]:font-semibold [&_h1]:mt-3 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h2]:text-text [&_h2]:text-prose-emphasis [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mx-0 [&_h2]:mb-1.5 [&_h3]:text-text [&_h3]:text-prose-emphasis [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mx-0 [&_h3]:mb-1.5 [&_h4]:text-text [&_h4]:text-prose-emphasis [&_h4]:font-semibold [&_h4]:mt-3 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:ps-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:ps-5.5 [&_li::marker]:text-text [&_table]:border-collapse [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:text-sm [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_table]:overflow-x-auto [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-start [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-start [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pe-0 [&_blockquote]:pb-0.5 [&_blockquote]:ps-2.5 [&_blockquote]:border-s-[3px] [&_blockquote]:border-s-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text">
       <StreamingContext value={predict}>
+        <ImageResolverContext value={imageSrc}>
         <StreamingMarkdown
           content={normalizeMarkdownForRendering(text, { predictMath: predict })}
           processor={markdownProcessor}
           components={components}
           predict={predict}
         />
+        </ImageResolverContext>
       </StreamingContext>
     </div>
   );

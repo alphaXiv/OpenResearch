@@ -540,3 +540,13 @@
   --surface: var(--material-hover);
   --panel: var(--material-selected);
 }
+.pele {
+  --pele-bg: var(--base);
+  --pele-fg: var(--text);
+  --pele-muted: var(--subtext);
+  --pele-line: var(--text);
+  --pele-surface: var(--surface);
+  --pele-surface-alt: var(--base);
+  --pele-border: var(--border);
+  --pele-accent: var(--accent-blue);
+}

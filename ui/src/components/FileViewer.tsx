@@ -58,7 +58,7 @@ import { HtmlPreview } from "./HtmlPreview";
 import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
-import { Md } from "./Md";
+import { Md, MermaidBlock } from "./Md";
 import { Button, IconButton, IconButtonLink, Spinner, showAlert } from "./ui";
 
 const NO_ARTIFACT_ENTRIES: ArtifactEntry[] = [];
@@ -226,6 +226,7 @@ export function FileViewer({
   const isAbsolute = source === "abs";
   // Markdown renders by default; the header toggle shows the raw source.
   const isMarkdown = isMarkdownFile(path);
+  const isMermaid = /\.(mmd|mermaid)$/i.test(path);
   // .tex behaves like markdown — rendered by default, source behind the toggle —
   // and adds the real compiler on top.
   const isLatex = isLatexFile(path);
@@ -233,7 +234,7 @@ export function FileViewer({
   const isHtml = isHtmlFile(path);
   // .csv/.tsv render as a sortable table, source behind the same toggle.
   const isCsv = isCsvFile(path);
-  const rendersByDefault = isMarkdown || isHtml || isCsv;
+  const rendersByDefault = isMarkdown || isMermaid || isHtml || isCsv;
   const [activated, setActivated] = useState(false);
   const autoRun = !restored || activated;
   const activate = () => {
@@ -444,7 +445,7 @@ export function FileViewer({
     !(rendersByDefault && !showSource) &&
     !showingPdf;
   const canCopyContents = data !== null && !data.notFound && !data.binary && !mediaKind && !showingPdf;
-  const canSelectContents = canCopyContents && !showingEditor && (!(isHtml || isCsv) || showSource);
+  const canSelectContents = canCopyContents && !showingEditor && (!(isMermaid || isHtml || isCsv) || showSource);
 
   const copyContents = async () => {
     if (!data) return;
@@ -943,6 +944,8 @@ export function FileViewer({
               />
             )}
           </div>
+        ) : isMermaid && !showSource ? (
+          <MermaidBlock code={data.content} sourceToggle={false} imageResolver={resolveImageCandidates} />
         ) : isHtml && !showSource ? (
           <HtmlPreview
             html={data.content}
