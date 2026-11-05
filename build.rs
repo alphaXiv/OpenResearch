@@ -63,7 +63,7 @@ fn main() {
         println!("cargo:rustc-cfg=desktop_app");
     }
 
-    embed_host_binaries(channel == "production", &os);
+    embed_host_binaries(channel == "production");
     embed_windows_icon();
 }
 
@@ -84,7 +84,7 @@ fn embed_windows_icon() {
         .unwrap();
 }
 
-fn embed_host_binaries(required: bool, os: &str) {
+fn embed_host_binaries(required: bool) {
     use std::{fmt::Write, path::PathBuf};
 
     println!("cargo:rerun-if-env-changed=ORX_EMBED_HOST_DIR");
@@ -97,9 +97,6 @@ fn embed_host_binaries(required: bool, os: &str) {
             ("linux", "aarch64"),
             ("darwin", "universal"),
         ] {
-            if host_os == "darwin" && os != "macos" {
-                continue;
-            }
             let path = directory.join(format!("orx-host-{host_os}-{arch}"));
             if !path.exists() && !required {
                 continue;
