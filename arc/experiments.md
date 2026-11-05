@@ -49,6 +49,7 @@ which path recovers orphaned supervised runs.
 
 Engine runs keep their first payload start in `started_at` and finish in
 `ended_at`, using source timestamps when available and observation time otherwise.
+Box runs stay starting until remote inspection confirms a live payload PID.
 
 The snapshot contract below applies in both modes. The engine lifecycle and
 `orx-host` sections describe engine-owned runs; supervised runs keep their
