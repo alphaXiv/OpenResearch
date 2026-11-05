@@ -745,7 +745,7 @@ fn import_staged(
             experiment_id: experiment_id.clone(),
             project_id: project.id.clone(),
             status: run.status.clone(),
-            // No backend acts on this kind, so nothing ever polls or cleans up a copied run.
+            // Served by the local backend's stored-row defaults; nothing watches a finished copy.
             backend_json: serde_json::json!({ "kind": "imported", "flavor": run.flavor })
                 .to_string(),
             command: run.command.clone(),
@@ -814,29 +814,38 @@ fn shared_session(
         return Ok(None);
     };
     let shared_messages: Vec<SharedMessage> = serde_json::from_slice(&file)?;
-    let message_ids: HashMap<&str, String> = shared_messages
+    let message_ids: HashMap<&str, (usize, String)> = shared_messages
         .iter()
-        .map(|message| (message.id.as_str(), format!("msg_{}", uuid::Uuid::new_v4())))
+        .enumerate()
+        .map(|(index, message)| {
+            (
+                message.id.as_str(),
+                (index, format!("msg_{}", uuid::Uuid::new_v4())),
+            )
+        })
         .collect();
     let messages = shared_messages
         .iter()
-        .map(|message| {
+        .enumerate()
+        .map(|(index, message)| {
             let mut parts = serde_json::to_string(&message.parts)?;
             if let Some((from, to)) = artifact_links {
                 parts = parts.replace(from.as_str(), to);
             }
             Ok(StoredChatMessage {
-                id: message_ids[message.id.as_str()].clone(),
+                id: message_ids[message.id.as_str()].1.clone(),
                 session_id: id.to_string(),
                 role: message.role.clone(),
                 parts_json: parts,
                 created_at: message.created_at,
                 completed_at: message.completed_at,
+                // Only an earlier message can be a parent, so a crafted file cannot loop the transcript.
                 parent_id: message
                     .parent_id
                     .as_deref()
                     .and_then(|parent| message_ids.get(parent))
-                    .cloned(),
+                    .filter(|(parent, _)| *parent < index)
+                    .map(|(_, id)| id.clone()),
                 base_native_session_id: None,
                 result_native_session_id: None,
             })
@@ -846,7 +855,7 @@ fn shared_session(
         .active_leaf_id
         .as_deref()
         .and_then(|leaf| message_ids.get(leaf))
-        .cloned()
+        .map(|(_, id)| id.clone())
         .or_else(|| messages.last().map(|message| message.id.clone()));
     let snapshot = crate::local::harness::transcript_snapshot(super::chat::active_path(
         &messages,
@@ -1094,6 +1103,33 @@ mod tests {
         let error = bundle(&shallow, &manifest, &root.join("x.bundle")).unwrap_err();
         assert!(error.to_string().contains("shallow clone"), "{error}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn looping_message_parents_cannot_hang_an_import() {
+        let staging = temp("loop");
+        std::fs::create_dir_all(staging.join("chats")).unwrap();
+        let message = |id: &str, parent: &str| serde_json::json!({ "id": id, "parentId": parent, "role": "user", "parts": [], "createdAt": 1 });
+        std::fs::write(
+            staging.join("chats/c.json"),
+            serde_json::to_vec(&[message("a", "b"), message("b", "a"), message("c", "c")]).unwrap(),
+        )
+        .unwrap();
+        let chat = SharedChat {
+            id: "c".into(),
+            title: None,
+            harness: "claude-code".into(),
+            model: None,
+            active_leaf_id: Some("c".into()),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let (_, messages) = shared_session(&staging, &chat, "chat", "p", "claude-code", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(messages[0].parent_id, None);
+        assert_eq!(messages[1].parent_id.as_ref(), Some(&messages[0].id));
+        assert_eq!(messages[2].parent_id, None);
     }
 
     #[test]

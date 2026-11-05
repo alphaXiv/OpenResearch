@@ -2021,7 +2021,7 @@ async fn share_project(
     Json(req): Json<ShareProjectReq>,
 ) -> std::result::Result<axum::response::Response, ApiError> {
     reject_if_moving(&state)?;
-    let _admission = state
+    let admission = state
         .project_lifecycle
         .admit(&id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
@@ -2029,7 +2029,9 @@ async fn share_project(
     let project = Store::open()?
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
-    let (name, bytes, skipped) = tokio::task::spawn_blocking(move || -> Result<_> {
+    // The worker owns the lease: a dropped request must not let a delete or move start mid-export.
+    let (name, scratch, out, skipped) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let _admission = admission;
         use local::share::{ChatSelection, ShareOptions};
         let options = ShareOptions {
             chats: if req.chats.is_empty() {
@@ -2046,13 +2048,22 @@ async fn share_project(
         let manifest = local::share::export(&Store::open()?, &project, &options, &out)?;
         Ok((
             local::share::file_name(&project),
-            std::fs::read(&out)?,
+            scratch,
+            out,
             manifest.skipped,
         ))
     })
     .await
     .map_err(|error| ApiError::from(anyhow!("share task failed: {error}")))?
     .map_err(bad_request)?;
+    let file = tokio::fs::File::open(out)
+        .await
+        .map_err(|error| ApiError::from(anyhow!("Could not read the shared project: {error}")))?;
+    // Streamed from disk, since a project can outgrow memory; the stream keeps the scratch folder alive.
+    let body = futures::StreamExt::map(tokio_util::io::ReaderStream::new(file), move |chunk| {
+        let _keep = &scratch;
+        chunk
+    });
     axum::response::Response::builder()
         .header(header::CONTENT_TYPE, "application/zip")
         .header(
@@ -2063,7 +2074,7 @@ async fn share_project(
             "x-orx-share",
             urlencoding::encode(&json!({ "skipped": skipped }).to_string()).into_owned(),
         )
-        .body(axum::body::Body::from(bytes))
+        .body(axum::body::Body::from_stream(body))
         .map_err(|error| ApiError::from(anyhow!("share response failed: {error}")))
 }
 
@@ -2085,13 +2096,12 @@ async fn import_shared_project(
 ) -> ApiResult {
     use futures::StreamExt;
     reject_if_moving(&state)?;
-    let _admission = state
+    let admission = state
         .project_lifecycle
         .admit("__project_create__")
         .ok_or_else(|| bad_request("project creation is unavailable"))?;
     reject_if_moving(&state)?;
-    // Held until the import ends, so a dropped request still removes the upload.
-    let (file, _upload) = match query.file {
+    let (file, upload) = match query.file {
         Some(file) => (
             local::projects::expand_path(&file).map_err(bad_request)?,
             None,
@@ -2126,8 +2136,9 @@ async fn import_shared_project(
         }
     };
     let creation_guard = state.project_creation_lock.clone().lock_owned().await;
+    // The worker owns the lease and the upload: a dropped request must not delete either mid-import.
     let result = tokio::task::spawn_blocking(move || -> Result<Value> {
-        let _creation_guard = creation_guard;
+        let (_creation_guard, _admission, _upload) = (creation_guard, admission, upload);
         let target = local::projects::expand_path(&query.path)?;
         let imported = local::share::import(&Store::open()?, &file, &target)?;
         Ok(json!({
@@ -2708,7 +2719,12 @@ fn backend_for_run(
         .kind
         .strip_suffix("_job")
         .unwrap_or(&descriptor.kind);
-    let id = if id == "k8s" { "k8s" } else { id };
+    let id = match id {
+        "k8s" => "k8s",
+        // An opened `.orx` run has nothing to watch; the local backend reads its stored row and copied log.
+        "imported" => "local",
+        id => id,
+    };
     crate::compute::backend(id).map_err(bad_request)
 }
 
