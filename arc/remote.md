@@ -29,18 +29,22 @@ The dashboard on the laptop opens a remote machine as a workspace, from the
 user's own SSH configuration (an alias, `user@host`, or `user@host:port`).
 
 ```text
-browser ──► local gateway (loopback, one port per remote)
-               ├─ UI         served by the laptop's own orx
-               └─ /api/...   ─► SSH forward ─► remote orx (loopback) + bearer token
+main app ─► /_orx/workspaces/<session>/api/...
+                   └─► SSH forward ─► remote orx (loopback) + bearer token
 ```
 
-Each remote workspace gets a gateway on its own loopback port. The gateway
-serves the dashboard from the laptop's binary and proxies only the API through
-an SSH local forward to the remote server's loopback port. It applies the same
-host, origin and fetch-metadata checks as the dashboard
-([dashboard](dashboard.md)), so a web page cannot drive a remote machine
-through it. It also adds a bearer token on the way out, so another account on
-the remote machine that can reach its loopback port still cannot use the API.
+The main dashboard routes each remote workspace through its session's path on
+its own origin. The session fixes the SSH forward and bearer token for API
+requests, events, file resources and websockets. Switching machines changes
+the visible workspace without navigating away from the app; connected
+workspaces retain their screens and caches. The event stream follows the visible
+workspace and repairs changes received while it was hidden.
+
+The same host, origin and fetch-metadata checks protect these paths as the
+local API ([dashboard](dashboard.md)). Another account on the remote machine
+cannot use its API without a live attachment's bearer token. `orx up --remote`
+opens the same dashboard and authenticated proxy on a loopback gateway port of
+its own.
 
 Connecting resolves the remote `orx` once through the account's login
 environment and then runs that exact path, so a different non-interactive
@@ -50,6 +54,14 @@ executed. orx reports it and shows the command that would fix the
 permissions, and never changes a shared install itself. Installing or updating
 `orx` on the remote is an explicit step the user confirms, with the binary,
 database and cache paths visible and changeable.
+
+A new remote machine opens agent configuration without repeating the welcome,
+research profile or demo setup. Agent installations and sign-ins belong to each
+machine; the account picker and paper library continue to use the laptop account.
+Installing or signing in to Claude Code with a subscription first checks the
+remote's public egress IP; a known datacenter address prompts once per setup,
+naming the IP, and the warning permits continuing. Allowlisted agent setup commands run on the
+remote host through its authenticated API.
 
 ## The persistent host
 

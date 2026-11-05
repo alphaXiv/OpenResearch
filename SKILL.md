@@ -101,7 +101,6 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |
 | `orx exp move/archive/unarchive/delete <localExpId>` | Re-parent, hide, restore, or permanently delete experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
-| `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.
@@ -139,7 +138,7 @@ list, with one-line descriptions, is printed at the end of `orx skill` output):
 - **orx-compute** — launch and monitor runs; after resolving the backend, read its bundled reference.
 - **orx-instances** — create persistent standalone machines for manual work.
 - **orx-git** — read, edit, and diff a node's code with plain git.
-- **orx-agent-delegation** — delegate independent work to helper sessions safely.
+- **orx-agent-delegation** — delegate to other models and chats with orx's MCP tools.
 - **orx-logs** — retrieve persisted run output for progress, debugging, or measurements.
 - **orx-results** — interpret, compare, and summarize measured experiment outcomes.
 - **orx-reports** — write durable research outputs into the project's artifacts directory.

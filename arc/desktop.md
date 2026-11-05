@@ -72,6 +72,10 @@ on Windows, custom window controls; and on macOS, a native menu bar whose
 structure and state the page sends. The window never runs commands on the
 page's behalf.
 
+Remote machines share the main window. The machine switcher selects a retained
+workspace with its own route, cache, dialogs and drafts; connecting a server
+keeps the progress dialog visible until that workspace is ready to open.
+
 What leaves the window:
 
 - A pop-up never opens inside the app. `http:`, `https:` and `mailto:` links
@@ -116,6 +120,17 @@ failures. The CLI prints a one-line warning when a newer release exists.
 builds (`canary-YYYYMMDD.N`), one per merge to main. Switching channels is
 refused while a downloaded update waits for a restart.
 
+**What an update brings.** Every release publishes cumulative totals of its
+commit titles by prefix (`feat`, `fix`, everything else) next to what the
+updater already reads: `orx_changes` in a stable release's `dist-manifest.json`,
+`changes` in the canary manifest. The update's summary is its totals minus the
+running build's, which a canary build has compiled in and a stable build reads
+from its own release. A release or build without totals has no summary; nothing
+else depends on it. The canary manifest also lists
+the commits between the latest stable release and its own commit, which the
+canary release's notes repeat; a canary build shows the part from its own
+commit down, so the list matches the build rather than the newest canary.
+
 ## The build channel
 
 A build is **production** only when it is an official release built in the
@@ -138,18 +153,20 @@ regenerated lockfile.
 
 ```text
 merge bump ─► release workflow ─► build and sign every target
-                                ─► CI on the exact packaged commit
+                                ─► CI on the exact packaged commit, beside the builds
                                 ─► verify the build channel and telemetry contract
                                 ─► publish the release (creates the tag)
            ─► desktop workflows ─► DMG (signed, notarized), Windows installer,
                                    AppImages; update manifests; download links
-merge any  ─► canary workflow  ─► CI on that commit ─► canary desktop builds
+merge any  ─► canary workflow  ─► canary desktop builds, beside CI on that commit
+                                ─► publish once both pass
 ```
 
 - **Nothing publishes untested code.** The release workflow calls the same CI
   workflow on the commit being packaged, and publishing requires it, the
-  build-channel check and the telemetry-contract check to pass. CI stays in
-  the release tool's global-artifacts jobs for this reason.
+  build-channel check and the telemetry-contract check to pass. CI runs beside
+  the builds but stays in the release tool's global-artifacts jobs, so a
+  regenerated workflow still gates publishing on it.
 - **Release notes** are GitHub's generated notes, preceded by download buttons
   that link only assets actually uploaded, refreshed as each desktop package
   attaches, plus the issues the release's pull requests closed.

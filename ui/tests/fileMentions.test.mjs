@@ -3,6 +3,9 @@ import test from "node:test";
 import {
   fileMentionContext,
   insertFileMention,
+  insertMentionToken,
+  PAPER_LINK,
+  paperToken,
   matchFileMentions,
   mentionCandidates,
   splitMentionPath,
@@ -69,4 +72,17 @@ test("menu rows split a path into name and parent, keeping a directory's slash",
   assert.deepEqual(splitMentionPath("README.md"), { name: "README.md", parent: "" });
   assert.deepEqual(splitMentionPath("src/store/"), { name: "store/", parent: "src" });
   assert.deepEqual(splitMentionPath("a/b/c.rs"), { name: "c.rs", parent: "a/b" });
+});
+
+test("a paper token reads back as the paper it cites", () => {
+  const token = paperToken({ title: "Attention [Is] All\nYou Need", url: "https://www.alphaxiv.org/abs/1706.03762" });
+  assert.equal(token, "[Attention Is All You Need](https://www.alphaxiv.org/abs/1706.03762)");
+  const [match] = `see ${token} please`.matchAll(PAPER_LINK);
+  assert.deepEqual({ ...match.groups }, { paperTitle: "Attention Is All You Need", paperUrl: "https://www.alphaxiv.org/abs/1706.03762" });
+});
+
+test("a picked token replaces the @query and leaves the caret after its space", () => {
+  const text = "compare @atten with this";
+  const next = insertMentionToken(text, fileMentionContext(text, 14), "chat_x");
+  assert.deepEqual(next, { text: "compare chat_x with this", cursor: 15 });
 });

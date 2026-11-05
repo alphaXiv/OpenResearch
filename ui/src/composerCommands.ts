@@ -122,20 +122,11 @@ export function insertSlashCommand(
   text: string,
   context: SlashCommandContext,
   name: string,
-  marginSpaces = 1,
 ): { text: string; cursor: number } {
-  const margin = " ".repeat(marginSpaces);
   const before = text.slice(0, context.start);
   let after = text.slice(context.end);
-  if (!after) {
-    after = margin;
-  } else if (!after.startsWith("\n")) {
-    const leading = /^[ \t]+/.exec(after)?.[0];
-    after = leading
-      ? `${leading.length >= marginSpaces ? leading : margin}${after.slice(leading.length)}`
-      : margin + after;
-  }
-  // The caret lands past the reserved inline margin, where surrounding prose continues.
+  if (!/^\s/.test(after)) after = ` ${after}`;
+  // The caret lands past the space, where surrounding prose continues.
   const gap = /^[ \t]+/.exec(after)?.[0].length ?? 0;
   return {
     text: `${before}/${name}${after}`,

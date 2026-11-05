@@ -1,15 +1,11 @@
+import { QueryEvents } from "./queries/Events";
+import { WorkspaceDomContext } from "./WorkspaceDom";
+import { useMachines } from "./machineSelection";
+import { WorkspaceConnection } from "./components/WorkspaceConnection";
+import { useWorkspace } from "./workspace";
 import { useQuery } from "@tanstack/react-query";
 
-import { getRuntimeQuery, reportLocaleQuery } from "./queries/settings";
 import {
-  activateWorkspace,
-  workspaceScope,
-  getWorkspaceGeneration,
-  subscribeWorkspace,
-} from "./queries/client";
-import { QueryEvents } from "./queries/Events";
-import {
-  useSyncExternalStore,
   createContext,
   useContext,
   useEffect,
@@ -19,29 +15,17 @@ import {
 } from "react";
 import { Outlet, useLocation } from "@tanstack/react-router";
 import { WifiOff } from "lucide-react";
-import {
-  disconnectCurrentRemote,
-  getRemoteStopPreview,
-  installRemoteSession,
-  reconnectCurrentRemote,
-  startCurrentRemoteHost,
-  stopCurrentRemoteHost,
-  type RemoteInstallPaths,
-  type RemoteSessionInfo,
-  type RuntimeInfo,
-} from "./api";
+import { type RemoteInstallPaths, type RemoteSessionInfo, type RuntimeInfo } from "./api";
 import { ltr } from "./i18n";
 import { setLocale, useLocale } from "./locale";
 import { m } from "./paraglide/messages.js";
 import { isLocale } from "./paraglide/runtime.js";
 import { setThemePreference } from "./theme";
 import { Button, Input, showAlert, Spinner } from "./components/ui";
-import { showCustomDialog } from "./dialog";
+
 import { RemoteStopDialog } from "./components/RemoteStopDialog";
 import { ProgressBar } from "./components/ProgressBar";
 import { CommandTerminal, SshConnectTerminal, isComplete } from "./components/SshConnectTerminal";
-import { resetGlobalWorkspace } from "./workspacePersistence";
-import { clearProjectWorkspaceCache } from "./useProjectWorkspace";
 
 const REMOTE_FAVICON =
   "data:image/svg+xml," +
@@ -156,10 +140,12 @@ function connectionPhase(session: RemoteSessionInfo, gatewayError: string | null
 }
 
 function GatewayUnavailable({ host }: { host: string }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
   return (
     <div className="app flex h-full items-center justify-center bg-background p-6">
       <section className="w-full max-w-2xl rounded-xl border border-border bg-background p-7 shadow-modal">
-        <h1 id="remote-setup-title" className="m-0 text-2xl font-semibold text-text">
+        <h1 id={elementId("remote-setup-title")} className="m-0 text-2xl font-semibold text-text">
           {m.remote_disconnected_title({ host: ltr(host) })}
         </h1>
         <p className="mt-2 mb-0 text-base text-text">{m.offline_banner_disconnected()}</p>
@@ -180,6 +166,19 @@ function RemoteSetup({
   retriedInteractiveError: string | null;
   setRetriedInteractiveError: (error: string | null) => void;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog } = useWorkspace().dialogs;
+
+  const {
+    installRemoteSession,
+    reconnectCurrentRemote,
+    disconnectCurrentRemote,
+    getRemoteStopPreview,
+    stopCurrentRemoteHost,
+    startCurrentRemoteHost,
+  } = useWorkspace().api;
+
   const { session } = runtime;
   const [paths, setPaths] = useState<RemoteInstallPaths | null>(session.installPaths);
   const [busy, setBusy] = useState(false);
@@ -304,7 +303,7 @@ function RemoteSetup({
         <section className="w-full max-w-2xl rounded-xl border border-border bg-background p-7 shadow-modal">
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
-              <h1 id="remote-setup-title" className="m-0 text-2xl font-semibold text-text">
+              <h1 id={elementId("remote-setup-title")} className="m-0 text-2xl font-semibold text-text">
                 {title}
               </h1>
               {!showSshTerminal && (working
@@ -468,6 +467,8 @@ function RemoteSetup({
 }
 
 function RemoteOverlay({ children }: { children: ReactNode }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => ref.current?.focus(), []);
@@ -477,7 +478,7 @@ function RemoteOverlay({ children }: { children: ReactNode }) {
       ref={ref}
       role="alertdialog"
       aria-modal="true"
-      aria-labelledby="remote-setup-title"
+      aria-labelledby={elementId("remote-setup-title")}
       tabIndex={-1}
       className="absolute inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-6"
     >
@@ -487,17 +488,14 @@ function RemoteOverlay({ children }: { children: ReactNode }) {
 }
 
 export function RuntimeRoot() {
+  const machines = useMachines();
+  const { getRuntimeQuery, reportLocaleQuery } = useWorkspace().queries;
+  const { replaceWorkspace } = useWorkspace();
+  const { startCurrentRemoteHost, reconnectCurrentRemote } = useWorkspace().api;
+
   const locale = useLocale();
-  useSyncExternalStore(subscribeWorkspace, getWorkspaceGeneration);
-  useEffect(() => subscribeWorkspace(() => {
-    resetGlobalWorkspace();
-    clearProjectWorkspaceCache();
-  }), []);
   const launchPlaceholder = useLocation({ select: (location) => location.pathname === "/remote-launch" });
-  const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const everConnected = useRef(false);
-  const workspaceMounted = useRef(false);
   const preferencesApplied = useRef(false);
   const previousWorkspace = useRef<string | null>(null);
   const [retriedInteractiveError, setRetriedInteractiveError] = useState<string | null>(null);
@@ -508,6 +506,8 @@ export function RuntimeRoot() {
     refetchInterval: (query) => query.state.status === "error" || query.state.data?.kind === "ssh" ? 2_000 : false,
     refetchIntervalInBackground: true,
   });
+  const runtime = runtimeQuery.data ?? null;
+  const error = runtimeQuery.error?.message ?? null;
   useQuery({
     ...reportLocaleQuery(locale),
     enabled: !launchPlaceholder && (runtime?.kind === "local" ||
@@ -516,16 +516,11 @@ export function RuntimeRoot() {
   useEffect(() => {
     if (launchPlaceholder) return;
     const next = runtimeQuery.data;
-    if (!next) {
-      setError(runtimeQuery.error?.message ?? null);
-      return;
-    }
+    if (!next) return;
     const nextWorkspace = workspaceKey(next);
-    activateWorkspace(nextWorkspace);
-    if (previousWorkspace.current !== null && previousWorkspace.current !== nextWorkspace) {
-      everConnected.current = false;
-      workspaceMounted.current = false;
-      preferencesApplied.current = false;
+    if (previousWorkspace.current !== null && previousWorkspace.current !== nextWorkspace && everConnected.current) {
+      replaceWorkspace();
+      return;
     }
     previousWorkspace.current = nextWorkspace;
     if (next.kind === "ssh") {
@@ -535,20 +530,15 @@ export function RuntimeRoot() {
       }
       if (next.session.status === "connected") {
         everConnected.current = true;
-        workspaceMounted.current = true;
         setRetriedInteractiveError(null);
-      } else if (next.session.status === "disconnected" && next.session.error === null) {
-        workspaceMounted.current = false;
       }
     }
-    setRuntime(next);
-    setError(runtimeQuery.error?.message ?? null);
   }, [launchPlaceholder, runtimeQuery.data, runtimeQuery.error]);
 
   useEffect(() => {
     const remote = runtime?.kind === "ssh";
     setFavicon(remote);
-    if (remote && (!everConnected.current || (runtime.session.status === "disconnected" && !runtime.session.error))) {
+    if (remote && !everConnected.current) {
       document.title = "OpenResearch";
     }
   }, [runtime]);
@@ -564,22 +554,21 @@ export function RuntimeRoot() {
     return (
       <main className="app flex h-full items-center justify-center gap-3 bg-background text-base text-text">
         {error
-          ? <><span>{error}</span><Button onClick={() => location.reload()}>{m.app_retry()}</Button></>
+          ? <><span>{error}</span><Button onClick={() => void runtimeQuery.refetch()}>{m.app_retry()}</Button>{machines.activeId !== "local" && <Button onClick={machines.selectLocal}>{m.projects_local()}</Button>}</>
           : <Spinner />}
       </main>
     );
   }
-  if (runtime.kind === "local") return <RuntimeContext key={workspaceScope()[1]} value={runtime}><QueryEvents /><Outlet /></RuntimeContext>;
-  const keepWorkspace = workspaceMounted.current &&
-    (runtime.session.status !== "disconnected" || runtime.session.error !== null);
+  if (runtime.kind === "local") return <RuntimeContext value={runtime}><QueryEvents /><Outlet /></RuntimeContext>;
+  const keepWorkspace = everConnected.current || runtime.session.status === "connected";
   if (!keepWorkspace && runtime.session.status !== "connected") {
     return error
-      ? <GatewayUnavailable host={runtime.session.host} />
-      : <RemoteSetup
+      ? <><GatewayUnavailable host={runtime.session.host} /><WorkspaceConnection runtime={runtime} corner /></>
+      : <><RemoteSetup
         runtime={runtime}
         retriedInteractiveError={retriedInteractiveError}
         setRetriedInteractiveError={setRetriedInteractiveError}
-      />;
+      /><WorkspaceConnection runtime={runtime} corner /></>;
   }
   const { session } = runtime;
   const phase = connectionPhase(session, error);
@@ -599,8 +588,9 @@ export function RuntimeRoot() {
   return (
     <div className="relative h-full">
       <div className="h-full" inert={showOverlay}>
-        <RuntimeContext key={workspaceScope()[1]} value={runtime}>
-          <RemoteConnectionContext value={connection}><QueryEvents /><Outlet /></RemoteConnectionContext>
+        <RuntimeContext value={runtime}>
+          <QueryEvents />
+          <RemoteConnectionContext value={connection}><Outlet /></RemoteConnectionContext>
         </RuntimeContext>
       </div>
       {showOverlay && (
@@ -611,6 +601,7 @@ export function RuntimeRoot() {
             retriedInteractiveError={retriedInteractiveError}
             setRetriedInteractiveError={setRetriedInteractiveError}
           />
+          <WorkspaceConnection runtime={runtime} corner />
         </RemoteOverlay>
       )}
     </div>

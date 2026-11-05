@@ -1,3 +1,4 @@
+import { useWorkspace } from "../workspace";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import {
@@ -10,17 +11,8 @@ import {
   Terminal,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import {
-  experimentMonitoringError,
-  fmtDuration,
-  runDisplayStatus,
-  timeAgo,
-  trackioRunUrl,
-  type Experiment,
-  type Project,
-  type Run,
-} from "../api";
-import { useTrackioRuns } from "../queries/settings";
+import { experimentMonitoringError, fmtDuration, runDisplayStatus, timeAgo, type Experiment, type Project, type Run } from "../api";
+
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
@@ -78,6 +70,9 @@ export function ExperimentOverview({
   onOpenCode: (intent: TabOpenIntent) => void;
   onOpenDiff: (intent: TabOpenIntent) => void;
 }) {
+  const { useTrackioRuns } = useWorkspace().queries;
+  const { trackioRunUrl } = useWorkspace().api;
+
   const latestRun = runs[0] ?? null;
   const monitoringError = experimentMonitoringError(runs);
   const hasLiveRun = runs.some(

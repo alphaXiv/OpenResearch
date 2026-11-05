@@ -1,49 +1,51 @@
-import { queryClient } from "./queries/client";
-import { getUiStateQuery } from "./queries/projects";
-import { saveGlobalWorkspace } from "./api";
+import type { WorkspaceQueries } from "./workspace";
+import type { Api } from "./api";
+import type { WorkspaceClient } from "./queries/client";
+
 import { showAlert } from "./components/ui";
 import { m } from "./paraglide/messages.js";
 import { createWorkspaceWriter, type GlobalWorkspace } from "./workspaceState";
 
-let rememberedGlobalWorkspace: GlobalWorkspace | null = null;
-let epoch = 0;
-export const getRememberedGlobalWorkspace = () => rememberedGlobalWorkspace;
+export function createGlobalPersistence(
+  client: WorkspaceClient,
+  api: Api,
+  queries: WorkspaceQueries,
+) {
+  const { queryClient, workspaceScope, isCurrentScope } = client;
+  const scope = workspaceScope();
+  const { saveGlobalWorkspace } = api;
+  const { getUiStateQuery } = queries;
 
-function createWriter() {
-  const visit = epoch;
-  return createWorkspaceWriter<GlobalWorkspace>(
+  let rememberedGlobalWorkspace: GlobalWorkspace | null = null;
+  const getRememberedGlobalWorkspace = () => rememberedGlobalWorkspace;
+
+  const writer = createWorkspaceWriter<GlobalWorkspace>(
     async (value, unloading) => {
-      if (visit !== epoch) return;
+      if (!isCurrentScope(scope)) return;
       const saved = await saveGlobalWorkspace(value, unloading);
-      if (visit === epoch) queryClient.setQueryData(getUiStateQuery().queryKey, (current) => current ? { ...current, workspace: saved.workspace } : saved);
+      if (isCurrentScope(scope))
+        queryClient.setQueryData(getUiStateQuery().queryKey, (current) => current ? { ...current, workspace: saved.workspace } : saved);
     },
     (error) => {
-      if (visit !== epoch) return;
+      if (!isCurrentScope(scope)) return;
       showAlert(error instanceof Error ? error.message : String(error), "error", {
         id: "workspace-save",
         action: { label: m.app_retry(), onClick: () => void globalWorkspaceWriter.retry() },
       });
     },
   );
+
+  const globalWorkspaceWriter = {
+    flush: (unloading = false) => writer.flush(unloading),
+    retry: () => writer.retry(),
+    queue(value: GlobalWorkspace, delay = 0) {
+      const old = rememberedGlobalWorkspace;
+      // Avoid writing the acknowledged snapshot back to the server.
+      if (old && old.lastLocation === value.lastLocation && old.railOpen === value.railOpen && old.panelWidth === value.panelWidth && old.railWidth === value.railWidth && old.experimentsView === value.experimentsView) return;
+      rememberedGlobalWorkspace = value;
+      writer.queue(value, delay);
+    },
+  };
+
+  return { getRememberedGlobalWorkspace, globalWorkspaceWriter };
 }
-let writer = createWriter();
-
-export function resetGlobalWorkspace() {
-  epoch++;
-  rememberedGlobalWorkspace = null;
-  writer = createWriter();
-}
-
-export const globalWorkspaceWriter = {
-  flush: (unloading = false) => writer.flush(unloading),
-  retry: () => writer.retry(),
-  queue(value: GlobalWorkspace, delay = 0) {
-    const old = rememberedGlobalWorkspace;
-    // Avoid writing the acknowledged snapshot back to the server.
-    if (old && old.lastLocation === value.lastLocation && old.railOpen === value.railOpen && old.panelWidth === value.panelWidth && old.railWidth === value.railWidth && old.experimentsView === value.experimentsView) return;
-    rememberedGlobalWorkspace = value;
-    writer.queue(value, delay);
-  },
-};
-
-window.addEventListener("pagehide", () => void globalWorkspaceWriter.flush(true));

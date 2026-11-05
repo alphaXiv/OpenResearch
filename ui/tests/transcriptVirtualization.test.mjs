@@ -27,7 +27,7 @@ test("virtual history retains interacted rows outside the viewport and drops abs
     useCallback: callback => callback,
     visibleMessages: ["a", "b", "c", "d", "e"].map(id => [{ id }]),
     retainedRows,
-    fullHistory: false,
+    focusedRow: null,
     defaultRangeExtractor,
   });
   assert.deepEqual(extract({ startIndex: 3, endIndex: 4, overscan: 0, count: 5 }), [0, 3, 4]);
@@ -51,14 +51,76 @@ test("tool labels reuse immutable parts but refresh after stream replacement or 
   assert.equal(calls, 3);
 });
 
-test("accessible full history includes every message", () => {
+test("the focused article stays mounted outside the viewport without being retained", () => {
   const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "rangeExtractor").initializer;
-  const extract = evaluate(`return ${expression.getText(file)}`, {
+  const retainedRows = { current: new Set() };
+  const extract = focusedRow => evaluate(`return ${expression.getText(file)}`, {
     useCallback: callback => callback,
     visibleMessages: ["a", "b", "c"].map(id => [{ id }]),
-    retainedRows: { current: new Set() }, fullHistory: true, defaultRangeExtractor,
+    retainedRows, focusedRow, defaultRangeExtractor,
   });
-  assert.deepEqual(extract({ startIndex: 2, endIndex: 2, overscan: 0, count: 3 }), [0, 1, 2]);
+  const range = { startIndex: 2, endIndex: 2, overscan: 0, count: 3 };
+  assert.deepEqual(extract("a")(range), [0, 2]);
+  assert.deepEqual(extract(null)(range), [2]);
+  assert.equal(retainedRows.current.size, 0);
+});
+
+test("focus holds a row only while it lasts; clicks and typing retain it for the visit", () => {
+  const handler = name => find(node => ts.isJsxAttribute(node) && node.name.getText(file) === name && node.parent.getText(file).includes('role="article"')).initializer.expression;
+  const retainedRows = { current: new Set() };
+  let focusedRow = null;
+  const bindings = {
+    retainedRows, rowId: "a",
+    setFocusedRow: id => { focusedRow = id; },
+    stickToBottom: { current: true },
+    virtualizer: { options: {}, setOptions() {} },
+    Element: class {},
+  };
+  const run = (name, event = {}) => evaluate(`return ${handler(name).getText(file)}`, bindings)(event);
+  run("onFocusCapture");
+  assert.equal(focusedRow, "a");
+  assert.equal(retainedRows.current.size, 0, "a screen reader moving focus while reading retains nothing");
+  run("onClickCapture", { target: {} });
+  assert.deepEqual([...retainedRows.current], ["a"]);
+  retainedRows.current.clear();
+  run("onInputCapture");
+  assert.deepEqual([...retainedRows.current], ["a"]);
+});
+
+test("feed keys move focus between articles and leave the feed", () => {
+  const handler = find(node => ts.isJsxAttribute(node) && node.name.getText(file) === "onKeyDown" && node.getText(file).includes("PageDown")).initializer.expression;
+  const focused = [], left = [];
+  class HTMLElement {
+    constructor(index, editable) { Object.assign(this, { index, editable, isContentEditable: false }); }
+    matches() { return this.editable; }
+    closest() { return { dataset: { index: String(this.index) } }; }
+  }
+  const keydown = evaluate(`return ${handler.getText(file)}`, {
+    HTMLElement,
+    visibleMessages: ["a", "b", "c"].map(id => [{ id }]),
+    setFocusedRow: id => focused.push(id),
+    onLeaveFeed: forward => left.push(forward),
+  });
+  const press = (key, { index = 1, ctrlKey = false, shiftKey = false, editable = false } = {}) => {
+    let prevented = false;
+    keydown({
+      key, ctrlKey, shiftKey, altKey: false, metaKey: false,
+      target: new HTMLElement(index, editable),
+      preventDefault: () => { prevented = true; },
+    });
+    return prevented;
+  };
+  assert.equal(press("PageDown"), true);
+  assert.equal(press("PageUp"), true);
+  assert.deepEqual(focused, ["c", "a"]);
+  assert.equal(press("PageDown", { index: 2 }), false, "the last article lets the page scroll");
+  assert.equal(press("PageDown", { editable: true }), false, "text fields keep their own keys");
+  assert.equal(press("PageDown", { ctrlKey: true }), false, "Ctrl+PageDown stays the browser's");
+  assert.equal(press("PageDown", { shiftKey: true }), false);
+  assert.equal(press("End", { ctrlKey: true }), true);
+  assert.equal(press("Home", { ctrlKey: true }), true);
+  assert.deepEqual(left, [true, false]);
+  assert.deepEqual(focused, ["c", "a"]);
 });
 
 test("viewport and footer resizing preserve bottom pin without moving a reader", () => {

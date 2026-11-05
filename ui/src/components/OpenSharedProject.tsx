@@ -2,11 +2,10 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { FolderOpen } from "lucide-react";
 import { useId, useState } from "react";
 
-import { getPublicProject, importSharedProject, type OpenedSharedProject, type SharedSource } from "../api";
+import type { OpenedSharedProject, SharedSource } from "../api";
 import { m } from "../paraglide/messages.js";
-import { workspaceKey } from "../queries/client";
-import { getProjectPathStatusQuery } from "../queries/projects";
 import { slugify } from "./NewProjectForm";
+import { useWorkspace } from "../workspace";
 import { Button, Input, LoadingRow, Spinner, showAlert } from "./ui";
 
 interface FormProps {
@@ -18,6 +17,7 @@ interface FormProps {
 /** Choose where a shared project goes, then open it; a published link shows its name first. */
 export function OpenSharedProjectForm(props: FormProps) {
   const { source, onCancel } = props;
+  const { api: { getPublicProject }, workspaceKey } = useWorkspace();
   const link = typeof source === "string" || source instanceof File ? null : source.link;
   const preview = useQuery({
     queryKey: workspaceKey("getPublicProject", link),
@@ -40,6 +40,7 @@ function PickFolder({ source, onCancel, onOpened, name, intro = m.open_shared_bo
   intro?: string;
   publisher?: string | null;
 }) {
+  const { api: { importSharedProject }, queries: { getProjectPathStatusQuery } } = useWorkspace();
   const pathId = useId();
   const problemId = useId();
   const [path, setPath] = useState(`~/OpenResearch/${slugify(name.replace(/\.orx$/i, ""), 48)}`);

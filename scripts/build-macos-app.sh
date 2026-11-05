@@ -1,9 +1,10 @@
 #!/bin/bash
 # Assemble the downloadable macOS app bundle: OpenResearch.app.
 #
-# Builds a release `orx`, generates AppIcon.icns from the brand mark, and lays
-# out dist/OpenResearch.app. The bundle's executable IS `orx`; launched from the
-# bundle it enters GUI app mode (see src/commands/app.rs). macOS only.
+# Builds a release `orx` (or takes ORX_APP_BINARY), generates AppIcon.icns from
+# the brand mark, and lays out dist/OpenResearch.app. The bundle's executable IS
+# `orx`; launched from the bundle it enters GUI app mode (see
+# src/commands/app.rs). macOS only.
 #
 # The result is UNSIGNED — Gatekeeper will warn on first open (right-click →
 # Open, or `xattr -dr com.apple.quarantine`). Signing + notarization is separate.
@@ -20,9 +21,13 @@ fi
 
 VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 
-# ORX_APP_UNIVERSAL=1 builds a universal (arm64 + x86_64) binary for
-# distribution; the default single-arch build is faster for local iteration.
-if [[ "${ORX_APP_UNIVERSAL:-0}" == "1" ]]; then
+# ORX_APP_BINARY bundles an already-built orx; ORX_APP_UNIVERSAL=1 builds a
+# universal (arm64 + x86_64) binary for distribution; the default single-arch
+# build is faster for local iteration.
+if [[ -n "${ORX_APP_BINARY:-}" ]]; then
+  echo "==> Bundling prebuilt $ORX_APP_BINARY (v$VERSION)"
+  BIN="$ORX_APP_BINARY"
+elif [[ "${ORX_APP_UNIVERSAL:-0}" == "1" ]]; then
   echo "==> Building universal release orx (v$VERSION: arm64 + x86_64)"
   cargo build --release --bin orx --target aarch64-apple-darwin --manifest-path "$ROOT/Cargo.toml"
   cargo build --release --bin orx --target x86_64-apple-darwin --manifest-path "$ROOT/Cargo.toml"

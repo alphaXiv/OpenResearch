@@ -1,3 +1,4 @@
+import { useWorkspace } from "./workspace";
 // The compile side of a .tex tab: probe the machine for an engine, compile the
 // file to a real PDF, and track whether that PDF still matches the source.
 // Split out of FileViewer, which already carries three file sources, an editor
@@ -5,10 +6,8 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-import { getLatexEngineQuery } from "./queries/files";
-
 import { useCallback, useEffect, useRef, useState } from "react";
-import { compileLatex } from "./api";
+
 import { m } from "./paraglide/messages.js";
 
 interface CompiledPdf {
@@ -71,6 +70,9 @@ export function useLatexCompile({
   /** The live edit buffer, which is what a compile should reflect. */
   source: string;
 }): LatexCompile {
+  const { getLatexEngineQuery } = useWorkspace().queries;
+  const { compileLatex } = useWorkspace().api;
+
   const engineQuery = useQuery({ ...getLatexEngineQuery(), enabled, subscribed: enabled });
   const engine = engineQuery.data?.engine ?? (engineQuery.isPending ? undefined : null);
   const installHint = engineQuery.data?.hint ?? null;

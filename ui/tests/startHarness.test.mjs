@@ -65,15 +65,8 @@ test("a side composer restores its draft and attachments after unmount", () => {
   assert.deepEqual(restored, { draft: "unsent", attachments: [{ dataUrl: "data:,image" }], annotations: [], unconfirmedSend: null });
 });
 
-test("workspace changes clear old stashes and late panel cleanups cannot restore them", () => {
-  const registration = file.statements.find((node) => ts.isExpressionStatement(node)
-    && node.getText(file).startsWith("subscribeWorkspace("));
-  assert.ok(registration);
-  let workspaceChanged;
+test("composers on machines with matching session IDs retain separate drafts", () => {
   const stashes = new Map();
-  new Function("subscribeWorkspace", "composerStashes", registration.getText(file))(
-    (callback) => { workspaceChanged = callback; }, stashes,
-  );
   let effect;
   function visit(node) {
     if (ts.isCallExpression(node) && node.expression.getText(file) === "useLayoutEffect"
@@ -83,7 +76,7 @@ test("workspace changes clear old stashes and late panel cleanups cannot restore
   visit(file);
   assert.ok(effect);
   const code = ts.transpileModule(effect.getText(file), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  let generation = 1;
+  let generation = "machine-a";
   const mount = (key, value) => {
     let cleanup;
     const live = { current: EMPTY_COMPOSER_STASH };
@@ -92,28 +85,21 @@ test("workspace changes clear old stashes and late panel cleanups cannot restore
       stashKey: `${generation}:${key}`, composerPrefill: null, composerLiveRef: live, pendingClientTurn: { current: null }, pendingScope: { current: null },
       EMPTY_COMPOSER_STASH, composerStashContent,
       mountedComposers: new Map(), deletedSessionIds: new Set(), activeId: key, sideParentSessionId: null,
-      isCurrentScope: (scope) => scope[1] === generation, sessionsOptions: { queryKey: ["workspace", generation] },
+      isCurrentScope: () => true, sessionsOptions: { queryKey: ["workspace", generation] },
       setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setUnconfirmedSend: () => {}, setImageRefusedFor: () => {},
     };
     new Function(...Object.keys(bindings), code)(...Object.values(bindings));
     live.current = value;
     return () => cleanup();
   };
-  const main = { draft: "main", attachments: [{ dataUrl: "data:,main" }], annotations: [] };
-  const side = { draft: "side", attachments: [{ dataUrl: "data:,side" }], annotations: [] };
-  mount("main", main)();
-  mount("side", side)();
-  assert.deepEqual([...stashes.values()], [main, side]);
-  const lateMain = mount("main", main);
-  const lateSide = mount("side", side);
-  generation = 2;
-  workspaceChanged();
-  lateMain();
-  lateSide();
-  assert.equal(stashes.size, 0);
-  mount("main", main)();
-  mount("side", side)();
-  assert.deepEqual([...stashes.values()], [main, side]);
+  const first = { draft: "first machine", attachments: [], annotations: [] };
+  const second = { draft: "second machine", attachments: [], annotations: [] };
+  const cleanup = mount("session", first);
+  generation = "machine-b";
+  mount("session", second)();
+  cleanup();
+  assert.deepEqual(stashes.get("machine-a:session"), first);
+  assert.deepEqual(stashes.get("machine-b:session"), second);
 });
 
 test("a file read finishing after a workspace change cannot update or recreate a stash", () => {
@@ -131,7 +117,7 @@ test("a file read finishing after a workspace change cannot update or recreate a
   const stashes = new Map();
   const bindings = {
     FileReader: class { constructor() { reader = this; this.result = "data:,image"; } readAsDataURL() {} },
-    attachments: [], noImageInputError: null, selectedModel: null,
+    cited: { attachments: [] }, noImageInputError: null, selectedModel: null,
     setAttachError: () => {}, setImageRefusedFor: () => {}, setAttachments: () => { updates++; },
     composerScopeRef: { current: { projectId: "p", activeId: "s" } }, composerMountedRef: { current: true },
     stashKey: "1:side:s", composerStashes: stashes, EMPTY_COMPOSER_STASH,

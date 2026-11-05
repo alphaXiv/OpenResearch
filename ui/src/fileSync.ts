@@ -1,4 +1,5 @@
-import { showConfirmDialog } from "./dialog";
+import type { createDialogs } from "./dialog";
+
 import { m } from "./paraglide/messages.js";
 
 export interface FileConflict {
@@ -9,7 +10,7 @@ export interface FileConflict {
 // Dialog focus must not trigger an editor save while discard is pending.
 export let confirmingFileDiscard = false;
 
-export function confirmFileDiscard(message: string): Promise<boolean> {
+export function confirmFileDiscard(message: string, showConfirmDialog: ReturnType<typeof createDialogs>["showConfirmDialog"]): Promise<boolean> {
   confirmingFileDiscard = true;
   return new Promise<boolean>((resolve) => {
     showConfirmDialog({

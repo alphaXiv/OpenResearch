@@ -1,9 +1,10 @@
+import { useWorkspace } from "../workspace";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link2, Plus, RefreshCw, Trash2, X } from "lucide-react";
-import { connectLocalModel, discoverLocalModels, removeLocalModel, checkLocalModel, type LocalModelConnection } from "../api";
-import { getLocalModelsQuery, getHarnessesQuery, refreshHarnesses } from "../queries/settings";
-import { showCustomDialog, type DialogContentProps } from "../dialog";
+import { type LocalModelConnection } from "../api";
+
+import { type DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
 import { OptionPicker } from "./ModelPicker";
 import lmStudioLogo from "../assets/lm-studio-logo.svg";
@@ -29,6 +30,11 @@ type ProviderDraft = {
 };
 
 export function LocalModelSetup() {
+  const { showCustomDialog } = useWorkspace().dialogs;
+
+  const { getLocalModelsQuery, getHarnessesQuery } = useWorkspace().queries;
+  const { removeLocalModel } = useWorkspace().api;
+
   const connections = useQuery(getLocalModelsQuery());
   const harnesses = useQuery(getHarnessesQuery());
   const opencode = harnesses.data?.find((harness) => harness.id === "opencode");
@@ -65,6 +71,9 @@ export function LocalModelSetup() {
 export function LocalModelDialog({ confirm, cancel, isDisabled, errorMessage, onConnected }: DialogContentProps<() => Promise<void>> & {
   onConnected?: (model: string) => void;
 }) {
+  const { getHarnessesQuery, refreshHarnesses } = useWorkspace().queries;
+  const { discoverLocalModels, connectLocalModel } = useWorkspace().api;
+
   const harnesses = useQuery(getHarnessesQuery());
   const installed = harnesses.data?.find((harness) => harness.id === "opencode")?.installed ?? false;
   const formRef = useRef<HTMLFormElement>(null);
@@ -186,6 +195,9 @@ function SavedLocalModel({ connection, harnessReady, availableModels, checking, 
   disabled: boolean;
   onRemove: () => void;
 }) {
+  const { checkLocalModel } = useWorkspace().api;
+  const { refreshHarnesses } = useWorkspace().queries;
+
   const probe = useMutation({ mutationFn: async () => {
     try { await checkLocalModel(connection.id); }
     finally { await refreshHarnesses(true); }

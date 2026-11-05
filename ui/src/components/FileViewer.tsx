@@ -1,10 +1,8 @@
-import {
-  setScopedQueryData,
-  queryClient,
-} from "../queries/client";
+import { useWorkspace } from "../workspace";
+
 import { useQuery } from "@tanstack/react-query";
 import { useFileManagerLabel } from "./useFileManagerLabel";
-import { resolvedFileQuery, refreshFile, type LoadedFile } from "../queries/files";
+import { type LoadedFile } from "../queries/files";
 
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
@@ -29,16 +27,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { formatForDisplay, useHotkey } from "@tanstack/react-hotkeys";
-import {
-  absoluteFileUrl,
-  artifactUrl,
-  FileChangedError,
-  openFileInEditor,
-  projectFileUrl,
-  revealFileInManager,
-  saveProjectFile,
-  type ArtifactEntry,
-} from "../api";
+import { FileChangedError, type ArtifactEntry } from "../api";
 import { useFileVersion } from "../useFileVersion";
 import {
   conflictAfterRefresh,
@@ -214,6 +203,17 @@ export function FileViewer({
   showSource?: boolean;
   onShowSourceChange?: (showSource: boolean) => void;
 }) {
+  const { resolvedFileQuery, refreshFile } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+  const {
+    absoluteFileUrl,
+    artifactUrl,
+    projectFileUrl,
+    saveProjectFile,
+    openFileInEditor,
+    revealFileInManager,
+  } = useWorkspace().api;
+
   const fileOptions = resolvedFileQuery(projectId, path, source ?? "repo", sessionId, gitRef);
   const fileQuery = useQuery({ ...fileOptions, enabled: !bufferSession.saving });
   const loaded = fileQuery.data ?? null;

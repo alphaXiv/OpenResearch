@@ -2,12 +2,11 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Copy, Download, Link2, X } from "lucide-react";
 import { useRef, type RefObject } from "react";
 
-import { getProjectLink, publishProject, type Project, type ShareChoice } from "../api";
+import type { Project, ShareChoice } from "../api";
 import type { DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
-import { listChatSessionsQuery } from "../queries/chat";
-import { queryClient, workspaceKey } from "../queries/client";
-import { openSignIn } from "./AccountChip";
+import { useWorkspace } from "../workspace";
+import { useSignIn } from "./AccountChip";
 import { Button, ButtonLink, DialogContent, DialogTitle, IconButton, Input, Spinner, showAlert } from "./ui";
 
 export function ShareProjectDialog({ project, remote, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage }: DialogContentProps<ShareChoice> & {
@@ -15,6 +14,13 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
   remote: boolean;
   returnFocus: RefObject<HTMLButtonElement | null>;
 }) {
+  const {
+    api: { getProjectLink, publishProject },
+    queries: { listChatSessionsQuery },
+    queryClient,
+    workspaceKey,
+  } = useWorkspace();
+  const openSignIn = useSignIn();
   const chatsQuery = useQuery(listChatSessionsQuery(project.id));
   const chats = chatsQuery.data?.filter((chat) => !chat.sideParentSessionId);
   const choice: ShareChoice = { chats: chats?.map((chat) => chat.id) ?? [], logs: true, artifacts: true };

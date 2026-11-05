@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -14,7 +15,7 @@ function loadProjectsPage(projects, state, calls = {}) {
   ).outputText;
   const exports = {};
   const element = (marker) => () => react.createElement("div", { "data-marker": marker });
-  new Function("require", "exports", output)((id) => {
+  new Function("require", "exports", output)(withWorkspaceMocks((id) => {
     if (id === "react") return react;
     if (id === "react/jsx-runtime") return jsx;
     if (id === "@tanstack/react-query") {
@@ -25,7 +26,7 @@ function loadProjectsPage(projects, state, calls = {}) {
     }
     if (id === "@tanstack/react-router") {
       return {
-        useRouteContext: () => ({ queryClient: { setQueryData: (key, update) => { calls.cache = { key, value: update(projects) }; } } }),
+        useRouteContext: () => ({ queryClient: { setQueryData: (key, update) => { calls.cache = { key, value: typeof update === "function" ? update(projects) : update }; } } }),
         Link: element("link"),
         useNavigate: () => (to) => { calls.navigate = to; },
       };
@@ -36,7 +37,7 @@ function loadProjectsPage(projects, state, calls = {}) {
         getUiStateQuery: () => ({ queryKey: ["uiState"] }),
       };
     }
-    if (id === "./RemoteRuntime") return { useRuntime: () => ({ kind: "local" }) };
+    if (id === "./RemoteRuntime") return { useRuntime: () => calls.runtime ?? ({ kind: "local" }) };
     if (id === "./demoSessionState") return { clearReadDemoSessions: () => {} };
     if (id === "./routeResume") {
       return { globalResumeLocation: async () => "/projects", projectResumeLocation: async () => "/projects" };
@@ -44,7 +45,7 @@ function loadProjectsPage(projects, state, calls = {}) {
     if (id === "./paraglide/messages.js") {
       return { m: new Proxy({}, { get: (_, name) => () => String(name) }) };
     }
-    if (id === "./components/Onboarding") return { Onboarding: element("onboarding") };
+    if (id === "./components/Onboarding") return { Onboarding: (props) => { calls.setup = props; return element(props.remote ? "agent-setup" : "onboarding")(); } };
     if (id === "./components/ProjectsHome") {
       return { ProjectsEmptyState: (props) => { calls.emptyState = props; return element("no-projects")(); } };
     }
@@ -56,7 +57,7 @@ function loadProjectsPage(projects, state, calls = {}) {
       return { Button: element("button"), Spinner: element("spinner"), showAlert: (message) => { calls.alert = message; } };
     }
     throw new Error(`Unexpected dependency: ${id}`);
-  }, exports);
+  }), exports);
   return exports.ProjectsPage;
 }
 
@@ -89,4 +90,23 @@ test("creating a project from the empty state caches it and opens it", () => {
   assert.deepEqual(calls.cache, { key: ["projects"], value: [{ id: "new id" }] });
   assert.deepEqual(calls.navigate, { href: "/projects/new%20id/settings/projects" });
   assert.equal(calls.alert, "publish failed");
+});
+
+
+test("a fresh remote goes directly to per-machine agent setup without the full walkthrough", () => {
+  const calls = { runtime: { kind: "ssh", session: { host: "gpu-lab" } } };
+  const html = render([], { onboardingCompleted: false, preferredAgent: null }, calls);
+  assert.ok(html.includes('data-marker="agent-setup"'), html);
+  assert.ok(!html.includes('data-marker="onboarding"'), html);
+  assert.equal(calls.setup.host, "gpu-lab");
+  const configured = { onboardingCompleted: false, preferredAgent: { harness: "codex" } };
+  calls.setup.onDone(configured);
+  assert.deepEqual(calls.cache, { key: ["uiState"], value: configured });
+});
+
+test("configured remote agents skip setup even without the local onboarding flag", () => {
+  const calls = { runtime: { kind: "ssh", session: { host: "gpu-lab" } } };
+  const html = render([], { onboardingCompleted: false, preferredAgent: { harness: "codex" } }, calls);
+  assert.ok(html.includes('data-marker="no-projects"'), html);
+  assert.equal(calls.setup, undefined);
 });

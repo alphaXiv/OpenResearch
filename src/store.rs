@@ -423,6 +423,67 @@ pub enum RunWakeupRegistration {
     AlreadyDelivered,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delegation {
+    pub depth: u32,
+    /// The chat that delegated to this one; `None` for a chat the user started.
+    pub parent: Option<String>,
+    pub may_delegate: bool,
+}
+
+/// One chat's standing request to hear from another. A paused one, which the
+/// user stopped, tells nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatSubscription {
+    pub subscriber_session_id: String,
+    pub target_session_id: String,
+    pub paused: bool,
+    pub told_prompt_id: Option<String>,
+    /// The target is working, or idle after a turn the subscriber was not told.
+    pub outstanding: bool,
+}
+
+/// What a subscription tells: a finished turn, or a question its target asked.
+#[derive(Debug, Clone, Copy)]
+pub enum ToldEvent<'a> {
+    Turn(&'a str),
+    Prompt(&'a str),
+}
+
+/// A chat whose latest turn has ended since its subscriber was last told.
+#[derive(Debug, Clone)]
+pub struct ReadyChatSubscription {
+    pub subscriber_session_id: String,
+    pub target_session_id: String,
+    pub turn_id: String,
+    pub turn_state: String,
+    pub assistant_message_id: String,
+    subscribed_at: i64,
+    told_turn_id: Option<String>,
+}
+
+/// Each subscription with its target's latest turn and whether the target is
+/// idle after it: done, and with nothing queued unless a stop held the queue.
+const LATEST_SUBSCRIBED_TURNS: &str = "subscribed AS (
+    SELECT s.subscriber_session_id, s.target_session_id, s.paused, s.told_turn_id,
+           s.told_prompt_id, s.claim_token, s.claimed_at, s.created_at,
+           t.id AS turn_id, t.state,
+           t.assistant_message_id, t.updated_at,
+           t.state = 'interrupted'
+               OR (t.state IN ('completed', 'failed') AND NOT EXISTS (
+                   SELECT 1 FROM chat_queued_messages q
+                   WHERE q.session_id = s.target_session_id
+               )) AS idle
+    FROM chat_subscriptions s
+    LEFT JOIN chat_turns t ON t.id = (
+        SELECT id FROM chat_turns WHERE session_id = s.target_session_id
+        ORDER BY created_at DESC, rowid DESC LIMIT 1
+    )
+),
+latest AS (
+    SELECT *, NOT (idle IS 1 AND told_turn_id IS turn_id) AS pending FROM subscribed
+)";
+
 const RUN_WAKEUP_CLAIM_TTL_MS: i64 = 60 * 1000;
 pub(crate) const CHAT_TURN_LEASE_TTL_MS: i64 = 60 * 1000;
 
@@ -858,6 +919,25 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_run_wakeups_requested
                 ON chat_run_wakeups(requested_at);
+            CREATE TABLE IF NOT EXISTS chat_delegates (
+                session_id        TEXT PRIMARY KEY,
+                parent_session_id TEXT NOT NULL,
+                may_delegate      INTEGER NOT NULL,
+                created_at        INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_subscriptions (
+                subscriber_session_id TEXT NOT NULL,
+                target_session_id     TEXT NOT NULL,
+                created_at            INTEGER NOT NULL,
+                paused                INTEGER NOT NULL DEFAULT 0,
+                told_turn_id          TEXT,
+                told_prompt_id        TEXT,
+                claim_token           TEXT,
+                claimed_at            INTEGER,
+                PRIMARY KEY (subscriber_session_id, target_session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_subscriptions_target
+                ON chat_subscriptions(target_session_id);
             CREATE TABLE IF NOT EXISTS chat_turn_leases (
                 chat_session_id TEXT PRIMARY KEY,
                 claim_token     TEXT NOT NULL,
@@ -960,6 +1040,7 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
             "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_autonomy TEXT",
+            "ALTER TABLE ui_state ADD COLUMN nested_delegation INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
             "ALTER TABLE runs ADD COLUMN cancel_reason TEXT",
         ] {
@@ -973,6 +1054,9 @@ impl Store {
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
+        // A delegate that outlives its delegator, in a worktree of its own, stands as the user's.
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_delegates AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_delegates WHERE session_id = OLD.id OR parent_session_id = OLD.id; END;")?;
         conn.execute(
             "DELETE FROM native_invocation_identities WHERE session_id IS NULL AND created_at < ?1",
             [now_ms() - 7 * 24 * 60 * 60 * 1000],
@@ -1203,7 +1287,7 @@ impl Store {
             "SELECT onboarding_completed, tour_completed, preferred_harness,
                     preferred_model, preferred_service_tier,
                     preferred_permission_mode, preferred_reasoning_level, workspace_state_json,
-                    preferred_autonomy
+                    preferred_autonomy, nested_delegation
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1230,6 +1314,7 @@ impl Store {
                         .get::<_, Option<String>>(8)?
                         .as_deref()
                         .and_then(Autonomy::from_id),
+                    nested_delegation: row.get(9)?,
                 })
             },
         )?)
@@ -1277,6 +1362,14 @@ impl Store {
         self.conn.execute(
             "UPDATE ui_state SET tour_completed = ?1 WHERE id = 1",
             params![completed],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_nested_delegation(&self, allowed: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET nested_delegation = ?1 WHERE id = 1",
+            params![allowed],
         )?;
         Ok(())
     }
@@ -1588,21 +1681,6 @@ impl Store {
         Ok((claimed == 1).then_some(token))
     }
 
-    pub fn renew_run_wakeup_claim(
-        &self,
-        run_id: &str,
-        chat_session_id: &str,
-        token: &str,
-    ) -> Result<bool> {
-        let renewed = self.conn.execute(
-            "UPDATE chat_run_wakeups SET claimed_at = ?4
-             WHERE run_id = ?1 AND chat_session_id = ?2
-               AND state = 'claimed' AND claim_token = ?3",
-            params![run_id, chat_session_id, token, now_ms()],
-        )?;
-        Ok(renewed == 1)
-    }
-
     pub fn release_run_wakeup(
         &self,
         run_id: &str,
@@ -1633,6 +1711,256 @@ impl Store {
             params![run_id, chat_session_id, token, now_ms()],
         )?;
         Ok(delivered == 1)
+    }
+
+    /// Record `child` as a delegate of `parent`; recording it again, as a
+    /// retried start does, changes nothing.
+    pub fn record_chat_delegate(
+        &self,
+        child: &str,
+        parent: &str,
+        may_delegate: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO chat_delegates (session_id, parent_session_id, may_delegate, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![child, parent, may_delegate, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Forget who delegated to `id`; it stands as a chat the user started.
+    pub fn remove_chat_delegate(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM chat_delegates WHERE session_id = ?1", [id])?
+            == 1)
+    }
+
+    /// The chats `parent` delegated to, oldest first.
+    pub fn chat_delegates_of(&self, parent: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id FROM chat_delegates WHERE parent_session_id = ?1
+             ORDER BY created_at, session_id",
+        )?;
+        let rows = stmt.query_map([parent], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// How many delegations deep `id` is, who delegated to it, and whether it
+    /// may delegate. A chat the user started is at depth 0 and may.
+    pub fn delegation(&self, id: &str) -> Result<Delegation> {
+        Ok(self.conn.query_row(
+            "WITH RECURSIVE chain(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION ALL
+                 SELECT d.parent_session_id, chain.depth + 1 FROM chain
+                 JOIN chat_delegates d ON d.session_id = chain.id
+             )
+             SELECT (SELECT MAX(depth) FROM chain), d.parent_session_id,
+                    COALESCE(d.may_delegate, 1)
+             FROM (SELECT 1) LEFT JOIN chat_delegates d ON d.session_id = ?1",
+            params![id],
+            |row| {
+                Ok(Delegation {
+                    depth: row.get(0)?,
+                    parent: row.get(1)?,
+                    may_delegate: row.get(2)?,
+                })
+            },
+        )?)
+    }
+
+    /// Subscribe `subscriber` to `target`; an existing subscription, paused
+    /// or not, stays as it is. `told_turn_id` names a turn of `target` the
+    /// subscriber already knows.
+    pub fn subscribe_chat(
+        &self,
+        subscriber: &str,
+        target: &str,
+        told_turn_id: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO chat_subscriptions
+             (subscriber_session_id, target_session_id, told_turn_id, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![subscriber, target, told_turn_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Stop `target` telling `subscriber` anything; subscribing again keeps it
+    /// stopped.
+    pub fn pause_chat_subscription(&self, subscriber: &str, target: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE chat_subscriptions SET paused = 1
+             WHERE subscriber_session_id = ?1 AND target_session_id = ?2",
+            params![subscriber, target],
+        )? == 1)
+    }
+
+    /// A subscription the user paused stays, so subscribing again cannot undo
+    /// the user's choice.
+    pub fn unsubscribe_chat(&self, subscriber: &str, target: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM chat_subscriptions
+             WHERE subscriber_session_id = ?1 AND target_session_id = ?2 AND paused = 0",
+            params![subscriber, target],
+        )? == 1)
+    }
+
+    /// Every subscription, or one subscriber's.
+    pub fn list_chat_subscriptions(
+        &self,
+        subscriber: Option<&str>,
+    ) -> Result<Vec<ChatSubscription>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH {LATEST_SUBSCRIBED_TURNS}
+             SELECT subscriber_session_id, target_session_id, paused, told_prompt_id, pending
+             FROM latest
+             WHERE ?1 IS NULL OR subscriber_session_id = ?1
+             ORDER BY created_at, target_session_id"
+        ))?;
+        let rows = stmt.query_map([subscriber], |row| {
+            Ok(ChatSubscription {
+                subscriber_session_id: row.get(0)?,
+                target_session_id: row.get(1)?,
+                paused: row.get(2)?,
+                told_prompt_id: row.get(3)?,
+                outstanding: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Subscriptions whose target is idle after a turn the subscriber has not
+    /// been told about. A delegate is still working while delegates of its own
+    /// have not answered it: a turn that ends waiting on them is not its answer.
+    pub fn list_ready_chat_subscriptions(&self) -> Result<Vec<ReadyChatSubscription>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH {LATEST_SUBSCRIBED_TURNS}
+             SELECT subscriber_session_id, target_session_id, turn_id, state,
+                    assistant_message_id, created_at, told_turn_id
+             FROM latest l
+             WHERE l.idle AND l.paused = 0
+               AND l.told_turn_id IS NOT l.turn_id
+               AND (l.claim_token IS NULL OR l.claimed_at < ?1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM latest own
+                   JOIN chat_delegates d ON d.session_id = own.target_session_id
+                       AND d.parent_session_id = own.subscriber_session_id
+                   WHERE own.subscriber_session_id = l.target_session_id
+                     AND own.pending
+               )
+             ORDER BY l.updated_at"
+        ))?;
+        let rows = stmt.query_map([now_ms() - RUN_WAKEUP_CLAIM_TTL_MS], |row| {
+            Ok(ReadyChatSubscription {
+                subscriber_session_id: row.get(0)?,
+                target_session_id: row.get(1)?,
+                turn_id: row.get(2)?,
+                turn_state: row.get(3)?,
+                assistant_message_id: row.get(4)?,
+                subscribed_at: row.get(5)?,
+                told_turn_id: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The answers of turns the target finished since the subscriber was last
+    /// told, before the one it is told now: a later turn started before the
+    /// subscriber was free to hear them. Oldest first.
+    pub fn untold_chat_answers(&self, ready: &ReadyChatSubscription) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.assistant_message_id FROM chat_turns e
+             JOIN chat_turns now ON now.id = ?2
+             WHERE e.session_id = ?1 AND e.id != now.id
+               AND e.state IN ('completed', 'failed', 'interrupted')
+               AND e.updated_at >= ?3
+               AND (e.created_at, e.rowid) < (now.created_at, now.rowid)
+               AND NOT EXISTS (
+                   SELECT 1 FROM chat_turns told WHERE told.id = ?4
+                     AND (e.created_at, e.rowid) <= (told.created_at, told.rowid)
+               )
+             ORDER BY e.created_at, e.rowid",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                ready.target_session_id,
+                ready.turn_id,
+                ready.subscribed_at,
+                ready.told_turn_id
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Lease a subscription to tell `event`, unless it was told already or
+    /// another sweep holds the lease.
+    pub fn claim_chat_subscription(
+        &self,
+        subscriber: &str,
+        target: &str,
+        event: ToldEvent,
+    ) -> Result<Option<String>> {
+        let token = uuid::Uuid::new_v4().to_string();
+        // A turn older than the one told already would rewind the cursor and
+        // tell the newer one twice.
+        let (told, id, newer) = match event {
+            ToldEvent::Turn(id) => (
+                "told_turn_id",
+                id,
+                "AND NOT EXISTS (
+                     SELECT 1 FROM chat_turns e JOIN chat_turns t ON t.id = told_turn_id
+                     WHERE e.id = ?3 AND (e.created_at, e.rowid) <= (t.created_at, t.rowid)
+                 )",
+            ),
+            ToldEvent::Prompt(id) => ("told_prompt_id", id, ""),
+        };
+        let claimed = self.conn.execute(
+            &format!(
+                "UPDATE chat_subscriptions SET claim_token = ?4, claimed_at = ?5
+                 WHERE subscriber_session_id = ?1 AND target_session_id = ?2
+                   AND {told} IS NOT ?3 {newer}
+                   AND (claim_token IS NULL OR claimed_at < ?6)"
+            ),
+            params![
+                subscriber,
+                target,
+                id,
+                token,
+                now_ms(),
+                now_ms() - RUN_WAKEUP_CLAIM_TTL_MS
+            ],
+        )?;
+        Ok((claimed == 1).then_some(token))
+    }
+
+    /// Release a claim. `told` records the event as told; without it the
+    /// event is retried on a later sweep.
+    pub fn settle_chat_subscription(
+        &self,
+        subscriber: &str,
+        target: &str,
+        token: &str,
+        told: Option<ToldEvent>,
+    ) -> Result<bool> {
+        let (turn, prompt) = match told {
+            Some(ToldEvent::Turn(id)) => (Some(id), None),
+            Some(ToldEvent::Prompt(id)) => (None, Some(id)),
+            None => (None, None),
+        };
+        let settled = self.conn.execute(
+            "UPDATE chat_subscriptions
+             SET claim_token = NULL, claimed_at = NULL,
+                 told_turn_id = COALESCE(?4, told_turn_id),
+                 told_prompt_id = COALESCE(?5, told_prompt_id)
+             WHERE subscriber_session_id = ?1 AND target_session_id = ?2 AND claim_token = ?3",
+            params![subscriber, target, token, turn, prompt],
+        )?;
+        Ok(settled == 1)
     }
 
     pub fn chat_turn_leased(&self, chat_session_id: &str) -> Result<bool> {
@@ -2830,20 +3158,21 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// The session whose worktree `id` runs in: its side-chat parent while that
-    /// parent exists, else itself.
+    /// The session whose worktree `id` runs in: the top of its chain of
+    /// existing side-chat parents (a delegate can delegate again), else itself.
     pub fn chat_worktree_owner(&self, id: &str) -> Result<String> {
-        let owner: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT parent.id FROM chat_sessions side
+        Ok(self.conn.query_row(
+            "WITH RECURSIVE chain(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION ALL
+                 SELECT parent.id, chain.depth + 1 FROM chain
+                 JOIN chat_sessions side ON side.id = chain.id
                  JOIN chat_sessions parent ON parent.id = side.side_parent_session_id
-                 WHERE side.id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(owner.unwrap_or_else(|| id.to_string()))
+             )
+             SELECT id FROM chain ORDER BY depth DESC LIMIT 1",
+            params![id],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn list_chat_session_project_ids(&self) -> Result<Vec<(String, String)>> {
@@ -3571,6 +3900,40 @@ impl Store {
             .optional()?)
     }
 
+    /// The turn a user message started.
+    pub fn chat_turn_for_user_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Option<StoredChatTurn>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {CHAT_TURN_COLS} FROM chat_turns
+                     WHERE session_id = ?1 AND user_message_id = ?2
+                     ORDER BY created_at, rowid LIMIT 1"
+                ),
+                params![session_id, message_id],
+                row_to_chat_turn,
+            )
+            .optional()?)
+    }
+
+    pub fn latest_chat_turn(&self, session_id: &str) -> Result<Option<StoredChatTurn>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {CHAT_TURN_COLS} FROM chat_turns WHERE session_id = ?1
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                ),
+                params![session_id],
+                row_to_chat_turn,
+            )
+            .optional()?)
+    }
+
     pub(crate) fn steer_receipt(
         &self,
         session_id: &str,
@@ -3979,14 +4342,23 @@ impl Store {
     }
 
     pub fn list_chat_messages(&self, session_id: &str) -> Result<Vec<StoredChatMessage>> {
+        self.list_chat_messages_since(session_id, i64::MIN)
+    }
+
+    /// A chat's messages created at or after `since`, oldest first.
+    pub fn list_chat_messages_since(
+        &self,
+        session_id: &str,
+        since: i64,
+    ) -> Result<Vec<StoredChatMessage>> {
         let mut stmt = self.conn.prepare(
             // rowid tiebreak: a user message and its reply can share a millisecond.
             "SELECT id, session_id, role, parts_json, created_at, parent_id,
                     base_native_session_id, result_native_session_id, completed_at
              FROM chat_messages
-             WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
+             WHERE session_id = ?1 AND created_at >= ?2 ORDER BY created_at ASC, rowid ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
+        let rows = stmt.query_map(params![session_id, since], |row| {
             Ok(StoredChatMessage {
                 id: row.get(0)?,
                 session_id: row.get(1)?,
@@ -4008,6 +4380,19 @@ impl Store {
             params![session_id],
             |row| row.get(0),
         )?)
+    }
+
+    /// Message ids that start with `msg_` and `hex`, at most two: enough to
+    /// tell a unique match from an ambiguous one.
+    pub fn chat_message_ids_with_prefix(&self, hex: &str) -> Result<Vec<String>> {
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM chat_messages WHERE id GLOB ?1 LIMIT 2")?;
+        let rows = stmt.query_map([format!("msg_{hex}*")], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// A single chat message by id (used to reconcile a message's persisted
@@ -4202,8 +4587,8 @@ pub struct StoredChatSession {
     pub native_session_id: Option<String>,
     pub title: Option<String>,
     /// Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
-    /// (harness auto-title), `"user"` (explicitly chosen — a rename, or an
-    /// agent's `orx agent spawn --title`, neither of which auto-titling may
+    /// (harness auto-title), `"user"` (explicitly chosen — a rename, or the
+    /// title a delegating agent gave, neither of which auto-titling may
     /// overwrite). NULL on legacy rows, which the conditional setter treats as
     /// "unknown, don't overwrite".
     pub title_source: Option<String>,
@@ -4235,8 +4620,6 @@ pub struct StoredChatSession {
     /// Tip of the branch the UI is currently showing. Forked turns make the
     /// transcript a tree; this picks which path through it is live.
     pub active_leaf_id: Option<String>,
-    /// Session that spawned this one with `orx agent spawn`. `None` for
-    /// sessions the user started from the dashboard.
     /// Chat this side chat branched from. Side chats share that chat's
     /// worktree, stay out of history, and are deleted with it.
     pub side_parent_session_id: Option<String>,
@@ -4264,6 +4647,9 @@ pub struct StoredUiState {
     pub preferred_agent: Option<StoredAgentSelection>,
     pub workspace: Option<GlobalWorkspaceState>,
     pub preferred_autonomy: Option<Autonomy>,
+    /// Whether delegates may delegate in turn unless a `delegate` call says
+    /// otherwise. Off: only chats the user started delegate.
+    pub nested_delegation: bool,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -5658,6 +6044,7 @@ mod tests {
                 preferred_agent: None,
                 workspace: None,
                 preferred_autonomy: None,
+                nested_delegation: false,
             }
         );
 
@@ -5681,6 +6068,7 @@ mod tests {
                 preferred_agent: Some(selection),
                 workspace: None,
                 preferred_autonomy: Some(Autonomy::Copilot),
+                nested_delegation: false,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -6952,6 +7340,14 @@ mod tests {
             store.chat_worktree_owner("chat_side").unwrap(),
             "chat_parent"
         );
+        let mut nested = chat_session_fixture("chat_nested");
+        nested.side_parent_session_id = Some("chat_side".into());
+        store.create_chat_session(&nested).unwrap();
+        assert_eq!(
+            store.chat_worktree_owner("chat_nested").unwrap(),
+            "chat_parent"
+        );
+        store.delete_chat_session("chat_nested").unwrap();
         assert_eq!(store.chat_worktree_owner("chat_gone").unwrap(), "chat_gone");
         assert!(store.delete_chat_session("chat_parent").is_err());
         assert!(store.get_chat_session("chat_parent").unwrap().is_some());
@@ -7597,6 +7993,267 @@ mod tests {
     }
 
     #[test]
+    fn news_of_a_turn_names_the_answers_it_overtook() {
+        let dir = std::env::temp_dir().join(format!("orx-store-untold-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["chat_parent", "chat_child"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+        }
+        let finish = |id: &str, created_at: i64| {
+            let mut turn = chat_turn_fixture(id, &format!("client-{id}"));
+            turn.session_id = "chat_child".into();
+            turn.created_at = created_at;
+            store.admit_chat_turn(None, &turn).unwrap();
+            store.complete_chat_turn(id).unwrap();
+        };
+        finish("history", 1);
+        store
+            .subscribe_chat("chat_parent", "chat_child", Some("history"))
+            .unwrap();
+        finish("one", 2);
+        finish("two", 3);
+
+        let ready = store.list_ready_chat_subscriptions().unwrap();
+        assert_eq!(ready[0].turn_id, "two");
+        assert_eq!(
+            store.untold_chat_answers(&ready[0]).unwrap(),
+            ["assistant_one"],
+            "the subscriber was never told of `one`, and `history` came before it subscribed"
+        );
+        let told = store
+            .claim_chat_subscription("chat_parent", "chat_child", ToldEvent::Turn("two"))
+            .unwrap()
+            .unwrap();
+        store
+            .settle_chat_subscription(
+                "chat_parent",
+                "chat_child",
+                &told,
+                Some(ToldEvent::Turn("two")),
+            )
+            .unwrap();
+        assert!(
+            store
+                .claim_chat_subscription("chat_parent", "chat_child", ToldEvent::Turn("one"))
+                .unwrap()
+                .is_none(),
+            "a turn older than the one told cannot rewind the subscription"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn chat_subscriptions_tell_each_finished_turn_once_after_the_queue_drains() {
+        let dir = std::env::temp_dir().join(format!("orx-store-sub-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["chat_parent", "chat_child"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+        }
+        store
+            .record_chat_delegate("chat_child", "chat_parent", false)
+            .unwrap();
+        store
+            .subscribe_chat("chat_parent", "chat_child", None)
+            .unwrap();
+        store
+            .subscribe_chat("chat_parent", "chat_child", None)
+            .unwrap();
+        assert_eq!(store.list_chat_subscriptions(None).unwrap().len(), 1);
+        let ready = || store.list_ready_chat_subscriptions().unwrap();
+        let outstanding = || {
+            store
+                .list_chat_subscriptions(Some("chat_parent"))
+                .unwrap()
+                .into_iter()
+                .filter(|sub| sub.outstanding)
+                .map(|sub| sub.target_session_id)
+                .collect::<Vec<_>>()
+        };
+        let turn = |session: &str, id: &str, created_at: i64| {
+            let mut turn = chat_turn_fixture(id, &format!("client-{id}"));
+            turn.session_id = session.into();
+            turn.created_at = created_at;
+            store.admit_chat_turn(None, &turn).unwrap();
+        };
+        let claim = |ready: &ReadyChatSubscription| {
+            store.claim_chat_subscription(
+                &ready.subscriber_session_id,
+                &ready.target_session_id,
+                ToldEvent::Turn(&ready.turn_id),
+            )
+        };
+        let tell = |ready: &ReadyChatSubscription| {
+            let token = claim(ready).unwrap().unwrap();
+            assert!(store
+                .settle_chat_subscription(
+                    &ready.subscriber_session_id,
+                    &ready.target_session_id,
+                    &token,
+                    Some(ToldEvent::Turn(&ready.turn_id)),
+                )
+                .unwrap());
+        };
+
+        assert_eq!(
+            outstanding(),
+            ["chat_child"],
+            "a new delegate owes an answer"
+        );
+        turn("chat_child", "one", 2);
+        assert!(ready().is_empty(), "a running turn has nothing to tell");
+        store.complete_chat_turn("one").unwrap();
+        let first = ready();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].turn_id, "one");
+        let token = claim(&first[0]).unwrap().unwrap();
+        assert!(claim(&first[0]).unwrap().is_none());
+        assert!(ready().is_empty(), "a claimed answer is in flight");
+        store
+            .settle_chat_subscription("chat_parent", "chat_child", &token, None)
+            .unwrap();
+        assert_eq!(ready().len(), 1, "an untold answer is retried");
+        tell(&first[0]);
+        assert!(ready().is_empty(), "each turn is told once");
+        assert!(outstanding().is_empty());
+
+        turn("chat_child", "two", 3);
+        store.complete_chat_turn("two").unwrap();
+        store
+            .insert_queued_chat_message(&StoredQueuedChatMessage {
+                id: "queued".into(),
+                session_id: "chat_child".into(),
+                client_turn_id: "client-queued".into(),
+                request_hash: "hash".into(),
+                payload_json: "{}".into(),
+                created_at: 4,
+            })
+            .unwrap();
+        assert!(ready().is_empty(), "a queued message means more work first");
+        store.delete_queued_chat_message("queued").unwrap();
+        assert_eq!(ready()[0].turn_id, "two");
+        tell(&ready()[0]);
+
+        // The child delegates in turn: its turn ending while its own delegate
+        // works is not an answer for the parent. An unrelated subscription of
+        // the child does not hold its answer back.
+        for id in ["chat_grandchild", "chat_elsewhere"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+            store.subscribe_chat("chat_child", id, None).unwrap();
+        }
+        store
+            .record_chat_delegate("chat_grandchild", "chat_child", false)
+            .unwrap();
+        turn("chat_child", "three", 5);
+        store.complete_chat_turn("three").unwrap();
+        assert!(ready().is_empty(), "its delegate has not run yet");
+        turn("chat_grandchild", "four", 6);
+        assert!(ready().is_empty(), "its delegate is still working");
+        store.complete_chat_turn("four").unwrap();
+        let waiting = ready();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].subscriber_session_id, "chat_child");
+        tell(&waiting[0]);
+        assert_eq!(
+            ready()[0].turn_id,
+            "three",
+            "answered, the child's turn is its answer"
+        );
+
+        // The user stopped the child telling its parent: neither subscribing
+        // again nor unsubscribing first undoes that.
+        assert!(store
+            .pause_chat_subscription("chat_parent", "chat_child")
+            .unwrap());
+        assert!(ready()
+            .iter()
+            .all(|ready| ready.subscriber_session_id != "chat_parent"));
+        store.unsubscribe_chat("chat_parent", "chat_child").unwrap();
+        store
+            .subscribe_chat("chat_parent", "chat_child", None)
+            .unwrap();
+        assert!(ready()
+            .iter()
+            .all(|ready| ready.subscriber_session_id != "chat_parent"));
+
+        store.delete_chat_session("chat_child").unwrap();
+        assert!(store
+            .list_chat_subscriptions(None)
+            .unwrap()
+            .iter()
+            .all(|sub| sub.subscriber_session_id != "chat_child"
+                && sub.target_session_id != "chat_child"));
+        assert!(store.chat_delegates_of("chat_parent").unwrap().is_empty());
+        assert_eq!(
+            store.delegation("chat_grandchild").unwrap().parent,
+            None,
+            "a delegate outliving its delegator is the user's"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn delegation_depth_follows_delegate_links_not_side_chats() {
+        let dir = std::env::temp_dir().join(format!("orx-store-depth-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let chat = |id: &str, side_parent: Option<&str>| {
+            let mut session = chat_session_fixture(id);
+            session.side_parent_session_id = side_parent.map(str::to_string);
+            store.create_chat_session(&session).unwrap();
+        };
+        chat("chat_root", None);
+        chat("chat_side", Some("chat_root"));
+        chat("chat_one", Some("chat_side"));
+        chat("chat_two", None);
+        store
+            .record_chat_delegate("chat_one", "chat_side", true)
+            .unwrap();
+        store
+            .record_chat_delegate("chat_two", "chat_one", false)
+            .unwrap();
+        store
+            .subscribe_chat("chat_root", "chat_side", None)
+            .unwrap();
+        let at = |id: &str| store.delegation(id).unwrap();
+        let user = Delegation {
+            depth: 0,
+            parent: None,
+            may_delegate: true,
+        };
+        assert_eq!(at("chat_root"), user);
+        assert_eq!(
+            at("chat_side"),
+            user,
+            "a side chat the user opened is not a delegate, subscribed or not"
+        );
+        assert_eq!(
+            at("chat_one"),
+            Delegation {
+                depth: 1,
+                parent: Some("chat_side".into()),
+                may_delegate: true
+            }
+        );
+        assert_eq!(
+            at("chat_two"),
+            Delegation {
+                depth: 2,
+                parent: Some("chat_one".into()),
+                may_delegate: false
+            },
+            "a delegate in its own worktree is still one level deeper"
+        );
+        assert_eq!(store.chat_worktree_owner("chat_one").unwrap(), "chat_root");
+        assert_eq!(store.chat_worktree_owner("chat_two").unwrap(), "chat_two");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn run_wakeups_are_idempotent_ready_only_at_success_or_failure_and_pruned() {
         let dir = std::env::temp_dir().join(format!("orx-store-wake-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -7780,9 +8437,13 @@ mod tests {
         assert!(!first
             .mark_run_wakeup_delivered("run_done", "chat_A", &stale_token)
             .unwrap());
-        assert!(second
-            .renew_run_wakeup_claim("run_done", "chat_A", &current_token)
-            .unwrap());
+        assert!(
+            first
+                .claim_run_wakeup("run_done", "chat_A")
+                .unwrap()
+                .is_none(),
+            "a stale token releases nothing"
+        );
         second
             .release_run_wakeup("run_done", "chat_A", &current_token)
             .unwrap();

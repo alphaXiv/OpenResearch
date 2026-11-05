@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -22,12 +23,12 @@ const messages = new Proxy({}, {
 let folders;
 let titles = {};
 const mocks = {
-  "../queries/projects": new Proxy({}, { get: (_, name) => (name === "resolvePaperQuery" ? (id) => ({ id }) : stub[name]) }),
+  "../queries/projects": new Proxy({ resolvePaperQuery: (id) => ({ id }) }, { get: (target, name) => target[name] ?? stub[name] }),
   "@tanstack/react-query": {
     ...require("@tanstack/react-query"),
     useQueries: ({ queries }) => queries.map(({ id }) => ({ data: titles[id] ? { paperId: id, title: titles[id] } : undefined })),
   },
-  "../queries/settings": new Proxy({}, { get: (_, name) => (name === "useAlphaXivFolders" ? () => ({ data: folders }) : stub[name]) }),
+  "../queries/settings": new Proxy({ useAlphaXivFolders: () => ({ data: folders }) }, { get: (target, name) => target[name] ?? stub[name] }),
   "../paraglide/messages.js": { m: messages },
   "../paraglide/runtime.js": { getLocale: () => "en" },
   "../i18n": { ltr: String, autoDir: String },
@@ -45,7 +46,7 @@ const mocks = {
 };
 const exports = {};
 new Function("require", "exports", compiled)(
-  (name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name)),
+  withWorkspaceMocks((name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name))),
   exports,
 );
 

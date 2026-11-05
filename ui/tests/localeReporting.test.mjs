@@ -36,8 +36,8 @@ test("locale reporting waits for readiness, retries, and repeats on reconnect an
   observer.setOptions({ ...query("ja"), enabled: true });
   await settle();
   assert.equal(calls.at(-1), "ja");
-  load("client").activateWorkspace("another-backend");
-  observer.setOptions({ ...query("ja"), enabled: true });
-  await settle();
+  const other = queryModules({ reportLocale: async (locale) => { calls.push(locale); return { locale }; } }, { nativeClient: true });
+  t.after(() => other.client.clear());
+  await other.client.fetchQuery(other.load("settings").reportLocaleQuery("ja"));
   assert.deepEqual(calls.slice(-2), ["ja", "ja"]);
 });

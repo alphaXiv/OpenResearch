@@ -52,7 +52,7 @@ test("file buffers preserve line endings and only conflict after a dirty disk ch
 
 test("discard confirmation protects blur-save until confirmed or canceled", async () => {
   for (const answer of [false, true]) {
-    const pending = confirmFileDiscard("Discard?");
+    const pending = confirmFileDiscard("Discard?", globalThis.__fileSyncShowConfirm);
     assert.equal(fileSync.confirmingFileDiscard, true);
     assert.equal(dialogOptions.description, "Discard?");
     assert.equal(dialogOptions.destructive, true);
@@ -63,7 +63,7 @@ test("discard confirmation protects blur-save until confirmed or canceled", asyn
   }
 
   dialogError = new Error("dialog unavailable");
-  await assert.rejects(confirmFileDiscard("Discard?"), dialogError);
+  await assert.rejects(confirmFileDiscard("Discard?", globalThis.__fileSyncShowConfirm), dialogError);
   assert.equal(fileSync.confirmingFileDiscard, false);
   dialogError = null;
 });

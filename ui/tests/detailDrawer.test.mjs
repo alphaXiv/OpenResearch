@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -29,7 +30,7 @@ const mocks = {
   "lucide-react": { ChartLine: () => null, ChevronDown: () => null, CircleStop: () => null, ExternalLink: () => null, ScrollText: () => null },
 };
 const exports = {};
-new Function("require", "exports", compiled)((name) => mocks[name] ?? require(name), exports);
+new Function("require", "exports", compiled)(withWorkspaceMocks((name) => mocks[name] ?? require(name)), exports);
 const props = {
   experiment: { id: "experiment-a", projectId: "project-a", slug: "example" },
   project: {},

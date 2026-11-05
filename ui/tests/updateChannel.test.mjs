@@ -1,3 +1,5 @@
+import { workspaceDom, mockWorkspace } from "./workspaceMocks.mjs";
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -43,7 +45,10 @@ function updates(initialChannel = "stable", fail = false) {
     showConfirmDialog(options) { confirmations.push(options); dialogs.showConfirmDialog(options); },
     Button: "button", Switch: "switch", InstallCliRow: "install", LoadingRow: "loading", Spinner: "spinner",
   };
-  new Function("require", "exports", ...Object.keys(bindings), compiled)(require, exports, ...Object.values(bindings));
+  bindings.useWorkspace = () => mockWorkspace(bindings);
+  bindings.useContext = () => workspaceDom;
+  bindings.WorkspaceDomContext = {};
+  new Function("require", "exports", ...Object.keys(bindings), compiled)(withWorkspaceMocks(require), exports, ...Object.values(bindings));
   return {
     render() { cursor = 0; return elements(exports.UpdatesTab()); },
     requests, dialogs, confirmations,

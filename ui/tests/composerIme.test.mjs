@@ -12,11 +12,11 @@ function textareaCallback(editor, name) {
     : file;
   let callback;
   function visit(node) {
-    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(source) === "textarea") {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(source) === (editor ? "textarea" : "ComposerEditor")) {
       const attributes = node.attributes.properties;
-      const target = attributes.some(attribute => ts.isJsxAttribute(attribute)
-        && attribute.name.text === (editor ? "value" : "ref")
-        && attribute.initializer?.expression?.getText(source) === (editor === "plan" ? "note" : editor ? "editDraft" : "composerRef"));
+      const target = !editor || attributes.some(attribute => ts.isJsxAttribute(attribute)
+        && attribute.name.text === "value"
+        && attribute.initializer?.expression?.getText(source) === (editor === "plan" ? "note" : "editDraft"));
       if (target) callback = attributes.find(attribute => attribute.name?.text === name)?.initializer.expression;
     }
     ts.forEachChild(node, visit);
@@ -35,18 +35,33 @@ function composer(editor, overrides = {}, platform = "mac") {
     composingRef: { current: false }, skillMenuOpen: false, mentionMenuOpen: false, bashMode: false,
     activeSkillIdx: 0, selectableSkillIndices: [0], skillMatches: ["skill"], activeMentionIdx: 0, mentionMatches: ["file"], mentionQuery: "file",
     setSkillIdx: record("skillIndex"), pickSkill: record("skill"), setMentionIdx: record("mentionIndex"),
-    pickFileMention: record("mention"), setSkillMenuDismissed: record("dismiss"),
+    pickMention: record("mention"), setSkillMenuDismissed: record("dismiss"),
     deleteCommandBehindCaret: record("deleteChip"), runShell: record("shell"), send: record("send"),
     submit: record("submit"), submitRevision: record("submit"), setEditDraft: record("edit"),
     setNote: record("note"), setRevising: record("revising"), ...overrides,
   };
   const evaluate = name => new Function(...Object.keys(bindings), `return (${textareaCallback(editor, name)})`)(...Object.values(bindings));
   const keydown = evaluate("onKeyDown");
+  // The composer editor drops composing keys before its handlers, then sends a
+  // plain Enter its key handler left alone.
+  const submit = editor ? null : evaluate("onSubmit");
   return {
     calls, evaluate,
     get stopped() { return stopped; },
     press(key = "Enter", nativeEvent = {}, modifiers = {}) {
       stopped = false;
+      if (!editor) {
+        const event = { key, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, isComposing: false, keyCode: 13, ...nativeEvent, ...modifiers,
+          defaultPrevented: false,
+          stopPropagation: () => { stopped = true; },
+          preventDefault: () => { event.defaultPrevented = true; calls.push(["preventDefault"]); } };
+        keydown(event);
+        if (!event.defaultPrevented && key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          submit(event);
+        }
+        return;
+      }
       keydown({ key, shiftKey: false, metaKey: false, ctrlKey: false, ...modifiers,
         stopPropagation: () => { stopped = true; },
         nativeEvent: { key, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...modifiers, isComposing: false, keyCode: 13, ...nativeEvent }, preventDefault: record("preventDefault") });
@@ -54,7 +69,7 @@ function composer(editor, overrides = {}, platform = "mac") {
   };
 }
 
-for (const editor of [false, true, "plan"]) {
+for (const editor of [true, "plan"]) {
   for (const nativeEvent of [{ isComposing: true }, { keyCode: 229 }]) {
     test(`${editor === "plan" ? "plan revision" : editor ? "edit/resend" : "composer"} leaves IME Enter to the input method: ${JSON.stringify(nativeEvent)}`, () => {
       const input = composer(editor);
@@ -65,15 +80,19 @@ for (const editor of [false, true, "plan"]) {
       assert.deepEqual(input.calls, [["preventDefault"], editor ? ["submit"] : ["send", { queue: false }]]);
     });
   }
-
-  test(`${editor === "plan" ? "plan revision" : editor ? "edit/resend" : "composer"} preserves Shift+Enter`, () => {
-    const input = composer(editor);
-    input.press("Enter", {}, { shiftKey: true });
-    assert.deepEqual(input.calls, []);
-  });
 }
 
 for (const editor of [false, true, "plan"]) {
+  test(`${editor === "plan" ? "plan revision" : editor ? "edit/resend" : "composer"} sends on Enter and preserves Shift+Enter`, () => {
+    const input = composer(editor);
+    input.press("Enter", {}, { shiftKey: true });
+    assert.deepEqual(input.calls, []);
+    input.press();
+    assert.deepEqual(input.calls, [["preventDefault"], editor ? ["submit"] : ["send", { queue: false }]]);
+  });
+}
+
+for (const editor of [true, "plan"]) {
   test(`IME Escape cannot bubble to the stop-turn shortcut (${editor})`, () => {
     const input = composer(editor, { skillMenuOpen: true });
     for (const nativeEvent of [{ isComposing: true }, { keyCode: 229 }]) {
@@ -81,29 +100,6 @@ for (const editor of [false, true, "plan"]) {
       assert.equal(input.stopped, true);
       assert.deepEqual(input.calls, []);
     }
-  });
-}
-
-test("composition ending before WebKit's confirming keydown does not submit", () => {
-  const input = composer(false);
-  input.evaluate("onCompositionStart")();
-  input.press();
-  assert.deepEqual(input.calls, []);
-  input.evaluate("onCompositionEnd")();
-  input.press("Enter", { keyCode: 229 });
-  assert.deepEqual(input.calls, []);
-  input.press();
-  assert.deepEqual(input.calls, [["preventDefault"], ["send", { queue: false }]]);
-});
-
-for (const menu of ["skillMenuOpen", "mentionMenuOpen"]) {
-  test(`IME keys do not activate ${menu} shortcuts`, () => {
-    const input = composer(false, { [menu]: true });
-    for (const key of ["Enter", "Tab", "ArrowDown", "ArrowUp", "Escape", "Backspace"]) {
-      input.press(key, { isComposing: true });
-      input.press(key, { keyCode: 229 });
-    }
-    assert.deepEqual(input.calls, []);
   });
 }
 
@@ -185,7 +181,7 @@ test("Enter on typed unsupported compact and its alias silently does nothing", a
   }
 });
 
-test("activating Goal removes its token without moving the caret behind newly typed text", async () => {
+test("activating Goal removes its token in one editor edit", async () => {
   const { removeSlashCommand } = await import("../src/composerCommands.ts");
   let activation;
   function find(node) {
@@ -198,26 +194,16 @@ test("activating Goal removes its token without moving the caret behind newly ty
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText;
   const calls = [];
-  let frame;
-  const textarea = { value: "/goal", focus: () => calls.push("focus"),
-    setSelectionRange: (...range) => calls.push(range) };
   const bindings = {
-    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
-    removeSlashCommand, composerRef: { current: textarea },
-    setDraft: (text) => { textarea.value = text; },
+    removeSlashCommand,
+    composerRef: { current: { setText: (...edit) => calls.push(["setText", ...edit]) } },
+    setDraft: (text) => calls.push(["draft", text]),
     setSkillMenuDismissed: () => {},
     runComposerCommand: (name) => { calls.push(name); return false; },
-    setComposerCursor: () => {},
-    window: { requestAnimationFrame: (callback) => { frame = callback; } },
   };
   const activate = new Function(...Object.keys(bindings), `${compiled}\nreturn activate;`)(...Object.values(bindings));
-  activate("goal", "/goal", { start: 0, end: 5, query: "goal" });
-  assert.equal(textarea.value, "");
-  assert.deepEqual(calls, ["goal"]);
-  textarea.value = "R";
-  frame();
-  assert.equal(textarea.value, "R");
-  assert.deepEqual(calls, ["goal"]);
+  activate("goal", "/goal now", { start: 0, end: 5, query: "goal" });
+  assert.deepEqual(calls, [["draft", "now"], "goal", ["setText", "now", 0]]);
 });
 
 test("ACP Plan configuration failure keeps the draft and prevents sending", async () => {

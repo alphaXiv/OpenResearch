@@ -11,17 +11,6 @@ import {
   splitCommandTokens,
 } from "../src/composerCommands.ts";
 
-test("a selected skill can be removed with its trailing composer spaces", () => {
-  const selected = insertSlashCommand("/deb", { start: 0, end: 4, query: "deb" }, "debate", 2);
-  const tokenEnd = selected.text.trimEnd().length;
-  const context = slashCommandContext(selected.text, tokenEnd);
-  assert.ok(context);
-  assert.deepEqual(removeSlashCommand(selected.text, { ...context, end: selected.cursor }), {
-    text: "",
-    cursor: 0,
-  });
-});
-
 const ALL_COMMANDS = ["compact", "copy", "export", "goal", "model", "new", "plan", "resume", "side"];
 
 test("every harness gets the same commands ahead of its skills", () => {
@@ -216,19 +205,6 @@ test("picking a command replaces the token in place", () => {
   assert.deepEqual(insertSlashCommand(tail, slashCommandContext(tail, 11), "write"), {
     text: "look at /write ",
     cursor: 15,
-  });
-});
-
-test("skill insertion can reserve its full hover margin", () => {
-  const text = "look at /wr now";
-  assert.deepEqual(insertSlashCommand(text, slashCommandContext(text, 11), "write", 2), {
-    text: "look at /write  now",
-    cursor: 16,
-  });
-  const indented = "\t/wr now";
-  assert.deepEqual(insertSlashCommand(indented, slashCommandContext(indented, 4), "write", 2), {
-    text: "\t/write  now",
-    cursor: 9,
   });
 });
 

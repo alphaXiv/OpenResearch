@@ -1,15 +1,17 @@
+import { useContext, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Popover } from "@base-ui/react/popover";
 import { formatForDisplay } from "@tanstack/react-hotkeys";
 import { PanelLeft } from "lucide-react";
-import { useState } from "react";
-import { applyUpdate } from "../api";
+
 import { appHotkeys } from "../hotkeys";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { useRuntime } from "../RemoteRuntime";
 import { setQueryDevtoolsOpen, useQueryDevtoolsOpen } from "./QueryDevtools";
-import { useRestartApp, useUpdateStatus } from "./UpdateBanner";
+import { BuildNotes, describeChanges, releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { BrandMark } from "./Wordmark";
 import { Badge, Button, IconButton, Switch, Tooltip } from "./ui";
 
@@ -37,6 +39,11 @@ export function RailHeader({ onCollapse }: { onCollapse?: () => void }) {
 
 /** The logo and name, marked when this isn't a stable release; hovering shows the version and its update state. */
 function Brand() {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { applyUpdate } = useWorkspace().api;
+  const { showFormDialog } = useWorkspace().dialogs;
+
   const runtime = useRuntime();
   const { status, apply } = useUpdateStatus(runtime.kind === "local");
   const restart = useRestartApp(status);
@@ -58,6 +65,8 @@ function Brand() {
     : status.restartRequired && status.canRestart ? { label: restart.restarting ? m.update_banner_restarting() : m.update_banner_restart(), run: restart.restart }
       : status.selfUpdates ? { label: checking ? m.chat_working() : status.updateAvailable ? m.settings_update_now() : m.settings_check_now(), run: check }
         : null;
+  const currentTag = status && !canary && !dev ? `v${status.current}` : null;
+  const changes = status && (status.updateAvailable || status.restartRequired) ? describeChanges(status.changes) : null;
   const shownError = restart.error ? m.update_banner_restart_failed({ error: restart.error }) : error;
 
   return (
@@ -78,20 +87,27 @@ function Brand() {
             <span className={`whitespace-nowrap ${badge ? "me-1.5" : ""}`}>OpenResearch</span>
           </span>
         </Popover.Trigger>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner side="bottom" align="start" sideOffset={6} collisionPadding={8} className="z-50">
             <Popover.Popup aria-label="OpenResearch" className="w-max min-w-56 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-background p-3 text-sm text-text shadow-menu outline-none">
               <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2">
                 <dt className="text-subtext">{m.settings_page_version()}</dt>
-                <dd className="m-0 truncate">{ltr(status?.current ?? runtime.version)}</dd>
+                <dd className="m-0 flex items-center justify-between gap-3">
+                  <span className="truncate">{ltr(status?.current ?? runtime.version)}</span>
+                  {canary
+                    ? <button type="button" className="shrink-0 cursor-pointer text-subtext underline" onClick={() => showFormDialog(m.update_notes_title(), () => <BuildNotes />)}>{m.update_notes_open()}</button>
+                    : currentTag && <ReleaseNotesLink tag={currentTag} />}
+                </dd>
                 {status && <>
                   <dt className="text-subtext">{m.settings_page_latest()}</dt>
                   <dd className="m-0 flex items-center justify-between gap-3">
                     <span className="truncate">{ltr(status.latest ?? "—")}</span>
+                    {status.updateAvailable && status.latestTag && <ReleaseNotesLink tag={status.latestTag} />}
                     {action && <Button size="small" disabled={busy} onClick={action.run}>{action.label}</Button>}
                   </dd>
                 </>}
               </dl>
+              {changes && <p className="mt-2 mb-0 text-subtext">{changes}</p>}
               {shownError && <p role="alert" className="mt-2 mb-0 text-accent-red">{shownError}</p>}
               {import.meta.env.DEV && <DevtoolsSwitch />}
             </Popover.Popup>
@@ -99,6 +115,14 @@ function Brand() {
         </Popover.Portal>
       </Popover.Root>
     </DirectionProvider>
+  );
+}
+
+function ReleaseNotesLink({ tag }: { tag: string }) {
+  return (
+    <a href={releaseNotesUrl(tag)} target="_blank" rel="noreferrer" className="shrink-0 text-subtext underline">
+      {m.settings_release_notes()}
+    </a>
   );
 }
 

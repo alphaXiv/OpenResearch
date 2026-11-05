@@ -111,6 +111,9 @@ workflows.
 ## Commits and pull requests
 
 - Title with a type, optionally scoped: `feat:`, `fix(ui):`, `chore:`, `ci:`.
+  After it, name the change in a few words, like
+  `feat(desktop): in-app remote machine switcher`; the description carries
+  the why.
 - Credit each model with `Assisted-by: claude-opus-5.5` (or `gpt-6.1-sol`,
   one trailer per model). Never add `Co-authored-by` for a model.
 - Say why and what is surprising; the reviewer reads the diff, so don't list

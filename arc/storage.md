@@ -44,9 +44,10 @@ and a terminal `orx` on the same machine would open different databases.
 
 A SQLite database in WAL mode is orx's truth for everything that is not code:
 projects, the experiment records, runs and their backend descriptors, chat
-sessions, messages and turn leases, wake-up registrations, UI and workspace
-state. Many short-lived processes open it concurrently, each with a busy
-timeout; WAL lets readers proceed while one writer commits.
+sessions, messages and turn leases, wake-up registrations, chat delegations
+and subscriptions, UI and workspace state. Many short-lived processes open it
+concurrently, each with a busy timeout; WAL lets readers proceed while one
+writer commits.
 
 **The schema only grows.** Every open of the store applies the whole schema:
 tables are created if missing, and each added column is an `ALTER TABLE ADD
@@ -152,6 +153,10 @@ traffic:
   public key to their account so OpenResearch boxes accept their SSH: by
   default `~/.ssh/id_ed25519.pub`, creating the pair if it is missing. The
   private key never leaves the machine.
+- **Remote network check.** Setting up Claude Code asks `ipaddress.to` from the remote
+  machine for its public IP and hosting classification. Only the source IP
+  reaches that service; no account credentials or research data are sent.
+  The result is cached for five minutes and a failed lookup never blocks setup.
 - **Paper search.** Queries go to the public alphaXiv, OpenAlex, bioRxiv and
   PubMed APIs, without credentials.
 - **alphaXiv.** Sign-in is a browser trip to alphaXiv, whose identity token

@@ -161,6 +161,10 @@ pub struct ModelInfo {
     /// Whether the model accepts image input, when the catalog says (OpenCode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_input: Option<bool>,
+    /// The versioned model an unversioned alias runs today (Claude's
+    /// `opus[1m]` → `claude-opus-5-5`), which model routing joins on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
 }
 
 impl ModelInfo {
@@ -175,6 +179,7 @@ impl ModelInfo {
             default_reasoning_level: None,
             service_tiers: None,
             image_input: None,
+            resolved_model: None,
         }
     }
 

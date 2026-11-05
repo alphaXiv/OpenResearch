@@ -1,10 +1,10 @@
+import { useWorkspace } from "../workspace";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Plus, RefreshCw, SquareTerminal } from "lucide-react";
-import { listAcpHarnesses, listAcpPresets, type AcpDefinition, type Harness, type HarnessId, type HarnessSetupCommands } from "../api";
+import { type AcpDefinition, type Harness, type HarnessId, type HarnessSetupCommands } from "../api";
 import type { DialogContentProps } from "../dialog";
-import { getHarnessesQuery, getHarnessSetupCommandsQuery, refreshHarnesses } from "../queries/settings";
-import { workspaceKey } from "../queries/client";
+
 import { m } from "../paraglide/messages.js";
 import { HarnessLogo } from "./HarnessLogo";
 import { renderNote } from "./agentNote";
@@ -31,6 +31,10 @@ export function AddHarnessDialog({ initialCandidate, remote, cancel, onCustom, o
   onEdit: (definition: AcpDefinition) => void;
   onSetup: (harness: Harness, commands?: HarnessSetupCommands) => void;
 }) {
+  const { getHarnessesQuery, getHarnessSetupCommandsQuery, refreshHarnesses } = useWorkspace().queries;
+  const { workspaceKey } = useWorkspace();
+  const { listAcpHarnesses, listAcpPresets } = useWorkspace().api;
+
   const harnessQuery = useQuery(getHarnessesQuery());
   const definitions = useQuery({ queryKey: workspaceKey("getAcpHarnesses"), queryFn: listAcpHarnesses });
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());

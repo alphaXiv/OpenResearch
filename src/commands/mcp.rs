@@ -1,24 +1,31 @@
-//! `orx mcp-gate` — the plan-mode permission bridge.
+//! `orx mcp` — the orx MCP server every agent harness is given.
 //!
-//! Hidden from `--help`: it's not a user command, it's the stdio MCP server
-//! Claude Code spawns via `--mcp-config` and consults via
-//! `--permission-prompt-tool mcp__orx__approve` (see
-//! `local::harness::claude::write_mcp_config`). Every permission decision the
-//! CLI would have shown as an interactive prompt arrives here as a
-//! `tools/call`; we relay it to the running `orx up` over localhost HTTP —
-//! which auto-decides by policy or surfaces a card and *blocks until the user
-//! answers* — and hand the decision back. That held call is what turns
-//! headless plan mode into desktop-style mid-turn approvals.
+//! Hidden from `--help`: it's not a user command, it's the stdio MCP server a
+//! harness spawns from orx's config — Claude via `--mcp-config`, Codex through
+//! its thread config, OpenCode through its config file, ACP agents through
+//! `session/new`. Stdio is the one transport every harness supports (ACP
+//! requires it), so each relays here and this process forwards over localhost
+//! HTTP to the `orx up` that spawned the agent.
+//!
+//! Two tool families ride it. `approve` is Claude's permission prompt tool
+//! (`--permission-prompt-tool mcp__orx__approve`): each decision Claude would
+//! have shown interactively arrives as a `tools/call`, and `orx up` either
+//! decides by policy or surfaces a card and *blocks until the user answers*.
+//! The orchestration tools (delegate and friends) are listed and served by
+//! `orx up` itself, so this process only relays them.
 //!
 //! The wire is MCP's stdio transport: newline-delimited JSON-RPC 2.0, the same
 //! framing as `local::codex` (this end is the server). Only three methods
 //! matter — `initialize`, `tools/list`, `tools/call` — so it's hand-rolled
 //! rather than pulling in an MCP crate.
 //!
-//! Failure posture: never hang Claude and never allow by accident. Any
-//! transport or orx-side error answers `deny` with the reason; unknown methods
-//! get a JSON-RPC error; a missing env contract exits nonzero (Claude reports
-//! the server as failed and plan mode degrades to its default gating).
+//! Failure posture: never hang the agent and never allow by accident. Any
+//! transport or orx-side error answers `deny` (or a tool error) with the
+//! reason; unknown methods get a JSON-RPC error; a missing env contract exits
+//! nonzero (the harness reports the server as failed).
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -26,12 +33,14 @@ use tokio::sync::mpsc;
 
 use crate::error::{anyhow, Result};
 
-/// Env contract injected by `write_mcp_config` (values ride the MCP server's
-/// `env` block, so they survive however Claude spawns us).
+/// Env contract the harness adapters put in the server's `env` block, so the
+/// values survive however the harness spawns us. `token` is Claude's per-child
+/// permission token; `agent_token` names the chat for orchestration tools.
 struct GateEnv {
     up_port: u16,
     session_id: String,
-    token: String,
+    token: Option<String>,
+    agent_token: Option<String>,
 }
 
 impl GateEnv {
@@ -42,13 +51,23 @@ impl GateEnv {
             .ok_or_else(|| anyhow!("ORX_UP_PORT missing or invalid"))?;
         let session_id =
             std::env::var("ORX_SESSION_ID").map_err(|_| anyhow!("ORX_SESSION_ID missing"))?;
-        let token =
-            std::env::var("ORX_GATE_TOKEN").map_err(|_| anyhow!("ORX_GATE_TOKEN missing"))?;
+        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
         Ok(Self {
             up_port,
             session_id,
-            token,
+            token: var("ORX_GATE_TOKEN"),
+            agent_token: var("ORX_AGENT_TOKEN"),
         })
+    }
+
+    fn agent_request(&self, method: &str, params: Value) -> Option<Value> {
+        let token = self.agent_token.as_ref()?;
+        Some(json!({
+            "sessionId": self.session_id,
+            "token": token,
+            "method": method,
+            "params": params,
+        }))
     }
 }
 
@@ -60,6 +79,7 @@ pub async fn run() -> Result<()> {
         .connect_timeout(std::time::Duration::from_secs(3))
         .build()
         .map_err(|e| anyhow!("http client: {e}"))?;
+    let tools_url = format!("http://127.0.0.1:{}/api/internal/mcp", env.up_port);
 
     // Single writer task: tool calls are handled concurrently (Claude may
     // check several tools at once), so responses funnel through one channel
@@ -77,6 +97,9 @@ pub async fn run() -> Result<()> {
         }
     });
 
+    // A call the agent cancels, such as an interrupted `wait`, stops here too,
+    // so `orx up` does not go on to claim news nobody will read.
+    let calls: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>> = Arc::default();
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     while let Some(line) = lines.next_line().await.unwrap_or(None) {
@@ -102,18 +125,24 @@ pub async fn run() -> Result<()> {
                 ));
             }
             Some("tools/list") => {
-                let _ = out_tx.send(reply(
-                    id,
-                    json!({
-                        "tools": [{
-                            "name": "approve",
-                            "description": "Ask the orx user to approve a tool call",
-                            "inputSchema": { "type": "object", "additionalProperties": true },
-                        }]
-                    }),
-                ));
+                let mut tools = Vec::new();
+                if env.token.is_some() {
+                    tools.push(json!({
+                        "name": "approve",
+                        "description": "Ask the orx user to approve a tool call",
+                        "inputSchema": { "type": "object", "additionalProperties": true },
+                    }));
+                }
+                // An unreachable `orx up` leaves only `approve`: the agent
+                // keeps working without orchestration rather than failing.
+                if let Some(body) = env.agent_request("tools/list", json!({})) {
+                    if let Ok(listed) = relay(&http, &tools_url, body).await {
+                        tools.extend(listed["tools"].as_array().cloned().unwrap_or_default());
+                    }
+                }
+                let _ = out_tx.send(reply(id, json!({ "tools": tools })));
             }
-            Some("tools/call") => {
+            Some("tools/call") if msg.pointer("/params/name") == Some(&json!("approve")) => {
                 // Handled concurrently: a held approval must not block the next
                 // permission check (Claude can run tools in parallel).
                 let args = msg
@@ -145,6 +174,39 @@ pub async fn run() -> Result<()> {
                     ));
                 });
             }
+            Some("tools/call") => {
+                let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
+                let body = env.agent_request("tools/call", params);
+                let http = http.clone();
+                let url = tools_url.clone();
+                let out = out_tx.clone();
+                let key = id.as_ref().map(Value::to_string);
+                let running = calls.clone();
+                let finished = key.clone();
+                let call = tokio::spawn(async move {
+                    let result = match body {
+                        Some(body) => relay(&http, &url, body).await,
+                        None => Err(anyhow!("orx tools are unavailable in this session")),
+                    };
+                    let result = result.unwrap_or_else(|e| {
+                        json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true })
+                    });
+                    if let Some(key) = &finished {
+                        running.lock().unwrap().remove(key);
+                    }
+                    let _ = out.send(reply(id, result));
+                });
+                if let Some(key) = key {
+                    calls.lock().unwrap().insert(key, call.abort_handle());
+                }
+            }
+            Some("notifications/cancelled") => {
+                if let Some(key) = msg.pointer("/params/requestId").map(Value::to_string) {
+                    if let Some(call) = calls.lock().unwrap().remove(&key) {
+                        call.abort();
+                    }
+                }
+            }
             // Notifications (no id) are fire-and-forget; anything else with an
             // id gets a proper method-not-found so the client never stalls.
             _ => {
@@ -168,8 +230,8 @@ fn reply(id: Option<Value>, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "result": result })
 }
 
-/// POST the permission request to `orx up` and return its decision JSON.
-/// The response body is the decision verbatim (`{"behavior": ...}`).
+/// POST one request to `orx up` and return its JSON body; an error status
+/// carries the server's `error` text.
 async fn relay(http: &reqwest::Client, url: &str, body: Value) -> Result<Value> {
     let resp = http
         .post(url)
@@ -177,10 +239,13 @@ async fn relay(http: &reqwest::Client, url: &str, body: Value) -> Result<Value> 
         .send()
         .await
         .map_err(|e| anyhow!("{e}"))?;
-    if !resp.status().is_success() {
-        return Err(anyhow!("orx up answered {}", resp.status()));
+    let status = resp.status();
+    let body = resp.json::<Value>().await.map_err(|e| anyhow!("{e}"))?;
+    if !status.is_success() {
+        let reason = body["error"].as_str().unwrap_or("no reason given");
+        return Err(anyhow!("orx up answered {status}: {reason}"));
     }
-    resp.json::<Value>().await.map_err(|e| anyhow!("{e}"))
+    Ok(body)
 }
 
 pub async fn run_antigravity() -> Result<()> {
@@ -306,6 +371,7 @@ async fn antigravity_decision(input: &str) -> Result<Value> {
         .pointer("/toolCall/args")
         .ok_or_else(|| anyhow!("missing tool arguments"))?;
     let env = GateEnv::from_env()?;
+    let token = env.token.ok_or_else(|| anyhow!("ORX_GATE_TOKEN missing"))?;
     if workspace_read(name, args, &payload) {
         return Ok(json!({"decision": "allow"}));
     }
@@ -316,7 +382,7 @@ async fn antigravity_decision(input: &str) -> Result<Value> {
     let decision = relay(
         &http,
         &format!("http://127.0.0.1:{}/api/internal/permissions", env.up_port),
-        json!({"sessionId":env.session_id,"token":env.token,"toolName":tool,"toolInput":input}),
+        json!({"sessionId":env.session_id,"token":token,"toolName":tool,"toolInput":input}),
     )
     .await?;
     Ok(match decision.get("behavior").and_then(Value::as_str) {

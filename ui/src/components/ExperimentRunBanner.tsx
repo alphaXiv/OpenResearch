@@ -1,6 +1,7 @@
+import { useWorkspace } from "../workspace";
 import { ChevronRight, CircleStop, FlaskConical, ScrollText } from "lucide-react";
 import { useEffect, useState } from "react";
-import { cancelRun, fmtDuration, type ChatActiveRun } from "../api";
+import { fmtDuration, type ChatActiveRun } from "../api";
 import { m } from "../paraglide/messages.js";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button } from "./ui";
@@ -9,6 +10,8 @@ type OpenTarget = (id: string, intent: TabOpenIntent) => void;
 const BANNER_CLASS = "mb-2.5 rounded-lg border border-border bg-accent-green-subtle px-3 py-2 text-sm text-text";
 
 function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; onOpenRun?: OpenTarget; onOpenExperiment?: OpenTarget }) {
+  const { cancelRun } = useWorkspace().api;
+
   const { run, experimentName } = item;
   const [now, setNow] = useState(Date.now);
   const [pending, setPending] = useState(false);

@@ -1,3 +1,4 @@
+import { WorkspaceDomContext } from "../../WorkspaceDom";
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { createContext, useContext, useEffect, useState, type ComponentProps } from "react";
 import { EscapeScope } from "../EscapeScope";
@@ -26,9 +27,11 @@ export function Dialog({ error = false, open, children, ...props }: BaseDialog.R
 }
 
 export function DialogContent({ className, children, ...props }: StringClass<BaseDialog.Popup.Props>) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
   const error = useContext(DialogErrorContext);
   return (
-    <BaseDialog.Portal>
+    <BaseDialog.Portal container={portalContainer}>
       <BaseDialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop transition-opacity duration-150 data-ending-style:opacity-0 data-starting-style:opacity-0" />
       <BaseDialog.Viewport className="fixed inset-0 z-200 flex items-center justify-center p-5">
         <BaseDialog.Popup

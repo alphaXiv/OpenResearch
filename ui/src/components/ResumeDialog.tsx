@@ -1,11 +1,22 @@
+import {
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+
 import { timeAgo, type ChatSession, type NativeChat } from "../api";
 import { type DialogContentProps } from "../dialog";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { listAllChatSessionsQuery, listNativeChatsQuery } from "../queries/chat";
-import { listProjectsQuery } from "../queries/projects";
+
 import { HarnessLogo } from "./HarnessLogo";
 import { harnessLabel } from "./ModelPicker";
 import { DialogContent, Input, LoadingRow, MenuItem, Spinner } from "./ui";
@@ -50,6 +61,10 @@ export function ResumeDialog({
   onImport: (chat: NativeChat) => void;
   cancelRef: RefObject<(() => void) | null>;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { listAllChatSessionsQuery, listProjectsQuery, listNativeChatsQuery } = useWorkspace().queries;
+
   useEffect(() => {
     cancelRef.current = cancel;
     return () => { if (cancelRef.current === cancel) cancelRef.current = null; };
@@ -110,8 +125,8 @@ export function ResumeDialog({
           role="combobox"
           aria-autocomplete="list"
           aria-expanded={matches.length > 0}
-          aria-controls="resume-options"
-          aria-activedescendant={matches[selected] ? `resume-option-${matches[selected].key}` : undefined}
+          aria-controls={elementId("resume-options")}
+          aria-activedescendant={matches[selected] ? elementId(`resume-option-${matches[selected].key}`) : undefined}
           onChange={(event) => {
             setFilter(event.target.value);
             setActiveIndex(0);
@@ -132,7 +147,7 @@ export function ResumeDialog({
         />
       </div>
       <div
-        id="resume-options"
+        id={elementId("resume-options")}
         className="min-h-0 flex-1 overflow-y-auto p-1.5"
         role={matches.length > 0 ? "listbox" : undefined}
         aria-label={matches.length > 0 ? m.resume_dialog_title() : undefined}
@@ -154,7 +169,7 @@ export function ResumeDialog({
             const row = (
               <MenuItem
                 key={entry.key}
-                id={`resume-option-${entry.key}`}
+                id={elementId(`resume-option-${entry.key}`)}
                 ref={index === selected ? activeRef : undefined}
                 type="button"
                 role="option"

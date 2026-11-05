@@ -1,3 +1,4 @@
+import { workspaceDom } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -15,7 +16,7 @@ function load(file, mocks, globals = {}) {
   }).outputText;
   const exports = {};
   new Function("require", "exports", ...Object.keys(globals), code)(
-    (name) => name === "./EscapeScope" ? { EscapeScope: "escape-scope" } : mocks[name] ?? require(name), exports, ...Object.values(globals),
+    (name) => name === "../WorkspaceDom" ? { WorkspaceDomContext: {} } : name === "./EscapeScope" ? { EscapeScope: "escape-scope" } : mocks[name] ?? require(name), exports, ...Object.values(globals),
   );
   return exports;
 }
@@ -28,6 +29,7 @@ function hooks() {
     react: {
       ...React,
       useEffect: () => {},
+      useContext: () => workspaceDom,
       useRef: () => ({ current: null }),
       useState: (initial) => {
         const index = cursor++;
@@ -43,63 +45,69 @@ function nodes(tree) {
   return [tree, ...React.Children.toArray(tree.props.children).flatMap(nodes)];
 }
 
+const Menu = Object.fromEntries(["Root", "Trigger", "Portal", "Positioner", "Popup", "Item", "RadioGroup", "RadioItem", "RadioItemIndicator", "Separator"].map((name) => [name, `menu-${name}`]));
+
 for (const corner of [true, false]) {
-  test(`local ${corner ? "home" : "sidebar"} control opens hosts and returns from SSH config`, () => {
+  test(`${corner ? "home" : "sidebar"} machine menu selects retained servers and configures the owning laptop`, () => {
     const state = hooks();
     const dialogs = [];
     const configurations = [];
+    const selections = [];
+    const owner = { queryClient: {} };
+    const dialogController = { showCustomDialog: (options) => dialogs.push(options) };
+    const session = { id: "server", host: "research", status: "connected" };
+    const machines = { owner, activeId: "local", canSwitch: true, sessions: [session], selectLocal: () => selections.push("local"), selectRemote: (value) => selections.push(value) };
     const { WorkspaceConnection } = load("components/WorkspaceConnection.tsx", {
       react: state.react,
-      "../dialog": { showCustomDialog: (options) => dialogs.push(options) },
-      "../i18n": { ltr: (text) => text },
+      "../workspace": { useWorkspace: () => ({ dialogs: dialogController, api: {} }) },
+      "../machineSelection": { useMachines: () => machines },
+      "@base-ui/react/menu": { Menu },
+      "@base-ui/react/direction-provider": { DirectionProvider: "direction" },
+      "../i18n": { ltr: String },
       "../paraglide/messages.js": messages,
       "./RemoteHostDialog": { RemoteHostDialog: "HostDialog" },
-      "./RemoteStatus": { RemoteStatus: "RemoteStatus" },
+      "./RemoteStopDialog": { RemoteStopDialog: "StopDialog" },
       "./RemoteIcon": { RemoteIcon: "RemoteIcon" },
-      "./SshConfigDialog": { showSshConfigDialog: (onClose) => configurations.push(onClose) },
+      "./SshConfigDialog": { showSshConfigDialog: (...args) => configurations.push(args) },
       "./Wordmark": { BrandMark: "BrandMark" },
       "./UpdateBanner": { useUpdateStatus: () => ({ status: null }) },
-      "./ui": { Button: "button", IconButton: "button" },
+      "./ui": { Button: "button", MenuItem: "item", Tooltip: "tooltip" },
     });
-    const runtime = { kind: "local", version: "test" };
-    const render = () => { state.reset(); return nodes(WorkspaceConnection({ runtime, corner })); };
-    assert.equal(dialogs.length, 0);
-    render().find((node) => node.type === "button" && node.props["aria-haspopup"] === "dialog").props.onClick();
+    const render = () => { state.reset(); return nodes(WorkspaceConnection({ runtime: { kind: "local", version: "test" }, corner })); };
+    const tree = render();
+    assert.equal(tree.find((node) => node.type === Menu.Trigger).props["aria-label"], "remote_machine_switcher");
+    assert.equal(tree.find((node) => node.type === Menu.RadioGroup).props.value, "local");
+    tree.find((node) => node.type === Menu.RadioItem && node.props.value === "server").props.onClick();
+    tree.find((node) => node.type === Menu.RadioItem && node.props.value === "local").props.onClick();
+    assert.deepEqual(selections, [session, "local"]);
+    tree.find((node) => node.type === Menu.Item && node.props.children === "remote_dialog_title").props.onClick();
     assert.equal(dialogs[0].component, "HostDialog");
-    assert.equal(dialogs[0].onCancel, "close");
     dialogs[0].props.onConfigureSsh();
-    assert.equal(configurations.length, 1);
-    configurations[0]();
-    assert.equal(dialogs[1].component, "HostDialog");
-
-    state.reset();
-    const remote = { kind: "ssh", session: { host: "research" } };
-    const status = WorkspaceConnection({ runtime: remote, corner });
-    assert.equal(status.type, "RemoteStatus");
-    assert.equal(status.props.runtime, remote);
-    assert.equal(status.props.corner, corner);
+    assert.equal(configurations[0][0], dialogController);
+    assert.equal(configurations[0][2], owner);
+    configurations[0][1]();
+    assert.equal(dialogs.length, 2);
   });
 }
 
 for (const kind of ["local", "ssh"]) {
   for (const scenario of ["loading", "error", "onboarding", "no-projects", "projects"]) {
-    test(`${kind} project home connection control during ${scenario}`, () => {
-      const runtime = { kind, version: "test" };
+    test(`${kind} project home always offers machine selection during ${scenario}`, () => {
+      const runtime = { kind, version: "test", ...(kind === "ssh" ? { session: { host: "research" } } : {}) };
       const { ProjectsPage } = load("routePages.tsx", {
         react: hooks().react,
-        "./queries/client": {},
+        "./workspace": { useWorkspace: () => ({ queries: { listProjectsQuery: () => ({ kind: "projects" }), getUiStateQuery: () => ({ kind: "state" }) } }) },
         "@tanstack/react-query": { useQuery: ({ kind }) => ({
           data: scenario === "loading" || scenario === "error" ? undefined
             : kind === "projects" ? (scenario === "projects" ? [{ id: "p" }] : []) : { onboardingCompleted: scenario !== "onboarding" },
           error: scenario === "error" ? new Error("offline") : null,
         }) },
-        "./queries/projects": { listProjectsQuery: () => ({ kind: "projects" }), getUiStateQuery: () => ({ kind: "state" }) },
         "@tanstack/react-router": { useNavigate: () => () => {}, useRouteContext: () => ({ queryClient: {} }) },
         "./RemoteRuntime": { useRuntime: () => runtime },
-        "./demoSessionState": {}, "./routeResume": {}, "./workspacePersistence": {}, "./panelLayout": {},
+        "./demoSessionState": {}, "./routeResume": {},
         "./paraglide/messages.js": messages,
         "./components/Onboarding": { Onboarding: "Onboarding" },
-        "./components/ProjectsHome": { ProjectsHome: "ProjectsHome", ProjectsEmptyState: "ProjectsEmptyState" },
+        "./components/ProjectsHome": { ProjectsEmptyState: "ProjectsEmptyState" },
         "./components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
         "./components/WorkspaceConnection": { WorkspaceConnection: "WorkspaceConnection" },
         "./components/UpdateBanner": { UpdateBanner: "UpdateBanner", useUpdateStatus: () => ({}) },
@@ -107,89 +115,55 @@ for (const kind of ["local", "ssh"]) {
         "./components/ui": {},
       });
       const connection = nodes(ProjectsPage()).find((node) => node.type === "WorkspaceConnection");
-      // The local corner belongs to the project home: it stays away while the
-      // first-run walkthrough runs and before the state has loaded.
-      const expected = kind === "ssh" || !["loading", "error", "onboarding"].includes(scenario);
-      if (!expected) {
-        assert.equal(connection, undefined);
-        return;
-      }
-      assert.ok(connection);
       assert.equal(connection.props.runtime, runtime);
       assert.equal(connection.props.corner, true);
     });
   }
 }
 
-for (const [desktop, outcome] of [
-  [false, "success"], [false, "failure"], [false, "popup-blocked"],
-  [true, "success"], [true, "failure"],
-]) {
-  test(`SSH host selection in ${desktop ? "desktop" : "browser"}: ${outcome}`, async () => {
+for (const outcome of ["success", "failure"]) {
+  test(`SSH onboarding switches inside the app: ${outcome}`, async () => {
     const state = hooks();
     const calls = [];
     let finishConnection;
+    const session = { id: "remote", host: "research", gatewayUrl: "http://localhost:4910/" };
+    const owner = { queryClient: {}, queries: { getSshSettingsQuery: () => ({ kind: "hosts" }), listRemoteSessionsQuery: () => ({ kind: "sessions" }) }, api: { createRemoteSession: async (...args) => {
+      calls.push(["connect", ...args]);
+      await new Promise((resolve) => { finishConnection = resolve; });
+      if (outcome === "failure") throw new Error("connection failed");
+      return session;
+    } } };
     const { RemoteHostDialog } = load("components/RemoteHostDialog.tsx", {
       react: state.react,
-      "react-dom": { createPortal: (tree) => tree },
+      "../machineSelection": { useMachines: () => ({ owner, selectRemote: (value) => calls.push(["select", value]) }) },
       "@tanstack/react-query": {
-        useQuery: ({ kind }) => ({ data: kind === "hosts" ? { hosts: [{ host: "research" }], defaultHost: null } : [] }),
-        useMutation: () => ({ mutateAsync: async (args) => {
-          calls.push(["connect", ...args]);
-          await new Promise((resolve) => { finishConnection = resolve; });
-          if (outcome === "failure") throw new Error("connection failed");
-          return { gatewayUrl: "http://localhost:4910/" };
-        } }),
+        useQuery: ({ kind }, client) => { assert.equal(client, owner.queryClient); return { data: kind === "hosts" ? { hosts: [{ host: "research" }], defaultHost: null } : [] }; },
+        useMutation: ({ mutationFn }, client) => { assert.equal(client, owner.queryClient); return { mutateAsync: mutationFn }; },
       },
       "lucide-react": { SlidersHorizontal: "Icon", X: "Icon" },
-      "../api": {}, "../paraglide/messages.js": messages,
-      "../i18n": { ltr: (text) => text },
+      "../paraglide/messages.js": messages,
+      "../i18n": { ltr: String },
       "./ProgressBar": { ProgressBar: "ProgressBar" },
       "../paraglide/runtime.js": { getLocale: () => "en" },
-      "../queries/settings": { getSshSettingsQuery: () => ({ kind: "hosts" }), listRemoteSessionsQuery: () => ({ kind: "sessions" }) },
       "../theme": { getThemePreference: () => "dark" },
-      "./ui": {
-        Button: "button", IconButton: "button", Input: "input", Spinner: "Spinner",
-        showAlert: (...args) => calls.push(["alert", ...args]),
-      },
-    }, {
-      document: { body: {} },
-      window: { ...(desktop ? { __ORX_DESKTOP__: true } : {}), open: (...args) => {
-        calls.push(["open", ...args]);
-        return desktop || outcome === "popup-blocked" ? null : {
-          location: { replace: (url) => calls.push(["navigate", url]) },
-          close: () => calls.push(["close-tab"]),
-        };
-      } },
-    });
+      "./ui": { Button: "button", IconButton: "button", Input: "input", Spinner: "Spinner" },
+    }, { window: { open: () => { throw new Error("Unexpected browser popup"); } } });
     const props = {
       cancel: () => calls.push(["close-dialog"]),
-      confirm: (openRemote) => Promise.resolve(openRemote()).then(
-        () => calls.push(["close-dialog"]),
-        (error) => calls.push(["error", error.message]),
-      ),
-      isDisabled: false,
-      onConfigureSsh: () => {},
+      confirm: (openRemote) => Promise.resolve(openRemote()).then(() => calls.push(["close-dialog"]), (error) => calls.push(["error", error.message])),
+      isDisabled: false, onConfigureSsh: () => {},
     };
     const render = () => { state.reset(); return RemoteHostDialog(props); };
     nodes(render()).find((node) => node.type === "button" && nodes(node).some((child) => child.props.children === "research")).props.onClick();
-    if (!desktop) assert.deepEqual(calls.shift(), ["open", "/remote-launch", "_blank"]);
-    if (outcome === "popup-blocked") {
-      assert.deepEqual(calls, [["alert", "remote_popup_blocked", "error"]]);
-    } else {
-      assert.deepEqual(calls, [["connect", "research", { theme: "dark", locale: "en" }]]);
-      props.isDisabled = true;
-      const pending = nodes(render());
-      assert.ok(pending.some((node) => node.props.role === "status" && nodes(node).some((child) => child.type === "ProgressBar")));
-      assert.ok(pending.filter((node) => node.type === "button" || node.type === "input").every((node) => node.props.disabled));
-
-      finishConnection();
-      await new Promise(setImmediate);
-      assert.deepEqual(calls.slice(1), outcome === "success"
-        ? [desktop ? ["open", "http://localhost:4910/", "_blank"] : ["navigate", "http://localhost:4910/"], ["close-dialog"]]
-        : [...(desktop ? [] : [["close-tab"]]), ["error", "connection failed"]]);
-      assert.ok(!nodes(render()).some((node) => node.type === "ProgressBar"));
-    }
+    assert.deepEqual(calls, [["connect", "research", { theme: "dark", locale: "en" }]]);
+    props.isDisabled = true;
+    const pending = nodes(render());
+    assert.ok(pending.some((node) => node.props.role === "status" && nodes(node).some((child) => child.type === "ProgressBar")));
+    assert.ok(pending.filter((node) => node.type === "button" || node.type === "input").every((node) => node.props.disabled));
+    finishConnection();
+    await new Promise(setImmediate);
+    assert.deepEqual(calls.slice(1), outcome === "success" ? [["select", session], ["close-dialog"]] : [["error", "connection failed"]]);
+    assert.ok(!nodes(render()).some((node) => node.type === "ProgressBar"));
   });
 }
 

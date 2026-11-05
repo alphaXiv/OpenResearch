@@ -1,5 +1,16 @@
+import {
+  useContext,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { getRunDiffQuery } from "../queries/files";
+
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { ltr } from "../i18n";
@@ -11,7 +22,6 @@ import { ltr } from "../i18n";
 // node's own views, so keyboard/touch users lose a shortcut, not a capability.
 // Client-only (portals straight into document.body).
 
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { FolderTree, GitBranch, Terminal } from "lucide-react";
 import { parseDiff, type FileData } from "react-diff-view";
@@ -141,6 +151,10 @@ export function ExpHoverCard({
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { getRunDiffQuery } = useWorkspace().queries;
+
   const measure = useMeasure();
   // Prefer beside the node; on windows too narrow for either side, go
   // above/below — usePopoverPosition only clamps, and a clamped side
@@ -325,6 +339,6 @@ export function ExpHoverCard({
         <span>{m.exp_hover_card_created()} {fmtCreated(exp.createdAt)}</span>
       </div>
     </div>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }
