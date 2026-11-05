@@ -38,7 +38,6 @@ const settingsFamilies: Record<string, readonly string[]> = {
   compute: ["getComputeSettings"],
   openresearch: ["getOpenResearchSettings", "getOpenResearchAccount", "getComputeSettings"],
   git: ["githubAccount", "repoAccess", "getProjectGitStatus"],
-  profile: ["getProfile"],
   "lit-sources": ["getLitSources"],
   projects: ["getProjectDefaults", "getProjectGitStatus"],
   telemetry: ["getTelemetry"],
@@ -150,7 +149,7 @@ export function createInvalidation(client: WorkspaceClient) {
       invalidate(["getProjectGitStatus", "getCodeTree", "getProjectStarterPrompts"], scope, (query) => query.queryKey[3] === projectId);
       return;
     }
-    if (path === "/api/projects" || path === "/api/onboarding/complete") invalidate(["listProjects", "listProjectActivity", "getUiState", "getProfile"], scope);
+    if (path === "/api/projects" || path === "/api/onboarding/complete") invalidate(["listProjects", "listProjectActivity", "getUiState"], scope);
   }
 
   return {

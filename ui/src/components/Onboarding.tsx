@@ -24,6 +24,8 @@ import {
   type OnboardingStep,
   type Project,
   type UiState,
+  AlphaXivNotConnectedError,
+  type OpenResearchAccount as OpenResearchAccountInfo,
 } from "../api";
 import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
@@ -50,11 +52,6 @@ const ONB_CARD_META_CLASS_NAME = [
 const GIT_RETRY_HINT_CLASS_NAME = [
   "onb-gate-hint mt-4.5 mx-0 mb-0 text-base font-medium leading-normal",
   "text-text onb-git-hint mt-2",
-].join(" ");
-
-const ONB_CARD_CLASS_NAME = [
-  "onb-card flex flex-col gap-1 bg-background",
-  "border border-border rounded-lg py-4.5 px-5",
 ].join(" ");
 
 const FINISH_ERROR_CLASS_NAME = [
@@ -88,7 +85,13 @@ export function Onboarding(props: OnboardingProps) {
     refreshHarnesses,
   } = useWorkspace().queries;
   const { queryClient, workspaceScope, isCurrentScope } = useWorkspace();
-  const alphaXivLinked = !!useMachines().owner.queries.useOpenResearchAccount().data?.user;
+  const { useOpenResearchAccount, useAlphaXivMe } = useMachines().owner.queries;
+  const accountQuery = useOpenResearchAccount();
+  const alphaXivMe = useAlphaXivMe();
+  const user = accountQuery.data?.user ?? null;
+  // An OpenResearch account without an alphaXiv connection still needs to connect it.
+  const connectOnly = !!user && alphaXivMe.error instanceof AlphaXivNotConnectedError;
+  const alphaXivLinked = !!user && !connectOnly;
 
   const completeOnboardingMutation = useMutation({ mutationFn: completeOnboarding });
 
@@ -277,6 +280,10 @@ export function Onboarding(props: OnboardingProps) {
       setFinishing(false);
     }
   };
+
+  // Sign-in resolves several renders after the click; finish with what is true by then.
+  const latestFinish = useRef(finishOnboarding);
+  latestFinish.current = finishOnboarding;
 
   const openAuth = (harness: Harness) => showCustomDialog({
     component: AcpAuthDialog,
@@ -475,7 +482,13 @@ export function Onboarding(props: OnboardingProps) {
             </div>
             <h2 className="onb-title mt-0 mx-0 mb-3 text-5xl tracking-tight">{m.onboarding_alphaxiv_title()}</h2>
             <p className="onb-sub text-text text-lg leading-normal mt-0 mx-0 mb-8 max-w-150">{m.onboarding_alphaxiv_description()}</p>
-            <AlphaXivAccountCard onSignedIn={() => void finishOnboarding()} />
+            <AlphaXivAccountCard
+              user={alphaXivLinked ? user : null}
+              avatarUrl={alphaXivMe.data?.avatarUrl ?? null}
+              connectOnly={connectOnly}
+              disabled={accountQuery.isLoading || finishing}
+              onSignedIn={() => void latestFinish.current()}
+            />
             {automaticSetup && !gitReady && (
               <div className="mt-5" role="status">
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
@@ -707,27 +720,30 @@ function GitInstallPrompt({
   );
 }
 
-function AlphaXivAccountCard({ onSignedIn }: { onSignedIn: () => void }) {
-  const { useOpenResearchAccount, useAlphaXivMe } = useMachines().owner.queries;
-  const accountQuery = useOpenResearchAccount();
-  const avatarUrl = useAlphaXivMe().data?.avatarUrl;
-  const [avatarFailed, setAvatarFailed] = useState(false);
+function AlphaXivAccountCard({ user, avatarUrl, connectOnly, disabled, onSignedIn }: {
+  user: OpenResearchAccountInfo["user"];
+  avatarUrl: string | null;
+  connectOnly: boolean;
+  disabled: boolean;
+  onSignedIn: () => void;
+}) {
   const openSignIn = useSignIn();
   const card = useRef<HTMLDivElement>(null);
-  const user = accountQuery.data?.user;
+  const [failedAvatar, setFailedAvatar] = useState<string | null>(null);
   const initial = user && ([user.firstName, user.lastName].filter(Boolean).join(" ") || user.email).trim().charAt(0).toLocaleUpperCase();
   return (
+    // Sign-in swaps the button for the account card; the dialog returns focus here.
     <div ref={card} tabIndex={-1} className="outline-none">
       {user ? (
         <div className="flex items-center gap-4 rounded-lg border border-border bg-background px-5 py-4">
-          {avatarUrl && !avatarFailed
-            ? <img src={avatarUrl} alt="" className="size-12 shrink-0 rounded-full object-cover" onError={() => setAvatarFailed(true)} />
+          {avatarUrl && avatarUrl !== failedAvatar
+            ? <img src={avatarUrl} alt="" className="size-12 shrink-0 rounded-full object-cover" onError={() => setFailedAvatar(avatarUrl)} />
             : <span className="flex size-12 shrink-0 items-center justify-center rounded-full bg-panel text-lg font-medium text-text" aria-hidden="true">{initial}</span>}
           <span className="min-w-0 flex-1 text-base"><OpenResearchAccount user={user} /></span>
           <StatusIndicator tone="success">{m.onboarding_signed_in()}</StatusIndicator>
         </div>
       ) : (
-        <Button size="large" className="h-16 w-full justify-center text-lg" disabled={accountQuery.isLoading} onClick={() => openSignIn(false, card.current, onSignedIn)} aria-haspopup="dialog">
+        <Button size="large" className="h-16 w-full justify-center text-lg" disabled={disabled} onClick={() => openSignIn(connectOnly, card.current, onSignedIn)} aria-haspopup="dialog">
           <LitSourceLogo source="alphaxiv" size={24} decorative />{m.account_sign_in_alphaxiv()}
         </Button>
       )}
@@ -743,7 +759,7 @@ function LocalGitCard({
   error: boolean;
 }) {
   return (
-    <div className={ONB_CARD_CLASS_NAME}>
+    <div className="onb-card flex flex-col gap-1 bg-background border border-border rounded-lg py-4.5 px-5">
       <div className="onb-card-head flex items-center justify-between gap-3">
         <span className="onb-card-name font-semibold text-base">{m.onboarding_local_git()}</span>
         <StatusIndicator tone={gitVersion ? "success" : error || gitVersion === null ? "danger" : "warning"}>

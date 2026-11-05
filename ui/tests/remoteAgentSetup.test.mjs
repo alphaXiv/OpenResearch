@@ -5,40 +5,39 @@ import React from "react";
 import * as jsx from "react/jsx-runtime";
 import ts from "typescript";
 
+class AlphaXivNotConnectedError extends Error {}
+
 const code = ts.transpileModule(readFileSync(new URL("../src/components/Onboarding.tsx", import.meta.url), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
 
-function setup({ datacenter = true, lookupFails = false, delayed = false, remote = true, harnesses } = {}) {
+function setup({ datacenter = true, lookupFails = false, delayed = false, remote = true, harnesses, user = null, alphaXivError = null } = {}) {
   const values = [];
   const effects = [];
   const dialogs = [];
   const writes = [];
   const done = [];
   let cursor = 0;
-  let profileReads = 0;
   let releaseNetwork;
   const screen = { isConnected: true };
   const ready = { id: "codex", name: "Codex", installed: true, agentReady: true, models: [], options: {} };
   const claude = { id: "claude-code", name: "Claude Code", installed: false, agentReady: false, models: [], options: {} };
-  const data = { harnesses: harnesses ?? [ready, claude], profile: { researchAreas: ["RL"], otherArea: null, background: "saved", papers: [] }, path: { gitVersion: "git 2.49.0" }, commands: { "claude-code": { install: "install", login: "login" } }, network: lookupFails ? undefined : { ip: "192.0.2.1", isDatacenter: datacenter } };
+  const data = { harnesses: harnesses ?? [ready, claude], path: { gitVersion: "git 2.49.0" }, commands: { "claude-code": { install: "install", login: "login" } }, network: lookupFails ? undefined : { ip: "192.0.2.1", isDatacenter: datacenter } };
   const queries = Object.fromEntries([
-    ["getHarnessesQuery", "harnesses"], ["getProjectPathStatusQuery", "path"], ["getHarnessSetupCommandsQuery", "commands"], ["getPublicNetworkQuery", "network"], ["getProfileQuery", "profile"],
+    ["getHarnessesQuery", "harnesses"], ["getProjectPathStatusQuery", "path"], ["getHarnessSetupCommandsQuery", "commands"], ["getPublicNetworkQuery", "network"]
   ].map(([name, kind]) => [name, () => ({ kind })]));
   queries.refreshHarnesses = async () => data.harnesses;
   const workspace = {
     api: {
       captureUiEvent: () => { if (remote) assert.fail("remote setup is not the onboarding funnel"); },
-      completeOnboarding: () => assert.fail("remote setup must not seed a demo or save a research profile"),
+      completeOnboarding: () => assert.fail("remote setup must not seed a demo"),
       updateUiState: async (body) => { writes.push(body); return { preferredAgent: body.preferredAgent }; },
     },
     queries,
     dialogs: { showCustomDialog: (dialog) => dialogs.push(dialog) },
     queryClient: {
       fetchQuery: async ({ kind }) => {
-        if (remote) assert.notEqual(kind, "profile", "remote agent setup never fetches the research profile");
         if (remote) assert.notEqual(kind, "path", "remote agent setup does not run the local Git setup");
-        if (kind === "profile") profileReads++;
         if (kind === "network" && delayed) return new Promise((resolve) => { releaseNetwork = () => resolve(data.network); });
         if (kind === "network" && lookupFails) throw new Error("lookup failed");
         return data[kind];
@@ -68,7 +67,11 @@ function setup({ datacenter = true, lookupFails = false, delayed = false, remote
   const modules = {
     react, "react/jsx-runtime": jsx,
     "../workspace": { useWorkspace: () => workspace },
-    "../api": { reasoningFor: () => ({ defaultId: null }) },
+    "../api": { reasoningFor: () => ({ defaultId: null }), AlphaXivNotConnectedError },
+    "../machineSelection": { useMachines: () => ({ owner: { queries: {
+      useOpenResearchAccount: () => ({ data: { user }, isLoading: false }),
+      useAlphaXivMe: () => ({ data: alphaXivError ? undefined : { avatarUrl: null }, error: alphaXivError }),
+    } } }) },
     "../i18n": { ltr: String },
     "../paraglide/messages.js": { m: messages },
     "@tanstack/react-query": {
@@ -92,9 +95,6 @@ function setup({ datacenter = true, lookupFails = false, delayed = false, remote
   effects.splice(0).forEach((effect) => effect());
   const app = {
     render, dialogs, writes, done,
-    profileReads: () => profileReads,
-    // Activity reruns a hidden screen's effects when it is shown again.
-    reveal: () => { render(); effects.splice(0).forEach((effect) => effect()); },
     leave: () => { screen.isConnected = false; },
     release: () => releaseNetwork(),
     signIn: async () => {
@@ -121,7 +121,7 @@ test("remote setup starts at agents and saves only the machine's preferred agent
   assert.ok(text.includes("remote_agents_description"));
   assert.ok(!text.includes("onboarding_step_1_of_2"));
   assert.ok(!text.includes("onboarding_back"));
-  assert.ok(!text.includes("onboarding_tell_us_about_your_research"));
+  assert.ok(!text.includes("onboarding_alphaxiv_title"));
   const next = tree.find((node) => node.type === "Button" && React.Children.toArray(node.props.children).includes("onboarding_continue"));
   assert.equal(next.props.disabled, false);
   await next.props.onClick();
@@ -175,14 +175,24 @@ test("leaving agent setup cancels a delayed Claude install prompt", async () => 
   assert.equal(app.dialogs.length, 0);
 });
 
-test("showing a hidden machine again keeps unsaved research profile answers", async () => {
-  const app = setup({ remote: false });
-  await new Promise(setImmediate);
-  assert.equal(app.profileReads(), 1);
-  app.reveal();
-  await new Promise(setImmediate);
-  assert.equal(app.profileReads(), 1);
-});
+for (const [name, options, label] of [
+  ["signed out", {}, "onboarding_skip"],
+  ["signed in to alphaXiv", { user: { email: "a@b.c" } }, "onboarding_get_started"],
+  ["signed in without an alphaXiv connection", { user: { email: "a@b.c" }, alphaXivError: new AlphaXivNotConnectedError() }, "onboarding_skip"],
+]) {
+  test(`the alphaXiv step offers to finish by skipping only until alphaXiv is linked: ${name}`, async () => {
+    const app = setup({ remote: false, ...options });
+    await new Promise(setImmediate);
+    const button = (label) => app.render().find((node) => node.type === "Button" && React.Children.toArray(node.props.children).includes(label));
+    button("onboarding_continue").props.onClick();
+    await button("onboarding_continue").props.onClick();
+    const tree = app.render();
+    const card = tree.find((node) => typeof node.type === "function" && node.type.name === "AlphaXivAccountCard");
+    assert.equal(card.props.connectOnly, !!options.alphaXivError);
+    assert.equal(card.props.user, label === "onboarding_get_started" ? options.user : null);
+    assert.ok(tree.some((node) => React.Children.toArray(node.props.children).includes(label)));
+  });
+}
 
 test("Continue explains when the chosen agent is still loading", async () => {
   const pending = { id: "codex", name: "Codex", installed: true, agentReady: true, catalogPending: true, models: [], options: {} };

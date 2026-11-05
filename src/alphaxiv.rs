@@ -17,6 +17,8 @@ use crate::error::{anyhow, Result};
 const CLIENT_ID: &str = "openresearch-desktop";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const PROFILE_TTL: Duration = Duration::from_secs(600);
+const MAX_PROFILE_AREAS: usize = 20;
 
 #[derive(Debug)]
 pub struct NotConnected;
@@ -379,7 +381,7 @@ async fn get(path: &str, query: &[(&str, &str)]) -> Result<Value> {
     .await?
     .json()
     .await
-    .map_err(|_| anyhow!("alphaXiv returned an incorrect library response."))
+    .map_err(|_| anyhow!("alphaXiv returned an unexpected response."))
 }
 
 pub async fn folders() -> Result<Value> {
@@ -450,15 +452,32 @@ pub async fn me() -> Result<Value> {
     Ok(serde_json::json!({ "avatarUrl": url("thumbnail").or_else(|| url("full_size")) }))
 }
 
-/// What the signed-in researcher shows publicly on alphaXiv: the token only
-/// reaches library routes, so this reads the public profile its `sub` names.
+/// The signed-in researcher's public alphaXiv profile, remembered briefly so
+/// reopening an empty chat neither waits on alphaXiv nor changes its brief.
+/// alphaXiv has no route for the caller's own profile, so this reads the public
+/// one the token's `sub` names.
 pub async fn research_profile() -> Result<crate::telemetry::ResearchProfile> {
+    type Memo = Option<(
+        String,
+        std::time::Instant,
+        crate::telemetry::ResearchProfile,
+    )>;
+    static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);
     let id = user_id().await?;
+    let memo = |memo: &Memo| {
+        memo.as_ref()
+            .filter(|(user, at, _)| *user == id && at.elapsed() < PROFILE_TTL)
+            .map(|(_, _, profile)| profile.clone())
+    };
+    if let Some(profile) = memo(&MEMO.lock().unwrap_or_else(|e| e.into_inner())) {
+        return Ok(profile);
+    }
     let (user_path, topics_path) = (
         format!("/users/v3/{id}"),
         format!("/users/v3/{id}/following/topics"),
     );
-    let (user, topics) = tokio::try_join!(get(&user_path, &[]), get(&topics_path, &[]))?;
+    let (user, topics) = tokio::join!(get(&user_path, &[]), get(&topics_path, &[]));
+    let user = user?;
     let text = |value: &Value, key: &str| {
         value
             .get(key)
@@ -473,19 +492,25 @@ pub async fn research_profile() -> Result<crate::telemetry::ResearchProfile> {
             .ok(),
         None => None,
     };
-    let strings = |value: Option<&Value>, key: Option<&str>| {
-        value
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|item| key.map_or(Some(item), |key| item.get(key))?.as_str())
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    };
-    let mut research_areas = strings(card.as_ref().and_then(|c| c.get("researchAreas")), None);
-    for topic in strings(topics.get("topics"), Some("topic")) {
-        if !research_areas.contains(&topic) {
-            research_areas.push(topic);
+    let areas = card
+        .as_ref()
+        .and_then(|card| card.get("researchAreas"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    let followed = topics.ok();
+    let followed = followed
+        .as_ref()
+        .and_then(|topics| topics.get("topics"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|topic| topic.get("topic")?.as_str());
+    let mut research_areas = Vec::<String>::new();
+    for area in areas.chain(followed) {
+        if research_areas.len() < MAX_PROFILE_AREAS && !research_areas.iter().any(|a| a == area) {
+            research_areas.push(area.to_owned());
         }
     }
     let card_text = |key| card.as_ref().and_then(|card| text(card, key));
@@ -498,12 +523,14 @@ pub async fn research_profile() -> Result<crate::telemetry::ResearchProfile> {
     .flatten()
     .collect::<Vec<_>>()
     .join("\n");
-    Ok(crate::telemetry::ResearchProfile {
+    let profile = crate::telemetry::ResearchProfile {
         research_areas,
-        other_area: None,
         background: (!background.is_empty()).then_some(background),
-        papers: Vec::new(),
-    })
+        ..Default::default()
+    };
+    *MEMO.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((id, std::time::Instant::now(), profile.clone()));
+    Ok(profile)
 }
 
 pub async fn print_library(json: bool) -> Result<()> {
@@ -670,7 +697,15 @@ mod tests {
             .route(
                 "/users/v3/u1",
                 get(|| async {
-                    Json(json!({ "researcherSlug": "ada", "institution": "MIT", "biography": " " }))
+                    Json(json!({
+                        "researcherSlug": "ada",
+                        "institution": "MIT",
+                        "biography": " ",
+                        "avatar": [
+                            { "type": "full_size", "url": "https://cdn/full.png" },
+                            { "type": "thumbnail", "url": "https://cdn/thumb.png" },
+                        ],
+                    }))
                 }),
             )
             .route(
@@ -753,6 +788,10 @@ mod tests {
         assert_eq!(
             profile.background.as_deref(),
             Some("PhD student\nMIT\nLearns to walk.")
+        );
+        assert_eq!(
+            me().await.unwrap(),
+            json!({ "avatarUrl": "https://cdn/thumb.png" })
         );
 
         // Sign-out revokes the refresh token at alphaXiv and forgets both.

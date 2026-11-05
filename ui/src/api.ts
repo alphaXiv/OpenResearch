@@ -897,20 +897,6 @@ export interface GitSettings {
   githubAuthenticated: boolean;
 }
 
-/** A paper linked to the researcher profile during onboarding. */
-export interface LinkedPaper {
-  paperId: string;
-  title: string | null;
-}
-
-/** The local researcher profile captured in onboarding (settings.json). */
-export interface Profile {
-  researchAreas: string[];
-  otherArea: string | null;
-  background: string | null;
-  papers: LinkedPaper[];
-}
-
 /** Which literature sources discovery and paper reading may use (settings.json). */
 export interface LitSourcesSettings {
   alphaxiv: boolean;
@@ -2275,9 +2261,6 @@ export function createApi(
   const saveGitSettings = (body: { userName?: string; userEmail?: string }) =>
     post<GitSettings>("/api/settings/git", body);
 
-  const getProfile = (signal?: AbortSignal) => get<Profile>("/api/settings/profile", signal);
-
-  const setProfile = (body: Profile) => post<Profile>("/api/settings/profile", body);
 
   const getLitSources = (signal?: AbortSignal) =>
     get<LitSourcesSettings>("/api/settings/lit-sources", signal);
@@ -2728,8 +2711,6 @@ export function createApi(
     getArtifactFileMetadata,
     getGitSettings,
     saveGitSettings,
-    getProfile,
-    setProfile,
     getLitSources,
     setLitSources,
     getProjectDefaults,

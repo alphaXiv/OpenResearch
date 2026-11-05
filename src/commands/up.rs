@@ -1097,9 +1097,6 @@ fn normalize_research_profile(
     background: Option<String>,
     papers: Vec<crate::telemetry::ProfilePaper>,
 ) -> std::result::Result<crate::telemetry::ResearchProfile, ApiError> {
-    if research_areas.is_empty() {
-        return Err(bad_request("choose at least one research area"));
-    }
     let mut normalized_areas = Vec::with_capacity(research_areas.len());
     for area in research_areas {
         let area = area.trim().to_string();
@@ -1153,7 +1150,7 @@ async fn complete_onboarding(
         permission_mode,
         reasoning_level: nonempty(req.reasoning_level),
     };
-    // Onboarding no longer asks for a profile; an empty one must not erase a saved one.
+    // A request without areas carries no profile and must not erase a saved one.
     let profile = (!req.research_areas.is_empty())
         .then(|| {
             normalize_research_profile(
@@ -10099,10 +10096,7 @@ mod tests {
     }
 
     #[test]
-    fn research_profile_requires_an_area_and_other_description() {
-        let missing_area = normalize_research_profile(vec![], None, None, vec![]).unwrap_err();
-        assert_eq!(missing_area.1, "choose at least one research area");
-
+    fn research_profile_requires_an_other_description() {
         let missing_other =
             normalize_research_profile(vec!["Other".into()], Some("   ".into()), None, vec![])
                 .unwrap_err();

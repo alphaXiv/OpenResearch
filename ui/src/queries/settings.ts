@@ -203,12 +203,6 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     staleTime: 300_000,
   });
 
-  const getProfileQuery = () => queryOptions({
-    queryKey: workspaceKey("getProfile"),
-    queryFn: ({ signal }) => api.getProfile(signal),
-    staleTime: 300_000,
-  });
-
   const getLitSourcesQuery = () => queryOptions({
     queryKey: workspaceKey("getLitSources"),
     queryFn: ({ signal }) => api.getLitSources(signal),
@@ -340,7 +334,6 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     listRemoteSessionsQuery,
     getUpdateStatusQuery,
     getBuildNotesQuery,
-    getProfileQuery,
     getLitSourcesQuery,
     getProjectDefaultsQuery,
     getProjectGitStatusQuery,

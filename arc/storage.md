@@ -163,8 +163,12 @@ endpoints out of it. Other traffic:
   `orx login --alphaxiv`, to link alphaXiv to the signed-in account. orx keeps
   alphaXiv's tokens owner-only in the config directory, refreshing them under
   a file lock since each refresh retires the last one, and reads the user's
-  folders and papers with them. The chat's library picker loads paper
-  thumbnails from alphaXiv's public asset CDN. Agents also send research tool
+  folders and papers with them. It also reads the user's public alphaXiv
+  profile, followed topics and researcher card: the dashboard shows the
+  profile picture alphaXiv names, and a blank project's starter prompts are
+  briefed from the profile, so it reaches the agent's model provider. The
+  chat's library picker loads paper thumbnails from alphaXiv's public asset
+  CDN. Agents also send research tool
   calls to alphaXiv while signed out, limited by IP. Signed-in agents read
   library notes and highlights and, when requested, create folders and save
   papers to them. Tool arguments (including research queries, paper and
@@ -174,7 +178,7 @@ endpoints out of it. Other traffic:
   experiments or logs of its own.
 - **Telemetry.** Official builds send opt-out usage events to the first-party
   API under a random install ID that is not tied to an account: commands run,
-  harness detection states, and the research profile chosen at onboarding.
+  harness detection states, and a research profile when onboarding submits one.
   Source builds send nothing. Events wait in an outbox in the config directory
   and send in the background, so telemetry never blocks or fails a command. A
   change of the telemetry choice is itself recorded, so opt-outs are visible.
