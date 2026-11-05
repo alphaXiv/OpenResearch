@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::{anyhow, Result};
@@ -723,7 +723,7 @@ fn spawn_client(
     bin: PathBuf,
     codex_home: PathBuf,
 ) -> Result<Arc<CodexClient>> {
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.arg("app-server");
     if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
         cmd.args(["-c", &override_arg]);
@@ -1309,7 +1309,7 @@ mod windows_job {
     /// caller still reaps the wrapper.
     pub(super) fn kill_tree(pid: u32) {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("taskkill")
+        let _ = crate::process::command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .creation_flags(CREATE_NO_WINDOW)
             .stdout(std::process::Stdio::null())
@@ -1386,7 +1386,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     fn test_client(shell: &str, last_active: Instant, read_events: bool) -> Arc<CodexClient> {
-        let mut command = Command::new("sh");
+        let mut command = crate::process::tokio_command("sh");
         command
             .args(["-c", shell])
             .stdin(Stdio::piped())
@@ -1668,7 +1668,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn terminate_kills_the_native_child_behind_a_wrapper() {
         // The npm `codex.js` shape: a wrapper whose child outlives its SIGKILL.
-        let mut command = Command::new("sh");
+        let mut command = crate::process::tokio_command("sh");
         command
             .args(["-c", "sleep 30 & echo $!; wait"])
             .stdin(Stdio::piped())
@@ -1726,7 +1726,7 @@ pub(crate) mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn terminate_kills_the_native_child_behind_a_wrapper() {
-        let mut command = Command::new("cmd");
+        let mut command = crate::process::tokio_command("cmd");
         command
             .args(["/c", "timeout /t 600 > nul"])
             .stdin(Stdio::piped())

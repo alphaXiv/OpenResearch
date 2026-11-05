@@ -710,7 +710,7 @@ fn ensure_no_external_users(database: &Path) -> Result<()> {
     ];
     #[cfg(unix)]
     {
-        let output = std::process::Command::new("lsof")
+        let output = crate::process::command("lsof")
             .args(["-w", "-nP", "-Fpc", "--"])
             .args(paths.iter().filter(|path| path.exists()))
             .output()

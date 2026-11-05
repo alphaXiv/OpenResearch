@@ -10034,7 +10034,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("orx-project-path-status-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
-        let status = std::process::Command::new("git")
+        let status = crate::process::command("git")
             .current_dir(&path)
             .args(["init", "-q", "-b", "main"])
             .status()

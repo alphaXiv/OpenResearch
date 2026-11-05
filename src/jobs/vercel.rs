@@ -26,7 +26,6 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::process::Command;
 
 use super::managed_env::ManagedEnv;
 use crate::error::{anyhow, Result};
@@ -844,7 +843,7 @@ fn plan_limit_hint(stderr: &str) -> Option<&'static str> {
 }
 
 async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>> {
-    let mut cmd = Command::new(python_bin());
+    let mut cmd = crate::process::tokio_command(python_bin());
     cmd.arg("-c")
         .arg(launcher())
         .args(args)
@@ -1033,7 +1032,7 @@ pub async fn stream_logs(
 ) -> Result<u64> {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-    let mut child = Command::new(python_bin())
+    let mut child = crate::process::tokio_command(python_bin())
         .arg("-c")
         .arg(launcher())
         .args(["logs", sandbox_name])
@@ -1103,7 +1102,7 @@ pub async fn preflight() -> Result<()> {
              `vercel env pull`) in the environment."
         ));
     }
-    let probe = Command::new(python_bin())
+    let probe = crate::process::tokio_command(python_bin())
         .args(["-c", VERCEL_ENV.ready_check])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1454,7 +1453,7 @@ def get_sandbox(**kw): return Box()
                 ),
             )
             .unwrap();
-            let out = std::process::Command::new(python)
+            let out = crate::process::command(python)
                 .args(["-c", launcher(), "status", "orx-run-1", "cmd_1"])
                 .env("PYTHONPATH", &dir)
                 .output()
@@ -1512,7 +1511,7 @@ def get_sandbox(**kw): return Box()
 "#,
         )
         .unwrap();
-        let mut child = std::process::Command::new(python)
+        let mut child = crate::process::command(python)
             .args(["-c", launcher(), "submit"])
             .env("PYTHONPATH", &dir)
             .stdin(Stdio::piped())
@@ -1581,7 +1580,7 @@ def get_sandbox(**kw): return Box()
                 ),
             )
             .unwrap();
-            let out = std::process::Command::new(python)
+            let out = crate::process::command(python)
                 .args(["-c", launcher(), "status", "orx-run-1", "cmd_1"])
                 .env("PYTHONPATH", &dir)
                 .output()
@@ -1632,7 +1631,7 @@ def get_sandbox(**kw):
 "#,
         )
         .unwrap();
-        let out = std::process::Command::new(python)
+        let out = crate::process::command(python)
             .args(["-c", launcher(), "logs", "orx-run-1"])
             .env("PYTHONPATH", &dir)
             .output()
@@ -1670,7 +1669,7 @@ def get_sandbox(**kw):
     #[cfg(target_os = "linux")]
     #[test]
     fn log_follow_reads_until_the_pid_exits_without_gnu_tail() {
-        let real_tail = std::process::Command::new("sh")
+        let real_tail = crate::process::command("sh")
             .arg("-c")
             .arg("command -v tail")
             .output()
@@ -1737,7 +1736,7 @@ def get_sandbox(**kw):
         std::fs::write(&log, "first\n").unwrap();
         // Detach sleep so killing it is reaped by init. A direct child stays a
         // zombie, and `kill -0` on a zombie still succeeds, so the follow never ends.
-        let launched = std::process::Command::new("bash")
+        let launched = crate::process::command("bash")
             .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $! > \"$1\""])
             .arg("bash")
             .arg(&pidfile)
@@ -1751,13 +1750,13 @@ def get_sandbox(**kw):
         let killer = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(900));
             let _ = std::fs::write(&log_for_append, "first\nsecond\n");
-            let _ = std::process::Command::new("kill")
+            let _ = crate::process::command("kill")
                 .arg(&pid_for_kill)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
         });
-        let mut cmd = std::process::Command::new("timeout");
+        let mut cmd = crate::process::command("timeout");
         cmd.args(["15", "bash", "-c", LOG_FOLLOW_SH, "bash"])
             .arg(&log)
             .arg(&pidfile);
@@ -1770,7 +1769,7 @@ def get_sandbox(**kw):
         }
         let output = cmd.output().unwrap();
         let _ = killer.join();
-        let _ = std::process::Command::new("kill")
+        let _ = crate::process::command("kill")
             .arg(&pid)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

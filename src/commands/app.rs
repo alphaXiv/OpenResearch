@@ -110,7 +110,7 @@ fn install_desktop_entry() {
     match entry_changed() {
         // The entry's MimeType offers it; this makes it the handler for openresearch: links.
         Ok(true) => {
-            let mut handler = std::process::Command::new("xdg-mime");
+            let mut handler = crate::process::command("xdg-mime");
             handler.args([
                 "default",
                 "openresearch.desktop",
@@ -285,7 +285,7 @@ pub(crate) async fn hydrate_shell_env() {
         .join(" ");
     let template = "%s\\0".repeat(crate::local::shell_env::IMPORTED.len());
     let script = format!(r#"/bin/sh -c 'printf "{marker}{template}{marker}" {reads}'"#);
-    let mut probe = tokio::process::Command::new(&shell);
+    let mut probe = crate::process::tokio_command(&shell);
     probe
         .args(["-ilc".to_string(), script])
         .stdin(std::process::Stdio::null())

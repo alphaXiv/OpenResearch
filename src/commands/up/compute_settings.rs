@@ -704,7 +704,7 @@ $path = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SOFTWARE\Micros
 if (!$path) { $path = $env:SystemRoot }
 [Environment]::ExpandEnvironmentVariables($path)
 "#;
-    let output = std::process::Command::new("powershell.exe")
+    let output = crate::process::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("ORX_SSH_CONFIG_USER", user)
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
@@ -1978,7 +1978,7 @@ Host b
         let user = std::env::var("USERNAME").unwrap();
         #[cfg(unix)]
         let user = String::from_utf8(
-            std::process::Command::new("id")
+            crate::process::command("id")
                 .arg("-un")
                 .output()
                 .unwrap()

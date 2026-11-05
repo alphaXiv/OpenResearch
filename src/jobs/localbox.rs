@@ -81,7 +81,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         let _ = std::fs::set_permissions(&run_sh_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    let mut cmd = std::process::Command::new(crate::local::bash::program());
+    let mut cmd = crate::process::command(crate::local::bash::program());
     if let Some(path) =
         crate::local::bash::path_with_toolchain(crate::local::shell_env::search_path())
     {
@@ -144,7 +144,7 @@ fn run_alive(dir: &Path, pid: &str) -> bool {
 
 #[cfg(not(windows))]
 fn run_alive_via(ps: &str, dir: &Path, pid: &str) -> bool {
-    let Ok(output) = std::process::Command::new(ps)
+    let Ok(output) = crate::process::command(ps)
         .args(["-ww", "-o", "stat=,command=", "-p", pid])
         .stderr(std::process::Stdio::null())
         .output()
@@ -304,7 +304,7 @@ pub fn orphaned_job_is_running(dir: &Path) -> Result<bool> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         };
-        let output = std::process::Command::new("ps")
+        let output = crate::process::command("ps")
             .args(["-A", "-ww", "-o", "stat=,command="])
             .output()?;
         if !output.status.success() {
@@ -388,7 +388,7 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
 fn terminate_tree(pid: &str) -> Result<()> {
     // `/T` fails if any descendant already exited, so success is read from the leader's liveness.
     use std::os::windows::process::CommandExt;
-    let _ = std::process::Command::new("taskkill")
+    let _ = crate::process::command("taskkill")
         .args(["/PID", pid, "/T", "/F"])
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .stdout(std::process::Stdio::null())
@@ -405,7 +405,7 @@ fn terminate_tree(pid: &str) -> Result<()> {
 
 #[cfg(not(windows))]
 fn terminate_group(pid: &str) -> Result<()> {
-    let group = std::process::Command::new("kill")
+    let group = crate::process::command("kill")
         .args(["-TERM", "--", &format!("-{pid}")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -413,7 +413,7 @@ fn terminate_group(pid: &str) -> Result<()> {
         .map(|s| s.success())
         .unwrap_or(false);
     if !group {
-        let process = std::process::Command::new("kill")
+        let process = crate::process::command("kill")
             .args(["-TERM", pid])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -457,7 +457,7 @@ pub struct Gpu {
 /// Blocking (subprocesses); call via `spawn_blocking` from async handlers.
 pub fn hardware_info() -> LocalHardware {
     let cmd = |name: &str, args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new(name).args(args).output().ok()?;
+        let out = crate::process::command(name).args(args).output().ok()?;
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -526,12 +526,12 @@ fn parse_nvidia_smi_csv(out: &str) -> Vec<Gpu> {
 #[cfg(all(test, unix))]
 pub(crate) fn spawn_lingering_group(dir: &Path) -> std::process::Child {
     use std::os::unix::process::CommandExt;
-    let mut leader = std::process::Command::new("sleep")
+    let mut leader = crate::process::command("sleep")
         .arg("30")
         .process_group(0)
         .spawn()
         .unwrap();
-    let survivor = std::process::Command::new("sleep")
+    let survivor = crate::process::command("sleep")
         .arg("30")
         .process_group(i32::try_from(leader.id()).unwrap())
         .spawn()
@@ -577,7 +577,7 @@ mod tests {
         let script = dir.join("run.sh");
         std::fs::write(&script, "read -r value\n").unwrap();
         assert!(!orphaned_job_is_running(&dir).unwrap());
-        let mut child = std::process::Command::new(crate::local::bash::program())
+        let mut child = crate::process::command(crate::local::bash::program())
             .arg(script.canonicalize().unwrap())
             .stdin(std::process::Stdio::piped())
             .spawn()
@@ -624,7 +624,7 @@ mod tests {
     fn assert_reaped(dir: &Path) {
         let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
         for _ in 0..100 {
-            let output = std::process::Command::new("ps")
+            let output = crate::process::command("ps")
                 .args(["-o", "stat=", "-p", pid.trim()])
                 .output()
                 .unwrap();
@@ -641,10 +641,7 @@ mod tests {
     fn run_alive_without_ps_probes_the_pid() {
         let dir = std::env::temp_dir();
         let unrunnable_ps = "/nonexistent/orx-test-ps";
-        let mut child = std::process::Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .unwrap();
+        let mut child = crate::process::command("sleep").arg("60").spawn().unwrap();
         let pid = child.id().to_string();
         let alive = run_alive_via(unrunnable_ps, &dir, &pid);
         child.kill().unwrap();
@@ -845,10 +842,7 @@ mod tests {
         {
             let stale = base.join("stale-pid");
             std::fs::create_dir_all(&stale).unwrap();
-            let mut unrelated = std::process::Command::new("sleep")
-                .arg("60")
-                .spawn()
-                .unwrap();
+            let mut unrelated = crate::process::command("sleep").arg("60").spawn().unwrap();
             std::fs::write(stale.join("pid"), unrelated.id().to_string()).unwrap();
             std::fs::write(
                 stale.join("pid_script"),

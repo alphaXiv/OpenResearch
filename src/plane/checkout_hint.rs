@@ -62,7 +62,7 @@ pub(super) fn print(path: &str, branch: &str) {
 
 #[cfg(unix)]
 fn parent_shell() -> Option<ShellKind> {
-    let output = std::process::Command::new("ps")
+    let output = crate::process::command("ps")
         // SAFETY: getppid has no preconditions.
         .args(["-p", &unsafe { libc::getppid() }.to_string(), "-o", "comm="])
         .output()

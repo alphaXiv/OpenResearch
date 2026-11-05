@@ -247,7 +247,7 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
     let mut child = match supervise_command(&exe, run_id, &path).spawn() {
         // `/proc/self/exe` can name a path this process cannot exec (OR-334); the `orx` on PATH still runs.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match crate::local::shell_env::find_on_path("orx").filter(|orx| *orx != exe) {
+            match crate::local::shell_env::find("orx").filter(|orx| *orx != exe) {
                 Some(orx) => {
                     let tried = format!("`{}`{}: {error}", exe.display(), current_exe_note(&exe));
                     let child = supervise_command(&orx, run_id, &path)
@@ -292,21 +292,12 @@ fn supervise_command(
         .open(log_path)
         .map_or_else(|_| std::process::Stdio::null(), std::process::Stdio::from);
     // A long-lived `orx up` may be running a replaced binary; spawn the new file at its path.
-    let mut cmd = std::process::Command::new(exe);
+    let mut cmd = crate::process::command(exe);
     cmd.arg("supervise")
         .arg(run_id)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(stderr);
-    // The supervisor re-resolves its directories from its own environment, so
-    // without this a run launched from the macOS app is tracked in a different
-    // store than the app is reading.
-    if let Some(path) = crate::local::shell_env::search_path() {
-        cmd.env("PATH", path);
-    }
-    crate::local::shell_env::export_to(|key, value| {
-        cmd.env(key, value);
-    });
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

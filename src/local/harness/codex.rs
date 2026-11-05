@@ -58,7 +58,7 @@ use crate::local::chat::{
 use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
-use crate::local::shell_env::find_on_path;
+use crate::local::shell_env::installs;
 use crate::store::{Store, StoredChatMessage};
 
 fn codex_native_usage(usage: &Value) -> crate::store::TokenUsage {
@@ -357,7 +357,7 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
     let fut = async move {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -556,35 +556,27 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     })
 }
 
-/// `codex` on PATH then in installer locations, in preference order, symlinks
-/// resolved — codex needs to find its `codex-code-mode-host` helper next to the
-/// real binary.
+/// Every `codex` install, in preference order, symlinks resolved — codex needs
+/// to find its `codex-code-mode-host` helper next to the real binary.
 fn codex_candidates() -> Vec<PathBuf> {
-    let drops = codex_install_dirs(dirs::home_dir().as_deref())
+    installs("codex", codex_install_dirs(dirs::home_dir().as_deref()))
         .into_iter()
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
-    find_on_path("codex")
-        .into_iter()
-        .chain(drops)
         .map(resolve_symlinks)
         .collect()
 }
 
-/// Installer locations off PATH. ChatGPT.app bundles the Codex CLI without
+/// Codex's own installer locations. ChatGPT.app bundles the Codex CLI without
 /// putting it on PATH, sometimes as the only install.
 fn codex_install_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     let chatgpt_apps = [
         Some(PathBuf::from("/Applications")),
         home.map(|home| home.join("Applications")),
     ];
-    home.map(|home| home.join(".local").join("bin"))
+    cfg!(windows)
+        .then(dirs::data_local_dir)
+        .flatten()
+        .map(|dir| dir.join("Programs/OpenAI/Codex/bin"))
         .into_iter()
-        .chain(
-            cfg!(windows)
-                .then(dirs::data_local_dir)
-                .flatten()
-                .map(|dir| dir.join("Programs/OpenAI/Codex/bin")),
-        )
         .chain(
             chatgpt_apps
                 .into_iter()
@@ -633,7 +625,7 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     };
     let message = format!("{}\n\n{}", request.system, request.prompt);
     let fut = async {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
             .args(["-c", "sandbox_mode=\"read-only\""])
             .args(["-c", "approval_policy=\"never\""])
@@ -1308,7 +1300,7 @@ impl Harness for Codex {
                 .build()
                 .ok()?;
             runtime.block_on(async {
-                let mut cmd = Command::new(bin);
+                let mut cmd = crate::process::tokio_command(bin);
                 cmd.args(["plugin", "list", "--json"])
                     .env("CODEX_HOME", &worker_home)
                     .current_dir(std::env::temp_dir())
@@ -4000,7 +3992,7 @@ fn codex_sandbox(mode: Option<PermissionMode>) -> Option<&'static str> {
 }
 
 fn codex_exec_command(bin: &Path, roots: &[PathBuf], native_id: Option<&str>) -> Command {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("exec");
     for root in roots {
         cmd.arg("--add-dir").arg(root);

@@ -5,8 +5,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Stdio;
 
-use tokio::process::Command;
-
 use super::{control_dir, control_dir_for, resolved_control_path, sh_quote, SshTarget};
 use crate::error::{anyhow, Result};
 
@@ -197,7 +195,7 @@ fn install(ssh_dir: &Path, default_dir: &Path, publication: Option<Publication>)
 }
 
 pub(super) async fn setup(target: &SshTarget) -> Result<()> {
-    let version = Command::new("ssh")
+    let version = crate::process::tokio_command("ssh")
         .arg("-V")
         .stdin(Stdio::null())
         .kill_on_drop(true)
@@ -215,7 +213,7 @@ pub(super) async fn setup(target: &SshTarget) -> Result<()> {
     tokio::task::spawn_blocking(move || install(&ssh_dir, &default_dir, Some(publication)))
         .await??;
 
-    let mut command = Command::new("ssh");
+    let mut command = crate::process::tokio_command("ssh");
     command
         .args(["-G", "--"])
         .arg(&target.dest)
@@ -251,10 +249,7 @@ mod tests {
     #[test]
     fn native_config_shares_only_matching_live_sockets_and_preserves_user_settings() {
         use std::os::unix::net::UnixListener;
-        let version = std::process::Command::new("ssh")
-            .arg("-V")
-            .output()
-            .unwrap();
+        let version = crate::process::command("ssh").arg("-V").output().unwrap();
         if !supports_sharing(&String::from_utf8_lossy(&version.stderr)) {
             return;
         }
@@ -287,7 +282,7 @@ mod tests {
                 "--".into(),
                 host.into(),
             ];
-            let output = std::process::Command::new("ssh")
+            let output = crate::process::command("ssh")
                 .args(probe_args())
                 .args(&args)
                 .env("HOME", temp.path())
@@ -318,7 +313,7 @@ mod tests {
         )
         .unwrap();
         let query = |args: &[&str], marker: Option<&Path>| {
-            let mut cmd = std::process::Command::new("ssh");
+            let mut cmd = crate::process::command("ssh");
             cmd.arg("-F")
                 .arg(&config)
                 .arg("-G")
@@ -443,7 +438,7 @@ mod tests {
         )
         .unwrap();
         install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
-        let resolved = std::process::Command::new("ssh")
+        let resolved = crate::process::command("ssh")
             .args(["-G", "-F"])
             .arg(&user_config)
             .arg("another-host")

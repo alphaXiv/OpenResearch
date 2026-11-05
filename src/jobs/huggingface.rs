@@ -266,7 +266,7 @@ pub async fn run_job_with_source(
         "timeoutSeconds": spec.timeout_seconds,
         "labels": spec.labels,
     });
-    let mut child = tokio::process::Command::new(python)
+    let mut child = crate::process::tokio_command(python)
         .args(["-c", SOURCE_LAUNCHER])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -476,7 +476,7 @@ class HfApi:
             "image": "", "command": [], "environment": {}, "secrets": {}, "flavor": "",
             "timeoutSeconds": 0, "labels": {},
         });
-        let mut child = std::process::Command::new(python)
+        let mut child = crate::process::command(python)
             .args(["-c", SOURCE_LAUNCHER])
             .env("PYTHONPATH", &dir)
             .stdin(Stdio::piped())

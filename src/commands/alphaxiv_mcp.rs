@@ -217,7 +217,7 @@ mod tests {
     async fn proxy_enforces_tools_and_switches_authentication() {
         if std::env::var_os("ORX_MCP_TEST_CHILD").is_none() {
             let root = crate::local::git::TemporaryDirectory::new("orx-mcp-test").unwrap();
-            let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+            let status = crate::process::tokio_command(std::env::current_exe().unwrap())
                 .args(["--exact", "commands::alphaxiv_mcp::tests::proxy_enforces_tools_and_switches_authentication", "--nocapture"])
                 .env("ORX_MCP_TEST_CHILD", "1")
                 .env("XDG_CONFIG_HOME", root.path())

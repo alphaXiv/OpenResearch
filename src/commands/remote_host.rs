@@ -749,7 +749,7 @@ fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)
     let args = ["up", "--no-browser", "--remote-host", "--port", "0"];
     let log_path = runtime_path(data_dir, "log")?;
     let log = open_runtime_log(&log_path)?;
-    let mut command = std::process::Command::new(&executable);
+    let mut command = crate::process::command(&executable);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -770,7 +770,7 @@ fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)
         return Ok((child, log_path));
     }
     let log = open_runtime_log(&log_path)?;
-    let child = std::process::Command::new("nohup")
+    let child = crate::process::command("nohup")
         .arg(&executable)
         .args(args)
         .stdin(Stdio::null())
@@ -858,7 +858,7 @@ pub(crate) fn canonical_data_dir() -> Result<PathBuf> {
 }
 
 pub(crate) fn hostname() -> String {
-    std::process::Command::new("hostname")
+    crate::process::command("hostname")
         .output()
         .ok()
         .filter(|output| output.status.success())

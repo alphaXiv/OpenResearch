@@ -1668,7 +1668,7 @@ mod tests {
     #[test]
     fn hands_the_token_only_to_the_host_the_project_was_linked_with() {
         let filled = |asked_for: &str| {
-            let mut command = std::process::Command::new("git");
+            let mut command = crate::process::command("git");
             command
                 .env(HOST_ENV, "git.overleaf.com")
                 .env(TOKEN_ENV, "olp_secret")

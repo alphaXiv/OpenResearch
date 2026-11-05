@@ -27,7 +27,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 use super::detect::{
     bin_version, nonempty_str, parse_version, read_json, HarnessAuthState, HarnessInfo, ModelInfo,
@@ -47,7 +46,7 @@ use crate::local::chat::{
 use crate::local::claude::{SpawnConfig, SpawnSpec, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
-use crate::local::shell_env::find_on_path;
+use crate::local::shell_env::installs;
 
 /// Harness-wide effort choices when no model-specific catalog is available.
 const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -175,7 +174,7 @@ pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence:
 }
 
 async fn probe_auth(bin: &Path, sequence: u64) -> AuthProbe {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.args(["auth", "status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -289,7 +288,7 @@ pub(crate) fn external_provider(method: Option<&str>, provider: Option<&str>) ->
 /// Any failure reports unsupported: a missing choice is a smaller harm than a
 /// choice that silently runs at the default effort.
 async fn probe_auth_and_ultracode(bin: &Path, sequence: u64) -> (AuthProbe, bool) {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.args(["--effort", CLAUDE_ULTRACODE, "auth", "status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -331,7 +330,7 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
     let fut = async move {
-        let mut cmd = Command::new(&bin);
+        let mut cmd = crate::process::tokio_command(&bin);
         cmd.args([
             "--print",
             "--input-format",
@@ -548,7 +547,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         OneShotQuality::Cheap => "haiku",
         OneShotQuality::Standard => "sonnet",
     };
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.args([
         "-p",
         request.prompt,
@@ -606,17 +605,10 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `claude` on PATH, then the common install drop locations, in preference order.
+/// Every `claude` install, in preference order.
 fn claude_candidates() -> Vec<PathBuf> {
-    let drops = dirs::home_dir().into_iter().flat_map(|home| {
-        [
-            home.join(".claude").join("local"),
-            home.join(".local").join("bin"),
-        ]
-        .into_iter()
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "claude"))
-    });
-    find_on_path("claude").into_iter().chain(drops).collect()
+    let own = dirs::home_dir().map(|home| home.join(".claude").join("local"));
+    installs("claude", own)
 }
 
 /// The executable detection selected, else `claude` on PATH / the drop

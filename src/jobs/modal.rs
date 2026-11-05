@@ -19,7 +19,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::process::Command;
 
 use super::managed_env::ManagedEnv;
 use crate::error::{anyhow, Result};
@@ -224,7 +223,7 @@ fn launcher_error(what: &str, code: Option<i32>, stderr: &str) -> crate::error::
 
 /// Run the launcher and capture its output (submit / status / cancel).
 async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>> {
-    let mut cmd = Command::new(python_bin());
+    let mut cmd = crate::process::tokio_command(python_bin());
     cmd.arg("-c")
         .arg(LAUNCHER)
         .args(args)
@@ -403,7 +402,7 @@ pub async fn stream_logs(
 ) -> Result<u64> {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-    let mut child = Command::new(python_bin())
+    let mut child = crate::process::tokio_command(python_bin())
         .arg("-c")
         .arg(LAUNCHER)
         .args(["logs", sandbox_id])
@@ -579,7 +578,7 @@ pub async fn detect() -> ModalStatus {
         token_configured,
         error,
     };
-    let probe = Command::new(python_bin())
+    let probe = crate::process::tokio_command(python_bin())
         .arg("-c")
         .arg("import modal")
         .stdin(Stdio::null())
@@ -652,7 +651,7 @@ mod credential_tests {
                 format!("class Sandbox:\n    @classmethod\n    def create(cls, {params}):\n        pass\n"),
             )
             .unwrap();
-            let status = std::process::Command::new(python)
+            let status = crate::process::command(python)
                 .args(["-c", MODAL_ENV.ready_check])
                 .env("PYTHONPATH", &dir)
                 .stderr(Stdio::null())
@@ -696,7 +695,7 @@ class Sandbox:
 "#,
         )
         .unwrap();
-        let mut child = std::process::Command::new(python)
+        let mut child = crate::process::command(python)
             .args(["-c", LAUNCHER, "submit"])
             .env("PYTHONPATH", &dir)
             .stdin(Stdio::piped())
