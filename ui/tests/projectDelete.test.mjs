@@ -18,6 +18,7 @@ async function openDelete(reply = () => ({})) {
       return reply();
     }
     if (path.startsWith("/api/file-manager")) return { os: "macos", name: "Finder" };
+    if (path === "/_orx/runtime") return { kind: "local", version: "test", buildChannel: "stable" };
   });
   await render(createElement(Fragment, null,
     createElement(Toaster),

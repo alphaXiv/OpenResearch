@@ -160,10 +160,11 @@ interrupted halfway resumes on the next run.
 
 ## What leaves the machine
 
-**Code, experiments, runs, logs, chats, transcripts and artifacts never go to
-openresearch.sh.** The client for it is limited to accounts, organizations,
-SSH keys, sandboxes and compute catalogs, and a test keeps research-state
-endpoints out of it. Other traffic:
+**Code, experiments, runs, logs, chats, transcripts and artifacts go to
+openresearch.sh only when the user publishes a project.** Otherwise the
+client for it is limited to accounts, organizations, SSH keys, sandboxes and
+compute catalogs, and a test keeps research-state endpoints out of it. Other
+traffic:
 
 - **Compute.** Work the user launches goes, as a source snapshot, to the
   backend they chose; logs and metrics come back.
@@ -217,3 +218,10 @@ endpoints out of it. Other traffic:
   scanned, since it is what the user chose to send. Opening one clones the
   bundle into a new project with fresh ids and no remote; its runs carry the
   backend kind `imported`, which no supervisor or cleanup acts on.
+- **Published projects.** "Publish link" in the Share dialog, or
+  `orx project share --publish`, uploads exactly the `.orx` file that "Save"
+  would write, after the same credential scan, to openresearch.sh, which
+  serves it to anyone with the link until the publisher deletes it. Nothing is
+  published unless the user asks for it there. The upload names the local
+  project id, so publishing again replaces the file behind the same link. Opening a link downloads the file from the app's own API, without
+  signing in.

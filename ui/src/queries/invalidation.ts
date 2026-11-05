@@ -35,7 +35,7 @@ const settingsFamilies: Record<string, readonly string[]> = {
   "data-dir": ["getDataDir"],
   ssh: ["getSshSettings", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
   compute: ["getComputeSettings"],
-  openresearch: ["getOpenResearchSettings", "getOpenResearchAccount", "getComputeSettings"],
+  openresearch: ["getOpenResearchSettings", "getOpenResearchAccount", "getComputeSettings", "getProjectLink"],
   git: ["githubAccount", "repoAccess", "getProjectGitStatus"],
   "lit-sources": ["getLitSources"],
   projects: ["getProjectDefaults", "getProjectGitStatus"],

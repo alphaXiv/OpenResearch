@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { m } from "../paraglide/messages.js";
 import { useRef, useState } from "react";
 import { FileArchive, FolderOpen, Plus } from "lucide-react";
-import { type AgentSelection, type Project } from "../api";
+import { type AgentSelection, type Project, type SharedSource } from "../api";
 
 import { type DialogContentProps } from "../dialog";
 import { NewProjectForm } from "./NewProjectForm";
@@ -54,14 +54,14 @@ export function NewProjectDialog({
   remote?: boolean;
   preferredAgent: AgentSelection | null;
   initialPaperId?: string;
-  /** A `.orx` file to open instead of creating a project. */
-  initialShared?: File | string;
+  /** A shared project to open instead of creating one. */
+  initialShared?: SharedSource;
 }) {
   const { getUiStateQuery } = useWorkspace().queries;
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [shared, setShared] = useState<File | string | null>(initialShared ?? null);
+  const [shared, setShared] = useState<SharedSource | null>(initialShared ?? null);
   const { data: uiState } = useQuery(getUiStateQuery());
 
   if (shared) return <DialogContent ref={dialogRef} className="max-h-[calc(100vh-2.5rem)] overflow-y-auto">

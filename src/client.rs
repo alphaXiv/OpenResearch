@@ -596,6 +596,273 @@ pub async fn create_ssh_key(
 }
 
 // ---------------------------------------------------------------------------
+// Published projects: the one place research leaves for openresearch.sh, and
+// only the `.orx` file the user chose to publish.
+// ---------------------------------------------------------------------------
+
+/// Largest `.orx` file openresearch.sh accepts or serves.
+const MAX_PUBLISHED_PROJECT_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// A link the signed-in user published (`zSharedProject`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedProject {
+    pub id: String,
+    pub slug: String,
+    pub url: String,
+    /// The local project id the link was published from.
+    pub source_project_id: String,
+    pub name: String,
+    pub byte_size: u64,
+    pub published_at: String,
+}
+
+/// What anyone with a link sees (`zPublicSharedProject`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicProject {
+    pub slug: String,
+    pub url: String,
+    pub name: String,
+    pub byte_size: u64,
+    pub publisher: Option<String>,
+}
+
+/// A `/shared-projects` request that surfaces the service's own message, which it writes for people.
+async fn shared_projects_request(
+    creds: &Credentials,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<reqwest::Response> {
+    let mut request = http()
+        .request(method, format!("{}{path}", creds.api_url))
+        .bearer_auth(&creds.token);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| anyhow!("Could not reach the API at {}: {err}", creds.api_url))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let message = response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|body| body["error"]["message"].as_str().map(str::to_owned));
+    Err(match (status.as_u16(), message) {
+        (401, _) => Unauthorized.into(),
+        (404, None) => anyhow!("{} can't publish projects yet.", creds.api_url),
+        (_, Some(message)) => anyhow!("{message}"),
+        _ => anyhow!("Request to {path} failed ({status})."),
+    })
+}
+
+/// Uploads `file`, the `.orx` written with `manifest`, as the link for
+/// `source_project_id`: `POST /shared-projects`, a PUT to the presigned URL,
+/// then `POST /shared-projects/{id}/publish`. Publishing again replaces the file behind the same link.
+pub async fn publish_project(
+    creds: &Credentials,
+    source_project_id: &str,
+    manifest: &crate::local::share::Manifest,
+    file: &std::path::Path,
+) -> Result<PublishedProject> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Reserved {
+        shared_project_id: String,
+        upload_id: String,
+        upload: Upload,
+    }
+    #[derive(Deserialize)]
+    struct Upload {
+        url: String,
+        headers: HashMap<String, String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Published {
+        shared_project: PublishedProject,
+    }
+
+    let digest_path = file.to_path_buf();
+    let (sha256, byte_size) =
+        tokio::task::spawn_blocking(move || crate::compute::digest_file(&digest_path))
+            .await
+            .map_err(|error| anyhow!("hashing the project failed: {error}"))??;
+    if byte_size > MAX_PUBLISHED_PROJECT_BYTES {
+        return Err(anyhow!(
+            "This project is {} as a .orx file; published projects can be at most {}. Leave out logs or artifacts and try again.",
+            crate::store::human_bytes(byte_size),
+            crate::store::human_bytes(MAX_PUBLISHED_PROJECT_BYTES)
+        ));
+    }
+    let reserved: Reserved = shared_projects_request(
+        creds,
+        Method::POST,
+        "/shared-projects",
+        Some(serde_json::json!({
+            "sourceProjectId": source_project_id,
+            // The service keeps names to 200 characters.
+            "name": manifest.project.name.trim().chars().take(200).collect::<String>(),
+            "summary": {
+                "experiments": manifest.experiments.len(),
+                "runs": manifest.runs.len(),
+                "chats": manifest.chats.len(),
+            },
+            "byteSize": byte_size,
+            "sha256": sha256,
+        })),
+    )
+    .await?
+    .json()
+    .await?;
+    let body = tokio::fs::File::open(file).await?;
+    // The presigned URL signs the length, and R2 refuses chunked uploads.
+    let mut put = http()
+        .put(&reserved.upload.url)
+        .header(reqwest::header::CONTENT_LENGTH, byte_size)
+        .body(reqwest::Body::wrap_stream(
+            tokio_util::io::ReaderStream::new(body),
+        ));
+    for (header, value) in &reserved.upload.headers {
+        put = put.header(header, value);
+    }
+    let response = put
+        .send()
+        .await
+        .map_err(|err| anyhow!("Uploading the project failed: {err}"))?;
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "Uploading the project failed ({}).",
+            response.status()
+        ));
+    }
+    let published: Published = shared_projects_request(
+        creds,
+        Method::POST,
+        &format!("/shared-projects/{}/publish", reserved.shared_project_id),
+        Some(serde_json::json!({ "uploadId": reserved.upload_id })),
+    )
+    .await?
+    .json()
+    .await?;
+    Ok(published.shared_project)
+}
+
+/// The signed-in user's link for a local project — `GET /shared-projects`.
+pub async fn find_published_project(
+    creds: &Credentials,
+    project_id: &str,
+) -> Result<Option<PublishedProject>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct List {
+        shared_projects: Vec<PublishedProject>,
+    }
+    let list: List = shared_projects_request(creds, Method::GET, "/shared-projects", None)
+        .await?
+        .json()
+        .await?;
+    Ok(list
+        .shared_projects
+        .into_iter()
+        .find(|link| link.source_project_id == project_id))
+}
+
+/// Unpublish: the link stops working and its file is deleted — `DELETE /shared-projects/{id}`.
+pub async fn delete_published_project(creds: &Credentials, id: &str) -> Result<()> {
+    shared_projects_request(
+        creds,
+        Method::DELETE,
+        &format!("/shared-projects/{id}"),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The slug of an openresearch.sh project link, or the slug itself.
+pub fn published_project_slug(link: &str) -> Option<&str> {
+    let link = link.trim();
+    let link = link[..link.find(['?', '#']).unwrap_or(link.len())].trim_end_matches('/');
+    let slug = link.rsplit_once("/p/").map_or(link, |(_, slug)| slug);
+    (slug.len() == 12 && slug.bytes().all(|b| b.is_ascii_alphanumeric())).then_some(slug)
+}
+
+/// A public link request's response, or why the link doesn't open.
+async fn public_project_response(api_url: &str, path: &str) -> Result<reqwest::Response> {
+    let response = http()
+        .get(format!("{api_url}{path}"))
+        .send()
+        .await
+        .map_err(|err| anyhow!("Could not reach the API at {api_url}: {err}"))?;
+    match response.status().as_u16() {
+        200 => Ok(response),
+        404 => Err(anyhow!(
+            "This project link doesn't work; its publisher may have unpublished it."
+        )),
+        status => Err(anyhow!("Opening the project link failed ({status}).")),
+    }
+}
+
+/// A link's public details; no sign-in — `GET /shared-projects/by-slug/{slug}`.
+pub async fn get_public_project(api_url: &str, slug: &str) -> Result<PublicProject> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Found {
+        shared_project: PublicProject,
+    }
+    let found: Found =
+        public_project_response(api_url, &format!("/shared-projects/by-slug/{slug}"))
+            .await?
+            .json()
+            .await?;
+    Ok(found.shared_project)
+}
+
+/// Saves a link's `.orx` file to `out`; no sign-in — `GET /shared-projects/by-slug/{slug}/file`.
+pub async fn download_public_project(
+    api_url: &str,
+    slug: &str,
+    out: &std::path::Path,
+) -> Result<()> {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    // A whole-request timeout would cut off a large file; a stall is what to give up on.
+    const STALL: std::time::Duration = std::time::Duration::from_secs(60);
+    let response = tokio::time::timeout(
+        STALL,
+        public_project_response(api_url, &format!("/shared-projects/by-slug/{slug}/file")),
+    )
+    .await
+    .map_err(|_| anyhow!("Downloading the project stalled."))??;
+    let mut file = tokio::fs::File::create(out).await?;
+    let mut received = 0u64;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = tokio::time::timeout(STALL, stream.next())
+        .await
+        .map_err(|_| anyhow!("Downloading the project stalled."))?
+    {
+        let chunk = chunk.map_err(|err| anyhow!("Downloading the project failed: {err}"))?;
+        received += chunk.len() as u64;
+        if received > MAX_PUBLISHED_PROJECT_BYTES {
+            return Err(anyhow!(
+                "The project file is larger than {}.",
+                crate::store::human_bytes(MAX_PUBLISHED_PROJECT_BYTES)
+            ));
+        }
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // alphaXiv literature endpoints (public — no auth, different hosts).
 //
 // These do NOT go through `send_request`/`Credentials`: they hit alphaXiv's
@@ -1858,6 +2125,9 @@ fn parse_pubmed_articles(xml: &str) -> Result<Vec<PubmedArticle>> {
 #[cfg(test)]
 mod tests {
     use super::{
+        download_public_project, publish_project, published_project_slug, Credentials, Value,
+    };
+    use super::{
         openalex_discovery_url, openalex_selector, paper_discovery_url, reconstruct_abstract,
         rerank_openalex_works, CreateSandboxBody, ListCatalog, ListCpuCatalog, LitHit,
         OpenAlexDiscoveryOptions, OpenAlexWork, PaperDiscoveryOptions, PaperHit, SandboxEnvelope,
@@ -2165,7 +2435,7 @@ mod tests {
     }
 
     #[test]
-    fn openresearch_client_contains_only_account_and_compute_paths() {
+    fn openresearch_client_sends_research_only_when_publishing() {
         let source = include_str!("client.rs");
         let production = source
             .split("#[cfg(test)]")
@@ -2177,11 +2447,14 @@ mod tests {
                 "research-state endpoint remains in client.rs: {forbidden}"
             );
         }
+        // Publishing a project is the one upload of research, and only of the `.orx` file.
+        assert_eq!(production.matches("Body::wrap_stream").count(), 1);
         for retained in [
             "\"/orgs\"",
             "\"/compute/catalog",
             "\"/sandboxes",
             "\"/ssh-keys",
+            "\"/shared-projects\"",
         ] {
             assert!(
                 production.contains(retained),
@@ -2798,5 +3071,114 @@ mod tests {
             .to_string();
         assert_eq!(err, format!("{url} is too large to download"));
         server.await.unwrap();
+    }
+
+    #[test]
+    fn published_project_slug_accepts_links_and_bare_slugs() {
+        for link in [
+            "a1B2c3D4e5F6",
+            "https://openresearch.sh/p/a1B2c3D4e5F6",
+            "https://openresearch.sh/p/a1B2c3D4e5F6/?ref=x",
+            "openresearch://p/a1B2c3D4e5F6#top",
+        ] {
+            assert_eq!(published_project_slug(link), Some("a1B2c3D4e5F6"), "{link}");
+        }
+        for link in [
+            "https://openresearch.sh/p/short",
+            "../../etc/passwd",
+            "a1B2c3D4e5F-",
+        ] {
+            assert_eq!(published_project_slug(link), None, "{link}");
+        }
+    }
+
+    /// The upload carries the signed checksum header, publish names the reserved
+    /// upload, and the public download follows the redirect to the same bytes.
+    #[tokio::test]
+    async fn publishes_a_project_and_downloads_it_back() {
+        use axum::extract::{Path as UrlPath, State};
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::{get, post, put};
+        use std::sync::{Arc, Mutex};
+
+        type Blob = Arc<Mutex<Option<(Vec<u8>, String)>>>;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let blob: Blob = Arc::default();
+        let link = json!({
+            "id": "link-1", "slug": "a1B2c3D4e5F6", "url": "https://openresearch.sh/p/a1B2c3D4e5F6",
+            "sourceProjectId": "project-1", "name": "Tiny LM", "byteSize": 5,
+            "publishedAt": "2026-11-03T00:00:00.000Z",
+        });
+        let upload_url = format!("{base}/blob");
+        let app = axum::Router::new()
+            .route(
+                "/shared-projects",
+                post(move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| async move {
+                    assert_eq!(headers["authorization"], "Bearer pat");
+                    assert_eq!(body["sourceProjectId"], "project-1");
+                    assert_eq!(body["name"], "Tiny LM");
+                    assert_eq!(body["summary"]["experiments"], 0);
+                    axum::Json(json!({
+                        "sharedProjectId": "link-1",
+                        "uploadId": "upload-1",
+                        "upload": { "url": upload_url, "headers": { "x-amz-meta-sha256": body["sha256"] } },
+                    }))
+                }),
+            )
+            .route(
+                "/blob",
+                put(|State(blob): State<Blob>, headers: HeaderMap, bytes: axum::body::Bytes| async move {
+                    let sha = headers["x-amz-meta-sha256"].to_str().unwrap().to_string();
+                    *blob.lock().unwrap() = Some((bytes.to_vec(), sha));
+                    StatusCode::OK
+                })
+                .get(|State(blob): State<Blob>| async move {
+                    blob.lock().unwrap().as_ref().unwrap().0.clone()
+                }),
+            )
+            .route(
+                "/shared-projects/{id}/publish",
+                post(move |UrlPath(id): UrlPath<String>, State(blob): State<Blob>, axum::Json(body): axum::Json<Value>| {
+                    let link = link.clone();
+                    async move {
+                        assert_eq!((id.as_str(), &body["uploadId"]), ("link-1", &Value::from("upload-1")));
+                        let (bytes, sha) = blob.lock().unwrap().clone().unwrap();
+                        use sha2::Digest;
+                        assert_eq!(format!("{:x}", sha2::Sha256::digest(&bytes)), sha);
+                        axum::Json(json!({ "sharedProject": link }))
+                    }
+                }),
+            )
+            .route(
+                "/shared-projects/by-slug/{slug}/file",
+                get(|| async { axum::response::Redirect::to("/blob") }),
+            )
+            .with_state(blob);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-publish-test").unwrap();
+        let file = dir.path().join("project.orx");
+        std::fs::write(&file, b"hello").unwrap();
+        let creds = Credentials {
+            api_url: base.clone(),
+            token: "pat".into(),
+        };
+        let manifest = serde_json::from_value(json!({
+            "format": 1,
+            "project": { "name": "Tiny LM", "baselineBranch": "main" },
+        }))
+        .unwrap();
+        let published = publish_project(&creds, "project-1", &manifest, &file)
+            .await
+            .unwrap();
+        assert_eq!(published.slug, "a1B2c3D4e5F6");
+
+        let downloaded = dir.path().join("download.orx");
+        download_public_project(&base, &published.slug, &downloaded)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&downloaded).unwrap(), b"hello");
+        server.abort();
     }
 }
