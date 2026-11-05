@@ -232,8 +232,14 @@ exists, so `ssh`, `scp` and `rsync` to that alias reuse the authenticated
 session; without a live master they authenticate as usual and never start an
 engine login.
 
-On Windows there is no shared master. Connect recovers the transports needed
-by existing runs; a second MFA prompt may be required.
+**On Windows the SSH service holds the login.** Windows OpenSSH has no
+ControlMaster, so Connect starts each root's `ssh` inside the detached
+`orx ssh-service`, reached on loopback with the token in its owner-only
+directory, and `orx up` talks to orx-host through it. A restarted or reopened
+server attaches to that login with no prompt. It ends when the user signs out
+of Windows, Connect replaces it, its route changes, or no server has attached
+for 24 hours. Plain `ssh` does not share it, and Connect still logs in the
+transports existing 0.2.x runs need, so a second MFA prompt may be required.
 
 ## What must stay true
 

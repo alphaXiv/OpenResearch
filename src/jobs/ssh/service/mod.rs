@@ -1,3 +1,4 @@
+mod hold;
 pub(crate) mod logs;
 mod state;
 mod transport;
@@ -81,6 +82,7 @@ struct Broker {
     slurm: Mutex<HashMap<String, Arc<Mutex<SlurmCache>>>>,
     shutdown: tokio::sync::Notify,
     stopping: std::sync::atomic::AtomicBool,
+    held: hold::Registry,
 }
 
 fn private_directory(path: &Path) -> Result<()> {
@@ -220,6 +222,14 @@ async fn exchange(
     target: Option<SshTarget>,
     operation: Value,
 ) -> Result<Value> {
+    Ok(open(endpoint, target, operation).await?.1)
+}
+
+async fn open(
+    endpoint: &Endpoint,
+    target: Option<SshTarget>,
+    operation: Value,
+) -> Result<(TcpStream, Value)> {
     let mut stream = tokio::time::timeout(
         Duration::from_secs(2),
         TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, endpoint.port)),
@@ -239,9 +249,10 @@ async fn exchange(
     if let Some(error) = response.error {
         return Err(anyhow!(error));
     }
-    response
+    let value = response
         .value
-        .ok_or_else(|| anyhow!("Missing SSH service response"))
+        .ok_or_else(|| anyhow!("Missing SSH service response"))?;
+    Ok((stream, value))
 }
 
 async fn ensure() -> Result<Endpoint> {
@@ -341,6 +352,13 @@ pub(crate) async fn reset_existing_backoff(target: &SshTarget) -> Result<()> {
         [resolved.key],
     )?;
     Ok(())
+}
+
+/// Opens a stream to a login the service holds for the engine: after `hold_start` or
+/// `hold_attach`, it carries that login's orx-host traffic.
+#[cfg(windows)]
+pub(crate) async fn hold(operation: Value) -> Result<(TcpStream, Value)> {
+    open(&ensure().await?, None, operation).await
 }
 
 pub(crate) async fn request(target: &SshTarget, operation: Value) -> Result<Value> {
@@ -767,8 +785,11 @@ pub(crate) async fn run() -> Result<()> {
         slurm: Mutex::new(HashMap::new()),
         shutdown: tokio::sync::Notify::new(),
         stopping: std::sync::atomic::AtomicBool::new(false),
+        held: Mutex::new(HashMap::new()),
         endpoint,
     });
+    let sweeper = broker.clone();
+    tokio::spawn(async move { hold::sweep(&sweeper.held).await });
     let limit = Arc::new(Semaphore::new(128));
     loop {
         let (mut stream, _) = tokio::select! {
@@ -791,6 +812,14 @@ pub(crate) async fn run() -> Result<()> {
             if request.token != broker.endpoint.token || request.version != VERSION {
                 return;
             }
+            // A held login's stream lasts as long as its server, so it must not count as busy.
+            if request.operation["op"]
+                .as_str()
+                .is_some_and(|op| op.starts_with("hold_"))
+            {
+                drop(_permit);
+                return hold::serve(&broker.held, &request.operation, stream).await;
+            }
             let idle_only = request.operation["op"] == "shutdown_if_idle";
             let shutting_down = idle_only || request.operation["op"] == "shutdown";
             let result = if shutting_down {
@@ -808,6 +837,7 @@ pub(crate) async fn run() -> Result<()> {
                     broker
                         .stopping
                         .store(true, std::sync::atomic::Ordering::SeqCst);
+                    broker.held.lock().await.clear();
                     let mut error = None;
                     for host in broker.hosts.lock().await.values() {
                         if let Some(session) = &host.lock().await.session {

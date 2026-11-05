@@ -6,11 +6,14 @@ fn stub(bytes: &[u8]) -> Session {
     let mut child = crate::process::tokio_command("python3")
         .args(["-c", "import os,sys; os.write(1,bytes.fromhex(sys.argv[1])); os.close(1); sys.stdin.buffer.read()", &hex])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn().unwrap();
+    let output: Box<dyn AsyncRead + Send + Unpin> = Box::new(child.stdout.take().unwrap());
     Session {
-        input: child.stdin.take().unwrap(),
-        output: Some(BufReader::new(child.stdout.take().unwrap())),
-        child,
-        stderr: tokio::spawn(async {}),
+        input: Box::new(child.stdin.take().unwrap()),
+        output: Some(BufReader::new(output)),
+        child: Some(child),
+        #[cfg(windows)]
+        held: None,
+        stderr: None,
         stderr_tail: Arc::new(Mutex::new(Vec::new())),
         bootstrapped: false,
         authenticated: Arc::new(AtomicBool::new(false)),

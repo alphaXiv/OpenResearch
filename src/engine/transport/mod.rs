@@ -3,6 +3,7 @@ mod ssh;
 
 #[cfg(unix)]
 pub(crate) use ssh::local_binary;
+pub(crate) use ssh::read_stderr;
 
 use anyhow::{anyhow, bail, Result};
 use orx_host_proto::{Message, Request, Response};
@@ -382,9 +383,7 @@ impl Actor {
             self.state.since_ms = now;
         }
         self.state.cause = Some(cause);
-        if breaker
-            || cfg!(windows) && self.auth.state.borrow().class == Some(HostClass::Interactive)
-        {
+        if breaker {
             if let Err(error) = self.auth.block(
                 &self.store,
                 &self.config.alias,
@@ -475,6 +474,10 @@ impl Actor {
         if let Some(previous) = pinned.filter(|previous| *previous != route) {
             ssh::stop_master(&self.config, &previous).await?;
         }
+        #[cfg(windows)]
+        if let Some(previous) = pinned.filter(|previous| *previous != route) {
+            ssh::release(&self.config, &previous).await;
+        }
         auth.update(&self.store, &self.config.alias, |state| {
             state.route = Some(route.clone())
         })?;
@@ -532,26 +535,53 @@ impl Actor {
                 }
                 attach = alive;
             }
-            #[cfg(windows)]
-            if self.auth.state.borrow().class == Some(HostClass::Interactive) && !approve_route {
-                self.failed(true, "Interactive SSH requires Connect".into());
-                bail!("Interactive SSH requires Connect");
-            }
             None
         };
+        // Windows has no ControlMaster; the SSH service may still hold this root's login.
+        #[cfg(windows)]
+        let resumed = if askpass.is_none()
+            && self.auth.state.borrow().class == Some(HostClass::Interactive)
+        {
+            match ssh::attach(&self.config, &route).await {
+                Ok(session) => Some(session),
+                Err(_) if !approve_route => {
+                    self.failed(true, "Interactive SSH requires Connect".into());
+                    bail!("Interactive SSH requires Connect");
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
         #[cfg(unix)]
         if attach {
             publish_master(&self.config, &route).await;
         }
-        let mut session = {
-            let authorization = auth.state.borrow();
-            if !approve_route {
-                if let Some((_, cause)) = &authorization.blocked {
-                    bail!("{cause}");
-                }
+        if !approve_route {
+            if let Some((_, cause)) = auth.state.borrow().blocked.clone() {
+                bail!("{cause}");
             }
-            ssh::spawn(&self.config, attach, &route, askpass.as_ref())?
+        }
+        #[cfg(windows)]
+        let resuming = resumed.is_some();
+        #[cfg(windows)]
+        let mut session = match (resumed, &askpass) {
+            (Some(session), _) => session,
+            (None, Some(bridge)) => match ssh::hold(&self.config, &route, bridge).await {
+                Ok(session) => session,
+                Err(error) => {
+                    eprintln!(
+                        "Host {}: the SSH service cannot hold this login, so it ends with this server: {error:#}",
+                        self.config.alias
+                    );
+                    ssh::spawn(&self.config, attach, &route, Some(bridge))?
+                }
+            },
+            (None, None) => ssh::spawn(&self.config, attach, &route, None)?,
         };
+        #[cfg(unix)]
+        let mut session = ssh::spawn(&self.config, attach, &route, askpass.as_ref())?;
         #[cfg(windows)]
         let deadline = if askpass.is_some() {
             Duration::from_secs(300)
@@ -561,6 +591,10 @@ impl Actor {
         #[cfg(unix)]
         let deadline = deadline();
         let result = tokio::time::timeout(deadline, async {
+            #[cfg(windows)]
+            if resuming {
+                return session.resume(self.config.binary_dir.as_deref()).await;
+            }
             let (os, arch) = session.handshake().await?;
             if askpass
                 .as_ref()
@@ -623,7 +657,9 @@ impl Actor {
         let (events, mut responses) = mpsc::channel(64);
         let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
         let mut queues: [VecDeque<Call>; 4] = std::array::from_fn(|_| VecDeque::new());
-        let mut id = 1u64;
+        // Unique across restarts: a resumed Windows login can still carry replies to the last server.
+        let mut id = self.clock.wall_ms().max(0) as u64 * 1000;
+        let mut first = id;
         let mut jumps = JumpDetector::new(self.clock.as_ref());
         let mut last_reply = self.clock.monotonic();
         let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -664,7 +700,7 @@ impl Actor {
                             self.state.last_live_ms = Some(self.clock.wall_ms());
                             if let Some(call) = pending.remove(&id) {
                                 if let Reply::Call(reply) = call.reply { let _ = reply.send(Ok(body)); }
-                            } else { disconnect = Some("Unexpected orx-host response id".into()); }
+                            } else if id >= first { disconnect = Some("Unexpected orx-host response id".into()); }
                         }
                         Some(Err(_)) => disconnect = Some("Connection closed".into()),
                         None => disconnect = Some("Connection closed".into()),
@@ -957,6 +993,7 @@ impl Actor {
                             }
                         }));
                         session = Some(connected);
+                        first = id;
                         last_reply = self.clock.monotonic();
                     }
                     Err(error) => {
