@@ -1709,9 +1709,10 @@ async fn dashboard_host_routes_report_states_and_retry_only_key_hosts() {
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
+    let connect_required = cfg!(windows) && !crate::config::run_engine_settings().unwrap().0;
     assert_eq!(
         serde_json::from_slice::<Value>(&bytes).unwrap(),
-        json!([{"alias":"lab","status":"backoff","class":"key","connectRequired":cfg!(windows),"sinceMs":100,"nextRetryMs":200,"cause":"offline","root":"/engine"}])
+        json!([{"alias":"lab","status":"backoff","class":"key","connectRequired":connect_required,"sinceMs":100,"nextRetryMs":200,"cause":"offline","root":"/engine"}])
     );
     let request = || {
         Request::builder()
