@@ -1711,7 +1711,7 @@ async fn dashboard_host_routes_report_states_and_retry_only_key_hosts() {
         .unwrap();
     assert_eq!(
         serde_json::from_slice::<Value>(&bytes).unwrap(),
-        json!([{"alias":"lab","status":"backoff","class":"key","sinceMs":100,"nextRetryMs":200,"cause":"offline","root":"/engine"}])
+        json!([{"alias":"lab","status":"backoff","class":"key","connectRequired":cfg!(windows),"sinceMs":100,"nextRetryMs":200,"cause":"offline","root":"/engine"}])
     );
     let request = || {
         Request::builder()
