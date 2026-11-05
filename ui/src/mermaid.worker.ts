@@ -8,6 +8,18 @@ self.onmessage = (event: MessageEvent<{ code: string; id: string; math: Measured
     const measured = Object.hasOwn(math, tex) ? math[tex] : undefined;
     return measured ? { html: measured.html, width: measured.width * size / 16, height: measured.height * size / 16 } : null;
   } })
-    .then(({ svg }) => self.postMessage(svg))
+    .then(async ({ svg }) => {
+      if (svg.length >= 200_000) {
+        try {
+          const { prepareMermaidSvg } = await import("./mermaidWorkerSvg");
+          const prepared = prepareMermaidSvg(svg);
+          if (prepared !== null) {
+            self.postMessage({ svg: prepared, prepared: true });
+            return;
+          }
+        } catch { /* Keep the existing browser-parser path if the module cannot load. */ }
+      }
+      self.postMessage({ svg, prepared: false });
+    })
     .catch(() => self.postMessage(null));
 };

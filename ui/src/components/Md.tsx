@@ -441,8 +441,8 @@ export function MermaidBlock({ code, sourceToggle = true, imageResolver, openFil
     let deadline: number | undefined;
     const timer = window.setTimeout(() => {
       worker = new Worker(new URL("../mermaid.worker.ts", import.meta.url), { type: "module" });
-      worker.onmessage = (event: MessageEvent<string | null>) => {
-        const svg = event.data && resolveMermaidImages(event.data, absoluteFileUrl, apiPrefix, resolve);
+      worker.onmessage = (event: MessageEvent<{ svg: string; prepared: boolean } | null>) => {
+        const svg = event.data && (event.data.prepared ? event.data.svg : resolveMermaidImages(event.data.svg, absoluteFileUrl, apiPrefix, resolve));
         if (!cancelled) setResult(svg ? { code, svg } : null);
         worker?.terminate();
         window.clearTimeout(deadline);
