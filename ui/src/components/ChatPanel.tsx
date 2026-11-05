@@ -1,5 +1,6 @@
 import { useMachines } from "../machineSelection";
 import {
+  createContext,
   useContext,
   memo,
   useCallback,
@@ -2511,7 +2512,7 @@ function TurnStatusRow({
   const Icon = temporaryApiError ? WifiOff : usageLimited ? Gauge : TriangleAlert;
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
-    <details className="turn-usage-limit group/limit mt-4 text-base text-subtext">
+    <Disclosure id={`${part.id}:${turnId ?? ""}`} className="turn-usage-limit group/limit mt-4 text-base text-subtext">
       <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
         <Icon size={18} className={temporaryApiError ? "shrink-0 text-subtext" : "shrink-0 text-accent-red"} aria-hidden="true" />
         <span>{label}</span>
@@ -2531,7 +2532,7 @@ function TurnStatusRow({
           {recovering ? m.chat_starting() : action === "retry" ? m.app_retry() : m.chat_continue()}
         </Button>
       )}
-    </details>
+    </Disclosure>
   );
 }
 
@@ -2899,7 +2900,7 @@ function PromptCard({
             : { label: m.chat_panel_plan_resolved(), icon: FileText, iconClass: "text-muted" };
       const OutcomeIcon = outcome.icon;
       return (
-        <details className={PLAN_RESOLVED_CLASS_NAME}>
+        <Disclosure id={part.id} className={PLAN_RESOLVED_CLASS_NAME}>
           <summary>
             <span className="plan-resolved-label text-base font-normal wrap-anywhere">
               {p.synthesized ? m.chat_plan() : m.chat_proposed_plan()}
@@ -2912,19 +2913,19 @@ function PromptCard({
             <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
             {p.note && <div className="prompt-collapsed-note mt-1.5 italic">{p.note}</div>}
           </div>
-        </details>
+        </Disclosure>
       );
     }
     const chosen = [(p.answers ?? []).join(", "), p.note].filter(Boolean).join("\n\n");
     if (p.approved === false && !chosen) {
       return (
-        <details className="group/question py-1 text-base text-subtext">
+        <Disclosure id={part.id} className="group/question py-1 text-base text-subtext">
           <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
             <span>{m.chat_question()} — {m.chat_question_skipped()}</span>
             <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/question:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
           </summary>
           <div className="mt-1 leading-normal text-subtext whitespace-pre-line wrap-anywhere">{questionText}</div>
-        </details>
+        </Disclosure>
       );
     }
     const annotations: ComposerAnnotation[] = (p.annotations ?? []).map((annotation, index) => ({
@@ -3932,17 +3933,26 @@ export function SubagentTranscript({
   );
 }
 
+const DisclosureState = createContext<Map<string, boolean> | undefined>(undefined);
+
+/** A `<details>` whose open state outlives its virtualized row. */
+function Disclosure({ id, ...props }: React.ComponentProps<"details"> & { id: string }) {
+  const state = useContext(DisclosureState);
+  const [open] = useState(() => state?.get(`details:${id}`) ?? false);
+  return <details {...props} open={open} onToggle={(event) => state?.set(`details:${id}`, event.currentTarget.open)} />;
+}
+
 function AgentUpdateRow({ part }: { part: ChatPart }) {
   const text = parentUpdateText(part);
   const label = <><ToolActivityIcon activity={{ kind: "agent", label: m.activity_sent_update_to_parent() }} className="text-muted" /><span className={`${TOOL_LINE_CLASS_NAME} text-subtext`}>{m.activity_sent_update_to_parent()}</span></>;
   if (!text) return <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">{label}</div>;
   return (
-    <details className="min-w-0 [&[open]_.update-chevron]:rotate-90">
+    <Disclosure id={part.id} className="min-w-0 [&[open]_.update-chevron]:rotate-90">
       <summary className="tool-row flex cursor-pointer list-none items-center gap-2 min-w-0 py-1 px-1 rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
         {label}<ChevronRight size={12} className="update-chevron text-muted" aria-hidden="true" />
       </summary>
       <div className="ps-7 py-2 text-sm"><Md text={text} /></div>
-    </details>
+    </Disclosure>
   );
 }
 
@@ -4140,6 +4150,8 @@ export type FocusedMessage = { sessionId: string; messageId: string; nonce: numb
 // Transcripts remount per chat and side chats per tab switch; a request is handled once, not once per mount.
 let handledFocusNonce: number | undefined;
 let openedSearchNonce: number | undefined;
+/** The opened request whose plan or subagent tab may replace the side pane that searched for it. */
+let handedOffSearchNonce: number | undefined;
 
 const Transcript = memo(function Transcript({
   messages,
@@ -4525,6 +4537,7 @@ const Transcript = memo(function Transcript({
           {group[0].role === "user"
             ? <h5 id={headingId} className="sr-only select-none">{userLabel}</h5>
             : <h6 id={headingId} className="sr-only select-none">{assistantLabel}</h6>}
+          <DisclosureState value={expansionState}>
           <Message
             message={m}
             expansionState={expansionState}
@@ -4557,6 +4570,7 @@ const Transcript = memo(function Transcript({
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
+          </DisclosureState>
           {onOpenDelegate && delegatesByRow.has(item.index) && (
             <div className="mt-3 flex flex-col gap-2">
               {delegatesByRow.get(item.index)?.map(({ session, status }) => (
@@ -5490,8 +5504,16 @@ export function ChatPanel({
     });
   }, []);
   const findOpen = findRequest !== null;
-  // A hit can open in the other chat pane, which highlights it until this box closes or unmounts.
-  useLayoutEffect(() => { if (findOpen) return onClearSearch; }, [findOpen, onClearSearch]);
+  const unmounting = useRef(false);
+  useLayoutEffect(() => {
+    unmounting.current = false;
+    return () => { unmounting.current = true; };
+  }, []);
+  // A hit can open in the other chat pane, which highlights it until this box closes or unmounts,
+  // unless this pane gave way to the plan or subagent tab that still shows the hit.
+  useLayoutEffect(() => {
+    if (findOpen) return () => { if (!unmounting.current || handedOffSearchNonce !== openedSearchNonce) onClearSearch(); };
+  }, [findOpen, onClearSearch]);
   const threadInnerRef = useRef<HTMLDivElement>(null);
   const scrollToEndRef = useRef<(() => void) | null>(null);
   const stickToBottom = useRef(true);
@@ -7199,11 +7221,10 @@ export function ChatPanel({
     const message = messages.find((message) => message.id === focusedMessage.messageId);
     if (!message) return;
     openedSearchNonce = focusedMessage.nonce;
+    const part = focusedMessage.partId ? findPartById(message.parts, focusedMessage.partId) : undefined;
+    handedOffSearchNonce = (focusedMessage.spawnPartId ? openSubagent : part?.prompt?.kind === "plan" && openPlan) ? focusedMessage.nonce : undefined;
     if (focusedMessage.spawnPartId) openSubagent?.(focusedMessage.spawnPartId, undefined, "preview");
-    else if (focusedMessage.partId) {
-      const part = findPartById(message.parts, focusedMessage.partId);
-      if (part?.prompt?.kind === "plan") openPlan?.(part.prompt.plan ?? "", part.id, "preview");
-    }
+    else if (part?.prompt?.kind === "plan") openPlan?.(part.prompt.plan ?? "", part.id, "preview");
   }, [contentLoading, historyLoading, focusedMessage, activeId, messages, openSubagent, openPlan]);
   useLayoutEffect(() => {
     if (!focusedMessage?.query || !focusedMessage.partId || focusedMessage.sessionId !== activeId) return;
