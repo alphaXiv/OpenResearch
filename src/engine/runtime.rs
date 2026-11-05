@@ -692,17 +692,44 @@ impl Runtime {
         budget: Duration,
     ) -> Result<bool> {
         let mirrored = matches!(&run.handle, Handle::Legacy { descriptor } if descriptor.kind == "openresearch_job");
-        if !mirrored {
-            let mut progressed = false;
-            let collected = async {
-                backend.drain_log(run).await?;
-                self.collect_log(backend, run, &mut progressed).await
-            };
-            match tokio::time::timeout(budget, collected).await {
-                Ok(result) => result?,
-                Err(_) if progressed => return Ok(false),
-                Err(_) => bail!("timed out without keeping more log bytes"),
+        if mirrored {
+            let mut ranges = crate::commands::up::api_v2::kept_ranges(&self.data_dir, &run.id)?;
+            let (stored, state) = self.engine.load(&run.id)?;
+            if Phase::parse(&stored.status).is_some_and(Phase::is_terminal)
+                && state.cancel_accepted_at.is_some()
+                && state.contact == crate::store::Contact::Live
+            {
+                if let Some(last) = ranges.last_mut() {
+                    last.eof = true;
+                } else {
+                    let path = self
+                        .data_dir
+                        .join("run-logs")
+                        .join(format!("{}.log", run.id));
+                    std::fs::create_dir_all(path.parent().unwrap())?;
+                    crate::local::git::atomic_write_with_mode(&path, &[], Some(0o600))?;
+                    ranges.push(KeptRange {
+                        offset: 0,
+                        len: 0,
+                        file: path,
+                        ident: FileIdent { dev: 0, ino: 0 },
+                        eof: true,
+                    });
+                }
+                crate::commands::up::api_v2::keep_ranges(&self.data_dir, &run.id, ranges)?;
+                return Ok(true);
             }
+            return Ok(ranges.iter().any(|range| range.eof));
+        }
+        let mut progressed = false;
+        let collected = async {
+            backend.drain_log(run).await?;
+            self.collect_log(backend, run, &mut progressed).await
+        };
+        match tokio::time::timeout(budget, collected).await {
+            Ok(result) => result?,
+            Err(_) if progressed => return Ok(false),
+            Err(_) => bail!("timed out without keeping more log bytes"),
         }
         Ok(true)
     }
@@ -1651,6 +1678,97 @@ mod tests {
         assert_eq!(*backend.held.lock().unwrap(), ["kept"]);
         drop(runtime);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn released_boxes_settle_partial_and_empty_logs_only_after_stop_proof() {
+        for partial in [false, true] {
+            let dir = std::env::temp_dir().join(format!("orx-released-{}", uuid::Uuid::new_v4()));
+            let runtime = collector(&dir);
+            let descriptor = crate::jobs::BackendDescriptor::parse(
+                r#"{"kind":"openresearch_job","jobId":"box","namespace":"org"}"#,
+            )
+            .unwrap();
+            runtime
+                .engine
+                .insert(SubmittingRun {
+                    id: "run",
+                    experiment_id: "exp",
+                    project_id: "project",
+                    metadata: &descriptor,
+                    command: "true",
+                    created_at: 1,
+                    commit_sha: None,
+                    chat_session_id: None,
+                    spec_digest: "digest",
+                    launch: &LaunchSpec {
+                        kind: "openresearch_job".into(),
+                        target: Some("org".into()),
+                        options: json!({}),
+                    },
+                })
+                .unwrap();
+            let run = WatchedRun {
+                id: "run".into(),
+                handle: Handle::Legacy {
+                    descriptor: Box::new(descriptor),
+                },
+            };
+            runtime
+                .store()
+                .unwrap()
+                .record_run_handle("run", 1, &run.handle)
+                .unwrap();
+            runtime
+                .store()
+                .unwrap()
+                .accept_run_cancel("run", Some("user"))
+                .unwrap();
+            if partial {
+                let path = dir.join("run-logs/run.log");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"available copy").unwrap();
+                crate::commands::up::api_v2::keep_ranges(
+                    &dir,
+                    "run",
+                    vec![KeptRange {
+                        offset: 0,
+                        len: 14,
+                        file: path,
+                        ident: FileIdent { dev: 1, ino: 2 },
+                        eof: false,
+                    }],
+                )
+                .unwrap();
+            }
+            let backend = Host::default();
+            assert!(!runtime
+                .collect(&backend, &run, COLLECTION_BUDGET)
+                .await
+                .unwrap());
+            let stored = runtime.engine.load("run").unwrap().0;
+            runtime
+                .engine
+                .apply_cancel(&stored, super::super::CancelOutcome::Verified)
+                .unwrap();
+            assert!(runtime
+                .collect(&backend, &run, COLLECTION_BUDGET)
+                .await
+                .unwrap());
+            let ranges = kept_ranges(&dir);
+            assert_eq!(ranges.len(), 1);
+            assert!(ranges[0].eof);
+            assert_eq!(
+                std::fs::read(&ranges[0].file).unwrap(),
+                if partial {
+                    b"available copy".as_slice()
+                } else {
+                    b""
+                }
+            );
+            drop(runtime);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[tokio::test]

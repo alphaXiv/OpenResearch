@@ -23,6 +23,9 @@ use crate::jobs::{is_terminal_stage, stage_to_run_status, BackendDescriptor};
 use crate::store::{log_path, now_ms, RunStatus, Store};
 
 pub(crate) trait RunSink {
+    fn finish_log_collection(&self, _run: &str) -> Result<()> {
+        Ok(())
+    }
     fn transport_error(&self, _run: &str, _target: &ssh::SshTarget, _cause: &str) -> Result<()> {
         Ok(())
     }
@@ -1143,6 +1146,9 @@ pub(crate) async fn watch_ssh_job(
                     format!("{prefix}: {message}")
                 });
             store.finish(run_id, status, exit_code, reason.as_deref())?;
+            if collected {
+                store.finish_log_collection(run_id)?;
+            }
             if descriptor.rental_lease.is_some()
                 && stage != "LOST"
                 && collected

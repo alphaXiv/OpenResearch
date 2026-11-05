@@ -886,7 +886,14 @@ pub async fn delete_resources(
     for r in resources.iter().rev() {
         match kubectl(
             context,
-            &["delete", r, "-n", namespace, "--wait=false"],
+            &[
+                "delete",
+                r,
+                "-n",
+                namespace,
+                "--cascade=foreground",
+                "--wait=false",
+            ],
             None,
         )
         .await
@@ -1017,7 +1024,8 @@ impl LogResume {
 /// rotation a replay from the start is shorter than what was already written.
 /// Ends when kubectl exits (pod gone/finished) or after `idle` silence; the
 /// supervisor re-checks job state and reconnects if still live. True only when
-/// kubectl's stream closed, never for an unscheduled pod or an idle stop.
+/// kubectl's stream closed or the Job and its pods are gone, never for an
+/// unscheduled pod or an idle stop.
 ///
 /// Only the leader pod is captured: a stable single stream keeps the resume
 /// point sound, and the leader is where the driver's output lives. Other pods
@@ -1034,8 +1042,7 @@ pub async fn stream_logs(
 
     let target = match leader_pod(context, namespace, job_name).await? {
         Some(pod) => format!("pod/{pod}"),
-        // Not scheduled yet — let the supervisor's retry loop come back.
-        None => return Ok(false),
+        None => return Ok(inspect_job(context, namespace, job_name).await?.stage == "DELETED"),
     };
 
     let mut cmd = crate::process::tokio_command("kubectl");

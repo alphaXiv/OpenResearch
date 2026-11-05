@@ -49,6 +49,7 @@ which path recovers orphaned supervised runs.
 
 Engine runs keep their first payload start in `started_at` and finish in
 `ended_at`, using source timestamps when available and observation time otherwise.
+Box runs stay starting until remote inspection confirms a live payload PID.
 
 The snapshot contract below applies in both modes. The engine lifecycle and
 `orx-host` sections describe engine-owned runs; supervised runs keep their
@@ -196,6 +197,9 @@ engine follows its length and pages it from the host by byte range and file
 identity; a changed identity resets the reader rather than splicing different
 bytes. API backends offer no random access, so their logs stream into a local
 spool.
+
+Kubernetes cancellation keeps the deleting Job visible until its Pods are gone.
+Once both are gone, the log already spooled on this computer becomes the kept log.
 
 When a run ends, keeping its log becomes an obligation recorded in the same
 transaction as the terminal phase:
