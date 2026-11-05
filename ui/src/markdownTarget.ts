@@ -10,6 +10,11 @@ export function isExternalMarkdownTarget(target: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("//");
 }
 
+export function isNetworkImage(target: string): boolean {
+  const value = target.replace(/[\u0000-\u0020]/g, "");
+  return /^https?:/i.test(value) || value.startsWith("//") || value.startsWith("\\\\");
+}
+
 export function resolveMarkdownTarget(
   folder: string,
   target: string,

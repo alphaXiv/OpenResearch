@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renderAsync } from "pele/lazy";
 
-const options = { images: true, imageSchemes: ["file", ..."abcdefghijklmnopqrstuvwxyz"], links: false, idPrefix: "orx-test-" };
+const options = { images: true, imageSchemes: ["file", ..."abcdefghijklmnopqrstuvwxyz"], links: true, linkSchemes: ["http", "https", "mailto", "tel", "file", ..."abcdefghijklmnopqrstuvwxyz"], idPrefix: "orx-test-" };
 
-test("diagram families render without external links", async () => {
+test("diagram families render with links available for explicit navigation", async () => {
   for (const source of [
     'flowchart LR\n A[Start] --> B[End]',
     'sequenceDiagram\n Alice->>Bob: Hello',
@@ -25,7 +25,7 @@ test("diagram families render without external links", async () => {
   ]) {
     const { svg } = await renderAsync(source, options);
     assert.match(svg, /<svg\b/);
-    assert.doesNotMatch(svg, /https?:\/\/example\.com/);
+    if (!source.includes('click A href')) assert.doesNotMatch(svg, /https?:\/\/example\.com/);
   }
 });
 

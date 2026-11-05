@@ -12,12 +12,18 @@ import {
   encodeMarkdownPath,
   firstCitedLine,
   isExternalMarkdownTarget,
+  isNetworkImage,
   markdownTargetUrl,
   nativeMarkdownPath,
   rehypeSafeUrls,
   resolveMarkdownTarget,
   splitLineSuffix,
 } from "../src/markdownTarget.ts";
+
+test("network image references are distinguished from local and embedded files", () => {
+  for (const src of ["https://example.com/a.png", "HTTP:example.com/a.png", "h\nttps://example.com/a.png", "//example.com/a.png", "\\\\server\\share\\a.png"]) assert.equal(isNetworkImage(src), true);
+  for (const src of ["images/a.png", "/tmp/a.png", "C:/a.png", "data:image/png;base64,AA=="]) assert.equal(isNetworkImage(src), false);
+});
 
 test("repository markdown resolves images relative to the document", () => {
   assert.deepEqual(resolveMarkdownTarget("", "dev/logo.png"), {

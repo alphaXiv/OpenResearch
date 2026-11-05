@@ -31,7 +31,7 @@ import { FileChip, FileReference, FileScopeContext, type OpenFile } from "./File
 import { imageWheelZoom } from "../imageZoom";
 import { CITED_ID } from "../agentMessages";
 import { CitedRef } from "./ChatLinks";
-import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
+import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, isNetworkImage, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
 import { measureMermaidMath } from "../mermaidMath";
 import { resolveMermaidImages } from "../mermaidImages";
 
@@ -512,7 +512,7 @@ export const Md = memo(function Md({
   const imageSrc = resolveImageSrc ?? chatImageSrc;
   // Callers pass fresh callbacks; a new `img` type would remount every image.
   const img = useMemo(() => function MarkdownImg({ node: _node, src, alt, className, ...rest }: any) {
-    const sources = useMemo(() => typeof src === "string" && src ? imageSrc?.(src) ?? [{ url: src, resolveAsset: () => null }] : [], [src, imageSrc]);
+    const sources = useMemo(() => typeof src === "string" && src && !isNetworkImage(src) ? imageSrc?.(src) ?? [{ url: src, resolveAsset: () => null }] : [], [src, imageSrc]);
     const resolved = sources[0]?.url;
     if (!resolved) return null;
     if (imageSrc && chatImageTarget(src)?.path.match(/\.html?$/i)) {
