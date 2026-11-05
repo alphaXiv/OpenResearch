@@ -461,7 +461,7 @@ mod tests {
         let root = home.path().join(".orx/engine");
         let sources = root.join("sources");
         std::fs::create_dir_all(&sources).unwrap();
-        let mut wrapper = std::process::Command::new("sleep")
+        let mut wrapper = crate::process::command("sleep")
             .arg("30")
             .process_group(0)
             .spawn()
@@ -476,7 +476,7 @@ mod tests {
         for name in [&linked, &unlinked, &fresh, &kept] {
             std::fs::write(sources.join(name), "x").unwrap();
             if name != &fresh {
-                assert!(std::process::Command::new("touch")
+                assert!(crate::process::command("touch")
                     .args(["-t", "202001010000"])
                     .arg(sources.join(name))
                     .status()
@@ -535,7 +535,7 @@ mod tests {
             slurm_run("finished", "42"),
             slurm_run("unknown", "43"),
         ];
-        let out = std::process::Command::new("bash")
+        let out = crate::process::command("bash")
             .args([
                 "-c",
                 &host_script(
@@ -613,7 +613,7 @@ mod tests {
             std::env::consts::ARCH
         ));
         for binary in [std::path::Path::new("/usr/bin/false"), &native] {
-            let output = std::process::Command::new("bash")
+            let output = crate::process::command("bash")
                 .args([
                     "-c",
                     &host_script(&batch, &BTreeSet::new(), &BTreeSet::new()),

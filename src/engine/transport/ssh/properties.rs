@@ -3,7 +3,7 @@ use crate::engine::runtime::chaos::rng::Rng;
 
 fn stub(bytes: &[u8]) -> Session {
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    let mut child = Command::new("python3")
+    let mut child = crate::process::tokio_command("python3")
         .args(["-c", "import os,sys; os.write(1,bytes.fromhex(sys.argv[1])); os.close(1); sys.stdin.buffer.read()", &hex])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn().unwrap();
     Session {

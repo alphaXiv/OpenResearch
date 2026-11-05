@@ -267,7 +267,7 @@ async fn ssh_idempotent_launch_staging_notify_and_cleanup() {
     fs::create_dir(&snapshot).unwrap();
     fs::write(snapshot.join("value"), "staged").unwrap();
     let archive = f.server.directory().join("source.tar");
-    assert!(std::process::Command::new("tar")
+    assert!(crate::process::command("tar")
         .arg("-cf")
         .arg(&archive)
         .arg("-C")
@@ -583,7 +583,7 @@ async fn fifty_runs_share_one_ssh_session() {
     })
     .await
     .unwrap();
-    let output = std::process::Command::new("ps")
+    let output = crate::process::command("ps")
         .args(["-A", "-ww", "-o", "comm=,args="])
         .output()
         .unwrap();
@@ -695,7 +695,7 @@ async fn adopted_legacy_run_uses_read_only_inspection_and_group_cancel() {
     fs::create_dir(&dir).unwrap();
     let script = "sleep 60";
     fs::write(dir.join("run.sh"), script).unwrap();
-    let mut child = std::process::Command::new("bash")
+    let mut child = crate::process::command("bash")
         .arg(dir.join("run.sh"))
         .process_group(0)
         .spawn()
@@ -1127,7 +1127,7 @@ async fn submission_child() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_engine_at_each_submission_boundary_then_restart_executes_once() {
     if std::env::var_os("ORX_ADAPTER_CRASH_PARENT").is_none() {
-        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::tokio_command(std::env::current_exe().unwrap())
             .args(["--exact", "engine::adapters::tests::kill_engine_at_each_submission_boundary_then_restart_executes_once", "--nocapture"])
             .env("ORX_ADAPTER_CRASH_PARENT", "1")
             .env(crate::jobs::tinker::API_KEY_ENV, "test-only-tinker-key")
@@ -1152,7 +1152,7 @@ async fn kill_engine_at_each_submission_boundary_then_restart_executes_once() {
                 json!({"id":id,"script":script,"kind":kind}).to_string(),
             )
             .unwrap();
-            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::process::tokio_command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "engine::adapters::tests::submission_child",
@@ -1412,7 +1412,7 @@ async fn interrupted_blob_upload_recovers_without_failing_the_run() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("large"), vec![b'x'; 8 * 1024 * 1024]).unwrap();
     let archive = f.server.directory().join("upload.tar");
-    assert!(std::process::Command::new("tar")
+    assert!(crate::process::command("tar")
         .arg("-cf")
         .arg(&archive)
         .arg("-C")
@@ -1466,7 +1466,7 @@ async fn a_source_swept_before_launch_is_restaged_and_runs() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("train"), "x").unwrap();
     let archive = f.server.directory().join("swept.tar");
-    assert!(std::process::Command::new("tar")
+    assert!(crate::process::command("tar")
         .arg("-cf")
         .arg(&archive)
         .arg("-C")
@@ -2157,7 +2157,7 @@ async fn ssh_recovery_cancels_a_fully_staged_intent_before_launch_repair() {
     let dir = f.dir(&intent.run.id);
     fs::create_dir_all(dir.join("repo")).unwrap();
     let archive = dir.join("source.tar");
-    assert!(std::process::Command::new("tar")
+    assert!(crate::process::command("tar")
         .args(["-cf"])
         .arg(&archive)
         .arg("-C")
@@ -2997,7 +2997,7 @@ async fn legacy_survivors_settle_on_group_absence_without_reconnect() {
     ] {
         let dir = f.server.home().join(id);
         fs::create_dir(&dir).unwrap();
-        let mut child = std::process::Command::new("sleep")
+        let mut child = crate::process::command("sleep")
             .arg("60")
             .process_group(0)
             .spawn()

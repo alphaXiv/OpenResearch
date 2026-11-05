@@ -11126,7 +11126,7 @@ mod run_wakeup_tests {
         if std::env::var_os(CHILD).is_none() {
             let dir = std::env::temp_dir().join(format!("orx-outbox-{}", uuid::Uuid::new_v4()));
             for phase in ["send", "restart"] {
-                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                let output = crate::process::command(std::env::current_exe().unwrap())
                     .args([
                         "--exact",
                         "local::chat::run_wakeup_tests::outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle",
@@ -11364,7 +11364,7 @@ mod run_wakeup_tests {
         if std::env::var_os(CHILD).is_none() {
             let dir =
                 std::env::temp_dir().join(format!("orx-outbox-events-{}", uuid::Uuid::new_v4()));
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::process::command(std::env::current_exe().unwrap())
                 .args(["--exact", "local::chat::run_wakeup_tests::outbox_wakes_on_idle_and_bus_and_retires_or_retries_delivery_failures", "--nocapture"])
                 .env(CHILD, "1").env("ORX_DATA_DIR", &dir).env("ORX_NO_TELEMETRY", "1")
                 .output().unwrap();

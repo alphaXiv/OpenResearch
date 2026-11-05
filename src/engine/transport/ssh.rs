@@ -30,7 +30,7 @@ impl Drop for Session {
 }
 
 pub(super) fn command(config: &Config) -> Command {
-    let mut command = Command::new("ssh");
+    let mut command = crate::process::tokio_command("ssh");
     if let Some(path) = &config.ssh_config {
         command.arg("-F").arg(path);
     }

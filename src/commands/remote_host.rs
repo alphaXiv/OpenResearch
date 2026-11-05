@@ -1519,7 +1519,7 @@ mod discovery_tests {
             std::env::temp_dir().join(format!("orx-legacy-spawn-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let output = directory.join("source");
-        let result = std::process::Command::new(std::env::current_exe().unwrap())
+        let result = crate::process::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "commands::remote_host::discovery_tests::legacy_spawn_parent",
@@ -1702,7 +1702,7 @@ mod discovery_tests {
     fn discovery_uses_agent_environment_without_touching_a_descriptor_or_starting_a_server() {
         let path =
             std::env::temp_dir().join(format!("orx-agent-discovery-{}", uuid::Uuid::new_v4()));
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "commands::remote_host::discovery_tests::agent_session_child",

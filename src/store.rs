@@ -8120,7 +8120,7 @@ mod tests {
             std::env::consts::ARCH
         ));
         let mut wrapper = orx_test_support::Process::spawn(
-            std::process::Command::new(binary)
+            crate::process::command(binary)
                 .arg("wrap")
                 .arg(&run_dir)
                 .env("ORX_TEST_FAST_STOPS", "1"),

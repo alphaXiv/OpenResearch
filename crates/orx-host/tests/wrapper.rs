@@ -1,3 +1,5 @@
+// Separate test crate; commands inherit the terminal environment.
+#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 mod common;
 use common::{until, Directory, Run};

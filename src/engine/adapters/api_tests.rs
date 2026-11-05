@@ -158,7 +158,7 @@ async fn isolated(test: &str) -> Option<PathBuf> {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+    let output = crate::process::tokio_command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             &format!("engine::adapters::api_tests::{test}"),
@@ -1177,7 +1177,7 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
             .file_name()
             .to_string_lossy()
             .starts_with("ssh-service-")));
-    let processes = std::process::Command::new("ps")
+    let processes = crate::process::command("ps")
         .args(["-axo", "command"])
         .output()
         .unwrap();

@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 #[cfg(windows)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -203,7 +203,7 @@ impl Local {
                 .create(true)
                 .append(true)
                 .open(dir.join("wrapper.log"))?;
-            let status = Command::new(crate::local::bash::program())
+            let status = crate::process::command(crate::local::bash::program())
                 .args(["-c", "\"$@\" &", "orx-local"])
                 .arg(binary)
                 .arg("wrap")
@@ -243,7 +243,7 @@ impl Local {
                 dir.join("pid_script"),
                 script_path.to_string_lossy().as_bytes(),
             )?;
-            let mut command = Command::new(crate::local::bash::program());
+            let mut command = crate::process::command(crate::local::bash::program());
             command
                 .arg(crate::local::bash::bash_path(&script_path))
                 .envs(&env)
@@ -479,7 +479,9 @@ impl Backend for Local {
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                let output = Command::new("ps").args(["-axo", "pgid=,stat="]).output()?;
+                let output = crate::process::command("ps")
+                    .args(["-axo", "pgid=,stat="])
+                    .output()?;
                 if !output.status.success() {
                     bail!("Could not inspect the local process group");
                 }

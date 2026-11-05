@@ -635,7 +635,7 @@ mod credential_tests {
             std::fs::write(dir.join("modal.py"), format!(
                 "class Sandbox:\n    @staticmethod\n    def from_id(sid): return Sandbox()\n    def poll(self): return {code}\n"
             )).unwrap();
-            let output = std::process::Command::new(python)
+            let output = crate::process::command(python)
                 .args(["-B", "-c", LAUNCHER, "status", "sandbox"])
                 .env("PYTHONPATH", &dir)
                 .output()

@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
-use std::process::Command;
 use std::time::Instant;
 
 pub(crate) mod rng;
@@ -146,7 +145,7 @@ async fn chaos_engine_worker() {
 fn worker(server: &Sshd, hook: Option<&str>) -> Process {
     let ready = server.directory().join("worker-ready");
     let _ = fs::remove_file(&ready);
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = crate::process::command(std::env::current_exe().unwrap());
     command
         .args([
             "--exact",
@@ -389,7 +388,7 @@ fn assert_step(
         }
         terminal += usize::from(phase.is_terminal());
     }
-    let output = Command::new("ps")
+    let output = crate::process::command("ps")
         .args(["-axo", "comm=,args="])
         .output()
         .unwrap();
@@ -475,7 +474,7 @@ fn held_outage_does_not_make_an_old_live_marker_prove_receipt_reconciliation() {
             .set_times(fs::FileTimes::new().set_modified(old))
             .unwrap();
     }
-    let worker = Process::spawn(&mut Command::new("true")).unwrap();
+    let worker = Process::spawn(&mut crate::process::command("true")).unwrap();
     let mut starts = BTreeMap::new();
     assert_eq!(assert_step(&server, &worker, &mut starts, None), 0);
     let healthy = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

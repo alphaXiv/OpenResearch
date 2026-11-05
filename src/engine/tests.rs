@@ -636,10 +636,7 @@ async fn a_relaunch_interrupted_again_waits_out_the_backoff_with_the_launch_erro
 #[tokio::test]
 async fn recovery_waits_out_a_recorded_submitter_before_asking_the_backend() {
     let f = Fixture::new();
-    let mut child = std::process::Command::new("sleep")
-        .arg("60")
-        .spawn()
-        .unwrap();
+    let mut child = crate::process::command("sleep").arg("60").spawn().unwrap();
     *f.backend.submitter.lock().unwrap() = Some(child.id());
     f.backend
         .then_launch(Err(LaunchError::Interrupted {

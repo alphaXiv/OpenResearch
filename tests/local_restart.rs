@@ -1,3 +1,5 @@
+// Separate test crate; commands inherit the terminal environment.
+#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
 use orx_host::{platform, read_json, wrapper};

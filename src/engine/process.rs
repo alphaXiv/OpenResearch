@@ -190,16 +190,13 @@ mod tests {
     #[tokio::test]
     async fn a_live_submitter_is_killed_and_a_reused_pid_is_not_mistaken_for_it() {
         let mut child = if cfg!(windows) {
-            std::process::Command::new("ping")
+            crate::process::command("ping")
                 .args(["-n", "60", "127.0.0.1"])
                 .stdout(std::process::Stdio::null())
                 .spawn()
                 .unwrap()
         } else {
-            std::process::Command::new("sleep")
-                .arg("60")
-                .spawn()
-                .unwrap()
+            crate::process::command("sleep").arg("60").spawn().unwrap()
         };
         let recorded = identity(child.id()).unwrap();
         let impostor = SubmitterIdentity {

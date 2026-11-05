@@ -633,7 +633,7 @@ fn engine_run_sh_runs_the_payload_inside_the_container_with_its_source() {
         std::fs::create_dir_all(dir).unwrap();
     }
     std::fs::write(staged.join("source.txt"), "snapshot\n").unwrap();
-    assert!(std::process::Command::new("tar")
+    assert!(crate::process::command("tar")
         .arg("-cf")
         .arg(host.join("source.tar"))
         .arg("-C")
@@ -679,7 +679,7 @@ esac
         Some("source.tar"),
     );
     std::fs::write(host.join("run.sh"), run_sh).unwrap();
-    let status = std::process::Command::new("bash")
+    let status = crate::process::command("bash")
         .arg("run.sh")
         .current_dir(&host)
         .env(

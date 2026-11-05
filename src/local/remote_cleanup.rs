@@ -197,7 +197,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orx-retention-{}", uuid::Uuid::new_v4()));
         const CHILD: &str = "ORX_TEST_RETENTION_GATE";
         if std::env::var_os(CHILD).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::process::command(std::env::current_exe().unwrap())
                 .args(["--exact", "local::remote_cleanup::tests::queued_retention_rechecks_the_kill_before_contacting_the_host", "--nocapture"])
                 .env(CHILD, "1")
                 .env("ORX_DATA_DIR", &dir)

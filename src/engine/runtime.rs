@@ -1346,7 +1346,7 @@ mod tests {
         const CHILD: &str = "ORX_TEST_RETIREMENT_BACKOFF";
         if std::env::var_os(CHILD).is_none() {
             let server = orx_test_support::Sshd::start().unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::process::command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "engine::runtime::tests::ssh_retirement_failures_wait_five_minutes_before_retrying",

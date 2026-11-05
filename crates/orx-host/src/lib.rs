@@ -1,3 +1,5 @@
+// Host processes inherit the host environment and the recorded run environment.
+#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
 pub mod exec;

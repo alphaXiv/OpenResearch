@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn cancellation_checks_the_job_even_after_the_exit_code() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-job-exited").unwrap();
-        let mut command = Command::new("cmd");
+        let mut command = crate::process::command("cmd");
         command.args(["/C", "ping -n 30 127.0.0.1 >nul"]);
         let mut child = spawn(&mut command, dir.path()).unwrap();
         std::fs::write(dir.path().join("exit_code"), "0\n").unwrap();

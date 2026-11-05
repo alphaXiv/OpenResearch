@@ -201,7 +201,7 @@ fn run_with_engine(test: &str) -> bool {
     if std::env::var("ORX_RUN_ENGINE").as_deref() == Ok("1") {
         return false;
     }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = crate::process::command(std::env::current_exe().unwrap())
         .env("ORX_RUN_ENGINE", "1")
         .args(["--exact", test, "--nocapture"])
         .output()
@@ -1215,7 +1215,7 @@ async fn wait_and_follow_rediscover_and_rebuild_snapshots_when_the_sse_connectio
         });
         let output = tokio::time::timeout(
             Duration::from_secs(5),
-            tokio::process::Command::new(std::env::current_exe().unwrap())
+            crate::process::tokio_command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "commands::up::api_v2::tests::reconnect_child",
@@ -1809,7 +1809,7 @@ fn dashboard_connect_clears_the_engine_breaker_and_resumes_pending_runs() {
     let directory =
         std::env::temp_dir().join(format!("orx-dashboard-host-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    let mut command = crate::process::command(std::env::current_exe().unwrap());
     command
         .args([
             "--exact",
@@ -2016,7 +2016,7 @@ async fn dashboard_host_lifecycle_child() {
     let tested: Value = tested.json().await.unwrap();
     assert_eq!(tested["reachable"], true, "{tested}");
     assert_eq!(server.auth_attempts().unwrap(), attempts);
-    let processes = std::process::Command::new("ps")
+    let processes = crate::process::command("ps")
         .args(["-axo", "ppid=,comm=,args="])
         .output()
         .unwrap();
@@ -2468,7 +2468,7 @@ async fn initial_connection_failure_and_idle_refusal_rediscover_without_replayin
         let exiting = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        let mut command = crate::process::tokio_command(std::env::current_exe().unwrap());
         command
             .args([
                 "--exact",

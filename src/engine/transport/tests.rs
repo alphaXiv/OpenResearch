@@ -105,7 +105,7 @@ async fn logged_attempts(server: &Sshd, count: usize) -> BTreeMap<(String, Strin
 }
 
 fn ssh_pids(server: &Sshd) -> Vec<u32> {
-    let output = std::process::Command::new("ps")
+    let output = crate::process::command("ps")
         .args(["-axo", "pid=,ppid=,comm=,args="])
         .output()
         .unwrap();
@@ -309,7 +309,7 @@ async fn interactive_lifecycle(server: Sshd, factors: usize) {
             let fixture = fixture.clone();
             Box::pin(async move {
                 prompts.fetch_add(1, Ordering::SeqCst);
-                let answer = tokio::process::Command::new(fixture)
+                let answer = crate::process::tokio_command(fixture)
                     .arg(question)
                     .output()
                     .await?;
@@ -1948,7 +1948,7 @@ else
 fi
 "#).unwrap();
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        let mut command = crate::process::command(std::env::current_exe().unwrap());
         command
             .args([
                 "--exact",
@@ -2020,7 +2020,7 @@ fi
     );
 
     let plain = |scoped: bool| {
-        let mut command = tokio::process::Command::new("ssh");
+        let mut command = crate::process::tokio_command("ssh");
         command
             .args([
                 "-oBatchMode=yes",

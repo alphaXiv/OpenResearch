@@ -373,7 +373,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
         let home = crate::local::git::TemporaryDirectory::new("orx-sharing-withdraw").unwrap();
         if std::env::var("ORX_TEST_SHARED_MASTER").as_deref() != Ok("1") {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::process::command(std::env::current_exe().unwrap())
                 .env("ORX_TEST_SHARED_MASTER", "1")
                 .env("XDG_CONFIG_HOME", home.path().join("config"))
                 .args([
