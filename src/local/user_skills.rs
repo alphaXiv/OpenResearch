@@ -560,35 +560,46 @@ fn collect_mirrored(
         accepted: 0,
         skipped: Vec::new(),
     };
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) => {
-            report.status = if error.kind() == std::io::ErrorKind::NotFound {
-                SkillRootStatus::Missing
-            } else {
-                SkillRootStatus::Unreadable
-            };
-            return report;
-        }
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
+    // A plugin may point at one skill folder instead of a folder of skills.
+    let candidates = if plugin && dir.join("SKILL.md").is_file() {
+        vec![dir.to_path_buf()]
+    } else {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
             Err(error) => {
-                report.skip(dir, format!("unreadable entry ({:?})", error.kind()));
-                continue;
+                report.status = if error.kind() == std::io::ErrorKind::NotFound {
+                    SkillRootStatus::Missing
+                } else {
+                    SkillRootStatus::Unreadable
+                };
+                return report;
             }
         };
-        let path = entry.path();
-        match path.metadata() {
-            Ok(metadata) if !metadata.is_dir() => continue,
-            Ok(_) => {}
-            Err(error) => {
-                report.skip(&path, format!("unreadable entry ({:?})", error.kind()));
-                continue;
+        let mut candidates = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    report.skip(dir, format!("unreadable entry ({:?})", error.kind()));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            match path.metadata() {
+                Ok(metadata) if !metadata.is_dir() => continue,
+                Ok(_) => candidates.push(path),
+                Err(error) => {
+                    report.skip(&path, format!("unreadable entry ({:?})", error.kind()));
+                }
             }
         }
-        let dir_name = entry.file_name().to_string_lossy().into_owned();
+        candidates
+    };
+    for path in candidates {
+        let dir_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if dir_name == "orx" || dir_name.starts_with("orx-") {
             report.skip(&path, "reserved name");
             continue;
@@ -1475,6 +1486,26 @@ mod tests {
             &mut Vec::new(),
         );
         assert_eq!(unreadable.status, SkillRootStatus::Unreadable);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_plugin_root_can_be_one_skill_folder() {
+        let root = temp_root();
+        let skill = root.join("deep-research");
+        fs::create_dir_all(skill.join("references")).unwrap();
+        fs::write(skill.join("SKILL.md"), skill_md("deep-research")).unwrap();
+        fs::write(skill.join("references/guide.md"), "reference").unwrap();
+        let mut found = Vec::new();
+        let report = collect_mirrored(&skill, "research", "claude", true, 0, &mut found);
+        assert_eq!(report.status, SkillRootStatus::Scanned);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "deep-research");
+        assert_eq!(found[0].dir, skill);
+        // A native skills dir is always a folder of skills.
+        let mut native = Vec::new();
+        collect_mirrored(&skill, "Claude Code", "claude", false, 0, &mut native);
+        assert!(native.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
