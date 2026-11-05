@@ -33,7 +33,7 @@ import { CITED_ID } from "../agentMessages";
 import { CitedRef } from "./ChatLinks";
 import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, isNetworkImage, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
 import { measureMermaidMath } from "../mermaidMath";
-import { resolveMermaidImages } from "../mermaidImages";
+import { advanceMermaidImage, resolveMermaidImages } from "../mermaidImages";
 
 export const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
 
@@ -453,7 +453,11 @@ export function MermaidBlock({ code, sourceToggle = true, imageResolver }: { cod
   if (streaming || result?.code !== code) return <CodeBlock code={code} lang={null} />;
   return <div className="my-3 min-w-0 overflow-auto">
     {sourceToggle && <Button onClick={() => setSource(!source)}>{source ? m.common_rendered_view() : m.common_view_source()}</Button>}
-    {source ? <CodeBlock code={code} lang={null} /> : <div className="pele" dangerouslySetInnerHTML={{ __html: result.svg }} />}
+    {source ? <CodeBlock code={code} lang={null} /> : <div className="pele" onErrorCapture={(event) => {
+      const image = event.target;
+      if (!(image instanceof SVGImageElement)) return;
+      advanceMermaidImage(image, apiPrefix);
+    }} dangerouslySetInnerHTML={{ __html: result.svg }} />}
   </div>;
 }
 

@@ -146,14 +146,21 @@ export function ArtifactMarkdown({
   // Artifact writes refresh `src` through this ref; a new `img` type would remount images.
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
+  const entriesVersion = useMemo(() => JSON.stringify(entries), [entries]);
   const mermaidImages = useMemo(() => (src: string) => {
     const absolute = chatImageTarget(src);
     if (absolute?.source === "absolute" && (/^file:/i.test(src) || /^[a-z]:[\\/]/i.test(src))) {
       return [{ url: absoluteFileUrl(absolute.path) + absolute.hash, resolveAsset: () => null }];
     }
     const target = artifactTarget(projectId, folder, src, artifactUrl);
-    return target ? [{ url: target.url, resolveAsset: () => null }] : [];
-  }, [absoluteFileUrl, artifactUrl, projectId, folder]);
+    if (!target) return [];
+    const entry = findArtifactEntry(entriesRef.current, target.path);
+    const hashAt = target.url.indexOf("#");
+    const base = hashAt === -1 ? target.url : target.url.slice(0, hashAt);
+    const hash = hashAt === -1 ? "" : target.url.slice(hashAt);
+    const url = entry ? `${base}&v=${entry.modifiedAt}:${entry.size}${hash}` : target.url;
+    return [{ url, resolveAsset: () => null }];
+  }, [absoluteFileUrl, artifactUrl, projectId, folder, entriesVersion]);
   const components = useMemo((): Components => {
     const resolve = (src: string) => {
       const absolute = chatImageTarget(src);
