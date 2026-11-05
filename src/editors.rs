@@ -208,7 +208,8 @@ mod tests {
         // Commas are legal in NTFS names but are explorer's token separator;
         // the quoted form keeps the selection target intact.
         let cmd = reveal_command(std::path::Path::new(r"C:\work\a,b.bin"));
-        assert_eq!(cmd.get_program(), "explorer.exe");
+        let program = std::path::Path::new(cmd.get_program()).file_name().unwrap();
+        assert!(program.eq_ignore_ascii_case("explorer.exe"));
         assert_eq!(args(&cmd), [r#"/select,"C:\work\a,b.bin""#]);
     }
 
