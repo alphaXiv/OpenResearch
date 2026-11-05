@@ -923,10 +923,18 @@ fn run_attribution(
     })
 }
 
-pub(crate) fn supervised_ssh_needed(engine_enabled: bool, runs: &[StoredRun], host: &str) -> bool {
+/// Connect also logs in 0.2.x supervisors' SSH: always with the setting off, otherwise only
+/// for the host's supervised runs the engine has not adopted (`held`).
+pub(crate) fn supervised_ssh_needed(
+    engine_enabled: bool,
+    runs: &[StoredRun],
+    host: &str,
+    held: impl Fn(&str) -> bool,
+) -> bool {
     !engine_enabled
         || runs.iter().any(|run| {
             !crate::local::is_terminal(&run.status)
+                && !held(&run.id)
                 && BackendDescriptor::parse(&run.backend_json).is_ok_and(|descriptor| {
                     matches!(descriptor.kind.as_str(), "ssh_job" | "slurm_job")
                         && descriptor.namespace.as_deref() == Some(host)
@@ -1327,7 +1335,7 @@ echo ok
     }
 
     #[test]
-    fn supervisor_transport_is_needed_only_for_opt_out_or_active_runs_on_the_alias() {
+    fn supervisor_transport_is_needed_only_for_opt_out_or_unadopted_runs_on_the_alias() {
         let mut run = StoredRun {
             id: "run".into(),
             experiment_id: "exp".into(),
@@ -1345,26 +1353,24 @@ echo ok
             cancel_reason: None,
             chat_session_id: None,
         };
-        assert!(supervised_ssh_needed(false, &[], "lab"));
-        assert!(!supervised_ssh_needed(true, &[], "lab"));
+        let free = |_: &str| false;
+        assert!(supervised_ssh_needed(false, &[], "lab", free));
+        assert!(!supervised_ssh_needed(true, &[], "lab", free));
         for kind in ["ssh_job", "slurm_job", "engine", "hf_job"] {
             run.backend_json =
                 serde_json::json!({"kind": kind, "namespace": "lab", "jobId": "job"}).to_string();
+            let runs = std::slice::from_ref(&run);
             let expected = matches!(kind, "ssh_job" | "slurm_job");
-            assert_eq!(
-                supervised_ssh_needed(true, std::slice::from_ref(&run), "lab"),
-                expected
-            );
-            assert!(!supervised_ssh_needed(
-                true,
-                std::slice::from_ref(&run),
-                "other"
-            ));
+            assert_eq!(supervised_ssh_needed(true, runs, "lab", free), expected);
+            assert!(!supervised_ssh_needed(true, runs, "other", free));
+            assert!(!supervised_ssh_needed(true, runs, "lab", |id| id == "run"));
+            assert!(supervised_ssh_needed(false, runs, "lab", |id| id == "run"));
             run.status = "done".into();
             assert!(!supervised_ssh_needed(
                 true,
                 std::slice::from_ref(&run),
-                "lab"
+                "lab",
+                free
             ));
             run.status = "running".into();
         }
