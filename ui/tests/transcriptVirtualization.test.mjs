@@ -233,3 +233,19 @@ test("row estimates are computed once per response group", async () => {
   }
   assert.equal(reads, 0, "a streamed reply leaves the unchanged rows' estimates alone");
 });
+
+test("a row growing above the view keeps a scroll that hasn't reported yet", async () => {
+  await renderHistory();
+  const bottom = thread().scrollTop;
+  await scrollTo(bottom - 2_500);
+  await scrollTo(bottom - 2_000);
+  thread().scrollTop = bottom - 2_200;
+  const row = find('[data-message-id="s-15"]');
+  await act(async () => {
+    for (const observer of [...observers]) {
+      if (observer.targets.has(row)) observer.callback([{ target: row, borderBoxSize: [{ blockSize: 1_000, inlineSize: 800 }] }], observer);
+    }
+  });
+  await settle();
+  assert.equal(thread().scrollTop, bottom - 2_000);
+});
