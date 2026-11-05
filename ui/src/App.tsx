@@ -14,6 +14,7 @@ import { useWorkspace } from "./workspace";
 
 import { EscapeScope } from "./components/EscapeScope";
 import { navigateKeyboardList } from "./keyboardNavigation";
+import { chatSearchRanges } from "./chatSearch";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Viewport } from "@xyflow/react";
@@ -92,6 +93,7 @@ import {
   type RuntimeInfo,
   type Run,
   type ChatMessage,
+  type ChatSearchHit,
   type UiState,
 } from "./api";
 import { WorkspaceTools } from "./components/WorkspaceTools";
@@ -519,7 +521,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (pendingTabFocus.current && panelOpen && mainView === "chat" && pendingTabFocus.current === rightTabKey(rightTab)) {
       const content = bodyRef.current?.querySelector<HTMLElement>(".right-pane [data-workspace-content]");
       if (content) {
-        content.focus();
+        if (!document.activeElement?.closest("[role=search]")) content.focus();
         pendingTabFocus.current = null;
       }
     }
@@ -1412,14 +1414,99 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     else focusSideTab(sessionId);
   }, [sessionsQuery.data, onActiveSessionChange, focusSideTab]);
 
-  const [focusedMessage, setFocusedMessage] = useState<FocusedMessage | null>(null);
+  const [requestedFocus, setRequestedFocus] = useState<FocusedMessage | null>(null);
+  const focusedMessage = destination?.projectId === projectId ? requestedFocus : null;
+  const openSearchHit = useCallback((hit: ChatSearchHit, query: string) => {
+    const visible = hit.projectId === projectId && (hit.sessionId === activeSessionId
+      || typeof rightTab === "object" && "kind" in rightTab && rightTab.kind === "side" && rightTab.sessionId === hit.sessionId);
+    if (!visible) {
+      if (hit.projectId === projectId && sessionsQuery.data?.some((session) => session.id === hit.sessionId)) openDelegate(hit.sessionId);
+      else onActiveSessionChange(hit.sessionId, { projectId: hit.projectId });
+    }
+    setRequestedFocus({ sessionId: hit.sessionId, messageId: hit.messageId, nonce: Date.now(), query, partId: hit.partId ?? undefined, spawnPartId: hit.spawnPartId ?? undefined });
+  }, [projectId, activeSessionId, rightTab, sessionsQuery.data, openDelegate, onActiveSessionChange]);
+  const clearSearch = useCallback(() => setRequestedFocus((current) => current?.query ? { ...current, query: undefined } : current), []);
+  useLayoutEffect(() => {
+    if (!focusedMessage?.query || typeof rightTab !== "object" || !("kind" in rightTab)) return;
+    const relevant = rightTab.kind === "subagent" && rightTab.spawnPartId === focusedMessage.spawnPartId
+      || rightTab.kind === "plan" && rightTab.promptId === focusedMessage.partId;
+    const pane = document.querySelector<HTMLElement>(".right-pane");
+    if (!relevant || !pane) return;
+    let frame = 0, anchoredAt: number | undefined;
+    let holdPosition = true;
+    let measuring = true, stable = 0, attempts = 0;
+    let observed: HTMLElement | undefined;
+    let highlight: Highlight | undefined;
+    let content = pane.querySelector<HTMLElement>(".pane-content");
+    if (content) content.style.visibility = "hidden";
+    const finish = () => { measuring = false; if (content) content.style.visibility = ""; };
+    const draw = () => {
+      if (measuring) attempts++;
+      const part = focusedMessage.partId ? pane.querySelector<HTMLElement>(`[data-part-id="${CSS.escape(focusedMessage.partId)}"]`) : null;
+      const root = part ?? (focusedMessage.spawnPartId ? pane.querySelector<HTMLElement>(".subagent-tab-content .msg-assistant") : null);
+      if (!root) {
+        if (measuring && attempts < 12) frame = requestAnimationFrame(draw);
+        else finish();
+        return;
+      }
+      const scroll = root.closest<HTMLElement>(".pane-content");
+      if (root !== observed) {
+        resize.disconnect();
+        resize.observe(root);
+        if (scroll) resize.observe(scroll);
+        observed = root;
+      }
+      const ranges = chatSearchRanges(root, focusedMessage.query ?? "");
+      if ("highlights" in CSS && typeof Highlight !== "undefined") {
+        highlight = new Highlight(...ranges);
+        CSS.highlights.set("side-chat-search", highlight);
+      }
+      if (scroll !== content) {
+        if (content) content.style.visibility = "";
+        content = scroll;
+        if (content && measuring) content.style.visibility = "hidden";
+      }
+      if (holdPosition && ranges[0] && scroll) {
+        const bounds = ranges[0].getBoundingClientRect();
+        const desired = measuring || anchoredAt === undefined
+          ? Math.min(160, scroll.clientHeight / 3)
+          : Math.min(anchoredAt, Math.max(0, scroll.clientHeight - bounds.height));
+        scroll.scrollTop += bounds.top - scroll.getBoundingClientRect().top - desired;
+        const top = ranges[0].getBoundingClientRect().top - scroll.getBoundingClientRect().top;
+        if (measuring) {
+          stable = anchoredAt !== undefined && Math.abs(top - anchoredAt) < 0.5 ? stable + 1 : 0;
+          if (stable >= 2 || attempts >= 12) finish();
+        }
+        anchoredAt = top;
+      }
+      if (measuring) {
+        if (attempts < 12) { cancelAnimationFrame(frame); frame = requestAnimationFrame(draw); }
+        else finish();
+      }
+    };
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(draw); };
+    const resize = new ResizeObserver(draw);
+    const observer = new MutationObserver(schedule);
+    observer.observe(pane, { childList: true, subtree: true, characterData: true });
+    const release = () => { holdPosition = false; finish(); };
+    for (const event of ["wheel", "touchstart", "pointerdown", "keydown"]) pane.addEventListener(event, release, { passive: true });
+    frame = requestAnimationFrame(draw);
+    return () => {
+      cancelAnimationFrame(frame);
+      finish();
+      observer.disconnect();
+      resize.disconnect();
+      for (const event of ["wheel", "touchstart", "pointerdown", "keydown"]) pane.removeEventListener(event, release);
+      if ("highlights" in CSS && CSS.highlights.get("side-chat-search") === highlight) CSS.highlights.delete("side-chat-search");
+    };
+  }, [focusedMessage, rightTab]);
   const openMessage = useCallback((cited: string) => {
     const missing = () => showAlert(m.chat_cited_message_missing(), "error");
     void citedMessage(cited).then(({ projectId: owner, sessionId, messageId }) => {
       if (owner && owner !== projectId) onActiveSessionChange(sessionId, { projectId: owner });
       else if (sessionsQuery.data?.some((session) => session.id === sessionId)) openDelegate(sessionId);
       else return missing();
-      setFocusedMessage({ sessionId, messageId, nonce: Date.now() });
+      setRequestedFocus({ sessionId, messageId, nonce: Date.now() });
     }, missing);
   }, [projectId, sessionsQuery.data, openDelegate, onActiveSessionChange]);
 
@@ -2058,6 +2145,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             chatInfo={chatInfo}
             onOpenMessage={openMessage}
             focusedMessage={focusedMessage}
+            onOpenSearchHit={openSearchHit}
+            onClearSearch={clearSearch}
             onOpenExperiment={openExperimentNotes}
             experimentName={experimentName}
             onOpenPlan={openPlanTab}
@@ -2463,8 +2552,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               <TabBody>
                 {/* The plan markdown is already client-side — render directly,
                   file links resolve against the plan's session worktree. */}
-                <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto bg-background py-4.5 px-6 [&_.md]:max-w-readable">
+                <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto [overflow-anchor:none] bg-background py-4.5 px-6 [&_.md]:max-w-readable">
                   <Md
+                    partId={planTab.promptId}
                     text={planContent?.key === `${planTab.sessionId}:${planTab.promptId}` ? planContent.text ?? m.model_picker_unavailable() : planTabs.find((tab) => tab.promptId === planTab.promptId)?.plan || m.artifacts_tab_loading()}
                     onOpenFile={(path, line, exp, ref, intent) =>
                       openFromRightTab(planTab, () =>
@@ -2503,6 +2593,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       chatInfo={chatInfo}
                       onOpenMessage={openMessage}
                       focusedMessage={focusedMessage}
+                      onOpenSearchHit={openSearchHit}
+                      onClearSearch={clearSearch}
                       onOpenExperiment={(experimentId, intent) =>
                         openFromRightTab(sideTab, () => openExperimentNotes(experimentId, intent))
                       }
@@ -2560,6 +2652,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 sessionId={subagentTab.sessionId}
                 spawnPartId={subagentTab.spawnPartId}
                 expansionState={getSubagentExpansionState(subagentTab)}
+                searchQuery={focusedMessage?.spawnPartId === subagentTab.spawnPartId ? focusedMessage.query : undefined}
+                searchNonce={focusedMessage?.nonce}
+                searchPartId={focusedMessage?.partId}
                 onOpenFile={(path, line, exp, ref, intent) =>
                   openFromRightTab(subagentTab, () =>
                     openChatFile(path, subagentTab.sessionId, line, exp, ref, intent),

@@ -27,6 +27,12 @@ body {
   background: var(--selection-background);
 }
 
+::highlight(chat-search),
+::highlight(side-chat-search),
+::highlight(chat-search-results),
+::highlight(side-chat-search-results),
+::highlight(chat-search-prompt),
+::highlight(side-chat-search-prompt),
 ::highlight(chat-annotations),
 ::highlight(side-chat-annotations) {
   background: var(--chat-annotation-highlight);

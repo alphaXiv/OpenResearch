@@ -9,6 +9,7 @@
 //! `~/.local/share/openresearch`.
 
 mod acp;
+pub(crate) mod search;
 mod telemetry;
 pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 
@@ -1330,6 +1331,7 @@ impl Store {
             tx.pragma_update(None, "user_version", 1)?;
             tx.commit()?;
         }
+        search::initialize(&conn)?;
         // Older builds of this branch created a one-root-per-project unique
         // index; multiple baselines are allowed, so make sure it's gone.
         let _ = conn.execute(

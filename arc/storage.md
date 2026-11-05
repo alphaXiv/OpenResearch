@@ -62,6 +62,19 @@ freshly updated CLI, so:
 - a column is never renamed, retyped or given a new meaning;
 - an old binary must be able to keep writing rows a new binary reads.
 
+Chat search is a contentless full-text index in this same database. Database
+triggers extract searchable message parts, including nested parts, so writes
+from older binaries keep it current too. Visible shell output, tool errors and
+subagent reports are searchable; hidden tool output and reasoning stay out.
+Session, project, archive and branch membership come from the source rows at
+query time. The dashboard indexes older messages in bounded transactions,
+committing its progress with each batch; SQLite's `user_version` records
+completion only after every batch finishes. Search reports when that history
+is still being indexed, and reads each result page from one database snapshot.
+Results follow newest stored messages first, with row-ID cursors that do not
+shift when a streaming reply changes. Scoped searches bound the full-text
+scan to their messages' row-ID range and check membership against session rows.
+
 ## Code lives in Git
 
 A project is a Git repository the user owns, anywhere on disk; the store only

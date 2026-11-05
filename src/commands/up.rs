@@ -53,6 +53,7 @@ pub(crate) mod api_v2;
 pub(crate) mod compute_settings;
 mod harness_setup;
 mod network;
+mod search;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -196,6 +197,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
 
     spawn_agent_preflight(state.clone());
+    search::spawn_backfill(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.
     // On Windows those spawns run at idle priority (see `demo::prewarm`) so
@@ -613,6 +615,7 @@ fn launch_admission(
 fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/search", get(search::search))
         .route("/api/file-manager", get(file_manager))
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))

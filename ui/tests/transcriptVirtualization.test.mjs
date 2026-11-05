@@ -20,19 +20,24 @@ function evaluate(code, bindings) {
   return new Function(...Object.keys(bindings), js)(...Object.values(bindings));
 }
 
-test("virtual history retains interacted rows outside the viewport and drops absent branch IDs", () => {
+test("virtual history retains selections and dirty forms, then releases closed forms", () => {
   const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "rangeExtractor").initializer;
-  const retainedRows = { current: new Set(["a", "deleted"]) };
+  const draftRows = { current: new Set(["a", "deleted"]) };
+  const selectedRows = new Set(["b"]);
+  let formOpen = true;
   const extract = evaluate(`return ${expression.getText(file)}`, {
     useCallback: callback => callback,
-    visibleMessages: ["a", "b", "c", "d", "e"].map(id => [{ id }]),
-    retainedRows,
-    focusedRow: null,
-    defaultRangeExtractor,
+    rowIndexes: new Map(["a", "b", "c", "d", "e"].map((id, index) => [id, index])),
+    draftRows, selectedRows, focusedRow: null, jumping: false, targetIndex: undefined,
+    scrollRef: { current: { querySelector: () => ({ querySelector: () => formOpen }) } },
+    CSS: { escape: value => value }, defaultRangeExtractor,
   });
-  assert.deepEqual(extract({ startIndex: 3, endIndex: 4, overscan: 0, count: 5 }), [0, 3, 4]);
-  retainedRows.current.add("b");
-  assert.deepEqual(extract({ startIndex: 4, endIndex: 4, overscan: 0, count: 5 }), [0, 1, 4]);
+  const range = { startIndex: 3, endIndex: 4, overscan: 0, count: 5 };
+  assert.deepEqual(extract(range), [0, 1, 3, 4]);
+  formOpen = false;
+  selectedRows.clear();
+  assert.deepEqual(extract(range), [3, 4]);
+  assert.equal(draftRows.current.size, 0);
 });
 
 test("tool labels reuse immutable parts but refresh after stream replacement or locale change", () => {
@@ -53,24 +58,24 @@ test("tool labels reuse immutable parts but refresh after stream replacement or 
 
 test("the focused article stays mounted outside the viewport without being retained", () => {
   const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "rangeExtractor").initializer;
-  const retainedRows = { current: new Set() };
+  const draftRows = { current: new Set() };
   const extract = focusedRow => evaluate(`return ${expression.getText(file)}`, {
     useCallback: callback => callback,
-    visibleMessages: ["a", "b", "c"].map(id => [{ id }]),
-    retainedRows, focusedRow, defaultRangeExtractor,
+    rowIndexes: new Map(["a", "b", "c"].map((id, index) => [id, index])),
+    draftRows, selectedRows: new Set(), focusedRow, jumping: false, targetIndex: undefined, scrollRef: { current: null }, defaultRangeExtractor,
   });
   const range = { startIndex: 2, endIndex: 2, overscan: 0, count: 3 };
   assert.deepEqual(extract("a")(range), [0, 2]);
   assert.deepEqual(extract(null)(range), [2]);
-  assert.equal(retainedRows.current.size, 0);
+  assert.equal(draftRows.current.size, 0);
 });
 
-test("focus holds a row only while it lasts; clicks and typing retain it for the visit", () => {
+test("focus and dirty form input retain rows; ordinary clicks retain nothing", () => {
   const handler = name => find(node => ts.isJsxAttribute(node) && node.name.getText(file) === name && node.parent.getText(file).includes('role="article"')).initializer.expression;
-  const retainedRows = { current: new Set() };
+  const draftRows = { current: new Set() };
   let focusedRow = null;
   const bindings = {
-    retainedRows, rowId: "a",
+    draftRows, rowId: "a",
     setFocusedRow: id => { focusedRow = id; },
     stickToBottom: { current: true },
     virtualizer: { options: {}, setOptions() {} },
@@ -79,12 +84,11 @@ test("focus holds a row only while it lasts; clicks and typing retain it for the
   const run = (name, event = {}) => evaluate(`return ${handler(name).getText(file)}`, bindings)(event);
   run("onFocusCapture");
   assert.equal(focusedRow, "a");
-  assert.equal(retainedRows.current.size, 0, "a screen reader moving focus while reading retains nothing");
+  assert.equal(draftRows.current.size, 0, "a screen reader moving focus while reading retains nothing");
   run("onClickCapture", { target: {} });
-  assert.deepEqual([...retainedRows.current], ["a"]);
-  retainedRows.current.clear();
+  assert.equal(draftRows.current.size, 0);
   run("onInputCapture");
-  assert.deepEqual([...retainedRows.current], ["a"]);
+  assert.deepEqual([...draftRows.current], ["a"]);
 });
 
 test("feed keys move focus between articles and leave the feed", () => {
@@ -164,7 +168,7 @@ test("mounting a different conversation resets both bottom-pin representations",
     setTranscriptAtBottom: value => { atBottom = value; },
   });
   const mount = evaluate(`return ${effect.getText(file)}`, {
-    virtualizer: { scrollToEnd: () => { scrolls++; } }, scrollToEndRef, onPinToBottom: pin,
+    virtualizer: { scrollToOffset: offset => { assert.equal(offset, 1000); scrolls++; } }, scrollRef: { current: { scrollHeight: 1000 } }, scrollToEndRef, onPinToBottom: pin,
   });
   const cleanup = mount();
   assert.equal(stickToBottom.current, true);
@@ -172,4 +176,34 @@ test("mounting a different conversation resets both bottom-pin representations",
   assert.equal(scrolls, 1);
   cleanup();
   assert.equal(scrollToEndRef.current, null);
+});
+
+test("the bottom pin follows every scroll except the virtualizer's own", () => {
+  const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "updateTranscriptBottom").initializer;
+  const stickToBottom = { current: true }, programmaticScroll = { current: null };
+  const update = evaluate(`return ${expression.getText(file)}`, {
+    useCallback: callback => callback, stickToBottom, programmaticScroll, setTranscriptAtBottom: () => {},
+  });
+  const el = { scrollHeight: 5000, clientHeight: 500, scrollTop: 1200 };
+  programmaticScroll.current = 1200;
+  update(el);
+  assert.equal(stickToBottom.current, true, "measuring rows above keeps a streaming chat pinned");
+  update(el);
+  assert.equal(stickToBottom.current, false, "a screen reader or focus moving the view unpins it");
+  el.scrollTop = 4500;
+  update(el);
+  assert.equal(stickToBottom.current, true);
+});
+
+test("row estimates are computed once per response group", () => {
+  const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "estimateSize").initializer;
+  let splits = 0;
+  const groups = [[{ role: "assistant", parts: [] }], [{ role: "user", parts: [{ type: "text", text: "warmup" }] }]];
+  const estimate = evaluate(`return ${expression.getText(file)}`, {
+    useCallback: callback => callback, estimates: { current: new WeakMap() }, visibleMessages: groups, scrollRef: { current: null },
+    splitResponseParts: () => { splits++; return { answer: [{ type: "text", text: "loss 2.3" }], work: [] }; },
+  });
+  const first = [estimate(0), estimate(1)];
+  assert.deepEqual([estimate(0), estimate(1)], first);
+  assert.equal(splits, 1);
 });

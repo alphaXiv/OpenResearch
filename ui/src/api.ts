@@ -1435,6 +1435,32 @@ export interface NativeChat {
   updatedAt: number;
 }
 
+export type ChatSearchScope = "chat" | "project" | "all";
+export interface ChatSearchParams {
+  q: string;
+  scope: ChatSearchScope;
+  sessionId?: string;
+  projectId?: string;
+}
+export interface ChatSearchHit {
+  sessionId: string;
+  projectId: string;
+  messageId: string;
+  partId: string | null;
+  spawnPartId: string | null;
+  role: string;
+  createdAt: number;
+  chatTitle: string | null;
+  archived: boolean;
+  onActiveBranch: boolean;
+  snippet: string;
+}
+export interface ChatSearchPage {
+  hits: ChatSearchHit[];
+  cursor: string | null;
+  indexing: boolean;
+  requiresLongerQuery: boolean;
+}
 export interface SidebarChatCursor { updatedAt: number; id: string }
 export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null }
 
@@ -2473,6 +2499,15 @@ export function createApi(
   /** Every project's sessions, newest first, for the composer's `/resume` picker. */
   const listAllChatSessions = (signal?: AbortSignal) =>
     get<{ sessions: ChatSession[] }>("/api/chat/sessions?scope=all", signal).then((r) => r.sessions);
+
+  const searchChatMessages = (query: ChatSearchParams, cursor: string | null, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ q: query.q, scope: query.scope });
+    if (query.sessionId) params.set("sessionId", query.sessionId);
+    if (query.projectId) params.set("projectId", query.projectId);
+    if (cursor) params.set("cursor", cursor);
+    return get<ChatSearchPage>(`/api/search?${params}`, signal);
+  };
+
   const listSidebarChatSessions = (filter: "active" | "archived" | "all", before: SidebarChatCursor | null, signal?: AbortSignal) => {
     const params = new URLSearchParams({ scope: "sidebar" });
     if (filter !== "all") params.set("archived", String(filter === "archived"));
@@ -2824,6 +2859,7 @@ export function createApi(
     listNativeChats,
     importNativeChat,
     listAllChatSessions,
+    searchChatMessages,
     listSidebarChatSessions,
     createChatSession,
     getChatSession,
