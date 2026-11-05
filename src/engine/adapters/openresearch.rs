@@ -215,6 +215,9 @@ pub struct OpenResearch {
     bootstrap: tokio::sync::Mutex<Option<crate::jobs::rental::Heartbeat>>,
 }
 
+const COLLECTION_GRACE: Duration = Duration::from_secs(15 * 60);
+const MAX_ACTIVE_SECONDS: u64 = 7 * 24 * 3600;
+
 const REJECTED_KEY_GRACE_MS: i64 = 15 * 60 * 1000;
 
 fn rejected_key_expired(
@@ -587,6 +590,9 @@ impl Backend for OpenResearch {
         let timeout = intent.launch.options["timeout_seconds"]
             .as_u64()
             .unwrap_or(4 * 3600);
+        let collection_grace = COLLECTION_GRACE
+            .as_secs()
+            .min(MAX_ACTIVE_SECONDS.saturating_sub(timeout));
         let creds = crate::config::load_credentials()
             .await
             .map_err(super::api::rejected)?
@@ -598,7 +604,7 @@ impl Backend for OpenResearch {
                 target,
                 rental_lease: Some(crate::client::CreateRentalLease {
                     version: 1,
-                    max_active_seconds: timeout,
+                    max_active_seconds: timeout + collection_grace,
                 }),
             },
         )

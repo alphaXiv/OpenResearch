@@ -45,6 +45,12 @@ pub fn engine_root(remote_root: Option<&str>) -> String {
     remote_root.map_or_else(|| DEFAULT_ROOT.into(), |root| format!("{root}/engine"))
 }
 
+fn box_alias(target: &SshTarget) -> Result<String> {
+    let identity =
+        serde_json::to_vec(&(&target.dest, &target.extra_opts, &target.managed_generation))?;
+    Ok(format!("orx-box-{}", &hex(&Sha256::digest(identity))[..16]))
+}
+
 /// What one adapter instance serves.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Key {
@@ -334,9 +340,7 @@ impl Runtime {
     /// An OpenResearch box is reached through a generated `ssh -F` file that layers its
     /// endpoint over the user's own configuration.
     fn box_transport(&self, target: &SshTarget) -> Result<Arc<LegacyTransport>> {
-        let identity =
-            serde_json::to_vec(&(&target.dest, &target.extra_opts, &target.managed_generation))?;
-        let alias = format!("orx-box-{}", &hex(&Sha256::digest(identity))[..16]);
+        let alias = box_alias(target)?;
         if let Some(transport) = lock(&self.boxes).get(&alias) {
             return Ok(transport.clone());
         }
@@ -686,7 +690,18 @@ impl Runtime {
             let on_host = store
                 .get_run(&run_id)?
                 .and_then(|run| handle_of(&run))
-                .and_then(|handle| Key::of_handle(&handle).ok())
+                .and_then(|handle| match &handle {
+                    Handle::OpenResearch { descriptor } | Handle::Legacy { descriptor }
+                        if descriptor.kind == "openresearch_job" =>
+                    {
+                        let target = descriptor.openresearch_ssh_target()?;
+                        Some(Key::Ssh {
+                            host: box_alias(&target).ok()?,
+                            root: DEFAULT_ROOT.into(),
+                        })
+                    }
+                    _ => Key::of_handle(&handle).ok(),
+                })
                 .is_some_and(|key| {
                     matches!(&key, Key::Ssh { host, root: r } | Key::Slurm { host, root: r }
                         if host == alias && r == root)
@@ -2311,6 +2326,93 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[tokio::test(start_paused = true)]
+    async fn rental_live_at_eight_minutes_wakes_collection_after_seven_minute_failure() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-rental-collection-{}", uuid::Uuid::new_v4()));
+        let runtime = collector(&dir);
+        let store = Store::open_at(dir.clone()).unwrap();
+        let descriptor = crate::jobs::BackendDescriptor::parse(
+            r#"{"kind":"openresearch_job","namespace":"org","jobId":"rental","sshHost":"box","sshPort":22,"sshUser":"root"}"#,
+        )
+        .unwrap();
+        let alias = box_alias(&descriptor.openresearch_ssh_target().unwrap()).unwrap();
+        let handle = Handle::OpenResearch {
+            descriptor: Box::new(descriptor),
+        };
+        store
+            .upsert_run(&StoredRun {
+                id: "run".into(),
+                experiment_id: "exp".into(),
+                project_id: "project".into(),
+                status: "done".into(),
+                backend_json: json!({"kind":"engine","handle":handle}).to_string(),
+                command: "train".into(),
+                created_at: 1,
+                updated_at: 1,
+                ended_at: Some(1),
+                exit_code: Some(0),
+                commit_sha: None,
+                result_markdown: None,
+                cancel_requested: false,
+                cancel_reason: None,
+                chat_session_id: None,
+            })
+            .unwrap();
+        store.queue_log_collection("run").unwrap();
+        for _ in 0..3 {
+            store.defer_log_collection("run", "unreachable").unwrap();
+        }
+        let key = Key::of_handle(&handle).unwrap();
+        let stalled = Arc::new(Host {
+            stall_after: Some(0),
+            ..Host::default()
+        });
+        let output = b"final result=42\n";
+        stalled.log.log.lock().unwrap().bytes = output.to_vec();
+        lock(&runtime.backends).insert(key.clone(), stalled);
+        let start = tokio::time::Instant::now();
+        tokio::time::advance(Duration::from_secs(5 * 60)).await;
+        let mut events = runtime.engine.bus.subscribe();
+        let task = tokio::spawn(runtime.clone().collect_pending());
+        tokio::time::timeout(Duration::from_secs(3 * 60), async {
+            while !matches!(events.recv().await.unwrap(), super::super::bus::RunEvent::LogCollection { run_id } if run_id == "run") {}
+        })
+        .await
+        .unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(7 * 60));
+        assert!(store
+            .log_collection("run")
+            .unwrap()
+            .unwrap()
+            .1
+            .unwrap()
+            .contains("timed out"));
+        assert!(store.due_log_collections(10).unwrap().is_empty());
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let recovered = Arc::new(Host::default());
+        recovered.log.log.lock().unwrap().bytes = output.to_vec();
+        lock(&runtime.backends).insert(key, recovered);
+        runtime.host_returned("other", DEFAULT_ROOT).unwrap();
+        runtime.host_returned(&alias, "/wrong-root").unwrap();
+        assert!(store.due_log_collections(10).unwrap().is_empty());
+        runtime.host_returned(&alias, DEFAULT_ROOT).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(events.recv().await.unwrap(), super::super::bus::RunEvent::LogCollection { run_id } if run_id == "run") {}
+        })
+        .await
+        .expect("Live must wake collection before its backoff expires");
+        assert!(!store.log_collection_pending("run").unwrap());
+        assert_eq!(std::fs::read(dir.join("run-logs/run.log")).unwrap(), output);
+        assert!(start.elapsed() < Duration::from_secs(9 * 60));
+        task.abort();
+        let _ = task.await;
+        drop(runtime);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn rented_boxes_keep_separate_transports_for_ports_and_rental_generations() {
         let directory =

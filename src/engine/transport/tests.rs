@@ -517,6 +517,66 @@ async fn black_hole_is_unreachable_by_deadline_and_recovers_in_one_backoff_step(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_rental_reconnects_after_repeated_failures_within_collection_grace() {
+    if !paced_child() {
+        return;
+    }
+    let server = Sshd::start().unwrap();
+    let clock = TestClock::new();
+    let store = Store::open_at(server.directory().join("store")).unwrap();
+    let mut config = config(&server);
+    config.alias = "orx-box-recovery".into();
+    let text = fs::read_to_string(server.config_path()).unwrap();
+    fs::write(
+        server.config_path(),
+        text.replace(
+            &format!("Host {}", server.alias()),
+            &format!("Host {}", config.alias),
+        ),
+    )
+    .unwrap();
+    let auth = Auth::new(&store, &config.alias).unwrap();
+    let conn = HostConn::start_shared(config, store, clock.clone(), auth).unwrap();
+    status(&conn, Status::Live).await;
+    let disconnected_at = clock.wall_ms();
+    server
+        .proxy()
+        .set(Faults {
+            refuse_new: true,
+            ..Faults::default()
+        })
+        .unwrap();
+    server.proxy().reset().unwrap();
+
+    let mut state = conn.state();
+    for failures in 1..=5 {
+        let failed = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let snapshot = state.borrow_and_update().clone();
+                if snapshot.status == Status::Backoff && snapshot.failures >= failures {
+                    return snapshot;
+                }
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        if failures < 5 {
+            let delay = failed.next_retry_ms.unwrap() - clock.wall_ms();
+            clock.advance(delay.max(0) as u64 + 1);
+        }
+    }
+
+    server.proxy().clear().unwrap();
+    let elapsed = u64::try_from(clock.wall_ms() - disconnected_at).unwrap();
+    clock.advance(420_000_u64.saturating_sub(elapsed));
+    tokio::time::timeout(Duration::from_secs(6), status(&conn, Status::Live))
+        .await
+        .expect("rental must retry before collection grace expires");
+    assert!(clock.wall_ms() - disconnected_at < 900_000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wall_clock_jump_reconnects_key_host_without_backoff() {
     let server = Sshd::start().unwrap();
     let clock = TestClock::new();
