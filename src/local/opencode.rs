@@ -661,7 +661,7 @@ pub(crate) enum SummarizeOutcome {
 /// `Arc<AgentHost>` in axum state.
 pub struct AgentHost {
     /// Explicit `orx up --model` default when the session has no model.
-    model_override: Option<String>,
+    pub(crate) model_override: Option<String>,
     /// Serializes ensure() spawns (across all sessions — a spawn is seconds,
     /// and one at a time keeps clone/fetch traffic sane). Never taken by
     /// status()/endpoint_for(), and `inner` is never held across a spawn — a slow

@@ -1,6 +1,6 @@
 import { useTerminalSession } from "./useTerminalSession";
 import { useWorkspace } from "../workspace";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { Check, X } from "lucide-react";
 import type { SlurmPreflight, SshPreflight } from "../api";
 import { ltr } from "../i18n";
@@ -158,7 +158,7 @@ export function SettingsCommandTerminal({ path, label, className = "mt-4 overflo
   );
 }
 
-export function CommandTerminal({ path, label, command, heightClass = "h-40", frame = "card", palette = "dark", shellAfter = false, active = true, awaitingApproval = false, onComplete, onError, onClosed }: {
+export function CommandTerminal({ path, label, command, heightClass = "h-40", frame = "card", palette = "dark", shellAfter = false, active = true, awaitingApproval = false, sendRef, onComplete, onError, onClosed }: {
   path: string;
   label: string;
   command?: string;
@@ -169,8 +169,12 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
   /** The server follows a command that ran with the user's shell, so the socket
    * stays up and input stays enabled after a command failure. */
   shellAfter?: boolean;
+  /** Takes input and focus; an inactive terminal still runs, out of the way. */
   active?: boolean;
   awaitingApproval?: boolean;
+  /** Set while the socket is open, for control frames such as a pasted sign-in code. */
+  sendRef?: RefObject<((message: object) => void) | null>;
+  /** Every text frame the server sends; true when it ends the command. */
   onComplete: (value: unknown) => boolean;
   /** `sessionEnded` is false for a server-reported failure the follow-up shell
    * continues past (`shellAfter`); true whenever the terminal is done for. */
@@ -195,7 +199,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
       if (command) terminal.writeln(`$ ${command}`);
       return mounted;
     }
-    terminal.focus();
+    if (active) terminal.focus();
     const url = socketUrl(path);
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
@@ -228,6 +232,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
     socket.onopen = () => {
       if (command) terminal.writeln(`$ ${command}`);
       socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
+      if (sendRef) sendRef.current = (message) => socket.send(JSON.stringify(message));
     };
     socket.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
@@ -266,6 +271,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
     };
 
     return { ...mounted, dispose: () => {
+      if (sendRef) sendRef.current = null;
       socket.onopen = null;
       socket.onmessage = null;
       socket.onerror = null;

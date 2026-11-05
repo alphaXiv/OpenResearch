@@ -75,9 +75,9 @@ export function createProjectQueries(client: WorkspaceClient, api: Api) {
     staleTime: 3_600_000,
   });
 
-  const getProjectStarterPromptsQuery = (projectId: string, harness: api.HarnessId, model: string | null, locale: string) => queryOptions({
-    queryKey: workspaceKey("getProjectStarterPrompts", projectId, harness, model, locale),
-    queryFn: ({ signal }) => api.getProjectStarterPrompts(projectId, harness, model, locale, signal),
+  const getProjectStarterPromptsQuery = (projectId: string, harness: api.HarnessId, model: string | null, locale: string, profile: string | null) => queryOptions({
+    queryKey: workspaceKey("getProjectStarterPrompts", projectId, harness, model, locale, profile),
+    queryFn: ({ signal }) => api.getProjectStarterPrompts(projectId, harness, model, locale, profile, signal),
     staleTime: 300_000,
     refetchOnWindowFocus: false,
     retryOnMount: false,

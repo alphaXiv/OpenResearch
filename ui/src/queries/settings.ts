@@ -5,7 +5,6 @@ import type { WorkspaceClient } from "./client";
 import { readLiveSnapshot } from "./live";
 import { mutations } from "./mutations";
 import type { Workspace } from "../workspace";
-import { m } from "../paraglide/messages.js";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import type * as api from "../api";
@@ -307,6 +306,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 30_000,
   });
 
+  const getOpenCodeProvidersQuery = () => queryOptions({
+    queryKey: workspaceKey("getOpenCodeProviders"),
+    queryFn: ({ signal }) => api.getOpenCodeProviders(signal),
+    staleTime: 30_000,
+  });
+
   const reportLocaleQuery = (locale: string) => queryOptions({
     queryKey: workspaceKey("reportLocale", locale),
     queryFn: ({ signal }) => api.reportLocale(locale, signal),
@@ -362,6 +367,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     refreshHarness,
     readHarnesses,
     getLocalModelsQuery,
+    getOpenCodeProvidersQuery,
     reportLocaleQuery,
   };
 }
@@ -372,11 +378,18 @@ type UiStatePatch = Parameters<Api["updateUiState"]>[0];
 export const mutUpdateUiState = mutations.define({
   id: "settings/ui-state",
   mutate: (ws: Workspace, changes: UiStatePatch) => ws.api.updateUiState(changes),
-  optimistic({ helpers, args: [ws, changes], onSuccess }) {
+  optimistic({ helpers, args: [ws, changes], onRestore, onSuccess }) {
     const options = ws.queries.getUiStateQuery();
-    helpers(ws.queryClient).updateExisting(options, (state) => ({ ...state, ...changes }));
-    const shown = ws.queryClient.getQueryData(options.queryKey);
+    const before = ws.queryClient.getQueryData(options.queryKey);
+    if (!before) return;
     const fields = Object.keys(changes) as (keyof UiStatePatch)[];
+    ws.setScopedQueryData(options.queryKey, (state) => state && { ...state, ...changes });
+    void ws.queryClient.cancelQueries({ queryKey: options.queryKey, exact: true });
+    helpers(ws.queryClient).refetchOnSettled(options);
+    const shown = ws.queryClient.getQueryData(options.queryKey);
+    onRestore(() => ws.setScopedQueryData(options.queryKey, (state) => state && {
+      ...state, ...Object.fromEntries(fields.map((field) => [field, before[field]])),
+    }));
     onSuccess((saved) => ws.setScopedQueryData(options.queryKey, (state) => {
       if (!state || fields.some((field) => state[field] !== shown?.[field])) return state;
       return { ...state, ...Object.fromEntries(fields.map((field) => [field, saved[field]])) };
@@ -719,23 +732,6 @@ export const mutRemoveAcpHarness = mutations.define({
     helpers(ws.queryClient).arrayFilter(ws.queries.getHarnessesQuery(), (harness) => harness.id !== id);
   },
   describe: "remove the agent",
-  describeResult: null,
-});
-
-export const mutConnectLocalModel = mutations.define({
-  id: "settings/local-model-connect",
-  async mutate(ws: Workspace, connection: Parameters<Api["connectLocalModel"]>[0]) {
-    const result = await ws.api.connectLocalModel(connection);
-    // A plain read can land on a provisional entry whose model list is still
-    // empty — verify against the forced refresh instead.
-    const harnesses = await ws.queries.refreshHarnesses(true);
-    if (!harnesses.find((h) => h.id === "opencode")?.models.some((model) => model.id === result.model)) {
-      throw new Error(m.local_models_config_restricted());
-    }
-    return result;
-  },
-  optimistic: () => {},
-  describe: "connect the model",
   describeResult: null,
 });
 

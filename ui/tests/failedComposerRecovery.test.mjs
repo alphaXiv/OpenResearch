@@ -437,13 +437,13 @@ test("a session settings refresh does not change the recovered request", async (
   assert.equal(retry.reasoningLevel, first.reasoningLevel);
 });
 
-for (const model of ["gpt-6.1-sol", "gpt-6-astra"]) {
+for (const [model, name] of [["gpt-6.1-sol", "GPT-6.1 Sol"], ["gpt-6-astra", "GPT-6 Astra"]]) {
   const changed = model !== "gpt-6.1-sol";
   test(`${changed ? "changing" : "re-picking"} the model ${changed ? "makes a recovered retry a new message" : "keeps a recovered retry"} and its warning`, async () => {
     const chat = await compose();
     await chat.input.send();
     await chat.reply.reject(lost());
-    await chat.input.pick(model);
+    await chat.input.pick(name);
     assert.match(chat.input.warning, /Failed to fetch/);
     await chat.input.send();
     const [first, retry] = chat.chat.sent();
@@ -455,7 +455,7 @@ for (const model of ["gpt-6.1-sol", "gpt-6-astra"]) {
 test("a model change while a send is in flight is not undone by its late failure", async () => {
   const chat = await compose();
   await chat.input.send();
-  await chat.input.pick("gpt-6-astra");
+  await chat.input.pick("GPT-6 Astra");
   await chat.unmount();
   await chat.reply.reject(lost());
   const input = await chat.reopen();
@@ -480,7 +480,7 @@ test("retrying a failed plan message does not toggle plan a second time", async 
 });
 
 test("sending during an agent switch keeps the draft until the new agent is ready", async () => {
-  const claude = { ...codex, id: "claude-code", name: "Claude Code", models: [{ id: "claude-model" }] };
+  const claude = { ...codex, id: "claude-code", name: "Claude Code", models: [{ id: "claude-model", displayName: "Claude Model" }] };
   const switched = deferred();
   const chat = await renderChat("/projects/p/tasks/s", {
     harnesses: [codex, claude],
@@ -488,7 +488,7 @@ test("sending during an agent switch keeps the draft until the new agent is read
   });
   const input = composer();
   await input.type("original");
-  await input.pick("claude-model");
+  await input.pick("Claude Model", "Claude Code");
   assert.deepEqual(chat.requests.filter(({ request }) => request === "PATCH /api/chat/sessions/s").map(({ body }) => body.agent.harness), ["claude-code"]);
   await input.send();
   assert.equal(input.draft, "original");

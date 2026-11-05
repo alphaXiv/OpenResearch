@@ -124,8 +124,8 @@ pub enum HarnessAuthState {
     Unsupported,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(remote = "Self", rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,6 +167,32 @@ pub struct ModelInfo {
     /// `opus[1m]` → `claude-opus-5-5`), which model routing joins on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_model: Option<String>,
+}
+
+/// The wire form adds the ids the picker and delegate routing share.
+impl Serialize for ModelInfo {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            #[serde(flatten, with = "ModelInfo")]
+            info: &'a ModelInfo,
+            canonical: String,
+            free: bool,
+        }
+        let routed = self.resolved_model.as_deref().unwrap_or(&self.id);
+        Wire {
+            info: self,
+            canonical: crate::local::model_routes::canonical(routed),
+            free: crate::local::model_routes::free(&self.id),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ModelInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ModelInfo::deserialize(deserializer)
+    }
 }
 
 impl ModelInfo {
@@ -301,6 +327,10 @@ pub struct HarnessInfo {
     /// entry. Everything on the card is provisional until the flag clears.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub catalog_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    #[serde(skip)]
+    pub configured_model: Option<String>,
     pub models: Vec<ModelInfo>,
     /// Composer toggle vocabulary (permission modes, reasoning levels).
     pub options: super::HarnessOptions,
@@ -339,6 +369,8 @@ impl HarnessInfo {
             supports_steering: false,
             supports_compaction: false,
             catalog_pending: false,
+            default_model: None,
+            configured_model: None,
             models: Vec::new(),
             options: super::HarnessOptions::none(),
         }
@@ -373,7 +405,7 @@ impl HarnessInfo {
 
     pub(super) fn broken_note(&self, fix: &str) -> String {
         format!(
-            "{} is installed but failed to run. {fix}, then re-check this harness.",
+            "{} is installed but failed to run. {fix}, then re-check this agent.",
             self.name
         )
     }
@@ -937,6 +969,23 @@ pub(super) fn title_case(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_entries_carry_their_routing_ids() {
+        let mut alias = ModelInfo::new("opus[1m]").with_label(Some("Opus"), None);
+        alias.resolved_model = Some("claude-opus-5-5".into());
+        assert_eq!(
+            serde_json::json!([
+                alias,
+                ModelInfo::new("openrouter/deepseek/deepseek-r1:free")
+            ]),
+            serde_json::json!([
+                {"id": "opus[1m]", "displayName": "Opus", "resolvedModel": "claude-opus-5-5",
+                 "canonical": "claude-opus-5.5", "free": false},
+                {"id": "openrouter/deepseek/deepseek-r1:free", "canonical": "deepseek-r1", "free": true},
+            ])
+        );
+    }
 
     #[cfg(unix)]
     #[test]

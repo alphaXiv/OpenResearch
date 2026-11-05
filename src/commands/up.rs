@@ -167,11 +167,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
     claude.start_reaper();
     codex.start_reaper();
     let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
+    let chat = Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone()));
     let state = AppState {
         agent: agent.clone(),
-        chat: Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone())),
+        chat: chat.clone(),
         claude: claude.clone(),
-        harnesses: Arc::new(tokio::sync::Mutex::new(None)),
+        harnesses: chat.harnesses.clone(),
         project_lifecycle,
         project_creation_lock: Arc::new(tokio::sync::Mutex::new(())),
         publication_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -186,6 +187,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         restart: Arc::new(tokio::sync::Notify::new()),
         reopen: Arc::default(),
         trackio: Arc::default(),
+        opencode_signins: Arc::default(),
     };
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -374,6 +376,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if explicit_stop {
         state.chat.interrupt_all().await;
     }
+    state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;
     agent.shutdown().await;
     codex.shutdown().await;
@@ -516,6 +519,7 @@ struct AppState {
     /// update is installed first.
     reopen: Arc<AtomicBool>,
     trackio: Arc<crate::local::trackio::LocalServer>,
+    opencode_signins: Arc<local::opencode_signin::SignIns>,
 }
 
 async fn project_publication_lock(
@@ -904,6 +908,12 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route("/api/agents/{key}", axum::routing::patch(edit_agent))
+        .route("/api/agent-profiles", post(create_agent_profile))
+        .route(
+            "/api/agent-profiles/{id}",
+            axum::routing::delete(delete_agent_profile),
+        )
         .route(
             "/api/harnesses/acp",
             get(list_acp_harnesses).post(create_acp_harness),
@@ -915,6 +925,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             axum::routing::put(update_acp_harness).delete(delete_acp_harness),
         )
         .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
+        .route(
+            "/api/harnesses/{id}/install",
+            axum::routing::delete(remove_harness_install),
+        )
         .route(
             "/api/harnesses/setup/commands",
             get(harness_setup::commands),
@@ -929,6 +943,31 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route(
             "/api/local-models/{id}",
             axum::routing::delete(remove_local_model),
+        )
+        .route(
+            "/api/opencode/providers",
+            get(list_opencode_providers).post(add_opencode_provider),
+        )
+        .route(
+            "/api/opencode/providers/{id}",
+            axum::routing::delete(remove_opencode_provider),
+        )
+        .route(
+            "/api/opencode/providers/{id}/key",
+            axum::routing::put(replace_opencode_key),
+        )
+        .route(
+            "/api/opencode/integrations",
+            get(list_opencode_integrations),
+        )
+        .route("/api/opencode/sign-in", post(start_opencode_signin))
+        .route(
+            "/api/opencode/sign-in/{attempt}",
+            get(opencode_signin_status).delete(cancel_opencode_signin),
+        )
+        .route(
+            "/api/opencode/sign-in/{attempt}/code",
+            post(opencode_signin_code),
         )
         .route("/api/skills", get(list_skills))
         .route("/api/skills/{name}", get(get_skill))
@@ -1299,6 +1338,7 @@ async fn file_manager(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompleteOnboardingReq {
+    profile: Option<String>,
     harness: String,
     model: Option<String>,
     permission_mode: Option<String>,
@@ -1365,7 +1405,7 @@ async fn complete_onboarding(
 ) -> ApiResult {
     reject_if_moving(&state)?;
     if !local::harness::is_chat_harness(&req.harness) {
-        return Err(bad_request(format!("unknown harness: {}", req.harness)));
+        return Err(bad_request(format!("unknown agent: {}", req.harness)));
     }
     let nonempty = |value: Option<String>| value.filter(|item| !item.trim().is_empty());
     let permission_mode = nonempty(req.permission_mode);
@@ -1373,11 +1413,25 @@ async fn complete_onboarding(
         .as_deref()
         .is_some_and(|mode| local::harness::permission_mode_for(&req.harness, mode).is_none())
     {
-        return Err(bad_request("invalid permission mode for selected harness"));
+        return Err(bad_request(
+            "invalid permission mode for the selected agent",
+        ));
     }
+    if let Some(profile) = &req.profile {
+        local::agent_profiles::home(profile, &req.harness).map_err(bad_request)?;
+    }
+    let model = selected_chat_model(
+        &state,
+        &req.harness,
+        req.profile.as_deref(),
+        req.model.as_deref(),
+    )
+    .await
+    .map_err(bad_request)?;
     let selection = local::demo::DemoSelection {
+        profile: req.profile,
         harness: req.harness,
-        model: nonempty(req.model),
+        model,
         permission_mode,
         reasoning_level: nonempty(req.reasoning_level),
     };
@@ -1400,6 +1454,7 @@ async fn complete_onboarding(
         let completion = local::demo::complete_onboarding(selection)?;
         let store = Store::open()?;
         store.set_preferred_agent(&StoredAgentSelection {
+            profile: completion.selection.profile.clone(),
             harness: completion.selection.harness.clone(),
             model: completion.selection.model.clone(),
             service_tier: None,
@@ -3184,6 +3239,7 @@ async fn prewarm_starter_prompts(Json(req): Json<PrewarmStarterPromptsReq>) -> A
 
 #[derive(Deserialize)]
 struct StarterPromptsQuery {
+    profile: Option<String>,
     /// Chat harness whose one-shot child writes the prompts; the composer's
     /// current pick. Unknown or missing = no prompts.
     harness: Option<String>,
@@ -3199,6 +3255,7 @@ struct StarterPromptsQuery {
 /// with no profile to tailor to, or whose tailored prompts fail, is flagged so
 /// the UI shows its pre-written prompts.
 async fn project_starter_prompts(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<StarterPromptsQuery>,
 ) -> ApiResult {
@@ -3223,14 +3280,13 @@ async fn project_starter_prompts(
         return Ok(Json(json!({ "prompts": [], "blank": false })));
     };
     let locale = q.locale.as_deref().unwrap_or("en");
+    let model = selected_chat_model(&state, harness, q.profile.as_deref(), q.model.as_deref())
+        .await
+        .map_err(bad_request)?;
     let agent = local::starter::Agent {
+        profile: q.profile,
         harness: harness.to_string(),
-        model: q
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-            .map(String::from),
+        model,
     };
     let (prompts, blank) = match local::starter::prompts(&project, &agent, locale).await {
         local::starter::Starter::Blank => (Some(Vec::new()), true),
@@ -5291,7 +5347,7 @@ fn spawn_agent_updates(state: AppState) {
         // Startup detection's probes go first.
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
-            for harness in local::harness::managed::HARNESSES {
+            for harness in local::harness::managed::harnesses() {
                 match harness_setup::keep_current(harness).await {
                     Ok(false) => {}
                     Ok(true) => {
@@ -6306,13 +6362,24 @@ async fn set_profile_settings(Json(req): Json<SetProfileReq>) -> ApiResult {
     .map_err(|e| ApiError::from(anyhow!("profile task failed: {e}")))?
 }
 
-async fn ui_state() -> ApiResult {
-    tokio::task::spawn_blocking(|| -> Result<Json<Value>> {
-        Ok(Json(json!(Store::open()?.ui_state()?)))
-    })
-    .await
-    .map_err(|error| ApiError::from(anyhow!("UI state task failed: {error}")))?
-    .map_err(ApiError::from)
+async fn ui_state(State(state): State<AppState>) -> ApiResult {
+    let mut preferences = Store::open()?.ui_state()?;
+    if let Some(selection) = preferences.preferred_agent.as_mut() {
+        if selection
+            .model
+            .as_deref()
+            .is_none_or(|model| !local::harness::concrete_model(model))
+        {
+            if let Some((_, catalog)) = state.harnesses.lock().await.as_ref() {
+                selection.model = local::harness::catalog_default(
+                    catalog,
+                    &selection.harness,
+                    selection.profile.as_deref(),
+                );
+            }
+        }
+    }
+    Ok(Json(json!(preferences)))
 }
 
 async fn project_ui_state(Path(id): Path<String>) -> ApiResult {
@@ -6352,11 +6419,19 @@ struct SetUiStateReq {
     workspace: Option<GlobalWorkspaceState>,
     preferred_autonomy: Option<Autonomy>,
     nested_delegation: Option<bool>,
+    opencode_free_models: Option<bool>,
+    favorite_models: Option<Vec<String>>,
+    hidden_models: Option<Vec<String>>,
+    hidden_agents: Option<Vec<String>>,
+    model_section_order: Option<Vec<String>>,
+    collapsed_model_sections: Option<Vec<String>>,
+    model_sightings: Option<Value>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredAgentSelectionReq {
+    profile: Option<String>,
     harness: String,
     model: Option<String>,
     service_tier: Option<String>,
@@ -6364,17 +6439,89 @@ struct StoredAgentSelectionReq {
     reasoning_level: Option<String>,
 }
 
-async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
+async fn set_ui_state(
+    State(state): State<AppState>,
+    Json(mut req): Json<SetUiStateReq>,
+) -> ApiResult {
+    if let Some(selection) = req.preferred_agent.as_mut() {
+        selection.model = selected_chat_model(
+            &state,
+            &selection.harness,
+            selection.profile.as_deref(),
+            selection.model.as_deref(),
+        )
+        .await
+        .map_err(bad_request)?;
+    }
     if let Some(workspace) = &req.workspace {
         workspace.validate().map_err(bad_request)?;
     }
-    tokio::task::spawn_blocking(move || -> Result<Json<Value>> {
+    let switched = req.hidden_agents.is_some();
+    let lists = [
+        (
+            "favorite_models",
+            req.favorite_models.take(),
+            500,
+            200,
+            "Favorite models",
+        ),
+        (
+            "hidden_models",
+            req.hidden_models.take(),
+            2000,
+            200,
+            "Hidden models",
+        ),
+        (
+            "hidden_agents",
+            req.hidden_agents.take(),
+            2000,
+            200,
+            "Hidden agents",
+        ),
+        (
+            "model_section_order",
+            req.model_section_order.take(),
+            200,
+            80,
+            "Model sections",
+        ),
+        (
+            "collapsed_model_sections",
+            req.collapsed_model_sections.take(),
+            200,
+            80,
+            "Collapsed sections",
+        ),
+    ];
+    for (_, list, entries, chars, name) in &lists {
+        if list.as_ref().is_some_and(|list| {
+            list.len() > *entries
+                || list
+                    .iter()
+                    .any(|item| item.trim().is_empty() || item.len() > *chars)
+        }) {
+            return Err(bad_request(format!(
+                "{name} must be up to {entries} names of up to {chars} characters"
+            )));
+        }
+    }
+    if req
+        .model_sightings
+        .as_ref()
+        .is_some_and(|sightings| !sightings.is_object() || sightings.to_string().len() > 512 * 1024)
+    {
+        return Err(bad_request(
+            "Model sightings must be a JSON object of up to 512 KiB",
+        ));
+    }
+    let saved = tokio::task::spawn_blocking(move || -> Result<Json<Value>> {
         let store = Store::open()?;
         let selection = req
             .preferred_agent
             .map(|selection| {
                 if !local::harness::is_chat_harness(&selection.harness) {
-                    return Err(anyhow!("unknown harness: {}", selection.harness));
+                    return Err(anyhow!("unknown agent: {}", selection.harness));
                 }
                 let nonempty = |value: Option<String>| value.filter(|item| !item.trim().is_empty());
                 let permission_mode = nonempty(selection.permission_mode);
@@ -6382,14 +6529,18 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
                 if permission_mode.as_deref().is_some_and(|mode| {
                     local::harness::permission_mode_for(&selection.harness, mode).is_none()
                 }) {
-                    return Err(anyhow!("invalid permission mode for selected harness"));
+                    return Err(anyhow!("invalid permission mode for the selected agent"));
                 }
                 if service_tier.as_deref().is_some_and(|tier| {
                     local::harness::service_tier_for(&selection.harness, tier).is_none()
                 }) {
-                    return Err(anyhow!("invalid speed for selected harness"));
+                    return Err(anyhow!("invalid speed for the selected agent"));
+                }
+                if let Some(id) = &selection.profile {
+                    local::agent_profiles::home(id, &selection.harness)?;
                 }
                 Ok(StoredAgentSelection {
+                    profile: selection.profile,
                     harness: selection.harness.clone(),
                     model: nonempty(selection.model),
                     service_tier,
@@ -6410,6 +6561,17 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
         if let Some(allowed) = req.nested_delegation {
             store.set_nested_delegation(allowed)?;
         }
+        if let Some(offered) = req.opencode_free_models {
+            store.set_opencode_free_models(offered)?;
+        }
+        for (column, list, ..) in lists {
+            if let Some(list) = list {
+                store.set_ui_json(column, &list)?;
+            }
+        }
+        if let Some(sightings) = &req.model_sightings {
+            store.set_ui_json("model_sightings", sightings)?;
+        }
         if let Some(workspace) = req.workspace {
             store.set_global_workspace_state(&workspace)?;
         }
@@ -6417,7 +6579,12 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
     })
     .await
     .map_err(|error| ApiError::from(anyhow!("UI state task failed: {error}")))?
-    .map_err(bad_request)
+    .map_err(bad_request)?;
+    // Each `/api/harnesses` entry says whether it is turned off.
+    if switched {
+        state.chat.emit_event("harness.catalog", json!({}));
+    }
+    Ok(saved)
 }
 
 /// The lit-source toggles as booleans (enabled = not in the disabled set).
@@ -6925,7 +7092,7 @@ async fn relay_pty(
     session: PtySession,
     mut output: Option<&mut String>,
     size: &mut PtySize,
-    completed: Option<fn(&str) -> bool>,
+    mut screen: Option<&mut harness_setup::TerminalScreen>,
 ) -> Option<std::result::Result<portable_pty::ExitStatus, String>> {
     let PtySession {
         master,
@@ -6937,15 +7104,39 @@ async fn relay_pty(
         kill,
         running: true,
     };
+    // A pasted code's Enter waits for the CLI to echo it, at most a second:
+    // Claude Code reads a long chunk as a paste, where Enter does not submit.
+    let mut enter_at: Option<tokio::time::Instant> = None;
 
     let status = loop {
+        let enter = async move {
+            match enter_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             event = events.recv() => match event {
                 Some(PtyEvent::Output(bytes)) => {
                     if let Some(output) = output.as_deref_mut() { harness_setup::append_output(output, &bytes); }
+                    if enter_at.take().is_some() && input.send(b"\r".to_vec()).is_err() {
+                        break Err("Terminal input closed".into());
+                    }
+                    let page = screen.as_deref_mut().and_then(|screen| screen.sign_in.as_mut());
+                    let update = page.map(|page| page.observe(&bytes, size.cols)).unwrap_or_default();
                     if socket.send(Message::Binary(bytes.into())).await.is_err() {
                         return None;
                     }
+                    if let Some(url) = update.url {
+                        let frame = json!({ "type": "signin", "url": url }).to_string();
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return None;
+                        }
+                    }
+                    if update.failure.is_some() {
+                        return Some(Ok(portable_pty::ExitStatus::with_exit_code(1)));
+                    }
+                    let completed = screen.as_deref().and_then(|screen| screen.completed);
                     if let (Some(completed), Some(output)) = (completed, output.as_deref()) {
                         if completed(output) {
                             return Some(Ok(portable_pty::ExitStatus::with_exit_code(0)));
@@ -6968,10 +7159,25 @@ async fn relay_pty(
                 Some(Ok(Message::Text(text))) => {
                     if apply_resize(size, &text) {
                         let _ = master.resize(*size);
+                    } else if let Some(code) = screen
+                        .as_deref_mut()
+                        .and_then(|screen| screen.sign_in.as_mut())
+                        .and_then(|page| page.code(&text))
+                    {
+                        if input.send(code.into_bytes()).is_err() {
+                            break Err("Terminal input closed".into());
+                        }
+                        enter_at = Some(tokio::time::Instant::now() + Duration::from_secs(1));
                     }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
                 Some(Ok(_)) => {}
+            },
+            () = enter => {
+                enter_at = None;
+                if input.send(b"\r".to_vec()).is_err() {
+                    break Err("Terminal input closed".into());
+                }
             }
         }
     };
@@ -7517,45 +7723,246 @@ async fn local_runtime() -> Json<Value> {
     }))
 }
 
-async fn list_local_models() -> ApiResult {
+enum OpenCodeError {
+    V1,
+    Api(ApiError),
+}
+
+impl IntoResponse for OpenCodeError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::V1 => (StatusCode::CONFLICT, Json(json!({"error":"Update OpenCode to add or change providers, or use OpenResearch's copy.","code":"opencode1"}))).into_response(),
+            Self::Api(error) => error.into_response(),
+        }
+    }
+}
+
+impl From<crate::error::Error> for OpenCodeError {
+    fn from(error: crate::error::Error) -> Self {
+        Self::Api(error.into())
+    }
+}
+
+impl From<ApiError> for OpenCodeError {
+    fn from(error: ApiError) -> Self {
+        Self::Api(error)
+    }
+}
+
+type OpenCodeResult = std::result::Result<Json<Value>, OpenCodeError>;
+
+fn opencode_v2(protocol: local::opencode::Protocol) -> std::result::Result<(), OpenCodeError> {
+    if protocol == local::opencode::Protocol::V1 {
+        return Err(OpenCodeError::V1);
+    }
+    Ok(())
+}
+
+async fn require_opencode_v2() -> std::result::Result<local::opencode::ResolvedBinary, OpenCodeError>
+{
+    let binary = local::opencode::resolve_binary().await?;
+    opencode_v2(binary.protocol)?;
+    Ok(binary)
+}
+
+/// OpenCode 1 is read-only here, so a change needs OpenCode 2. Without OpenCode a
+/// change still saves, since installing it brings OpenCode 2.
+async fn opencode_for_change(
+) -> std::result::Result<Option<local::opencode::ResolvedBinary>, OpenCodeError> {
+    match local::opencode::resolve_binary().await {
+        Ok(binary) => opencode_v2(binary.protocol).map(|()| Some(binary)),
+        Err(_) => Ok(None),
+    }
+}
+
+async fn list_local_models() -> OpenCodeResult {
     Ok(Json(local::local_models::list()?))
 }
 
-async fn discover_local_models(Json(req): Json<local::local_models::Probe>) -> ApiResult {
+async fn discover_local_models(Json(req): Json<local::local_models::Probe>) -> OpenCodeResult {
+    opencode_for_change().await?;
     let models = local::local_models::discover(&req)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
-    Ok(Json(json!({ "models": models })))
+    Ok(Json(json!({"models":models})))
 }
 
-async fn check_local_model(Path(id): Path<String>) -> ApiResult {
+async fn check_local_model(Path(id): Path<String>) -> OpenCodeResult {
     let connection = local::local_models::read()?
         .remove(&id)
-        .ok_or_else(|| not_found("local model connection"))?;
+        .ok_or_else(|| not_found("model connection"))?;
     let models = local::local_models::discover(&local::local_models::Probe {
         base_url: connection.base_url,
         api_key: connection.api_key,
     })
     .await
     .map_err(|e| bad_request(e.to_string()))?;
-    Ok(Json(json!({ "models": models })))
+    Ok(Json(json!({"models":models})))
 }
 
 async fn connect_local_model(
     State(state): State<AppState>,
     Json(req): Json<local::local_models::Connect>,
-) -> ApiResult {
+) -> OpenCodeResult {
+    opencode_for_change().await?;
     let model = local::local_models::connect(req)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
-    *state.harnesses.lock().await = None;
-    Ok(Json(json!({ "model": model })))
+    recheck_opencode(&state).await;
+    Ok(Json(json!({"model":model})))
 }
 
-async fn remove_local_model(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    local::local_models::remove(&id)?;
-    *state.harnesses.lock().await = None;
-    Ok(Json(json!({ "ok": true })))
+#[derive(Deserialize)]
+struct RemoveLocalModelQuery {
+    model: Option<String>,
+}
+
+async fn remove_local_model(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<RemoveLocalModelQuery>,
+) -> OpenCodeResult {
+    local::local_models::remove(&id, query.model.as_deref())?;
+    recheck_opencode(&state).await;
+    Ok(Json(json!({"ok":true})))
+}
+
+/// Re-detects OpenCode alone after a change only its catalog shows: its entry reads as checking
+/// meanwhile, and the other agents keep their answers.
+async fn recheck_opencode(state: &AppState) {
+    if let Some(opencode) = state
+        .harnesses
+        .lock()
+        .await
+        .as_mut()
+        .and_then(|(_, payload)| payload["harnesses"].as_array_mut())
+        .and_then(|all| all.iter_mut().find(|h| h["id"] == "opencode"))
+    {
+        opencode["catalogPending"] = json!(true);
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        if let Some(info) = local::harness::detect_harness("opencode").await {
+            publish_harness(&state, &info).await;
+        }
+        state.chat.emit_event("harness.catalog", json!({}));
+    });
+}
+
+async fn list_opencode_providers() -> OpenCodeResult {
+    Ok(Json(local::local_models::provider_list()?))
+}
+
+async fn add_opencode_provider(
+    State(state): State<AppState>,
+    Json(req): Json<local::local_models::AddProvider>,
+) -> OpenCodeResult {
+    let binary = opencode_for_change().await?;
+    let id = local::local_models::add_provider(binary.as_ref(), req)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    recheck_opencode(&state).await;
+    Ok(Json(json!({"id":id})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveOpenCodeKeyReq {
+    api_key: String,
+}
+
+async fn replace_opencode_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SaveOpenCodeKeyReq>,
+) -> OpenCodeResult {
+    opencode_for_change().await?;
+    if !local::local_models::providers()?.contains_key(&id) {
+        return Err(not_found("provider").into());
+    }
+    local::local_models::replace_key(&id, &req.api_key).map_err(|e| bad_request(e.to_string()))?;
+    recheck_opencode(&state).await;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn remove_opencode_provider(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> OpenCodeResult {
+    state.opencode_signins.cancel_integration(&id).await;
+    if let Some(record) = local::local_models::providers()?.get(&id) {
+        if matches!(
+            record.credential,
+            local::local_models::ProviderCredential::Oauth
+        ) {
+            local::opencode_signin::sign_out(&require_opencode_v2().await?, &id).await?;
+        }
+    }
+    local::local_models::remove_provider(&id)?;
+    recheck_opencode(&state).await;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn list_opencode_integrations() -> OpenCodeResult {
+    let binary = require_opencode_v2().await?;
+    Ok(Json(local::opencode_signin::integrations(&binary).await?))
+}
+
+async fn start_opencode_signin(
+    State(state): State<AppState>,
+    Json(req): Json<local::opencode_signin::SignIn>,
+) -> OpenCodeResult {
+    let binary = require_opencode_v2().await?;
+    Ok(Json(
+        state
+            .opencode_signins
+            .start(&binary, req)
+            .await
+            .map_err(|e| bad_request(e.to_string()))?,
+    ))
+}
+
+async fn opencode_signin_status(
+    State(state): State<AppState>,
+    Path(attempt): Path<String>,
+) -> OpenCodeResult {
+    let status = state
+        .opencode_signins
+        .status(&attempt)
+        .ok_or_else(|| not_found("sign-in"))?;
+    if status["status"] == "complete" {
+        recheck_opencode(&state).await;
+    }
+    Ok(Json(status))
+}
+
+#[derive(Deserialize)]
+struct OpenCodeSignInCode {
+    code: String,
+}
+
+async fn opencode_signin_code(
+    State(state): State<AppState>,
+    Path(attempt): Path<String>,
+    Json(req): Json<OpenCodeSignInCode>,
+) -> OpenCodeResult {
+    if state.opencode_signins.status(&attempt).is_none() {
+        return Err(not_found("sign-in").into());
+    }
+    state
+        .opencode_signins
+        .code(&attempt, req.code)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn cancel_opencode_signin(
+    State(state): State<AppState>,
+    Path(attempt): Path<String>,
+) -> OpenCodeResult {
+    state.opencode_signins.cancel(&attempt).await;
+    Ok(Json(json!({"ok":true})))
 }
 
 // --- harnesses ---------------------------------------------------------------
@@ -7575,14 +7982,13 @@ struct HarnessQuery {
 }
 
 fn overlay_claude_auth(payload: &mut Value, snapshot: &local::claude::AuthSnapshot) {
-    const FAILED_RECHECK_NOTE: &str = "Could not re-check Claude Code. The last verified configuration is still in use; re-check this harness.";
+    const FAILED_RECHECK_NOTE: &str = "Could not re-check Claude Code. The last verified configuration is still in use; re-check this agent.";
     let Some(harnesses) = payload.get_mut("harnesses").and_then(Value::as_array_mut) else {
         return;
     };
-    let Some(claude) = harnesses
-        .iter_mut()
-        .find(|h| h.get("id").and_then(Value::as_str) == Some("claude-code"))
-    else {
+    let Some(claude) = harnesses.iter_mut().find(|h| {
+        h.get("id").and_then(Value::as_str) == Some("claude-code") && h.get("profile").is_none()
+    }) else {
         return;
     };
     // Cached auth cannot make a missing or broken binary runnable.
@@ -7659,8 +8065,9 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: &local::claude::AuthSnapsh
     claude["authenticated"] = json!(false);
     claude["agentReady"] = json!(false);
     claude["models"] = json!([]);
+    claude.as_object_mut().unwrap().remove("defaultModel");
     if snapshot.credential_conflict {
-        claude["agentNote"] = json!("Claude Code reports a subscription login while an Anthropic environment credential is set. Fix or unset that credential, then re-check this harness.");
+        claude["agentNote"] = json!("Claude Code reports a subscription login while an Anthropic environment credential is set. Fix or unset that credential, then re-check this agent.");
         return;
     }
     claude["agentNote"] = json!(if snapshot.runtime_rejected {
@@ -7674,16 +8081,16 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: &local::claude::AuthSnapsh
                     snapshot.provider.as_deref(),
                     false,
                 ) {
-                    "Sign in with `claude auth login`, then re-check this harness."
+                    "Sign in with `claude auth login`, then re-check this agent."
                 } else {
-                    "Check the configured Claude Code provider with `claude auth status`, then re-check this harness."
+                    "Check the configured Claude Code provider with `claude auth status`, then re-check this agent."
                 }
             }
             local::harness::HarnessAuthState::Unknown => {
-                "Open a terminal and run `claude auth status`, then re-check this harness."
+                "Open a terminal and run `claude auth status`, then re-check this agent."
             }
             local::harness::HarnessAuthState::Unsupported => {
-                "Update Claude Code to 2.1.211 or newer, then re-check this harness."
+                "Update Claude Code to 2.1.211 or newer, then re-check this agent."
             }
             local::harness::HarnessAuthState::Ready => unreachable!(),
         }
@@ -7748,7 +8155,7 @@ fn enqueue_claude_catalog(
                 }
             };
             let (cached_at, request) = next;
-            let models =
+            let (models, default_model) =
                 local::harness::claude::external_model_catalog(request.bin, request.ultracode)
                     .await;
             let empty = models.is_empty();
@@ -7774,8 +8181,12 @@ fn enqueue_claude_catalog(
                 continue;
             };
             claude["models"] = json!(models);
+            local::harness::resolve_entry(claude, default_model.as_deref())
+                .expect("harness models");
             if empty {
-                claude["agentNote"] = json!("Could not load Claude Code models. Re-check this harness or update Claude Code; the CLI default model is still available.");
+                claude["agentNote"] = json!(
+                    "Could not load Claude Code models. Re-check this agent or update Claude Code."
+                );
             } else if let Some(object) = claude.as_object_mut() {
                 object.remove("agentNote");
             }
@@ -7786,11 +8197,9 @@ fn enqueue_claude_catalog(
 }
 
 fn claude_entry(payload: &Value) -> Option<&Value> {
-    payload
-        .get("harnesses")?
-        .as_array()?
-        .iter()
-        .find(|h| h.get("id").and_then(Value::as_str) == Some("claude-code"))
+    payload.get("harnesses")?.as_array()?.iter().find(|h| {
+        h.get("id").and_then(Value::as_str) == Some("claude-code") && h.get("profile").is_none()
+    })
 }
 
 fn entry_install_broken(entry: &Value) -> bool {
@@ -7829,11 +8238,119 @@ async fn harness_snapshot(Path(id): Path<String>) -> ApiResult {
     Ok(Json(json!(info)))
 }
 
-async fn list_harnesses(
+async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQuery>) -> ApiResult {
+    let mut payload = harnesses_payload(&state, &q).await;
+    let hidden = Store::open()?.ui_state()?.hidden_agents;
+    for entry in payload["harnesses"].as_array_mut().into_iter().flatten() {
+        entry["off"] = json!(local::model_routes::turned_off(entry, &hidden));
+    }
+    Ok(Json(payload))
+}
+
+#[derive(Deserialize)]
+struct CreateAgentProfileReq {
+    harness: String,
+    name: String,
+    icon: Option<Value>,
+}
+
+async fn create_agent_profile(
     State(state): State<AppState>,
-    Query(q): Query<HarnessQuery>,
-) -> Json<Value> {
-    Json(harnesses_payload(&state, &q).await)
+    Json(req): Json<CreateAgentProfileReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let id = tokio::task::spawn_blocking(move || {
+        local::agent_profiles::create(&req.harness, &req.name, req.icon)
+    })
+    .await
+    .map_err(|e| anyhow!("Agent account creation failed: {e}"))?
+    .map_err(bad_request)?;
+    state.chat.emit_event("harness.catalog", json!({}));
+    Ok(Json(json!({"id": id})))
+}
+
+async fn remove_harness_install(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> std::result::Result<StatusCode, ApiError> {
+    local::harness::managed::removable_key(&id).map_err(bad_request)?;
+    let _data = state.data_dir_gate.lock().await;
+    reject_if_moving(&state)?;
+    let _setup = local::harness::managed::lock_installations()
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
+    if !state
+        .chat
+        .remove_harness_install(Store::open()?, &id, async {
+            let result = local::harness::managed::uninstall(&id).await;
+
+            *state.harnesses.lock().await = None;
+            state.chat.emit_event("harness.catalog", json!({}));
+
+            result
+        })
+        .await?
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Wait for this agent’s running chats to finish or stop them, then remove it again."
+                .into(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn edit_agent(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Json(edit): Json<local::agent_profiles::Edit>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let relabels = tokio::task::spawn_blocking(move || local::agent_profiles::edit(&key, &edit))
+        .await
+        .map_err(|e| anyhow!("Agent update failed: {e}"))?
+        .map_err(bad_request)?;
+    if relabels {
+        recheck_opencode(&state).await;
+    } else {
+        state.chat.emit_event("harness.catalog", json!({}));
+    }
+    Ok(Json(json!({})))
+}
+
+async fn delete_agent_profile(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let harness = local::agent_profiles::harness_of(&id)
+        .ok_or_else(|| bad_request("Choose an existing agent account"))?;
+    if let Ok(env) = local::agent_profiles::login_env(&id) {
+        let bin = if harness == "claude-code" {
+            local::harness::claude::find_claude()
+        } else {
+            local::harness::codex::find_codex()
+        };
+        if let Some(bin) = bin {
+            let mut command = crate::process::tokio_command(bin);
+            if harness == "claude-code" {
+                command.args(["auth", "logout"]);
+            } else {
+                command.arg("logout");
+            }
+            local::chat::prepare_env(&mut command);
+            command
+                .envs(env)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(10), command.status()).await;
+        }
+    }
+    tokio::task::spawn_blocking(move || local::agent_profiles::remove(&id))
+        .await
+        .map_err(|e| anyhow!("Agent account removal failed: {e}"))?
+        .map_err(bad_request)?;
+    state.chat.emit_event("harness.catalog", json!({}));
+    Ok(Json(json!({"ok": true})))
 }
 
 #[derive(serde::Deserialize)]
@@ -7970,7 +8487,11 @@ async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
             spawn_catalog_fill(state.clone(), *at, uuid::Uuid::new_v4());
         }
         let mut out = payload.clone();
+        drop(cache);
         overlay_claude_auth(&mut out, &auth);
+        if let Err(error) = local::agent_profiles::reconcile(&mut out) {
+            eprintln!("orx up: agent profiles: {error}");
+        }
         return out;
     }
     seed_harnesses_locked(state, &mut cache).await
@@ -7979,12 +8500,14 @@ async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
 /// Commit one harness's full detection after setup or a sign-in changed it, so
 /// the dashboard need not wait on every sibling's probes to see the result.
 async fn publish_harness(state: &AppState, info: &local::harness::HarnessInfo) {
+    let mut info = info.clone();
+    apply_model_override(state, &mut info);
     if info.id == "claude-code" {
         if let Some(probe) = info.auth_observation.as_ref() {
             state.claude.observe_auth_probe(probe);
         }
     }
-    let catalog = claude_catalog_request(std::slice::from_ref(info));
+    let catalog = claude_catalog_request(std::slice::from_ref(&info));
     let mut cache = state.harnesses.lock().await;
     // Bumping `at` voids a fill that probed before setup ran (and any cursor
     // lookup keyed to it); a fresh seed's fill probes after, so it keeps its `at`.
@@ -7997,7 +8520,7 @@ async fn publish_harness(state: &AppState, info: &local::harness::HarnessInfo) {
     };
     let Some(slot) = payload["harnesses"].as_array_mut().and_then(|all| {
         all.iter_mut()
-            .find(|h| h["id"].as_str() == Some(info.id.as_str()))
+            .find(|h| h["id"].as_str() == Some(info.id.as_str()) && h.get("profile").is_none())
     }) else {
         return;
     };
@@ -8014,7 +8537,28 @@ async fn publish_harness(state: &AppState, info: &local::harness::HarnessInfo) {
     if lookup_voided || info.id == "cursor" {
         spawn_cursor_account_details(state, payload, cached_at);
     }
+    let base = payload["harnesses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("profile").is_none())
+        .cloned()
+        .collect::<Vec<_>>();
     drop(cache);
+    match local::agent_profiles::entries(&base).await {
+        Ok(profiles) => {
+            let mut cache = state.harnesses.lock().await;
+            if let Some((at, payload)) = cache.as_mut() {
+                if *at == cached_at {
+                    if let Some(all) = payload["harnesses"].as_array_mut() {
+                        all.retain(|entry| entry.get("profile").is_none());
+                        all.extend(profiles);
+                    }
+                }
+            }
+        }
+        Err(error) => eprintln!("orx up: agent profiles: {error}"),
+    }
     if let Some(catalog) = catalog {
         enqueue_claude_catalog(state.clone(), cached_at, catalog);
     }
@@ -8060,6 +8604,14 @@ async fn seed_harnesses_locked(
     payload
 }
 
+fn apply_model_override(state: &AppState, info: &mut local::harness::HarnessInfo) {
+    if info.id == "opencode" {
+        if let Some(model) = state.agent.model_override.as_deref() {
+            local::harness::resolve_model(info, Some(model));
+        }
+    }
+}
+
 /// The post-detection half of the harness answer: reconcile the result with
 /// the ClaudeHost's tracked auth state, then overlay and report. Shared by
 /// the snapshot and full passes, and by the background catalog fill.
@@ -8083,6 +8635,10 @@ async fn finish_harnesses_payload(
             state.claude.observe_auth_probe(probe);
         }
     }
+    let mut harnesses = harnesses;
+    for info in &mut harnesses {
+        apply_model_override(state, info);
+    }
     let mut payload = json!({ "harnesses": harnesses });
     let mut snapshot = state.claude.auth_snapshot();
     // A claude that broke mid-session leaves the snapshot `Ready` — `detect`
@@ -8101,6 +8657,21 @@ async fn finish_harnesses_payload(
     // race never burns a generation it can't announce.
     let announce = (!provisional).then_some(snapshot.clone());
     overlay_claude_auth(&mut payload, &snapshot);
+    if let Some(base) = payload["harnesses"].as_array() {
+        match local::agent_profiles::entries(base).await {
+            Ok(profiles) => {
+                let all = payload["harnesses"].as_array_mut().unwrap();
+                all.extend(profiles);
+            }
+            Err(error) => {
+                eprintln!("orx up: agent profiles: {error}");
+            }
+        }
+    }
+    // After the profiles join, so it adds none of its own beside them.
+    if let Err(error) = local::agent_profiles::reconcile(&mut payload) {
+        eprintln!("orx up: agent profiles: {error}");
+    }
     if !provisional {
         crate::telemetry::harness::capture_initial(&payload);
     }
@@ -8213,7 +8784,8 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
             // `first_ready_ms` answers the churn question directly: how far into
             // the fill did a usable agent actually publish.
             let mut first_ready_ms = None;
-            while let Some((index, info)) = futures::StreamExt::next(&mut stream).await {
+            while let Some((index, mut info)) = futures::StreamExt::next(&mut stream).await {
+                apply_model_override(&state, &mut info);
                 // A progressive claude entry settles shared auth *now*: reads
                 // overlay that state onto every non-pending entry, so a Ready
                 // probe left unobserved until fill end would be stamped back to
@@ -8232,8 +8804,10 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
                         if *at == snapshot_at {
                             if let Some(slot) =
                                 payload["harnesses"].as_array_mut().and_then(|all| {
-                                    all.iter_mut()
-                                        .find(|h| h["id"].as_str() == Some(info.id.as_str()))
+                                    all.iter_mut().find(|h| {
+                                        h["id"].as_str() == Some(info.id.as_str())
+                                            && h.get("profile").is_none()
+                                    })
                                 })
                             {
                                 *slot = json!(info);
@@ -8366,8 +8940,14 @@ struct SessionsQuery {
     before_id: Option<String>,
 }
 
-fn sidebar_session_json(store: &Store, session: &StoredChatSession, busy: bool) -> Result<Value> {
+fn sidebar_session_json(
+    store: &Store,
+    session: &StoredChatSession,
+    busy: bool,
+    catalog: &Value,
+) -> Result<Value> {
     let mut value = local::chat::session_json_with(Some(store), session, busy);
+    local::chat::project_model(&mut value, session, catalog);
     value["awaitingInput"] = json!(store.chat_session_awaiting_input(&session.id, busy)?);
     Ok(value)
 }
@@ -8395,6 +8975,13 @@ async fn list_chat_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionsQuery>,
 ) -> ApiResult {
+    let catalog = state
+        .harnesses
+        .lock()
+        .await
+        .as_ref()
+        .map(|(_, catalog)| catalog.clone())
+        .unwrap_or(Value::Null);
     let store = Store::open()?;
     if q.scope.as_deref() == Some("sidebar") {
         let before = match (q.before_updated_at, q.before_id.as_deref()) {
@@ -8412,7 +8999,9 @@ async fn list_chat_sessions(
         let busy = state.chat.busy_sessions().await;
         let sessions: Vec<Value> = sessions
             .iter()
-            .map(|session| sidebar_session_json(&store, session, busy.contains(&session.id)))
+            .map(|session| {
+                sidebar_session_json(&store, session, busy.contains(&session.id), &catalog)
+            })
             .collect::<Result<_>>()?;
         return Ok(Json(json!({ "sessions": sessions, "next": next })));
     }
@@ -8424,7 +9013,7 @@ async fn list_chat_sessions(
     let busy = state.chat.busy_sessions().await;
     let sessions: Vec<Value> = sessions
         .iter()
-        .map(|s| sidebar_session_json(&store, s, busy.contains(&s.id)))
+        .map(|s| sidebar_session_json(&store, s, busy.contains(&s.id), &catalog))
         .collect::<Result<_>>()?;
     Ok(Json(json!({ "sessions": sessions })))
 }
@@ -8432,6 +9021,7 @@ async fn list_chat_sessions(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateChatSessionReq {
+    profile: Option<String>,
     project_id: String,
     harness: Option<String>,
     model: Option<String>,
@@ -8441,6 +9031,16 @@ struct CreateChatSessionReq {
     plan_mode: bool,
     reasoning_level: Option<String>,
     autonomy: Option<Autonomy>,
+}
+
+async fn selected_chat_model(
+    state: &AppState,
+    harness: &str,
+    profile: Option<&str>,
+    model: Option<&str>,
+) -> Result<Option<String>> {
+    let payload = harnesses_payload(state, &HarnessQuery::default()).await;
+    local::harness::selected_model(&payload, harness, profile, model)
 }
 
 fn new_chat_settings(
@@ -8454,12 +9054,17 @@ fn new_chat_settings(
         .ok_or_else(|| anyhow!("OpenResearch could not load New Chat settings."))?;
     let saved = preferences.preferred_agent;
     let selected = match saved.as_ref() {
-        Some(saved) => harnesses
-            .iter()
-            .find(|h| h.get("id").and_then(Value::as_str) == Some(&saved.harness)),
-        None => harnesses
-            .iter()
-            .find(|h| h.get("agentReady").and_then(Value::as_bool) == Some(true)),
+        Some(saved) => harnesses.iter().find(|h| {
+            h.get("id").and_then(Value::as_str) == Some(&saved.harness)
+                && h.get("profile")
+                    .and_then(|p| p.get("id"))
+                    .and_then(Value::as_str)
+                    == saved.profile.as_deref()
+        }),
+        None => harnesses.iter().find(|h| {
+            h.get("agentReady").and_then(Value::as_bool) == Some(true)
+                && h["defaultModel"].is_string()
+        }),
     }
     .ok_or_else(|| {
         anyhow!("Your New Chat agent is unavailable. Select an available agent in New Chat.")
@@ -8470,13 +9075,11 @@ fn new_chat_settings(
     let string = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_string);
     let harness = string(selected.get("id"));
     let models = selected.get("models").and_then(Value::as_array);
-    let model = saved.as_ref().and_then(|s| s.model.clone()).or_else(|| {
-        if saved.is_none() {
-            string(models.and_then(|m| m.first()).and_then(|m| m.get("id")))
-        } else {
-            None
-        }
-    });
+    let model = saved
+        .as_ref()
+        .and_then(|s| s.model.clone())
+        .filter(|model| local::harness::concrete_model(model))
+        .or_else(|| string(selected.get("defaultModel")));
     let metadata = models.and_then(|models| {
         models
             .iter()
@@ -8528,6 +9131,7 @@ fn new_chat_settings(
         None => string(options.and_then(|o| o.get("defaultPermissionMode"))),
     };
     Ok(CreateChatSessionReq {
+        profile: string(selected.get("profile").and_then(|p| p.get("id"))),
         project_id,
         harness,
         model,
@@ -8545,7 +9149,7 @@ async fn get_chat_session(State(state): State<AppState>, Path(id): Path<String>)
         .ok_or_else(|| not_found("chat session"))?;
     let busy = state.chat.is_busy(&id).await;
     Ok(Json(
-        json!({ "session": local::chat::session_json(&session, busy) }),
+        json!({ "session": state.chat.session_json(&session, busy).await }),
     ))
 }
 
@@ -8592,17 +9196,18 @@ async fn create_chat_session(
     store
         .get_local_project(&req.project_id)?
         .ok_or_else(|| not_found("project"))?;
+    let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
+    if req.harness.is_none() {
+        if let Some(profile) = req.profile.as_deref() {
+            req.harness = Some(
+                local::agent_profiles::harness_of(profile)
+                    .ok_or_else(|| bad_request("Choose an existing agent account"))?
+                    .to_string(),
+            );
+        }
+    }
     if req.harness.is_none() {
         let preferences = store.ui_state()?;
-        let catalog = harnesses_payload(
-            &state,
-            &HarnessQuery {
-                refresh: None,
-                retry: None,
-                harness: None,
-            },
-        )
-        .await;
         req = new_chat_settings(req.project_id, preferences, &catalog).map_err(bad_request)?;
     }
     let harness = req
@@ -8618,20 +9223,31 @@ async fn create_chat_session(
         .as_deref()
         .is_some_and(|mode| local::harness::permission_mode_for(&harness, mode).is_none())
     {
-        return Err(bad_request("invalid permission mode for selected harness"));
+        return Err(bad_request(
+            "invalid permission mode for the selected agent",
+        ));
     }
     if service_tier
         .as_deref()
         .is_some_and(|tier| local::harness::service_tier_for(&harness, tier).is_none())
     {
-        return Err(bad_request("invalid speed for selected harness"));
+        return Err(bad_request("invalid speed for the selected agent"));
     }
     if req.plan_mode && !local::harness::supports_command_plan(&harness) {
-        return Err(bad_request(
-            "this harness activates Plan through permissions",
-        ));
+        return Err(bad_request("this agent activates Plan through permissions"));
     }
+    if let Some(id) = &req.profile {
+        local::agent_profiles::home(id, &harness).map_err(bad_request)?;
+    }
+    let model = local::harness::selected_model(
+        &catalog,
+        &harness,
+        req.profile.as_deref(),
+        req.model.as_deref(),
+    )
+    .map_err(bad_request)?;
     let session = StoredChatSession {
+        profile_id: req.profile,
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         project_id: req.project_id,
         harness,
@@ -8639,7 +9255,7 @@ async fn create_chat_session(
         native_fork_at: None,
         title: None,
         title_source: None,
-        model: nonempty(req.model),
+        model,
         service_tier,
         permission_mode,
         plan_mode: req.plan_mode,
@@ -8659,7 +9275,7 @@ async fn create_chat_session(
     store.create_chat_session(&session)?;
     state.chat.emit_session(Some(session.clone())).await;
     Ok(Json(
-        json!({ "session": local::chat::session_json(&session, false) }),
+        json!({ "session": state.chat.session_json(&session, false).await }),
     ))
 }
 
@@ -8710,6 +9326,12 @@ async fn import_native_chat(
     if !local::native_chats::is_importable(&req.harness) {
         return Err(bad_request("that agent's chats cannot be adopted"));
     }
+    let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
+    let native_model =
+        local::native_chats::selection_model(&catalog, &req.harness, None, &req.native_id)?;
+    let model =
+        local::harness::selected_model(&catalog, &req.harness, None, native_model.as_deref())
+            .map_err(bad_request)?;
     // As create does: a project whose delete is in flight takes no new sessions.
     let _admission = state
         .project_lifecycle
@@ -8722,6 +9344,7 @@ async fn import_native_chat(
             &req.harness,
             &req.native_id,
             req.title,
+            model,
         )
     })
     .await
@@ -8732,7 +9355,7 @@ async fn import_native_chat(
         .await
         .ok_or_else(|| not_found("chat session"))?;
     Ok(Json(
-        json!({ "session": local::chat::session_json(&session, false) }),
+        json!({ "session": state.chat.session_json(&session, false).await }),
     ))
 }
 
@@ -8748,9 +9371,16 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
         .project_lifecycle
         .admit(&parent.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
-    let session = state.chat.open_side_chat(&parent).await?;
+    harnesses_payload(&state, &HarnessQuery::default()).await;
+    let session = state.chat.open_side_chat(&parent).await.map_err(|error| {
+        if error.is::<local::harness::ModelSelectionError>() {
+            bad_request(error)
+        } else {
+            ApiError::from(error)
+        }
+    })?;
     Ok(Json(
-        json!({ "session": local::chat::session_json(&session, false) }),
+        json!({ "session": state.chat.session_json(&session, false).await }),
     ))
 }
 
@@ -8768,6 +9398,13 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
 #[serde(rename_all = "camelCase")]
 struct UpdateChatSessionReq {
     agent: Option<crate::store::StoredAgentSelection>,
+    harness: Option<String>,
+    #[serde(default, deserialize_with = "present_nullable_string")]
+    profile: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present_nullable_string")]
+    model: Option<Option<String>>,
+    service_tier: Option<String>,
+    reasoning_level: Option<String>,
     archived: Option<bool>,
     title: Option<String>,
     plan_mode: Option<bool>,
@@ -8862,10 +9499,12 @@ async fn set_chat_configuration(
         .emit_session(session)
         .await
         .ok_or_else(|| bad_request("Chat session no longer exists"))?;
-    Ok(Json(local::chat::session_json(
-        &session,
-        state.chat.is_busy(&id).await,
-    )))
+    Ok(Json(
+        state
+            .chat
+            .session_json(&session, state.chat.is_busy(&id).await)
+            .await,
+    ))
 }
 
 async fn update_chat_session(
@@ -8874,38 +9513,100 @@ async fn update_chat_session(
     Json(req): Json<UpdateChatSessionReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    let session = if let Some(agent) = req.agent {
-        let catalog = harnesses_payload(
-            &state,
-            &HarnessQuery {
-                refresh: None,
-                retry: None,
-                harness: None,
-            },
+    let session = if req.agent.is_some() || req.harness.is_some() || req.profile.is_some() {
+        let current = Store::open()?
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        let mut selection = if let Some(agent) = req.agent {
+            agent
+        } else {
+            let harness = req.harness.unwrap_or_else(|| current.harness.clone());
+            if !local::harness::is_chat_harness(&harness) {
+                return Err(bad_request("Choose an available agent"));
+            }
+            let same_harness = harness == current.harness;
+            let profile = req.profile.unwrap_or_else(|| {
+                if same_harness {
+                    current.profile_id.clone()
+                } else {
+                    None
+                }
+            });
+            let same_agent = same_harness && profile == current.profile_id;
+            StoredAgentSelection {
+                profile,
+                harness: harness.clone(),
+                model: req.model.unwrap_or_else(|| {
+                    if same_agent {
+                        current.model.clone()
+                    } else {
+                        None
+                    }
+                }),
+                service_tier: req.service_tier.or_else(|| {
+                    if same_harness {
+                        current.service_tier.clone()
+                    } else {
+                        None
+                    }
+                }),
+                permission_mode: req.permission_mode.or_else(|| {
+                    if same_harness {
+                        current.permission_mode.clone()
+                    } else {
+                        None
+                    }
+                }),
+                reasoning_level: req.reasoning_level.or_else(|| {
+                    if same_harness {
+                        current.reasoning_level.clone()
+                    } else {
+                        None
+                    }
+                }),
+            }
+        };
+        if let Some(profile) = &selection.profile {
+            local::agent_profiles::home(profile, &selection.harness).map_err(bad_request)?;
+        }
+        let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
+        selection.model = local::harness::selected_model(
+            &catalog,
+            &selection.harness,
+            selection.profile.as_deref(),
+            selection.model.as_deref(),
         )
-        .await;
-        let selected = catalog["harnesses"]
+        .map_err(bad_request)?;
+        if selection.permission_mode.as_deref().is_some_and(|mode| {
+            local::harness::permission_mode_for(&selection.harness, mode).is_none()
+        }) {
+            return Err(bad_request(
+                "invalid permission mode for the selected agent",
+            ));
+        }
+        if selection.service_tier.as_deref().is_some_and(|tier| {
+            local::harness::service_tier_for(&selection.harness, tier).is_none()
+        }) {
+            return Err(bad_request("invalid speed for the selected agent"));
+        }
+        let window = catalog["harnesses"]
             .as_array()
-            .and_then(|harnesses| {
-                harnesses
-                    .iter()
-                    .find(|harness| harness["id"].as_str() == Some(&agent.harness))
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry["id"].as_str() == Some(&selection.harness)
+                        && entry["profile"]["id"].as_str() == selection.profile.as_deref()
+                })
             })
-            .filter(|harness| harness["agentReady"].as_bool() == Some(true))
-            .ok_or_else(|| {
-                bad_request(
-                    "This agent is unavailable. Check its installation and sign-in in Settings.",
-                )
-            })?;
-        let metadata = selected["models"].as_array().and_then(|models| {
-            models
-                .iter()
-                .find(|model| model["id"].as_str() == agent.model.as_deref())
-        });
-        let window = metadata.and_then(|model| model["contextWindow"].as_u64());
+            .and_then(|entry| entry["models"].as_array())
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|model| model["id"].as_str() == selection.model.as_deref())
+            })
+            .and_then(|model| model["contextWindow"].as_u64());
         state
             .chat
-            .set_agent(&id, agent, window)
+            .set_agent(&id, selection, window)
             .await
             .map_err(bad_request)?
     } else if let Some(title) = req.title {
@@ -8961,7 +9662,7 @@ async fn update_chat_session(
     };
     let busy = state.chat.is_busy(&id).await;
     Ok(Json(
-        json!({ "session": local::chat::session_json(&session, busy) }),
+        json!({ "session": state.chat.session_json(&session, busy).await }),
     ))
 }
 
@@ -10152,7 +10853,15 @@ mod tests {
             workspace: None,
             preferred_autonomy: Some(Autonomy::Copilot),
             nested_delegation: false,
+            opencode_free_models: true,
+            favorite_models: Vec::new(),
+            hidden_models: Vec::new(),
+            hidden_agents: Vec::new(),
+            model_section_order: Vec::new(),
+            collapsed_model_sections: Vec::new(),
+            model_sightings: None,
             preferred_agent: Some(StoredAgentSelection {
+                profile: None,
                 harness: "codex".into(),
                 model: Some("custom-model".into()),
                 reasoning_level: Some("ultra".into()),
@@ -10161,8 +10870,8 @@ mod tests {
             }),
         };
         let catalog = json!({"harnesses": [{
-            "id": "codex", "agentReady": true,
-            "models": [], "options": {"reasoningLevels": [{"id": "default"}, {"id": "high"}]}
+            "id": "codex", "agentReady": true,"defaultModel":"gpt-6-sol",
+            "models": [{"id":"gpt-6-sol"}], "options": {"reasoningLevels": [{"id": "default"}, {"id": "high"}]}
         }]});
         let req = new_chat_settings("project".into(), preferences, &catalog).unwrap();
         assert_eq!(req.harness.as_deref(), Some("codex"));
@@ -10183,8 +10892,15 @@ mod tests {
             preferred_autonomy: None,
             preferred_agent: None,
             nested_delegation: false,
+            opencode_free_models: true,
+            favorite_models: Vec::new(),
+            hidden_models: Vec::new(),
+            hidden_agents: Vec::new(),
+            model_section_order: Vec::new(),
+            collapsed_model_sections: Vec::new(),
+            model_sightings: None,
         };
-        let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,
+        let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
         let req = new_chat_settings("project".into(), preferences.clone(), &catalog).unwrap();
         assert_eq!(req.harness.as_deref(), Some("claude-code"));
@@ -10192,6 +10908,7 @@ mod tests {
         assert_eq!(req.permission_mode.as_deref(), Some("plan"));
         assert_eq!(req.autonomy, Some(Autonomy::Agentic));
         preferences.preferred_agent = Some(StoredAgentSelection {
+            profile: None,
             harness: "claude-code".into(),
             model: Some("custom-claude-model".into()),
             service_tier: None,
@@ -10204,6 +10921,7 @@ mod tests {
         let unavailable = json!({"harnesses": [{"id":"claude-code", "agentReady":false}, {"id":"codex", "agentReady":true}]});
         assert!(new_chat_settings("project".into(), preferences.clone(), &unavailable).is_err());
         preferences.preferred_agent = Some(StoredAgentSelection {
+            profile: None,
             harness: "codex".into(),
             model: Some("gpt-6-sol".into()),
             service_tier: None,
@@ -10211,6 +10929,41 @@ mod tests {
             reasoning_level: None,
         });
         assert!(new_chat_settings("project".into(), preferences, &catalog).is_err());
+    }
+
+    #[test]
+    fn new_chat_matches_the_preferred_profile_without_falling_back() {
+        let preferences = crate::store::StoredUiState {
+            onboarding_completed: false,
+            tour_completed: false,
+            preferred_agent: Some(StoredAgentSelection {
+                profile: Some("codex-012345abcd".into()),
+                harness: "codex".into(),
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                reasoning_level: None,
+            }),
+            workspace: None,
+            preferred_autonomy: None,
+            nested_delegation: false,
+            opencode_free_models: true,
+            favorite_models: Vec::new(),
+            hidden_models: Vec::new(),
+            hidden_agents: Vec::new(),
+            model_section_order: Vec::new(),
+            collapsed_model_sections: Vec::new(),
+            model_sightings: None,
+        };
+        let catalog = json!({"harnesses":[
+            {"id":"codex", "agentReady":true, "models":[], "options":{}},
+            {"id":"codex", "profile":{"id":"codex-012345abcd","name":"Work"}, "agentReady":true,"defaultModel":"gpt-6-sol","models":[{"id":"gpt-6-sol"}],"options":{}}
+        ]});
+        let selected = new_chat_settings("project".into(), preferences.clone(), &catalog).unwrap();
+        assert_eq!(selected.profile.as_deref(), Some("codex-012345abcd"));
+        let local_only =
+            json!({"harnesses":[{"id":"codex","agentReady":true,"models":[],"options":{}}]});
+        assert!(new_chat_settings("project".into(), preferences, &local_only).is_err());
     }
 
     #[test]
@@ -10428,15 +11181,40 @@ mod tests {
         }))
         .unwrap();
         assert!(invalid.validate().is_err());
-        let result = set_ui_state(Json(SetUiStateReq {
-            tour_completed: Some(true),
-            preferred_agent: None,
-            workspace: Some(invalid),
-            preferred_autonomy: None,
-            nested_delegation: None,
-        }))
+        let result = set_ui_state(
+            State(test_state()),
+            Json(SetUiStateReq {
+                tour_completed: Some(true),
+                preferred_agent: None,
+                workspace: Some(invalid),
+                preferred_autonomy: None,
+                nested_delegation: None,
+                opencode_free_models: None,
+                favorite_models: None,
+                hidden_models: None,
+                hidden_agents: None,
+                model_section_order: None,
+                collapsed_model_sections: None,
+                model_sightings: None,
+            }),
+        )
         .await;
         assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+        for invalid in [
+            json!({"hiddenModels": [" "]}),
+            json!({"hiddenAgents": [" "]}),
+            json!({"hiddenAgents": ["x".repeat(201)]}),
+            json!({"hiddenAgents": vec!["codex"; 2001]}),
+            json!({"modelSectionOrder": ["x".repeat(81)]}),
+            json!({"modelSightings": ["gpt-6"]}),
+        ] {
+            let result = set_ui_state(
+                State(test_state()),
+                Json(serde_json::from_value(invalid).unwrap()),
+            )
+            .await;
+            assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+        }
         let unsupported: WorkspaceState = serde_json::from_value(json!({
             "version":2, "lastLocation":null, "tasks":{}
         }))
@@ -11075,15 +11853,58 @@ mod tests {
         assert!(lifecycle.begin_delete("p1").is_some());
     }
 
+    #[tokio::test]
+    async fn opencode_v1_provider_routes_report_upgrade() {
+        let response = opencode_v2(local::opencode::Protocol::V1)
+            .err()
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "opencode1");
+        assert!(body["error"].as_str().unwrap().contains("Update OpenCode"));
+        assert!(opencode_v2(local::opencode::Protocol::V2).is_ok());
+    }
+
+    #[tokio::test]
+    async fn discarded_detection_cannot_change_committed_model_selection() {
+        let state = test_state();
+        *state.harnesses.lock().await = Some((
+            std::time::Instant::now(),
+            json!({"harnesses":[{
+                "id":"codex", "name":"Codex", "agentReady":true, "authState":"ready", "defaultModel":"custom-provider-model", "models":[{"id":"custom-provider-model"}]
+            }]}),
+        ));
+        for mut discarded in [
+            json!({"id":"codex","catalogPending":true,"models":[]}),
+            json!({"id":"codex","authState":"needsLogin","models":[]}),
+        ] {
+            local::harness::resolve_entry(&mut discarded, None).unwrap();
+        }
+        for model in [None, Some("explicit-model")] {
+            assert_eq!(
+                selected_chat_model(&state, "codex", None, model)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(model.unwrap_or("custom-provider-model"))
+            );
+        }
+    }
+
     fn test_state() -> AppState {
         let agent = Arc::new(AgentHost::new(None));
         let codex = Arc::new(local::codex::CodexHost::new());
         let claude = Arc::new(local::claude::ClaudeHost::new());
+        let chat = Arc::new(ChatHost::new(agent.clone(), codex, claude.clone()));
         AppState {
-            agent: agent.clone(),
-            chat: Arc::new(ChatHost::new(agent, codex, claude.clone())),
+            agent,
+            chat: chat.clone(),
             claude,
-            harnesses: Default::default(),
+            harnesses: chat.harnesses.clone(),
             project_lifecycle: Default::default(),
             project_creation_lock: Default::default(),
             publication_locks: Default::default(),
@@ -11098,7 +11919,61 @@ mod tests {
             restart: Default::default(),
             reopen: Default::default(),
             trackio: Default::default(),
+            opencode_signins: Arc::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn side_chat_reports_selection_as_400_and_store_faults_as_500() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = test_state();
+        let _store = Store::open().unwrap();
+        let connection =
+            rusqlite::Connection::open(crate::store::data_dir().join("orx.db")).unwrap();
+        connection.execute_batch(
+            "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, repo_path, created_at, updated_at)
+             VALUES ('side-project', 'Side project', 'side-project', '', '', '/unused', 1, 1);
+             INSERT INTO chat_sessions (id, project_id, harness, created_at, updated_at)
+             VALUES ('side-parent', 'side-project', 'codex', 1, 1);",
+        ).unwrap();
+        *state.harnesses.lock().await = Some((
+            std::time::Instant::now(),
+            json!({"harnesses":[{
+                "id":"codex","agentReady":false,"authState":"needsLogin"
+            }]}),
+        ));
+        let response = open_side_chat(State(state.clone()), Path("side-parent".into()))
+            .await
+            .err()
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.harnesses.try_lock().is_ok());
+        *state.harnesses.lock().await = Some((
+            std::time::Instant::now(),
+            json!({"harnesses":[{
+                "id":"codex","agentReady":true,"defaultModel":"concrete-model"
+            }]}),
+        ));
+        let Json(response) = open_side_chat(State(state.clone()), Path("side-parent".into()))
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.1));
+        assert_eq!(response["session"]["model"], "concrete-model");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_side_chat BEFORE INSERT ON chat_sessions
+                BEGIN SELECT RAISE(FAIL, 'side chat insert failed'); END;",
+            )
+            .unwrap();
+        let response = open_side_chat(State(state.clone()), Path("side-parent".into()))
+            .await
+            .err()
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(state.harnesses.try_lock().is_ok());
     }
 
     async fn serve(app: Router) -> std::net::SocketAddr {
@@ -11557,6 +12432,32 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(!forwarded.exists());
+    }
+
+    #[tokio::test]
+    async fn removal_rejects_unknown_and_protected_agents_as_json() {
+        let state = test_state();
+        for id in [
+            "../x",
+            "cursor/..",
+            "/tmp/x",
+            "",
+            "unknown",
+            "acp:unknown",
+            "claude-code",
+            "codex",
+            "opencode",
+        ] {
+            let error = remove_harness_install(State(state.clone()), Path(id.into()))
+                .await
+                .unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            let response = error.into_response();
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert!(serde_json::from_slice::<Value>(&bytes).unwrap()["error"].is_string());
+        }
     }
 
     #[tokio::test]

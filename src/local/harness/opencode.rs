@@ -151,16 +151,19 @@ impl OpenCode {
                     let busy = error
                         .downcast_ref::<native_store::opencode_database::DatabaseBusy>()
                         .is_some();
+                    let needs_v2 = error
+                        .downcast_ref::<native_store::opencode_database::NeedsOpenCode2>()
+                        .is_some();
                     info.auth_state = if busy {
                         HarnessAuthState::Unknown
                     } else {
                         HarnessAuthState::Unsupported
                     };
-                    // A database the CLI will not open is not an out-of-date
-                    // binary: upgrading a current install cannot repair it, and
-                    // orx must never delete a user's database to clear it.
-                    info.needs_config_repair = !busy;
-                    info.agent_note = Some(if busy {
+                    // Any other database the CLI will not open is not an
+                    // out-of-date binary: upgrading cannot repair it, and orx
+                    // must never delete a user's database to clear it.
+                    info.needs_config_repair = !busy && !needs_v2;
+                    info.agent_note = Some(if busy || needs_v2 {
                         error.to_string()
                     } else {
                         format!(
@@ -235,9 +238,10 @@ impl OpenCode {
             ("deepseek", "DEEPSEEK_API_KEY"),
         ];
         if !info.authenticated
-            && PROVIDER_KEYS.iter().any(|(id, key)| {
-                provider_enabled(&config, id) && super::detect::api_key(key).is_some()
-            })
+            && (crate::local::local_models::configures_remote()
+                || PROVIDER_KEYS.iter().any(|(id, key)| {
+                    provider_enabled(&config, id) && super::detect::api_key(key).is_some()
+                }))
         {
             info.authenticated = true;
             info.auth_method = Some("apiKey");
@@ -258,15 +262,19 @@ impl OpenCode {
         if missing_local {
             info.agent_note = Some("Some local models are unavailable. Start the server, load the configured model, and re-check OpenCode.".to_string());
         }
+        let free = free_models_offered();
         models.retain(|model| {
+            if public_models.contains(&model.id) && !free {
+                return false;
+            }
             available.contains(&model.id)
                 || (info.authenticated && !is_local(model))
                 || (public_models.contains(&model.id)
                     && provider_enabled(&config, "opencode")
                     && !is_local(model))
         });
-        // Onboarding and the composer seed their selection from the first model.
         let default = config.get("model").and_then(Value::as_str);
+        info.configured_model = default.map(str::to_owned);
         models.sort_by_key(|model| {
             (
                 Some(model.id.as_str()) != default,
@@ -531,6 +539,13 @@ fn snapshot_config() -> (Value, bool) {
         let _ = crate::local::local_models::merge_config(&mut config, &connections, None);
     }
     (config, unresolved)
+}
+
+/// Whether the user keeps OpenCode's free models on; they are unless switched off.
+fn free_models_offered() -> bool {
+    crate::store::Store::open()
+        .and_then(|store| store.ui_state())
+        .map_or(true, |state| state.opencode_free_models)
 }
 
 /// Providers opencode is signed into (its auth.json is `{provider: {type}}`).
@@ -828,7 +843,8 @@ async fn run_models(bin: PathBuf, args: &[&str]) -> Option<String> {
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    crate::local::local_models::prepare_env(&mut cmd, None).ok()?;
+    crate::local::local_models::prepare_env(&mut cmd, None, crate::local::opencode::Protocol::V1)
+        .ok()?;
     cmd.env("OPENCODE_DB", ":memory:")
         .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
         // The probe runs from the home dir, so project-layer discovery is
