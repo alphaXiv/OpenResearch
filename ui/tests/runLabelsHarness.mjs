@@ -40,7 +40,7 @@ export function runLabelsHarness(locale = "en", sessionExperiments = [], overrid
     modules.set(name, exports);
     new Function("require", "exports", code)((id) => {
       if (!id.startsWith(".")) return mocks[id] ?? require(id);
-      const dependency = resolve(dirname(file), id).slice(src.length);
+      const dependency = resolve(dirname(file), id).slice(src.length).replaceAll("\\", "/");
       return load(dependency);
     }, exports);
     return exports;
