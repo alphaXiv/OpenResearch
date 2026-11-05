@@ -30,7 +30,7 @@
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Релизы" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · Для бета-версии под Windows нужен <a href="docs/windows.md">Git for Windows</a> · Приложению для <a href="docs/linux.md">Linux</a> нужна glibc 2.35+</sub></p>
+<p><sub>macOS 11+ · Для бета-версии под Windows нужен <a href="https://gitforwindows.org">Git for Windows</a> · Приложению для <a href="https://openresearch.sh/docs/install">Linux</a> нужна glibc 2.35+</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: репозиторий дня №1" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
@@ -73,7 +73,7 @@ orx up
 <img src=".github/readme-assets/opencode.svg" alt="" width="18" height="18" align="texttop" /> OpenCode,
 <img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor и
 <img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity.
-Можно также [использовать локальную модель](docs/local-models.md) с OpenCode через
+Можно также [использовать локальную модель](https://openresearch.sh/docs/agents) с OpenCode через
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
 <img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama или собственный адрес сервера.

@@ -30,7 +30,7 @@ El entorno de ejecución y espacio de trabajo local para agentes de investigaci�
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · La versión beta para Windows requiere <a href="docs/windows.md">Git for Windows</a> · La app para <a href="docs/linux.md">Linux</a> requiere glibc 2.35+</sub></p>
+<p><sub>macOS 11+ · La versión beta para Windows requiere <a href="https://gitforwindows.org">Git for Windows</a> · La app para <a href="https://openresearch.sh/docs/install">Linux</a> requiere glibc 2.35+</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
@@ -72,7 +72,7 @@ y utilizar los recursos de cómputo administrados de OpenResearch.
 <img src=".github/readme-assets/opencode.svg" alt="" width="18" height="18" align="texttop" /> OpenCode,
 <img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor y
 <img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity.
-También puedes [usar un modelo local](docs/local-models.md) con OpenCode a través de
+También puedes [usar un modelo local](https://openresearch.sh/docs/agents) con OpenCode a través de
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
 <img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama o un endpoint personalizado.

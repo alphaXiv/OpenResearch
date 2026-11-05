@@ -11,9 +11,8 @@ Claude.local.md
 # entry, which breaks `git checkout --recurse-submodules` in CI.
 .claude/worktrees/
 
-# Keep local skills private.
-.claude/skills/
-.agents/skills/
+# Repo skills live in .agents/skills; `pnpm install` in ui/ links Claude Code's copy.
+.claude/skills
 .cursor/skills/
 
 # Stray SQLite store if the binary is ever run from the repo root
