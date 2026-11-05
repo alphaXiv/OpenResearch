@@ -906,6 +906,7 @@ async fn v2_launches_are_host_checked_admitted_and_keep_a_run_submission_active(
         Some(crate::commands::remote_host::RemoteAuth::new(
             "legacy-token",
         )),
+        crate::commands::up_remote::Reach::Loopback,
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -2571,6 +2572,7 @@ async fn dashboard_cleanup_uses_the_existing_handler_and_abandon_security_bounda
     let app = crate::commands::up::server_router(
         dashboard_routes(f.api.clone()).merge(routes(f.api.clone())),
         Some(auth),
+        crate::commands::up_remote::Reach::Loopback,
     );
     let request = |action: &str, token: Option<&str>, origin: &str| {
         let mut builder = Request::builder()

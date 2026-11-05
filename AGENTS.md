@@ -31,8 +31,9 @@ catalogs; when you change an API it serves, keep both sides compatible.
   serves every client in the wild. The store, settings, run descriptors and
   wire protocols only grow: add fields, never rename or repurpose one.
   Compatibility code is for shipped contracts; an unmerged change has no users.
-- **Loopback only.** `orx up` binds 127.0.0.1 without auth and checks the Host
-  and Origin of every request that changes state. Remote access goes over SSH.
+- **Loopback by default.** `orx up` binds 127.0.0.1 without auth and checks the
+  Host and Origin of every request that changes state. Remote access goes over
+  SSH; `--host 0.0.0.0` is the user's explicit opt-in to their private network.
 - **Agents are the user's own tools.** orx runs them in homes it prepares,
   reusing the user's sign-in, and never edits their agent configuration.
 - **Nothing is lost silently.** When orx cannot finish a turn, a queued message
