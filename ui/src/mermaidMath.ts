@@ -1,11 +1,16 @@
 import katex from "katex";
+import { MERMAID_SOURCE_LIMIT } from "./mermaidLimits";
 
 export type MeasuredMath = Record<string, { html: string; width: number; height: number }>;
 
 export function measureMermaidMath(source: string): MeasuredMath {
   const result: MeasuredMath = Object.create(null);
-  if (source.length > 50_000) return result;
-  const expressions = [...source.matchAll(/\$\$([\s\S]*?)\$\$/g)].slice(0, 64);
+  if (source.length > MERMAID_SOURCE_LIMIT) return result;
+  const expressions = [];
+  for (const expression of source.matchAll(/\$\$([\s\S]*?)\$\$/g)) {
+    expressions.push(expression);
+    if (expressions.length === 64) break;
+  }
   if (!expressions.length) return result;
   const probe = document.createElement("div");
   probe.style.cssText = "position:fixed;left:-10000px;top:0;visibility:hidden;display:inline-block;white-space:nowrap;font-size:16px";
