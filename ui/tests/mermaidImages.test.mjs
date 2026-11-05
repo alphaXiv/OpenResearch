@@ -30,6 +30,18 @@ test("native diagram images and links keep SVG fragments", (t) => {
   moduleExports.resolveMermaidImages("<svg/>", (path) => `/api/raw?path=${encodeURIComponent(path)}`, "/api/");
   assert.equal(nodes[0].attrs.href, "/api/raw?path=C%3A%2Ffigures%2Fchart.svg#plot");
   assert.equal(nodes[1].attrs.href, "/api/raw?path=C%3A%2Ffigures%2Fchart.svg#section");
+  assert.equal(nodes[1].attrs["data-orx-file-target"], "file:///C:/figures/chart.svg#section");
+});
+
+test("external diagram links cannot masquerade as local file links", (t) => {
+  const node = element("a", "https://example.com/");
+  node.attrs["data-orx-file-target"] = "local.md";
+  globalThis.DOMParser = class { parseFromString() { return { documentElement: { localName: "svg" }, querySelector: () => null, querySelectorAll: () => [node] }; } };
+  globalThis.XMLSerializer = class { serializeToString() { return "<svg/>"; } };
+  t.after(() => { delete globalThis.DOMParser; delete globalThis.XMLSerializer; });
+  moduleExports.resolveMermaidImages("<svg/>", () => "", "/api/");
+  assert.equal(node.attrs["data-orx-file-target"], undefined);
+  assert.equal(node.attrs.href, "https://example.com/");
 });
 
 test("diagram image fallback advances only through scoped candidates", (t) => {

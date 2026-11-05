@@ -8,6 +8,7 @@ export function resolveMermaidImages(svg: string, absoluteFileUrl: (path: string
     element.removeAttribute("href");
     element.removeAttributeNS("http://www.w3.org/1999/xlink", "href");
     element.removeAttribute("data-orx-fallbacks");
+    element.removeAttribute("data-orx-file-target");
     if (!src || src.startsWith("//") || src.startsWith("\\\\")) continue;
     if (element.localName === "a" && /^(https?:|mailto:|tel:)/i.test(src)) {
       element.setAttribute("href", src);
@@ -25,6 +26,7 @@ export function resolveMermaidImages(svg: string, absoluteFileUrl: (path: string
       element.setAttribute("href", urls[0]);
       if (element.localName === "image" && urls.length > 1) element.setAttribute("data-orx-fallbacks", JSON.stringify(urls.slice(1)));
       if (element.localName === "a") {
+        element.setAttribute("data-orx-file-target", src);
         element.setAttribute("target", "_blank");
         element.setAttribute("rel", "noopener noreferrer");
       }

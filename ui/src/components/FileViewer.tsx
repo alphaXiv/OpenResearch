@@ -951,7 +951,12 @@ export function FileViewer({
             )}
           </div>
         ) : isMermaid && !showSource ? (
-          <MermaidBlock code={data.content} sourceToggle={false} imageResolver={resolveImageCandidates} />
+          <MermaidBlock code={data.content} sourceToggle={false} imageResolver={resolveImageCandidates} openFile={onOpenFile ? (src, intent) => {
+            const path = resolveMarkdownFilePath(src);
+            if (!path) return false;
+            openMarkdownFile(path, undefined, undefined, undefined, intent);
+            return true;
+          } : undefined} />
         ) : isHtml && !showSource ? (
           <HtmlPreview
             html={data.content}
