@@ -20,12 +20,14 @@ function documentOf(elements) {
     setAttribute: (name, value) => { attributes[name] = value; },
   });
   const nodes = elements.map(([tag, attributes]) => element(tag, attributes));
+  const headNodes = [];
   return {
     nodes,
+    headNodes,
     querySelectorAll: (selector) => selector === "a[href]" ? [] : nodes,
     querySelector: () => null,
     createElement: (tag) => element(tag, {}),
-    head: { prepend() {} },
+    head: { prepend(node) { headNodes.unshift(node); } },
     doctype: null,
     documentElement: { outerHTML: "" },
   };
@@ -51,6 +53,7 @@ test("external assets bypass the local resolver; relative ones keep the MIME gat
   });
   const resolved = [];
   await exports.assembleDocument("", (src) => { resolved.push(src); return `/root/${src}`; }, new AbortController().signal);
+  assert.ok(doc.headNodes.some((node) => node.attributes["http-equiv"] === "Content-Security-Policy" && node.attributes.content === "img-src data: blob:"));
   assert.deepEqual(resolved, ["chart.png", "key.txt"]);
   assert.deepEqual(fetched, ["/root/chart.png", "/root/key.txt"]);
   assert.deepEqual(doc.nodes.map((node) => Object.values(node.attributes)[0]), [
