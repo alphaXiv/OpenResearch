@@ -1,6 +1,7 @@
 /**
  * The real `orx up` in a sandboxed home: its own config, data and cache directories, a PATH with
- * only the system's tools, and every request off the machine sent to the outside server. @module
+ * the system's tools and a signed-out Claude Code, and every request off the machine sent to the
+ * outside server. @module
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
@@ -24,6 +25,11 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
   mkdirSync(path.join(home, 'projects'), { recursive: true })
   mkdirSync(path.join(root, 'tmp'))
   writeFileSync(path.join(home, '.gitconfig'), '[user]\n\tname = E2E Researcher\n\temail = e2e@example.com\n')
+  // A signed-out Claude Code, so every host has an agent installed: macOS finds ChatGPT.app's Codex
+  // outside PATH, and with none at all onboarding skips its agent step to install OpenCode.
+  const bin = path.join(root, 'bin')
+  mkdirSync(bin)
+  writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n[ "$1" = --version ] && echo "2.1.0 (Claude Code)" && exit 0\nexit 1\n', { mode: 0o755 })
   const log = path.join(root, 'orx.log')
   const env = {
     HOME: home,
@@ -31,7 +37,7 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     XDG_DATA_HOME: path.join(home, '.local', 'share'),
     XDG_CACHE_HOME: path.join(home, '.cache'),
     TMPDIR: path.join(root, 'tmp'),
-    PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+    PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
     LANG: 'en_US.UTF-8',
     SHELL: '/bin/sh',
     OPENRESEARCH_API_URL: outside.url,
