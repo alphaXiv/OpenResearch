@@ -198,15 +198,18 @@ impl Delegated {
             command.args(["/D", "/S", "/C", &request.command]);
             command
         } else {
-            // A PATH the agent sends picks its program. A Unix child already looks
-            // there itself, relative entries included; Windows lookup has to be told.
-            let bare = cfg!(windows) && !request.command.contains(['/', '\\']);
+            // A PATH the agent sends picks its program, relative entries from the cwd.
+            let bare = !request.command.contains(['/', '\\']);
+            let is_path =
+                |name: &str| name == "PATH" || cfg!(windows) && name.eq_ignore_ascii_case("PATH");
             let program = request
                 .env
                 .iter()
-                .rfind(|variable| bare && variable.name.eq_ignore_ascii_case("PATH"))
+                .rfind(|variable| bare && is_path(&variable.name))
                 .and_then(|path| {
-                    crate::local::shell_env::search_in(path.value.as_ref(), &request.command)
+                    let dirs = std::env::split_paths(&path.value).map(|dir| cwd.join(dir));
+                    let paths = std::env::join_paths(dirs).ok()?;
+                    crate::local::shell_env::search_in(&paths, &request.command)
                 })
                 .unwrap_or_else(|| PathBuf::from(&request.command));
             crate::process::tokio_command(program)
@@ -416,22 +419,20 @@ mod tests {
         let (command, file, body) = ("sh", "sh", "#!/bin/sh\necho AGENT_PATH_OK\n");
         #[cfg(windows)]
         let (command, file, body) = ("whoami", "whoami.cmd", "@echo AGENT_PATH_OK\r\n");
-        std::fs::write(dir.path().join(file), body).unwrap();
+        let tool = dir.path().join("bin").join(file);
+        std::fs::create_dir(dir.path().join("bin")).unwrap();
+        std::fs::write(&tool, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                dir.path().join(file),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let delegated = Delegated::new(&std::env::temp_dir());
+        let delegated = Delegated::new(dir.path());
         let created = delegated
             .request(
                 "terminal/create",
-                json!({"sessionId":"s", "command":command, "env":[{"name":"PATH", "value":dir.path()}]}),
+                json!({"sessionId":"s", "command":command, "env":[{"name":"PATH", "value":"bin"}]}),
             )
             .await
             .unwrap();

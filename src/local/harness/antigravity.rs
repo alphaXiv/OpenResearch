@@ -276,7 +276,10 @@ fn agy_candidates() -> Vec<PathBuf> {
         })
         .chain(dirs::data_local_dir().map(|dir| dir.join("agy").join("bin")))
         .collect::<Vec<_>>();
-    installs("agy", own).map(resolve_symlinks).collect()
+    installs("agy", own)
+        .into_iter()
+        .map(resolve_symlinks)
+        .collect()
 }
 
 /// The executable detection selected, else the first candidate — sync callers

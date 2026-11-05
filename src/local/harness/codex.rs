@@ -560,6 +560,7 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
 /// to find its `codex-code-mode-host` helper next to the real binary.
 fn codex_candidates() -> Vec<PathBuf> {
     installs("codex", codex_install_dirs(dirs::home_dir().as_deref()))
+        .into_iter()
         .map(resolve_symlinks)
         .collect()
 }

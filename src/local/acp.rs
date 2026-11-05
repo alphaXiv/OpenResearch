@@ -207,7 +207,9 @@ pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
         ]
         .map(|directory| home.join(directory))
     });
-    crate::local::shell_env::installs(executable, own).next()
+    crate::local::shell_env::installs(executable, own)
+        .into_iter()
+        .next()
 }
 
 pub fn save(definition: Definition, create: bool) -> Result<()> {

@@ -608,7 +608,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
 /// Every `claude` install, in preference order.
 fn claude_candidates() -> Vec<PathBuf> {
     let own = dirs::home_dir().map(|home| home.join(".claude").join("local"));
-    installs("claude", own).collect()
+    installs("claude", own)
 }
 
 /// The executable detection selected, else `claude` on PATH / the drop

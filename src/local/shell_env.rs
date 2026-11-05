@@ -165,29 +165,33 @@ pub const PATH_LIST_SEPARATOR: &str = ";";
 /// Where `binary` lives: what detection reports and what [`crate::process`]
 /// runs for a bare name.
 pub fn find(binary: &str) -> Option<PathBuf> {
-    installs(binary, []).next()
+    installs(binary, []).into_iter().next()
 }
 
 /// Every copy of `binary` worth trying, best first: the one on PATH, then the
 /// directories installers drop CLIs into without putting them on PATH, then the
-/// tool's `own` install locations, then `npx`'s cache. The path is returned as it
-/// sits in its directory; a caller that needs the real binary behind a symlink
-/// composes with `resolve_symlinks`.
-pub fn installs<'a>(
-    binary: &'a str,
-    own: impl IntoIterator<Item = PathBuf>,
-) -> impl Iterator<Item = PathBuf> + 'a {
+/// tool's `own` install locations. Only when none has it, `npx`'s cache. The path
+/// is returned as it sits in its directory; a caller that needs the real binary
+/// behind a symlink composes with `resolve_symlinks`.
+pub fn installs(binary: &str, own: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = dirs::home_dir()
         .map(|home| vec![home.join(".local/bin"), home.join(".npm-global/bin")])
         .unwrap_or_default();
     #[cfg(windows)]
     dirs.extend(dirs::config_dir().map(|roaming| roaming.join("npm")));
     dirs.extend(own);
-    let drops = dirs
+    let found: Vec<PathBuf> = find_on_path(binary)
         .into_iter()
-        .chain(std::iter::once_with(|| npx_bins(npx_roots())).flatten())
-        .filter_map(move |dir| find_in_dir(&dir, binary));
-    find_on_path(binary).into_iter().chain(drops)
+        .chain(dirs.iter().filter_map(|dir| find_in_dir(dir, binary)))
+        .collect();
+    if !found.is_empty() {
+        return found;
+    }
+    // Last, since reading the cache costs a stat for every run it ever kept.
+    npx_bins(npx_roots())
+        .iter()
+        .filter_map(|dir| find_in_dir(dir, binary))
+        .collect()
 }
 
 /// Where npm keeps `npx` runs by default.
@@ -391,11 +395,11 @@ mod tests {
     fn a_tool_off_path_is_found_in_its_own_install_dir() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-installs").unwrap();
         let own = || [dir.path().to_path_buf()];
-        assert_eq!(installs("orx-install-probe", own()).next(), None);
+        assert!(installs("orx-install-probe", own()).is_empty());
         std::fs::write(dir.path().join(PROBE), "").unwrap();
         assert_eq!(
-            installs("orx-install-probe", own()).next(),
-            Some(dir.path().join(PROBE))
+            installs("orx-install-probe", own()),
+            vec![dir.path().join(PROBE)]
         );
     }
 

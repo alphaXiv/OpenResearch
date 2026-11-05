@@ -253,7 +253,7 @@ fn cursor_candidates() -> Vec<PathBuf> {
             .flatten()
             .map(|dir| dir.join("cursor-agent"))
     };
-    let cursor_agents: Vec<PathBuf> = installs("cursor-agent", own()).collect();
+    let cursor_agents = installs("cursor-agent", own());
     let agents = installs("agent", own());
     // `agent` is the installer's alias binary in the same directory — where a
     // `cursor-agent` sibling exists, probing both doubles the sweep.
@@ -265,7 +265,7 @@ fn cursor_candidates() -> Vec<PathBuf> {
         .collect();
     cursor_agents
         .into_iter()
-        .chain(agents.filter(|path| {
+        .chain(agents.into_iter().filter(|path| {
             looks_like_cursor(path)
                 && !path
                     .parent()

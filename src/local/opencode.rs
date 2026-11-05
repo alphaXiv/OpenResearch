@@ -53,6 +53,7 @@ pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
     // drop directory, and probing that one binary twice costs a 15s timeout.
     crate::local::harness::unique_bins(
         crate::local::shell_env::installs("opencode", own)
+            .into_iter()
             .map(|path| crate::paths::canonicalize(&path).unwrap_or(path))
             .collect(),
     )
