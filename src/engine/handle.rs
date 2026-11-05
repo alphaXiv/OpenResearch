@@ -200,7 +200,23 @@ mod tests {
                 serde_json::to_value(&decoded).unwrap(),
                 serde_json::to_value(&handle).unwrap()
             );
-            assert_eq!(serde_json::to_value(old).unwrap().get("handle"), None);
+            assert_eq!(
+                serde_json::to_value(old).unwrap()["handle"],
+                value["handle"]
+            );
+        }
+    }
+
+    /// Stored rows outlive the version that wrote them, so every engine handle
+    /// in the contract fixture decodes and re-encodes unchanged.
+    #[test]
+    fn stored_engine_handles_decode() {
+        let stored: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../tests/contracts/run-descriptors.json"))
+                .unwrap();
+        for row in stored.iter().filter(|row| row["kind"] == "engine") {
+            let handle: Handle = serde_json::from_value(row["handle"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(&handle).unwrap(), row["handle"]);
         }
     }
 

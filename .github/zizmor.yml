@@ -1,0 +1,18 @@
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": hash-pin
+  self-repository:
+    disable: true
+  # cargo-dist generates these parts of its workflows.
+  excessive-permissions:
+    ignore:
+      - release.yml
+  template-injection:
+    ignore:
+      - release.yml
+  unpinned-images:
+    ignore:
+      - release.yml
+      - verify-build-channel.yml

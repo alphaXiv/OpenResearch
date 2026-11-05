@@ -32,7 +32,9 @@ compute capabilities.
 **The config directory never moves**, which is why the settings that point
 at the data directory, the credentials for openresearch.sh, alphaXiv and
 Overleaf, and every cross-process lock live there. A lock inside the data
-directory could not guard a move of that directory.
+directory could not guard a move of that directory. Old and new binaries
+rewrite the same settings files, so each save keeps the fields its binary
+does not know.
 
 A desktop app launched from Finder inherits none of the user's shell
 environment, so app mode imports a short list of variables from the login
@@ -74,6 +76,9 @@ is still being indexed, and reads each result page from one database snapshot.
 Results follow newest stored messages first, with row-ID cursors that do not
 shift when a streaming reply changes. Scoped searches bound the full-text
 scan to their messages' row-ID range and check membership against session rows.
+
+`tests/contracts/store-schema.json` holds the last release's columns; a test
+checks the current schema against it.
 
 ## Code lives in Git
 
@@ -179,18 +184,21 @@ endpoints out of it. Other traffic:
   `orx login --alphaxiv`, to link alphaXiv to the signed-in account. orx keeps
   alphaXiv's tokens owner-only in the config directory, refreshing them under
   a file lock since each refresh retires the last one, and reads the user's
-  folders and papers with them. The chat's library picker loads paper
-  thumbnails from alphaXiv's public asset CDN. Agents also send research tool
-  calls to alphaXiv while signed out, limited by IP. Signed-in agents read
-  library notes and highlights and, when requested, create folders and save
-  papers to them. Tool arguments (including research queries, paper and
+  folders and papers with them. It also reads the user's public alphaXiv
+  profile, followed topics and researcher card: the dashboard shows the
+  profile picture alphaXiv names, and a blank project's starter prompts are
+  briefed from the profile, so it reaches the agent's model provider. The
+  chat's library picker loads paper thumbnails from alphaXiv's public asset
+  CDN. Agents also send research tool calls to alphaXiv while signed out,
+  limited by IP. Signed-in agents read library notes and highlights and, when
+  requested, create folders and save papers to them. Tool arguments (including research queries, paper and
   researcher identifiers, GitHub repository paths, folder identifiers and
   names) go to alphaXiv; tool results enter the agent's context and reach its
   model provider. The MCP proxy sends no chat transcript, project files,
   experiments or logs of its own.
 - **Telemetry.** Official builds send opt-out usage events to the first-party
   API under a random install ID that is not tied to an account: commands run,
-  harness detection states, and the research profile chosen at onboarding.
+  harness detection states, and a research profile when onboarding submits one.
   Source builds send nothing. Events wait in an outbox in the config directory
   and send in the background, so telemetry never blocks or fails a command. A
   change of the telemetry choice is itself recorded, so opt-outs are visible.

@@ -1018,8 +1018,12 @@ fn parse_job_state(out: &str) -> Result<JobState> {
         });
     }
     Ok(match out {
-        "RUNNING" | "PENDING" => JobState {
+        "RUNNING" => JobState {
             stage: "RUNNING".into(),
+            message: None,
+        },
+        "PENDING" => JobState {
+            stage: "SCHEDULING".into(),
             message: None,
         },
         "DEAD" => JobState {
@@ -1167,7 +1171,7 @@ mod tests {
         }
         for (output, stage) in [
             ("RUNNING", "RUNNING"),
-            ("PENDING", "RUNNING"),
+            ("PENDING", "SCHEDULING"),
             ("EXIT 0", "COMPLETED"),
             ("EXIT 42", "ERROR"),
             ("DEAD", "ERROR"),
@@ -1193,6 +1197,18 @@ mod tests {
         let dir = home.path().join(".orx/runs/r1");
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(inspect(), "PENDING");
+        std::fs::write(dir.join("launch_started"), "").unwrap();
+        let state = parse_job_state(&inspect()).unwrap();
+        assert_eq!(
+            super::super::stage_to_run_status(&state.stage),
+            crate::store::RunStatus::Starting
+        );
+        std::fs::write(dir.join("pid"), std::process::id().to_string()).unwrap();
+        let state = parse_job_state(&inspect()).unwrap();
+        assert_eq!(
+            super::super::stage_to_run_status(&state.stage),
+            crate::store::RunStatus::Running
+        );
         std::fs::write(dir.join("exit_code"), "0\n").unwrap();
         assert_eq!(inspect(), "EXIT 0");
     }

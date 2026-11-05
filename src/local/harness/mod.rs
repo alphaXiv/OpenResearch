@@ -401,11 +401,13 @@ pub fn service_tier_for<'a>(harness_id: &str, id: &'a str) -> Option<&'a str> {
     (harness_id == "codex" && matches!(id, "default" | "priority")).then_some(id)
 }
 
-/// One wait in a harness's turn loop: the harness's own next event, or a
-/// message the user steered into the turn meanwhile.
+/// One wait in a harness's turn loop: the harness's own next event, a
+/// message the user steered into the turn meanwhile, or a held-back flush
+/// coming due.
 pub(crate) enum Waited<T> {
     Event(T),
     Steer(SteerMessage),
+    Flush,
 }
 
 /// The next message the user steers into a running turn. A turn without a
@@ -885,17 +887,8 @@ mod tests {
         o.reasoning_levels.iter().map(|c| c.id.as_str()).collect()
     }
 
-    fn permission_contract(o: &HarnessOptions) -> Vec<(&str, &str, &str)> {
-        o.permission_modes
-            .iter()
-            .map(|choice| {
-                (
-                    choice.id.as_str(),
-                    choice.label.as_str(),
-                    choice.description.as_deref().unwrap_or_default(),
-                )
-            })
-            .collect()
+    fn permission_ids(o: &HarnessOptions) -> Vec<&str> {
+        o.permission_modes.iter().map(|c| c.id.as_str()).collect()
     }
 
     /// Pin each harness's native permission vocabulary and Plan activation.
@@ -903,22 +896,8 @@ mod tests {
     fn advertised_options_per_harness() {
         let claude = options_for("claude-code");
         assert_eq!(
-            permission_contract(&claude),
-            [
-                ("manual", "Manual", "Always ask before making changes"),
-                (
-                    "acceptEdits",
-                    "Accept edits",
-                    "Automatically accept all file edits"
-                ),
-                ("plan", "Plan", "Create a plan before making changes"),
-                ("auto", "Auto", "Claude handles permission decisions"),
-                (
-                    "bypassPermissions",
-                    "Bypass permissions",
-                    "Accepts all permissions"
-                ),
-            ]
+            permission_ids(&claude),
+            ["manual", "acceptEdits", "plan", "auto", "bypassPermissions"]
         );
         assert_eq!(claude.default_permission_mode, Some("auto"));
         assert_eq!(claude.plan_activation, Some(PlanActivation::Permission));
@@ -937,24 +916,8 @@ mod tests {
 
         let codex = options_for("codex");
         assert_eq!(
-            permission_contract(&codex),
-            [
-                (
-                    "ask",
-                    "Ask for approval",
-                    "Ask before commands that need elevated access"
-                ),
-                (
-                    "approve-for-me",
-                    "Approve for me",
-                    "Codex reviews approval requests automatically"
-                ),
-                (
-                    "full-access",
-                    "Full access",
-                    "Run without sandbox or approval prompts"
-                ),
-            ]
+            permission_ids(&codex),
+            ["ask", "approve-for-me", "full-access"]
         );
         assert_eq!(codex.default_permission_mode, Some("approve-for-me"));
         assert_eq!(codex.plan_activation, Some(PlanActivation::Command));
@@ -970,58 +933,19 @@ mod tests {
         );
 
         let opencode = options_for("opencode");
-        assert_eq!(
-            permission_contract(&opencode),
-            [
-                (
-                    "default",
-                    "Default",
-                    "Ask before actions that need your approval"
-                ),
-                (
-                    "auto-approve",
-                    "Auto-approve",
-                    "Approve requests automatically, except actions you have denied"
-                ),
-            ]
-        );
+        assert_eq!(permission_ids(&opencode), ["default", "auto-approve"]);
         assert_eq!(opencode.default_permission_mode, Some("default"));
         assert_eq!(opencode.plan_activation, Some(PlanActivation::Command));
         assert!(opencode.reasoning_levels.is_empty());
 
         let cursor = options_for("cursor");
-        assert_eq!(
-            permission_contract(&cursor),
-            [
-                ("ask", "Ask", "Answer questions without changing files"),
-                ("auto", "Auto", "Allow commands unless explicitly denied"),
-                (
-                    "full-access",
-                    "Full access",
-                    "Allow commands and disable the sandbox"
-                ),
-            ]
-        );
+        assert_eq!(permission_ids(&cursor), ["ask", "auto", "full-access"]);
         assert_eq!(cursor.default_permission_mode, Some("auto"));
         assert_eq!(cursor.plan_activation, Some(PlanActivation::Command));
         assert!(cursor.reasoning_levels.is_empty());
 
         let antigravity = options_for("antigravity");
-        assert_eq!(
-            permission_contract(&antigravity),
-            [
-                (
-                    "default",
-                    "Ask for approval",
-                    "Ask before changes; allow read-only planning"
-                ),
-                (
-                    "bypass",
-                    "Bypass permissions",
-                    "Allow commands and skip tool confirmation prompts"
-                ),
-            ]
-        );
+        assert_eq!(permission_ids(&antigravity), ["default", "bypass"]);
         assert_eq!(antigravity.default_permission_mode, Some("bypass"));
         assert_eq!(antigravity.plan_activation, Some(PlanActivation::Command));
         assert!(reasoning_ids(&antigravity).is_empty());

@@ -384,6 +384,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
     let mut deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
     loop {
         tokio::select! {
+            _ = ctx.flush_due() => { let _ = ctx.flush(); }
             _ = watchdog.tick() => {
                 if client.awaiting_permission() {
                     deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;

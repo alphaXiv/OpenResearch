@@ -1,0 +1,17 @@
+{
+  "name": "orx-e2e",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.16.1",
+  "scripts": {
+    "test": "node run.ts",
+    "typecheck": "tsc",
+    "test:lint": "node --test lint.test.ts",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "26.6.6",
+    "typescript": "5.9.3"
+  }
+}

@@ -206,6 +206,21 @@ impl LegacyTransport {
             &serde_json::to_vec(&cursor)?,
             Some(0o600),
         )?;
+        if let Some(ident) = cursor.ident {
+            crate::commands::up::api_v2::keep_ranges(
+                self.log_dir
+                    .parent()
+                    .ok_or_else(|| anyhow!("Missing log parent"))?,
+                run,
+                vec![crate::commands::up::api_v2::KeptRange {
+                    offset: 0,
+                    len: cursor.offset,
+                    file: path,
+                    ident,
+                    eof,
+                }],
+            )?;
+        }
         #[cfg(unix)]
         std::fs::File::open(&self.log_dir)?.sync_all()?;
         Ok(serde_json::json!({ "eof": eof }))
@@ -293,6 +308,13 @@ impl RunSink for EngineSink {
     }
     fn queue_finished_remote_cleanup(&self, run: &str) -> Result<()> {
         self.engine.store().queue_finished_remote_cleanup(run)
+    }
+    fn finish_log_collection(&self, run: &str) -> Result<()> {
+        self.engine.store().finish_log_collection(run)?;
+        self.engine
+            .bus
+            .publish(crate::engine::bus::RunEvent::LogCollection { run_id: run.into() });
+        Ok(())
     }
     fn transport_error(&self, run: &str, target: &ssh::SshTarget, cause: &str) -> Result<()> {
         let transport = target
@@ -497,6 +519,7 @@ impl Backend for OpenResearch {
             api_url: creds.api_url,
             sandbox_id: created.sandbox.id,
             token: lease.token,
+            unknown: Default::default(),
         });
         Ok(Handle::Legacy {
             descriptor: Box::new(descriptor),
@@ -600,7 +623,28 @@ impl Backend for OpenResearch {
         .await;
 
         match released {
-            Ok(()) => CancelOutcome::Verified,
+            Ok(()) => {
+                if let Some(target) = descriptor.openresearch_ssh_target() {
+                    let kept = (|| {
+                        let transport = (self.transport)(&target)?;
+                        let data_dir = transport
+                            .log_dir
+                            .parent()
+                            .ok_or_else(|| anyhow!("Missing log parent"))?;
+                        if crate::commands::up::api_v2::kept_ranges(data_dir, &run.id)?
+                            .iter()
+                            .any(|range| range.eof)
+                        {
+                            self.engine.store().finish_log_collection(&run.id)?;
+                        }
+                        Ok::<_, crate::error::Error>(())
+                    })();
+                    if let Err(error) = kept {
+                        eprintln!("Could not settle cancelled run {}'s log: {error}", run.id);
+                    }
+                }
+                CancelOutcome::Verified
+            }
             Err(error) => CancelOutcome::Undelivered {
                 detail: error.to_string(),
             },
@@ -783,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_sink_keeps_legacy_lease_and_terminal_reason_in_the_notice() {
+    fn engine_sink_records_payload_start_and_keeps_legacy_lease_and_terminal_reason() {
         let root = std::env::temp_dir().join(format!("orx-legacy-sink-{}", uuid::Uuid::new_v4()));
         let engine = Arc::new(super::super::api_tests::engine(&root));
         let descriptor = BackendDescriptor::parse(r#"{"kind":"openresearch_job","namespace":"org","jobId":"box","rentalLease":{"apiUrl":"https://example.invalid","sandboxId":"box","token":"private"}}"#).unwrap();
@@ -791,7 +835,7 @@ mod tests {
             id: "run".into(),
             experiment_id: "exp".into(),
             project_id: "proj".into(),
-            status: "running".into(),
+            status: "starting".into(),
             backend_json: descriptor.to_json(),
             command: "true".into(),
             created_at: 1,
@@ -814,6 +858,14 @@ mod tests {
             panic!("lost legacy envelope");
         };
         assert_eq!(saved.rental_lease.unwrap().token, "private");
+        sink.update_status("run", RunStatus::Starting, None, None)
+            .unwrap();
+        assert_eq!(engine.load("run").unwrap().0.status, "starting");
+        assert_eq!(engine.load("run").unwrap().1.started_at, None);
+        sink.update_status("run", RunStatus::Running, None, None)
+            .unwrap();
+        assert_eq!(engine.load("run").unwrap().0.status, "running");
+        assert!(engine.load("run").unwrap().1.started_at.is_some());
         sink.finish(
             "run",
             RunStatus::Failed,
@@ -827,6 +879,7 @@ mod tests {
 
         let pending = StoredRun {
             id: "pending-stop".into(),
+            status: "running".into(),
             ..run.clone()
         };
         engine.store().upsert_run(&pending).unwrap();

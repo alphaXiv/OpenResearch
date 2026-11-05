@@ -1,62 +1,45 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
+import { Activity, act, createElement, useRef } from "react";
+import { useTerminalSession } from "../src/components/useTerminalSession.ts";
+import { render } from "./render.mjs";
 
-function harness() {
-  const slots = [];
-  let cursor, effect, dispose;
-  const exports = {};
-  const code = ts.transpileModule(readFileSync(new URL("../src/components/useTerminalSession.ts", import.meta.url), "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  new Function("require", "exports", code)(() => ({
-    useRef: (value) => { const index = cursor++; return slots[index] ??= { current: value }; },
-    useEffectEvent: (callback) => callback,
-    useEffect: (callback) => { effect = callback; },
-  }), exports);
-  const element = { current: { isConnected: true } };
-  let opened = 0, closed = 0;
+/** A terminal pane in a workspace that Activity can hide; each connection it opens is numbered. */
+async function pane(identity) {
+  let opened = 0, closed = 0, session;
+  function Terminal({ identity }) {
+    const element = useRef(null);
+    session = useTerminalSession(element, identity, () => ({ terminal: {}, dispose: () => closed++, number: ++opened }));
+    return createElement("div", { ref: element });
+  }
+  const page = (mode, identity) => createElement(Activity, { mode }, createElement(Terminal, { identity }));
+  const view = await render(page("visible", identity));
+  const flush = () => act(async () => { await Promise.resolve(); });
   return {
-    element,
-    mount(id) {
-      cursor = 0;
-      const resource = exports.useTerminalSession(element, id, () => ({ terminal: {}, dispose: () => closed++, number: ++opened }));
-      dispose = effect();
-      return resource;
-    },
-    cleanup: () => dispose(),
-    get opened() { return opened; }, get closed() { return closed; },
+    show: async (mode, next = identity) => { await view.rerender(page(mode, next)); await flush(); },
+    unmount: async () => { await view.unmount(); await flush(); },
+    get connection() { return session.current?.mounted.number; },
+    get opened() { return opened; },
+    get closed() { return closed; },
   };
 }
 
-const settle = () => new Promise(setImmediate);
-
 test("hiding and reactivating a workspace preserves its terminal connection", async () => {
-  const view = harness();
-  const first = view.mount("shell-a").current;
-  view.cleanup();
-  await settle();
-  assert.equal(view.closed, 0);
-  assert.equal(view.mount("shell-a").current, first);
-  assert.equal(view.opened, 1);
-  view.element.current.isConnected = false;
-  view.cleanup();
-  await settle();
-  assert.equal(view.closed, 1);
+  const terminal = await pane("shell-a");
+  await terminal.show("hidden");
+  assert.equal(terminal.closed, 0);
+  await terminal.show("visible");
+  assert.equal(terminal.connection, 1);
+  assert.equal(terminal.opened, 1);
+  await terminal.unmount();
+  assert.equal(terminal.closed, 1);
 });
 
 test("changing the terminal identity replaces only that connection", async () => {
-  const view = harness();
-  const first = view.mount("shell-a").current;
-  view.cleanup();
-  const second = view.mount("shell-b").current;
-  await settle();
-  assert.notEqual(first, second);
-  assert.equal(view.opened, 2);
-  assert.equal(view.closed, 1);
-  view.element.current.isConnected = false;
-  view.cleanup();
-  await settle();
-  assert.equal(view.closed, 2);
+  const terminal = await pane("shell-a");
+  await terminal.show("visible", "shell-b");
+  assert.equal(terminal.connection, 2);
+  assert.equal(terminal.closed, 1);
+  await terminal.unmount();
+  assert.equal(terminal.closed, 2);
 });

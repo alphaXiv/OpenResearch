@@ -84,15 +84,38 @@ window on the user's screen, so open it only to test the app.
 CI runs what the changed files need: `cargo fmt --all`,
 `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`;
 in `ui/`, `pnpm typecheck`, `pnpm lint:i18n`, `pnpm lint:styles`, `pnpm test`;
-`node --test scripts/*.test.mjs` and
-`node --test --experimental-strip-types scripts/dev.test.ts`. Release builds
+`node --test scripts/*.test.mjs`, `node --test 'src/**/*.test.mjs'` and
+`node --test --experimental-strip-types scripts/dev.test.ts`; `node e2e/run.ts`
+when `src/` or `ui/` change ([e2e/README.md](e2e/README.md)). Release builds
 embed `ui/dist`: run `pnpm build` in `ui/` before `cargo build --release`.
 
 Other scripts: `build-macos-app.sh` and `package-macos-app.sh` sign and
 notarize the app and DMG (`macos/DISTRIBUTION.md`), `build-linux-appimage.sh`
-builds the AppImage, `generate-*` draw brand assets and the demo's evidence,
-and `ci-*`, `canary-*`, `find-release-run.sh` and `release_notes.py` serve the
-workflows.
+builds the AppImage, `build-host.mjs` builds the `orx-host` binaries official
+builds embed through `ORX_EMBED_HOST_DIR`, `generate-*` draw brand assets and
+the demo's evidence, and `ci-*`, `canary-*`, `change-counts.mjs`,
+`release-source.sh`, `find-release-run.sh` and `release_notes.py` serve the
+workflows. Workflows pass `actionlint` and `zizmor --offline` (with
+`.github/zizmor.yml`), and every action is pinned to a commit.
+
+## Tests
+
+- Test through a module's interface or the running app. Never parse, regex or
+  evaluate source text (`createSourceFile`, `new Function`, YAML splitting); if
+  logic is buried in a component, render the component or move the logic out.
+- Fake only what orx doesn't own: agent CLIs, ssh, cloud APIs, openresearch.sh,
+  the network. Never replace an orx function with a reimplementation.
+- A test fails for a bug a user would notice and survives a rename. Pin a
+  string only when it is a contract: a CLI flag, a wire field, a stored value.
+- Shipped contracts get both directions: old data read by new code, and a newer
+  version's unknown fields kept by an old writer. Fixtures live in
+  `tests/contracts/`.
+- Tests are hermetic: under `cfg(test)` the data and config dirs are a
+  per-process temp root, and a test that needs other env runs in a child
+  (`config::in_test_child`). No wall-clock sleeps; long waits go through
+  `config::paced`. A tool missing in CI fails (`config::skip_without_tool`).
+- UI tests render real React in happy-dom through `ui/tests/register.mjs` and
+  `render.mjs`; `e2e/` drives the real `orx up` and dashboard with a fake agent.
 
 ## Code
 

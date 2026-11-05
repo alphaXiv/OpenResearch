@@ -1,72 +1,49 @@
-import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import test from "node:test";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import ts from "typescript";
-import * as bashCommand from "../src/bashCommand.ts";
-import * as chatRecovery from "../src/chatRecovery.ts";
-import * as chatRendering from "../src/chatRendering.ts";
-import * as orxCommand from "../src/orxCommand.ts";
+import { createElement } from "react";
+import { Message, spawnRowTitle } from "../src/components/ChatPanel.tsx";
+import { m } from "../src/paraglide/messages.js";
+import { render, serve, settle } from "./render.mjs";
 
-const require = createRequire(import.meta.url);
-const source = readFileSync(new URL("../src/components/ChatPanel.tsx", import.meta.url), "utf8");
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-}).outputText;
-const stub = new Proxy({}, { get: (_, name) => (name === "__esModule" ? false : () => null) });
-const messages = new Proxy({}, {
-  get: (_, name) => (params) => params ? `${String(name)} ${JSON.stringify(params)}` : String(name),
-});
-let folders;
-let titles = {};
-const mocks = {
-  "../queries/projects": new Proxy({ resolvePaperQuery: (id) => ({ id }) }, { get: (target, name) => target[name] ?? stub[name] }),
-  "@tanstack/react-query": {
-    ...require("@tanstack/react-query"),
-    useQueries: ({ queries }) => queries.map(({ id }) => ({ data: titles[id] ? { paperId: id, title: titles[id] } : undefined })),
-  },
-  "../queries/settings": new Proxy({ useAlphaXivFolders: () => ({ data: folders }) }, { get: (target, name) => target[name] ?? stub[name] }),
-  "../paraglide/messages.js": { m: messages },
-  "../paraglide/runtime.js": { getLocale: () => "en" },
-  "../i18n": { ltr: String, autoDir: String },
-  "../bashCommand": bashCommand,
-  "../chatRecovery": chatRecovery,
-  "../chatRendering": chatRendering,
-  "../queries/chatState": { LOCAL_PREFIX: "local-", SHELL_TOOL: "shell" },
-  "../orxCommand": orxCommand,
-  "../api": new Proxy({}, { get: (_, name) => (name === "fmtNumber" ? String : stub[name]) }),
-  "./LitSourceLogo": { ...orxCommand, LitSourceLogo: ({ source }) => React.createElement("i", { "data-source": source }), paperUrl: (_, id) => `https://www.alphaxiv.org/abs/${id}` },
-  "@tanstack/react-router": { useNavigate: () => () => {} },
-  "./ui": new Proxy({}, {
-    get: (_, name) => (name === "Button" ? ({ children }) => React.createElement("button", null, children) : stub[name]),
-  }),
-};
-const exports = {};
-new Function("require", "exports", compiled)(
-  withWorkspaceMocks((name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name))),
-  exports,
-);
+/** Text as the reader sees it, without the bidi isolates around interpolated values. */
+const plain = (text) => text.replace(/[⁦-⁩]/g, "");
 
 const call = (tool, input, extra = {}) => ({
   id: `tool-${tool}`, type: "tool", tool, state: { status: "completed", input, ...extra },
 });
-const label = (part) => exports.spawnRowTitle(part);
-const renderMessage = (parts, activePermissionId = null) => renderToStaticMarkup(React.createElement(exports.Message, {
-  message: { id: "msg-1", role: "assistant", parts, createdAt: 0, completedAt: 1000 },
-  activePermissionId,
-  forkDisabled: false,
-  branchDisabled: false,
-  onFork: () => {},
-  onSelectFork: () => {},
-  onRecover: () => {},
-}));
+const label = (part) => plain(spawnRowTitle(part));
+
+/** Renders an assistant message against an alphaXiv account holding `folders` and papers titled by `titles`. */
+async function renderMessage(parts, { activePermissionId = null, folders, titles = {} } = {}) {
+  serve((path) => {
+    if (path === "/api/account/openresearch") return { loggedIn: folders !== undefined, apiUrl: null, user: { id: "u" } };
+    if (path === "/api/alphaxiv/folders") return folders;
+    const paper = /^\/api\/papers\/resolve\?id=(.+)$/.exec(path)?.[1];
+    if (paper) return titles[decodeURIComponent(paper)] ? { paper: { paperId: paper, title: titles[decodeURIComponent(paper)] } } : Response.json({ error: "unknown" }, { status: 404 });
+  });
+  const { container } = await render(createElement(Message, {
+    message: { id: "msg-1", role: "assistant", parts, createdAt: 0, completedAt: 1000 },
+    activePermissionId,
+    forkDisabled: false,
+    branchDisabled: false,
+    onFork: () => {},
+    onSelectFork: () => {},
+    onRecover: () => {},
+  }));
+  await settle();
+  return container;
+}
+
+const approval = (tool, toolInput, options) => {
+  const prompt = { id: "perm-1", type: "prompt", prompt: { kind: "permission", tool, toolInput } };
+  return renderMessage([prompt], { activePermissionId: prompt.id, ...options });
+};
+const logos = (container) => container.querySelectorAll('[role="img"][aria-label="alphaXiv"]').length;
+const link = (container, id) => container.querySelector(`a[href="https://www.alphaxiv.org/abs/${id}"]`);
 
 test("every harness's alphaXiv tool name reaches the same row", () => {
   const input = { paper_id_or_url: "2307.12307" };
-  const expected = 'activity_alphaxiv_read_notes_on {"paper":"2307.12307"}';
+  const expected = plain(m.activity_alphaxiv_read_notes_on({ paper: "2307.12307" }));
   assert.equal(label(call("mcp__alphaxiv__get_paper_notes", input)), expected);
   assert.equal(label(call("orx_alphaxiv_get_paper_notes", input)), expected);
   assert.equal(label(call("alphaxiv:get_paper_notes", { arguments: input })), expected);
@@ -76,99 +53,89 @@ test("every harness's alphaXiv tool name reaches the same row", () => {
 });
 
 test("alphaXiv rows name the paper, folder, query or researcher from the call", () => {
-  assert.equal(label(call("mcp__alphaxiv__list_library", {})), "activity_alphaxiv_read_library");
-  assert.equal(label(call("mcp__alphaxiv__save_papers_to_folder", { paper_ids_or_urls: ["2307.12307"] })), 'activity_alphaxiv_saved_paper {"paper":"2307.12307"}');
-  assert.equal(label(call("mcp__alphaxiv__save_papers_to_folder", { paper_ids_or_urls: ["a", "b", "c"] })), 'activity_alphaxiv_saved_papers {"count":"3"}');
-  assert.equal(label(call("mcp__alphaxiv__create_folder", { name: "Diffusion" })), 'activity_alphaxiv_created_folder {"name":"Diffusion"}');
+  assert.equal(label(call("mcp__alphaxiv__list_library", {})), plain(m.activity_alphaxiv_read_library()));
+  assert.equal(label(call("mcp__alphaxiv__save_papers_to_folder", { paper_ids_or_urls: ["2307.12307"] })), plain(m.activity_alphaxiv_saved_paper({ paper: "2307.12307" })));
+  assert.equal(label(call("mcp__alphaxiv__save_papers_to_folder", { paper_ids_or_urls: ["a", "b", "c"] })), plain(m.activity_alphaxiv_saved_papers({ count: "3" })));
+  assert.equal(label(call("mcp__alphaxiv__create_folder", { name: "Diffusion" })), plain(m.activity_alphaxiv_created_folder({ name: "Diffusion" })));
   assert.equal(
     label(call("mcp__alphaxiv__answer_pdf_queries", { paper: "2307.12307", queries: "What datasets?" })),
-    'activity_for_query {"activity":"activity_read_target {\\"target\\":\\"2307.12307\\"}","query":"What datasets?"}',
+    plain(m.activity_for_query({ activity: m.activity_read_target({ target: "2307.12307" }), query: "What datasets?" })),
   );
   assert.equal(
     label(call("mcp__alphaxiv__read_files_from_github_repository", { githubUrl: "https://github.com/karpathy/nanoGPT.git", path: "/model.py" })),
-    'activity_read_target {"target":"karpathy/nanoGPT/model.py"}',
+    plain(m.activity_read_target({ target: "karpathy/nanoGPT/model.py" })),
   );
   assert.equal(
     label(call("mcp__alphaxiv__discover_papers", { keywords: ["GRPO"], question: "GRPO variants" })),
-    'activity_for_query {"activity":"activity_searched_alphaxiv","query":"GRPO variants"}',
+    plain(m.activity_for_query({ activity: m.activity_searched_alphaxiv(), query: "GRPO variants" })),
   );
-  assert.equal(label(call("mcp__alphaxiv__resolve_researchers", { people: [{ name: "Yann LeCun" }] })), 'activity_alphaxiv_looked_up_researcher {"name":"Yann LeCun"}');
-  assert.equal(label(call("mcp__alphaxiv__get_researcher", { researchers: ["A", "B"] })), 'activity_alphaxiv_looked_up_researchers {"count":"2"}');
-  assert.equal(label(call("mcp__alphaxiv__get_researcher_papers", { researchers: ["Yann LeCun"] })), 'activity_alphaxiv_listed_papers_by {"name":"Yann LeCun"}');
-  assert.equal(label(call("mcp__alphaxiv__rename_folder", { name: "x" })), "activity_used_alphaxiv");
+  assert.equal(label(call("mcp__alphaxiv__resolve_researchers", { people: [{ name: "Yann LeCun" }] })), plain(m.activity_alphaxiv_looked_up_researcher({ name: "Yann LeCun" })));
+  assert.equal(label(call("mcp__alphaxiv__get_researcher", { researchers: ["A", "B"] })), plain(m.activity_alphaxiv_looked_up_researchers({ count: "2" })));
+  assert.equal(label(call("mcp__alphaxiv__get_researcher_papers", { researchers: ["Yann LeCun"] })), plain(m.activity_alphaxiv_listed_papers_by({ name: "Yann LeCun" })));
+  assert.equal(label(call("mcp__alphaxiv__rename_folder", { name: "x" })), plain(m.activity_used_alphaxiv()));
 });
 
 test("commands and URLs that mention alphaXiv keep their own rows", () => {
   assert.equal(label(call("mcp__other__list_library", {})), "mcp__other__list_library");
   const curl = call("bash", { command: "curl https://alphaxiv.org/abs/1" }, { title: "curl https://alphaxiv.org/abs/1" });
-  assert.doesNotMatch(label(curl), /alphaxiv_|used_alphaxiv/);
+  assert.notEqual(label(curl), plain(m.activity_used_alphaxiv()));
+  assert.doesNotMatch(label(curl), /alphaXiv/);
 });
 
-test("alphaXiv rows show the alphaXiv logo and link only a paper id", () => {
-  const notes = renderMessage([call("mcp__alphaxiv__get_paper_notes", { paper_id_or_url: "2307.12307" })]);
-  assert.match(notes, /data-source="alphaxiv"/);
-  assert.match(notes, /href="https:\/\/www.alphaxiv.org\/abs\/2307.12307"/);
-  const titled = renderMessage([call("mcp__alphaxiv__answer_pdf_queries", { paper: "Attention Is All You Need", queries: ["q"] })]);
-  assert.match(titled, /data-source="alphaxiv"/);
-  assert.doesNotMatch(titled, /href=/);
+test("alphaXiv rows show the alphaXiv logo and link only a paper id", async () => {
+  const notes = await renderMessage([call("mcp__alphaxiv__get_paper_notes", { paper_id_or_url: "2307.12307" })]);
+  assert.equal(logos(notes), 1);
+  assert.ok(link(notes, "2307.12307"));
+  const titled = await renderMessage([call("mcp__alphaxiv__answer_pdf_queries", { paper: "Attention Is All You Need", queries: ["q"] })]);
+  assert.equal(logos(titled), 1);
+  assert.equal(titled.querySelector("a[href]")?.outerHTML, undefined);
 });
 
-const approval = (tool, toolInput) => {
-  const prompt = { id: "perm-1", type: "prompt", prompt: { kind: "permission", tool, toolInput } };
-  return renderMessage([prompt], prompt.id).replaceAll("&quot;", '"');
-};
-
-test("an alphaXiv write's approval card names what it writes", () => {
-  folders = undefined;
-  assert.match(approval("mcp__alphaxiv__create_folder", { name: "Diffusion" }), /activity_alphaxiv_create_folder \{"name":"Diffusion"\}/);
-  assert.match(approval("orx_alphaxiv_create_folder", { name: "Diffusion" }), /activity_alphaxiv_create_folder \{"name":"Diffusion"\}/);
+test("an alphaXiv write's approval card names what it writes", async () => {
+  const expected = plain(m.activity_alphaxiv_create_folder({ name: "Diffusion" }));
+  assert.ok(plain((await approval("mcp__alphaxiv__create_folder", { name: "Diffusion" })).textContent).includes(expected));
+  assert.ok(plain((await approval("orx_alphaxiv_create_folder", { name: "Diffusion" })).textContent).includes(expected));
 });
 
-test("the save approval lists every paper and names its folder once folders load", () => {
+test("the save approval lists every paper and names its folder once folders load", async () => {
   const input = { paper_ids_or_urls: ["2307.12307", "2401.04088", "2209.10652"], folder_id: "f2" };
-  folders = undefined;
-  const loading = approval("mcp__alphaxiv__save_papers_to_folder", input);
-  assert.match(loading, /activity_alphaxiv_save_papers \{"count":"3"\}/);
-  for (const id of input.paper_ids_or_urls) assert.match(loading, new RegExp(`href="https://www.alphaxiv.org/abs/${id}"`));
-  assert.equal(loading.match(/data-source="alphaxiv"/g)?.length, 3);
+  const loading = await approval("mcp__alphaxiv__save_papers_to_folder", input);
+  assert.ok(plain(loading.textContent).includes(plain(m.activity_alphaxiv_save_papers({ count: "3" }))));
+  for (const id of input.paper_ids_or_urls) assert.ok(link(loading, id));
+  assert.equal(logos(loading), 3);
 
-  folders = [{ id: "f1", name: "Want to read" }, { id: "f2", name: "Interpretability" }];
-  assert.match(approval("mcp__alphaxiv__save_papers_to_folder", input), /activity_alphaxiv_save_papers_to \{"count":"3","folder":"Interpretability"\}/);
-  assert.match(
-    approval("mcp__alphaxiv__save_papers_to_folder", { ...input, folder_id: "gone" }),
-    /activity_alphaxiv_save_papers \{"count":"3"\}/,
-  );
+  const folders = [{ id: "f1", name: "Want to read" }, { id: "f2", name: "Interpretability" }];
+  const named = await approval("mcp__alphaxiv__save_papers_to_folder", input, { folders });
+  assert.ok(plain(named.textContent).includes(plain(m.activity_alphaxiv_save_papers_to({ count: "3", folder: "Interpretability" }))));
+  const gone = await approval("mcp__alphaxiv__save_papers_to_folder", { ...input, folder_id: "gone" }, { folders });
+  assert.ok(plain(gone.textContent).includes(plain(m.activity_alphaxiv_save_papers({ count: "3" }))));
 
-  const single = approval("mcp__alphaxiv__save_papers_to_folder", { paper_ids_or_urls: ["2307.12307"] });
-  assert.match(single, /activity_alphaxiv_save_a_paper</);
-  assert.match(single, /<ul[^]*href="https:\/\/www.alphaxiv.org\/abs\/2307.12307"[^>]*>2307.12307<\/a>/);
+  const single = await approval("mcp__alphaxiv__save_papers_to_folder", { paper_ids_or_urls: ["2307.12307"] });
+  assert.ok(plain(single.textContent).includes(plain(m.activity_alphaxiv_save_a_paper())));
+  assert.equal(plain(link(single, "2307.12307").textContent), "2307.12307");
+  assert.ok(link(single, "2307.12307").closest("li"));
 });
 
-test("the save approval links each paper by title once it resolves, keeping its id beside it", () => {
-  folders = undefined;
-  const input = { paper_ids_or_urls: ["2307.12307", "2401.04088"] };
-  titles = { "2307.12307": "Robust Weighted Sum-Rate Maximization for Transmissive RIS Transmitter Enabled RSMA Networks" };
-  const html = approval("mcp__alphaxiv__save_papers_to_folder", input);
-  assert.match(html, /href="https:\/\/www.alphaxiv.org\/abs\/2307.12307"[^>]*>Robust Weighted Sum-Rate/);
-  assert.match(html, /<span class="shrink-0 text-xs text-subtext">2307.12307<\/span>/);
-  assert.match(html, /href="https:\/\/www.alphaxiv.org\/abs\/2401.04088"[^>]*>2401.04088<\/a>/);
-  assert.doesNotMatch(html, /text-subtext">2401.04088/);
+test("the save approval links each paper by title once it resolves, keeping its id beside it", async () => {
+  const titles = { "2307.12307": "Robust Weighted Sum-Rate Maximization for Transmissive RIS Transmitter Enabled RSMA Networks" };
+  const html = await approval("mcp__alphaxiv__save_papers_to_folder", { paper_ids_or_urls: ["2307.12307", "2401.04088"] }, { titles });
+  const [titled, pending] = html.querySelectorAll("li");
+  assert.equal(link(titled, "2307.12307").textContent, titles["2307.12307"]);
+  assert.ok(plain(titled.textContent).endsWith("2307.12307"));
+  assert.equal(plain(link(pending, "2401.04088").textContent), "2401.04088");
+  assert.equal(plain(pending.textContent).trim(), "2401.04088");
 
-  folders = [{ id: "f2", name: "Interpretability" }];
+  const folders = [{ id: "f2", name: "Interpretability" }];
   const single = { paper_ids_or_urls: ["2307.12307"], folder_id: "f2" };
-  const titled = approval("mcp__alphaxiv__save_papers_to_folder", single);
-  assert.match(titled, /activity_alphaxiv_save_a_paper_to \{"folder":"Interpretability"\}/);
-  assert.match(titled, /<li[^]*>Robust Weighted Sum-Rate[^]*text-subtext">2307.12307</);
-  titles = {};
-  const pending = approval("mcp__alphaxiv__save_papers_to_folder", single);
-  assert.match(pending, /activity_alphaxiv_save_a_paper_to \{"folder":"Interpretability"\}/);
-  assert.match(pending, /<li[^]*>2307.12307<\/a>/);
+  const named = await approval("mcp__alphaxiv__save_papers_to_folder", single, { folders, titles });
+  assert.ok(plain(named.textContent).includes(plain(m.activity_alphaxiv_save_a_paper_to({ folder: "Interpretability" }))));
+  assert.equal(link(named, "2307.12307").textContent, titles["2307.12307"]);
+  const unresolved = await approval("mcp__alphaxiv__save_papers_to_folder", single, { folders });
+  assert.ok(plain(unresolved.textContent).includes(plain(m.activity_alphaxiv_save_a_paper_to({ folder: "Interpretability" }))));
+  assert.equal(plain(link(unresolved, "2307.12307").textContent), "2307.12307");
 });
 
-test("the create-folder approval names its parent folder", () => {
-  folders = [{ id: "f2", name: "Interpretability" }];
-  assert.match(
-    approval("mcp__alphaxiv__create_folder", { name: "SAEs", parent_folder_id: "f2" }),
-    /activity_alphaxiv_create_folder_in \{"name":"SAEs","parent":"Interpretability"\}/,
-  );
+test("the create-folder approval names its parent folder", async () => {
+  const html = await approval("mcp__alphaxiv__create_folder", { name: "SAEs", parent_folder_id: "f2" }, { folders: [{ id: "f2", name: "Interpretability" }] });
+  assert.ok(plain(html.textContent).includes(plain(m.activity_alphaxiv_create_folder_in({ name: "SAEs", parent: "Interpretability" }))));
 });

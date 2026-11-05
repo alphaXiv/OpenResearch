@@ -1642,6 +1642,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 
     loop {
         tokio::select! {
+            _ = ctx.flush_due() => { let _ = ctx.flush(); }
             chunk = stream.next() => {
                 let Some(chunk) = chunk else {
                     return Err(anyhow!("opencode event stream ended mid-turn"));

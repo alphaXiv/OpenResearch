@@ -1,33 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import ts from "typescript";
-
-const require = createRequire(import.meta.url);
-function load(name) {
-  const source = readFileSync(new URL(`../src/components/ui/${name}.tsx`, import.meta.url), "utf8");
-  const compiled = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText;
-  const exports = {};
-  new Function("require", "exports", compiled)((id) => id === "./cn" ? { cn: (...values) => values.filter(Boolean).join(" ") } : require(id), exports);
-  return exports;
-}
-
-const controls = [
-  load("Button").Button,
-  load("Button").ButtonLink,
-  load("IconButton").IconButton,
-  load("IconButton").IconButtonLink,
-  load("MenuItem").MenuItem,
-  load("Switch").Switch,
-];
+import { Button, ButtonLink } from "../src/components/ui/Button.tsx";
+import { IconButton, IconButtonLink } from "../src/components/ui/IconButton.tsx";
+import { MenuItem } from "../src/components/ui/MenuItem.tsx";
+import { Switch } from "../src/components/ui/Switch.tsx";
 
 test("standard controls suppress native titles, including untyped spreads and ancestor titles", () => {
-  for (const Control of controls) {
+  for (const Control of [Button, ButtonLink, IconButton, IconButtonLink, MenuItem, Switch]) {
     const html = renderToStaticMarkup(React.createElement("div", { title: "ancestor" },
       React.createElement(Control, { title: "leaked", "aria-label": "Action", "data-tip": "Custom hint" })));
     assert.match(html, /title=""/);

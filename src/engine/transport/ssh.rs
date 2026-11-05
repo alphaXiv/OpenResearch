@@ -1,4 +1,4 @@
-use super::{askpass::Askpass, Config, DEADLINE};
+use super::{askpass::Askpass, deadline, Config};
 use crate::jobs::ssh::sh_quote;
 use anyhow::{anyhow, bail, Context, Result};
 use orx_host_proto::{Message, Request, Response, MAX_FRAME_LEN, PROTOCOL_VERSION};
@@ -55,7 +55,7 @@ pub(super) fn command(config: &Config) -> Command {
 
 pub(super) async fn route(config: &Config) -> Result<String> {
     let output = tokio::time::timeout(
-        DEADLINE,
+        deadline(),
         command(config).args(["-G", "--", &config.alias]).output(),
     )
     .await??;

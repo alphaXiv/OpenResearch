@@ -1,84 +1,89 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test from "node:test";
-import ts from "typescript";
+import { test } from "node:test";
+import { act } from "react";
+import { m } from "../src/paraglide/messages.js";
+import { find, renderApp, serveApp, settle } from "./render.mjs";
 
-const file = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let resizeEffect;
-let focusEffect;
-function visit(node) {
-  if (ts.isCallExpression(node) && node.expression.getText(file) === "useEffect" && node.getText(file).includes("const onResize =")) resizeEffect = node;
-  if (ts.isCallExpression(node) && node.expression.getText(file) === "useLayoutEffect" && node.arguments[1]?.getText(file) === "[railVisible]") focusEffect = node;
-  ts.forEachChild(node, visit);
-}
-visit(file);
-assert.ok(resizeEffect && focusEffect);
+/** Too narrow for the sidebar beside an open panel, and wide enough for both. */
+const NARROW = 800;
+const WIDE = 1600;
 
-function scenario({ focusedInChat = true, railOpen = true } = {}) {
-  const body = { closest: () => null };
-  const button = {
-    isConnected: true,
-    closest: (selector) => focusedInChat && selector === ".chat-pane" ? {} : null,
-    getAttribute: () => "Show sidebar",
-    getClientRects: () => [{}],
-    focus() { document.activeElement = button; },
-  };
-  const document = { body, activeElement: button };
-  const hiddenRailButton = { getClientRects: () => [] };
-  const railButton = { getClientRects: () => [{}], focus() { document.activeElement = railButton; } };
-  const focusAfterRailChange = { current: null };
-  const lastFocused = { current: button };
-  const bodyRef = { current: {
-    querySelectorAll: () => [hiddenRailButton, railButton],
-    parentElement: { querySelectorAll: () => [button] },
-  } };
-  const getComputedStyle = () => ({ visibility: "visible" });
-  const m = { chat_panel_show_sidebar: () => "Show sidebar" };
-  let onResize;
-  const window = { innerWidth: 1040, addEventListener: (_, callback) => { onResize = callback; }, removeEventListener() {} };
-  const resize = ts.transpile(resizeEffect.getText(file));
-  new Function("useEffect", "window", "document", "railOpen", "railTemporarilyHidden", "railWidth", "sidebarFitsWithPanel", "focusAfterRailChange", "setWindowWidth", "m", resize)(
-    (effect) => effect(), window, document, railOpen, true, 300, (width, railWidth) => width >= railWidth + 740, focusAfterRailChange, () => {}, m,
-  );
-  const focus = ts.transpile(focusEffect.getText(file));
-  const restore = (railVisible = true) => new Function("useLayoutEffect", "railVisible", "lastFocused", "document", "focusAfterRailChange", "bodyRef", "getComputedStyle", "m", focus)(
-    (effect) => effect(), railVisible, lastFocused, document, focusAfterRailChange, bodyRef, getComputedStyle, m,
-  );
-  return { onResize, restore, button, body, document, railButton, focusAfterRailChange };
+const resize = (width) => act(async () => happyDOM.setViewport({ width, height: 900 }));
+const rail = () => document.querySelector(".session-rail");
+const showSidebar = () => find(`.chat-pane button[aria-label="${m.chat_panel_show_sidebar()}"]`);
+
+/** A project chat at `width`, with its files panel open unless `panel` is false. */
+async function chat(width, panel = true) {
+  await resize(width);
+  serveApp({ "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }) });
+  const pane = panel ? `?pane=${encodeURIComponent(JSON.stringify({ kind: "home", view: "files" }))}` : "";
+  await renderApp(`/projects/p/tasks/new${pane}`);
 }
 
-test("resize restores focus when the focused show-sidebar button disappears", () => {
-  const s = scenario();
-  s.onResize();
-  s.button.isConnected = false;
-  s.document.activeElement = s.body;
-  s.restore();
-  assert.equal(s.document.activeElement, s.railButton);
+const focus = (element) => act(async () => element.focus());
+
+test("widening the window moves focus from the vanishing show-sidebar button into the sidebar", async () => {
+  await chat(NARROW);
+  assert.equal(rail(), null);
+  const button = showSidebar();
+  await focus(button);
+  await resize(WIDE);
+  await settle();
+  assert.equal(button.isConnected, false);
+  assert.ok(rail().contains(document.activeElement));
 });
 
-test("closing the sidebar focuses the show button outside the app body", () => {
-  const s = scenario();
-  s.focusAfterRailChange.current = "show";
-  s.document.activeElement = s.body;
-  s.restore(false);
-  assert.equal(s.document.activeElement, s.button);
+test("collapsing the sidebar focuses the show-sidebar button", async () => {
+  await chat(WIDE, false);
+  const hide = find(`.session-rail button[aria-label="${m.header_hide_sidebar()}"]`);
+  await focus(hide);
+  await act(async () => hide.click());
+  await settle();
+  assert.equal(rail(), null);
+  assert.equal(document.activeElement.getAttribute("aria-label"), m.chat_panel_show_sidebar());
 });
 
-test("resize leaves focus elsewhere and respects a collapsed sidebar", () => {
-  for (const options of [{ focusedInChat: false }, { railOpen: false }]) {
-    const s = scenario(options);
-    s.onResize();
-    assert.equal(s.focusAfterRailChange.current, null);
-  }
-  const blurred = scenario();
-  blurred.document.activeElement = blurred.body;
-  blurred.onResize();
-  assert.equal(blurred.focusAfterRailChange.current, null);
-  const s = scenario();
-  s.onResize();
-  s.button.isConnected = false;
-  const otherControl = {};
-  s.document.activeElement = otherControl;
-  s.restore();
-  assert.equal(s.document.activeElement, otherControl);
+test("widening leaves focus that is elsewhere", async () => {
+  await chat(NARROW);
+  const elsewhere = document.querySelector(".right-pane [data-workspace-content]");
+  await focus(elsewhere);
+  await resize(WIDE);
+  await settle();
+  assert.ok(rail());
+  assert.equal(document.activeElement, elsewhere);
+});
+
+test("widening leaves focus on the body", async () => {
+  await chat(NARROW);
+  await act(async () => document.activeElement.blur());
+  await resize(WIDE);
+  await settle();
+  assert.ok(rail());
+  assert.equal(document.activeElement, document.body);
+});
+
+test("widening keeps a collapsed sidebar collapsed and its show button focused", async () => {
+  await chat(WIDE);
+  await act(async () => find(`.session-rail button[aria-label="${m.header_hide_sidebar()}"]`).click());
+  await settle();
+  await resize(NARROW);
+  const collapsed = showSidebar();
+  await focus(collapsed);
+  await resize(WIDE);
+  await settle();
+  assert.equal(rail(), null);
+  assert.equal(document.activeElement, collapsed);
+});
+
+test("focus moved elsewhere during the resize stays there", async () => {
+  await chat(NARROW);
+  await focus(showSidebar());
+  const other = document.querySelector(".right-pane [data-workspace-content]");
+  await act(async () => {
+    happyDOM.setViewport({ width: WIDE, height: 900 });
+    other.focus();
+  });
+  await settle();
+  assert.ok(rail());
+  assert.equal(document.activeElement, other);
 });

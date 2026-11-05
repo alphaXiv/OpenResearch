@@ -1,37 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
-import { formatCodexModel, groupModels, resolveHarnessDefaultModel } from "../src/modelSelection.ts";
-
-const file = ts.createSourceFile(
-  "ChatPanel.tsx",
-  readFileSync(new URL("../src/components/ChatPanel.tsx", import.meta.url), "utf8"),
-  ts.ScriptTarget.Latest,
-  true,
-  ts.ScriptKind.TSX,
-);
-
-function derive(rawSelection, activeHarness, reconcile = {}) {
-  const declaration = file.statements.find(
-    (node) => ts.isFunctionDeclaration(node) && node.name?.text === "deriveComposerSelection",
-  );
-  assert.ok(declaration);
-  const js = ts.transpileModule(declaration.getText(file).replace(/^export /, ""), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const factory = new Function(
-    "reconcileServiceTier",
-    "reconcileReasoning",
-    "resolveHarnessDefaultModel",
-    `${js}; return deriveComposerSelection;`,
-  );
-  return factory(
-    reconcile.serviceTier ?? ((_harness, _model, current) => current ?? null),
-    reconcile.reasoning ?? ((_harness, _model, current) => current),
-    resolveHarnessDefaultModel,
-  )(rawSelection, activeHarness);
-}
+import { deriveComposerSelection as derive, formatCodexModel, groupModels, resolveHarnessDefaultModel } from "../src/modelSelection.ts";
 
 const selection = (model) => ({
   harness: "codex",
@@ -45,6 +14,7 @@ const harness = (...models) => ({
   id: "codex",
   agentReady: true,
   models: models.map((id) => ({ id })),
+  options: { reasoningLevels: [{ id: "default", label: "Default" }, { id: "high", label: "High" }] },
 });
 
 test("an explicitly entered model id survives composer reconciliation and send", () => {
@@ -99,17 +69,18 @@ test("default resolution uses labels and preserves other harness semantics", () 
 });
 
 test("catalog models still reconcile their model-specific settings", () => {
-  const selected = selection("gpt-5.5");
-  const result = derive(selected, harness("gpt-5.5"), {
-    serviceTier: (_harness, model) => model === "gpt-5.5" ? "default" : null,
-    reasoning: (_harness, model) => model === "gpt-5.5" ? "medium" : null,
-  });
+  const catalog = { ...harness(), models: [{
+    id: "gpt-5.5",
+    serviceTiers: [{ id: "priority", label: "Fast" }],
+    reasoningLevels: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }],
+    defaultReasoningLevel: "medium",
+  }] };
+  const result = derive(selection("gpt-5.5"), catalog);
 
   assert.equal(result.model, "gpt-5.5");
   assert.equal(result.serviceTier, "default");
   assert.equal(result.reasoningLevel, "medium");
 });
-
 
 test("model families show newest first and keep older versions searchable", () => {
   const models = ["Haiku 4.5", "Sonnet 5", "Opus 5.5", "Fable 5.1", "Haiku 5.5", "Opus 4.8", "Mythos 6"].map((name) => ({ id: name, displayName: name }));

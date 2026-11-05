@@ -1,95 +1,134 @@
-import { readFileSync } from "node:fs";
-import ts from "typescript";
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { act } from "react";
+import { commandRegion, subscribeCommandRegion } from "../src/keyboardRegion.ts";
+import { navigate, renderApp, serveApp, settle } from "./render.mjs";
 
-let pointerdown;
-const focusListeners = new Map();
-class Element {
-  constructor(...ancestors) { this.ancestors = ancestors; }
-  closest(selectors) { return selectors.split(", ").some((selector) => this.ancestors.includes(selector)) ? this : null; }
+// The terminal tab's shell never connects.
+globalThis.WebSocket = class extends EventTarget { send() {} close() {} };
+// Wide enough for the sidebar beside an open panel.
+happyDOM.setViewport({ width: 1600, height: 900 });
+
+/** A focusable element inside one container per selector, outermost first: `.class` or `[role=name]`. */
+function within(...selectors) {
+  let parent = document.body;
+  for (const selector of selectors) {
+    const element = parent.appendChild(document.createElement("div"));
+    const role = selector.match(/^\[role=(\w+)\]$/)?.[1];
+    if (role) element.setAttribute("role", role);
+    else element.className = selector.slice(1);
+    parent = element;
+  }
+  return parent.appendChild(document.createElement("button"));
 }
-globalThis.Element = Element;
-globalThis.window = {
-  addEventListener(type, listener) { if (type === "pointerdown") pointerdown = listener; else focusListeners.set(type, listener); },
-  removeEventListener(type) { focusListeners.delete(type); },
-};
-globalThis.document = { body: new Element(), activeElement: null };
-const { commandRegion, subscribeCommandRegion } = await import("../src/keyboardRegion.ts");
+const click = (target) => target.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
 
 test("focus chooses the left session or right tab, including embedded side chats", () => {
-  assert.equal(commandRegion(new Element(".session-rail")), "left");
-  assert.equal(commandRegion(new Element(".chat-pane")), "left");
-  assert.equal(commandRegion(new Element(".chat-pane", ".right-pane")), "right");
-  assert.equal(commandRegion(new Element()), null);
+  assert.equal(commandRegion(within(".session-rail")), "left");
+  assert.equal(commandRegion(within(".chat-pane")), "left");
+  assert.equal(commandRegion(within(".right-pane", ".chat-pane")), "right");
+  assert.equal(commandRegion(within()), null);
 });
 
 test("body focus falls back to the last clicked pane, including native menu commands", () => {
-  pointerdown({ target: new Element(".right-pane") });
-  document.activeElement = document.body;
+  click(within(".right-pane"));
+  document.activeElement?.blur();
   assert.equal(commandRegion(), "right");
-  pointerdown({ target: new Element(".session-rail") });
+  click(within(".session-rail"));
   assert.equal(commandRegion(), "left");
-  assert.equal(commandRegion(new Element(".right-pane")), "right");
-  pointerdown({ target: new Element() });
+  assert.equal(commandRegion(within(".right-pane")), "right");
+  click(within());
   assert.equal(commandRegion(), null);
 });
 
 test("the Windows menu preserves its originating pane", () => {
-  pointerdown({ target: new Element(".right-pane") });
-  pointerdown({ target: new Element("[role=menubar]") });
-  assert.equal(commandRegion(new Element("[role=menu]")), "right");
+  click(within(".right-pane"));
+  click(within("[role=menubar]"));
+  assert.equal(commandRegion(within("[role=menu]")), "right");
 });
 
-const source = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let closeCallback;
-function visit(node) {
-  if (ts.isCallExpression(node) && node.expression.getText(source) === "useHotkey" && node.arguments[0]?.getText(source) === 'appHotkeys["tab.close"]') closeCallback = node.arguments[1].getText(source);
-  ts.forEachChild(node, visit);
+/** A project with chats `s` and `side` and an experiment `exp` on branch `b`, open at `path`. */
+async function project(path) {
+  const chat = (id) => ({ id, projectId: "p", harness: "claude", title: id, model: null, serviceTier: null, permissionMode: null, planMode: false, autonomy: "default", reasoningLevel: null, archived: false, createdAt: 1, updatedAt: 1, busy: false, activeLeafId: null });
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
+    "GET /api/projects/p/experiments": () => ({ experiments: [{ id: "exp", projectId: "p", slug: "exp", branchName: "b", runCommand: "", agentStatus: "", createdAt: 1, updatedAt: 1, archived: false }] }),
+    "GET /api/chat/sessions": () => ({ sessions: [chat("s"), chat("side")] }),
+  });
+  await renderApp(path);
+  return { go: navigate, pane: () => JSON.parse(new URLSearchParams(location.search).get("pane")), tabs: () => document.querySelectorAll(".right-pane .tab-close").length };
 }
-visit(source);
-assert.ok(closeCallback);
 
-for (const [tab, action] of [
-  ["files", "home"], ["terminal", "home"], ["artifacts", "home"], ["experiments", "home"],
-  [{ code: "e" }, "code"], [{ path: "paper.md" }, "file"], [{ experimentId: "e" }, "experiment"],
-  [{ kind: "plan" }, "plan"], [{ kind: "subagent" }, "subagent"], [{ kind: "side" }, "side"],
+const withPane = (pane) => `/projects/p/tasks/s?pane=${encodeURIComponent(JSON.stringify(pane))}`;
+const files = { kind: "home", view: "files" };
+const focus = async (element) => {
+  await act(async () => element.focus());
+  await settle();
+};
+const closeTab = async () => {
+  await act(async () => window.dispatchEvent(new CustomEvent("orx:command", { detail: "tab.close" })));
+  await settle();
+};
+
+for (const pane of [
+  files, { kind: "home", view: "terminal" }, { kind: "home", view: "artifacts" }, { kind: "home", view: "experiments" },
+  { kind: "code", experimentId: "exp", branch: "b", view: "changes" }, { kind: "file", path: "paper.md" }, { kind: "experiment", experimentId: "exp", view: "overview" },
+  { kind: "plan", sessionId: "s", promptId: "plan" }, { kind: "subagent", sessionId: "s", spawnPartId: "spawn" }, { kind: "side", sessionId: "side" },
 ]) {
-  test(`Close Tab routes the focused right tab through its ${action} close path`, () => {
-    document.activeElement = new Element(".right-pane");
-    const called = [];
-    const bindings = { commandRegion, mainView: "chat", activeSessionId: "s", panelOpen: true, rightTab: tab };
-    for (const [name, label] of Object.entries({ closeHomeTab: "home", closeCodeTab: "code", closeFileTab: "file", closeExperimentTab: "experiment", closePlanTab: "plan", closeSubagentTab: "subagent", closeSideTab: "side", selectMainView: "view", onActiveSessionChange: "session" })) bindings[name] = (...args) => called.push([label, ...args]);
-    new Function(...Object.keys(bindings), `return (${closeCallback})`)(...Object.values(bindings))();
-    assert.deepEqual(called, [[action, tab]]);
+  test(`Close Tab closes the focused right ${pane.view ?? pane.kind} tab and falls back to the previous one`, async () => {
+    const previous = pane === files ? { kind: "home", view: "artifacts" } : files;
+    const app = await project(withPane(previous));
+    await app.go(withPane(pane));
+    assert.equal(app.tabs(), 2);
+    await focus(document.querySelector(".right-pane [data-workspace-content]"));
+    await closeTab();
+    assert.deepEqual(app.pane(), previous);
+    assert.equal(app.tabs(), 1);
   });
 }
 
-test("Close Tab on the left deselects sessions or leaves settings, without closing right tabs", () => {
-  document.activeElement = new Element(".session-rail");
-  for (const [mainView, activeSessionId, expected] of [["chat", "s", ["session", null]], ["settings", "s", ["view", "chat"]], ["chat", null, null]]) {
-    const called = [];
-    const bindings = { commandRegion, mainView, activeSessionId, panelOpen: true, rightTab: "files", selectMainView: (view) => called.push(["view", view]), onActiveSessionChange: (id) => called.push(["session", id]), closeHomeTab: () => assert.fail("left focus must not close a right tab") };
-    new Function(...Object.keys(bindings), `return (${closeCallback})`)(...Object.values(bindings))();
-    assert.deepEqual(called, expected ? [expected] : []);
-  }
+test("Close Tab on the left deselects the chat without closing its right tabs", async () => {
+  const app = await project(withPane(files));
+  await focus(document.querySelector(".session-rail button"));
+  await closeTab();
+  assert.equal(location.pathname, "/projects/p/tasks/new");
+  await act(async () => history.back());
+  await settle();
+  assert.deepEqual(app.pane(), files);
+  assert.equal(app.tabs(), 1);
 });
 
-test("Close Tab does nothing outside a pane or while the right pane is closed", () => {
-  for (const target of [new Element(), new Element(".right-pane")]) {
-    document.activeElement = target;
-    const bindings = { commandRegion, mainView: "chat", panelOpen: false, closeHomeTab: () => assert.fail("nothing is closable") };
-    new Function(...Object.keys(bindings), `return (${closeCallback})`)(...Object.values(bindings))();
-  }
+test("Close Tab on the left leaves settings, and does nothing on a new chat", async () => {
+  const app = await project("/projects/p/settings/settings");
+  await focus(document.querySelector(".session-rail button"));
+  await closeTab();
+  assert.match(location.pathname, /^\/projects\/p\/tasks\//);
+  await app.go("/projects/p/tasks/new");
+  await focus(document.querySelector(".session-rail button"));
+  await closeTab();
+  assert.equal(location.pathname + location.search, "/projects/p/tasks/new");
+});
+
+test("Close Tab does nothing outside a pane or while the right pane is closed", async () => {
+  const app = await project(withPane(files));
+  await focus(document.querySelector(".titlebar-sidebar-toggle button"));
+  await closeTab();
+  assert.deepEqual(app.pane(), files);
+  assert.equal(app.tabs(), 1);
+
+  click(document.querySelector(".right-pane [data-workspace-content]"));
+  await app.go("/projects/p/tasks/s");
+  document.activeElement?.blur();
+  assert.equal(commandRegion(), "right");
+  await closeTab();
+  assert.equal(app.pane(), null);
 });
 
 test("keyboard entry into the Windows menu preserves the previously focused pane", async () => {
-  pointerdown({ target: new Element() });
+  click(within());
   const release = subscribeCommandRegion(() => {});
-  const pane = new Element(".right-pane");
-  const menu = new Element("[role=menubar]");
-  document.activeElement = menu;
-  focusListeners.get("focusin")({ type: "focusin", target: menu, relatedTarget: pane });
+  within(".right-pane").focus();
+  within("[role=menubar]").focus();
   await Promise.resolve();
   assert.equal(commandRegion(), "right");
   release();

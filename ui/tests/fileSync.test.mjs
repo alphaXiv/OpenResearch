@@ -1,28 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerHooks } from "node:module";
+import * as fileSync from "../src/fileSync.ts";
 
-let dialogOptions;
-let dialogError;
-globalThis.__fileSyncShowConfirm = (options) => {
-  if (dialogError) throw dialogError;
-  dialogOptions = options;
-};
-const hooks = registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (context.parentURL?.endsWith("/src/fileSync.ts")) {
-      if (specifier === "./dialog") {
-        return { url: "data:text/javascript,export const showConfirmDialog = (...args) => globalThis.__fileSyncShowConfirm(...args)", shortCircuit: true };
-      }
-      if (specifier === "./paraglide/messages.js") {
-        return { url: 'data:text/javascript,export const m = { common_confirm: () => "Confirm" }', shortCircuit: true };
-      }
-    }
-    return nextResolve(specifier, context);
-  },
-});
-
-const fileSync = await import("../src/fileSync.ts");
 const {
   conflictAfterRefresh,
   confirmFileDiscard,
@@ -31,7 +10,13 @@ const {
   FileBufferSession,
   updateFileDraft,
 } = fileSync;
-hooks.deregister();
+
+let dialogOptions;
+let dialogError;
+const showConfirmDialog = (options) => {
+  if (dialogError) throw dialogError;
+  dialogOptions = options;
+};
 
 test("file buffers preserve line endings and only conflict after a dirty disk change", () => {
   const clean = createFileBuffer("notes.txt", "one\r\ntwo\r\n", "v1");
@@ -52,7 +37,7 @@ test("file buffers preserve line endings and only conflict after a dirty disk ch
 
 test("discard confirmation protects blur-save until confirmed or canceled", async () => {
   for (const answer of [false, true]) {
-    const pending = confirmFileDiscard("Discard?", globalThis.__fileSyncShowConfirm);
+    const pending = confirmFileDiscard("Discard?", showConfirmDialog);
     assert.equal(fileSync.confirmingFileDiscard, true);
     assert.equal(dialogOptions.description, "Discard?");
     assert.equal(dialogOptions.destructive, true);
@@ -63,7 +48,7 @@ test("discard confirmation protects blur-save until confirmed or canceled", asyn
   }
 
   dialogError = new Error("dialog unavailable");
-  await assert.rejects(confirmFileDiscard("Discard?", globalThis.__fileSyncShowConfirm), dialogError);
+  await assert.rejects(confirmFileDiscard("Discard?", showConfirmDialog), dialogError);
   assert.equal(fileSync.confirmingFileDiscard, false);
   dialogError = null;
 });

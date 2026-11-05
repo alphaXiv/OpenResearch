@@ -3098,6 +3098,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         // `steering` is borrowed out of `ctx` so the borrow ends with the
         // select — the steer arm's handler needs `&mut ctx`.
         let waited = {
+            let flush_due = ctx.flush_due();
             let steering = &mut ctx.steering;
             let event = async {
                 if open_requests.is_empty() {
@@ -3109,9 +3110,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             tokio::select! {
                 event = event => Waited::Event(event),
                 steer = super::next_steer(steering) => Waited::Steer(steer),
+                _ = flush_due => Waited::Flush,
             }
         };
         let event = match waited {
+            Waited::Flush => {
+                let _ = ctx.flush();
+                continue;
+            }
             Waited::Steer(steer) => {
                 steer_turn(ctx, &client, &thread_id, turn_id.as_deref(), steer).await;
                 continue;
@@ -4199,7 +4205,17 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     let mut open_text: Option<String> = None;
     let mut open_reasoning: Option<String> = None;
 
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line?,
+            _ = ctx.flush_due() => {
+                let _ = ctx.flush();
+                continue;
+            }
+        };
+        let Some(line) = line else {
+            break;
+        };
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
