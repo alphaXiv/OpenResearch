@@ -1,6 +1,6 @@
 //! Job backends — external compute that orx launches and supervises itself.
 //!
-//! Orx submits natively (HF Jobs, Modal, Kubernetes, SSH, Slurm, an OpenResearch
+//! Orx submits natively (HF Jobs, Modal, Vercel Sandbox, Kubernetes, SSH, Slurm, an OpenResearch
 //! box, Tinker through a local controller, or this machine) and a detached
 //! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
 //! is the serialized handle a later supervisor uses to reattach.
@@ -16,6 +16,7 @@ pub mod rental;
 pub mod slurm;
 pub mod ssh;
 pub mod tinker;
+pub mod vercel;
 
 use std::collections::HashMap;
 
@@ -45,10 +46,7 @@ pub fn default_python_env(env: &HashMap<String, String>) -> HashMap<String, Stri
     env
 }
 
-/// Backend descriptor stored on the local run.
-/// `kind` discriminates. This is a fixed field list — a key absent here does
-/// NOT survive a parse → to_json round-trip, so anything a backend must keep
-/// needs its own (optional) field.
+/// Backend descriptor stored on the local run; `kind` discriminates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendDescriptor {
@@ -109,6 +107,9 @@ pub struct BackendDescriptor {
     /// The host's storage root at submit; Slurm derives its run dir from it, SSH keeps it for source-cache cleanup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_root: Option<String>,
+    /// Fields a newer orx wrote, kept so an older supervisor's rewrite doesn't drop them.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 impl BackendDescriptor {
@@ -154,6 +155,20 @@ impl BackendDescriptor {
         self.job_id.as_deref().ok_or_else(|| {
             anyhow!("Backend descriptor is missing the Modal sandbox id — was the job submitted?")
         })
+    }
+
+    /// The Vercel (sandbox name, process id) handle; the name rides on
+    /// `namespace`.
+    pub fn vercel_ref(&self) -> Result<(&str, &str)> {
+        if self.kind != "vercel_job" {
+            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
+        }
+        match (self.namespace.as_deref(), self.job_id.as_deref()) {
+            (Some(name), Some(pid)) => Ok((name, pid)),
+            _ => Err(anyhow!(
+                "Backend descriptor is missing the Vercel sandbox name/process id — was the job submitted?"
+            )),
+        }
     }
 
     /// The Slurm (host, job id) handle; the login-node host rides on
@@ -301,6 +316,7 @@ mod tests {
             source_path: None,
             source_size: None,
             remote_root: None,
+            unknown: Default::default(),
         }
     }
 
@@ -372,6 +388,7 @@ mod tests {
             id: "immutable-id".into(),
             started_at: "2026-09-21T00:00:00Z".into(),
             run_dir: "/home/user/.orx/runs/r1".into(),
+            unknown: Default::default(),
         });
         let json = d.to_json();
         assert!(json.contains("sshContainer"));
@@ -379,6 +396,28 @@ mod tests {
             BackendDescriptor::parse(&json).unwrap().ssh_container,
             d.ssh_container
         );
+    }
+
+    /// One descriptor per backend as shipped versions wrote it. An older supervisor
+    /// reattaching to a newer run rewrites the descriptor, so a field it does not
+    /// know, at any level, must survive.
+    #[test]
+    fn shipped_descriptors_keep_fields_from_newer_versions() {
+        let shipped: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../tests/contracts/run-descriptors.json"))
+                .unwrap();
+        let newer = serde_json::json!({"nested": [1, 2]});
+        for mut descriptor in shipped {
+            for nested in descriptor.as_object_mut().unwrap().values_mut() {
+                if let Some(nested) = nested.as_object_mut() {
+                    nested.insert("fieldFromNewerOrx".into(), newer.clone());
+                }
+            }
+            descriptor["fieldFromNewerOrx"] = newer.clone();
+            let parsed = BackendDescriptor::parse(&descriptor.to_string()).unwrap();
+            let rewritten: serde_json::Value = serde_json::from_str(&parsed.to_json()).unwrap();
+            assert_eq!(rewritten, descriptor);
+        }
     }
 
     #[test]

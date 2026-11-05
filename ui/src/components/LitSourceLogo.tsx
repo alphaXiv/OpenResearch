@@ -20,34 +20,38 @@ export const LIT_SOURCE_NAME: Record<LitSource, string> = {
   pubmed: "PubMed",
 };
 
-const LIT_SOURCE_SVG: Record<LitSource, string> = {
-  alphaxiv: alphaxivSvg,
-  openalex: openalexSvg,
-  biorxiv: biorxivSvg,
-  pubmed: pubmedSvg,
+// Stable HTML objects preserve a pressed SVG target through a re-render.
+const LIT_SOURCE_HTML: Record<LitSource, { __html: string }> = {
+  alphaxiv: { __html: alphaxivSvg },
+  openalex: { __html: openalexSvg },
+  biorxiv: { __html: biorxivSvg },
+  pubmed: { __html: pubmedSvg },
 };
 
 /** `decorative` when the source name is already shown as adjacent text (Settings
- * rows); otherwise the logo carries the source name for screen readers. */
+ * rows); otherwise the logo carries the source name for screen readers. `framed`
+ * sets the mark on a white tile, so every brand reads on either theme. */
 export function LitSourceLogo({
   source,
   size = 16,
   decorative = false,
+  framed = true,
   className = "",
 }: {
   source: LitSource;
   size?: number;
   decorative?: boolean;
+  framed?: boolean;
   className?: string;
 }) {
   return (
     <span
-      className={`lit-logo flex-none inline-flex items-center justify-center p-[1.5px] box-border bg-white rounded-xs shadow-logo [&_svg]:w-full [&_svg]:h-full [&_svg]:block ${className}`}
+      className={`lit-logo flex-none inline-flex items-center justify-center box-border [&_svg]:w-full [&_svg]:h-full [&_svg]:block ${framed ? "p-[1.5px] bg-white rounded-xs shadow-logo" : ""} ${className}`}
       style={{ width: size, height: size }}
       {...(decorative ? { "aria-hidden": true } : { role: "img", "aria-label": LIT_SOURCE_NAME[source] })}
       // Static, build-inlined brand SVGs — not user input.
-      dangerouslySetInnerHTML={{ __html: LIT_SOURCE_SVG[source] }}
-   />
+      dangerouslySetInnerHTML={LIT_SOURCE_HTML[source]}
+    />
   );
 }
 

@@ -1,3 +1,13 @@
+import {
+  useContext,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { EscapeScope } from "./EscapeScope";
 import { m } from "../paraglide/messages.js";
 // The shape follows what Overleaf allows: syncing needs a Git authentication
 // token and a project that already exists (its bridge cannot create one), and
@@ -5,7 +15,6 @@ import { m } from "../paraglide/messages.js";
 // project and works on any account — is offered in every state, not only after
 // a refusal.
 
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CloudUpload, ExternalLink, X } from "lucide-react";
 import type { OverleafLiveStatus } from "../api";
@@ -16,6 +25,8 @@ import { Button, ButtonLink, IconButton, Input, showAlert, Spinner } from "./ui"
 import { usePopover } from "./ModelPicker";
 
 export function OverleafButton({ overleaf }: { overleaf: OverleafSync }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
   const triggerRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref } = usePopover(triggerRef);
   const id = useId();
@@ -85,8 +96,9 @@ export function OverleafButton({ overleaf }: { overleaf: OverleafSync }) {
             <IconButton size="small" aria-label={m.file_viewer_dismiss_overleaf_message()} onClick={() => { setOpen(false); triggerRef.current?.focus(); }}><X size={14} /></IconButton>
           </div>
           <OverleafPanel overleaf={overleaf} />
-        </div>, document.body,
+        </div>, portalContainer ?? document.body,
       )}
+      <EscapeScope enabled={open} onEscape={() => { setOpen(false); triggerRef.current?.focus(); }} />
     </>
   );
 }

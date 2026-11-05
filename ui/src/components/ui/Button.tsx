@@ -32,21 +32,24 @@ function classes(variant: ButtonVariant, size: ButtonSize, active: boolean, clas
 }
 
 export type ButtonProps = ComponentProps<"button"> & {
+  title?: never;
   active?: boolean;
   variant?: ButtonVariant;
   size?: ButtonSize;
 };
 
 export function Button({ active = false, variant = "default", size = "default", className, ...props }: ButtonProps) {
-  return <button className={classes(variant, size, active, className)} {...props} />;
+  // An empty title blocks native tooltips inherited from ancestors.
+  return <button className={classes(variant, size, active, className)} {...props} title="" />;
 }
 
 export type ButtonLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
+  title?: never;
   active?: boolean;
   variant?: ButtonVariant;
   size?: ButtonSize;
 };
 
 export function ButtonLink({ active = false, variant = "default", size = "default", className, ...props }: ButtonLinkProps) {
-  return <a className={classes(variant, size, active, className)} {...props} />;
+  return <a className={classes(variant, size, active, className)} {...props} title="" />;
 }

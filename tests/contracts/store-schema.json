@@ -1,0 +1,233 @@
+{
+  "release": "v0.2.24",
+  "tables": {
+    "acp_sessions": [
+      {"name": "session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "launch_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "configuration_json", "type": "TEXT", "notnull": true, "default": "'[]'", "pk": 0}
+    ],
+    "chat_messages": [
+      {"name": "id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "session_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "role", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "parts_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "created_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "parent_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "base_native_session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "result_native_session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "completed_at", "type": "INTEGER", "notnull": false, "default": null, "pk": 0}
+    ],
+    "chat_queued_messages": [
+      {"name": "id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "session_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "client_turn_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "request_hash", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "payload_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "created_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0}
+    ],
+    "chat_run_wakeups": [
+      {"name": "run_id", "type": "TEXT", "notnull": true, "default": null, "pk": 1},
+      {"name": "chat_session_id", "type": "TEXT", "notnull": true, "default": null, "pk": 2},
+      {"name": "requested_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "state", "type": "TEXT", "notnull": true, "default": "'pending'", "pk": 0},
+      {"name": "claim_token", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "claimed_at", "type": "INTEGER", "notnull": false, "default": null, "pk": 0},
+      {"name": "delivered_at", "type": "INTEGER", "notnull": false, "default": null, "pk": 0},
+      {"name": "monitoring_alerted", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0}
+    ],
+    "chat_sessions": [
+      {"name": "id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "project_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "harness", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "native_session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "title", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "title_source", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "model", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "service_tier", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "permission_mode", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "plan_mode", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0},
+      {"name": "plan_reset_pending", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0},
+      {"name": "reasoning_level", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "archived", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0},
+      {"name": "context_usage_json", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "bootstrap_context", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "parent_session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "created_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "updated_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "active_leaf_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "goal", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "autonomy", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "side_parent_session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "side_parent_leaf_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0}
+    ],
+    "chat_steer_receipts": [
+      {"name": "session_id", "type": "TEXT", "notnull": true, "default": null, "pk": 1},
+      {"name": "client_turn_id", "type": "TEXT", "notnull": true, "default": null, "pk": 2},
+      {"name": "request_hash", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "delivered", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0}
+    ],
+    "chat_turn_leases": [
+      {"name": "chat_session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "claim_token", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "heartbeat_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0}
+    ],
+    "chat_turns": [
+      {"name": "id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "session_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "user_message_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "assistant_message_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "client_turn_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "request_hash", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "prepared_input", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "settings_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "state", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "delivery_state", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "attempt_count", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0},
+      {"name": "next_retry_at", "type": "INTEGER", "notnull": false, "default": null, "pk": 0},
+      {"name": "error_kind", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "error_message", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "recovery_action", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "recovered_by_turn_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "created_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "updated_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0}
+    ],
+    "chat_usage_executions": [
+      {"name": "execution_id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "turn_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "harness", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "report_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "suppressed", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "outcome", "type": "TEXT", "notnull": false, "default": null, "pk": 0}
+    ],
+    "chat_usage_samples": [
+      {"name": "execution_id", "type": "TEXT", "notnull": true, "default": null, "pk": 1},
+      {"name": "sample_id", "type": "TEXT", "notnull": true, "default": null, "pk": 2},
+      {"name": "harness", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "model", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "provider", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "usage_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "complete", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0}
+    ],
+    "data_dir_move_lease": [
+      {"name": "id", "type": "INTEGER", "notnull": false, "default": null, "pk": 1},
+      {"name": "claim_token", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "heartbeat_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0}
+    ],
+    "local_experiments": [
+      {"name": "id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "project_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "parent_experiment_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "slug", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "branch_name", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "title", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "description", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "run_command", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "agent_status", "type": "TEXT", "notnull": true, "default": "'idle'", "pk": 0},
+      {"name": "created_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "updated_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "chat_session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "archived", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0}
+    ],
+    "local_projects": [
+      {"name": "id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "name", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "slug", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "github_owner", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "github_repo", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "github_sync_enabled", "type": "INTEGER", "notnull": true, "default": "1", "pk": 0},
+      {"name": "baseline_branch", "type": "TEXT", "notnull": true, "default": "'main'", "pk": 0},
+      {"name": "repo_path", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "run_command", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "paper_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "created_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "updated_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "workspace_state_json", "type": "TEXT", "notnull": false, "default": null, "pk": 0}
+    ],
+    "native_invocation_identities": [
+      {"name": "harness", "type": "TEXT", "notnull": true, "default": null, "pk": 1},
+      {"name": "call_id", "type": "TEXT", "notnull": true, "default": null, "pk": 2},
+      {"name": "identity_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "created_at", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0}
+    ],
+    "native_usage_baselines": [
+      {"name": "execution_id", "type": "TEXT", "notnull": true, "default": null, "pk": 1},
+      {"name": "prefix", "type": "TEXT", "notnull": true, "default": null, "pk": 2},
+      {"name": "totals_json", "type": "TEXT", "notnull": false, "default": null, "pk": 0}
+    ],
+    "native_usage_totals": [
+      {"name": "harness", "type": "TEXT", "notnull": true, "default": null, "pk": 1},
+      {"name": "native_scope", "type": "TEXT", "notnull": true, "default": null, "pk": 2},
+      {"name": "totals_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0}
+    ],
+    "overleaf_links": [
+      {"name": "project_id", "type": "TEXT", "notnull": true, "default": null, "pk": 1},
+      {"name": "tex_path", "type": "TEXT", "notnull": true, "default": null, "pk": 2},
+      {"name": "overleaf_project_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "host", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "head", "type": "TEXT", "notnull": true, "default": "''", "pk": 0},
+      {"name": "baseline", "type": "TEXT", "notnull": true, "default": "'{}'", "pk": 0},
+      {"name": "root", "type": "TEXT", "notnull": true, "default": "''", "pk": 0}
+    ],
+    "remote_cleanups": [
+      {"name": "run_id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "backend_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "deleted", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "attempts", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0},
+      {"name": "next_attempt_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "last_error", "type": "TEXT", "notnull": false, "default": null, "pk": 0}
+    ],
+    "remote_source_sweeps": [
+      {"name": "host", "type": "TEXT", "notnull": true, "default": null, "pk": 1},
+      {"name": "root", "type": "TEXT", "notnull": true, "default": null, "pk": 2},
+      {"name": "due_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0}
+    ],
+    "run_telemetry": [
+      {"name": "run_id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "identity_json", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "report_json", "type": "TEXT", "notnull": false, "default": null, "pk": 0}
+    ],
+    "runs": [
+      {"name": "id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "experiment_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "project_id", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "status", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "backend_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0},
+      {"name": "command", "type": "TEXT", "notnull": true, "default": "''", "pk": 0},
+      {"name": "created_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "updated_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "ended_at", "type": "INTEGER", "notnull": false, "default": null, "pk": 0},
+      {"name": "exit_code", "type": "INTEGER", "notnull": false, "default": null, "pk": 0},
+      {"name": "commit_sha", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "result_markdown", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "cancel_requested", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0},
+      {"name": "chat_session_id", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "cancel_reason", "type": "TEXT", "notnull": false, "default": null, "pk": 0}
+    ],
+    "ssh_host_tests": [
+      {"name": "host", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "reachable", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "git_found", "type": "INTEGER", "notnull": true, "default": null, "pk": 0},
+      {"name": "tools_found", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0},
+      {"name": "missing_tools", "type": "TEXT", "notnull": true, "default": "''", "pk": 0},
+      {"name": "error", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "tested_at", "type": "INTEGER", "notnull": true, "default": null, "pk": 0}
+    ],
+    "telemetry_pending_events": [
+      {"name": "event_id", "type": "TEXT", "notnull": false, "default": null, "pk": 1},
+      {"name": "payload_json", "type": "TEXT", "notnull": true, "default": null, "pk": 0}
+    ],
+    "ui_state": [
+      {"name": "id", "type": "INTEGER", "notnull": false, "default": null, "pk": 1},
+      {"name": "onboarding_completed", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0},
+      {"name": "tour_completed", "type": "INTEGER", "notnull": true, "default": "0", "pk": 0},
+      {"name": "preferred_harness", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "preferred_model", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "preferred_service_tier", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "preferred_permission_mode", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "preferred_reasoning_level", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "workspace_state_json", "type": "TEXT", "notnull": false, "default": null, "pk": 0},
+      {"name": "preferred_autonomy", "type": "TEXT", "notnull": false, "default": null, "pk": 0}
+    ]
+  }
+}

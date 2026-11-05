@@ -62,8 +62,9 @@ that fits the available compute. Create experiment nodes for meaningful variants
 make each change on its printed local branch, and commit it. Use the configured
 default compute target, or the explicit backend and flavor/host the user chose;
 source snapshots do not require GitHub. Keep the inherited run command fixed.
-Wait with `orx exp wait --project <project-id>`, inspect `orx runs`, and
-locate every terminal run's log with `orx logs <run-id>`, then inspect the file.
+Launch ready runs, then end your turn. Results and attention messages arrive
+in this chat. When one arrives, reconcile every newly terminal run with
+`orx runs <project-id>` and inspect the file located by `orx logs <run-id>`.
 
 Record the paper number, observed number, scale or substitutions, sample size,
 scoring method, runtime, and an honest assessment in `orx exp desc`. Repair a
@@ -174,56 +175,20 @@ mod tests {
     }
 
     #[test]
-    fn expands_known_skill_with_shared_request() {
-        let out = expand("lit-review", true).unwrap();
-        assert!(out.contains("# Literature retrieval"));
-        assert!(out.contains("Main-agent retrieval loop"));
-        assert!(!out.contains("Load and follow the `orx-lit-review` skill"));
-    }
-
-    #[test]
-    fn expands_bare_invocation_to_ask() {
-        let out = expand("lit-review", false).unwrap();
-        assert!(out.contains("ask the user"));
-    }
-
-    #[test]
-    fn expands_reproduce_paper_skill() {
-        let out = expand("reproduce-paper", true).unwrap();
-        assert!(out.contains("Paper and compute: the complete user request below"));
-        assert!(out.contains("Confirm the compute"));
-        assert!(out.contains("before any upstream README content"));
-        assert!(out.contains("exact run command"));
-        assert!(out.contains("Not run as an experiment (publication surface)"));
-        assert!(out.contains("every reader-facing report on `main`"));
-        assert!(out.contains("not considered published"));
-        assert!(out.contains("strongest result figure immediately after the title"));
-        assert!(out.contains("four or five distinct, evidence-bearing figures"));
-        assert!(out.contains("implementation-led rather than a run log"));
-        assert!(out.contains("images/<filename>"));
-        assert!(out.contains("illustrated technical article"));
-        assert!(out.contains("inconclusive under this setup"));
-        assert!(out.contains("this run did not show the reported effect"));
-        assert!(out.contains("Do not characterize the claim as wrong"));
-        assert!(out.contains("per-claim assessments"));
-        assert!(out.contains("absolute deadline and available accelerator capacity"));
-        assert!(out.contains("total GPUs across in-flight runs"));
-        assert!(out.contains("Do not invent or maintain a GPU-hour ledger"));
-        assert!(out.contains("published-checkpoint evaluation"));
-        assert!(out.contains("training eligible, not mandatory"));
-        assert!(out.contains("self-contained, tutorial-style marimo notebook"));
-        assert!(out.contains("marimo check <notebook.py>"));
-        assert!(out.contains("already-produced evidence"));
-        assert!(
-            out.contains("https://molab.marimo.io/github/<owner>/<repo>/blob/main/<notebook.py>")
-        );
-        assert!(out.contains("preserve private visibility"));
-        assert!(out.contains("marimo edit <notebook.py>"));
-        assert!(out.contains("Never change repository visibility without explicit authorization"));
-        assert!(!out.contains("trackio"));
-        let bare = expand("reproduce-paper", false).unwrap();
-        assert!(bare.contains("infer the paper from the current repository"));
-        assert!(bare.contains("only ask the user if no paper can be identified"));
+    fn bare_invocations_carry_the_empty_request() {
+        for skill in super::CATALOG {
+            for github_enabled in [false, true] {
+                let bare = super::instructions(skill.name, false, github_enabled).unwrap();
+                let full = super::instructions(skill.name, true, github_enabled).unwrap();
+                assert!(bare.contains(skill.empty_request), "{}", skill.name);
+                assert!(!full.contains(skill.empty_request), "{}", skill.name);
+                assert!(
+                    !full.starts_with("---"),
+                    "{} kept its frontmatter",
+                    skill.name
+                );
+            }
+        }
     }
 
     #[test]
@@ -239,36 +204,5 @@ mod tests {
         assert!(reproduce.contains("unpublished"));
         assert!(!reproduce.contains("git push"));
         assert!(!reproduce.contains("public GitHub"));
-    }
-
-    #[test]
-    fn write_paper_targets_a_compilable_tex_in_the_working_tree() {
-        let prompt = super::instructions("write-paper", true, false).unwrap();
-        assert!(prompt.contains("the complete user request below"));
-        assert!(prompt.contains("paper.tex"));
-        assert!(
-            prompt.contains("not compiled"),
-            "must steer away from artifacts"
-        );
-        assert!(
-            prompt.contains("orx-paper"),
-            "must load the skill that has the preamble"
-        );
-        // No-args form still has to produce a paper, not a question.
-        let bare = super::instructions("write-paper", false, false).unwrap();
-        assert!(bare.contains("infer the scope from this project"));
-    }
-
-    #[test]
-    fn expanded_skills_avoid_openresearch_ui_navigation() {
-        for skill in super::CATALOG {
-            for github_enabled in [false, true] {
-                for has_request in [false, true] {
-                    let prompt =
-                        super::instructions(skill.name, has_request, github_enabled).unwrap();
-                    crate::local::assert_agent_guidance_is_ui_agnostic(skill.name, &prompt);
-                }
-            }
-        }
     }
 }

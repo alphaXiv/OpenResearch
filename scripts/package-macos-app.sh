@@ -78,7 +78,13 @@ tiffutil -cathidpicheck "$BUILD/bg.png" "$BUILD/bg@2x.png" -out "$STAGE/.backgro
 
 # Lay the window out on a writable image, then convert to the compressed final.
 RW="$BUILD/rw.dmg"
-hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$RW" >/dev/null
+# GitHub's macOS runners intermittently fail this with "Resource busy" while
+# background scanners hold the staged files.
+for attempt in 1 2 3 4 5; do
+  hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$RW" >/dev/null && break
+  [[ "$attempt" == 5 ]] && exit 1
+  sleep $((attempt * 3))
+done
 ATTACH="$(hdiutil attach "$RW" -readwrite -noverify -noautoopen)"
 DEV="$(echo "$ATTACH" | grep -Eo '^/dev/disk[0-9]+' | head -1)"
 MNT="$(echo "$ATTACH" | grep -Eo '/Volumes/.*$' | head -1)"
@@ -112,12 +118,18 @@ tell application "Finder"
     open
     update without registering applications
     delay 2
+    close
   end tell
 end tell
 APPLESCRIPT
 [[ "$STYLED" == 1 ]] || echo "==> WARNING: Finder styling step failed — shipping a functional but unstyled DMG."
 sync
-hdiutil detach "$DEV" >/dev/null || { sleep 2; hdiutil detach "$DEV" -force >/dev/null; }
+detached=0
+for attempt in 1 2 3; do
+  if hdiutil detach "$DEV" >/dev/null; then detached=1; break; fi
+  sleep 2
+done
+if [[ "$detached" == 0 ]]; then hdiutil detach "$DEV" -force >/dev/null; fi
 hdiutil convert "$RW" -format UDZO -imagekey zlib-level=9 -o "$DMG" >/dev/null
 [[ -n "${MACOS_SIGN_IDENTITY:-}" ]] && codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$DMG"
 

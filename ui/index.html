@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>OpenResearch</title>
     <script>
@@ -25,7 +25,7 @@
         var saved = null;
         try { saved = localStorage.getItem("orx:locale"); } catch (e) {}
         var browserPreferences = navigator.languages || [navigator.language];
-        var supported = ["en", "zh-CN", "fa", "ar", "es", "hi", "pl"];
+        var supported = ["en", "zh-CN", "fa", "ar", "es", "hi", "ko", "ja", "pl", "ru", "tr"];
         var match = function (tag) {
           if (!tag) return null;
           var normalized = String(tag).toLowerCase();

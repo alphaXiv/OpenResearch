@@ -89,8 +89,10 @@
   --spacing-win-caption: calc(2rem / min(1, var(--desktop-page-zoom, 1)));
   --spacing-win-controls: calc(9rem / min(1, var(--desktop-page-zoom, 1)));
   --spacing-titlebar: calc(2.75rem / min(1, var(--desktop-page-zoom, 1)));
-  --spacing-titlebar-inset: calc(4.75rem / min(1, var(--desktop-page-zoom, 1)));
-  --spacing-titlebar-controls: calc(5rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-inset: calc((var(--titlebar-lights) - 0.25rem) / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-controls: calc(var(--titlebar-lights) / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-sidebar-controls: calc((var(--titlebar-lights) + 2.5rem) / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-toggle: calc((var(--titlebar-lights) + 0.15rem) / min(1, var(--desktop-page-zoom, 1)));
 
   --shadow-segment: 0 1px 3px rgb(0 0 0 / 14%);
   --shadow-menu: 0 12px 32px rgb(0 0 0 / 18%);
@@ -111,6 +113,7 @@
   --font-sans: var(--sans);
   --font-mono: var(--mono);
   --ease-standard: ease;
+  --animate-dialog-shake: dialog-shake 300ms ease;
   --container-readable: var(--readable-col);
 
   --radius-xs: 4px;
@@ -126,7 +129,7 @@
 }
 
 @utility grid-cols-titlebar-chat {
-  grid-template-columns: calc(7.5rem / min(1, var(--desktop-page-zoom, 1))) minmax(0, 1fr) calc(7.5rem / min(1, var(--desktop-page-zoom, 1)));
+  grid-template-columns: var(--spacing-titlebar-sidebar-controls) minmax(0, 1fr) var(--spacing-titlebar-sidebar-controls);
 }
 
 :root {
@@ -136,6 +139,10 @@
   --panel: #ededed;
   --surface: #f5f5f5;
   --surface-bright: #ffffff;
+  /* Fills over the macOS sidebar material (app.css). Literal rgb, not color-mix: macOS 11 WebKit. */
+  --material-veil: rgb(255 255 255 / 40%);
+  --material-hover: color-mix(in srgb, var(--text) 6%, transparent);
+  --material-selected: color-mix(in srgb, var(--text) 11%, transparent);
   --highlight: #e5e5e5;
   --chat-annotation-highlight: #b8d4ff;
   --selection-background: #e3e3e3;
@@ -216,6 +223,11 @@
   --red: var(--accent-red);
   --amber: var(--accent-amber);
 
+  /* Links are blue and the brand is red, so emphasis avoids both; bold-italic is the one deliberate red. */
+  --md-emphasis: #d6681f;
+  --md-strong-em: #db0218;
+  --md-strong-em-bg: color-mix(in srgb, var(--accent-red) 12%, var(--base));
+
   --syntax-comment: #a0a1a7;
   --syntax-text: #383a42;
   --syntax-red: #e45649;
@@ -233,6 +245,7 @@
 }
 
 :root[data-theme="dark"] {
+  --material-veil: rgb(24 24 24 / 40%);
   --base: #181818;
   --canvas: #1c1c1c;
   --panel: #2b2b2b;
@@ -273,6 +286,10 @@
   --term-app-bg: #1c1c1c;
   --term-app-foreground: #dcdcdc;
   --term-app-selection: #23364d;
+
+  --md-emphasis: #e27c23;
+  --md-strong-em: #ff8d97;
+  --md-strong-em-bg: color-mix(in srgb, var(--accent-red) 20%, var(--base));
 
   --syntax-comment: #7f848e;
   --syntax-text: #abb2bf;

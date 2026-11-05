@@ -582,6 +582,7 @@ fn seed_at(
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let assistant = StoredChatMessage {
         id: ASSISTANT_MESSAGE_ID.into(),
@@ -593,6 +594,7 @@ fn seed_at(
         parent_id: Some(USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let figure_session = StoredChatSession {
         id: FIGURE_SESSION_ID.into(),
@@ -631,6 +633,7 @@ fn seed_at(
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let figure_assistant = StoredChatMessage {
         id: FIGURE_ASSISTANT_MESSAGE_ID.into(),
@@ -642,6 +645,7 @@ fn seed_at(
         parent_id: Some(FIGURE_USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let literature_session = StoredChatSession {
         id: LITERATURE_SESSION_ID.into(),
@@ -680,6 +684,7 @@ fn seed_at(
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let literature_assistant = StoredChatMessage {
         id: LITERATURE_ASSISTANT_MESSAGE_ID.into(),
@@ -691,6 +696,7 @@ fn seed_at(
         parent_id: Some(LITERATURE_USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let worktree = data_root
         .join("worktrees")
@@ -1392,6 +1398,7 @@ fn tool_part(
         prompt: None,
         phase: None,
         children: Vec::new(),
+        orx: None,
     }
 }
 

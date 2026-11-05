@@ -1,23 +1,13 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useWorkspace } from "../workspace";
+import { type DialogContentProps } from "../dialog";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { listUserSkillsQuery, listLatexTemplatesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { RefreshCw, Trash2, Upload } from "lucide-react";
-import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import {
-  deleteLatexTemplate,
-  deleteUserSkill,
-  fmtBytes,
-  fmtNumber,
-  timeAgo,
-  uploadLatexTemplate,
-  uploadUserSkill,
-  type LatexTemplate,
-  type UserSkill,
-  type SkillDiscovery,
-} from "../api";
-import { Badge, Button, IconButton, Spinner } from "./ui";
+import { Pencil, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { fmtBytes, fmtNumber, timeAgo, type LatexTemplate, type UserSkill, type SkillDiscovery } from "../api";
+import { Badge, Button, DialogContent, DialogTitle, IconButton, Spinner, Textarea, showAlert } from "./ui";
 import { copyToClipboard } from "../clipboard";
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -137,17 +127,120 @@ function RowMeta({ bytes, updatedAt }: { bytes: number; updatedAt: number }) {
   );
 }
 
-/** Uploaded and discovered skills can both be removed from ORX. */
+function EditSkillDialog({
+  name,
+  content,
+  beforeCancel,
+  cancel,
+  confirm,
+  isDisabled: pending,
+  isPending,
+  errorMessage: error,
+}: DialogContentProps<string> & {
+  name: string;
+  content: string;
+  beforeCancel: { current: () => Promise<void> };
+}) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const [value, setValue] = useState(content);
+  const editorId = useId();
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = value !== content;
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  beforeCancel.current = () => {
+    if (pendingRef.current) return Promise.reject();
+    if (!dirtyRef.current) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      showConfirmDialog({
+        title: m.skills_edit_skill(),
+        description: m.skills_edit_discard_changes(),
+        destructive: true,
+        onConfirm: resolve,
+        onCancel: reject,
+      });
+    });
+  };
+
+  return (
+    <DialogContent
+      initialFocus={editorRef}
+      className="w-[52rem] max-h-[calc(100vh-2.5rem)] overflow-y-auto text-text"
+      render={<form onSubmit={(event) => {
+        event.preventDefault();
+        if (value.trim() && !pending) confirm(value);
+      }} />}
+    >
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <DialogTitle>{m.skills_edit_skill()}</DialogTitle>
+        <IconButton type="button" aria-label={m.tour_close()} onClick={cancel} disabled={pending}>
+          <X size={16} />
+        </IconButton>
+      </div>
+      <p className="mt-0 mx-0 mb-3 text-sm text-subtext">
+        {m.skills_edit_skill_description({ name: ltr(name) })}
+      </p>
+      <label htmlFor={editorId} className="sr-only">{m.skills_edit_skill_label({ name: ltr(name) })}</label>
+      <Textarea
+        id={editorId}
+        ref={editorRef}
+        value={value}
+        disabled={pending}
+        spellCheck={false}
+        onChange={(event) => setValue(event.target.value)}
+        className="min-h-96 resize-y font-mono text-sm leading-relaxed"
+      />
+      {error && <p role="alert" className="mt-3 mb-0 text-sm text-accent-red">{error}</p>}
+      <div className="mt-4 flex justify-end gap-2">
+        <Button type="button" variant="ghost" onClick={cancel} disabled={pending}>{m.common_cancel()}</Button>
+        <Button type="submit" variant="primary" disabled={pending || !value.trim()}>
+          {isPending && <Spinner />}
+          {m.common_save()}
+        </Button>
+      </div>
+    </DialogContent>
+  );
+}
+
+/** Uploaded skills can be edited or removed; discovered skills can be removed. */
 function SkillRow({
   skill,
-  onError,
 }: {
   skill: UserSkill;
-  onError: (message: string) => void;
 }) {
-  const deleteUserSkillMutation = useMutation({ mutationFn: deleteUserSkill });
+  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
 
-  const busy = deleteUserSkillMutation.isPending;
+  const { deleteUserSkill, getUserSkillContent, updateUserSkill } = useWorkspace().api;
+  const { listUserSkillsQuery } = useWorkspace().queries;
+
+  const deleteUserSkillMutation = useMutation({ mutationFn: deleteUserSkill });
+  const queryClient = useQueryClient();
+  const [loading, setLoading] = useState(false);
+
+  const busy = deleteUserSkillMutation.isPending || loading;
+  const edit = useCallback(async () => {
+    setLoading(true);
+    try {
+      const content = await getUserSkillContent(skill.name);
+      const beforeCancel = { current: () => Promise.resolve() };
+      showCustomDialog({
+        component: EditSkillDialog,
+        props: { name: skill.name, content, beforeCancel },
+        onCancel: async () => { await beforeCancel.current(); },
+        onConfirm: async (next) => {
+          await updateUserSkill(skill.name, next);
+          await queryClient.invalidateQueries({ queryKey: listUserSkillsQuery().queryKey });
+        },
+      });
+    } catch (e) {
+      showAlert(e instanceof Error ? e.message : String(e), "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [queryClient, skill.name]);
+
   return (
     <div className="flex items-center gap-2 py-1 border-t border-t-border first:border-t-0">
       <div className="flex-1 min-w-0 flex items-center gap-2">
@@ -155,6 +248,18 @@ function SkillRow({
         {skill.origin && <Badge size="small">{skill.origin}</Badge>}
       </div>
       <RowMeta bytes={skill.bytes} updatedAt={skill.updatedAt} />
+      {!skill.origin && (
+        <IconButton
+          size="small"
+          data-tip={m.skills_edit_skill()}
+          data-tip-align="end"
+          aria-label={m.skills_edit_skill_label({ name: ltr(skill.name) })}
+          disabled={busy}
+          onClick={() => void edit()}
+        >
+          <Pencil size={14} />
+        </IconButton>
+      )}
       <IconButton
         size="small"
         data-tip={skill.origin ? m.skills_remove_imported() : m.skills_tab_delete_skill()}
@@ -162,11 +267,14 @@ function SkillRow({
         aria-label={skill.origin ? m.skills_remove_imported_label({ name: ltr(skill.name) }) : m.skills_delete_skill_label({ name: ltr(skill.name) })}
         disabled={busy}
         onClick={() => {
-          if (!window.confirm(skill.origin ? m.skills_remove_imported_confirm({ name: ltr(skill.name) }) : m.skills_delete_skill_confirm({ name: ltr(skill.name) }))) return;
-          deleteUserSkillMutation.mutateAsync(skill.name)
-            .catch((e) => {
-              onError(e instanceof Error ? e.message : String(e));
-            });
+          showConfirmDialog({
+            title: skill.origin ? m.skills_remove_imported() : m.skills_tab_delete_skill(),
+            description: skill.origin ? m.skills_remove_imported_confirm({ name: ltr(skill.name) }) : m.skills_delete_skill_confirm({ name: ltr(skill.name) }),
+            destructive: true,
+            confirmLabel: skill.origin ? m.chat_panel_remove() : m.chat_panel_delete(),
+            onConfirm: async () => { await deleteUserSkillMutation.mutateAsync(skill.name); },
+            onCancel: "close",
+          });
         }}
       >
         <Trash2 size={14} />
@@ -177,11 +285,13 @@ function SkillRow({
 
 function LatexTemplateRow({
   template,
-  onError,
 }: {
   template: LatexTemplate;
-  onError: (message: string) => void;
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { deleteLatexTemplate } = useWorkspace().api;
+
   const deleteLatexTemplateMutation = useMutation({ mutationFn: deleteLatexTemplate });
 
   const busy = deleteLatexTemplateMutation.isPending;
@@ -205,11 +315,14 @@ function LatexTemplateRow({
         aria-label={m.skills_delete_template_label({ name: ltr(template.name) })}
         disabled={busy}
         onClick={() => {
-          if (!window.confirm(m.skills_delete_template_confirm({ name: ltr(template.name) }))) return;
-          deleteLatexTemplateMutation.mutateAsync(template.name)
-            .catch((e) => {
-              onError(e instanceof Error ? e.message : String(e));
-            });
+          showConfirmDialog({
+            title: m.skills_tab_delete_template(),
+            description: m.skills_delete_template_confirm({ name: ltr(template.name) }),
+            destructive: true,
+            confirmLabel: m.chat_panel_delete(),
+            onConfirm: async () => { await deleteLatexTemplateMutation.mutateAsync(template.name); },
+            onCancel: "close",
+          });
         }}
       >
         <Trash2 size={14} />
@@ -235,6 +348,9 @@ function SkillDetectionDetails({ reports }: { reports: SkillDiscovery[] }) {
 /** Everything the agent can invoke with `/name`: skills uploaded here, and the
  * ones already installed in the user's coding agents, mirrored automatically. */
 function SkillsCard() {
+  const { uploadUserSkill } = useWorkspace().api;
+  const { listUserSkillsQuery } = useWorkspace().queries;
+
   const uploadUserSkillMutation = useMutation({ mutationFn: uploadUserSkill });
 
   const skillsQuery = useQuery(listUserSkillsQuery());
@@ -335,7 +451,7 @@ function SkillsCard() {
         <div className="relative mt-1">
           <div ref={listRef} onScroll={updateScrollFade} className="flex flex-col max-h-120 overflow-y-auto overscroll-contain">
             {skills.map((s) => (
-              <SkillRow key={s.name} skill={s} onError={setError} />
+              <SkillRow key={s.name} skill={s} />
             ))}
           </div>
           {hasMoreAbove && (
@@ -354,6 +470,9 @@ function SkillsCard() {
 /** LaTeX templates the `orx-paper` skill follows instead of its built-in
  * preamble — a conference class, a lab style. */
 function LatexTemplatesCard() {
+  const { uploadLatexTemplate } = useWorkspace().api;
+  const { listLatexTemplatesQuery } = useWorkspace().queries;
+
   const uploadLatexTemplateMutation = useMutation({ mutationFn: uploadLatexTemplate });
 
   const templatesQuery = useQuery(listLatexTemplatesQuery());
@@ -425,7 +544,7 @@ function LatexTemplatesCard() {
       ) : (
         <div className="flex flex-col mt-1">
           {templates.map((t) => (
-            <LatexTemplateRow key={t.name} template={t} onError={setError} />
+            <LatexTemplateRow key={t.name} template={t} />
           ))}
         </div>
       )}

@@ -1,7 +1,10 @@
+import { useRuntime } from "../RemoteRuntime";
+import { useWorkspace } from "../workspace";
+
+import { matchesKeyboardEvent } from "@tanstack/react-hotkeys";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { useQuery } from "@tanstack/react-query";
-import { queryClient } from "../queries/client";
-import { getArtifactFileTextQuery } from "../queries/files";
+
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
@@ -18,16 +21,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import {
-  artifactUrl,
-  deleteArtifact,
-  FILE_PREVIEW_BYTES,
-  fmtBytes,
-  manageArtifactFile,
-  type ArtifactEntry,
-  type Project,
-  type ProjectArtifacts,
-} from "../api";
+import { FILE_PREVIEW_BYTES, fmtBytes, type ArtifactEntry, type Project, type ProjectArtifacts } from "../api";
 import { CodeView } from "./CodeView";
 import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
@@ -53,7 +47,7 @@ function isExternalSrc(src: string): boolean {
 
 /** Resolve a Markdown target within the artifacts root. URL suffixes stay
  * outside the encoded filesystem path, and upward escapes are rejected. */
-function artifactTarget(projectId: string, folder: string, src: string) {
+function artifactTarget(projectId: string, folder: string, src: string, artifactUrl: (projectId: string, path: string) => string) {
   const hashAt = src.indexOf("#");
   const beforeHash = hashAt === -1 ? src : src.slice(0, hashAt);
   const hash = hashAt === -1 ? "" : src.slice(hashAt);
@@ -147,13 +141,14 @@ export function ArtifactMarkdown({
   markdown: string;
   entries: ArtifactEntry[];
 }) {
+  const { artifactUrl } = useWorkspace().api;
   // Artifact writes refresh `src` through this ref; a new `img` type would remount images.
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
   const components = useMemo((): Components => {
     const resolve = (src: string) => {
       if (isExternalSrc(src)) return src;
-      const target = artifactTarget(projectId, folder, src);
+      const target = artifactTarget(projectId, folder, src, artifactUrl);
       if (!target) return null;
       const entry = findArtifactEntry(entriesRef.current, target.path);
       if (!entry) return target.url;
@@ -216,6 +211,9 @@ function previewKind(entry: ArtifactEntry): PreviewKind {
 
 /** Fetched body for kinds that need text: markdown or raw text. */
 function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind, version: string | null) {
+  const { getArtifactFileTextQuery } = useWorkspace().queries;
+  const { queryClient } = useWorkspace();
+
   const wantsText = kind === "markdown" || (kind === "text" && entry.size <= FILE_PREVIEW_BYTES);
   const options = getArtifactFileTextQuery(projectId, entry.path);
   const query = useQuery({ ...options, enabled: wantsText, subscribed: wantsText });
@@ -248,9 +246,13 @@ function PreviewPane({
 }: {
   projectId: string;
   entry: ArtifactEntry;
-  onDelete: (path: string) => void;
+  onDelete: (path: string) => Promise<void>;
   artifactEntries: ArtifactEntry[];
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { artifactUrl } = useWorkspace().api;
+
   const kind = previewKind(entry);
   const version = useFileVersion(artifactUrl(projectId, entry.path));
   const { text, binary, truncated, error, wantsText } = useTextBody(projectId, entry, kind, version);
@@ -345,8 +347,14 @@ function PreviewPane({
           data-tip-align="end"
           aria-label={m.artifacts_tab_delete_artifact()}
           onClick={() => {
-            if (window.confirm(m.artifact_delete_confirm({ path: ltr(entry.path) })))
-              onDelete(entry.path);
+            showConfirmDialog({
+              title: m.artifacts_tab_delete_artifact(),
+              description: m.artifact_delete_confirm({ path: ltr(entry.path) }),
+              destructive: true,
+              confirmLabel: m.chat_panel_delete(),
+              onConfirm: () => onDelete(entry.path),
+              onCancel: "close",
+            });
           }}
         >
           <Trash2 size={14} />
@@ -385,12 +393,14 @@ function TreeRows({
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
   onOpenFile: (path: string) => void;
-  onDelete: (path: string) => void;
+  onDelete: (path: string) => Promise<void>;
   renamingPath: string | null;
   onContextMenu: (event: FileContextMenuEvent, path: string) => void;
   onRename: (path: string, name: string) => void;
   onCancelRename: () => void;
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
   return (
     <div className="flex w-full max-w-full min-w-0 flex-col items-stretch">
       {entries.map((e) => {
@@ -401,6 +411,9 @@ function TreeRows({
             <div key={e.path} className="min-w-0 max-w-full">
               <div className="file-tree-row flex w-full min-w-0 items-center gap-1.5 py-1 px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100" style={indent} onClick={() => onToggle(e.path)}>
                 <button
+                  data-keyboard-item
+                  data-keyboard-path={e.path}
+                  aria-expanded={open}
                   className="file-tree-chevron text-muted shrink-0 [button&]:inline-flex [button&]:items-center [button&]:justify-center [button&]:size-3.5 [button&]:p-0 [button&]:border-0 [button&]:bg-transparent [button&_>_svg]:transition-transform [button&_>_svg]:duration-120 [button&_>_svg]:ease-standard [button&_>_svg.open]:rotate-90"
                   aria-label={open ? m.artifact_collapse_folder({ name: ltr(e.name) }) : m.artifact_expand_folder({ name: ltr(e.name) })}
                   onClick={(ev) => {
@@ -418,8 +431,14 @@ function TreeRows({
                   aria-label={m.artifact_delete_folder_label({ name: ltr(e.name) })}
                   onClick={(ev) => {
                     ev.stopPropagation();
-                    if (window.confirm(m.artifact_delete_confirm({ path: ltr(e.path) })))
-                      onDelete(e.path);
+                    showConfirmDialog({
+                      title: m.artifacts_tab_delete_folder(),
+                      description: m.artifact_delete_confirm({ path: ltr(e.path) }),
+                      destructive: true,
+                      confirmLabel: m.chat_panel_delete(),
+                      onConfirm: () => onDelete(e.path),
+                      onCancel: "close",
+                    });
                   }}
                 >
                   <Trash2 size={12} />
@@ -466,6 +485,8 @@ function TreeRows({
           <button
             key={e.path}
             type="button"
+            data-keyboard-item
+            data-keyboard-path={e.path}
             className={`file-tree-row flex w-full min-w-0 items-center gap-1.5 py-1 px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100 ${selected === e.path ? "selected" : ""}`}
             style={indent}
             title={m.a11y_artifact_preview({ path: ltr(e.path) })}
@@ -485,7 +506,7 @@ function TreeRows({
               onOpenFile(e.path);
             }}
             onKeyDown={(event) => {
-              if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+              if (event.key === "ContextMenu" || matchesKeyboardEvent(event.nativeEvent, "Shift+F10")) {
                 event.preventDefault();
                 onSelect(e.path);
                 onContextMenu(event, e.path);
@@ -521,16 +542,25 @@ export function ArtifactsTab({
   artifacts,
   onOpenFile,
   canRenameFile,
+  remote = false,
 }: {
   project: Project;
   artifacts: ProjectArtifacts | null;
   onOpenFile: (path: string) => void;
   canRenameFile: (path: string) => boolean;
+  /** The dashboard is connected to a remote instance; OS actions would run there. */
+  remote?: boolean;
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { deleteArtifact, manageArtifactFile, revealArtifactInManager } = useWorkspace().api;
+
+  const runtime = useRuntime();
+  const storageProjectId = runtime.kind === "ssh" ? `${encodeURIComponent(runtime.session.host)}:${project.id}` : project.id;
   const [selected, setSelected] = useState<string | null>(null);
   // Folders are open by default — including ones that appear later — so this
   // tracks what the user closed instead.
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => initialCollapsed(project.id));
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => initialCollapsed(storageProjectId));
   const [treeWidth, setTreeWidth] = useState(initialTreeWidth);
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
@@ -538,13 +568,13 @@ export function ArtifactsTab({
   useEffect(() => {
     try {
       localStorage.setItem(
-        `${COLLAPSED_DIRS_KEY_PREFIX}${project.id}`,
+        `${COLLAPSED_DIRS_KEY_PREFIX}${storageProjectId}`,
         JSON.stringify([...collapsed]),
       );
     } catch {
       // best-effort persistence
     }
-  }, [project.id, collapsed]);
+  }, [storageProjectId, collapsed]);
 
   // Drag the divider to resize the tree pane; width persists across reloads.
   // Mirrors App's end-panel resizer: capture the pointer so views under the
@@ -591,10 +621,9 @@ export function ArtifactsTab({
       return next;
     });
 
-  const remove = (path: string) => {
+  const remove = async (path: string) => {
+    await deleteArtifact(project.id, path);
     if (selected === path || selected?.startsWith(path + "/")) setSelected(null);
-    void deleteArtifact(project.id, path)
-      .catch(() => {});
   };
 
   const manage = async (
@@ -611,6 +640,14 @@ export function ArtifactsTab({
 
   const copyPath = (path: string) => {
     if (artifacts) copyFilePath(artifacts.dir, path);
+  };
+
+  const reveal = async (path: string) => {
+    try {
+      await revealArtifactInManager(project.id, path);
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
   };
 
   if (!artifacts) {
@@ -660,7 +697,7 @@ export function ArtifactsTab({
     <div className="files-tab h-full min-h-0 flex bg-background @container">
       <div className="ftree-pane relative shrink-0 flex flex-col min-h-0 border-s border-s-border-variant border-e border-e-border-variant bg-background [@container((max-width:_720px))]:!w-full" ref={treeRef} style={{ width: treeWidth }}>
         <div className="ftree-resizer absolute -end-[3px] top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover [@container((max-width:_720px))]:hidden" onPointerDown={resizeTree} />
-        <div className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
+        <div data-keyboard-list className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
           {tree(artifacts.entries)}
           {artifacts.truncated && (
             <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts()}</p>
@@ -687,12 +724,19 @@ export function ArtifactsTab({
         <FileContextMenu
           target={contextMenu}
           onOpen={() => onOpenFile(contextMenu.path)}
+          onReveal={remote ? undefined : () => void reveal(contextMenu.path)}
           onRename={canRenameFile(contextMenu.path) ? () => setRenamingPath(contextMenu.path) : undefined}
           onDuplicate={() => void manage(contextMenu.path, { action: "duplicate" })}
           onCopyPath={() => copyPath(contextMenu.path)}
           onDelete={() => {
-            if (window.confirm(m.artifact_delete_confirm({ path: ltr(contextMenu.path) })))
-              remove(contextMenu.path);
+            showConfirmDialog({
+              title: m.artifacts_tab_delete_artifact(),
+              description: m.artifact_delete_confirm({ path: ltr(contextMenu.path) }),
+              destructive: true,
+              confirmLabel: m.chat_panel_delete(),
+              onConfirm: () => remove(contextMenu.path),
+              onCancel: "close",
+            });
           }}
           onClose={() => setContextMenu(null)}
         />

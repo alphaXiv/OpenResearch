@@ -14,13 +14,12 @@
 //! to the process environment unchanged. The Linux AppImage also hands host
 //! programs the session's GTK settings ([`host_gui_env`]).
 //!
-//! Scope is orx's own resolution, the children it spawns (including `git`), and
-//! the dashboard's PTY terminals. `kubectl` and `ssh` still inherit the process
-//! environment.
+//! Scope is orx's own resolution, every child it spawns ([`crate::process`]),
+//! and the dashboard's PTY terminals.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// Deliberately short. These are the variables whose divergence makes the app
@@ -163,26 +162,69 @@ pub const PATH_LIST_SEPARATOR: &str = ":";
 #[cfg(windows)]
 pub const PATH_LIST_SEPARATOR: &str = ";";
 
-/// Where `binary` lives, or None when this machine has no such tool. The path
-/// is returned as it sits on PATH; a caller that needs the real binary behind a
-/// symlink composes with `resolve_symlinks`.
+/// Where `binary` lives: what detection reports and what [`crate::process`]
+/// runs for a bare name.
+pub fn find(binary: &str) -> Option<PathBuf> {
+    installs(binary, []).into_iter().next()
+}
+
+/// Every copy of `binary` worth trying, best first: the one on PATH, then the
+/// directories installers drop CLIs into without putting them on PATH, then the
+/// tool's `own` install locations. Only when none has it, `npx`'s cache. The path
+/// is returned as it sits in its directory; a caller that needs the real binary
+/// behind a symlink composes with `resolve_symlinks`.
+pub fn installs(binary: &str, own: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = dirs::home_dir()
+        .map(|home| vec![home.join(".local/bin"), home.join(".npm-global/bin")])
+        .unwrap_or_default();
+    #[cfg(windows)]
+    dirs.extend(dirs::config_dir().map(|roaming| roaming.join("npm")));
+    dirs.extend(own);
+    let found: Vec<PathBuf> = find_on_path(binary)
+        .into_iter()
+        .chain(dirs.iter().filter_map(|dir| find_in_dir(dir, binary)))
+        .collect();
+    if !found.is_empty() {
+        return found;
+    }
+    // Last, since reading the cache costs a stat for every run it ever kept.
+    npx_bins(npx_roots())
+        .iter()
+        .filter_map(|dir| find_in_dir(dir, binary))
+        .collect()
+}
+
+/// Where npm keeps `npx` runs by default.
+fn npx_roots() -> Vec<PathBuf> {
+    let windows_cache = cfg!(windows).then(dirs::cache_dir).flatten();
+    dirs::home_dir()
+        .map(|home| home.join(".npm/_npx"))
+        .into_iter()
+        .chain(windows_cache.map(|cache| cache.join("npm-cache/_npx")))
+        .collect()
+}
+
+/// Each `npx` run's `node_modules/.bin`, newest first: `npx -y <pkg>` installs
+/// nothing on PATH, and the most recent run is what `npx <pkg>` would start.
+fn npx_bins(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut bins: Vec<(std::time::SystemTime, PathBuf)> = roots
+        .into_iter()
+        .filter_map(|root| std::fs::read_dir(root).ok())
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let bin = entry.path().join("node_modules/.bin");
+            let modified = entry.metadata().and_then(|meta| meta.modified()).ok()?;
+            bin.is_dir().then_some((modified, bin))
+        })
+        .collect();
+    bins.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    bins.into_iter().map(|(_, bin)| bin).collect()
+}
+
+/// The first `binary` on the search PATH alone.
 pub fn find_on_path(binary: &str) -> Option<PathBuf> {
     search_in(&search_path()?, binary)
-}
-
-/// Like `find_on_path`, but on this process's PATH, which a bare `Command::new(binary)` searches.
-pub fn find_on_process_path(binary: &str) -> Option<PathBuf> {
-    search_from(
-        &std::env::var_os("PATH")?,
-        &std::env::current_dir().ok()?,
-        binary,
-    )
-}
-
-/// `search_in`, but with relative entries resolved against `cwd` as a bare command name would be.
-fn search_from(paths: &OsStr, cwd: &Path, binary: &str) -> Option<PathBuf> {
-    let dirs = std::env::split_paths(paths).map(|dir| cwd.join(dir));
-    search_in(&std::env::join_paths(dirs).ok()?, binary)
 }
 
 /// Where `binary` lives inside `dir`, trying the PATHEXT spellings a bare name lacks on Windows.
@@ -193,8 +235,8 @@ pub fn find_in_dir(dir: &std::path::Path, binary: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Split from the PATH lookup so the search is testable without a probe.
-fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
+/// The first `binary` on `paths`, a PATH value.
+pub fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
     // A relative entry (`""`, meaning cwd, or `bin`) names no fixed directory —
     // it resolves against whichever cwd is current, so it is never a place to
     // pick up a binary.
@@ -349,20 +391,32 @@ pub fn parse_probe(stdout: &str, marker: &str) -> Option<HashMap<&'static str, O
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
-    fn process_path_search_resolves_relative_entries_against_cwd() {
-        use std::os::unix::fs::PermissionsExt;
-        let cwd = crate::local::git::TemporaryDirectory::new("orx-path").unwrap();
-        std::fs::create_dir(cwd.path().join("bin")).unwrap();
-        let wrapper = cwd.path().join("bin").join("orx-test-tool");
-        std::fs::write(&wrapper, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fn a_tool_off_path_is_found_in_its_own_install_dir() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-installs").unwrap();
+        let own = || [dir.path().to_path_buf()];
+        assert!(installs("orx-install-probe", own()).is_empty());
+        std::fs::write(dir.path().join(PROBE), "").unwrap();
         assert_eq!(
-            search_from(OsStr::new("bin:/usr/bin"), cwd.path(), "orx-test-tool"),
-            Some(wrapper)
+            installs("orx-install-probe", own()),
+            vec![dir.path().join(PROBE)]
         );
-        assert_eq!(search_in(OsStr::new("bin:/usr/bin"), "orx-test-tool"), None);
+    }
+
+    #[test]
+    fn npx_runs_are_tried_newest_first_and_empty_ones_skipped() {
+        let root = crate::local::git::TemporaryDirectory::new("orx-npx").unwrap();
+        let older = root.path().join("older/node_modules/.bin");
+        std::fs::create_dir_all(&older).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let newer = root.path().join("newer/node_modules/.bin");
+        std::fs::create_dir_all(&newer).unwrap();
+        std::fs::create_dir_all(root.path().join("unpacking")).unwrap();
+
+        assert_eq!(
+            npx_bins(vec![root.path().to_path_buf()]),
+            vec![newer, older]
+        );
     }
 
     #[test]
@@ -394,6 +448,11 @@ mod tests {
     const TOOL: &str = "tool.exe";
     #[cfg(not(windows))]
     const TOOL: &str = "tool";
+
+    #[cfg(windows)]
+    const PROBE: &str = "orx-install-probe.exe";
+    #[cfg(not(windows))]
+    const PROBE: &str = "orx-install-probe";
 
     #[test]
     fn the_search_skips_relative_entries_and_takes_the_first_absolute_hit() {

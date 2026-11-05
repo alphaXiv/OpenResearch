@@ -4,7 +4,6 @@ use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::process::Command;
 
 use super::{control_dir, route_configuration, sh_quote, sharing::config_quote, SshTarget};
 use crate::error::{anyhow, Result};
@@ -75,13 +74,13 @@ async fn unresolved(key: &str) -> crate::error::Error {
     let version = ssh_version("ssh").await;
     anyhow!(unresolved_message(
         key,
-        crate::local::shell_env::find_on_process_path("ssh").as_deref(),
+        crate::local::shell_env::find("ssh").as_deref(),
         version.as_deref()
     ))
 }
 
 async fn ssh_version(program: &str) -> Option<String> {
-    let version = Command::new(program)
+    let version = crate::process::tokio_command(program)
         .arg("-V")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -125,7 +124,7 @@ fn host(query: &Query) -> Result<&str> {
 }
 
 async fn configuration(args: &[String], verbose: bool) -> Result<std::process::Output> {
-    let mut command = Command::new("ssh");
+    let mut command = crate::process::tokio_command("ssh");
     if verbose {
         command.arg("-vv");
     }
@@ -266,8 +265,14 @@ pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepare
             return Ok(connection);
         }
     }
-    let connection =
-        resolve_with_agent(&target.dest, None, query, target.auth_agent.as_deref()).await?;
+    let config = std::env::var_os("ORX_SSH_CONFIG").map(PathBuf::from);
+    let connection = resolve_with_agent(
+        &target.dest,
+        config.as_deref(),
+        query,
+        target.auth_agent.as_deref(),
+    )
+    .await?;
     CONNECTIONS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -297,12 +302,10 @@ fn user_or_empty_config(home: &std::path::Path) -> Result<PathBuf> {
     Ok(empty)
 }
 
-#[cfg(test)]
-async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
+pub(super) async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
     resolve_with(dest, config, query).await
 }
 
-#[cfg(test)]
 async fn resolve_with<F, Fut>(
     dest: &str,
     config: Option<&std::path::Path>,
@@ -526,7 +529,7 @@ mod tests {
             "Host lab\n HostName example.invalid\n IdentityFile none\n IdentityAgent none\n UserKnownHostsFile \"~/research keys/known_hosts\" \"~/second keyfile\"\n GlobalKnownHostsFile \"/tmp/global hostkeys\" /tmp/other\n StrictHostKeyChecking yes\n",
         ).unwrap();
         let prepared = resolve("lab", Some(&config)).await.unwrap();
-        let output = Command::new("ssh")
+        let output = crate::process::tokio_command("ssh")
             .args(["-vvv", "-F"])
             .arg(&prepared.snapshot)
             .args(["-oProxyCommand=false", "-oBatchMode=yes", "lab", "true"])
@@ -751,7 +754,7 @@ mod tests {
         CONNECTIONS.write().unwrap().insert(key.clone(), refreshed);
         let mut args = super::super::ssh_opts_prepared(&target, true, &command_a);
         args.extend(["--".into(), target.dest.clone()]);
-        let pinned = Command::new("ssh")
+        let pinned = crate::process::tokio_command("ssh")
             .arg("-G")
             .args(args)
             .env("ORX_SSH_PROBE", "1")

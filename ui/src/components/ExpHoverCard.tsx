@@ -1,5 +1,16 @@
+import {
+  useContext,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { getRunDiffQuery } from "../queries/files";
+
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { ltr } from "../i18n";
@@ -11,22 +22,20 @@ import { ltr } from "../i18n";
 // node's own views, so keyboard/touch users lose a shortcut, not a capability.
 // Client-only (portals straight into document.body).
 
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { FolderTree, GitBranch, Terminal } from "lucide-react";
 import { parseDiff, type FileData } from "react-diff-view";
 import {
   backendKind,
-  experimentMonitoringError,
   fmtDuration,
   fmtNumber,
-  runDisplayStatus,
   timeAgo,
   type Experiment,
   type Run,
 } from "../api";
 import { BackendBadge } from "./BackendLogos";
 import { countChanges } from "./GitDiff";
+import { noticeRun, runActive, runDisplay, runNotice, runResult } from "../runDisplay";
 import { StatusBadge } from "./StatusBadge";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -141,6 +150,10 @@ export function ExpHoverCard({
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { getRunDiffQuery } = useWorkspace().queries;
+
   const measure = useMeasure();
   // Prefer beside the node; on windows too narrow for either side, go
   // above/below — usePopoverPosition only clamps, and a clamped side
@@ -190,12 +203,13 @@ export function ExpHoverCard({
     return { fileCount: files.length, additions, deletions, truncated: p.truncated };
   }, [diff]);
 
-  const counts = { done: 0, failed: 0, cancelled: 0, live: 0 };
+  const counts = { done: 0, failed: 0, cancelled: 0, notFullyStopped: 0, live: 0 };
   for (const r of runs) {
     if (r.status === "done") counts.done += 1;
     else if (r.status === "failed") counts.failed += 1;
+    else if (runDisplay(r).status === "not_fully_stopped") counts.notFullyStopped += 1;
     else if (r.status === "cancelled") counts.cancelled += 1;
-    else if (r.status === "starting" || r.status === "running") counts.live += 1;
+    else if (runActive(r.status)) counts.live += 1;
   }
   const duration = latestRun
     ? fmtDuration((latestRun.endedAt ?? Date.now()) - latestRun.createdAt)
@@ -203,10 +217,13 @@ export function ExpHoverCard({
   // Local runs leave resultMarkdown empty on success (the agent freezes its
   // findings into the experiment description instead); on failure it holds a
   // short error worth surfacing — but never in both slots at once.
-  const failureNote =
-    latestRun?.status === "failed" && latestRun.resultMarkdown ? latestRun.resultMarkdown : null;
-  const body = exp.description || (failureNote ? null : latestRun?.resultMarkdown) || null;
-  const monitoringError = experimentMonitoringError(runs);
+  const result = latestRun ? runResult(latestRun) : null;
+  const failureNote = latestRun?.status === "failed" ? result : null;
+  const body = exp.description || (failureNote ? null : result) || null;
+  const attentionRun = noticeRun(runs);
+  const notice = attentionRun && runNotice(attentionRun);
+  // Legacy runs explain lost monitoring here; engine states read from the badge.
+  const monitoringError = notice?.kind === "monitoring" ? notice.error : null;
 
   // Clamped by default; "Show more" appears when the clamp actually hides
   // content and stays while expanded so "Show less" remains reachable.
@@ -238,7 +255,7 @@ export function ExpHoverCard({
     >
       <div className="hc-head">
         <span className="hc-slug">{exp.slug}</span>
-        <StatusBadge status={latestRun ? runDisplayStatus(latestRun) : "idle"} />
+        {latestRun ? <StatusBadge {...runDisplay(latestRun)} /> : <StatusBadge status="idle" />}
       </div>
       {exp.title && <div className="hc-title">{exp.title}</div>}
       <div className="hc-actions">
@@ -282,6 +299,7 @@ export function ExpHoverCard({
             ...(counts.done > 0 ? [m.hover_done_count({ count: fmtNumber(counts.done) })] : []),
             ...(counts.failed > 0 ? [m.hover_failed_count({ count: fmtNumber(counts.failed) })] : []),
             ...(counts.cancelled > 0 ? [m.hover_cancelled_count({ count: fmtNumber(counts.cancelled) })] : []),
+            ...(counts.notFullyStopped > 0 ? [m.hover_not_fully_stopped_count({ count: fmtNumber(counts.notFullyStopped) })] : []),
             ...(counts.live > 0 ? [m.hover_live_count({ count: fmtNumber(counts.live) })] : []),
           ])}
         </span>
@@ -325,6 +343,6 @@ export function ExpHoverCard({
         <span>{m.exp_hover_card_created()} {fmtCreated(exp.createdAt)}</span>
       </div>
     </div>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }

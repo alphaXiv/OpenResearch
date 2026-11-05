@@ -63,7 +63,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive
@@ -74,17 +74,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
         shell: bash
+        # An older source-sha predates the script, so run this workflow's copy.
         run: |
-          set -euo pipefail
-          test "$WORKFLOW_REF" = refs/heads/main
-          sha=$(git rev-parse HEAD)
-          git merge-base --is-ancestor "$sha" origin/main
-          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
-          test "$RELEASE_TAG" = "v$version"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          jq -n --arg tag "$RELEASE_TAG" --arg sha "$sha" '{tag: $tag, sha: $sha}' > release-source.json
-      - uses: actions/upload-artifact@v7
+          script=$(git show "$WORKFLOW_SHA:scripts/release-source.sh")
+          bash -c "$script"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-source
           path: release-source.json
@@ -94,7 +90,7 @@ jobs:
         shell: bash
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
       - name: Cache dist
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/dist
@@ -107,10 +103,47 @@ jobs:
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
+
+  build-ui:
+    needs: plan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: pnpm/setup@5d160c5bc68a09337ad0d5654e237e03253b5879 # v1.0.0
+        with:
+          package-json-file: ui/package.json
+          install: false
+      - name: Prepare release UI
+        working-directory: ui
+        run: |
+          if [ ! -f dist/index.html ]; then
+            pnpm install --frozen-lockfile
+            pnpm build
+          fi
+          test -s dist/index.html
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-ui
+          path: ui/dist/
+          if-no-files-found: error
+
+  build-host:
+    needs: plan
+    uses: ./.github/workflows/build-host.yml
+    with:
+      source-sha: ${{ needs.plan.outputs.source-sha }}
 
   # Build and packages all the platform-specific things
   build-local-artifacts:
@@ -118,6 +151,8 @@ jobs:
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
+      - build-ui
+      - build-host
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
     strategy:
       fail-fast: false
@@ -141,7 +176,7 @@ jobs:
       - name: enable windows longpaths
         run: |
           git config --global core.longpaths true
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive
@@ -151,7 +186,7 @@ jobs:
         run: |
           if ! command -v cargo > /dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
       - name: "Mark official release build"
         if: "needs.plan.outputs.publishing == 'true'"
@@ -161,7 +196,7 @@ jobs:
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -169,7 +204,22 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      - name: Remove checked-in UI
+        shell: bash
+        run: rm -rf ui/dist
+      - name: Download release UI
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ui
+          path: ui/dist
+      - name: Download release hosts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-host
+          path: target/host-binaries
       - name: Build artifacts
+        env:
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
         run: |
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
@@ -182,13 +232,15 @@ jobs:
         shell: bash
         run: |
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "paths<<EOF"
+            dist print-upload-files-from-manifest --manifest dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
           path: |
@@ -202,7 +254,7 @@ jobs:
     uses: ./.github/workflows/sign-macos-cli.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
-    secrets: inherit
+    secrets: inherit # zizmor: ignore[secrets-inherit] sign-macos-cli reads the macOS signing secrets
 
   custom-sign-windows-cli:
     needs:
@@ -227,20 +279,20 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive
           ref: ${{ needs.plan.outputs.source-sha }}
       - name: Install cached dist
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Get all the local artifacts for the global tasks to use (for e.g. checksums)
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -252,13 +304,15 @@ jobs:
           echo "dist ran successfully"
 
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "paths<<EOF"
+            jq --raw-output ".upload_files[]" dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts-build-global
           path: |
@@ -274,7 +328,6 @@ jobs:
     uses: ./.github/workflows/verify-build-channel.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
-    secrets: inherit
 
   custom-telemetry-contract:
     needs:
@@ -286,24 +339,22 @@ jobs:
     with:
       plan: ${{ needs.plan.outputs.val }}
       source-sha: ${{ needs.plan.outputs.source-sha }}
-    secrets: inherit
 
   custom-ci:
     needs:
       - plan
-      - build-local-artifacts
-      - custom-sign-macos-cli
-      - custom-sign-windows-cli
+      - build-ui
     uses: ./.github/workflows/ci.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
       source-sha: ${{ needs.plan.outputs.source-sha }}
       release: true
-    secrets: inherit
   # Determines if we should publish/announce
   host:
     needs:
       - plan
+      - build-ui
+      - build-host
       - build-local-artifacts
       - custom-sign-macos-cli
       - custom-sign-windows-cli
@@ -316,27 +367,28 @@ jobs:
       issues: read
       pull-requests: read
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && needs.custom-verify-build-channel.result == 'success' && needs.custom-telemetry-contract.result == 'success' && needs.custom-ci.result == 'success' && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-sign-macos-cli.result == 'skipped' || needs.custom-sign-macos-cli.result == 'success') && (needs.custom-sign-windows-cli.result == 'skipped' || needs.custom-sign-windows-cli.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-ui.result == 'success' && needs.build-host.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && needs.custom-verify-build-channel.result == 'success' && needs.custom-telemetry-contract.result == 'success' && needs.custom-ci.result == 'success' && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-sign-macos-cli.result == 'skipped' || needs.custom-sign-macos-cli.result == 'success') && (needs.custom-sign-windows-cli.result == 'skipped' || needs.custom-sign-windows-cli.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive
           ref: ${{ needs.plan.outputs.source-sha }}
+          fetch-depth: 0
       - name: Install cached dist
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Fetch artifacts from scratch-storage
       - name: Fetch artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -349,14 +401,14 @@ jobs:
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
           path: artifacts
@@ -372,6 +424,10 @@ jobs:
           RELEASE_COMMIT: "${{ needs.plan.outputs.source-sha }}"
         run: |
           python3 scripts/release_notes.py "${{ needs.plan.outputs.tag }}" "$RELEASE_COMMIT" "$RUNNER_TEMP/notes.txt"
+          jq --argjson changes "$(node scripts/change-counts.mjs "$RELEASE_COMMIT")" '. + {orx_changes: $changes}' artifacts/dist-manifest.json > "$RUNNER_TEMP/dist-manifest.json"
+          mv "$RUNNER_TEMP/dist-manifest.json" artifacts/dist-manifest.json
+          git rev-list "$RELEASE_COMMIT" | jq -R -s 'split("\n")[:-1]' > artifacts/desktop-ancestry.json
+          # shellcheck disable=SC2086 # an empty flag must vanish
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   announce:
@@ -386,7 +442,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive

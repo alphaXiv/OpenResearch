@@ -1,18 +1,21 @@
+import { useWorkspace } from "../workspace";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { setScopedQueryData } from "../queries/client";
-import { getLitSourcesQuery } from "../queries/settings";
+
 import { m } from "../paraglide/messages.js";
 // Literature-source toggles shown inline in the composer chat-settings panel:
 // which sources discovery and paper reading may use. State lives in settings.json
 // (same `/api/settings/lit-sources` endpoint the CLI enforces).
 
-import { setLitSources } from "../api";
 import { LitSourceLogo, LIT_SOURCE_NAME, type LitSource } from "./LitSourceLogo";
 import { MenuItem, SwitchIndicator } from "./ui";
 
 const LIT_SOURCES: LitSource[] = ["alphaxiv", "openalex", "biorxiv", "pubmed"];
 
 export function LitSourcesList() {
+  const { getLitSourcesQuery } = useWorkspace().queries;
+  const { setLitSources } = useWorkspace().api;
+  const { setScopedQueryData } = useWorkspace();
+
   const options = getLitSourcesQuery();
   const { data: settings } = useQuery(options);
   const mutation = useMutation({

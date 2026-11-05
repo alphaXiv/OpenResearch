@@ -1,3 +1,4 @@
+import { matchesKeyboardEvent } from "@tanstack/react-hotkeys";
 // The nested file-tree primitives shared by the code browsers: the committed
 // CodeTab and the live WorktreeTab's Files view. A flat, sorted, repo-relative
 // path list (from a git listing) becomes a nested dir tree that renders as
@@ -98,6 +99,9 @@ function DirRow({
     <>
       <button
         type="button"
+        data-keyboard-item
+        data-keyboard-path={path}
+        aria-expanded={isOpen}
         className={FILE_TREE_ROW_CLASS_NAME}
         style={{ paddingInlineStart: 8 + depth * 14 }}
         onClick={() => onToggle(path)}
@@ -199,6 +203,8 @@ export function TreeLevel({
           <button
             key={`f:${path}`}
             type="button"
+            data-keyboard-item
+            data-keyboard-path={path}
             className={FILE_TREE_ROW_CLASS_NAME}
             style={{ paddingInlineStart: 8 + depth * 14 }}
             {...openHandlers}
@@ -208,7 +214,7 @@ export function TreeLevel({
               onContextMenu(event, path);
             }}
             onKeyDown={(event) => {
-              if (onContextMenu && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+              if (onContextMenu && (event.key === "ContextMenu" || matchesKeyboardEvent(event.nativeEvent, "Shift+F10"))) {
                 event.preventDefault();
                 onContextMenu(event, path);
                 return;

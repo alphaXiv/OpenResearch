@@ -1,3 +1,4 @@
+import { useWorkspace } from "../workspace";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import {
@@ -11,20 +12,18 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
-  experimentMonitoringError,
   fmtDuration,
-  runDisplayStatus,
   timeAgo,
-  trackioRunUrl,
   type Experiment,
   type Project,
   type Run,
 } from "../api";
-import { useTrackioRuns } from "../queries/settings";
+import { noticeRun, runActive, runDisplay, runResult } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { Md } from "./Md";
+import { RunContactNotice } from "./RunContactNotice";
 import { StatusBadge } from "./StatusBadge";
 import { Button, Tooltip } from "./ui";
 import { ExperimentLineage } from "./ExperimentLineage";
@@ -78,11 +77,13 @@ export function ExperimentOverview({
   onOpenCode: (intent: TabOpenIntent) => void;
   onOpenDiff: (intent: TabOpenIntent) => void;
 }) {
+  const { useTrackioRuns } = useWorkspace().queries;
+  const { trackioRunUrl } = useWorkspace().api;
+
   const latestRun = runs[0] ?? null;
-  const monitoringError = experimentMonitoringError(runs);
-  const hasLiveRun = runs.some(
-    (run) => run.status === "running" || run.status === "starting",
-  );
+  const attentionRun = noticeRun(runs);
+  const result = latestRun ? runResult(latestRun) : null;
+  const hasLiveRun = runs.some((run) => runActive(run.status));
   const [now, setNow] = useState(() => Date.now());
   const trackio = useTrackioRuns(experiment.projectId, hasLiveRun).data;
   const hasTrackio = latestRun !== null && trackioRunUrl(trackio, latestRun.id) !== null;
@@ -102,7 +103,7 @@ export function ExperimentOverview({
             <h1>{experiment.title || experiment.slug}</h1>
             <div className="experiment-overview-slug mt-1 text-muted text-sm">{experiment.slug}</div>
           </div>
-          <StatusBadge status={latestRun ? runDisplayStatus(latestRun) : "idle"} />
+          {latestRun ? <StatusBadge {...runDisplay(latestRun)} /> : <StatusBadge status="idle" />}
         </header>
 
         <div className="experiment-overview-actions flex gap-2 mt-4.5 [@media((max-width:_720px))]:flex-wrap">
@@ -117,15 +118,17 @@ export function ExperimentOverview({
             </Button>
           )}
           {latestRun && hasTrackio && (
-            <Button
-              title={m.a11y_trackio_charts()}
-              {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                onOpenTrackio(latestRun.id, intent),
-              )}
-            >
-              <ChartLine size={16} />
-              {m.experiment_overview_visualize()}
-            </Button>
+            <Tooltip interactive content={m.a11y_trackio_charts()} className="rounded-md">
+              <Button
+                aria-description={m.a11y_trackio_charts()}
+                {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                  onOpenTrackio(latestRun.id, intent),
+                )}
+              >
+                <ChartLine size={16} />
+                {m.experiment_overview_visualize()}
+              </Button>
+            </Tooltip>
           )}
           <Button
             {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
@@ -156,7 +159,7 @@ export function ExperimentOverview({
           {latestRun && (
             <>
               <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-1 [&_code]:text-text [&_code]:text-xs">
-                <StatusBadge status={runDisplayStatus(latestRun)} />
+                <StatusBadge {...runDisplay(latestRun)} />
                 <BackendBadge backend={latestRun.backend} />
                 <span title={m.experiment_overview_started()}>
                   <CalendarDays size={14} />
@@ -181,16 +184,12 @@ export function ExperimentOverview({
               {latestRun.command && (
                 <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {latestRun.command}</code>
               )}
-              {monitoringError && (
-                <p className="experiment-overview-monitoring mt-4 text-accent-amber text-sm wrap-anywhere">
-                  {monitoringError}
-                </p>
-              )}
-              {latestRun.resultMarkdown && (
+              {attentionRun && <RunContactNotice run={attentionRun} className="mt-4" />}
+              {result && (
                 <div
                   className={`experiment-overview-result mt-4 [&.failed]:text-accent-red ${latestRun.status === "failed" ? "failed" : ""}`}
                 >
-                  <Md text={latestRun.resultMarkdown} />
+                  <Md text={result} />
                 </div>
               )}
             </>
@@ -209,7 +208,7 @@ export function ExperimentOverview({
                   )}
                 >
                   <span className="experiment-run-number text-xs font-medium">{m.experiment_overview_run()} {runs.length - index}</span>
-                  <StatusBadge status={runDisplayStatus(run)} className="min-w-0" />
+                  <StatusBadge {...runDisplay(run)} className="min-w-0" />
                   <span>{timeAgo(run.createdAt)}</span>
                   <span>{runDuration(run, now)}</span>
                   <Terminal size={14} />

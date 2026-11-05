@@ -1,3 +1,7 @@
+import { useContext, memo, useId, useMemo, useRef, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { useLocale } from "../locale";
@@ -10,18 +14,16 @@ import {
   type Edge,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
   type Viewport,
 } from "@xyflow/react";
 import { Archive, ChartLine, Ellipsis, FolderTree, Terminal } from "lucide-react";
-import { useTrackioRuns } from "../queries/settings";
-import { createPortal } from "react-dom";
+
+import { Menu } from "@base-ui/react/menu";
 import { GitHubMark } from "./BackendLogos";
-import { memo, useMemo, useRef, useState } from "react";
 import {
   githubBranchUrl,
   fmtNumber,
-  runDisplayStatus,
-  trackioRunUrl,
   timeAgo,
   type Experiment,
   type Project,
@@ -31,9 +33,9 @@ import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
-import { usePopover } from "./ModelPicker";
 import { MenuItem } from "./ui";
 import { statusLabel, StatusBadge } from "./StatusBadge";
+import { runDisplay, type RunDisplay } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const EMPTY_STATE_CLASS_NAME = [
@@ -214,18 +216,22 @@ function subtreeWidth(node: DisplayNode): number {
   return Math.max(nodeWidth(node), cw);
 }
 
-function runSquareClass(status: string): string {
+function runSquareClass({ status, stale }: RunDisplay): string {
+  if (stale) return "stale";
   if (status === "done") return "pass";
   if (status === "failed") return "fail";
-  if (status === "running" || status === "starting" || status === "cancelling") return "live";
+  if (status === "submitting" || status === "running" || status === "starting" || status === "cancelling") return "live";
   return "other";
 }
 
 const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
+  const { useTrackioRuns } = useWorkspace().queries;
+  const { trackioRunUrl } = useWorkspace().api;
+
   useLocale();
   const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode, onArchive, onDelete, actions } = data;
-  const status = latestRun ? runDisplayStatus(latestRun) : undefined;
-  const live = status === "running" || status === "starting" || status === "cancelling";
+  const display = latestRun ? runDisplay(latestRun) : null;
+  const live = display !== null && runSquareClass(display) === "live";
   const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
   const trackio = useTrackioRuns(exp.projectId, live).data;
@@ -249,6 +255,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
       <div
         role="button"
         tabIndex={0}
+        data-keyboard-item
         className="node-overview-link nodrag"
         {...tabOpenGestureHandlers<HTMLDivElement>((intent) =>
           onOpenView(exp.id, "overview", intent),
@@ -256,7 +263,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
       >
         <div className="node-eyebrow">
           <span>{exp.archived ? m.tree_archived() : kind}</span>
-          <StatusBadge status={status ?? "idle"} />
+          {display ? <StatusBadge {...display} /> : <StatusBadge status="idle" />}
         </div>
         <div className="node-head">
           <span className="node-slug">{exp.slug}</span>
@@ -268,13 +275,16 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           <span>{m.tree_view_runs()}</span>
           {squares.length > 0 ? (
             <span className="run-squares flex items-center gap-1">
-              {squares.map((run) => (
-                <span
-                  key={run.id}
-                  className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-danger-outline [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border ${runSquareClass(runDisplayStatus(run))}`}
-                  title={statusLabel(runDisplayStatus(run))}
-               />
-              ))}
+              {squares.map((run) => {
+                const square = runDisplay(run);
+                return (
+                  <span
+                    key={run.id}
+                    className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-danger-outline [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border [&.stale]:border-[1.5px] [&.stale]:border-accent-amber ${runSquareClass(square)}`}
+                    title={statusLabel(square.status, square.stopping)}
+                  />
+                );
+              })}
             </span>
           ) : (
             <span>{m.tree_view_no_runs()}</span>
@@ -356,47 +366,39 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
 });
 
 const ArchivedNode = memo(function ArchivedNode({ data }: NodeProps<ArchivedFlowNode>) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
   useLocale();
   const { rootId, count, onRestoreRegion } = data;
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const menu = usePopover(triggerRef);
-  const [position, setPosition] = useState({ top: 0, left: 0 });
-  const toggle = () => {
-    if (!menu.open && triggerRef.current) {
-      const rect = triggerRef.current.getBoundingClientRect();
-      const below = window.innerHeight - rect.bottom >= 44;
-      setPosition({
-        top: below ? rect.bottom + 4 : Math.max(4, rect.top - 44),
-        left: Math.max(4, Math.min(rect.left, window.innerWidth - 232)),
-      });
-    }
-    menu.setOpen((open) => !open);
-  };
+  const [open, setOpen] = useState(false);
+  const triggerId = useId();
   return (
     <div className="archived-node w-40 h-11">
       <Handle type="target" position={Position.Top} />
-      <button
-        type="button"
-        ref={triggerRef}
-        className="nodrag w-full h-full flex items-center justify-center gap-2 px-3 border border-border rounded-full bg-background text-text text-sm font-medium whitespace-nowrap transition-[background-color,border-color] duration-120 ease-standard hover:bg-surface hover:border-border-hover-strong"
-        aria-haspopup="menu"
-        aria-expanded={menu.open}
-        onClick={toggle}
-      >
-        <Archive size={16} className="shrink-0 text-subtext" aria-hidden="true" />
-        <span>{m.tree_archived_count({ count: fmtNumber(count) })}</span>
-      </button>
+      <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+        <Menu.Root open={open} onOpenChange={setOpen} triggerId={triggerId} modal={false}>
+          <Menu.Trigger
+            id={triggerId}
+            data-keyboard-item
+            // XYFlow consumes mousedown before React's bubble handlers receive it.
+            onMouseDown={(event) => event.preventBaseUIHandler()}
+            onClick={(event) => { event.preventBaseUIHandler(); setOpen((value) => !value); }}
+            className="nodrag w-full h-full flex items-center justify-center gap-2 px-3 border border-border rounded-full bg-background text-text text-sm font-medium whitespace-nowrap transition-[background-color,border-color] duration-120 ease-standard hover:bg-surface hover:border-border-hover-strong">
+            <Archive size={16} className="shrink-0 text-subtext" aria-hidden="true" />
+            <span>{m.tree_archived_count({ count: fmtNumber(count) })}</span>
+          </Menu.Trigger>
+          <Menu.Portal container={portalContainer}>
+            <Menu.Positioner positionMethod="fixed" side="bottom" align="start" sideOffset={4} collisionPadding={4} className="z-70">
+              <Menu.Popup className="outline-none max-h-(--available-height) overflow-y-auto option-menu min-w-56 rounded-lg border border-border bg-background p-1.5 shadow-menu">
+                <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onRestoreRegion(rootId)}>
+                  {count === 1 ? m.tree_restore_only() : m.tree_restore_archived_count({ count: fmtNumber(count) })}
+                </Menu.Item>
+              </Menu.Popup>
+            </Menu.Positioner>
+          </Menu.Portal>
+        </Menu.Root>
+      </DirectionProvider>
       <Handle type="source" position={Position.Bottom} />
-      {menu.open && createPortal(
-        <div ref={menu.ref} className="option-menu fixed z-70 min-w-56 rounded-lg border border-border bg-background p-1.5 shadow-menu" style={position}>
-          <MenuItem onClick={() => {
-            menu.setOpen(false);
-            onRestoreRegion(rootId);
-          }}>
-            {count === 1 ? m.tree_restore_only() : m.tree_restore_archived_count({ count: fmtNumber(count) })}
-          </MenuItem>
-        </div>, document.body,
-      )}
     </div>
   );
 });
@@ -413,6 +415,7 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
       className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-hover-faint text-muted text-sm font-medium text-start transition-[border-color,color] duration-120 ease-standard [&:hover]:border-border-hover-strong [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-snug [&_.elided-node-sub]:text-muted"
       role="button"
       tabIndex={0}
+      data-keyboard-item
       title={m.tree_view_switch_to_entire_project_to_see_all_experiments()}
       onClick={onShowProjectScope}
       onKeyDown={(e) => {
@@ -486,6 +489,7 @@ export function TreeView({
   viewport: Viewport | null;
   onViewportChange: (viewport: Viewport) => void;
 }) {
+  const flowRef = useRef<ReactFlowInstance<ExpFlowNode | ArchivedFlowNode | ElidedFlowNode> | null>(null);
   const { nodes, edges } = useMemo(() => {
     const runsByExp = new Map<string, Run[]>();
     for (const run of runs) {
@@ -607,6 +611,7 @@ export function TreeView({
 
   return (
     <ReactFlow
+      data-keyboard-list
       className="[&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-archived.selectable]:cursor-pointer [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
       // Saved viewports initialize on mount; a new scope needs its own canvas.
       key={agentSessionId ?? "project"}
@@ -617,6 +622,20 @@ export function TreeView({
       nodesDraggable={false}
       nodesConnectable={false}
       nodesFocusable={false}
+      onInit={(flow) => { flowRef.current = flow; }}
+      onFocusCapture={(event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement) || !target.hasAttribute("data-keyboard-item") || !target.matches(":focus-visible")) return;
+        const nodeElement = target.closest<HTMLElement>(".react-flow__node");
+        const node = nodeElement?.dataset.id ? flowRef.current?.getNode(nodeElement.dataset.id) : undefined;
+        if (!node || !nodeElement || !flowRef.current) return;
+        const bounds = nodeElement.getBoundingClientRect();
+        const viewport = event.currentTarget.getBoundingClientRect();
+        if (bounds.left >= viewport.left && bounds.right <= viewport.right && bounds.top >= viewport.top && bounds.bottom <= viewport.bottom) return;
+        const width = node.measured?.width ?? node.width ?? 0;
+        const height = node.measured?.height ?? node.height ?? 0;
+        void flowRef.current.setCenter(node.position.x + width / 2, node.position.y + height / 2, { zoom: flowRef.current.getZoom() });
+      }}
       onMoveStart={dismissTreeHoverCards}
       onMoveEnd={(event, nextViewport) => { if (event) onViewportChange(nextViewport); }}
       minZoom={0.15}

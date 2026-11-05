@@ -1,5 +1,6 @@
+import { useWorkspace } from "./workspace";
 import { isCancelledError, useQuery } from "@tanstack/react-query";
-import { listProjectsQuery, getUiStateQuery } from "./queries/projects";
+
 import { useRouteContext, Link, useNavigate, type ErrorComponentProps } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
@@ -40,14 +41,15 @@ export function RouteFailure({ error, reset }: Pick<ErrorComponentProps, "error"
 }
 
 function Resume({ projectId }: { projectId?: string }) {
-  const { queryClient: client } = useRouteContext({ from: "__root__" });
+  const runtime = useRuntime();
+  const workspace = useWorkspace();
   const navigate = useNavigate();
   const [error, setError] = useState<Error | null>(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let current = true;
     setError(null);
-    void (projectId ? projectResumeLocation(projectId, client) : globalResumeLocation(client))
+    void (projectId ? projectResumeLocation(projectId, workspace) : globalResumeLocation(workspace))
       .then((href) => { if (current) void navigate({ href, replace: true }); })
       .catch((cause: unknown) => {
         if (!current) return;
@@ -56,14 +58,16 @@ function Resume({ projectId }: { projectId?: string }) {
         else setError(cause instanceof Error ? cause : new Error(String(cause)));
       });
     return () => { current = false; };
-  }, [projectId, attempt, navigate, client]);
-  return error ? <RouteFailure error={error} reset={() => setAttempt((value) => value + 1)} /> : <RoutePending />;
+  }, [projectId, attempt, navigate, workspace]);
+  return <>{error ? <RouteFailure error={error} reset={() => setAttempt((value) => value + 1)} /> : <RoutePending />}<WorkspaceConnection runtime={runtime} corner /></>;
 }
 
 export function ResumeGlobal() { return <Resume />; }
 export function ResumeProject({ projectId }: { projectId: string }) { return <Resume projectId={projectId} />; }
 
 export function ProjectsPage() {
+  const { listProjectsQuery, getUiStateQuery } = useWorkspace().queries;
+
   const runtime = useRuntime();
   const navigate = useNavigate();
   const { queryClient } = useRouteContext({ from: "__root__" });
@@ -77,7 +81,8 @@ export function ProjectsPage() {
   // The walkthrough is a one-time setup, so the persisted flag gates it and not
   // the project count: onboarding installs a demo project, and counting projects
   // replayed the whole walkthrough the moment that demo was deleted.
-  const onboarding = noProjects && !onboarded;
+  const onboarding = runtime.kind === "local" && noProjects && !onboarded;
+  const agentSetup = runtime.kind === "ssh" && noProjects && !state?.preferredAgent;
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
   const { status } = useUpdateStatus(runtime.kind === "local");
@@ -92,9 +97,12 @@ export function ProjectsPage() {
       <DesktopAppBanner />
       {error && (!projects || !state) ? <RouteFailure error={error} reset={retry} />
         : !projects || !state ? <RoutePending />
-          : onboarding ? (
+          : agentSetup && runtime.kind === "ssh" ? (
+            <Onboarding remote host={runtime.session.host} preferredAgent={state.preferredAgent}
+              onDone={(next) => queryClient.setQueryData(getUiStateQuery().queryKey, next)} />
+          ) : onboarding ? (
             <Onboarding
-              remote={runtime.kind === "ssh"}
+              remote={false}
               preferredAgent={state.preferredAgent}
               onDone={(project) => {
                 clearReadDemoSessions();
@@ -116,7 +124,7 @@ export function ProjectsPage() {
           ) : (
             <ResumeGlobal />
           )}
-      {(runtime.kind === "ssh" || (projects && state && !onboarding)) && <WorkspaceConnection runtime={runtime} corner />}
+      <WorkspaceConnection runtime={runtime} corner />
     </div>
   );
 }

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Minus, Plus } from "lucide-react";
+import { formatForDisplay } from "@tanstack/react-hotkeys";
+import { appHotkeys } from "../hotkeys";
 import { m } from "../paraglide/messages.js";
 import { Button, IconButton, Tooltip } from "./ui";
 
@@ -49,14 +51,16 @@ export function DesktopZoomControls() {
       }}
     >
       <span role="status" className="min-w-12 px-1 text-sm font-medium tabular-nums text-text">{percent}%</span>
-      <Tooltip content={m.image_zoom_out()} interactive>
+      <Tooltip content={`${m.image_zoom_out()} (${formatForDisplay(appHotkeys["zoom-out"].hotkey ?? [])})`} interactive>
         <IconButton size="small" shape="circle" aria-label={m.image_zoom_out()} disabled={percent <= 50} onClick={() => send("out")}><Minus size={14} /></IconButton>
       </Tooltip>
-      <Tooltip content={m.image_zoom_in()} interactive>
+      <Tooltip content={`${m.image_zoom_in()} (${formatForDisplay(appHotkeys["zoom-in"].hotkey ?? [])})`} interactive>
         <IconButton size="small" shape="circle" aria-label={m.image_zoom_in()} disabled={percent >= 200} onClick={() => send("in")}><Plus size={14} /></IconButton>
       </Tooltip>
       <span aria-hidden className="mx-1 h-4 border-s border-border" />
-      <Button variant="ghost" size="small" disabled={percent === 100} onClick={() => send("reset")}>{m.desktop_zoom_reset()}</Button>
+      <Tooltip content={`${m.desktop_zoom_reset()} (${formatForDisplay(appHotkeys["zoom-reset"].hotkey ?? [])})`} interactive>
+        <Button variant="ghost" size="small" disabled={percent === 100} onClick={() => send("reset")}>{m.desktop_zoom_reset()}</Button>
+      </Tooltip>
     </div>
   );
 }

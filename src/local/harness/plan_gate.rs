@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 /// subcommand can turn them into a write). Kept in lockstep with `main.rs`'s `Command`
 /// enum; `readonly_verbs_are_real_commands` guards against a rename.
 const WHOLE_VERB_READS: &[&str] = &[
+    "alphaxiv",
     "projects",
     "orgs",
     "runs",
@@ -103,7 +104,7 @@ const GIT_WHOLE_VERB_READS: &[&str] = &[
 /// the call otherwise ("User has approved exiting plan mode", nobody asked —
 /// verified on claude 2.1.197), letting the model exit plan mode and edit
 /// files without the user's say. `ask` routes it to the permission prompt tool
-/// (the `orx mcp-gate` bridge), which surfaces the plan card and blocks until
+/// (the `orx mcp` bridge), which surfaces the plan card and blocks until
 /// the user answers; without a bridge configured, `ask` in headless denies —
 /// still strictly better than self-approval.
 pub fn decide(payload: &Value) -> Option<Value> {

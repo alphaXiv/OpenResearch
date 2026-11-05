@@ -33,6 +33,8 @@ export type Action =
   | { type: "setQueued"; sessionId: string; items: QueuedMessage[] };
 
 export const LOCAL_PREFIX = "local-";
+/** A dashboard-side failure, never part of an agent turn. */
+export const LOCAL_ERROR_PART_ID = "local-error";
 /** Server-side `USER_SHELL_TOOL`: a composer `!` command on a user message. */
 export const SHELL_TOOL = "bash";
 
@@ -93,7 +95,7 @@ export function reducer(state: ChatState, action: Exclude<Action, { type: "busy"
         id: `${LOCAL_PREFIX}senderr-${Date.now()}`,
         role: "assistant",
         parts: [
-          { id: "p0", type: "tool", tool: "error", state: { status: "error", error: action.text } },
+          { id: LOCAL_ERROR_PART_ID, type: "tool", tool: "error", state: { status: "error", error: action.text } },
         ],
         createdAt: Date.now(),
         // Sit on the branch that is showing, not at the root of a new one.

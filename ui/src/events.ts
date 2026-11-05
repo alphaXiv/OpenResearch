@@ -1,7 +1,4 @@
-// One EventSource('/api/events') for the whole app. Entity updates go to the
-// caller's handlers; run.log deltas fan out through a tiny per-run emitter so
-// terminals can subscribe without threading props everywhere.
-
+import type { WorkspaceClient } from "./queries/client";
 import { useEffect, useRef } from "react";
 
 import type {
@@ -12,6 +9,7 @@ import type {
   HarnessId,
   OverleafLiveStatus,
   Project,
+  EngineHost,
   QueuedMessage,
   Run,
   UpdateStatus,
@@ -25,25 +23,8 @@ export interface RunLogEvent {
 }
 
 type LogListener = (ev: RunLogEvent) => void;
-const logListeners = new Map<string, Set<LogListener>>();
 
-export function onRunLog(runId: string, fn: LogListener): () => void {
-  let set = logListeners.get(runId);
-  if (!set) {
-    set = new Set();
-    logListeners.set(runId, set);
-  }
-  set.add(fn);
-  return () => {
-    set.delete(fn);
-    if (set.size === 0) logListeners.delete(runId);
-  };
-}
-
-function emitRunLog(ev: RunLogEvent) {
-  logListeners.get(ev.runId)?.forEach((fn) => fn(ev));
-}
-
+type HostListener = (host: EngineHost) => void;
 // Chat events fan out the same way so ChatPanel shares the one EventSource.
 export type ChatEvent =
   | { type: "runsChanged" }
@@ -61,31 +42,6 @@ export type ChatEvent =
   | { type: "reconnected" };
 
 type ChatListener = (ev: ChatEvent) => void;
-const chatListeners = new Set<ChatListener>();
-
-export function onChatEvent(fn: ChatListener): () => void {
-  chatListeners.add(fn);
-  return () => {
-    chatListeners.delete(fn);
-  };
-}
-
-function emitChat(ev: ChatEvent) {
-  chatListeners.forEach((fn) => fn(ev));
-}
-
-const projectActivityListeners = new Set<() => void>();
-
-export function onProjectActivityEvent(fn: () => void): () => void {
-  projectActivityListeners.add(fn);
-  return () => {
-    projectActivityListeners.delete(fn);
-  };
-}
-
-function emitProjectActivityEvent() {
-  projectActivityListeners.forEach((fn) => fn());
-}
 
 export interface HarnessAuthEvent {
   /** `*` after a reconnect: any harness may have changed while events were lost. */
@@ -94,34 +50,10 @@ export interface HarnessAuthEvent {
 }
 
 type HarnessAuthListener = (ev: HarnessAuthEvent) => void;
-const harnessAuthListeners = new Set<HarnessAuthListener>();
-
-export function onHarnessAuth(fn: HarnessAuthListener): () => void {
-  harnessAuthListeners.add(fn);
-  return () => {
-    harnessAuthListeners.delete(fn);
-  };
-}
 
 // `harness.catalog` fires when the background fill has replaced a snapshot
 // answer's placeholder models with the real catalog — re-read, don't re-probe.
 type HarnessCatalogListener = () => void;
-const harnessCatalogListeners = new Set<HarnessCatalogListener>();
-
-export function onHarnessCatalog(fn: HarnessCatalogListener): () => void {
-  harnessCatalogListeners.add(fn);
-  return () => {
-    harnessCatalogListeners.delete(fn);
-  };
-}
-
-function emitHarnessCatalog() {
-  harnessCatalogListeners.forEach((fn) => fn());
-}
-
-function emitHarnessAuth(ev: HarnessAuthEvent) {
-  harnessAuthListeners.forEach((fn) => fn(ev));
-}
 
 // Data-dir move progress fans out the same way so the Storage settings card can
 // subscribe without touching the shared useOrxEvents handler set.
@@ -131,18 +63,6 @@ export type DataDirMoveEvent =
   | { type: "error"; error: string };
 
 type DataDirMoveListener = (ev: DataDirMoveEvent) => void;
-const dataDirMoveListeners = new Set<DataDirMoveListener>();
-
-export function onDataDirMove(fn: DataDirMoveListener): () => void {
-  dataDirMoveListeners.add(fn);
-  return () => {
-    dataDirMoveListeners.delete(fn);
-  };
-}
-
-function emitDataDirMove(ev: DataDirMoveEvent) {
-  dataDirMoveListeners.forEach((fn) => fn(ev));
-}
 
 // Overleaf live-sync events fan out the same way: the .tex tab that opened the
 // channel is the one that reloads on a pull or shows the connection state.
@@ -152,63 +72,11 @@ export type OverleafEvent =
   | { type: "pulled"; key: string; paths: string[] };
 
 type OverleafListener = (ev: OverleafEvent) => void;
-const overleafListeners = new Set<OverleafListener>();
-
-export function onOverleafEvent(fn: OverleafListener): () => void {
-  overleafListeners.add(fn);
-  return () => {
-    overleafListeners.delete(fn);
-  };
-}
-
-function emitOverleaf(ev: OverleafEvent) {
-  overleafListeners.forEach((fn) => fn(ev));
-}
 
 // Update status fans out the same way: the restart banner and the Updates
 // settings card both render it, and neither owns the other.
 type UpdateStatusListener = (status: UpdateStatus) => void;
-const updateStatusListeners = new Set<UpdateStatusListener>();
-
-export function onUpdateStatus(fn: UpdateStatusListener): () => void {
-  updateStatusListeners.add(fn);
-  return () => {
-    updateStatusListeners.delete(fn);
-  };
-}
-
-function emitUpdateStatus(status: UpdateStatus) {
-  updateStatusListeners.forEach((fn) => fn(status));
-}
-
-// Connection state for the whole dashboard: the one EventSource is also the only
-// evidence the local server is there. Starts true — it served this page moments ago.
-let connected = true;
 type ConnectionListener = () => void;
-const connectionListeners = new Set<ConnectionListener>();
-
-export function onConnectionChange(fn: ConnectionListener): () => void {
-  connectionListeners.add(fn);
-  return () => {
-    connectionListeners.delete(fn);
-  };
-}
-
-export function isConnected(): boolean {
-  return connected;
-}
-
-function setConnected(next: boolean) {
-  if (next === connected) return;
-  connected = next;
-  connectionListeners.forEach((fn) => fn());
-}
-
-// Chrome and Safari re-try a dropped stream after ~3s, so an outage is only
-// distinguishable from a blip once a couple of those attempts have failed; the
-// manual reopen below keeps to that same cadence.
-const OFFLINE_AFTER_MS = 8_000;
-const REOPEN_AFTER_MS = 3_000;
 
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
@@ -220,203 +88,396 @@ export interface OrxEventHandlers {
   onArtifacts?: (projectId: string) => void;
 }
 
-export function useOrxEventStream(handlers: OrxEventHandlers) {
-  // Keep the latest handlers without re-opening the stream every render.
-  const ref = useRef(handlers);
-  ref.current = handlers;
-  useEffect(() => {
-    let source: EventSource | null = null;
-    let stopped = false;
-    let offlineTimer: number | undefined;
-    let reopenTimer: number | undefined;
-    // The browser auto-reconnects a dropped EventSource and fires `open` again
-    // on each re-open. Emit on any open that follows a drop — including a
-    // FAILED first connect (page loaded while the backend was briefly down):
-    // the initial session-list/transcript fetches likely failed too, so the
-    // first successful open needs the same repair. A clean first open emits
-    // nothing.
-    let needsRepair = false;
+type EntityObservers = Pick<OrxEventHandlers, "onRun" | "onRunLog" | "onReconnect">;
 
-    const connect = () => {
-      // connect() owns exactly one live source.
-      source?.close();
-      const es = new EventSource("/api/events");
-      source = es;
-      es.onerror = () => {
-        // An error landing after cleanup would otherwise arm a timer whose id no
-        // longer reaches anyone, leaving the banner up over a healthy stream.
-        if (stopped) return;
-        needsRepair = true;
-        offlineTimer ??= window.setTimeout(() => setConnected(false), OFFLINE_AFTER_MS);
-        // CLOSED is the browser giving up for good, which it does for any
-        // non-SSE response — including the 500 the dev proxy returns while the
-        // backend restarts. Nothing reopens the stream after that but us.
-        if (es.readyState === EventSource.CLOSED && reopenTimer === undefined) {
-          reopenTimer = window.setTimeout(() => {
-            reopenTimer = undefined;
-            connect();
-          }, REOPEN_AFTER_MS);
-        }
-      };
-      es.onopen = () => {
-        if (stopped) return;
-        window.clearTimeout(offlineTimer);
-        offlineTimer = undefined;
-        setConnected(true);
-        if (needsRepair) {
+export function createEvents(client: WorkspaceClient) {
+  const { url } = client;
+
+  let pending: string | null = null;
+  const listeners = new Set<() => void>();
+
+  function requestHostConnect(host: string) {
+    pending = host;
+    listeners.forEach((fn) => fn());
+  }
+
+  const pendingHostConnect = () => pending;
+
+  function takeHostConnect(): string | null {
+    const host = pending;
+    pending = null;
+    return host;
+  }
+
+  function onHostConnectRequest(fn: () => void): () => void {
+    listeners.add(fn);
+    return () => {
+      listeners.delete(fn);
+    };
+  }
+
+  const hostListeners = new Set<HostListener>();
+
+  function onEngineHost(fn: HostListener): () => void {
+    hostListeners.add(fn);
+    return () => { hostListeners.delete(fn); };
+  }
+
+  const logListeners = new Map<string, Set<LogListener>>();
+
+  function onRunLog(runId: string, fn: LogListener): () => void {
+    let set = logListeners.get(runId);
+    if (!set) {
+      set = new Set();
+      logListeners.set(runId, set);
+    }
+    set.add(fn);
+    return () => {
+      set.delete(fn);
+      if (set.size === 0) logListeners.delete(runId);
+    };
+  }
+
+  function emitRunLog(ev: RunLogEvent) {
+    logListeners.get(ev.runId)?.forEach((fn) => fn(ev));
+  }
+  const chatListeners = new Set<ChatListener>();
+
+  function onChatEvent(fn: ChatListener): () => void {
+    chatListeners.add(fn);
+    return () => {
+      chatListeners.delete(fn);
+    };
+  }
+
+  function emitChat(ev: ChatEvent) {
+    chatListeners.forEach((fn) => fn(ev));
+  }
+
+  const projectActivityListeners = new Set<() => void>();
+
+  function onProjectActivityEvent(fn: () => void): () => void {
+    projectActivityListeners.add(fn);
+    return () => {
+      projectActivityListeners.delete(fn);
+    };
+  }
+
+  function emitProjectActivityEvent() {
+    projectActivityListeners.forEach((fn) => fn());
+  }
+  const harnessAuthListeners = new Set<HarnessAuthListener>();
+
+  function onHarnessAuth(fn: HarnessAuthListener): () => void {
+    harnessAuthListeners.add(fn);
+    return () => {
+      harnessAuthListeners.delete(fn);
+    };
+  }
+  const harnessCatalogListeners = new Set<HarnessCatalogListener>();
+
+  function onHarnessCatalog(fn: HarnessCatalogListener): () => void {
+    harnessCatalogListeners.add(fn);
+    return () => {
+      harnessCatalogListeners.delete(fn);
+    };
+  }
+
+  function emitHarnessCatalog() {
+    harnessCatalogListeners.forEach((fn) => fn());
+  }
+
+  function emitHarnessAuth(ev: HarnessAuthEvent) {
+    harnessAuthListeners.forEach((fn) => fn(ev));
+  }
+  const dataDirMoveListeners = new Set<DataDirMoveListener>();
+
+  function onDataDirMove(fn: DataDirMoveListener): () => void {
+    dataDirMoveListeners.add(fn);
+    return () => {
+      dataDirMoveListeners.delete(fn);
+    };
+  }
+
+  function emitDataDirMove(ev: DataDirMoveEvent) {
+    dataDirMoveListeners.forEach((fn) => fn(ev));
+  }
+  const overleafListeners = new Set<OverleafListener>();
+
+  function onOverleafEvent(fn: OverleafListener): () => void {
+    overleafListeners.add(fn);
+    return () => {
+      overleafListeners.delete(fn);
+    };
+  }
+
+  function emitOverleaf(ev: OverleafEvent) {
+    overleafListeners.forEach((fn) => fn(ev));
+  }
+  const updateStatusListeners = new Set<UpdateStatusListener>();
+
+  function onUpdateStatus(fn: UpdateStatusListener): () => void {
+    updateStatusListeners.add(fn);
+    return () => {
+      updateStatusListeners.delete(fn);
+    };
+  }
+
+  function emitUpdateStatus(status: UpdateStatus) {
+    updateStatusListeners.forEach((fn) => fn(status));
+  }
+
+  // Connection state for the whole dashboard: the one EventSource is also the only
+  // evidence the local server is there. Starts true — it served this page moments ago.
+  let connected = true;
+  const connectionListeners = new Set<ConnectionListener>();
+
+  function onConnectionChange(fn: ConnectionListener): () => void {
+    connectionListeners.add(fn);
+    return () => {
+      connectionListeners.delete(fn);
+    };
+  }
+
+  function isConnected(): boolean {
+    return connected;
+  }
+
+  function setConnected(next: boolean) {
+    if (next === connected) return;
+    connected = next;
+    connectionListeners.forEach((fn) => fn());
+  }
+
+  // Chrome and Safari re-try a dropped stream after ~3s, so an outage is only
+  // distinguishable from a blip once a couple of those attempts have failed; the
+  // manual reopen below keeps to that same cadence.
+  const OFFLINE_AFTER_MS = 8_000;
+  const REOPEN_AFTER_MS = 3_000;
+
+  function useOrxEventStream(handlers: OrxEventHandlers) {
+    // Keep the latest handlers without re-opening the stream every render.
+    const ref = useRef(handlers);
+    ref.current = handlers;
+    const hasOpened = useRef(false);
+    useEffect(() => {
+      let source: EventSource | null = null;
+      let stopped = false;
+      let offlineTimer: number | undefined;
+      let reopenTimer: number | undefined;
+      // The browser auto-reconnects a dropped EventSource and fires `open` again
+      // on each re-open. Emit on any open that follows a drop — including a
+      // FAILED first connect (page loaded while the backend was briefly down):
+      // the initial session-list/transcript fetches likely failed too, so the
+      // first successful open needs the same repair. A clean first open emits
+      // nothing.
+      let needsRepair = false;
+
+      const connect = () => {
+        // connect() owns exactly one live source.
+        source?.close();
+        const es = new EventSource(url("/api/events"));
+        source = es;
+        es.onerror = () => {
+          // An error landing after cleanup would otherwise arm a timer whose id no
+          // longer reaches anyone, leaving the banner up over a healthy stream.
+          if (stopped) return;
+          needsRepair = true;
+          offlineTimer ??= window.setTimeout(() => setConnected(false), OFFLINE_AFTER_MS);
+          // CLOSED is the browser giving up for good, which it does for any
+          // non-SSE response — including the 500 the dev proxy returns while the
+          // backend restarts. Nothing reopens the stream after that but us.
+          if (es.readyState === EventSource.CLOSED && reopenTimer === undefined) {
+            reopenTimer = window.setTimeout(() => {
+              reopenTimer = undefined;
+              connect();
+            }, REOPEN_AFTER_MS);
+          }
+        };
+        es.onopen = () => {
+          if (stopped) return;
+          window.clearTimeout(offlineTimer);
+          offlineTimer = undefined;
+          setConnected(true);
+          if (needsRepair || hasOpened.current) {
+            emitChat({ type: "reconnected" });
+            emitProjectActivityEvent();
+            if (needsRepair) emitHarnessAuth({ harness: "*", authState: "unknown" });
+            ref.current.onReconnect?.();
+          }
+          hasOpened.current = true;
+          // Every open after this one follows a drop by definition.
+          needsRepair = true;
+        };
+        const parse = <T>(e: MessageEvent): T | null => {
+          try {
+            return JSON.parse(e.data as string) as T;
+          } catch {
+            return null;
+          }
+        };
+        es.addEventListener("resync.required", () => {
           emitChat({ type: "reconnected" });
           emitProjectActivityEvent();
-          emitHarnessAuth({ harness: "*", authState: "unknown" });
           ref.current.onReconnect?.();
-        }
-        // Every open after this one follows a drop by definition.
-        needsRepair = true;
+        });
+        es.addEventListener("run.updated", (e) => {
+          const d = parse<{ run: Run }>(e as MessageEvent);
+          if (d?.run) {
+            emitProjectActivityEvent();
+            ref.current.onRun(d.run);
+          }
+        });
+        es.addEventListener("experiment.updated", (e) => {
+          const d = parse<{ experiment: Experiment }>(e as MessageEvent);
+          if (d?.experiment) {
+            emitProjectActivityEvent();
+            ref.current.onExperiment?.(d.experiment);
+          }
+        });
+        es.addEventListener("project.updated", (e) => {
+          const d = parse<{ project: Project }>(e as MessageEvent);
+          if (d?.project) {
+            emitProjectActivityEvent();
+            ref.current.onProject?.(d.project);
+          }
+        });
+        es.addEventListener("files.updated", (e) => {
+          const d = parse<{ projectId: string }>(e as MessageEvent);
+          if (d?.projectId) ref.current.onArtifacts?.(d.projectId);
+        });
+        es.addEventListener("run.log", (e) => {
+          const d = parse<RunLogEvent>(e as MessageEvent);
+          if (d?.runId) {
+            emitRunLog(d);
+            emitEntity.onRunLog(d);
+          }
+        });
+        es.addEventListener("host.updated", (e) => {
+          const host = parse<EngineHost>(e as MessageEvent);
+          if (host?.alias) hostListeners.forEach((fn) => fn(host));
+        });
+        es.addEventListener("chat.runs", () => emitChat({ type: "runsChanged" }));
+        es.addEventListener("chat.session", (e) => {
+          const d = parse<{ session: ChatSession }>(e as MessageEvent);
+          if (d?.session) {
+            emitProjectActivityEvent();
+            emitChat({ type: "session", session: d.session });
+          }
+        });
+        es.addEventListener("chat.session.deleted", (e) => {
+          const d = parse<{ sessionId: string }>(e as MessageEvent);
+          if (d?.sessionId) {
+            emitProjectActivityEvent();
+            emitChat({ type: "sessionDeleted", sessionId: d.sessionId });
+          }
+        });
+        es.addEventListener("chat.message", (e) => {
+          const d = parse<{ sessionId: string; message: ChatMessage }>(e as MessageEvent);
+          if (d?.message) {
+            emitProjectActivityEvent();
+            emitChat({ type: "message", sessionId: d.sessionId, message: d.message });
+          }
+        });
+        es.addEventListener("chat.busy", (e) => {
+          const d = parse<{ sessionId: string; busy: boolean }>(e as MessageEvent);
+          if (d?.sessionId) {
+            emitProjectActivityEvent();
+            emitChat({ type: "busy", sessionId: d.sessionId, busy: d.busy });
+          }
+        });
+        es.addEventListener("chat.usage", (e) => {
+          const d = parse<{ sessionId: string; usage: ContextUsage }>(e as MessageEvent);
+          if (d?.sessionId && d.usage) emitChat({ type: "usage", sessionId: d.sessionId, usage: d.usage });
+        });
+        es.addEventListener("chat.queued", (e) => {
+          const d = parse<{ sessionId: string; items: QueuedMessage[] }>(e as MessageEvent);
+          if (d?.sessionId) emitChat({ type: "queued", sessionId: d.sessionId, items: d.items ?? [] });
+        });
+        es.addEventListener("chat.branch", (e) => {
+          const d = parse<{ sessionId: string; activeLeafId: string | null }>(e as MessageEvent);
+          if (d?.sessionId)
+            emitChat({ type: "branch", sessionId: d.sessionId, activeLeafId: d.activeLeafId ?? null });
+        });
+        es.addEventListener("harness.auth", (e) => {
+          const d = parse<HarnessAuthEvent>(e as MessageEvent);
+          if (d?.harness && d.authState) emitHarnessAuth(d);
+        });
+        es.addEventListener("harness.catalog", () => emitHarnessCatalog());
+        es.addEventListener("datadir.move.progress", (e) => {
+          const d = parse<{ phase: string; copiedBytes: number; totalBytes: number }>(
+            e as MessageEvent,
+          );
+          if (d) emitDataDirMove({ type: "progress", ...d });
+        });
+        es.addEventListener("datadir.move.done", (e) => {
+          const d = parse<{ path: string; oldPathLeft?: string }>(e as MessageEvent);
+          if (d) emitDataDirMove({ type: "done", path: d.path, oldPathLeft: d.oldPathLeft });
+        });
+        es.addEventListener("datadir.move.error", (e) => {
+          const d = parse<{ error: string }>(e as MessageEvent);
+          if (d) emitDataDirMove({ type: "error", error: d.error });
+        });
+        es.addEventListener("update.status", (e) => {
+          const d = parse<UpdateStatus>(e as MessageEvent);
+          if (d) emitUpdateStatus(d);
+        });
+        es.addEventListener("overleaf.live", (e) => {
+          const d = parse<{ key: string; status: OverleafLiveStatus }>(e as MessageEvent);
+          if (d?.key && d.status) emitOverleaf({ type: "live", key: d.key, status: d.status });
+        });
+        es.addEventListener("overleaf.pulled", (e) => {
+          const d = parse<{ key: string; paths: string[] }>(e as MessageEvent);
+          if (d?.key && Array.isArray(d.paths)) emitOverleaf({ type: "pulled", key: d.key, paths: d.paths });
+        });
       };
-      const parse = <T>(e: MessageEvent): T | null => {
-        try {
-          return JSON.parse(e.data as string) as T;
-        } catch {
-          return null;
-        }
+      connect();
+      return () => {
+        stopped = true;
+        window.clearTimeout(offlineTimer);
+        window.clearTimeout(reopenTimer);
+        source?.close();
       };
-      es.addEventListener("resync.required", () => {
-        emitChat({ type: "reconnected" });
-        emitProjectActivityEvent();
-        ref.current.onReconnect?.();
-      });
-      es.addEventListener("run.updated", (e) => {
-        const d = parse<{ run: Run }>(e as MessageEvent);
-        if (d?.run) {
-          emitProjectActivityEvent();
-          ref.current.onRun(d.run);
-        }
-      });
-      es.addEventListener("experiment.updated", (e) => {
-        const d = parse<{ experiment: Experiment }>(e as MessageEvent);
-        if (d?.experiment) {
-          emitProjectActivityEvent();
-          ref.current.onExperiment?.(d.experiment);
-        }
-      });
-      es.addEventListener("project.updated", (e) => {
-        const d = parse<{ project: Project }>(e as MessageEvent);
-        if (d?.project) {
-          emitProjectActivityEvent();
-          ref.current.onProject?.(d.project);
-        }
-      });
-      es.addEventListener("files.updated", (e) => {
-        const d = parse<{ projectId: string }>(e as MessageEvent);
-        if (d?.projectId) ref.current.onArtifacts?.(d.projectId);
-      });
-      es.addEventListener("run.log", (e) => {
-        const d = parse<RunLogEvent>(e as MessageEvent);
-        if (d?.runId) {
-          emitRunLog(d);
-          emitEntity.onRunLog(d);
-        }
-      });
-      es.addEventListener("chat.runs", () => emitChat({ type: "runsChanged" }));
-      es.addEventListener("chat.session", (e) => {
-        const d = parse<{ session: ChatSession }>(e as MessageEvent);
-        if (d?.session) {
-          emitProjectActivityEvent();
-          emitChat({ type: "session", session: d.session });
-        }
-      });
-      es.addEventListener("chat.session.deleted", (e) => {
-        const d = parse<{ sessionId: string }>(e as MessageEvent);
-        if (d?.sessionId) {
-          emitProjectActivityEvent();
-          emitChat({ type: "sessionDeleted", sessionId: d.sessionId });
-        }
-      });
-      es.addEventListener("chat.message", (e) => {
-        const d = parse<{ sessionId: string; message: ChatMessage }>(e as MessageEvent);
-        if (d?.message) {
-          emitProjectActivityEvent();
-          emitChat({ type: "message", sessionId: d.sessionId, message: d.message });
-        }
-      });
-      es.addEventListener("chat.busy", (e) => {
-        const d = parse<{ sessionId: string; busy: boolean }>(e as MessageEvent);
-        if (d?.sessionId) {
-          emitProjectActivityEvent();
-          emitChat({ type: "busy", sessionId: d.sessionId, busy: d.busy });
-        }
-      });
-      es.addEventListener("chat.usage", (e) => {
-        const d = parse<{ sessionId: string; usage: ContextUsage }>(e as MessageEvent);
-        if (d?.sessionId && d.usage) emitChat({ type: "usage", sessionId: d.sessionId, usage: d.usage });
-      });
-      es.addEventListener("chat.queued", (e) => {
-        const d = parse<{ sessionId: string; items: QueuedMessage[] }>(e as MessageEvent);
-        if (d?.sessionId) emitChat({ type: "queued", sessionId: d.sessionId, items: d.items ?? [] });
-      });
-      es.addEventListener("chat.branch", (e) => {
-        const d = parse<{ sessionId: string; activeLeafId: string | null }>(e as MessageEvent);
-        if (d?.sessionId)
-          emitChat({ type: "branch", sessionId: d.sessionId, activeLeafId: d.activeLeafId ?? null });
-      });
-      es.addEventListener("harness.auth", (e) => {
-        const d = parse<HarnessAuthEvent>(e as MessageEvent);
-        if (d?.harness && d.authState) emitHarnessAuth(d);
-      });
-      es.addEventListener("harness.catalog", () => emitHarnessCatalog());
-      es.addEventListener("datadir.move.progress", (e) => {
-        const d = parse<{ phase: string; copiedBytes: number; totalBytes: number }>(
-          e as MessageEvent,
-        );
-        if (d) emitDataDirMove({ type: "progress", ...d });
-      });
-      es.addEventListener("datadir.move.done", (e) => {
-        const d = parse<{ path: string; oldPathLeft?: string }>(e as MessageEvent);
-        if (d) emitDataDirMove({ type: "done", path: d.path, oldPathLeft: d.oldPathLeft });
-      });
-      es.addEventListener("datadir.move.error", (e) => {
-        const d = parse<{ error: string }>(e as MessageEvent);
-        if (d) emitDataDirMove({ type: "error", error: d.error });
-      });
-      es.addEventListener("update.status", (e) => {
-        const d = parse<UpdateStatus>(e as MessageEvent);
-        if (d) emitUpdateStatus(d);
-      });
-      es.addEventListener("overleaf.live", (e) => {
-        const d = parse<{ key: string; status: OverleafLiveStatus }>(e as MessageEvent);
-        if (d?.key && d.status) emitOverleaf({ type: "live", key: d.key, status: d.status });
-      });
-      es.addEventListener("overleaf.pulled", (e) => {
-        const d = parse<{ key: string; paths: string[] }>(e as MessageEvent);
-        if (d?.key && Array.isArray(d.paths)) emitOverleaf({ type: "pulled", key: d.key, paths: d.paths });
-      });
-    };
-    connect();
-    return () => {
-      stopped = true;
-      window.clearTimeout(offlineTimer);
-      window.clearTimeout(reopenTimer);
-      source?.close();
-    };
-  }, []);
-}
+    }, []);
+  }
+  const entityListeners = new Set<EntityObservers>();
+  function useOrxEvents(handlers: EntityObservers) {
+    const ref = useRef(handlers);
+    ref.current = handlers;
+    useEffect(() => {
+      const listener: EntityObservers = {
+        onRun: (run) => ref.current.onRun(run),
+        onRunLog: (event) => ref.current.onRunLog?.(event),
+        onReconnect: () => ref.current.onReconnect?.(),
+      };
+      entityListeners.add(listener);
+      return () => { entityListeners.delete(listener); };
+    }, []);
+  }
+  const emitEntity = {
+    onRun: (run: Run) => entityListeners.forEach((h) => h.onRun(run)),
+    onRunLog: (event: RunLogEvent) => entityListeners.forEach((h) => h.onRunLog?.(event)),
+    onReconnect: () => entityListeners.forEach((h) => h.onReconnect?.()),
+  };
 
-type EntityObservers = Pick<OrxEventHandlers, "onRun" | "onRunLog" | "onReconnect">;
-const entityListeners = new Set<EntityObservers>();
-export function useOrxEvents(handlers: EntityObservers) {
-  const ref = useRef(handlers);
-  ref.current = handlers;
-  useEffect(() => {
-    const listener: EntityObservers = {
-      onRun: (run) => ref.current.onRun(run),
-      onRunLog: (event) => ref.current.onRunLog?.(event),
-      onReconnect: () => ref.current.onReconnect?.(),
-    };
-    entityListeners.add(listener);
-    return () => { entityListeners.delete(listener); };
-  }, []);
+  return {
+    requestHostConnect,
+    pendingHostConnect,
+    takeHostConnect,
+    onHostConnectRequest,
+    onEngineHost,
+    onRunLog,
+    onChatEvent,
+    onProjectActivityEvent,
+    onHarnessAuth,
+    onHarnessCatalog,
+    onDataDirMove,
+    onOverleafEvent,
+    onUpdateStatus,
+    onConnectionChange,
+    isConnected,
+    useOrxEventStream,
+    useOrxEvents,
+    emitEntity,
+  };
 }
-export const emitEntity = {
-  onRun: (run: Run) => entityListeners.forEach((h) => h.onRun(run)),
-  onRunLog: (event: RunLogEvent) => entityListeners.forEach((h) => h.onRunLog?.(event)),
-  onReconnect: () => entityListeners.forEach((h) => h.onReconnect?.()),
-};

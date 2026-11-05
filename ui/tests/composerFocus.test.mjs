@@ -1,166 +1,152 @@
+import { EditorView } from "@codemirror/view";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
+import { act, createElement, Fragment, useRef } from "react";
+import { ComposerEditor } from "../src/components/ComposerEditor.tsx";
+import { useComposerFocus } from "../src/components/useComposerFocus.ts";
+import { m } from "../src/paraglide/messages.js";
+import { renderChat, session } from "./chat.mjs";
+import { find, render, settle } from "./render.mjs";
 
-const source = ts.createSourceFile("ChatPanel.tsx", readFileSync(new URL("../src/components/ChatPanel.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let focusEffect;
-function visit(node) {
-  if (ts.isCallExpression(node) && node.expression.getText(source) === "useEffect"
-    && node.arguments[1]?.getText(source).includes("composerFocusNonce")) focusEffect = node;
-  ts.forEachChild(node, visit);
+let frames = [];
+const { requestAnimationFrame, cancelAnimationFrame } = window;
+test.beforeEach(() => {
+  frames = [];
+  window.requestAnimationFrame = (callback) => frames.push(callback);
+  window.cancelAnimationFrame = (id) => { frames[id - 1] = null; };
+});
+test.afterEach(() => Object.assign(window, { requestAnimationFrame, cancelAnimationFrame }));
+const flush = () => act(async () => { for (const frame of frames.splice(0)) frame?.(0); });
+
+const chips = { isCommand: () => false, skill: () => undefined, message: () => undefined, chat: () => undefined, isPath: () => false, attachment: () => undefined };
+const ignore = () => {};
+
+let requestNewChat;
+function Composer({ nonce = 0, ready = true, projectId = "p", activeId = null, inert = false }) {
+  const ref = useRef(null);
+  requestNewChat = useComposerFocus(ref, nonce, ready, projectId, activeId);
+  return createElement(Fragment, null,
+    createElement("div", { inert },
+      createElement(ComposerEditor, {
+        ref, value: "side question", onChange: ignore, onKeyDown: ignore, onSubmit: ignore, onFiles: ignore, onPaste: ignore,
+        placeholder: "Message", plain: false, chipSource: chips, projectId, draftKey: "draft", resizeKey: "composer-height",
+      })),
+    createElement("button", null, "elsewhere"),
+    createElement("div", { role: "search" }, createElement("input", { "aria-label": "Find" })));
 }
-visit(source);
-assert.ok(focusEffect);
 
-test("the embedded side-chat caller uses activation requests without remounting", () => {
-  const app = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const callers = [];
-  function visit(node) {
-    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(app) === "ChatPanel"
-      && node.attributes.properties.some(prop => ts.isJsxAttribute(prop)
-        && prop.name.text === "embedded")) callers.push(node);
-    ts.forEachChild(node, visit);
-  }
-  visit(app);
-  assert.equal(callers.length, 1);
-  const attributes = callers[0].attributes.properties.filter(ts.isJsxAttribute);
-  assert.ok(attributes.some(prop => prop.name.text === "embedded"));
-  const nonce = attributes.find(prop => prop.name.text === "composerFocusNonce")?.initializer;
-  assert.equal(nonce?.getText(app), "{sideComposerFocusNonce}");
-  assert.ok(!attributes.some(prop => prop.name.text === "key"));
-  const promotion = attributes.find(prop => prop.name.text === "onActiveSessionChange").initializer.getText(app);
-  assert.match(promotion, /openSideTab\(sessionId\)/);
-  assert.doesNotMatch(promotion, /focusSideTab|setSideComposerFocusNonce/);
-  assert.match(app.text, /onSelectSideChat=\{focusSideTab\}/);
-});
-
-test("repeated explicit openings request focus while navigation alone does not", () => {
-  const app = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let activation;
-  let start;
-  function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(app) === "focusSideTab") activation = node.initializer;
-    if (ts.isVariableDeclaration(node) && node.name.getText(app) === "startSideChat") start = node.initializer;
-    ts.forEachChild(node, visit);
-  }
-  visit(app);
-  assert.ok(activation);
-  assert.match(start.getText(app), /focusSideTab\(null\)/);
-  assert.match(start.getText(app), /focusSideTab\(session.id\)/);
-  let nonce = 0;
-  const opened = [];
-  const navigate = id => opened.push(id);
-  const activate = new Function("useCallback", "setSideComposerFocusNonce", "openSideTab",
-    `return ${ts.transpile(activation.getText(app))}`)(
-    callback => callback,
-    update => { nonce = update(nonce); },
-    navigate,
-  );
-  for (const id of [null, null, "existing-side"]) activate(id);
-  assert.equal(nonce, 3);
-  navigate("persisted-draft");
-  assert.equal(nonce, 3);
-  assert.deepEqual(opened, [null, null, "existing-side", "persisted-draft"]);
-});
-
-function composer() {
-  const frames = new Map();
-  const document = { activeElement: null };
-  const calls = [];
-  const focusedComposerNonce = { current: 0 };
-  let nextFrame = 0;
-  let cleanup;
-  let previousDeps;
-  const input = {
-    value: "side question",
-    focus() { document.activeElement = input; calls.push("focus"); },
-    setSelectionRange(start, end) { calls.push([start, end]); },
-    scrollIntoView() {},
-  };
-  const bindings = {
-    composerFocusNonce: 0, contentLoading: false, contentError: null, historyLoading: false,
-    focusedComposerNonce, composerRef: { current: input }, document,
-    window: {
-      requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; },
-      cancelAnimationFrame(id) { frames.delete(id); },
-    },
-  };
+/** A composer whose props follow each `update`. */
+async function composer(initial = {}) {
+  let props = initial;
+  const view = await render(createElement(Composer, props));
+  const field = view.container.querySelector(".cm-content");
   return {
-    calls, document, input,
-    render(props) {
-      Object.assign(bindings, props);
-      const evaluate = node => new Function(...Object.keys(bindings), `return (${node.getText(source)})`)(...Object.values(bindings));
-      const deps = evaluate(focusEffect.arguments[1]);
-      if (previousDeps?.every((value, index) => Object.is(value, deps[index]))) return;
-      cleanup?.();
-      previousDeps = deps;
-      cleanup = evaluate(focusEffect.arguments[0])();
-    },
-    flush() {
-      const pending = [...frames.values()];
-      frames.clear();
-      pending.forEach(callback => callback());
-    },
+    field,
+    focused: () => document.activeElement === field,
+    caret: () => EditorView.findFromDOM(field).state.selection.main.head,
+    update: (next) => view.rerender(createElement(Composer, props = { ...props, ...next })),
+    elsewhere: () => act(async () => view.container.querySelector("button").focus()),
+    search: () => act(async () => view.container.querySelector("[role=search] input").focus()),
   };
 }
 
-for (const loading of ["contentLoading", "contentError", "historyLoading"]) {
-  test(`composer focus waits for ${loading} and does not steal focus afterward`, () => {
-    const chat = composer();
-    chat.render({ composerFocusNonce: 1, [loading]: true });
-    chat.flush();
-    assert.deepEqual(chat.calls, []);
-    chat.render({ [loading]: false });
-    chat.flush();
-    assert.equal(chat.document.activeElement, chat.input);
-    assert.deepEqual(chat.calls, ["focus", [13, 13]]);
-    const main = {};
-    chat.document.activeElement = main;
-    chat.render({ [loading]: true });
-    chat.render({ [loading]: false });
-    chat.flush();
-    assert.equal(chat.document.activeElement, main);
-    assert.equal(chat.calls.length, 2);
-  });
-}
+test("composer focus waits until the chat is ready and does not steal focus afterward", async () => {
+  const chat = await composer({ nonce: 1, ready: false });
+  await flush();
+  assert.equal(chat.focused(), false);
+  await chat.update({ ready: true });
+  await flush();
+  assert.equal(chat.focused(), true);
+  assert.equal(chat.caret(), "side question".length);
+  await chat.elsewhere();
+  await chat.update({ ready: false });
+  await chat.update({ ready: true });
+  await flush();
+  assert.equal(chat.focused(), false);
+});
 
-test("a new nonce requests focus, but the default and unchanged nonce do not", () => {
-  const chat = composer();
-  chat.render({});
-  chat.flush();
-  assert.deepEqual(chat.calls, []);
+test("a new nonce requests focus, but the default and unchanged nonce do not", async () => {
+  const chat = await composer();
+  await flush();
+  assert.equal(chat.focused(), false);
   for (const nonce of [1, 2]) {
-    chat.render({ composerFocusNonce: nonce });
-    chat.flush();
-    assert.equal(chat.calls.length, nonce * 2);
-    chat.render({});
-    chat.flush();
-    assert.equal(chat.calls.length, nonce * 2);
+    await chat.update({ nonce });
+    await flush();
+    assert.equal(chat.focused(), true);
+    await chat.elsewhere();
+    await chat.update({ activeId: `rerender-${nonce}` });
+    await flush();
+    assert.equal(chat.focused(), false);
   }
 });
 
-test("loading cancels scheduled focus without consuming its request", () => {
-  const chat = composer();
-  chat.render({ composerFocusNonce: 1 });
-  chat.render({ historyLoading: true });
-  chat.flush();
-  assert.deepEqual(chat.calls, []);
-  chat.render({ historyLoading: false });
-  chat.flush();
-  assert.equal(chat.document.activeElement, chat.input);
+test("search navigation consumes composer focus without leaving the search field", async () => {
+  const chat = await composer();
+  await chat.search();
+  const field = document.activeElement;
+  await chat.update({ nonce: 1 });
+  await flush();
+  assert.ok(document.activeElement === field, "focus stays in the search field");
+
+  await chat.elsewhere();
+  await chat.update({ ready: false });
+  await chat.update({ ready: true });
+  await flush();
+  assert.equal(chat.focused(), false, "a request search consumed stays consumed");
 });
 
-test("unsuccessful focus leaves the request pending", () => {
-  const chat = composer();
-  const focus = chat.input.focus;
-  chat.input.focus = () => {};
-  chat.render({ composerFocusNonce: 1 });
-  chat.flush();
-  assert.deepEqual(chat.calls, []);
-  chat.input.focus = focus;
-  chat.render({ historyLoading: true });
-  chat.render({ historyLoading: false });
-  chat.flush();
-  assert.equal(chat.document.activeElement, chat.input);
+test("loading cancels scheduled focus without consuming its request", async () => {
+  const chat = await composer({ nonce: 1 });
+  await chat.update({ ready: false });
+  await flush();
+  assert.equal(chat.focused(), false);
+  await chat.update({ ready: true });
+  await flush();
+  assert.equal(chat.focused(), true);
+});
+
+test("unsuccessful focus leaves the request pending", async () => {
+  const chat = await composer({ nonce: 1, inert: true });
+  await flush();
+  assert.equal(chat.focused(), false);
+  await chat.update({ inert: false, ready: false });
+  await chat.update({ ready: true });
+  await flush();
+  assert.equal(chat.focused(), true);
+});
+
+test("new-chat focus waits for the requested project and new-chat route", async () => {
+  const chat = await composer({ activeId: "existing" });
+  await act(async () => requestNewChat("other"));
+  await flush();
+  assert.equal(chat.focused(), false);
+  await chat.update({ projectId: "other", activeId: null, ready: false });
+  await flush();
+  assert.equal(chat.focused(), false);
+  await chat.update({ ready: true });
+  await flush();
+  assert.equal(chat.focused(), true);
+});
+
+test("opening a side chat focuses its composer each time, and navigating to one does not", async () => {
+  const sideTab = (sessionId) => `?pane=${encodeURIComponent(JSON.stringify({ kind: "side", sessionId }))}`;
+  const chat = await renderChat("/projects/p/tasks/s", { sessions: [session("s"), session("side", { sideParentSessionId: "s" })] });
+  const focused = () => document.activeElement === document.querySelectorAll('[data-onboarding="composer"]')[1].querySelector(".cm-content");
+  const blur = () => act(async () => document.activeElement.blur());
+  const open = async () => {
+    await act(async () => find(`button[aria-label="${m.side_chat_open()}"]`).click());
+    await settle();
+    await flush();
+  };
+
+  await open();
+  assert.equal(focused(), true);
+  await blur();
+  await open();
+  assert.equal(focused(), true);
+
+  await blur();
+  await chat.navigate(`/projects/p/tasks/s${sideTab("side")}`);
+  await flush();
+  assert.equal(focused(), false);
 });

@@ -1,3 +1,5 @@
+import { useTerminalSession } from "./useTerminalSession";
+import { useWorkspace } from "../workspace";
 import { useEffect, useRef, useState } from "react";
 import { m } from "../paraglide/messages.js";
 import { Button } from "./ui";
@@ -10,20 +12,16 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
   sessionId: string | null;
   active: boolean;
 }) {
+  const { socketUrl } = useWorkspace();
   const wrapRef = useRef<HTMLDivElement>(null);
-  const mountRef = useRef<ReturnType<typeof mountTerminal> | null>(null);
   const [ended, setEnded] = useState<string | null>(null);
   const [generation, setGeneration] = useState(0);
 
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    if (!wrap) return;
+  const session = useTerminalSession(wrapRef, JSON.stringify([projectId, sessionId, generation]), (wrap) => {
     const mounted = mountTerminal(wrap, false, true, "app");
     const { terminal, dispose } = mounted;
-    mountRef.current = mounted;
     setEnded(null);
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = new URL(`/api/projects/${encodeURIComponent(projectId)}/terminal`, `${protocol}//${location.host}`);
+    const url = socketUrl(`/api/projects/${encodeURIComponent(projectId)}/terminal`);
     if (sessionId) url.searchParams.set("sessionId", sessionId);
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
@@ -65,7 +63,7 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
     socket.onclose = () => finish(m.workspace_terminal_disconnected());
     socket.onerror = () => finish(m.workspace_terminal_disconnected());
 
-    return () => {
+    return { ...mounted, dispose: () => {
       socket.onopen = null;
       socket.onmessage = null;
       socket.onerror = null;
@@ -73,17 +71,16 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
       input.dispose();
       resize.dispose();
       socket.close();
-      mountRef.current = null;
       dispose();
-    };
-  }, [projectId, sessionId, generation]);
+    } };
+  });
 
   useEffect(() => {
     if (!active || ended !== null) return;
     // A terminal mounted while hidden measured a zero-size cell; refit once visible.
     const frame = requestAnimationFrame(() => {
-      mountRef.current?.fit();
-      mountRef.current?.terminal.focus();
+      session.current?.mounted.fit();
+      session.current?.mounted.terminal.focus();
     });
     return () => cancelAnimationFrame(frame);
   }, [active, ended, generation]);

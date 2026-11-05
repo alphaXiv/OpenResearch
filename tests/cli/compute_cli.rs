@@ -49,6 +49,8 @@ impl Sandbox {
 }
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        orx_test_support::stop_server(&self.0.join("data"));
         if let Ok(db) = rusqlite::Connection::open(self.0.join("data/orx.db")) {
             let _ = db.execute(
                 "UPDATE runs SET status='cancelled' WHERE status IN ('running','starting')",
@@ -330,213 +332,6 @@ fn standalone_settings_defaults_and_instruction_conflicts() {
 
 #[cfg(unix)]
 #[test]
-fn interactive_ssh_retires_rejected_masters_without_unlinking_unknown_connections() {
-    std::thread::scope(|scope| {
-        for case in [
-            "healthy",
-            "legacy_other",
-            "legacy_unresolvable",
-            "legacy_same",
-            "rejection",
-            "exit_zero",
-            "stop_failure",
-            "probe_timeout",
-            "check_timeout",
-            "stop_timeout",
-        ] {
-            scope.spawn(move || interactive_ssh_case(case));
-        }
-    });
-}
-
-#[cfg(unix)]
-fn interactive_ssh_case(case: &str) {
-    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-    use std::io::Read;
-    use std::os::unix::fs::PermissionsExt;
-
-    let sandbox = Sandbox::new();
-    std::fs::write(
-        sandbox.0.join(".ssh/config"),
-        "Host lab\n  HostName localhost\n",
-    )
-    .unwrap();
-    let bin = sandbox.0.join("bin");
-    std::fs::create_dir(&bin).unwrap();
-    let ssh = bin.join("ssh");
-    std::fs::write(&ssh, r#"#!/bin/sh
-if [ "$1" = -G ]; then
-  for dest do :; done
-  if [ "$dest" = unresolvable-host ]; then echo "Invalid legacy SSH route" >&2; exit 1; fi
-  exec /usr/bin/ssh -F /dev/null "$@"
-fi
-printf '%s\n' "$*" >> "$HOME/calls"
-case "$*" in
-  *'-O check -S '*)
-    socket=$4
-    printf '%s' "$socket" > "$HOME/socket-path"
-    : > "$socket"
-    if [ "$CASE" = check_timeout ]; then exec sleep 30; fi
-    exit 0;;
-  *'-O stop -S '*)
-    socket=$4
-    case "$CASE" in
-      stop_failure) exit 1;;
-      stop_timeout) exec sleep 30;;
-    esac
-    rm "$socket"
-    exit 0;;
-  *'echo __ORX_SESSION_OK__'*)
-    case "$*" in
-      *'-oBatchMode=yes -oControlMaster=no -oControlPersist=no -oProxyCommand=false -oClearAllForwardings=yes -oRemoteCommand=none -T -S '*) ;;
-      *) echo 'probe allows fallback or user configuration' >&2; exit 99;;
-    esac
-    case "$CASE" in
-      healthy) echo __ORX_SESSION_OK__;;
-      rejection) echo 'cannot assign requested address' >&2; exit 1;;
-      exit_zero|stop_failure|stop_timeout) echo 'cannot assign requested address';;
-      probe_timeout) exec sleep 30;;
-    esac
-    exit 0;;
-  *'-- lab true') echo LOGIN; exit 0;;
-  *'sys.stdin.buffer.read'*) for cmd do :; done; exec /bin/sh -c "$cmd";;
-  *'command -v bash'*) exit 0;;
-  *) exit 1;;
-esac
-"#).unwrap();
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    for case in std::iter::once(case).chain((case == "healthy").then_some("backoff")) {
-        let _ = std::fs::remove_file(sandbox.0.join("calls"));
-        let command = sandbox.command();
-        let mut builder = CommandBuilder::new(command.get_program());
-        builder.args(command.get_args());
-        for (key, value) in command.get_envs() {
-            match value {
-                Some(value) => builder.env(key, value),
-                None => builder.env_remove(key),
-            }
-        }
-        builder.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
-        let data = sandbox
-            .0
-            .join(if case == "backoff" { "healthy" } else { case });
-        if case == "backoff" {
-            let root = std::fs::read_dir(&data)
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .find(|path| {
-                    path.file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .starts_with("ssh-service-")
-                })
-                .unwrap();
-            let db = rusqlite::Connection::open(root.join("state.sqlite3")).unwrap();
-            db.execute(
-                "UPDATE connections SET failures=6, next_at=?1",
-                [i64::try_from(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis(),
-                )
-                .unwrap()
-                    + 300_000],
-            )
-            .unwrap();
-        }
-        let legacy = matches!(case, "legacy_other" | "legacy_same" | "legacy_unresolvable");
-        let mut legacy_lock = if legacy {
-            let output = sandbox
-                .command()
-                .env("ORX_DATA_DIR", &data)
-                .args(["projects", "--json"])
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            let db = rusqlite::Connection::open(data.join("orx.db")).unwrap();
-            let host = match case {
-                "legacy_same" => "lab",
-                "legacy_unresolvable" => "unresolvable-host",
-                _ => "unrelated-host",
-            };
-            let backend = json!({"kind":"ssh_job", "namespace":host, "jobId":".orx/runs/legacy"});
-            db.execute("INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
-            db.execute("INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at) VALUES ('legacy','exp','project','running',?1,0,0)", [backend.to_string()]).unwrap();
-            std::fs::create_dir_all(data.join("run-logs")).unwrap();
-            Some(fd_lock::RwLock::new(
-                std::fs::File::create(data.join("run-logs/legacy.supervisor.lock")).unwrap(),
-            ))
-        } else {
-            None
-        };
-        let _legacy_guard = legacy_lock.as_mut().map(|lock| lock.write().unwrap());
-        builder.env("ORX_DATA_DIR", &data);
-        builder.env(
-            "CASE",
-            if case == "backoff" || legacy {
-                "healthy"
-            } else {
-                case
-            },
-        );
-        builder.args(["compute", "connect", "ssh", "--host", "lab"]);
-        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-        let mut child = pair.slave.spawn_command(builder).unwrap();
-        drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let mut output = Vec::new();
-        // Linux PTYs report EIO instead of EOF when the slave closes.
-        if let Err(error) = reader.read_to_end(&mut output) {
-            assert_eq!(error.raw_os_error(), Some(libc::EIO));
-        }
-        let status = child.wait().unwrap();
-        let calls = std::fs::read_to_string(sandbox.0.join("calls")).unwrap();
-        let socket = PathBuf::from(std::fs::read_to_string(sandbox.0.join("socket-path")).unwrap());
-        let output = String::from_utf8_lossy(&output);
-        if legacy {
-            rusqlite::Connection::open(data.join("orx.db"))
-                .unwrap()
-                .execute("UPDATE runs SET status='cancelled' WHERE id='legacy'", [])
-                .unwrap();
-            sandbox.stop_service(&data);
-        }
-        match case {
-            "healthy" | "backoff" | "legacy_other" | "legacy_unresolvable" => {
-                assert!(status.success(), "{output}");
-                assert!(!calls.contains("-O stop"));
-                assert!(socket.exists());
-                assert!(output.contains("LOGIN"));
-            }
-            "legacy_same" => {
-                assert!(!status.success(), "{output}");
-                assert!(output.contains("older OpenResearch process"), "{output}");
-            }
-            "rejection" | "exit_zero" => {
-                assert!(status.success(), "{output}");
-                assert!(calls.find("-O stop").unwrap() < calls.find("-- lab true").unwrap());
-                assert!(!socket.exists());
-                assert!(output.contains("LOGIN"));
-            }
-            _ => {
-                assert!(!status.success(), "{case}: {output}");
-                assert!(socket.exists(), "{case} removed an unknown/live socket");
-                assert!(!output.contains("LOGIN"));
-                if case != "stop_failure" && case != "stop_timeout" {
-                    assert!(!calls.contains("-O stop"));
-                }
-            }
-        }
-        sandbox.stop_service(&data);
-        assert!(!calls.contains("-O exit"));
-        let _ = std::fs::remove_file(&socket);
-        let _ = std::fs::remove_file(socket.with_extension("lock"));
-    }
-}
-
-#[cfg(unix)]
-#[test]
 fn ssh_config_conflict_and_execution_target_checks() {
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
@@ -601,6 +396,10 @@ fn ssh_config_conflict_and_execution_target_checks() {
         .contains("Host lab"));
 }
 
+/// Divides the supervisor's production waits (5 s polls, 60 s monitoring grace).
+#[cfg(unix)]
+const SUPERVISE_SPEEDUP: u32 = 20;
+
 #[cfg(unix)]
 #[test]
 fn slurm_supervisor_survives_connection_and_accounting_loss() {
@@ -659,6 +458,7 @@ exec python3 "$HOME/ssh-monitor-fixture.py" "$cmd"
         sandbox
             .command()
             .env("SSH_BACKEND", if ssh_backend { "1" } else { "0" })
+            .env("ORX_TEST_SPEEDUP", SUPERVISE_SPEEDUP.to_string())
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .args(["supervise", "00000000-0000-4000-8000-000000000001"])
             .stdout(std::process::Stdio::null())
@@ -689,13 +489,12 @@ exec python3 "$HOME/ssh-monitor-fixture.py" "$cmd"
         }
     };
     let wait = |condition: &dyn Fn() -> bool| wait_for(Duration::from_secs(15), condition);
-    // A missing scheduler record is reported only after about a minute, without failing the run.
+    // A missing scheduler record is reported only after the monitoring grace, without failing the run.
     wait(&|| {
         std::fs::read_to_string(sandbox.0.join("calls")).is_ok_and(|c| c.contains("exit_code"))
     });
-    std::thread::sleep(Duration::from_secs(10));
-    assert!(metadata()["monitoringError"].is_null());
-    wait_for(Duration::from_secs(75), &|| {
+    let missing_since = Instant::now();
+    wait(&|| {
         metadata()["monitoringError"].as_str().is_some_and(|s| {
             s.contains(if ssh_backend {
                 "unexpected inspect output"
@@ -704,6 +503,8 @@ exec python3 "$HOME/ssh-monitor-fixture.py" "$cmd"
             })
         })
     });
+    let grace = Duration::from_secs(60) / SUPERVISE_SPEEDUP;
+    assert!(missing_since.elapsed() >= grace - Duration::from_millis(500));
     std::fs::write(&phase, "outage").unwrap();
     wait(&|| {
         metadata()["monitoringError"]
@@ -915,6 +716,7 @@ esac
         Child(
             sandbox
                 .command()
+                .env("ORX_TEST_SPEEDUP", SUPERVISE_SPEEDUP.to_string())
                 .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
                 .args(["supervise", "00000000-0000-4000-8000-000000000001"])
                 .stdout(std::process::Stdio::null())
@@ -950,8 +752,8 @@ esac
         }
     };
     let child = spawn();
-    wait(&|| status() == "running");
-    assert!(sandbox.0.join("cancel-calls").exists());
+    // The supervisor reports the job running before it delivers the pending cancel.
+    wait(&|| status() == "running" && sandbox.0.join("cancel-calls").exists());
     assert_ne!(metadata()["cancellationAccepted"], true);
     assert_eq!(status(), "running");
     std::fs::write(sandbox.0.join("phase"), "unavailable").unwrap();

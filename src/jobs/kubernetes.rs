@@ -36,7 +36,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
-use tokio::process::Command;
 
 use crate::error::{anyhow, Result};
 
@@ -53,8 +52,7 @@ const PRIMARY_LABEL: &str = "orx-primary";
 
 /// User-tunable k8s settings, stored at
 /// `$XDG_CONFIG_HOME/openresearch/k8s.json`. No secrets in here — kubectl
-/// holds all auth. (Older files may carry extra fields like `flavors`; they
-/// parse fine and are dropped on the next save.)
+/// holds all auth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct K8sSettings {
@@ -63,6 +61,9 @@ pub struct K8sSettings {
     pub context: Option<String>,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_namespace() -> String {
@@ -74,6 +75,7 @@ impl Default for K8sSettings {
         Self {
             context: None,
             namespace: default_namespace(),
+            unknown: Default::default(),
         }
     }
 }
@@ -112,8 +114,21 @@ pub fn save_settings(settings: &K8sSettings) -> Result<()> {
 
 /// Run kubectl with the given args (plus `--context` when set), feeding
 /// `stdin` if provided. Non-zero exit → Err carrying stderr.
-async fn kubectl(context: Option<&str>, args: &[&str], stdin: Option<&str>) -> Result<String> {
-    let mut cmd = Command::new("kubectl");
+pub(crate) async fn kubectl(
+    context: Option<&str>,
+    args: &[&str],
+    stdin: Option<&str>,
+) -> Result<String> {
+    kubectl_fenced(context, args, stdin, None).await
+}
+
+async fn kubectl_fenced(
+    context: Option<&str>,
+    args: &[&str],
+    stdin: Option<&str>,
+    fence: Option<&crate::engine::Fence<'_>>,
+) -> Result<String> {
+    let mut cmd = crate::process::tokio_command("kubectl");
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
@@ -132,6 +147,18 @@ async fn kubectl(context: Option<&str>, args: &[&str], stdin: Option<&str>) -> R
             anyhow!("Could not run kubectl: {}", e)
         }
     })?;
+    if let Some(fence) = fence {
+        let recorded = fence.record_submitter(
+            child
+                .id()
+                .ok_or_else(|| anyhow!("kubectl exited before fencing"))?,
+        );
+        if let Err(error) = recorded {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    }
     if let Some(body) = stdin {
         let mut pipe = child.stdin.take().expect("piped stdin");
         pipe.write_all(body.as_bytes()).await?;
@@ -185,7 +212,7 @@ pub async fn preflight(context: Option<&str>, namespace: &str) -> Preflight {
     // `auth can-i` answers reachability and permission in one round trip:
     // "yes"/"no" on stdout both mean the API server responded (it exits 1 on
     // "no", so run it raw rather than through the exit-code-checking runner).
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = crate::process::tokio_command("kubectl");
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
@@ -229,6 +256,7 @@ pub async fn preflight(context: Option<&str>, namespace: &str) -> Preflight {
 
 // --- manifest submission --------------------------------------------------------
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ManifestSpec {
     /// Raw manifest text as committed on the experiment branch (YAML or JSON,
     /// multi-document fine).
@@ -239,11 +267,13 @@ pub struct ManifestSpec {
     /// Run-unique DNS-safe token substituted for `{{ORX_RUN}}`.
     pub run_token: String,
     /// Synced into the `orx-env` Secret.
+    #[serde(default)]
     pub env: HashMap<String, String>,
     /// Injected as `activeDeadlineSeconds` when the manifest doesn't set one.
     pub timeout_seconds: u64,
     pub labels: HashMap<String, String>,
     /// Set on the primary Job's containers, not in the shared `orx-env` Secret.
+    #[serde(default)]
     pub pod_env: Vec<(String, String)>,
     pub source_archive: PathBuf,
 }
@@ -257,10 +287,11 @@ pub struct Submitted {
 
 /// Sync the env Secret, then validate and create the manifest's resources.
 /// On a partial failure everything already created is rolled back.
-pub async fn run_manifest(
+pub(crate) async fn run_manifest(
     context: Option<&str>,
     namespace: &str,
     spec: &ManifestSpec,
+    fence: Option<&crate::engine::Fence<'_>>,
 ) -> Result<Submitted> {
     if !spec.env.is_empty() {
         // stringData via stdin — values never appear on a command line.
@@ -275,6 +306,47 @@ pub async fn run_manifest(
         kubectl(context, &["apply", "-f", "-"], Some(&secret.to_string())).await?;
     }
 
+    let (docs, job_name) = prepared_manifest(context, namespace, spec).await?;
+
+    // Create one resource at a time so a failure can roll back exactly what
+    // exists so far (a multi-doc `kubectl create` stops mid-way but doesn't
+    // undo).
+    let mut created: Vec<String> = Vec::new();
+    for doc in &docs {
+        let handle = resource_handle(doc);
+        if let Err(e) = kubectl_fenced(
+            context,
+            &["create", "-f", "-"],
+            Some(&doc.to_string()),
+            fence,
+        )
+        .await
+        {
+            for r in created.iter().rev() {
+                let _ = delete_resources(context, namespace, std::slice::from_ref(r)).await;
+            }
+            return Err(anyhow!("could not create {handle}: {e}"));
+        }
+        created.push(handle);
+    }
+    let staged = stage_source(context, namespace, &job_name, &spec.source_archive).await;
+    if let Err(error) = staged {
+        for resource in created.iter().rev() {
+            let _ = delete_resources(context, namespace, std::slice::from_ref(resource)).await;
+        }
+        return Err(error);
+    }
+    Ok(Submitted {
+        job_name,
+        resources: created,
+    })
+}
+
+pub(crate) async fn prepared_manifest(
+    context: Option<&str>,
+    namespace: &str,
+    spec: &ManifestSpec,
+) -> Result<(Vec<Value>, String)> {
     let rendered = spec.manifest.replace("{{ORX_RUN}}", &spec.run_token);
     // YAML → JSON plus schema sanity in one step, without touching the
     // cluster and without a YAML dependency.
@@ -310,34 +382,10 @@ pub async fn run_manifest(
         &spec.pod_env,
     )?;
 
-    // Create one resource at a time so a failure can roll back exactly what
-    // exists so far (a multi-doc `kubectl create` stops mid-way but doesn't
-    // undo).
-    let mut created: Vec<String> = Vec::new();
-    for doc in &docs {
-        let handle = resource_handle(doc);
-        if let Err(e) = kubectl(context, &["create", "-f", "-"], Some(&doc.to_string())).await {
-            for r in created.iter().rev() {
-                let _ = delete_resources(context, namespace, std::slice::from_ref(r)).await;
-            }
-            return Err(anyhow!("could not create {handle}: {e}"));
-        }
-        created.push(handle);
-    }
-    let staged = stage_source(context, namespace, &job_name, &spec.source_archive).await;
-    if let Err(error) = staged {
-        for resource in created.iter().rev() {
-            let _ = delete_resources(context, namespace, std::slice::from_ref(resource)).await;
-        }
-        return Err(error);
-    }
-    Ok(Submitted {
-        job_name,
-        resources: created,
-    })
+    Ok((docs, job_name))
 }
 
-async fn stage_source(
+pub(crate) async fn stage_source(
     context: Option<&str>,
     namespace: &str,
     job_name: &str,
@@ -365,20 +413,33 @@ async fn stage_source(
         .unwrap_or_default();
         let pod = pod.trim();
         if !pod.is_empty() {
+            if kubectl(
+                context,
+                &[
+                    "exec",
+                    "-n",
+                    namespace,
+                    pod,
+                    "--",
+                    "test",
+                    "-f",
+                    "/tmp/orx-source/source.tar.ready",
+                ],
+                None,
+            )
+            .await
+            .is_ok()
+            {
+                return Ok(());
+            }
             let local = archive.to_string_lossy().into_owned();
-            let remote = format!("{namespace}/{pod}:/tmp/orx-source/source.tar");
+            let remote = format!("{namespace}/{pod}:/tmp/orx-source/source.tar.part");
+            let size = tokio::fs::metadata(archive).await?.len();
+            let publish = format!("set -e; cd /tmp/orx-source; test -f source.tar.ready && exit 0; test $(wc -c < source.tar.part) -eq {size}; mv source.tar.part source.tar; touch source.tar.ready");
             match kubectl(context, &["cp", &local, &remote], None).await {
                 Ok(_) => match kubectl(
                     context,
-                    &[
-                        "exec",
-                        "-n",
-                        namespace,
-                        pod,
-                        "--",
-                        "touch",
-                        "/tmp/orx-source/source.tar.ready",
-                    ],
+                    &["exec", "-n", namespace, pod, "--", "sh", "-c", &publish],
                     None,
                 )
                 .await
@@ -457,7 +518,7 @@ fn pod_exit(pod: &Value) -> Option<(String, String)> {
     ))
 }
 
-fn resource_handle(doc: &Value) -> String {
+pub(crate) fn resource_handle(doc: &Value) -> String {
     format!(
         "{}/{}",
         doc["kind"].as_str().unwrap_or("").to_lowercase(),
@@ -695,6 +756,7 @@ fn prepare_docs(
 pub struct JobState {
     pub stage: String,
     pub message: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> Result<JobState> {
@@ -706,12 +768,11 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
     .await
     {
         Ok(raw) => raw,
-        // A deleted Job is how cancel manifests (and how TTL cleanup looks
-        // long after terminal — supervise has exited by then).
         Err(e) if e.to_string().contains("NotFound") => {
             return Ok(JobState {
                 stage: "DELETED".to_string(),
                 message: None,
+                exit_code: None,
             })
         }
         Err(e) => return Err(e),
@@ -732,24 +793,9 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
         return Ok(JobState {
             stage: "COMPLETED".to_string(),
             message: None,
+            exit_code: Some(0),
         });
     }
-    if let Some(failed) = condition("Failed") {
-        let reason = failed["reason"].as_str().unwrap_or("");
-        let msg = failed["message"].as_str().unwrap_or("");
-        return Ok(JobState {
-            stage: "ERROR".to_string(),
-            message: Some(
-                format!("{reason}: {msg}")
-                    .trim_matches([':', ' '])
-                    .to_string(),
-            ),
-        });
-    }
-
-    // Live: RUNNING once every expected pod runs (the whole gang for Indexed
-    // jobs), SCHEDULING before that (surfacing pod waiting reasons like
-    // ImagePullBackOff so "stuck" is diagnosable).
     let pods_raw = kubectl(
         context,
         &[
@@ -766,7 +812,40 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
     )
     .await
     .unwrap_or_default();
-    let pods: Value = serde_json::from_str(&pods_raw).unwrap_or_else(|_| json!({"items": []}));
+    let pods: Value = serde_json::from_str(&pods_raw).unwrap_or_default();
+    if let Some(failed) = condition("Failed") {
+        let reason = failed["reason"].as_str().unwrap_or("");
+        let msg = failed["message"].as_str().unwrap_or("");
+        return Ok(JobState {
+            stage: "ERROR".to_string(),
+            exit_code: pods["items"]
+                .as_array()
+                .unwrap_or(&empty)
+                .iter()
+                .find_map(|pod| {
+                    let script = pod["metadata"]["annotations"]
+                        ["kubectl.kubernetes.io/default-container"]
+                        .as_str()?;
+                    pod["status"]["containerStatuses"]
+                        .as_array()?
+                        .iter()
+                        .find(|container| container["name"] == script)?["state"]["terminated"]
+                        ["exitCode"]
+                        .as_i64()
+                        .and_then(|code| i32::try_from(code).ok())
+                        .filter(|code| *code != 0)
+                }),
+            message: Some(
+                format!("{reason}: {msg}")
+                    .trim_matches([':', ' '])
+                    .to_string(),
+            ),
+        });
+    }
+
+    // Live: RUNNING once every expected pod runs (the whole gang for Indexed
+    // jobs), SCHEDULING before that (surfacing pod waiting reasons like
+    // ImagePullBackOff so "stuck" is diagnosable).
     let mut waiting_msg = None;
     let mut live = 0u64;
     for pod in pods["items"].as_array().unwrap_or(&empty) {
@@ -787,11 +866,13 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
         return Ok(JobState {
             stage: "RUNNING".to_string(),
             message: None,
+            exit_code: None,
         });
     }
     Ok(JobState {
         stage: "SCHEDULING".to_string(),
         message: waiting_msg,
+        exit_code: None,
     })
 }
 
@@ -805,7 +886,14 @@ pub async fn delete_resources(
     for r in resources.iter().rev() {
         match kubectl(
             context,
-            &["delete", r, "-n", namespace, "--wait=false"],
+            &[
+                "delete",
+                r,
+                "-n",
+                namespace,
+                "--cascade=foreground",
+                "--wait=false",
+            ],
             None,
         )
         .await
@@ -821,7 +909,12 @@ pub async fn delete_resources(
 /// The pod whose stdout is the run log: the completion-index-0 pod for
 /// Indexed jobs (the annotation exists on any cluster with Indexed jobs),
 /// else the job's first pod by name. `None` while no pod exists yet.
-async fn leader_pod(context: Option<&str>, namespace: &str, job_name: &str) -> Option<String> {
+/// `None` while no pod is scheduled; a failed lookup is an error, never "no pod".
+async fn leader_pod(
+    context: Option<&str>,
+    namespace: &str,
+    job_name: &str,
+) -> Result<Option<String>> {
     let raw = kubectl(
         context,
         &[
@@ -836,22 +929,22 @@ async fn leader_pod(context: Option<&str>, namespace: &str, job_name: &str) -> O
         ],
         None,
     )
-    .await
-    .ok()?;
-    let pods: Value = serde_json::from_str(&raw).ok()?;
+    .await?;
+    let pods: Value = serde_json::from_str(&raw)?;
+    let unexpected = || anyhow!("Unexpected kubectl pod listing");
     let mut names: Vec<&str> = Vec::new();
-    for pod in pods["items"].as_array()? {
-        let name = pod["metadata"]["name"].as_str()?;
+    for pod in pods["items"].as_array().ok_or_else(unexpected)? {
+        let name = pod["metadata"]["name"].as_str().ok_or_else(unexpected)?;
         let index = pod["metadata"]["annotations"]["batch.kubernetes.io/job-completion-index"]
             .as_str()
             .unwrap_or("");
         if index == "0" {
-            return Some(name.to_string());
+            return Ok(Some(name.to_string()));
         }
         names.push(name);
     }
     names.sort_unstable();
-    names.first().map(|n| n.to_string())
+    Ok(names.first().map(|n| n.to_string()))
 }
 
 /// RFC3339Nano with trailing zeros trimmed doesn't sort as text; pad the
@@ -874,7 +967,7 @@ fn sort_key(ts: &str) -> Option<String> {
 
 /// Where the run log left off: the newest kubelet timestamp written and the
 /// lines that carried it, so a reconnect resumes there even after log rotation.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct LogResume {
     key: String,
     tied: Vec<String>,
@@ -930,7 +1023,9 @@ impl LogResume {
 /// not line count: kubelet serves only the current log file, so after
 /// rotation a replay from the start is shorter than what was already written.
 /// Ends when kubectl exits (pod gone/finished) or after `idle` silence; the
-/// supervisor re-checks job state and reconnects if still live.
+/// supervisor re-checks job state and reconnects if still live. True only when
+/// kubectl's stream closed or the Job and its pods are gone, never for an
+/// unscheduled pod or an idle stop.
 ///
 /// Only the leader pod is captured: a stable single stream keeps the resume
 /// point sound, and the leader is where the driver's output lives. Other pods
@@ -940,18 +1035,17 @@ pub async fn stream_logs(
     namespace: &str,
     job_name: &str,
     resume: &mut LogResume,
-    idle: Duration,
+    idle: Option<Duration>,
     sink: &mut (dyn FnMut(&str) + Send),
-) -> Result<()> {
+) -> Result<bool> {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-    let target = match leader_pod(context, namespace, job_name).await {
+    let target = match leader_pod(context, namespace, job_name).await? {
         Some(pod) => format!("pod/{pod}"),
-        // Not scheduled yet — let the supervisor's retry loop come back.
-        None => return Ok(()),
+        None => return Ok(inspect_job(context, namespace, job_name).await?.stage == "DELETED"),
     };
 
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = crate::process::tokio_command("kubectl");
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
@@ -973,15 +1067,19 @@ pub async fn stream_logs(
     let mut lines = BufReader::new(stdout).lines();
     let mut pass = Pass::default();
     loop {
-        match tokio::time::timeout(idle, lines.next_line()).await {
-            Err(_) => break, // idle — let the caller re-check state
+        let next = match idle {
+            Some(idle) => tokio::time::timeout(idle, lines.next_line()).await,
+            None => Ok(lines.next_line().await),
+        };
+        match next {
+            Err(_) => return Ok(false), // idle — let the caller re-check state
             Ok(Err(e)) => return Err(anyhow!("Could not read kubectl logs output: {}", e)),
             Ok(Ok(None)) => {
                 let status = child.wait().await?;
                 if !status.success() {
                     return Err(anyhow!("kubectl logs exited with {}", status));
                 }
-                break;
+                return Ok(true);
             }
             Ok(Ok(Some(line))) => {
                 if let Some(text) = resume.admit(&mut pass, &line) {
@@ -990,8 +1088,6 @@ pub async fn stream_logs(
             }
         }
     }
-    let _ = child.kill().await;
-    Ok(())
 }
 
 #[cfg(test)]

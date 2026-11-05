@@ -1,10 +1,9 @@
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
 
-import { getChatMessagesQuery } from "../queries/chat";
 import { m } from "../paraglide/messages.js";
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { getSubagentTranscript } from "../api";
-import { workspaceKey } from "../queries/client";
+
 import { agentTranscript } from "../chatRendering";
 
 import { SubagentTranscript } from "./ChatPanel";
@@ -13,7 +12,7 @@ import { ChatImageScope } from "./Md";
 import { TabBody } from "./layout/TabBody";
 
 const PANE_CONTENT_CLASS_NAME = [
-  "pane-content flex-1 min-h-0 relative subagent-tab-content overflow-y-auto",
+  "pane-content flex-1 min-h-0 relative subagent-tab-content overflow-y-auto [overflow-anchor:none]",
   // Same breathing room top and bottom (matches the main chat thread's pb) so
   // the transcript isn't cramped under the tab strip or flush at the end.
   "bg-background py-8 px-4",
@@ -25,6 +24,9 @@ export function SubagentTab({
   sessionId,
   spawnPartId,
   expansionState,
+  searchQuery,
+  searchNonce,
+  searchPartId,
   onOpenFile,
   onOpenRun,
   runExperimentName,
@@ -36,6 +38,9 @@ export function SubagentTab({
   sessionId: string;
   spawnPartId: string;
   expansionState: Map<string, boolean>;
+  searchQuery?: string;
+  searchNonce?: number;
+  searchPartId?: string;
   onOpenFile?: (
     path: string,
     line: number | undefined,
@@ -53,6 +58,10 @@ export function SubagentTab({
     intent: TabOpenIntent,
   ) => void;
 }) {
+  const { getChatMessagesQuery } = useWorkspace().queries;
+  const { workspaceKey } = useWorkspace();
+  const { getSubagentTranscript } = useWorkspace().api;
+
   const query = useQuery(getChatMessagesQuery(sessionId));
   const messages = query.data?.messages ?? (query.isError ? [] : null);
   const selectedSpawn = agentTranscript(messages ?? [], spawnPartId);
@@ -75,6 +84,8 @@ export function SubagentTab({
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [sessionId, spawnPartId]);
+
+  useLayoutEffect(() => { if (searchQuery) stickToBottom.current = false; }, [searchQuery, searchNonce]);
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -123,6 +134,9 @@ export function SubagentTab({
               <SubagentTranscript
                 spawn={spawn}
                 expansionState={expansionState}
+                searchQuery={searchQuery}
+                searchNonce={searchNonce}
+                searchPartId={searchPartId}
                 onOpenFile={onOpenFile}
                 onOpenRun={onOpenRun}
                 runExperimentName={runExperimentName}

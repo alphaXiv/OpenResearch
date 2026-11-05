@@ -1,7 +1,5 @@
-//! Local Kubernetes launch — the k8s twin of `local/hf.rs`: the run row comes
-//! from and goes to the local store only, and the detached `orx supervise`
-//! watches the Job via kubectl. Cluster/namespace come from the settings file
-//! (`orx up` Settings → Compute, or `~/.config/openresearch/k8s.json`).
+//! Kubernetes launch intents. Cluster/namespace come from the settings file (`orx up`
+//! Settings → Compute, or `~/.config/openresearch/k8s.json`).
 //!
 //! There are no flavors: the run's shape is a **manifest committed on the
 //! experiment branch** (default `.orx/k8s.yaml`, or `--manifest <path>`),
@@ -16,40 +14,84 @@ use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
 use crate::jobs::{huggingface as hf, kubernetes as k8s, BackendDescriptor};
 use crate::local::git;
-use crate::store::{now_ms, Store, StoredRun};
+use crate::store::{now_ms, LaunchSpec, Store, StoredRun};
 
 /// Manifest path on the experiment branch when `--manifest` is omitted.
 const DEFAULT_MANIFEST: &str = ".orx/k8s.yaml";
 
-/// CLI wrapper around `submit_local_k8s`: submit, then print the summary.
-pub async fn launch_local_k8s(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_k8s(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} Kubernetes resources created.");
-    println!(
-        "  job      {}/{}",
-        backend.namespace.as_deref().unwrap_or(""),
-        backend.job_id.as_deref().unwrap_or("")
-    );
-    println!(
-        "  manifest {}",
-        backend.manifest.as_deref().unwrap_or(DEFAULT_MANIFEST)
-    );
-    if let Some(resources) = backend.resources.as_deref().filter(|r| r.len() > 1) {
-        println!("  created  {}", resources.join(", "));
+pub async fn launch_spec(
+    args: &crate::ExpRunArgs,
+    source: &SourceSnapshot,
+    run_id: &str,
+    command: &str,
+) -> Result<LaunchSpec> {
+    if args.flavor.is_some() {
+        return Err(anyhow!(
+            "--backend k8s has no flavors — the manifest on the experiment branch \
+             (default {DEFAULT_MANIFEST}, or --manifest <path>) declares the resources."
+        ));
     }
-    println!("  run      {}", run.id);
-    println!(
-        "{} (the log follows the primary Job's leader pod).",
-        crate::invocation::follow_up(&run.experiment_id, &run.id).trim_end_matches('.')
-    );
-    Ok(())
-}
-
-/// Submit the local experiment's run from its committed manifest and detach a
-/// supervisor.
-pub async fn submit_local_k8s(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    crate::compute::submit(args).await
+    if args.image.is_some() {
+        return Err(anyhow!(
+            "--image doesn't apply to --backend k8s — set the image in the manifest."
+        ));
+    }
+    let settings = k8s::load_settings()?.unwrap_or_default();
+    let manifest_path = args
+        .manifest
+        .clone()
+        .unwrap_or_else(|| DEFAULT_MANIFEST.to_string());
+    // Same default as the HF path — no-timeout jobs are a footgun. The
+    // manifest's own activeDeadlineSeconds wins when set.
+    let timeout_seconds = match &args.timeout {
+        Some(t) => hf::parse_timeout(t)?,
+        None => 4 * 3600,
+    };
+    let store = Store::open()?;
+    let experiment = store
+        .get_local_experiment(&args.exp_id)?
+        .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
+    let project = store
+        .get_local_project(&experiment.project_id)?
+        .ok_or_else(|| anyhow!("Local project {} not found.", experiment.project_id))?;
+    let manifest = {
+        let repo_path = project.repo_path.clone();
+        let revision = source.revision.clone();
+        let path = manifest_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<String> {
+            git::file_at(std::path::Path::new(&repo_path), &revision, &path).map_err(|_| {
+                    anyhow!(
+                        "No manifest at '{path}' in committed revision {revision} — write one \
+                         and commit it before running. Pass --manifest <path> if it lives elsewhere."
+                    )
+                })
+        })
+        .await
+        .map_err(|e| anyhow!("git task failed: {e}"))??
+    };
+    // DNS-safe, run-unique token for {{ORX_RUN}} in resource names.
+    let run_token = run_id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(10)
+        .collect::<String>();
+    let spec = k8s::ManifestSpec {
+        manifest,
+        script: crate::compute::gated_script("/tmp/orx-source/source.tar", command),
+        run_token,
+        env: HashMap::new(),
+        timeout_seconds,
+        labels: super::run_labels(&args.exp_id, run_id)?,
+        pod_env: Vec::new(),
+        source_archive: source.path.clone(),
+    };
+    let mut options = serde_json::to_value(spec)?;
+    options["context"] = serde_json::json!(settings.context);
+    Ok(LaunchSpec {
+        kind: "k8s_job".into(),
+        target: Some(settings.namespace),
+        options,
+    })
 }
 
 pub async fn submit_local_k8s_with_source(
@@ -147,6 +189,7 @@ pub async fn submit_local_k8s_with_source(
             pod_env: crate::config::run_context_env(&run_id),
             source_archive: source.path.clone(),
         },
+        None,
     )
     .await?;
 
@@ -174,6 +217,7 @@ pub async fn submit_local_k8s_with_source(
         source_path: None,
         source_size: None,
         remote_root: None,
+        unknown: Default::default(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

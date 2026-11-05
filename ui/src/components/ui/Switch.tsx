@@ -14,8 +14,8 @@ function classes(checked: boolean, className?: string) {
   return cn(BASE, checked && "border-primary bg-primary [&_span]:translate-x-4 [&_span]:bg-background", className);
 }
 
-export function Switch({ checked = false, className, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { checked?: boolean }) {
-  return <button role="switch" aria-checked={checked} className={classes(checked, className)} {...props}>{children ?? <span />}</button>;
+export function Switch({ checked = false, className, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { title?: never; checked?: boolean }) {
+  return <button role="switch" aria-checked={checked} className={classes(checked, className)} {...props} title="">{children ?? <span />}</button>;
 }
 
 export function SwitchIndicator({ checked = false, className, ...props }: HTMLAttributes<HTMLSpanElement> & { checked?: boolean }) {

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use crate::error::{anyhow, Result};
@@ -44,19 +44,16 @@ pub(crate) struct ResolvedRuntime {
     pub store: NativeStore,
 }
 
-/// `opencode` on PATH, then the installer's default drop location, in
-/// preference order. The native installer writes `~/.opencode/bin`, which a
-/// stale npm-style `opencode` shim earlier on PATH otherwise hides.
+/// Every `opencode` install, in preference order. The native installer writes
+/// `~/.opencode/bin`, which a stale npm-style `opencode` shim earlier on PATH
+/// otherwise hides.
 pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
-    let drop = dirs::home_dir()
-        .map(|home| home.join(".opencode").join("bin"))
-        .and_then(|dir| crate::local::shell_env::find_in_dir(&dir, "opencode"));
+    let own = dirs::home_dir().map(|home| home.join(".opencode").join("bin"));
     // Resolved and de-duplicated: the native install is both on PATH and in its
     // drop directory, and probing that one binary twice costs a 15s timeout.
     crate::local::harness::unique_bins(
-        crate::local::shell_env::find_on_path("opencode")
+        crate::local::shell_env::installs("opencode", own)
             .into_iter()
-            .chain(drop)
             .map(|path| crate::paths::canonicalize(&path).unwrap_or(path))
             .collect(),
     )
@@ -90,7 +87,14 @@ pub fn agent_log_path() -> PathBuf {
 }
 
 /// Chat-server config; native questions are answered through the dashboard.
-fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<&str>) -> String {
+/// With orx's MCP server present, native sub-agents are off: delegation goes
+/// through orx, which can reach any model.
+fn opencode_config_json(
+    model: Option<&str>,
+    instructions: &str,
+    plugin: Option<&str>,
+    mcp: Option<&crate::local::chat::delegation::McpServer>,
+) -> Result<String> {
     let mut cfg = json!({
         "$schema": "https://opencode.ai/config.json",
         "permission": {
@@ -108,6 +112,8 @@ fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<
             "external_directory": "allow",
         },
         "instructions": [instructions],
+        // A name of orx's own keeps a user's `alphaxiv` server from merging into this one.
+        "mcp":{"orx_alphaxiv":{"type":"local", "command":[crate::paths::spawnable_exe()?, "alphaxiv-mcp"], "timeout":300000}},
     });
     if let Some(plugin) = plugin {
         cfg["plugin"] = json!([plugin]);
@@ -115,7 +121,29 @@ fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<
     if let Some(model) = model {
         cfg["model"] = json!(model);
     }
-    serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string())
+    cfg["permission"]["orx_alphaxiv_*"] = json!("allow");
+    for tool in crate::commands::alphaxiv_mcp::WRITE_TOOLS {
+        cfg["permission"][format!("orx_alphaxiv_{tool}")] = json!("ask");
+    }
+    if let Some(server) = mcp {
+        // Side chats and delegates share this file with their parent's
+        // worktree, so it names the env vars and each chat's serve child
+        // supplies its own values (OpenCode substitutes `{env:…}`).
+        let environment: serde_json::Map<String, Value> = server
+            .env
+            .iter()
+            .map(|(name, _)| (name.to_string(), json!(format!("{{env:{name}}}"))))
+            .collect();
+        cfg["mcp"]["orx"] = json!({
+            "type": "local",
+            "command": [server.command.as_str(), server.args[0]],
+            "environment": environment,
+            "enabled": true,
+            "timeout": crate::local::chat::delegation::TOOL_TIMEOUT_SECONDS * 1000,
+        });
+        cfg["permission"]["task"] = json!("deny");
+    }
+    Ok(serde_json::to_string_pretty(&cfg)?)
 }
 
 /// The research playbook: durable project context and skill routing for `orx up`.
@@ -125,7 +153,7 @@ fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<
 const SYSTEM_PROMPT: &str = include_str!("../../SYSTEM_PROMPT.md");
 
 #[derive(Default)]
-struct ProjectState {
+pub(super) struct ProjectState {
     experiments: usize,
     runs: usize,
     active_runs: usize,
@@ -188,7 +216,7 @@ fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
     )
 }
 
-fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
+pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
     let id = &project.id;
     let name = &project.name;
     let publication_line = if project.github_enabled() {
@@ -200,9 +228,14 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .to_string_lossy()
         .into_owned();
     let paper_line = project.paper_id.as_deref().map_or(String::new(), |p| {
+        let source = if crate::client::is_arxiv_id(crate::client::versionless_id(p)) {
+            format!("arXiv {p} (https://arxiv.org/abs/{p})")
+        } else {
+            format!("{p} ({})", crate::commands::paper::alphaxiv_paper_url(p))
+        };
         format!(
-            "- Paper: arXiv {p} (https://arxiv.org/abs/{p}) — the paper this project starts \
-             from; `orx paper {p}` fetches its report\n"
+            "- Paper: {source} — the paper this project starts from; `orx paper {p}` fetches \
+             its report\n"
         )
     });
     // The default compute target is read fresh on every
@@ -232,11 +265,6 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
          {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching"
     );
     let project_state = project_state_md(project, state);
-    let skill_names = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
-        .iter()
-        .map(|skill| format!("- `{}`: {}", skill.name, skill.description))
-        .collect::<Vec<_>>()
-        .join("\n");
     let template = SYSTEM_PROMPT
         .split_once("-->\n\n")
         .map(|(_, rest)| rest)
@@ -249,7 +277,6 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)
-        .replace("{skill_names}", &skill_names)
 }
 
 /// Keep the files we drop into the checkout out of `git status` / accidental
@@ -347,6 +374,7 @@ fn write_agent_files(
     project: &LocalProject,
     model: Option<&str>,
     session_id: &str,
+    up_port: Option<u16>,
     protocol: Protocol,
 ) -> Result<(PathBuf, Option<PathBuf>)> {
     // Source of truth for the session-skills dir is the harness trait.
@@ -364,6 +392,9 @@ fn write_agent_files(
     } else {
         None
     };
+    let mcp = up_port
+        .map(|port| crate::local::chat::delegation::mcp_server(session_id, port))
+        .transpose()?;
     let config_override = if git::is_tracked(&repo, "opencode.json") {
         // Out-of-root config: absolute instructions path (no root to anchor it).
         let path = repo
@@ -372,14 +403,19 @@ fn write_agent_files(
             .join("opencode.json");
         std::fs::write(
             &path,
-            opencode_config_json(model, &playbook.to_string_lossy(), plugin.as_deref()),
+            opencode_config_json(
+                model,
+                &playbook.to_string_lossy(),
+                plugin.as_deref(),
+                mcp.as_ref(),
+            )?,
         )
         .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
         Some(path)
     } else {
         std::fs::write(
             repo.join("opencode.json"),
-            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref()),
+            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref(), mcp.as_ref())?,
         )
         .map_err(|e| anyhow!("Could not write opencode.json: {}", e))?;
         None
@@ -410,6 +446,7 @@ struct AgentChild {
     session_id: String,
     model: Option<String>,
     native_store: NativeStore,
+    alphaxiv_signed_in: bool,
     binary: ResolvedBinary,
     endpoint: AgentEndpoint,
     database: native_store::opencode_database::DatabaseLease,
@@ -446,7 +483,7 @@ async fn spawn_agent(
         let session = session_id.to_string();
         let protocol = binary.protocol;
         tokio::task::spawn_blocking(move || {
-            write_agent_files(&project, model.as_deref(), &session, protocol)
+            write_agent_files(&project, model.as_deref(), &session, up_port, protocol)
         })
         .await
         .map_err(|e| anyhow!("agent file task failed: {e}"))??
@@ -456,7 +493,7 @@ async fn spawn_agent(
     if let Err(err) = crate::commands::install_skills::install_opencode_shim().await {
         eprintln!("warning: could not install the orx opencode skill: {err}");
     }
-    let mut cmd = Command::new(&binary.path);
+    let mut cmd = crate::process::tokio_command(&binary.path);
     cmd.current_dir(&repo);
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
@@ -467,6 +504,11 @@ async fn spawn_agent(
     // be explicitly subscribed to. One serve child per session; set after the
     // synced-env loop so it isn't shadowed.
     crate::local::chat::set_chat_session_env(&mut cmd, session_id, "opencode", up_port);
+    if let Some(port) = up_port {
+        for (name, value) in crate::local::chat::delegation::mcp_server(session_id, port)?.env {
+            cmd.env(name, value);
+        }
+    }
     if let Some(config) = &config_override {
         // The repo tracks its own opencode.json; ours rides OPENCODE_CONFIG.
         // Project configs load after OPENCODE_CONFIG and would override our
@@ -490,6 +532,7 @@ async fn spawn_agent(
         session_id: session_id.to_string(),
         model: model.map(str::to_string),
         native_store,
+        alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         binary,
         endpoint,
         database,
@@ -883,6 +926,7 @@ impl AgentHost {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
                 if agent.project_id == project.id
+                    && agent.alphaxiv_signed_in == crate::alphaxiv::signed_in()
                     && agent.native_store == native_store
                     && agent.binary == binary
                     && agent.database.path() == database_path
@@ -976,7 +1020,38 @@ impl AgentHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::agent_skills::{self, SkillSet};
+    use crate::local::agent_text::sample_project;
+
+    #[test]
+    fn alphaxiv_server_has_its_own_name_and_asks_before_writes() {
+        let cfg: Value =
+            serde_json::from_str(&opencode_config_json(None, "p.md", None, None).unwrap()).unwrap();
+        assert!(cfg["mcp"].get("alphaxiv").is_none());
+        assert_eq!(cfg["mcp"]["orx_alphaxiv"]["command"][1], "alphaxiv-mcp");
+        assert_eq!(cfg["permission"]["orx_alphaxiv_*"], "allow");
+        assert_eq!(cfg["permission"]["orx_alphaxiv_create_folder"], "ask");
+        assert_eq!(
+            cfg["permission"]["orx_alphaxiv_save_papers_to_folder"],
+            "ask"
+        );
+    }
+
+    #[test]
+    fn shared_config_names_the_orx_server_env_without_any_chats_values() {
+        let server = crate::local::chat::delegation::mcp_server("chat_a", 4900).unwrap();
+        let config: Value =
+            serde_json::from_str(&opencode_config_json(None, "p.md", None, Some(&server)).unwrap())
+                .unwrap();
+        let environment = &config["mcp"]["orx"]["environment"];
+        assert_eq!(environment["ORX_SESSION_ID"], "{env:ORX_SESSION_ID}");
+        assert_eq!(environment["ORX_AGENT_TOKEN"], "{env:ORX_AGENT_TOKEN}");
+        assert!(!config.to_string().contains("chat_a"));
+        assert_eq!(config["permission"]["task"], "deny");
+        let without: Value =
+            serde_json::from_str(&opencode_config_json(None, "p.md", None, None).unwrap()).unwrap();
+        assert_eq!(without["permission"]["task"], "allow");
+        assert!(without["mcp"].get("orx").is_none());
+    }
 
     #[test]
     fn resident_selection_keeps_cloud_session_ahead_of_host_default() {
@@ -1044,7 +1119,7 @@ mod tests {
             legacy_v2_api: false,
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let child = Command::new("sleep")
+        let child = crate::process::tokio_command("sleep")
             .arg("60")
             .kill_on_drop(true)
             .spawn()
@@ -1061,6 +1136,7 @@ mod tests {
                 session_id: "chat".into(),
                 model: Some("cloud/selected".into()),
                 native_store: NativeStore::Isolated,
+                alphaxiv_signed_in: false,
                 binary: binary.clone(),
                 endpoint,
                 database,
@@ -1149,7 +1225,7 @@ mod tests {
             return;
         }
         let fixture = git::TemporaryDirectory::new("orx-missing-opencode-compaction").unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "local::opencode::tests::cold_compaction_does_not_replace_a_missing_native_session",
@@ -1340,203 +1416,22 @@ mod tests {
         assert!(host.stopping.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    fn sample_project() -> LocalProject {
-        LocalProject {
-            id: "proj_test".into(),
-            name: "Test Project".into(),
-            slug: "test-project".into(),
-            github_owner: "acme".into(),
-            github_repo: "widget".into(),
-            github_sync_enabled: true,
-            baseline_branch: "main".into(),
-            repo_path: "/tmp/nonexistent".into(),
-            run_command: None,
-            paper_id: None,
-            created_at: 0,
-            updated_at: 0,
-        }
-    }
-
-    fn sample_playbook() -> String {
-        playbook_md(&sample_project(), &ProjectState::default())
-    }
-
-    /// The playbook's runtime placeholders must all resolve.
     #[test]
-    fn playbook_has_no_unresolved_placeholders() {
-        let md = sample_playbook();
-        // Scanned, not listed: a NEWLY ADDED token playbook_md doesn't know
-        // about is exactly the case a hardcoded list cannot catch, and the
-        // agent would read the literal `{token}` as instruction.
-        let leftover: Vec<&str> = md
-            .lines()
-            .flat_map(|line| {
-                line.match_indices('{').filter_map(move |(i, _)| {
-                    let rest = &line[i + 1..];
-                    let end = rest.find('}')?;
-                    let token = &rest[..end];
-                    (!token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
-                        .then_some(&line[i..=i + end + 1])
-                })
-            })
-            .collect();
-        assert!(leftover.is_empty(), "unresolved placeholders: {leftover:?}");
-        for retired in [
-            "{files}",
-            "{memory}",
-            "{experiment_publish_clause}",
-            "{edit_step}",
-            "{compute_contract}",
-            "{launch_step}",
-            "{backends_intro}",
-            "{run_invocation}",
-            "{run_guidance}",
-            "{compute_guidance}",
-            "{skills_scope}",
-            "{max_spawns}",
-            "{skills_list}",
-        ] {
-            assert!(!md.contains(retired), "retired placeholder {retired}");
-        }
-        // The template's leading HTML comment (repo-reader documentation) must
-        // be stripped — the prompt starts at the title.
-        assert!(
-            md.starts_with("# OpenResearch agent"),
-            "template comment not stripped"
-        );
-        assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
-        assert!(md.contains("Use the available OpenResearch skills"));
-        assert!(md.contains("execute important user flows"));
-        assert!(!md.contains("orx skill <name>"));
-        // Native catalogs may abbreviate descriptions; preserve routing context here.
-        for skill in agent_skills::skills(SkillSet::Local) {
-            assert!(md.contains(&format!("- `{}`: {}", skill.name, skill.description)));
-        }
-        assert!(md.contains("orx-compute"));
-        assert!(md.contains("helping the user across the research process"));
-        assert!(md.contains("The user's current project is **Test Project**"));
-        assert!(!md.contains("running inside `orx up`"));
-        assert!(!md.contains("## Memory"));
-        assert!(!md.contains("User memory"));
-        assert!(!md.contains("Project memory"));
-    }
-
-    #[test]
-    fn playbook_keeps_runtime_facts_and_delegates_procedures() {
+    fn project_state_summarizes_counts_and_the_run_command() {
         let mut project = sample_project();
-        project.github_owner.clear();
-        project.github_repo.clear();
-        let md = playbook_md(&project, &ProjectState::default());
-        assert!(md.contains("default target"));
-        assert!(md.contains("orx-compute"));
-        assert!(md.contains("orx-instances"));
-        assert!(!md.contains("## Cardinal rules"));
-        assert!(!md.contains("## Command index"));
-        assert!(!md.contains("## The auto-research loop"));
-        assert!(!md.contains("## Compute backends"));
-    }
+        let fresh = project_state_md(&project, &ProjectState::default());
+        assert!(fresh.contains("**0 experiments and 0 runs**"));
+        assert!(fresh.contains("no fixed run command"));
 
-    #[test]
-    fn playbook_carries_python_environment_policy() {
-        let md = sample_playbook();
-        assert!(md.contains("## Python environments"));
-        assert!(md.contains("use `uv run --locked`"));
-        assert!(md.contains("Without uv"));
-    }
-
-    #[test]
-    fn playbook_short_circuits_orientation_for_a_fresh_project() {
-        let md = sample_playbook();
-        assert!(md.contains("## Project state"));
-        assert!(md.contains("fresh project: **0 experiments and 0 runs**"));
-        assert!(md.contains("experiment tree is empty and no fixed run command is configured"));
-        assert!(!md.contains("Do not inspect the tree"));
-
-        let mut project = sample_project();
-        project.run_command = Some("python train.py".into());
-        let configured = playbook_md(&project, &ProjectState::default());
-        assert!(
-            configured.contains("experiment tree is empty and the fixed run command is configured")
-        );
-    }
-
-    #[test]
-    fn playbook_summarizes_existing_project_state_without_inlining_the_tree() {
-        let mut project = sample_project();
         project.run_command = Some("python train.py".into());
         let state = ProjectState {
             experiments: 12,
             runs: 18,
             active_runs: 1,
         };
-        let md = playbook_md(&project, &state);
-        assert!(md.contains("**12 experiments**"));
-        assert!(md.contains("**18 runs** (1 run active)"));
-        assert!(md.contains("fixed run command is configured"));
-        assert!(md.contains("orientation snapshot"));
-        assert!(!md.contains("Experiment tree:"));
-    }
-
-    #[test]
-    fn compute_skill_explains_opt_in_run_wakeups() {
-        let md = sample_playbook();
-        let compute = agent_skills::find("orx-compute", SkillSet::Local).unwrap();
-        assert!(compute.content.contains("`orx exp wake <expId>`"));
-        assert!(compute.content.contains("Wake-up is opt-in"));
-        assert!(!md.contains("`orx exp wake <expId>`"));
-        assert!(!md.contains("OpenResearch injects an `[orx]` message"));
-    }
-
-    #[test]
-    fn playbook_directs_figure_work_to_the_figures_skill() {
-        // Without this the agent plots with raw matplotlib and never loads the
-        // module, which is what shipped the first unusable figures.
-        let md = sample_playbook();
-        assert!(md.contains("`orx-figures` before writing plotting code"));
-    }
-
-    #[test]
-    fn reports_skill_owns_artifact_output_policy() {
-        let md = sample_playbook();
-        let reports = agent_skills::find("orx-reports", SkillSet::Local).unwrap();
-        assert!(md.contains("`orx-reports` before creating or organizing artifacts"));
-        assert!(reports.content.contains("Reuse the relevant folder"));
-        assert!(reports
-            .content
-            .contains("<file path=\"artifacts/transformer-sweep/figures/patch-size.svg\" />"));
-        assert!(!md.contains("PROJECT.md"));
-    }
-
-    #[test]
-    fn playbook_owns_clickable_references() {
-        let md = sample_playbook();
-        let results = agent_skills::find("orx-results", SkillSet::Local).unwrap();
-        let logs = agent_skills::find("orx-logs", SkillSet::Local).unwrap();
-        assert!(md.contains("## Evidence and links in chat"));
-        assert!(md.contains("<file path=\"relative/path.py\" />"));
-        assert!(md.contains("exp=\"<experimentId>\""));
-        assert!(md.contains("<run id=\"<runId>\" />"));
-        assert!(md.contains("<file path=\"artifacts/<relative-path>\" />"));
-        assert!(md.contains("Scholarly claims use the source links"));
-        assert!(md.contains("Use `$...$` for inline math"));
-        assert!(results.content.contains("Validate before reporting"));
-        assert!(logs
-            .content
-            .contains("Truncated output is not evidence of absence"));
-        assert!(!results.content.contains("<file path="));
-    }
-
-    #[test]
-    fn playbook_avoids_ui_navigation() {
-        let mut local_only = sample_project();
-        local_only.github_owner.clear();
-        local_only.github_repo.clear();
-
-        for md in [
-            sample_playbook(),
-            playbook_md(&local_only, &ProjectState::default()),
-        ] {
-            crate::local::assert_agent_guidance_is_ui_agnostic("playbook", &md);
-        }
+        let existing = project_state_md(&project, &state);
+        assert!(existing.contains("**12 experiments**"));
+        assert!(existing.contains("**18 runs** (1 run active)"));
+        assert!(existing.contains("fixed run command is configured"));
     }
 }

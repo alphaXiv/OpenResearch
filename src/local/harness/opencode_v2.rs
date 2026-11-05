@@ -428,7 +428,25 @@ fn projected_parts(message: &Value) -> Vec<(WirePart, &Value)> {
                     part["state"]["error"] = Value::Null;
                 }
             }
-            to_wire_part(&part).map(|part| (part, content))
+            let mut wire = to_wire_part(&part)?;
+            if content["name"] == "execute" {
+                wire.children = content
+                    .pointer("/state/metadata/toolCalls")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .filter_map(|(call_index, call)| {
+                        let tool = call["tool"].as_str()?.strip_prefix("orx_alphaxiv.")?;
+                        to_wire_part(&json!({
+                            "id":format!("{id}:{index}:alphaxiv:{call_index}"),
+                            "type":"tool", "tool":format!("orx_alphaxiv_{tool}"),
+                            "state":{"status":call["status"], "input":call["input"]}
+                        }))
+                    })
+                    .collect();
+            }
+            Some((wire, content))
         })
         .collect()
 }
@@ -774,7 +792,7 @@ pub(super) async fn detect(
     let catalog = tokio::spawn(async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let _lease = crate::local::opencode::prepare_database(&binary, &db).await?;
-        let mut cmd = tokio::process::Command::new(&binary.path);
+        let mut cmd = crate::process::tokio_command(&binary.path);
         crate::local::local_models::prepare_env(&mut cmd, None)?;
         cmd.env("OPENCODE_DB", _lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
@@ -849,7 +867,12 @@ pub(super) async fn detect(
 }
 
 async fn discover_models(endpoint: &AgentEndpoint) -> Result<(Value, Value)> {
-    discover_models_with_timeout(endpoint, Duration::from_secs(30)).await
+    discover_models_within(
+        endpoint,
+        Duration::from_secs(30),
+        Duration::from_millis(200),
+    )
+    .await
 }
 
 async fn catalog_get(endpoint: &AgentEndpoint, path: &str) -> Result<Option<Value>> {
@@ -881,9 +904,10 @@ async fn catalog_get(endpoint: &AgentEndpoint, path: &str) -> Result<Option<Valu
     Ok(Some(body))
 }
 
-async fn discover_models_with_timeout(
+async fn discover_models_within(
     endpoint: &AgentEndpoint,
     timeout: Duration,
+    retry: Duration,
 ) -> Result<(Value, Value)> {
     let mut catalog = None;
     let mut plugins_pending = false;
@@ -908,7 +932,7 @@ async fn discover_models_with_timeout(
                 }
             }
             // OpenCode 2.0.4 removed await-activation; cold catalogs can initially be empty.
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(retry).await;
         }
     })
     .await;
@@ -942,7 +966,7 @@ pub(super) async fn generate(
     tokio::spawn(async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let lease = crate::local::opencode::prepare_database(&binary, &db).await?;
-        let mut cmd = tokio::process::Command::new(&binary.path);
+        let mut cmd = crate::process::tokio_command(&binary.path);
         crate::local::local_models::prepare_generation_env(
             &mut cmd,
             Some(&model),
@@ -1076,6 +1100,7 @@ mod tests {
                     answers: Vec::new(),
                     note: None,
                     annotations: Vec::new(),
+                    from: None,
                 };
                 reply(&ctx, &endpoint, &prompt, &answer).await.unwrap();
             }
@@ -1131,6 +1156,7 @@ mod tests {
                 answers: Vec::new(),
                 note: Some("Skipped".into()),
                 annotations: Vec::new(),
+                from: None,
             };
             let result = reply(&ctx, &endpoint, &prompt, &answer).await;
             server.abort();
@@ -1152,6 +1178,8 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (endpoint, server)
     }
+
+    const RETRY: Duration = Duration::from_millis(1);
 
     fn plugin_pending() -> Value {
         json!({"_tag":"ServiceUnavailableError", "service":"plugin", "message":"fixture", "extra":true})
@@ -1195,7 +1223,7 @@ mod tests {
                     );
                 }
                 let (endpoint, server) = catalog_server(app, legacy).await;
-                let result = discover_models_with_timeout(&endpoint, Duration::from_secs(2)).await;
+                let result = discover_models_within(&endpoint, Duration::from_secs(2), RETRY).await;
                 server.abort();
                 let (models, integrations) = result.unwrap();
                 assert_eq!(models["data"][0]["id"], "/api/model");
@@ -1249,7 +1277,7 @@ mod tests {
                     }),
                 );
                 let (endpoint, server) = catalog_server(app, false).await;
-                let result = discover_models_with_timeout(&endpoint, Duration::from_secs(1)).await;
+                let result = discover_models_within(&endpoint, Duration::from_secs(1), RETRY).await;
                 server.abort();
                 let error = result.unwrap_err().to_string();
                 assert!(error.contains(diagnostic), "{error}");
@@ -1277,8 +1305,8 @@ mod tests {
             );
             let (endpoint, server) = catalog_server(app, false).await;
             let result = tokio::time::timeout(
-                Duration::from_secs(2),
-                discover_models_with_timeout(&endpoint, Duration::from_secs(1)),
+                Duration::from_secs(1),
+                discover_models_within(&endpoint, Duration::from_millis(100), RETRY),
             )
             .await;
             server.abort();
@@ -1286,7 +1314,7 @@ mod tests {
             if stalled {
                 assert_eq!(error, "OpenCode model discovery timed out");
             } else {
-                assert_eq!(error, "OpenCode plugins did not finish activating within 1 seconds. Re-check OpenCode.");
+                assert!(error.starts_with("OpenCode plugins did not finish activating"));
             }
         }
     }
@@ -1331,7 +1359,7 @@ mod tests {
                     }),
                 );
             let (endpoint, server) = catalog_server(app, false).await;
-            let result = discover_models_with_timeout(&endpoint, Duration::from_secs(1)).await;
+            let result = discover_models_within(&endpoint, Duration::from_millis(100), RETRY).await;
             server.abort();
             let (models, integrations) = result.unwrap();
             let expected = if plugins_reload {
@@ -1464,6 +1492,37 @@ mod tests {
         );
         assert!(field_answer(&json!({"type":"number"}), &["NaN".into()]).is_err());
     }
+    #[test]
+    fn code_mode_alphaxiv_calls_keep_inputs_without_duplicating_execute_output() {
+        let parts = wire_parts(&json!({"id":"message", "content":[{
+            "type":"tool", "name":"execute", "state":{
+                "status":"completed", "content":[{"type":"text","text":"library output"}],
+                "metadata":{"toolCalls":[
+                    {"tool":"orx_alphaxiv.list_library", "status":"completed", "input":{"include_papers":true}},
+                    {"tool":"other.read", "status":"completed", "input":{}},
+                    {"tool":"orx_alphaxiv.get_paper_notes", "status":"completed", "input":{"paper_id_or_url":"2502.16982"}}
+                ]}
+            }
+        }]}));
+        let execute = &parts[0];
+        assert_eq!(
+            execute.state.as_ref().unwrap().output.as_deref(),
+            Some("library output")
+        );
+        assert_eq!(execute.children.len(), 2);
+        let library = &execute.children[0];
+        assert_eq!(library.tool.as_deref(), Some("orx_alphaxiv_list_library"));
+        assert_eq!(
+            library.state.as_ref().unwrap().input.as_ref().unwrap()["include_papers"],
+            true
+        );
+        assert!(library.state.as_ref().unwrap().output.is_none());
+        assert_eq!(
+            execute.children[1].tool.as_deref(),
+            Some("orx_alphaxiv_get_paper_notes")
+        );
+    }
+
     #[test]
     fn dismissed_question_is_a_completed_interaction() {
         for (tool, message, status) in [

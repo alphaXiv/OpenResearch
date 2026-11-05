@@ -20,7 +20,7 @@ async fn prepare(
     )
     .unwrap();
     let archive = temp.path().join("source.tar");
-    assert!(std::process::Command::new("tar")
+    assert!(crate::process::command("tar")
         .arg("-cf")
         .arg(&archive)
         .arg("-C")
@@ -108,8 +108,10 @@ async fn ssh_container_lifecycle() {
         "-i".into(),
         std::env::var("ORX_SSH_TEST_KEY").expect("fixture key"),
     ]);
-    let connection = ssh::interactive_args(&target, None, None).await.unwrap();
-    assert!(tokio::process::Command::new("ssh")
+    let connection = ssh::prepare_interactive_connection(&target, None, None)
+        .await
+        .unwrap();
+    assert!(crate::process::tokio_command("ssh")
         .args(&connection.args)
         .status()
         .await
@@ -531,7 +533,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
         .unwrap()
         .join(format!("orx{}", std::env::consts::EXE_SUFFIX));
     let spawn = || {
-        let mut command = tokio::process::Command::new(&executable);
+        let mut command = crate::process::tokio_command(&executable);
         command
             .args(["--no-telemetry", "supervise", id])
             .env("HOME", root)
@@ -548,7 +550,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
             .kill_on_drop(true);
         command.spawn().unwrap()
     };
-    let mut connect = tokio::process::Command::new("script");
+    let mut connect = crate::process::tokio_command("script");
     #[cfg(target_os = "macos")]
     connect.args(["-q", "/dev/null"]).arg(&executable).args([
         "--no-telemetry",
@@ -608,7 +610,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
     let output = logs(target, &dir).await;
     assert_eq!(output.matches("ONCE").count(), 1);
     assert!(output.contains("AFTER"));
-    assert!(tokio::process::Command::new(&executable)
+    assert!(crate::process::tokio_command(&executable)
         .args(["ssh-service", "stop"])
         .env("HOME", root)
         .env("ORX_DATA_DIR", root.join("data"))
@@ -617,4 +619,86 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
         .await
         .unwrap()
         .success());
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_run_sh_runs_the_payload_inside_the_container_with_its_source() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = crate::local::git::TemporaryDirectory::new("orx-engine-container").unwrap();
+    let host = temp.path().join("host-run");
+    let staged = temp.path().join("staged");
+    let bin = temp.path().join("bin");
+    for dir in [&host, &staged, &bin] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(staged.join("source.txt"), "snapshot\n").unwrap();
+    assert!(crate::process::command("tar")
+        .arg("-cf")
+        .arg(host.join("source.tar"))
+        .arg("-C")
+        .arg(&staged)
+        .arg("source.txt")
+        .status()
+        .unwrap()
+        .success());
+    // `docker exec` runs its command here; the container is this machine.
+    std::fs::write(
+        bin.join("docker"),
+        r#"#!/bin/bash
+echo "$*" >> "$CALLS"
+case "$1" in
+  container) echo '2026-10-30T00:00:00Z running';;
+  exec)
+    shift
+    [ "$1" = -i ] && shift
+    shift
+    [ "$1" = setsid ] && shift 2
+    exec "$@";;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("docker"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let container = ContainerRun {
+        reference: "research".into(),
+        id: "cid".into(),
+        started_at: "2026-10-30T00:00:00Z".into(),
+        run_dir: temp
+            .path()
+            .join("container/.orx/runs")
+            .to_string_lossy()
+            .into_owned(),
+        unknown: Default::default(),
+    }
+    .for_run("run");
+    let run_sh = container.engine_run_sh(
+        "export ORX_TEST_SECRET='quote'\"'\"' and $literal'",
+        &crate::compute::staged_script(
+            "cat source.txt > ../out; echo \"$ORX_TEST_SECRET\" >> ../out; exit 3",
+        ),
+        Some("source.tar"),
+    );
+    std::fs::write(host.join("run.sh"), run_sh).unwrap();
+    let status = crate::process::command("bash")
+        .arg("run.sh")
+        .current_dir(&host)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("CALLS", temp.path().join("calls"))
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(3));
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&container.run_dir).join("out")).unwrap(),
+        "snapshot\nquote' and $literal\n"
+    );
+    let calls = std::fs::read_to_string(temp.path().join("calls")).unwrap();
+    assert!(calls.starts_with("container inspect"), "{calls}");
+    assert!(calls.contains("exec cid setsid --wait bash"), "{calls}");
+    assert!(container
+        .engine_cancel_sh()
+        .contains("docker exec -i 'cid' bash -c"));
 }

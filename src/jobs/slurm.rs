@@ -1,17 +1,13 @@
-//! Slurm backend — submit an experiment as a batch job on a Slurm cluster.
+//! Slurm settings and supervised launches. Engine launches use `engine::adapters::slurm`.
 //!
-//! orx talks to the cluster's **login node** over ssh (reusing the ssh
-//! backend's multiplexed transport) and drives the Slurm CLI there:
-//! `sbatch --parsable` to submit, `squeue`/`sacct` to poll, `scancel` to
-//! cancel. No `slurmrestd`: the REST daemon needs cluster-admin setup that
-//! most users don't have, while everyone with a cluster account can ssh to
-//! the login node — the same trade SkyPilot makes.
+//! orx talks to the cluster's **login node** over ssh and drives the Slurm CLI there:
+//! `squeue`/`sacct` to poll, `scancel` to cancel. No `slurmrestd`: the REST daemon needs
+//! cluster-admin setup that most users don't have, while everyone with a cluster account can
+//! ssh to the login node.
 //!
-//! The remote layout extends the ssh backend's convention. A run owns
+//! The 0.2.x layout extends the ssh backend's convention. A run owns
 //! `<root>/runs/<run_id>/` (root defaults to `~/.orx`) on the cluster's shared filesystem:
-//!   repo/       the experiment branch, cloned on the login node at submit
-//!               time (compute nodes often have no internet, so cloning
-//!               inside the job — the other backends' pattern — would break)
+//!   repo/       the experiment's committed source snapshot
 //!   job.sbatch  the generated batch script (env exports + payload)
 //!   log         merged stdout/stderr, captured by Slurm via `--output`
 //!   exit_code   written by job.sbatch's closing lines when the payload ends
@@ -64,6 +60,9 @@ pub struct SlurmSettings {
     /// Keep every finished run's remote dir, not just each project's newest few.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_remote_runs: bool,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 fn settings_path() -> std::path::PathBuf {
@@ -97,8 +96,6 @@ pub fn save_settings(settings: &SlurmSettings) -> Result<()> {
     Ok(())
 }
 
-// --- job spec & script generation --------------------------------------------
-
 pub struct SlurmJobSpec {
     /// ssh config host alias of the cluster's login node.
     pub host: String,
@@ -106,8 +103,6 @@ pub struct SlurmJobSpec {
     pub run_id: String,
     /// Configured storage root; `None` is `~/.orx`.
     pub remote_root: Option<String>,
-    /// Runs on the login node in the run dir at submit time, with `env`
-    /// exported — the clone step. Piped to `bash -s`, never written to disk.
     pub setup_script: String,
     /// The experiment's run command; the body of the batch job (runs in
     /// `repo/` on the compute node).
@@ -127,6 +122,105 @@ pub struct SlurmJobSpec {
     /// `parse_mem`. Unset leaves the partition default, which is usually
     /// `DefMemPerCPU × cpus-per-task` — i.e. memory tracks the CPU request.
     pub mem: Option<String>,
+}
+
+fn render_sbatch(spec: &SlurmJobSpec) -> String {
+    let mut directives = vec![
+        format!(
+            "#SBATCH --job-name=orx-{}",
+            &spec.run_id[..spec.run_id.len().min(8)]
+        ),
+        "#SBATCH --output=log".to_string(),
+        "#SBATCH --error=log".to_string(),
+        "#SBATCH --open-mode=append".to_string(),
+        // One task, stated rather than left to Slurm's default of one: some
+        // clusters' job-submit plugins refuse a job that names no task count
+        // ("You must specify a number of tasks"). Cores come from
+        // --cpus-per-task, so this changes nothing where the default applied.
+        "#SBATCH --ntasks=1".to_string(),
+    ];
+    if let Some(secs) = spec.time_limit_secs {
+        directives.push(format!("#SBATCH --time={}", slurm_time(secs)));
+    }
+    if let Some(p) = spec.partition.as_deref().filter(|p| !p.trim().is_empty()) {
+        directives.push(format!("#SBATCH --partition={p}"));
+    }
+    if let Some(a) = spec.account.as_deref().filter(|a| !a.trim().is_empty()) {
+        directives.push(format!("#SBATCH --account={a}"));
+    }
+    if let Some(g) = spec.gres.as_deref() {
+        directives.push(format!("#SBATCH --gres={g}"));
+    }
+    // Cores and host memory. Left out entirely when unset, so a cluster whose
+    // partition defaults are already right keeps behaving as before; asked for
+    // explicitly otherwise, because the common default is one core and
+    // `DefMemPerCPU` bytes with it — far too little to feed a GPU.
+    if let Some(c) = spec.cpus_per_task.filter(|c| *c > 0) {
+        directives.push(format!("#SBATCH --cpus-per-task={c}"));
+    }
+    if let Some(m) = spec.mem.as_deref().filter(|m| !m.trim().is_empty()) {
+        directives.push(format!("#SBATCH --mem={m}"));
+    }
+    // Slurm's verdict must match the payload while its exit_code is NFS-lagged.
+    format!(
+        "#!/usr/bin/env bash\n{directives}\n{exports}\n{tensorboard}\n(\ncd repo || exit 97\n{command}\n)\ncode=$?\necho \"$code\" > exit_code\nexit \"$code\"\n",
+        directives = directives.join("\n"),
+        exports = render_exports(&super::default_python_env(&spec.env)),
+        tensorboard = crate::compute::TENSORBOARD_LOGDIR_EXPORT,
+        command = spec.command,
+    )
+}
+
+fn render_exports(env: &HashMap<String, String>) -> String {
+    let mut pairs: Vec<_> = env.iter().collect();
+    pairs.sort(); // deterministic script for tests & debugging
+    pairs
+        .iter()
+        .map(|(k, v)| format!("export {}={}", k, sh_quote(v)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_job_id(out: &str) -> Result<String> {
+    let id = out.trim().split(';').next().unwrap_or("").trim();
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(anyhow!("Unexpected sbatch output: {:?}", out.trim()));
+    }
+    Ok(id.to_string())
+}
+
+pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
+    let dir = shell_path(&run_dir(spec.remote_root.as_deref(), &spec.run_id));
+
+    // Tokens travel over stdin rather than argv.
+    let setup = format!(
+        "{exports}\ncd {dir} || exit 97\n{script}\n",
+        exports = render_exports(&spec.env),
+        script = spec.setup_script,
+    );
+    ssh_run(
+        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
+        &format!("mkdir -p {dir} && chmod 700 {dir} && bash -s"),
+        Some(&setup),
+    )
+    .await
+    .map_err(|e| anyhow!("Setup on the login node failed: {e}"))?;
+
+    // Write the batch script (owner-only: it embeds tokens) and submit.
+    ssh_run(
+        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
+        &format!("umask 077 && cat > {dir}/job.sbatch"),
+        Some(&render_sbatch(spec)),
+    )
+    .await?;
+    let out = ssh_run(
+        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
+        &format!("cd {dir} && sbatch --parsable job.sbatch"),
+        None,
+    )
+    .await
+    .map_err(|e| anyhow!("sbatch failed: {e}"))?;
+    parse_job_id(&out)
 }
 
 /// Validate a Slurm memory request: a positive integer with an optional
@@ -182,7 +276,7 @@ pub fn resolve_gres(flavor: &str) -> Option<String> {
 }
 
 /// Seconds → Slurm's `--time` syntax (`D-HH:MM:SS` / `HH:MM:SS`).
-fn slurm_time(secs: u64) -> String {
+pub(crate) fn slurm_time(secs: u64) -> String {
     let (days, rem) = (secs / 86_400, secs % 86_400);
     let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
     if days > 0 {
@@ -192,127 +286,10 @@ fn slurm_time(secs: u64) -> String {
     }
 }
 
-/// Render job.sbatch. Slurm captures the whole script's stdout/stderr to
-/// `log` (relative paths resolve against the submit-time cwd, the run dir,
-/// which sbatch also makes the job's working directory). The payload runs in
-/// a SUBSHELL so an `exit`/`set -e` inside it still reaches the
-/// `echo $? > exit_code` line — same contract as the ssh backend's run.sh.
-fn render_sbatch(spec: &SlurmJobSpec) -> String {
-    let mut directives = vec![
-        format!(
-            "#SBATCH --job-name=orx-{}",
-            &spec.run_id[..spec.run_id.len().min(8)]
-        ),
-        "#SBATCH --output=log".to_string(),
-        "#SBATCH --error=log".to_string(),
-        "#SBATCH --open-mode=append".to_string(),
-        // One task, stated rather than left to Slurm's default of one: some
-        // clusters' job-submit plugins refuse a job that names no task count
-        // ("You must specify a number of tasks"). Cores come from
-        // --cpus-per-task, so this changes nothing where the default applied.
-        "#SBATCH --ntasks=1".to_string(),
-    ];
-    if let Some(secs) = spec.time_limit_secs {
-        directives.push(format!("#SBATCH --time={}", slurm_time(secs)));
-    }
-    if let Some(p) = spec.partition.as_deref().filter(|p| !p.trim().is_empty()) {
-        directives.push(format!("#SBATCH --partition={p}"));
-    }
-    if let Some(a) = spec.account.as_deref().filter(|a| !a.trim().is_empty()) {
-        directives.push(format!("#SBATCH --account={a}"));
-    }
-    if let Some(g) = spec.gres.as_deref() {
-        directives.push(format!("#SBATCH --gres={g}"));
-    }
-    // Cores and host memory. Left out entirely when unset, so a cluster whose
-    // partition defaults are already right keeps behaving as before; asked for
-    // explicitly otherwise, because the common default is one core and
-    // `DefMemPerCPU` bytes with it — far too little to feed a GPU.
-    if let Some(c) = spec.cpus_per_task.filter(|c| *c > 0) {
-        directives.push(format!("#SBATCH --cpus-per-task={c}"));
-    }
-    if let Some(m) = spec.mem.as_deref().filter(|m| !m.trim().is_empty()) {
-        directives.push(format!("#SBATCH --mem={m}"));
-    }
-    // The script exits with the payload's code so Slurm's own COMPLETED/FAILED
-    // verdict mirrors the payload — inspect leans on that when the exit_code
-    // file is NFS-lagged behind the compute node's write.
-    // Default the payload's Python to unbuffered so its prints stream live
-    // instead of block-buffering behind Slurm's --output redirect. Only the
-    // sbatch payload runs the job — the login-node setup script (below) is a
-    // git clone, so it keeps the raw env (see jobs::default_python_env).
-    format!(
-        "#!/usr/bin/env bash\n{directives}\n{exports}\n{tensorboard}\n(\ncd repo || exit 97\n{command}\n)\ncode=$?\necho \"$code\" > exit_code\nexit \"$code\"\n",
-        directives = directives.join("\n"),
-        exports = render_exports(&super::default_python_env(&spec.env)),
-        tensorboard = crate::compute::TENSORBOARD_LOGDIR_EXPORT,
-        command = spec.command,
-    )
-}
-
-fn render_exports(env: &HashMap<String, String>) -> String {
-    let mut pairs: Vec<_> = env.iter().collect();
-    pairs.sort(); // deterministic script for tests & debugging
-    pairs
-        .iter()
-        .map(|(k, v)| format!("export {}={}", k, sh_quote(v)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// `sbatch --parsable` prints `<jobid>` or `<jobid>;<cluster>`.
-fn parse_job_id(out: &str) -> Result<String> {
-    let id = out.trim().split(';').next().unwrap_or("").trim();
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
-        return Err(anyhow!("Unexpected sbatch output: {:?}", out.trim()));
-    }
-    Ok(id.to_string())
-}
-
-// --- lifecycle ----------------------------------------------------------------
-
 /// The remote run dir for a run (shared convention with the ssh backend),
 /// derived from the root recorded in the descriptor at submit.
 pub fn run_dir(root: Option<&str>, run_id: &str) -> String {
     super::ssh::remote_run_dir(root, run_id)
-}
-
-/// Submit the job: create the run dir, clone on the login node, write
-/// job.sbatch, `sbatch --parsable`. Returns the Slurm job id — the reattach
-/// handle (together with the host).
-pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
-    let dir = shell_path(&run_dir(spec.remote_root.as_deref(), &spec.run_id));
-
-    // Login-node setup (clone). Env + script travel via stdin so tokens never
-    // land on an argv or in a file.
-    let setup = format!(
-        "{exports}\ncd {dir} || exit 97\n{script}\n",
-        exports = render_exports(&spec.env),
-        script = spec.setup_script,
-    );
-    ssh_run(
-        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
-        &format!("mkdir -p {dir} && chmod 700 {dir} && bash -s"),
-        Some(&setup),
-    )
-    .await
-    .map_err(|e| anyhow!("Setup on the login node failed: {e}"))?;
-
-    // Write the batch script (owner-only: it embeds tokens) and submit.
-    ssh_run(
-        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
-        &format!("umask 077 && cat > {dir}/job.sbatch"),
-        Some(&render_sbatch(spec)),
-    )
-    .await?;
-    let out = ssh_run(
-        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
-        &format!("cd {dir} && sbatch --parsable job.sbatch"),
-        None,
-    )
-    .await
-    .map_err(|e| anyhow!("sbatch failed: {e}"))?;
-    parse_job_id(&out)
 }
 
 /// Job state in the shared stage vocabulary (see `jobs::stage_to_run_status`).
@@ -449,13 +426,13 @@ pub struct SlurmPreflight {
     pub error: Option<String>,
 }
 
-pub async fn preflight(host: &str) -> SlurmPreflight {
+pub async fn preflight(target: &SshTarget) -> SlurmPreflight {
     let cmd = "if command -v sbatch >/dev/null 2>&1 && command -v squeue >/dev/null 2>&1 \
                && command -v scancel >/dev/null 2>&1; then echo SLURM_OK; fi; \
                if command -v bash >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; \
                then echo TOOLS_OK; fi; \
                sinfo -h -o %P 2>/dev/null || true";
-    match ssh_run(&SshTarget::alias(host), cmd, None).await {
+    match ssh_run(target, cmd, None).await {
         Ok(out) => {
             let mut slurm_found = false;
             let mut tools_found = false;
@@ -513,14 +490,12 @@ pub async fn diagnostics(host: &str, job_id: &str) -> Result<serde_json::Value> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     fn spec() -> SlurmJobSpec {
         SlurmJobSpec {
             host: "cluster".into(),
             run_id: "0123456789abcdef".into(),
             remote_root: None,
-            setup_script: "git clone x repo".into(),
+            setup_script: "test -d repo".into(),
             command: "python train.py".into(),
             env: HashMap::new(),
             gres: None,
@@ -600,46 +575,6 @@ mod tests {
         assert!(!script.contains("--mem"));
     }
 
-    #[test]
-    fn mem_parses_slurm_sizes_and_rejects_the_rest() {
-        assert_eq!(parse_mem("64G").unwrap(), "64G");
-        assert_eq!(parse_mem(" 4000M ").unwrap(), "4000M");
-        assert_eq!(parse_mem("65536").unwrap(), "65536");
-        for bad in [
-            "",
-            "0",
-            "G",
-            "64g",
-            "64GB",
-            "64 G",
-            "-1",
-            "64G\n#SBATCH --account=someone-else",
-        ] {
-            assert!(parse_mem(bad).is_err(), "{bad:?} should be rejected");
-        }
-    }
-
-    #[test]
-    fn slurm_time_formats() {
-        assert_eq!(slurm_time(90), "00:01:30");
-        assert_eq!(slurm_time(4 * 3600), "04:00:00");
-        assert_eq!(slurm_time(86_400 + 3661), "1-01:01:01");
-    }
-
-    #[test]
-    fn gres_from_flavor() {
-        assert_eq!(resolve_gres(""), None);
-        assert_eq!(resolve_gres("gpu").as_deref(), Some("gpu:1"));
-        assert_eq!(resolve_gres("gpu:a100:4").as_deref(), Some("gpu:a100:4"));
-        assert_eq!(resolve_gres("h100:2").as_deref(), Some("gpu:h100:2"));
-        assert_eq!(resolve_gres("h100").as_deref(), Some("gpu:h100"));
-    }
-
-    /// Live E2E against a real cluster — opt-in, never runs in CI:
-    ///   ORX_SLURM_TEST_HOST=<ssh alias> cargo test jobs::slurm -- --ignored
-    /// Covers submit → SCHEDULING/RUNNING → COMPLETED with logs, plus
-    /// scancel → the job leaving the queue (CANCELED, or GONE where
-    /// accounting is disabled — monitoring remains unknown).
     #[tokio::test]
     #[ignore = "needs a live slurm cluster; set ORX_SLURM_TEST_HOST"]
     async fn e2e_lifecycle_against_live_cluster() {
@@ -726,6 +661,43 @@ mod tests {
         assert_eq!(parse_job_id("123;cluster2\n").unwrap(), "123");
         assert!(parse_job_id("sbatch: error").is_err());
         assert!(parse_job_id("").is_err());
+    }
+
+    use super::*;
+
+    #[test]
+    fn mem_parses_slurm_sizes_and_rejects_the_rest() {
+        assert_eq!(parse_mem("64G").unwrap(), "64G");
+        assert_eq!(parse_mem(" 4000M ").unwrap(), "4000M");
+        assert_eq!(parse_mem("65536").unwrap(), "65536");
+        for bad in [
+            "",
+            "0",
+            "G",
+            "64g",
+            "64GB",
+            "64 G",
+            "-1",
+            "64G\n#SBATCH --account=someone-else",
+        ] {
+            assert!(parse_mem(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn slurm_time_formats() {
+        assert_eq!(slurm_time(90), "00:01:30");
+        assert_eq!(slurm_time(4 * 3600), "04:00:00");
+        assert_eq!(slurm_time(86_400 + 3661), "1-01:01:01");
+    }
+
+    #[test]
+    fn gres_from_flavor() {
+        assert_eq!(resolve_gres(""), None);
+        assert_eq!(resolve_gres("gpu").as_deref(), Some("gpu:1"));
+        assert_eq!(resolve_gres("gpu:a100:4").as_deref(), Some("gpu:a100:4"));
+        assert_eq!(resolve_gres("h100:2").as_deref(), Some("gpu:h100:2"));
+        assert_eq!(resolve_gres("h100").as_deref(), Some("gpu:h100"));
     }
 
     #[test]

@@ -20,7 +20,7 @@ const FORWARD_TO_PYTHON: &str = "#!/bin/sh\nexec python \"$@\"\n";
 
 /// The run.sh line that routes whichever of `python`/`python3` hit the stub to
 /// a real interpreter, or to a clear error.
-pub(super) fn prelude(dir: &Path) -> std::io::Result<String> {
+pub(crate) fn prelude(dir: &Path) -> std::io::Result<String> {
     let Some(path) = crate::local::shell_env::search_path() else {
         return Ok(String::new());
     };
@@ -89,7 +89,7 @@ fn real_python(path: &OsStr) -> Option<PathBuf> {
 }
 
 fn py_launcher_python() -> Option<PathBuf> {
-    let py = crate::local::shell_env::find_on_path("py")?;
+    let py = crate::local::shell_env::find("py")?;
     let out = hidden(&py)
         .args(["-3", "-c", "import sys; print(sys.executable)"])
         .env("PYTHONUTF8", "1")
@@ -123,7 +123,7 @@ fn exists(path: &Path) -> bool {
 }
 
 fn hidden(program: &Path) -> Command {
-    let mut command = Command::new(program);
+    let mut command = crate::process::command(program);
     command
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -153,7 +153,7 @@ mod tests {
             path.push(";");
             path.push(rest);
         }
-        let out = Command::new(crate::local::bash::program())
+        let out = crate::process::command(crate::local::bash::program())
             .args(["-c", "python3 --version"])
             .env("PATH", path)
             .output()

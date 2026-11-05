@@ -10,6 +10,9 @@ pub struct ContainerRun {
     pub id: String,
     pub started_at: String,
     pub run_dir: String,
+    /// Fields a newer orx wrote, kept so an older supervisor's rewrite doesn't drop them.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -106,6 +109,7 @@ printf '%s' "$HOME"
         id: found.id,
         started_at: found.started_at,
         run_dir: format!("{}/.orx/runs", home.trim_end_matches('/')),
+        unknown: Default::default(),
     })
 }
 
@@ -122,6 +126,50 @@ impl ContainerRun {
             "docker exec -i {} bash -c {}",
             sh_quote(&self.id),
             sh_quote(script)
+        )
+    }
+
+    /// The engine's run.sh for a run in this container: checks the container generation,
+    /// copies the inner script and the host's staged source in, then runs it there.
+    pub(crate) fn engine_run_sh(
+        &self,
+        exports: &str,
+        script: &str,
+        source: Option<&str>,
+    ) -> String {
+        let dir = sh_quote(&self.run_dir);
+        let id = sh_quote(&self.id);
+        let check = sh_quote("{{.State.StartedAt}} {{.State.Status}}");
+        let expected = sh_quote(&format!("{} running", self.started_at));
+        let inner = sh_quote(&inner_script(self, exports, script));
+        let write = sh_quote(&format!("umask 077; mkdir -p {dir} && cat > {dir}/run.sh"));
+        let mut run_sh = format!(
+            "set -e\nactual=$(docker container inspect --format {check} -- {id})\n[ \"$actual\" = {expected} ] || {{ echo 'Container generation or readiness changed before launch' >&2; exit 97; }}\nprintf '%s' {inner} | docker exec -i {id} bash -c {write}\n"
+        );
+        if let Some(source) = source {
+            let extract = sh_quote(&format!(
+                "umask 077; cd {dir} && rm -rf repo.part repo && mkdir repo.part && tar -xf - -C repo.part && mv repo.part repo"
+            ));
+            run_sh.push_str(&format!(
+                "docker exec -i {id} bash -c {extract} < {}\n",
+                sh_quote(source)
+            ));
+        }
+        run_sh.push_str(&format!(
+            "exec docker exec {id} setsid --wait bash {dir}/run.sh </dev/null\n"
+        ));
+        run_sh
+    }
+
+    /// The engine's cancel.sh: signals the in-container process group before the host one.
+    pub(crate) fn engine_cancel_sh(&self) -> String {
+        let id = sh_quote(&self.id);
+        let check = sh_quote("{{.State.StartedAt}} {{.State.Status}}");
+        let running = sh_quote(&format!("{} running", self.started_at));
+        let paused = sh_quote(&format!("{} paused", self.started_at));
+        let stop = self.exec(&cancel_script(&self.run_dir));
+        format!(
+            "set -e\nfound=$(docker container ls --all --no-trunc --quiet --filter id={id})\n[ -n \"$found\" ] || exit 0\nactual=$(docker container inspect --format {check} -- {id})\ncase \"$actual\" in {running}|{paused}) {stop} ;; *) exit 0 ;; esac\n"
         )
     }
 
@@ -325,8 +373,18 @@ pub(super) async fn cancel(target: &SshTarget, container: &ContainerRun) -> Resu
         }
         return Ok(());
     }
-    let directory = sh_quote(&container.run_dir);
-    let script = format!(
+    super::ssh_control(
+        target,
+        &container.exec(&cancel_script(&container.run_dir)),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+fn cancel_script(run_dir: &str) -> String {
+    let directory = sh_quote(run_dir);
+    format!(
         r#"{PROCESS_HELPERS}
 cd {directory} || exit 1
 umask 077
@@ -345,9 +403,7 @@ for ((i=0; i<10; i++)); do group_alive || exit 0; sleep 0.1; done
 echo 'Experiment process group is still alive' >&2
 exit 1
 "#
-    );
-    super::ssh_control(target, &container.exec(&script), None).await?;
-    Ok(())
+    )
 }
 
 #[cfg(test)]

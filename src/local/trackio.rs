@@ -871,14 +871,14 @@ const SHOW_SCRIPT: &str = "import os, sys, threading, trackio; threading.Thread(
 const WINDOWS_STUB_EXIT: i32 = 9009;
 
 async fn start_local() -> Result<(LocalChild, String), String> {
-    use crate::local::shell_env::find_on_path;
+    use crate::local::shell_env::find;
     let install = "Install uv, or run `pip install trackio`, to see local runs in Trackio.";
     let dir = local_dir().ok_or("No home directory for Trackio's local store")?;
     let port = crate::local::opencode::free_port()
         .map_err(|error| error.to_string())?
         .to_string();
-    let mut cmd = if let Some(uvx) = find_on_path("uvx") {
-        let mut cmd = tokio::process::Command::new(uvx);
+    let mut cmd = if let Some(uvx) = find("uvx") {
+        let mut cmd = crate::process::tokio_command(uvx);
         cmd.args([
             "--from",
             LOCAL_REQUIREMENT,
@@ -888,8 +888,8 @@ async fn start_local() -> Result<(LocalChild, String), String> {
             &port,
         ]);
         cmd
-    } else if let Some(python) = find_on_path(if cfg!(windows) { "python" } else { "python3" }) {
-        let mut cmd = tokio::process::Command::new(python);
+    } else if let Some(python) = find(if cfg!(windows) { "python" } else { "python3" }) {
+        let mut cmd = crate::process::tokio_command(python);
         cmd.args(["-c", SHOW_SCRIPT, &port]);
         cmd
     } else {

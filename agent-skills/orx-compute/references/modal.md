@@ -23,5 +23,5 @@ orx exp run <expId> --backend modal --flavor cpu --image python:3.12
   adds `uv` to every image's PATH; an image's own `uv` on its PATH takes precedence.
 - `orx` copies the committed snapshot into the Sandbox; Modal never needs
   repository access.
-- A detached `orx supervise` process records provider status and logs; do not
-  kill it.
+
+See [run monitoring](../SKILL.md#run-engine-setting).

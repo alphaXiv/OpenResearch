@@ -41,7 +41,7 @@ use crate::local::chat::{
 };
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::{ensure_playbook, PLAYBOOK_REL};
-use crate::local::shell_env::{find_in_dir, find_on_path};
+use crate::local::shell_env::installs;
 
 const CURSOR_REINSTALL: &str = "Reinstall it from cursor.com/install";
 const AUTH_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -243,28 +243,18 @@ impl Harness for Cursor {
     }
 }
 
-/// `cursor-agent` on PATH, then an `agent` binary that is actually Cursor, then
-/// the platform's installer drop locations, in preference order. `agent` is a
-/// generic name, so a hit is only accepted when the path (or the symlink it
-/// resolves to) names Cursor.
+/// Every `cursor-agent` install, then every `agent` that is actually Cursor, in
+/// preference order. `agent` is a generic name, so a hit is only accepted when
+/// the path (or the symlink it resolves to) names Cursor.
 fn cursor_candidates() -> Vec<PathBuf> {
-    let drop_dirs: Vec<PathBuf> = dirs::home_dir()
-        .map(|home| home.join(".local").join("bin"))
-        .into_iter()
-        .chain(
-            cfg!(windows)
-                .then(dirs::data_local_dir)
-                .flatten()
-                .map(|dir| dir.join("cursor-agent")),
-        )
-        .collect();
-    let mut cursor_agents: Vec<PathBuf> = find_on_path("cursor-agent").into_iter().collect();
-    let mut agents: Vec<PathBuf> = Vec::new();
-    for dir in drop_dirs {
-        cursor_agents.extend(find_in_dir(&dir, "cursor-agent"));
-        agents.extend(find_in_dir(&dir, "agent"));
-    }
-    agents.extend(find_on_path("agent"));
+    let own = || {
+        cfg!(windows)
+            .then(dirs::data_local_dir)
+            .flatten()
+            .map(|dir| dir.join("cursor-agent"))
+    };
+    let cursor_agents = installs("cursor-agent", own());
+    let agents = installs("agent", own());
     // `agent` is the installer's alias binary in the same directory — where a
     // `cursor-agent` sibling exists, probing both doubles the sweep.
     let canon = |dir: &Path| crate::paths::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
@@ -391,7 +381,7 @@ fn version_dir_key(name: &str) -> Option<(u64, u64)> {
 /// dominant probe cost) and `CURSOR_INVOKED_AS`.
 fn cursor_command(bin: &Path) -> Command {
     if let Some(launch) = bundled_launch(bin) {
-        let mut cmd = Command::new(launch.node);
+        let mut cmd = crate::process::tokio_command(launch.node);
         cmd.arg(launch.index);
         if let Some(name) = bin.file_name() {
             cmd.env("CURSOR_INVOKED_AS", name);
@@ -401,7 +391,7 @@ fn cursor_command(bin: &Path) -> Command {
         }
         return cmd;
     }
-    Command::new(bin)
+    crate::process::tokio_command(bin)
 }
 
 /// The `status` payload's login verdict, in either shape the CLI reports.
@@ -573,7 +563,7 @@ fn cursor_exit_detail(status: std::process::ExitStatus, log: &Path) -> String {
 
 async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     let message = format!("{}\n\n{}", request.system, request.prompt);
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.args([
         "--print",
         "--output-format",
@@ -672,7 +662,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .filter(|_| native_session.is_some());
     let mut prompt = ctx.text.clone();
     if ctx.native_session_id.is_some() && resume.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Cursor") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Cursor")? {
             prompt = format!("{recovery}\n\n{prompt}");
         }
     }
@@ -680,7 +670,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         prompt = first_turn_prompt(&prompt);
     }
 
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
         "--print",
         "--output-format",
@@ -739,7 +729,14 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let mut state = TurnState::default();
 
     loop {
-        match tokio::time::timeout(TURN_WATCHDOG, lines.next_line()).await {
+        let next = tokio::select! {
+            next = tokio::time::timeout(TURN_WATCHDOG, lines.next_line()) => next,
+            _ = ctx.flush_due() => {
+                let _ = ctx.flush();
+                continue;
+            }
+        };
+        match next {
             Ok(Ok(Some(line))) => {
                 let Ok(event) = serde_json::from_str::<Value>(&line) else {
                     continue;
@@ -1005,6 +1002,7 @@ fn apply_tool_call(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
                 prompt: None,
                 phase: None,
                 children: Vec::new(),
+                orx: None,
             });
         }
         "completed" => {
@@ -1037,6 +1035,7 @@ fn apply_tool_call(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
                     prompt: None,
                     phase: None,
                     children: Vec::new(),
+                    orx: None,
                 });
             }
         }
@@ -1198,9 +1197,9 @@ mod tests {
                 ),
             )
             .unwrap();
-            Command::new(launcher)
+            crate::process::tokio_command(launcher)
         } else {
-            Command::new("cat")
+            crate::process::tokio_command("cat")
         };
         let prompt = "First line\nSecond line: \"quoted\" & 100% é\n";
         let mut child = command
@@ -1222,11 +1221,11 @@ mod tests {
     #[tokio::test]
     async fn early_exit_keeps_the_child_status_instead_of_a_broken_pipe_error() {
         let mut command = if cfg!(windows) {
-            let mut command = Command::new("cmd.exe");
+            let mut command = crate::process::tokio_command("cmd.exe");
             command.args(["/C", "exit 23"]);
             command
         } else {
-            let mut command = Command::new("sh");
+            let mut command = crate::process::tokio_command("sh");
             command.args(["-c", "exit 23"]);
             command
         };
@@ -1560,6 +1559,7 @@ ActionRequiredError: Named models unavailable Free plans can only use Auto. Swit
                     note: None,
                     resume_mode: None,
                     annotations: Vec::new(),
+                    from: None,
                 },
             )
             .await
@@ -1588,6 +1588,7 @@ ActionRequiredError: Named models unavailable Free plans can only use Auto. Swit
                     note: None,
                     resume_mode: None,
                     annotations: Vec::new(),
+                    from: None,
                 },
             )
             .await

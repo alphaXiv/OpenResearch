@@ -1,11 +1,8 @@
-import { queryClient } from "./queries/client";
-import { getUiStateQuery, listProjectsQuery, getProjectUiStateQuery } from "./queries/projects";
-import { listChatSessionsQuery } from "./queries/chat";
+import type { Workspace } from "./workspace";
+
 import { isDemoProjectId, type ChatSession } from "./api";
 import { defaultTaskWorkspace } from "./workspaceTabs";
 import { getTaskWorkspace, parseDestination, safeLocation, taskLocation } from "./workspaceState";
-import { getRememberedGlobalWorkspace } from "./workspacePersistence";
-import { getCachedProjectWorkspace } from "./useProjectWorkspace";
 
 function validSessionLocation(location: string, sessions: ChatSession[]): boolean {
   const destination = parseDestination(location.split("?")[0]);
@@ -13,10 +10,13 @@ function validSessionLocation(location: string, sessions: ChatSession[]): boolea
     session.id === destination.sessionId && session.projectId === destination.projectId)));
 }
 
-export async function globalResumeLocation(client = queryClient): Promise<string> {
+export async function globalResumeLocation(workspace: Workspace): Promise<string> {
+  const { queryClient: client } = workspace;
+  const { getUiStateQuery, listProjectsQuery, listChatSessionsQuery } = workspace.queries;
+  const { getRememberedGlobalWorkspace } = workspace.persistence;
   const [state, projects] = await Promise.all([client.fetchQuery(getUiStateQuery()), client.fetchQuery(listProjectsQuery())]);
   const location = safeLocation((getRememberedGlobalWorkspace() ?? state.workspace)?.lastLocation);
-  const fallback = () => projects[0] ? projectResumeLocation(projects[0].id, client) : Promise.resolve("/projects");
+  const fallback = () => projects[0] ? projectResumeLocation(projects[0].id, workspace) : Promise.resolve("/projects");
   if (!location) return fallback();
   const destination = parseDestination(location.split("?")[0]);
   if (!destination?.projectId) return fallback();
@@ -26,7 +26,10 @@ export async function globalResumeLocation(client = queryClient): Promise<string
   return location;
 }
 
-export async function projectResumeLocation(projectId: string, client = queryClient): Promise<string> {
+export async function projectResumeLocation(projectId: string, workspace: Workspace): Promise<string> {
+  const { queryClient: client } = workspace;
+  const { getProjectUiStateQuery, listChatSessionsQuery, getUiStateQuery } = workspace.queries;
+  const { getCachedProjectWorkspace } = workspace.projects;
   const [loaded, sessions] = await Promise.all([client.fetchQuery(getProjectUiStateQuery(projectId)), client.fetchQuery(listChatSessionsQuery(projectId))]);
   const state = getCachedProjectWorkspace(projectId) ?? loaded;
   const location = safeLocation(state?.lastLocation);

@@ -17,4 +17,5 @@ orx exp run <expId> --backend local
   the process group.
 - Finished runs older than each project's three newest local runs lose
   `repo/.venv` and `repo/.cache/uv`; logs, TensorBoard files, and other outputs stay.
-- A detached `orx supervise` process watches the run; do not kill it.
+
+See [run monitoring](../SKILL.md#run-engine-setting).

@@ -709,7 +709,7 @@ async fn opencode_child(
 ) -> Result<std::process::Output> {
     let db = native_store::prepare_opencode(NativeStore::Isolated)?;
     let lease = crate::local::opencode::prepare_database(binary, &db).await?;
-    let mut cmd = tokio::process::Command::new(&binary.path);
+    let mut cmd = crate::process::tokio_command(&binary.path);
     cmd.args(["run", "--agent", "plan", "--pure"]);
     cmd.args(["--model", model])
         .arg(message)
@@ -727,7 +727,7 @@ async fn opencode_child(
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
-    let mut config = tokio::process::Command::new(&binary.path);
+    let mut config = crate::process::tokio_command(&binary.path);
     config
         .args(["debug", "config", "--pure"])
         .current_dir(std::env::temp_dir())
@@ -823,7 +823,7 @@ async fn opencode_child(
 /// catalog children before resolution settles — a binary swapped mid-detect
 /// just answers as whatever it now is, and the next pass re-verifies.
 async fn run_models(bin: PathBuf, args: &[&str]) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null())
@@ -971,13 +971,17 @@ fn parse_verbose_models_filtered(out: &str, public_only: bool) -> Vec<super::Mod
             .as_ref()
             .and_then(|v| v.get("name"))
             .and_then(Value::as_str);
-        let model = match variants {
+        let mut model = match variants {
             Some(ids) => {
                 let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
                 super::ModelInfo::new(header).with_reasoning(&refs)
             }
             None => super::ModelInfo::new(header),
         };
+        model.context_window = parsed
+            .as_ref()
+            .and_then(|model| model.pointer("/limit/context"))
+            .and_then(Value::as_u64);
         let image_input = parsed
             .as_ref()
             .and_then(|v| v.pointer("/capabilities/input/image"))
@@ -1054,6 +1058,7 @@ pub(crate) fn to_wire_part(part: &Value) -> Option<WirePart> {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         }),
         "tool" => {
             let state = part.get("state");
@@ -1085,6 +1090,7 @@ pub(crate) fn to_wire_part(part: &Value) -> Option<WirePart> {
                 prompt: None,
                 phase: None,
                 children: Vec::new(),
+                orx: None,
             })
         }
         _ => None,
@@ -1575,7 +1581,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .map(|session| session.store)
         .unwrap_or(NativeStore::Isolated);
     if ctx.native_session_id.is_some() && native_session.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "OpenCode") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "OpenCode")? {
             ctx.text = format!("{recovery}\n\n{}", ctx.text);
         }
         ctx.native_session_id = None;
@@ -1636,6 +1642,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 
     loop {
         tokio::select! {
+            _ = ctx.flush_due() => { let _ = ctx.flush(); }
             chunk = stream.next() => {
                 let Some(chunk) = chunk else {
                     return Err(anyhow!("opencode event stream ended mid-turn"));
@@ -2129,7 +2136,7 @@ mod tests {
             crate::local::git::TemporaryDirectory::new("orx-one-shot-generation").unwrap();
         let script = sh_script("opencode", "#!/bin/sh\ncase \"$1\" in\ndebug) printf '%s' \"$OPENCODE_CONFIG_CONTENT\";;\nrun) printf '%s\\n' \"$6\"; printf '%s' \"$OPENCODE_CONFIG_CONTENT\";;\n*) exit 99;;\nesac\n");
         let root = fixture.path();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .env_clear()
             .args(["--exact", "local::harness::opencode::tests::v1_one_shot_verifies_file_captured_config_and_generates_on_selected_model", "--nocapture"])
             .env(CHILD, &script)
@@ -2244,7 +2251,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        let mut child = crate::process::command(std::env::current_exe().unwrap());
         child.env_clear();
         for key in ["SystemRoot", "COMSPEC", "TEMP", "TMP"] {
             if let Some(value) = std::env::var_os(key) {
@@ -2721,6 +2728,7 @@ opencode/unknown
             answers: values.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_owned),
             annotations: Vec::new(),
+            from: None,
         };
         let mut saved = Vec::new();
         for (index, response) in [
@@ -2778,6 +2786,7 @@ opencode/unknown
             answers: vec![choice.into()],
             note: None,
             annotations: Vec::new(),
+            from: None,
         };
         assert_eq!(plan_exit_transition(&prompt, &response("Yes")), Some(false));
         assert_eq!(plan_exit_transition(&prompt, &response("No")), Some(true));

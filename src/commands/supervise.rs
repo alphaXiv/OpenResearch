@@ -8,7 +8,7 @@
 use std::io::{Seek as _, Write as _};
 use std::time::Duration;
 
-use crate::config::Credentials;
+use crate::config::{paced, Credentials};
 use crate::error::{anyhow, Result};
 use crate::jobs::huggingface as hf;
 use crate::jobs::kubernetes as k8s;
@@ -18,17 +18,102 @@ use crate::jobs::openresearch;
 use crate::jobs::ray;
 use crate::jobs::slurm;
 use crate::jobs::ssh;
+use crate::jobs::vercel;
 use crate::jobs::{is_terminal_stage, stage_to_run_status, BackendDescriptor};
 use crate::store::{log_path, now_ms, RunStatus, Store};
+
+trait RunSink {
+    fn finish(
+        &self,
+        run: &str,
+        status: RunStatus,
+        exit_code: Option<i64>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        let applied = self.update_status(run, status, Some(now_ms()), exit_code)?;
+        if applied {
+            if let Some(reason) = reason {
+                if let Err(error) = self.set_result_markdown(run, reason) {
+                    eprintln!("supervise {run}: could not record failure reason: {error}");
+                }
+            }
+        }
+        Ok(applied)
+    }
+    fn get_run(&self, run: &str) -> Result<Option<crate::store::StoredRun>>;
+    fn update_status(
+        &self,
+        run: &str,
+        status: RunStatus,
+        ended_at: Option<i64>,
+        exit_code: Option<i64>,
+    ) -> Result<bool>;
+    fn set_result_markdown(&self, run: &str, result: &str) -> Result<()>;
+    fn set_backend_json(&self, run: &str, descriptor: &str) -> Result<()>;
+    fn queue_finished_remote_cleanup(&self, run: &str) -> Result<()>;
+}
+
+impl RunSink for Store {
+    fn get_run(&self, run: &str) -> Result<Option<crate::store::StoredRun>> {
+        self.get_run(run)
+    }
+    fn update_status(
+        &self,
+        run: &str,
+        status: RunStatus,
+        ended_at: Option<i64>,
+        exit_code: Option<i64>,
+    ) -> Result<bool> {
+        self.update_status(run, status, ended_at, exit_code)
+    }
+    fn set_result_markdown(&self, run: &str, result: &str) -> Result<()> {
+        self.set_result_markdown(run, result)
+    }
+    fn set_backend_json(&self, run: &str, descriptor: &str) -> Result<()> {
+        self.set_backend_json(run, descriptor)
+    }
+    fn queue_finished_remote_cleanup(&self, run: &str) -> Result<()> {
+        self.queue_finished_remote_cleanup(run)
+    }
+}
+
+impl RunSink for std::sync::Mutex<Store> {
+    fn get_run(&self, run: &str) -> Result<Option<crate::store::StoredRun>> {
+        self.lock().unwrap().get_run(run)
+    }
+    fn update_status(
+        &self,
+        run: &str,
+        status: RunStatus,
+        ended_at: Option<i64>,
+        exit_code: Option<i64>,
+    ) -> Result<bool> {
+        self.lock()
+            .unwrap()
+            .update_status(run, status, ended_at, exit_code)
+    }
+    fn set_result_markdown(&self, run: &str, result: &str) -> Result<()> {
+        self.lock().unwrap().set_result_markdown(run, result)
+    }
+    fn set_backend_json(&self, run: &str, descriptor: &str) -> Result<()> {
+        self.lock().unwrap().set_backend_json(run, descriptor)
+    }
+    fn queue_finished_remote_cleanup(&self, run: &str) -> Result<()> {
+        self.lock().unwrap().queue_finished_remote_cleanup(run)
+    }
+}
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How long a silent log stream is held before re-checking job state.
 const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
+/// How long a finished job's final log pass may take.
+const LOG_DRAIN: Duration = Duration::from_secs(20);
+const LOG_RETRY: Duration = Duration::from_secs(2);
 
 fn should_report_monitoring_error(already_reported: bool, elapsed: Option<Duration>) -> bool {
-    already_reported || elapsed.is_some_and(|elapsed| elapsed >= MONITORING_GRACE)
+    already_reported || elapsed.is_some_and(|elapsed| elapsed >= paced(MONITORING_GRACE))
 }
 
 fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
@@ -41,7 +126,7 @@ fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::f
 }
 
 fn supervisor_lock_path(run_id: &str) -> std::path::PathBuf {
-    log_path(run_id).with_extension("supervisor.lock")
+    log_path(&crate::store::data_dir(), run_id).with_extension("supervisor.lock")
 }
 
 /// Whether a live `orx supervise` holds `run_id`'s lock.
@@ -50,7 +135,9 @@ pub(crate) fn supervisor_running(run_id: &str) -> bool {
 }
 
 pub(crate) fn uses_shared_ssh(run_id: &str) -> bool {
-    lock_held(&log_path(run_id).with_extension("supervisor.shared-ssh.lock"))
+    lock_held(
+        &log_path(&crate::store::data_dir(), run_id).with_extension("supervisor.shared-ssh.lock"),
+    )
 }
 
 fn lock_held(path: &std::path::Path) -> bool {
@@ -119,8 +206,9 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
         Err(err) => return Err(err.into()),
     };
-    let mut protocol_lock =
-        open_supervisor_lock(&log_path(&run_id).with_extension("supervisor.shared-ssh.lock"))?;
+    let mut protocol_lock = open_supervisor_lock(
+        &log_path(&crate::store::data_dir(), &run_id).with_extension("supervisor.shared-ssh.lock"),
+    )?;
     let _protocol_guard = protocol_lock.try_write()?;
     let stored = store
         .get_run(&run_id)?
@@ -159,6 +247,9 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     if descriptor.kind == "modal_job" {
         return run_modal(store, stored, descriptor, run_id).await;
     }
+    if descriptor.kind == "vercel_job" {
+        return run_vercel(store, stored, descriptor, run_id).await;
+    }
     if descriptor.kind == "ssh_job" {
         return run_ssh(store, stored, descriptor, run_id).await;
     }
@@ -187,7 +278,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     // then report `running`… as `done` (the UI would see no live run at all,
     // then the whole log at once). The tail task owns the log file; this loop
     // owns status and cancel intent.
-    let path = log_path(&run_id);
+    let path = log_path(&crate::store::data_dir(), &run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let mut log_task = tokio::spawn(tail_logs(
         token.clone(),
@@ -207,7 +298,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -218,7 +309,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
         // complete local log.
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -250,13 +341,13 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
             request_backend_cancel(&token, &namespace, &job_id, &run_id, &mut cancel_sent).await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
 /// Local cancel intent from the run row itself. Best-effort — a transient
 /// db error must not kill supervision.
-fn local_cancel_requested(store: &Store, run_id: &str) -> bool {
+fn local_cancel_requested(store: &dyn RunSink, run_id: &str) -> bool {
     store
         .get_run(run_id)
         .ok()
@@ -265,11 +356,16 @@ fn local_cancel_requested(store: &Store, run_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn should_report_cancelled(store: &Store, run_id: &str, cancel_sent: bool) -> bool {
+fn should_report_cancelled(store: &dyn RunSink, run_id: &str, cancel_sent: bool) -> bool {
     cancel_sent || local_cancel_requested(store, run_id)
 }
 
-fn run_status_for_stage(store: &Store, run_id: &str, cancel_sent: bool, stage: &str) -> RunStatus {
+fn run_status_for_stage(
+    store: &dyn RunSink,
+    run_id: &str,
+    cancel_sent: bool,
+    stage: &str,
+) -> RunStatus {
     if stage == "LOST" {
         return if cancel_sent {
             RunStatus::Cancelled
@@ -326,7 +422,7 @@ async fn tail_logs(
             seen += 1;
             log.line(line);
         };
-        let pass = hf::stream_logs(&token, &namespace, &job_id, skip, LOG_IDLE, &mut sink);
+        let pass = hf::stream_logs(&token, &namespace, &job_id, skip, Some(LOG_IDLE), &mut sink);
         let Some(result) = log_pass(&mut done, draining, pass).await else {
             continue;
         };
@@ -337,7 +433,7 @@ async fn tail_logs(
         if draining && result.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -380,7 +476,7 @@ async fn run_k8s(
 
     eprintln!("supervise {run_id}: watching k8s job {namespace}/{job_name}");
 
-    let path = log_path(&run_id);
+    let path = log_path(&crate::store::data_dir(), &run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let mut log_task = tokio::spawn(tail_logs_k8s(
         context.clone(),
@@ -399,7 +495,7 @@ async fn run_k8s(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -408,7 +504,7 @@ async fn run_k8s(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -453,7 +549,7 @@ async fn run_k8s(
             .await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -486,7 +582,7 @@ async fn tail_logs_k8s(
             &namespace,
             &job_name,
             &mut resume,
-            LOG_IDLE,
+            Some(LOG_IDLE),
             &mut sink,
         );
         let Some(streamed) = log_pass(&mut done, draining, pass).await else {
@@ -499,7 +595,7 @@ async fn tail_logs_k8s(
         if draining && streamed.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -535,7 +631,7 @@ async fn run_modal(
 
     eprintln!("supervise {run_id}: watching modal sandbox {sandbox_id}");
 
-    let path = log_path(&run_id);
+    let path = log_path(&crate::store::data_dir(), &run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let mut log_task = tokio::spawn(tail_logs_modal(
         sandbox_id.clone(),
@@ -552,7 +648,7 @@ async fn run_modal(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -563,7 +659,7 @@ async fn run_modal(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -594,7 +690,7 @@ async fn run_modal(
             cancel_modal(&sandbox_id, &run_id, &mut cancel_sent).await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -624,7 +720,7 @@ async fn tail_logs_modal(
             seen += 1;
             log.line(line);
         };
-        let pass = modal::stream_logs(&sandbox_id, skip, LOG_IDLE, &mut sink);
+        let pass = modal::stream_logs(&sandbox_id, skip, Some(LOG_IDLE), &mut sink);
         let Some(result) = log_pass(&mut done, draining, pass).await else {
             continue;
         };
@@ -635,7 +731,7 @@ async fn tail_logs_modal(
         if draining && result.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -644,6 +740,193 @@ async fn cancel_modal(sandbox_id: &str, run_id: &str, cancel_sent: &mut bool) {
     match modal::cancel_job(sandbox_id).await {
         Ok(()) => *cancel_sent = true,
         Err(err) => eprintln!("supervise {run_id}: modal cancel failed (will retry): {err}"),
+    }
+}
+
+// --- vercel -------------------------------------------------------------------
+//
+// Modal's two-half shape, plus cleanup: a Vercel sandbox outlives its command
+// until the session limit, so once the run is terminal and its log drained the
+// supervisor stops and destroys it. Cancel stops the sandbox, which reads back
+// as ERROR and is reported as `cancelled`.
+
+async fn run_vercel(
+    store: Store,
+    stored: crate::store::StoredRun,
+    descriptor: BackendDescriptor,
+    run_id: String,
+) -> Result<()> {
+    let (name, process_id) = descriptor.vercel_ref()?;
+    let (name, process_id) = (name.to_string(), process_id.to_string());
+
+    eprintln!("supervise {run_id}: watching vercel sandbox {name} (process {process_id})");
+
+    let path = log_path(&crate::store::data_dir(), &run_id);
+    let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+    let mut log_task = tokio::spawn(tail_logs_vercel(
+        name.clone(),
+        path.clone(),
+        run_id.clone(),
+        done_rx,
+    ));
+
+    let mut last_status = status_of(&stored)?;
+    let mut cancel_sent = false;
+
+    loop {
+        let job = match vercel::inspect_job(&name, &process_id).await {
+            Ok(j) => j,
+            Err(err) => {
+                eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
+                continue;
+            }
+        };
+        let stage = job.stage.as_str();
+        let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
+
+        if is_terminal_stage(stage) {
+            let _ = done_tx.send(true);
+            drain_vercel_logs(&mut log_task, &path, &run_id).await;
+            let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
+            if applied && status == RunStatus::Failed {
+                if let Some(msg) = &job.message {
+                    if let Err(err) =
+                        store.set_result_markdown(&run_id, &format!("Job failed: {msg}"))
+                    {
+                        eprintln!("supervise {run_id}: could not record failure reason: {err}");
+                    }
+                }
+            }
+            finish_vercel(&name, &run_id).await;
+            eprintln!("supervise {run_id}: finished ({status})");
+            return Ok(());
+        }
+
+        if status != last_status && store.update_status(&run_id, status, None, None)? {
+            let cancel_requested = local_cancel_requested(&store, &run_id);
+            eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
+            last_status = status;
+            if cancel_requested && !cancel_sent {
+                cancel_vercel(&name, &run_id, &mut cancel_sent).await;
+            }
+        } else if !cancel_sent && local_cancel_requested(&store, &run_id) {
+            cancel_vercel(&name, &run_id, &mut cancel_sent).await;
+        }
+
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
+    }
+}
+
+/// How long the final log replay may go without writing anything before it is
+/// abandoned. Longer than one stream pass's idle window, so a live replay that
+/// reconnects is never mistaken for a stalled one.
+const VERCEL_DRAIN_STALL: Duration = Duration::from_secs(45);
+
+/// Attempts at stopping and destroying a finished run's sandbox.
+const VERCEL_FINISH_ATTEMPTS: u32 = 5;
+
+/// Wait for the final log replay before the sandbox is destroyed, which loses
+/// anything unread. A replay after a restart can outlast any fixed timeout, so
+/// keep waiting while the run log keeps changing (a fresh replay truncates it
+/// first) and give up only once it stalls.
+async fn drain_vercel_logs(
+    log_task: &mut tokio::task::JoinHandle<()>,
+    path: &std::path::Path,
+    run_id: &str,
+) {
+    let size = || std::fs::metadata(path).map(|m| m.len()).ok();
+    let mut last = size();
+    loop {
+        if tokio::time::timeout(paced(VERCEL_DRAIN_STALL), &mut *log_task)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        let now = size();
+        if now == last {
+            eprintln!(
+                "supervise {run_id}: final log replay stalled for {}s; cleaning up without it",
+                VERCEL_DRAIN_STALL.as_secs()
+            );
+            log_task.abort();
+            return;
+        }
+        last = now;
+    }
+}
+
+/// Stop and destroy a finished run's sandbox, retrying transient failures: once
+/// the run is terminal no supervisor comes back for it, so a sandbox left here
+/// keeps billing until its session limit.
+async fn finish_vercel(name: &str, run_id: &str) {
+    let mut delay = paced(Duration::from_secs(2));
+    for attempt in 1..=VERCEL_FINISH_ATTEMPTS {
+        match vercel::finish_job(name).await {
+            Ok(()) => return,
+            Err(err) if attempt == VERCEL_FINISH_ATTEMPTS => eprintln!(
+                "supervise {run_id}: could not stop vercel sandbox {name} after {attempt} \
+                 attempts (it stops at its session limit): {err}"
+            ),
+            Err(err) => {
+                eprintln!(
+                    "supervise {run_id}: stopping vercel sandbox {name} failed (attempt \
+                     {attempt}, will retry): {err}"
+                );
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+        }
+    }
+}
+
+/// Vercel twin of `tail_logs_modal` — each connect replays the in-sandbox log
+/// file from line 1, so the same replay-and-dedup contract applies.
+async fn tail_logs_vercel(
+    name: String,
+    path: std::path::PathBuf,
+    run_id: String,
+    mut done: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut log = match RunLog::open(&path) {
+        Ok(log) => log,
+        Err(err) => {
+            eprintln!(
+                "supervise {run_id}: could not open {}: {err}",
+                path.display()
+            );
+            return;
+        }
+    };
+    let mut seen = 0u64;
+    loop {
+        let draining = *done.borrow();
+        let skip = seen;
+        let mut sink = |line: &str| {
+            seen += 1;
+            log.line(line);
+        };
+        let pass = vercel::stream_logs(&name, skip, LOG_IDLE, &mut sink);
+        let Some(result) = log_pass(&mut done, draining, pass).await else {
+            continue;
+        };
+        if let Err(err) = &result {
+            eprintln!("supervise {run_id}: log stream error (will retry): {err}");
+        }
+        let _ = log.file.flush();
+        if draining && result.is_ok() {
+            return;
+        }
+        tokio::time::sleep(paced(LOG_RETRY)).await;
+    }
+}
+
+async fn cancel_vercel(name: &str, run_id: &str, cancel_sent: &mut bool) {
+    eprintln!("supervise {run_id}: cancel requested — stopping vercel sandbox");
+    match vercel::cancel_job(name).await {
+        Ok(()) => *cancel_sent = true,
+        Err(err) => eprintln!("supervise {run_id}: vercel cancel failed (will retry): {err}"),
     }
 }
 
@@ -660,6 +943,7 @@ async fn run_ssh(
     mut descriptor: BackendDescriptor,
     run_id: String,
 ) -> Result<()> {
+    let store = std::sync::Mutex::new(store);
     let (host, dir) = descriptor.ssh_ref()?;
     eprintln!("supervise {run_id}: watching ssh job {host}:{dir}");
     let target = ssh::SshTarget::alias(host).for_run(&run_id);
@@ -681,7 +965,7 @@ async fn run_ssh(
 /// box we ssh into (ssh itself, openresearch). Runs until the job is terminal
 /// and returns the final run status after logs are drained.
 async fn watch_ssh_job(
-    store: &Store,
+    store: &(dyn RunSink + Sync),
     initial_status: RunStatus,
     target: ssh::SshTarget,
     dir: String,
@@ -690,17 +974,23 @@ async fn watch_ssh_job(
     sandbox: Option<(&Credentials, &str)>,
 ) -> Result<RunStatus> {
     let container = descriptor.ssh_container.clone();
-    let path = log_path(run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
     let mut log_task = tokio::spawn(tail_logs_ssh(
         target.clone(),
         dir.clone(),
-        path.clone(),
         run_id.to_string(),
         done_rx,
         Some(log_error_tx),
     ));
+
+    struct StopTail(tokio::task::AbortHandle);
+    impl Drop for StopTail {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _tail = StopTail(log_task.abort_handle());
 
     let mut last_status = initial_status;
     let mut cancel_sent = descriptor.cancellation_accepted;
@@ -782,7 +1072,7 @@ async fn watch_ssh_job(
                 },
                 _ => {
                     missing_polls = 0;
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    tokio::time::sleep(paced(POLL_INTERVAL)).await;
                     continue;
                 }
             },
@@ -791,7 +1081,7 @@ async fn watch_ssh_job(
         if job.message.as_deref() == Some(ssh::RUN_DIR_MISSING) {
             missing_polls += 1;
             if missing_polls < 3 {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         } else {
@@ -799,7 +1089,7 @@ async fn watch_ssh_job(
         }
         let mut job = job;
         let mut exit_code = None;
-        if descriptor.rental_lease.is_some() && is_terminal_stage(&job.stage) {
+        if is_terminal_stage(&job.stage) {
             exit_code = ssh::ssh_run(
                 &target,
                 &format!("cat {}/exit_code", ssh::shell_path(&dir)),
@@ -815,7 +1105,7 @@ async fn watch_ssh_job(
                 if openresearch::box_deleted(creds, id).await {
                     job.stage = "LOST".into();
                 } else {
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    tokio::time::sleep(paced(POLL_INTERVAL)).await;
                     continue;
                 }
             }
@@ -826,30 +1116,25 @@ async fn watch_ssh_job(
         if is_terminal_stage(stage) || stage == "LOST" {
             let _ = done_tx.send(true);
             let collected = matches!(
-                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                tokio::time::timeout(paced(LOG_DRAIN), &mut log_task).await,
                 Ok(Ok(true))
             );
             if !collected {
                 log_task.abort();
             }
-            let applied = store.update_status(run_id, status, Some(now_ms()), exit_code)?;
-            if applied && matches!(status, RunStatus::Failed | RunStatus::Lost) {
-                if let Some(msg) = &job.message {
-                    if let Err(err) = store.set_result_markdown(
-                        run_id,
-                        &format!(
-                            "{}: {msg}",
-                            if status == RunStatus::Lost {
-                                "Outcome unavailable"
-                            } else {
-                                "Job failed"
-                            }
-                        ),
-                    ) {
-                        eprintln!("supervise {run_id}: could not record failure reason: {err}");
-                    }
-                }
-            }
+            let reason = job
+                .message
+                .as_ref()
+                .filter(|_| matches!(status, RunStatus::Failed | RunStatus::Lost))
+                .map(|message| {
+                    let prefix = if status == RunStatus::Lost {
+                        "Outcome unavailable"
+                    } else {
+                        "Job failed"
+                    };
+                    format!("{prefix}: {message}")
+                });
+            store.finish(run_id, status, exit_code, reason.as_deref())?;
             if descriptor.rental_lease.is_some()
                 && stage != "LOST"
                 && collected
@@ -914,7 +1199,7 @@ async fn watch_ssh_job(
             .await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -923,21 +1208,17 @@ async fn watch_ssh_job(
 async fn tail_logs_ssh(
     target: ssh::SshTarget,
     dir: String,
-    path: std::path::PathBuf,
     run_id: String,
     done: tokio::sync::watch::Receiver<bool>,
     errors: Option<tokio::sync::watch::Sender<Option<String>>>,
 ) -> bool {
-    let _ = path;
     let target = target.for_run(&run_id);
     let mut last_error = None;
     loop {
         let draining = *done.borrow();
         let result = ssh::service::request(
             &target,
-            serde_json::json!({
-                "op":"collect", "run":run_id, "dir":dir,
-            }),
+            serde_json::json!({ "op":"collect", "run":run_id, "dir":dir }),
         )
         .await;
         match result {
@@ -964,7 +1245,7 @@ async fn tail_logs_ssh(
         if let Some(errors) = &errors {
             errors.send_replace(last_error.clone());
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -1002,6 +1283,7 @@ async fn run_openresearch(
     mut descriptor: BackendDescriptor,
     run_id: String,
 ) -> Result<()> {
+    let store = &std::sync::Mutex::new(store);
     let (_org, sandbox_id) = descriptor.openresearch_ref()?;
     let sandbox_id = sandbox_id.to_string();
 
@@ -1011,16 +1293,16 @@ async fn run_openresearch(
     let lifecycle = match crate::config::load_credentials().await {
         Ok(Some(c)) => c,
         _ => {
-            if store.update_status(&run_id, RunStatus::Failed, Some(now_ms()), None)? {
-                store.set_result_markdown(
-                    &run_id,
-                    &format!(
-                        "The supervisor found no OpenResearch credentials (`orx login`), so it \
-                         could not manage box {sandbox_id} — the box may still be running; \
-                         delete it through OpenResearch."
-                    ),
-                )?;
-            }
+            store.finish(
+                &run_id,
+                RunStatus::Failed,
+                None,
+                Some(&format!(
+                    "The supervisor found no OpenResearch credentials (`orx login`), so it \
+                 could not manage box {sandbox_id} — the box may still be running; \
+                 delete it through OpenResearch."
+                )),
+            )?;
             return Err(anyhow!("no credentials for the openresearch backend"));
         }
     };
@@ -1037,38 +1319,42 @@ async fn run_openresearch(
         Some(target) => target,
         None => {
             eprintln!("supervise {run_id}: waiting for box {sandbox_id} to come online");
-            let outcome = openresearch::wait_online(
-                &lifecycle,
-                &sandbox_id,
-                openresearch::PROVISION_DEADLINE,
-                || local_cancel_requested(&store, &run_id),
-            )
-            .await;
-            let sandbox = match outcome {
-                Ok(openresearch::WaitOutcome::Online(sandbox)) => sandbox,
-                Ok(openresearch::WaitOutcome::Cancelled) => {
-                    eprintln!("supervise {run_id}: cancelled during provisioning");
-                    store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
-                    teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
-                    return Ok(());
-                }
-                Ok(openresearch::WaitOutcome::Failed(reason))
-                | Ok(openresearch::WaitOutcome::TimedOut(reason)) => {
-                    if store.update_status(&run_id, RunStatus::Failed, Some(now_ms()), None)? {
-                        store.set_result_markdown(
+            let sandbox = {
+                let outcome = openresearch::wait_online(
+                    &lifecycle,
+                    &sandbox_id,
+                    openresearch::PROVISION_DEADLINE,
+                    || local_cancel_requested(store, &run_id),
+                )
+                .await;
+                match outcome {
+                    Ok(openresearch::WaitOutcome::Online(sandbox)) => sandbox,
+                    Ok(openresearch::WaitOutcome::Cancelled) => {
+                        eprintln!("supervise {run_id}: cancelled during provisioning");
+                        store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
+                        teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
+                        return Ok(());
+                    }
+                    Ok(openresearch::WaitOutcome::Failed(reason))
+                    | Ok(openresearch::WaitOutcome::TimedOut(reason)) => {
+                        store.finish(
                             &run_id,
-                            &format!("Provisioning failed: {reason}"),
+                            RunStatus::Failed,
+                            None,
+                            Some(&format!("Provisioning failed: {reason}")),
                         )?;
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                Err(err) => {
-                    if store.update_status(&run_id, RunStatus::Failed, Some(now_ms()), None)? {
-                        store
-                            .set_result_markdown(&run_id, &format!("Provisioning failed: {err}"))?;
+                    Err(err) => {
+                        store.finish(
+                            &run_id,
+                            RunStatus::Failed,
+                            None,
+                            Some(&format!("Provisioning failed: {err}")),
+                        )?;
+                        teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
+                        return Ok(());
                     }
-                    teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
-                    return Ok(());
                 }
             };
             descriptor.ssh_host = sandbox.ssh_hostname.clone();
@@ -1091,21 +1377,21 @@ async fn run_openresearch(
             Ok(launched) => break launched,
             Err(_) if descriptor.rental_lease.is_some() => {
                 drop(bootstrap_heartbeat.take());
-                if local_cancel_requested(&store, &run_id) {
-                    teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+                if local_cancel_requested(store, &run_id) {
+                    teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
                     store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
                     return Ok(());
                 }
                 if openresearch::box_deleted(&lifecycle, &sandbox_id).await {
-                    if store.update_status(&run_id, RunStatus::Lost, Some(now_ms()), None)? {
-                        store.set_result_markdown(
-                            &run_id,
-                            "Outcome unavailable: the rental was released before its final outcome was collected.",
-                        )?;
-                    }
+                    store.finish(
+                        &run_id,
+                        RunStatus::Lost,
+                        None,
+                        Some(&crate::plane::LABELS["run_notice_rental_outcome_unavailable"]),
+                    )?;
                     return Ok(());
                 }
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
             }
             Err(_) => break false,
         }
@@ -1120,13 +1406,15 @@ async fn run_openresearch(
         let source = match crate::compute::SourceSnapshot::from_run(&stored, &descriptor) {
             Ok(source) => source,
             Err(error) => {
-                if store.update_status(&run_id, RunStatus::Failed, Some(now_ms()), None)? {
-                    store.set_result_markdown(
-                        &run_id,
-                        &format!("The recorded source snapshot could not be loaded: {error}"),
-                    )?;
-                }
-                teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+                store.finish(
+                    &run_id,
+                    RunStatus::Failed,
+                    None,
+                    Some(&format!(
+                        "The recorded source snapshot could not be loaded: {error}"
+                    )),
+                )?;
+                teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
                 return Ok(());
             }
         };
@@ -1142,18 +1430,19 @@ async fn run_openresearch(
         let mut launch_err = None;
         for backoff_secs in [0u64, 5, 10, 20, 30, 45] {
             if backoff_secs > 0 {
-                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                tokio::time::sleep(paced(Duration::from_secs(backoff_secs))).await;
             }
-            if local_cancel_requested(&store, &run_id) {
+            if local_cancel_requested(store, &run_id) {
                 eprintln!("supervise {run_id}: cancelled before launch");
                 store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
-                teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+                teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
                 return Ok(());
             }
             let staged =
                 ssh::stage_source(&target, &run_id, &source.path, &source.digest, None, None).await;
             if let Err(err) = staged {
                 eprintln!("supervise {run_id}: source staging failed (will retry): {err}");
+
                 launch_err = Some(err);
                 continue;
             }
@@ -1178,21 +1467,22 @@ async fn run_openresearch(
                 }
                 Err(err) => {
                     eprintln!("supervise {run_id}: launch failed (will retry): {err}");
+
                     launch_err = Some(err);
                 }
             }
         }
         if let Some(err) = launch_err.filter(|_| descriptor.rental_lease.is_none()) {
-            if store.update_status(&run_id, RunStatus::Failed, Some(now_ms()), None)? {
-                store.set_result_markdown(
-                    &run_id,
-                    &crate::local::ssh_identity::explain_launch_failure(
-                        &sandbox_id,
-                        &err.to_string(),
-                    ),
-                )?;
-            }
-            teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+            store.finish(
+                &run_id,
+                RunStatus::Failed,
+                None,
+                Some(&crate::local::ssh_identity::explain_launch_failure(
+                    &sandbox_id,
+                    &err.to_string(),
+                )),
+            )?;
+            teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
             return Ok(());
         }
     }
@@ -1204,7 +1494,7 @@ async fn run_openresearch(
     );
     // Legacy rentals require local teardown; leased rentals release remotely.
     let watch = watch_ssh_job(
-        &store,
+        store,
         status_of(&stored)?,
         target,
         dir,
@@ -1214,7 +1504,7 @@ async fn run_openresearch(
     )
     .await;
     if descriptor.rental_lease.is_none() {
-        teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+        teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
     }
     watch?;
     Ok(())
@@ -1223,7 +1513,12 @@ async fn run_openresearch(
 /// Delete the run's box; on failure warn loudly and leave a cleanup hint on
 /// the run. Teardown failure never changes the run's status — the run's
 /// outcome and the box's fate are separate facts.
-async fn teardown_box(store: &Store, creds: &Credentials, sandbox_id: &str, run_id: &str) {
+async fn teardown_box(
+    store: &(dyn RunSink + Sync),
+    creds: &Credentials,
+    sandbox_id: &str,
+    run_id: &str,
+) {
     match openresearch::teardown(creds, sandbox_id).await {
         Ok(()) => eprintln!("supervise {run_id}: box {sandbox_id} deleted"),
         Err(err) => {
@@ -1260,7 +1555,7 @@ async fn run_local(
 
     eprintln!("supervise {run_id}: watching local run {}", dir.display());
 
-    let path = log_path(&run_id);
+    let path = log_path(&crate::store::data_dir(), &run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let mut log_task = tokio::spawn(tail_logs_local(
         dir.clone(),
@@ -1279,13 +1574,18 @@ async fn run_local(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
                 log_task.abort();
             }
-            let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
+            let applied = store.update_status(
+                &run_id,
+                status,
+                Some(now_ms()),
+                job.exit_code.map(i64::from),
+            )?;
             if applied && status == RunStatus::Failed {
                 if let Some(msg) = &job.message {
                     if let Err(err) =
@@ -1310,7 +1610,7 @@ async fn run_local(
             cancel_local(&dir, &run_id, &mut cancel_sent);
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -1350,7 +1650,7 @@ async fn tail_logs_local(
         if draining && drained {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -1383,13 +1683,11 @@ async fn run_slurm(
 
     eprintln!("supervise {run_id}: watching slurm job {job_id} on {host}");
 
-    let path = log_path(&run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
     let mut log_task = tokio::spawn(tail_logs_ssh(
         ssh::SshTarget::alias(&host).for_run(&run_id),
         dir.clone(),
-        path.clone(),
         run_id.clone(),
         done_rx,
         Some(log_error_tx),
@@ -1448,7 +1746,7 @@ async fn run_slurm(
             }
         }
         if status_error.is_some() {
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::time::sleep(paced(POLL_INTERVAL)).await;
             continue;
         }
         let job = observed?;
@@ -1458,7 +1756,7 @@ async fn run_slurm(
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
             let collected = matches!(
-                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                tokio::time::timeout(paced(LOG_DRAIN), &mut log_task).await,
                 Ok(Ok(true))
             );
             if !collected {
@@ -1486,13 +1784,13 @@ async fn run_slurm(
             last_status = status;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
 /// Queues the remote run dir once logs are local; `orx up` removes it when it falls past its
 /// project's newest few, unless the target keeps results.
-fn queue_remote_cleanup(store: &Store, run_id: &str) {
+fn queue_remote_cleanup(store: &dyn RunSink, run_id: &str) {
     if let Err(err) = store.queue_finished_remote_cleanup(run_id) {
         eprintln!("supervise {run_id}: could not queue remote cleanup: {err}");
     }
@@ -1522,7 +1820,7 @@ async fn run_ray(
 
     eprintln!("supervise {run_id}: watching ray job {submission_id} at {address}");
 
-    let path = log_path(&run_id);
+    let path = log_path(&crate::store::data_dir(), &run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let mut log_task = tokio::spawn(tail_logs_ray(
         address.clone(),
@@ -1545,17 +1843,18 @@ async fn run_ray(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
         if job.stage == "GONE" {
             gone_polls += 1;
             if gone_polls < GONE_POLLS_TO_FAIL {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
             job = ray::JobInfo {
+                exit_code: None,
                 stage: "ERROR".to_string(),
                 message: Some(
                     "job no longer known to the cluster (record purged or head restarted?)"
@@ -1570,7 +1869,7 @@ async fn run_ray(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -1606,7 +1905,7 @@ async fn run_ray(
             }
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -1675,7 +1974,7 @@ async fn tail_logs_ray(
         if draining && drained {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -1691,6 +1990,42 @@ async fn cancel_ray(address: &str, submission_id: &str, run_id: &str, cancel_sen
 mod tests {
     use super::*;
     use crate::store::StoredRun;
+
+    #[test]
+    fn store_sink_finishes_even_when_the_failure_reason_cannot_be_written() {
+        let dir = std::env::temp_dir().join(format!("orx-sink-reason-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = StoredRun {
+            id: "run".into(),
+            experiment_id: "exp".into(),
+            project_id: "proj".into(),
+            status: "running".into(),
+            backend_json: "{}".into(),
+            command: String::new(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        };
+        store.upsert_run(&run).unwrap();
+        let fault = rusqlite::Connection::open(dir.join("orx.db")).unwrap();
+        fault.execute_batch("CREATE TRIGGER reject_reason BEFORE UPDATE OF result_markdown ON runs BEGIN SELECT RAISE(FAIL, 'reason write rejected'); END;").unwrap();
+        assert!(store
+            .finish("run", RunStatus::Failed, Some(7), Some("payload failed"))
+            .unwrap());
+        let finished = store.get_run("run").unwrap().unwrap();
+        assert_eq!(finished.status, "failed");
+        assert_eq!(finished.exit_code, Some(7));
+        assert!(finished.result_markdown.is_none());
+        drop(fault);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn monitoring_errors_wait_for_grace_but_preserve_existing_reports() {
@@ -1763,7 +2098,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn local_tail_keeps_its_log_until_replayed_and_finishes_partial_lines() {
         let temp = crate::local::git::TemporaryDirectory::new("orx-tail-test").unwrap();
         let (source, path) = (temp.path().join("run"), temp.path().join("run.log"));
@@ -1796,7 +2131,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_stalled_stream_pass_yields_to_the_final_drain() {
         let (tx, mut rx) = tokio::sync::watch::channel(false);
         let stalled = std::future::pending::<Result<()>>();

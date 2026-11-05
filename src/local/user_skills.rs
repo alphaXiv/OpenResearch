@@ -853,6 +853,62 @@ fn content_in(root: &Path, mirrored: &[Mirrored], name: &str) -> Option<String> 
     content_selected_in(root, mirrored, name, SkillSelection::Auto, None)
 }
 
+pub fn read_markdown(name: &str) -> Result<Option<String>> {
+    read_markdown_in(&root(), name)
+}
+
+fn read_markdown_in(root: &Path, name: &str) -> Result<Option<String>> {
+    if !is_valid_slug(name) {
+        return Err(anyhow!("invalid skill name"));
+    }
+    let dir = store_dir(root).join(name);
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let path = dir.join("SKILL.md");
+    let content =
+        fs::read_to_string(&path).map_err(|e| anyhow!("could not read {}: {e}", path.display()))?;
+    Ok(Some(content))
+}
+
+pub fn update_markdown(name: &str, content: &str) -> Result<UserSkill> {
+    update_markdown_in(&root(), name, content)
+}
+
+fn update_markdown_in(root: &Path, name: &str, content: &str) -> Result<UserSkill> {
+    if !is_valid_slug(name) {
+        return Err(anyhow!("invalid skill name"));
+    }
+    let dir = store_dir(root).join(name);
+    if !dir.is_dir() {
+        return Err(anyhow!("skill `{name}` not found"));
+    }
+    let md_path = dir.join("SKILL.md");
+    let previous = fs::metadata(&md_path).map(|meta| meta.len()).unwrap_or(0);
+    let tally = tally_all(&dir);
+    if tally.files > MAX_FILES as u64 {
+        return Err(anyhow!("the skill folder has too many files"));
+    }
+    let next_bytes = tally
+        .bytes
+        .saturating_sub(previous)
+        .saturating_add(content.len() as u64);
+    if next_bytes > MAX_TOTAL_BYTES {
+        return Err(anyhow!(
+            "the edited SKILL.md would make the skill folder larger than a skill folder may be"
+        ));
+    }
+    let fm = parse_frontmatter(content)?;
+    if fm.name != name {
+        return Err(anyhow!(
+            "the `name:` in SKILL.md must stay `{name}`; duplicate the skill to rename it"
+        ));
+    }
+    // Replace the file atomically so a failed write leaves the saved version intact.
+    super::git::atomic_write(&md_path, content.as_bytes())?;
+    read_uploaded_at(&dir)
+}
+
 /// Remove uploads, or exclude discovered skills without touching their source.
 pub fn delete(name: &str) -> Result<()> {
     let root = root();
@@ -1686,6 +1742,72 @@ mod tests {
         assert!(list_in(&root, &[]).is_empty());
         // Deleting a missing skill is an error.
         assert!(delete_in(&root, "alpha").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn markdown_edit_roundtrip_preserves_companion_files() {
+        let root = temp_root();
+        let zip = make_zip(&[
+            ("editor/SKILL.md", skill_md("editor").as_bytes()),
+            ("editor/reference.txt", b"keep me"),
+        ]);
+        save_zip_in(&root, &zip).unwrap();
+
+        let original = read_markdown_in(&root, "editor").unwrap().unwrap();
+        assert!(original.contains("body"));
+
+        let edited = skill_md_desc("editor", "Edited description. Use when editing.");
+        let saved = update_markdown_in(&root, "editor", &edited).unwrap();
+        assert_eq!(saved.description, "Edited description. Use when editing.");
+        assert_eq!(read_markdown_in(&root, "editor").unwrap().unwrap(), edited);
+        assert_eq!(
+            fs::read_to_string(root.join("global/editor/reference.txt")).unwrap(),
+            "keep me"
+        );
+
+        // Missing skills are reported as absent rather than created.
+        assert!(read_markdown_in(&root, "missing").unwrap().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn markdown_edit_rejects_folder_growth_past_the_budget() {
+        let root = temp_root();
+        save_skill_md_in(&root, skill_md("budget").as_bytes()).unwrap();
+        let dir = store_dir(&root).join("budget");
+        fs::File::create(dir.join("corpus.bin"))
+            .unwrap()
+            .set_len(MAX_TOTAL_BYTES - 1024)
+            .unwrap();
+
+        let original = read_markdown_in(&root, "budget").unwrap().unwrap();
+        let oversized = format!("{original}{}", "x".repeat(2048));
+        assert!(update_markdown_in(&root, "budget", &oversized).is_err());
+        // A rejected save must leave the previous SKILL.md intact.
+        assert_eq!(
+            read_markdown_in(&root, "budget").unwrap().unwrap(),
+            original
+        );
+
+        let fitting = format!("{original}{}", "x".repeat(128));
+        assert!(update_markdown_in(&root, "budget", &fitting).is_ok());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn markdown_edit_rejects_renames_and_malformed_content() {
+        let root = temp_root();
+        save_skill_md_in(&root, skill_md("keep-name").as_bytes()).unwrap();
+
+        let renamed = skill_md("other-name");
+        assert!(update_markdown_in(&root, "keep-name", &renamed).is_err());
+        assert!(update_markdown_in(&root, "keep-name", "no frontmatter").is_err());
+        assert!(update_markdown_in(&root, "missing", &skill_md("missing")).is_err());
+        assert!(read_markdown_in(&root, "keep-name")
+            .unwrap()
+            .unwrap()
+            .contains("# keep-name"));
         let _ = fs::remove_dir_all(&root);
     }
 
