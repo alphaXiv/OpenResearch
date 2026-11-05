@@ -13,7 +13,7 @@ use super::git;
 
 pub async fn prepare() -> Result<()> {
     tokio::task::spawn_blocking(|| {
-        let source = normalize(&git::legacy_cache_root())?;
+        let source = normalize(&git::cache_root())?;
         let target = normalize(&crate::store::data_dir())?;
         if source == target {
             return Ok(());

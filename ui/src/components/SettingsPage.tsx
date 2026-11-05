@@ -531,7 +531,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                     <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
                     <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
                     <span className="k">{m.settings_page_version()}</span>
-                    <span className="v">{h.version ?? "—"}</span>
+                    <span className="v">{h.version ?? "—"}{h.managed && ` · ${m.settings_page_installed_by_openresearch()}`}</span>
                     {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
                       <>
                         <span className="k">{m.settings_page_auth()}</span>

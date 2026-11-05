@@ -23,6 +23,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
 mod detect;
+pub(crate) mod managed;
 pub(crate) mod opencode;
 mod options;
 mod plan_gate;
