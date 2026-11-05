@@ -766,7 +766,6 @@ impl Runtime {
         };
         let last = ranges.len() - 1;
         std::fs::create_dir_all(&directory)?;
-        let mut kept = Vec::new();
         for (index, (start, end, suffix)) in ranges.into_iter().enumerate() {
             let path = directory.join(format!("{}.{suffix}", run.id));
             let part = directory.join(format!("{}.{suffix}.part", run.id));
@@ -828,11 +827,14 @@ impl Runtime {
             }
             drop(file);
             std::fs::rename(&part, &path)?;
-            match std::fs::remove_file(&marker) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(error.into())
-                }
-                _ => {}
+            let mut kept = crate::commands::up::api_v2::kept_ranges(data_dir, &run.id)?;
+            kept.retain(|range| {
+                range.ident == ident
+                    && range.file != path
+                    && (index != last || range.offset < start)
+            });
+            for range in &mut kept {
+                range.eof = false;
             }
             kept.push(KeptRange {
                 offset: start,
@@ -841,8 +843,16 @@ impl Runtime {
                 ident: ident.clone(),
                 eof: index == last && eof,
             });
+            kept.sort_by_key(|range| range.offset);
+            crate::commands::up::api_v2::keep_ranges(data_dir, &run.id, kept)?;
+            match std::fs::remove_file(&marker) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error.into())
+                }
+                _ => {}
+            }
         }
-        crate::commands::up::api_v2::keep_ranges(data_dir, &run.id, kept)
+        Ok(())
     }
 
     async fn log_info(backend: &dyn Backend, run: &WatchedRun) -> Result<Option<LogInfo>> {

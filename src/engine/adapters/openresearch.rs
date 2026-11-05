@@ -825,6 +825,129 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn released_rental_preserves_completed_head_after_tail_failure() {
+        const HEAD: u64 = 64 << 20;
+        const LEN: u64 = (1 << 30) + 100;
+        const TAIL: u64 = LEN - (256 << 20);
+        struct Log(u64);
+
+        #[async_trait]
+        impl Backend for Log {
+            async fn launch(
+                &self,
+                _: &RunIntent,
+                _: &Fence<'_>,
+            ) -> std::result::Result<Handle, LaunchError> {
+                unreachable!()
+            }
+            async fn recover(&self, _: &RunIntent) -> Recovery {
+                unreachable!()
+            }
+            async fn observe(&self, _: &[WatchedRun], _: Duration) -> Vec<(String, Observation)> {
+                unreachable!()
+            }
+            async fn cancel(&self, _: &WatchedRun) -> CancelOutcome {
+                unreachable!()
+            }
+            async fn read_log(
+                &self,
+                _: &WatchedRun,
+                _: LogFile,
+                range: ByteRange,
+                _: Option<&FileIdent>,
+            ) -> Result<LogPage> {
+                let ident = FileIdent { dev: 1, ino: 2 };
+                if range.start == u64::MAX - 1 {
+                    return Ok(LogPage::Reset {
+                        info: Some(orx_host_proto::LogInfo { ident, len: LEN }),
+                    });
+                }
+                let bytes = match range.start {
+                    HEAD => Vec::new(),
+                    TAIL if self.0 != 0 => vec![b't'; self.0 as usize],
+                    _ => return Err(anyhow!("SSH proxy disconnected")),
+                };
+                Ok(LogPage::Data {
+                    ident,
+                    len: Some(LEN),
+                    start: range.start,
+                    bytes,
+                    eof: false,
+                })
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("orx-completed-head-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("run-logs");
+        std::fs::create_dir_all(&directory).unwrap();
+        let ident = FileIdent { dev: 1, ino: 2 };
+        for (synced_tail, saved_tail) in [(0, false), (17, false), (0, true)] {
+            let run = WatchedRun {
+                id: format!("tail-{synced_tail}-{saved_tail}"),
+                handle: Handle::Local {
+                    dir: "/unused".into(),
+                },
+            };
+            let part = directory.join(format!("{}.log.part", run.id));
+            std::fs::write(&part, b"head\n").unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&part)
+                .unwrap()
+                .set_len(HEAD)
+                .unwrap();
+            std::fs::write(
+                directory.join(format!("{}.log.part.json", run.id)),
+                serde_json::to_vec(&(&ident, 0u64, HEAD)).unwrap(),
+            )
+            .unwrap();
+            let tail = directory.join(format!("{}.tail.log", run.id));
+            if saved_tail {
+                std::fs::write(&tail, b"previous tail\n").unwrap();
+                crate::commands::up::api_v2::keep_ranges(
+                    &root,
+                    &run.id,
+                    vec![crate::commands::up::api_v2::KeptRange {
+                        offset: TAIL - 100,
+                        len: 14,
+                        file: tail.clone(),
+                        ident: ident.clone(),
+                        eof: true,
+                    }],
+                )
+                .unwrap();
+            }
+            let error = crate::engine::runtime::Runtime::collect_log(
+                &root,
+                &Log(synced_tail),
+                &run,
+                &mut false,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("SSH proxy disconnected"));
+            assert!(!directory.join(format!("{}.log.part.json", run.id)).exists());
+            let kept = crate::commands::up::api_v2::kept_ranges(&root, &run.id).unwrap();
+            assert!(kept.iter().all(|range| !range.eof));
+            assert!(matches!(
+                kept_page(&directory, &run.id, ByteRange { start: 0, end: 5 }, Some(&ident)).unwrap(),
+                LogPage::Data { bytes, .. } if bytes == b"head\n"
+            ));
+            if saved_tail {
+                assert_eq!(std::fs::read(&tail).unwrap(), b"previous tail\n");
+            }
+            if synced_tail != 0 {
+                assert!(matches!(
+                    kept_page(&directory, &run.id, ByteRange { start: TAIL, end: TAIL + synced_tail }, Some(&ident)).unwrap(),
+                    LogPage::Data { bytes, .. } if bytes == vec![b't'; synced_tail as usize]
+                ));
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn round_two_rotated_log_discards_obsolete_tail_partial() {
         let root = std::env::temp_dir().join(format!("orx-rotated-part-{}", uuid::Uuid::new_v4()));
         let directory = root.join("run-logs");
