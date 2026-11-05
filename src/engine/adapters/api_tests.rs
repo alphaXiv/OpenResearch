@@ -934,7 +934,7 @@ async fn openresearch_rejected_key_auto_cancel_checks_rental_and_survives_restar
     }
 }
 
-async fn legacy_rejected_key(root: PathBuf, watching: bool) {
+async fn legacy_box(root: PathBuf, initial_stage: &str) {
     use super::openresearch::{LegacyTransport, OpenResearch};
     use super::ssh::Ssh;
     use crate::engine::transport::{Config, HostConn, Status};
@@ -942,6 +942,7 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
     use orx_test_support::host_binaries as binaries;
     // Paces the timers the checks below outlast.
     std::env::set_var("ORX_TEST_SPEEDUP", "10");
+    let watching = initial_stage != "starting";
     let server = orx_test_support::Sshd::start().unwrap();
     crate::config::save_credentials(&crate::config::Credentials {
         api_url: std::env::var("HF_ENDPOINT").unwrap(),
@@ -1018,6 +1019,9 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("pid"), server.pid().to_string()).unwrap();
         std::fs::write(dir.join("log"), vec![b'x'; 5000]).unwrap();
+        if initial_stage == "done" {
+            std::fs::write(dir.join("exit_code"), "0\n").unwrap();
+        }
     }
     let engine = Arc::new(engine(&root));
     let stored = StoredRun {
@@ -1049,7 +1053,59 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
             descriptor: Box::new(descriptor),
         },
     }];
+    let mut events = engine.bus.subscribe();
     adapter.observe(&watched, Duration::from_secs(1)).await;
+    if initial_stage == "done" {
+        let dir = server.home().join(format!(".orx/runs/{id}"));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !dir.join("final_collected").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(engine.load(&id).unwrap().0.status, "done");
+        assert!(!engine.store().log_collection_pending(&id).unwrap());
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            matches!(event, crate::engine::bus::RunEvent::LogCollection { run_id } if run_id == id)
+        }));
+        std::fs::remove_dir_all(dir).unwrap();
+        let runtime = crate::engine::runtime::Runtime::new(
+            engine.clone(),
+            Arc::new(TestClock::new()),
+            root.join("store"),
+            None,
+        );
+        let api = crate::commands::up::api_v2::Api::new(
+            "test".into(),
+            "token".into(),
+            engine,
+            runtime,
+            Box::new(|_| Ok(Box::new(()))),
+            root.join("store"),
+        )
+        .unwrap();
+        crate::commands::up::api_v2::install(Arc::new(api)).unwrap();
+        use tower::ServiceExt;
+        let response = crate::commands::up::api_v2::router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/runs/{id}/log?start=0&end=1048576"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page: LogPage = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            matches!(page, LogPage::Data { bytes, eof: true, .. } if bytes == vec![b'x'; 5000])
+        );
+        return;
+    }
     if watching {
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
@@ -1170,6 +1226,7 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
     if watching {
         assert!(engine.cancel(&adapter, &id, "user").await.unwrap());
         assert_eq!(engine.load(&id).unwrap().0.status, "cancelled");
+        assert!(!engine.store().log_collection_pending(&id).unwrap());
     } else {
         assert!(engine.abandon(&id).unwrap());
         engine
@@ -1196,7 +1253,7 @@ async fn openresearch_staging_rejected_key_needs_auth_after_one_attempt() {
     let Some(root) = isolated().await else {
         return;
     };
-    legacy_rejected_key(root, false).await;
+    legacy_box(root, "starting").await;
 }
 
 #[tokio::test]
@@ -1204,7 +1261,15 @@ async fn openresearch_watching_rejected_key_needs_auth_after_one_attempt() {
     let Some(root) = isolated().await else {
         return;
     };
-    legacy_rejected_key(root, true).await;
+    legacy_box(root, "running").await;
+}
+
+#[tokio::test]
+async fn openresearch_completed_log_is_readable_after_release() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    legacy_box(root, "done").await;
 }
 
 #[tokio::test]

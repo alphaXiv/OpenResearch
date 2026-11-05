@@ -206,6 +206,21 @@ impl LegacyTransport {
             &serde_json::to_vec(&cursor)?,
             Some(0o600),
         )?;
+        if let Some(ident) = cursor.ident {
+            crate::commands::up::api_v2::keep_ranges(
+                self.log_dir
+                    .parent()
+                    .ok_or_else(|| anyhow!("Missing log parent"))?,
+                run,
+                vec![crate::commands::up::api_v2::KeptRange {
+                    offset: 0,
+                    len: cursor.offset,
+                    file: path,
+                    ident,
+                    eof,
+                }],
+            )?;
+        }
         #[cfg(unix)]
         std::fs::File::open(&self.log_dir)?.sync_all()?;
         Ok(serde_json::json!({ "eof": eof }))
@@ -293,6 +308,13 @@ impl RunSink for EngineSink {
     }
     fn queue_finished_remote_cleanup(&self, run: &str) -> Result<()> {
         self.engine.store().queue_finished_remote_cleanup(run)
+    }
+    fn finish_log_collection(&self, run: &str) -> Result<()> {
+        self.engine.store().finish_log_collection(run)?;
+        self.engine
+            .bus
+            .publish(crate::engine::bus::RunEvent::LogCollection { run_id: run.into() });
+        Ok(())
     }
     fn transport_error(&self, run: &str, target: &ssh::SshTarget, cause: &str) -> Result<()> {
         let transport = target
@@ -601,7 +623,28 @@ impl Backend for OpenResearch {
         .await;
 
         match released {
-            Ok(()) => CancelOutcome::Verified,
+            Ok(()) => {
+                if let Some(target) = descriptor.openresearch_ssh_target() {
+                    let kept = (|| {
+                        let transport = (self.transport)(&target)?;
+                        let data_dir = transport
+                            .log_dir
+                            .parent()
+                            .ok_or_else(|| anyhow!("Missing log parent"))?;
+                        if crate::commands::up::api_v2::kept_ranges(data_dir, &run.id)?
+                            .iter()
+                            .any(|range| range.eof)
+                        {
+                            self.engine.store().finish_log_collection(&run.id)?;
+                        }
+                        Ok::<_, crate::error::Error>(())
+                    })();
+                    if let Err(error) = kept {
+                        eprintln!("Could not settle cancelled run {}'s log: {error}", run.id);
+                    }
+                }
+                CancelOutcome::Verified
+            }
             Err(error) => CancelOutcome::Undelivered {
                 detail: error.to_string(),
             },
