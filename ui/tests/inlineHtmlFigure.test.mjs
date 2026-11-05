@@ -1,78 +1,62 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
+import { createElement } from "react";
+import { InlineHtmlFigure } from "../src/components/InlineHtmlFigure.tsx";
+import { m } from "../src/paraglide/messages.js";
+import { render, serve, settle } from "./render.mjs";
 
-const source = readFileSync(new URL("../src/components/InlineHtmlFigure.tsx", import.meta.url), "utf8");
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-}).outputText;
+const page = (status, type, body = "") => new Response(body, { status, headers: { "content-type": type } });
 
-// Minimal hook runtime: enough to run InlineHtmlFigure's effect and re-render on state changes.
-function mount(props) {
-  const slots = [];
-  let index = 0;
-  let tree;
-  const pending = [];
-  const react = {
-    useState: (initial) => {
-      const slot = index++;
-      if (!(slot in slots)) slots[slot] = initial;
-      return [slots[slot], (value) => { slots[slot] = value; render(); }];
-    },
-    useEffect: (effect, deps) => {
-      const slot = index++;
-      const previous = slots[slot];
-      if (previous && deps.every((dep, i) => dep === previous.deps[i])) return;
-      slots[slot] = { deps };
-      pending.push(() => { previous?.cleanup?.(); slots[slot].cleanup = effect(); });
-    },
-  };
-  const HtmlPreview = () => null;
-  const element = (type, elementProps) => ({ type, props: elementProps });
-  const exports = {};
-  new Function("require", "exports", compiled)((name) => ({
-    react,
-    "react/jsx-runtime": { jsx: element, jsxs: element },
-    "../paraglide/messages.js": { m: new Proxy({}, { get: (_, key) => () => String(key) }) },
-    "./HtmlPreview": { HtmlPreview },
-  })[name], exports);
-  function render() {
-    index = 0;
-    tree = exports.InlineHtmlFigure(props);
-    while (pending.length) pending.shift()();
-  }
-  render();
-  const find = (node) => !node?.props ? undefined : node.type === HtmlPreview ? node : [node.props.children].flat().map(find).find(Boolean);
-  return { preview: () => find(tree)?.props, rerender: (next) => { props = next; render(); }, text: () => JSON.stringify(tree) };
-}
-
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
-const response = (status, type, body = "") => ({ ok: status === 200, headers: { get: () => type }, text: async () => body });
-
-test("the fallback candidate that served the HTML resolves its assets", async (t) => {
+test("the fallback candidate that served the HTML resolves its assets", async () => {
   const fetched = [];
-  const replies = { "/a": response(404, "text/html"), "/b": response(200, "image/png"), "/c": response(200, "text/html; charset=utf-8", "<p>c</p>"), "/d": response(200, "text/html") };
-  t.mock.method(globalThis, "fetch", async (url) => { fetched.push(url); return replies[url]; });
+  const replies = {
+    "/a": () => page(404, "text/html"),
+    "/b": () => page(200, "image/png"),
+    "/c": () => page(200, "text/html; charset=utf-8", '<p>c</p><img src="plot.png">'),
+    "/d": () => page(200, "text/html"),
+    "/c:plot.png": () => new Response("png", { headers: { "content-type": "image/png", "content-length": "3" } }),
+  };
+  serve((path) => { fetched.push(path); return replies[path]?.(); });
   const candidates = ["/a", "/b", "/c", "/d"].map((url) => ({ url, resolveAsset: (src) => `${url}:${src}` }));
-  const view = mount({ candidates, name: "chart" });
+  const { container } = await render(createElement(InlineHtmlFigure, { candidates, name: "chart" }));
   await settle();
-  const preview = view.preview();
-  assert.deepEqual(fetched, ["/a", "/b", "/c"]);
-  assert.equal(preview.url, "/c");
-  assert.equal(preview.html, "<p>c</p>");
-  assert.equal(preview.resolveSrc, candidates[2].resolveAsset);
+
+  assert.deepEqual(fetched, ["/a", "/b", "/c", "/c:plot.png"]);
+  const frame = new DOMParser().parseFromString(container.querySelector("iframe").getAttribute("srcdoc"), "text/html");
+  assert.equal(frame.querySelector("p").textContent, "c");
+  assert.match(frame.querySelector("img").getAttribute("src"), /^data:image\/png/);
 });
 
-test("changing candidates aborts the previous load, and all-failed shows a bounded error", async (t) => {
+test("changing candidates aborts the previous load, and all-failed shows a bounded error", async () => {
   const signals = [];
-  t.mock.method(globalThis, "fetch", async (_url, { signal }) => { signals.push(signal); return response(404, "text/html"); });
-  const view = mount({ candidates: [{ url: "/old", resolveAsset: () => null }], name: "chart" });
-  view.rerender({ candidates: [{ url: "/x", resolveAsset: () => null }, { url: "/y", resolveAsset: () => null }], name: "chart" });
+  serve((path, init) => {
+    signals.push(init.signal);
+    return path === "/old" ? new Promise(() => {}) : page(404, "text/html");
+  });
+  const { container, rerender } = await render(createElement(InlineHtmlFigure, { candidates: [{ url: "/old", resolveAsset: () => null }], name: "chart" }));
+  await rerender(createElement(InlineHtmlFigure, { candidates: [{ url: "/x", resolveAsset: () => null }, { url: "/y", resolveAsset: () => null }], name: "chart" }));
   assert.equal(signals[0].aborted, true);
   await settle();
+
   assert.equal(signals.length, 3);
-  assert.equal(view.preview(), undefined);
-  assert.match(view.text(), /file_viewer_failed_to_load_file/);
-  assert.match(view.text(), /"href":"\/x"/);
+  assert.equal(container.querySelector("iframe")?.outerHTML, undefined);
+  const link = container.querySelector("a");
+  assert.equal(link.textContent, m.file_viewer_failed_to_load_file());
+  assert.equal(link.getAttribute("href"), "/x");
+});
+
+test("returning to a cached figure shows it immediately without another request", async () => {
+  let calls = 0;
+  serve(() => { calls++; return page(200, "text/html", "<p>retained</p>"); });
+  const figure = createElement(InlineHtmlFigure, { candidates: [{ url: "/figure", resolveAsset: () => null }], name: "chart" });
+  const shown = (container) => new DOMParser().parseFromString(container.querySelector("iframe").getAttribute("srcdoc"), "text/html").querySelector("p").textContent;
+  const first = await render(figure);
+  await settle();
+  assert.equal(shown(first.container), "retained");
+  await first.unmount();
+
+  const { container } = await render(figure, first.workspace);
+  assert.equal(shown(container), "retained");
+  await settle();
+  assert.equal(calls, 1);
 });

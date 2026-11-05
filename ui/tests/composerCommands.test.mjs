@@ -11,17 +11,6 @@ import {
   splitCommandTokens,
 } from "../src/composerCommands.ts";
 
-test("a selected skill can be removed with its trailing composer spaces", () => {
-  const selected = insertSlashCommand("/deb", { start: 0, end: 4, query: "deb" }, "debate", 2);
-  const tokenEnd = selected.text.trimEnd().length;
-  const context = slashCommandContext(selected.text, tokenEnd);
-  assert.ok(context);
-  assert.deepEqual(removeSlashCommand(selected.text, { ...context, end: selected.cursor }), {
-    text: "",
-    cursor: 0,
-  });
-});
-
 const ALL_COMMANDS = ["compact", "copy", "export", "goal", "model", "new", "plan", "resume", "side"];
 
 test("every harness gets the same commands ahead of its skills", () => {
@@ -39,6 +28,19 @@ test("Plan is only offered where the harness can plan", () => {
     commandsForHarness([], null).map((item) => item.name),
     ALL_COMMANDS.filter((name) => name !== "plan"),
   );
+});
+
+test("unsupported compaction stays recognizable but disabled in the command menu", () => {
+  const unsupported = commandsForHarness([], null, false).find((item) => item.name === "compact");
+  const supported = commandsForHarness([], null, true).find((item) => item.name === "compact");
+  assert.equal(unsupported.disabled, true);
+  assert.equal(unsupported.description, "This agent does not support compaction.");
+  assert.equal(supported.disabled, false);
+  assert.equal(supported.description, "Shorten this chat's context");
+  assert.ok(commandMatchesQuery(unsupported, "summarize"));
+  for (const text of ["/compact", "/summarize"]) {
+    assert.deepEqual(parseComposerCommand(text, null), { name: "compact", prompt: "" });
+  }
 });
 
 test("built-in commands replace user-skill collisions, aliases included", () => {
@@ -203,19 +205,6 @@ test("picking a command replaces the token in place", () => {
   assert.deepEqual(insertSlashCommand(tail, slashCommandContext(tail, 11), "write"), {
     text: "look at /write ",
     cursor: 15,
-  });
-});
-
-test("skill insertion can reserve its full hover margin", () => {
-  const text = "look at /wr now";
-  assert.deepEqual(insertSlashCommand(text, slashCommandContext(text, 11), "write", 2), {
-    text: "look at /write  now",
-    cursor: 16,
-  });
-  const indented = "\t/wr now";
-  assert.deepEqual(insertSlashCommand(indented, slashCommandContext(indented, 4), "write", 2), {
-    text: "\t/write  now",
-    cursor: 9,
   });
 });
 

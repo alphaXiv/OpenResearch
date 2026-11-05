@@ -14,6 +14,7 @@
 //! so `thread/resume {threadId}` survives an `orx up` restart.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::{anyhow, Result};
@@ -128,6 +129,7 @@ pub fn classify_line(line: &str) -> Line {
 ///
 /// * `Approval` — `{"decision": accept|acceptForSession|decline|cancel}` (the two
 ///   sandbox-escalation requests).
+/// * `McpApproval` — `{"action": accept|decline|cancel, "content": ...}`.
 /// * `UserInput` — `{"answers": {<qid>: {"answers": [...]}}}`; `{}` is tolerated.
 /// * `Other` — a reply schema we don't speak (e.g.
 ///   `item/permissions/requestApproval`, whose reply is a permission-profile
@@ -135,6 +137,7 @@ pub fn classify_line(line: &str) -> Line {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerReqKind {
     Approval,
+    McpApproval,
     UserInput,
     Other,
 }
@@ -147,6 +150,7 @@ pub fn server_req_kind(method: &str) -> ServerReqKind {
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
             ServerReqKind::Approval
         }
+        "mcpServer/elicitation/request" => ServerReqKind::McpApproval,
         "item/tool/requestUserInput" => ServerReqKind::UserInput,
         _ => ServerReqKind::Other,
     }
@@ -216,6 +220,7 @@ pub struct CodexClient {
     /// child (crash/restart replacement) — the DB signal covers that case.
     last_collab_mode: std::sync::Mutex<Option<&'static str>>,
     native_store: NativeStore,
+    alphaxiv_signed_in: bool,
     session_id: String,
     /// Each native (thread, turn)'s model, outliving any one orx turn: sub-agents do.
     turn_models: std::sync::Mutex<HashMap<(String, String), String>>,
@@ -286,10 +291,17 @@ impl CodexClient {
             .await
     }
 
-    /// Decline a server→client request — the fail-safe answer whenever no one
-    /// can (or should) decide, so the server is never left blocked on us.
+    pub fn approval_reply(&self, id: &Value, approve: bool) -> Value {
+        if self.unanswered.lock().unwrap().get(&id.to_string()) == Some(&ServerReqKind::McpApproval)
+        {
+            json!({"action":if approve {"accept"} else {"decline"}, "content":if approve {json!({})} else {Value::Null}, "_meta":null})
+        } else {
+            json!({"decision":if approve {"accept"} else {"decline"}})
+        }
+    }
+
     pub async fn respond_decline(&self, id: &Value) -> Result<()> {
-        self.respond(id, json!({ "decision": "decline" })).await
+        self.respond(id, self.approval_reply(id, false)).await
     }
 
     /// Reject a server→client request whose reply schema we don't speak (e.g.
@@ -326,6 +338,9 @@ impl CodexClient {
                 continue;
             };
             let msg = match kind {
+                ServerReqKind::McpApproval => {
+                    json!({"id":id,"result":{"action":"cancel","content":null,"_meta":null}})
+                }
                 ServerReqKind::Approval => json!({ "id": id, "result": { "decision": "cancel" } }),
                 ServerReqKind::UserInput => json!({ "id": id, "result": { "answers": {} } }),
                 ServerReqKind::Other => json!({
@@ -580,7 +595,7 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                     // server hanging on a request nobody will answer — each
                     // kind gets the reply shape its method can parse.
                     match kind {
-                        ServerReqKind::Approval => {
+                        ServerReqKind::Approval | ServerReqKind::McpApproval => {
                             let _ = client.respond_decline(&id).await;
                         }
                         ServerReqKind::UserInput => {
@@ -671,21 +686,44 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
     crate::local::harness::codex::close_unowned(&client.session_id);
 }
 
+pub(crate) fn alphaxiv_config(servers: &Value) -> Result<Value> {
+    let name = if servers.get("alphaxiv").is_some() {
+        "orx_alphaxiv"
+    } else {
+        "alphaxiv"
+    };
+    if name == "orx_alphaxiv" && servers.get(name).is_some() {
+        return Err(anyhow!("Codex's orx_alphaxiv server name is reserved for OpenResearch. Rename that server in your Codex configuration."));
+    }
+    let mut overrides = json!({});
+    if name == "orx_alphaxiv" {
+        overrides["alphaxiv"] = json!({"enabled":false});
+    }
+    let tools: serde_json::Map<_, _> = crate::commands::alphaxiv_mcp::WRITE_TOOLS
+        .iter()
+        .map(|name| ((*name).to_owned(), json!({"approval_mode":"prompt"})))
+        .collect();
+    overrides[name] = json!({
+        "command":crate::paths::spawnable_exe()?, "args":["alphaxiv-mcp"],
+        "env_vars":["XDG_CONFIG_HOME", "ALPHAXIV_API_URL"],
+        "tool_timeout_sec":300,
+        "default_tools_approval_mode":"approve",
+        "tools":tools
+    });
+    Ok(overrides)
+}
+
 /// Spawn `codex app-server` (no handshake yet — see `CodexHost::ensure`, which
 /// registers the client *before* the handshake so every kill path can reach
 /// the child even if the spawning turn task is aborted mid-handshake).
-async fn spawn_client(
+fn spawn_client(
     session_id: &str,
     up_port: Option<u16>,
     native_store: NativeStore,
+    bin: PathBuf,
+    codex_home: PathBuf,
 ) -> Result<Arc<CodexClient>> {
-    let bin = find_codex_required()?;
-    let codex_home = tokio::task::spawn_blocking(move || {
-        crate::local::native_store::prepare_codex(native_store)
-    })
-    .await
-    .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.arg("app-server");
     if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
         cmd.args(["-c", &override_arg]);
@@ -760,6 +798,7 @@ async fn spawn_client(
         thread_model: std::sync::Mutex::new(None),
         last_collab_mode: std::sync::Mutex::new(None),
         native_store,
+        alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         session_id: session_id.to_string(),
         turn_models: std::sync::Mutex::new(HashMap::new()),
         last_active: std::sync::Mutex::new(Instant::now()),
@@ -834,72 +873,140 @@ impl CodexHost {
     /// child is alive; a dead child is replaced (its thread is re-resumed by
     /// the caller — `resumed_thread` starts empty on the replacement).
     ///
-    /// The spawn + registration + handshake run in a *detached* task: the
-    /// calling turn task is abortable (interrupt / delete), and an aborted
-    /// future would drop its `Arc` while the reader task keeps the child alive
-    /// — an unregistered client would be unreachable by every kill path and
-    /// leak the process for the rest of `orx up`'s life. Detached, the
-    /// bring-up always runs to completion: the client ends up registered
-    /// (killable via kill_session/shutdown) or killed on handshake failure.
-    /// One consequence of registering before the handshake: a reuse hit may
-    /// briefly hand out a still-mid-handshake client; its requests fail
-    /// cleanly (server "not initialized" / closed) and the next turn recovers.
+    /// Cancelled startup retires its child; the detached handoff owns cleanup.
     pub async fn ensure(
         self: &Arc<Self>,
         session_id: &str,
         native_store: NativeStore,
     ) -> Result<Arc<CodexClient>> {
-        let _spawning = self.spawn_lock.lock().await;
-        {
-            let mut guard = self.inner.lock().await;
-            if let Some(client) = guard.get(session_id) {
-                if client.native_store() == native_store
-                    && matches!(client.child.lock().await.try_wait(), Ok(None))
-                {
-                    client.touch();
-                    return Ok(client.clone());
-                }
-            }
-            if let Some(stale) = guard.remove(session_id) {
-                stale.terminate().await;
-            }
-        }
+        let codex_home =
+            tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
+                .await
+                .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
         let host = self.clone();
         let session = session_id.to_string();
+        self.ensure_with_spawn(session_id, native_store, async move {
+            let bin = find_codex_required()?;
+            Ok(move || {
+                spawn_client(
+                    &session,
+                    host.up_port.get().copied(),
+                    native_store,
+                    bin,
+                    codex_home,
+                )
+            })
+        })
+        .await
+    }
+
+    async fn ensure_with_spawn<F>(
+        self: &Arc<Self>,
+        session_id: &str,
+        native_store: NativeStore,
+        prepare: impl std::future::Future<Output = Result<F>>,
+    ) -> Result<Arc<CodexClient>>
+    where
+        F: FnOnce() -> Result<Arc<CodexClient>> + Send + 'static,
+    {
+        {
+            let _spawning = self.spawn_lock.lock().await;
+            if let Some(existing) = self.reusable_client(session_id, native_store).await {
+                return Ok(existing);
+            }
+        }
+        let spawn = prepare.await?;
+        let host = self.clone();
+        let session = session_id.to_string();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (accepted_tx, mut accepted_rx) = oneshot::channel();
         tokio::spawn(async move {
-            let client = spawn_client(&session, host.up_port.get().copied(), native_store).await?;
-            // Never displace a live entry: if an abandoned bring-up's insert
-            // races a successor's (spawn_lock was released by the abort), the
-            // loser kills its own child and defers to the live one.
+            let _spawning = host.spawn_lock.lock().await;
+            if ready_tx.is_closed() {
+                return;
+            }
+            // Another caller may have completed startup during preparation.
+            if let Some(existing) = host.reusable_client(&session, native_store).await {
+                let _ = ready_tx.send(Ok(existing));
+                return;
+            }
             {
                 let mut guard = host.inner.lock().await;
-                if let Some(existing) = guard.get(&session) {
-                    if existing.native_store() == native_store
-                        && matches!(existing.child.lock().await.try_wait(), Ok(None))
-                    {
-                        let existing = existing.clone();
-                        drop(guard);
-                        client.terminate().await;
-                        return Ok(existing);
-                    }
-                }
                 if let Some(stale) = guard.remove(&session) {
                     stale.terminate().await;
                 }
-                guard.insert(session.clone(), client.clone());
             }
-            if let Err(e) = handshake(&client).await {
-                client.terminate().await;
-                let mut guard = host.inner.lock().await;
-                if guard.get(&session).is_some_and(|c| Arc::ptr_eq(c, &client)) {
-                    guard.remove(&session);
+            if ready_tx.is_closed() {
+                return;
+            }
+            // The process launch itself has no await; a detached owner always
+            // registers or reaps the child, even if the caller is cancelled.
+            let client = match spawn() {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
                 }
-                return Err(e);
+            };
+            if ready_tx.is_closed() {
+                client.terminate().await;
+                return;
             }
-            Ok(client)
-        })
-        .await
-        .map_err(|e| anyhow!("codex app-server bring-up task failed: {e}"))?
+            host.inner
+                .lock()
+                .await
+                .insert(session.clone(), client.clone());
+            let initialized = tokio::select! {
+                result = handshake(&client) => result,
+                _ = &mut accepted_rx => Err(anyhow!("Codex startup was cancelled")),
+            };
+            if let Err(error) = initialized {
+                host.retire_client(&session, &client).await;
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+            if ready_tx.send(Ok(client.clone())).is_err() || accepted_rx.await.is_err() {
+                host.retire_client(&session, &client).await;
+            }
+        });
+        let result = ready_rx
+            .await
+            .map_err(|error| anyhow!("codex app-server bring-up task failed: {error}"))?;
+        // No await between receiving and accepting: cancellation before this
+        // hand-off closes accepted_rx and leaves cleanup to the bring-up task.
+        let _ = accepted_tx.send(());
+        result
+    }
+
+    /// Called under spawn_lock, so a client cannot be reused mid-handshake.
+    async fn reusable_client(
+        &self,
+        session_id: &str,
+        native_store: NativeStore,
+    ) -> Option<Arc<CodexClient>> {
+        let guard = self.inner.lock().await;
+        let client = guard.get(session_id)?;
+        if client.native_store() == native_store
+            && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+            && matches!(client.child.lock().await.try_wait(), Ok(None))
+        {
+            client.touch();
+            Some(client.clone())
+        } else {
+            None
+        }
+    }
+
+    async fn retire_client(&self, session_id: &str, client: &Arc<CodexClient>) {
+        let mut guard = self.inner.lock().await;
+        if guard
+            .get(session_id)
+            .is_some_and(|c| Arc::ptr_eq(c, client))
+        {
+            guard.remove(session_id);
+        }
+        drop(guard);
+        client.terminate().await;
     }
 
     /// The session's live client, if any (for inline replies / interrupts).
@@ -1202,7 +1309,7 @@ mod windows_job {
     /// caller still reaps the wrapper.
     pub(super) fn kill_tree(pid: u32) {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("taskkill")
+        let _ = crate::process::command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .creation_flags(CREATE_NO_WINDOW)
             .stdout(std::process::Stdio::null())
@@ -1232,7 +1339,7 @@ mod windows_job {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[cfg(windows)]
@@ -1255,6 +1362,7 @@ mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),
@@ -1268,17 +1376,32 @@ mod tests {
 
     #[cfg(unix)]
     fn test_client_running(shell: &str, last_active: Instant) -> Arc<CodexClient> {
-        let mut command = Command::new("sh");
+        test_client(shell, last_active, false)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn rpc_test_client(shell: &str) -> Arc<CodexClient> {
+        test_client(shell, Instant::now(), true)
+    }
+
+    #[cfg(unix)]
+    fn test_client(shell: &str, last_active: Instant, read_events: bool) -> Arc<CodexClient> {
+        let mut command = crate::process::tokio_command("sh");
         command
             .args(["-c", shell])
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(if read_events {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stderr(Stdio::null())
             .process_group(0);
         let mut child = command.spawn().unwrap();
         let process_group_id = child.id().unwrap();
         let stdin = child.stdin.take().unwrap();
-        Arc::new(CodexClient {
+        let stdout = child.stdout.take();
+        let client = Arc::new(CodexClient {
             child: Mutex::new(child),
             process_group_id,
             terminated: AtomicBool::new(false),
@@ -1292,10 +1415,56 @@ mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(last_active),
-        })
+        });
+        if let Some(stdout) = stdout {
+            tokio::spawn(read_loop(client.clone(), stdout));
+        }
+        client
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn stop_test_client(client: &CodexClient) {
+        client.terminate().await;
+    }
+
+    #[test]
+    fn configured_alphaxiv_is_disabled_when_our_server_uses_the_reserved_name() {
+        let configured =
+            json!({"alphaxiv":{"url":"https://example.com/mcp"},"other":{"command":"other"}});
+        let overrides = alphaxiv_config(&configured).unwrap();
+        assert_eq!(overrides["alphaxiv"], json!({"enabled":false}));
+        assert_eq!(overrides["orx_alphaxiv"]["args"], json!(["alphaxiv-mcp"]));
+        assert!(overrides.get("other").is_none());
+        assert!(alphaxiv_config(&json!({"alphaxiv":{},"orx_alphaxiv":{}})).is_err());
+        assert!(alphaxiv_config(&Value::Null)
+            .unwrap()
+            .get("alphaxiv")
+            .is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_approval_accepts_and_declines_in_its_native_reply_shape() {
+        let client = idle_test_client(Instant::now());
+        let id = json!(0);
+        client
+            .unanswered
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), ServerReqKind::McpApproval);
+        assert_eq!(
+            client.approval_reply(&id, true),
+            json!({"action":"accept","content":{},"_meta":null})
+        );
+        assert_eq!(
+            client.approval_reply(&id, false),
+            json!({"action":"decline","content":null,"_meta":null})
+        );
+        client.terminate().await;
     }
 
     #[cfg(unix)]
@@ -1313,6 +1482,110 @@ mod tests {
         assert!(client.pending.lock().unwrap().is_empty());
         assert!(client.idle_since().is_some());
         client.terminate().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initialized_bring_up_hands_off_a_reusable_client() {
+        let host = Arc::new(CodexHost::new());
+        let client = rpc_test_client(
+            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{}}'; sleep 600"#,
+        );
+        let spawned = client.clone();
+        let ensured = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("compact", NativeStore::Isolated, async {
+                Ok(move || Ok(spawned))
+            }),
+        )
+        .await;
+        let reused = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("compact", NativeStore::Isolated, async {
+                Ok(|| panic!("initialized client must be reused"))
+            }),
+        )
+        .await;
+        host.kill_session("compact").await;
+        assert!(Arc::ptr_eq(&ensured.unwrap().unwrap(), &client));
+        assert!(Arc::ptr_eq(&reused.unwrap().unwrap(), &client));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_bring_up_does_not_block_other_chats_or_leak_children() {
+        let host = Arc::new(CodexHost::new());
+        let warm = idle_test_client(Instant::now());
+        host.inner.lock().await.insert("warm".into(), warm.clone());
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let launched = Arc::new(AtomicBool::new(false));
+        let spawn_flag = launched.clone();
+        let operation_host = host.clone();
+        let operation = tokio::spawn(async move {
+            operation_host
+                .ensure_with_spawn("compact", NativeStore::Isolated, async move {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    Ok(move || {
+                        spawn_flag.store(true, Ordering::Release);
+                        Ok(idle_test_client(Instant::now()))
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        // A stalled preparation neither blocks reuse nor another cold startup.
+        let reused = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("warm", NativeStore::Isolated, async {
+                Ok(|| panic!("a warm client must not be spawned again"))
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(Arc::ptr_eq(&reused, &warm));
+        let cold = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("other", NativeStore::Isolated, async {
+                Err::<fn() -> Result<Arc<CodexClient>>, _>(anyhow!("preparation reached"))
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cold.err().unwrap().to_string(), "preparation reached");
+        operation.abort();
+        let _ = operation.await;
+        assert!(release_tx.send(()).is_err());
+        assert!(!launched.load(Ordering::Acquire));
+        host.kill_session("warm").await;
+
+        // Cancellation after process launch still reaps the registered child.
+        let client = idle_test_client(Instant::now());
+        let spawned = client.clone();
+        let operation_host = host.clone();
+        let operation = tokio::spawn(async move {
+            operation_host
+                .ensure_with_spawn("compact", NativeStore::Isolated, async {
+                    Ok(move || Ok(spawned))
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.pending.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        operation.abort();
+        let _ = operation.await;
+        let _settled = tokio::time::timeout(Duration::from_secs(2), host.spawn_lock.lock())
+            .await
+            .unwrap();
+        assert!(client.terminated.load(Ordering::Acquire));
+        assert!(host.inner.lock().await.is_empty());
     }
 
     #[cfg(unix)]
@@ -1395,7 +1668,7 @@ mod tests {
     #[tokio::test]
     async fn terminate_kills_the_native_child_behind_a_wrapper() {
         // The npm `codex.js` shape: a wrapper whose child outlives its SIGKILL.
-        let mut command = Command::new("sh");
+        let mut command = crate::process::tokio_command("sh");
         command
             .args(["-c", "sleep 30 & echo $!; wait"])
             .stdin(Stdio::piped())
@@ -1422,6 +1695,7 @@ mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),
@@ -1446,15 +1720,13 @@ mod tests {
         );
     }
 
-    /// The npm `codex.cmd` shape (OR-409): a `cmd.exe` wrapper whose native
-    /// child (`timeout.exe`) survives a wrapper-only kill while holding the
-    /// thread's writer lock. The Job Object must empty the whole tree.
+    /// The npm wrapper's child can outlive a wrapper-only kill (OR-409).
     #[cfg(windows)]
     #[tokio::test]
     async fn terminate_kills_the_native_child_behind_a_wrapper() {
-        let mut command = Command::new("cmd");
+        let mut command = crate::process::tokio_command("cmd");
         command
-            .args(["/c", "timeout /t 600 > nul"])
+            .args(["/c", "ping.exe -n 600 127.0.0.1 > nul"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

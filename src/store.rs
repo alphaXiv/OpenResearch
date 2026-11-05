@@ -9,6 +9,7 @@
 //! `~/.local/share/openresearch`.
 
 mod acp;
+pub(crate) mod search;
 mod telemetry;
 pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 
@@ -16,12 +17,25 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Result};
 use crate::local::autonomy::Autonomy;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
+
+/// An experiment a chat created, launched a run of, or asked to be woken for.
+/// Listed live first, then unarchived before archived, each newest activity first.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExperiment {
+    pub experiment: LocalExperiment,
+    pub project_name: String,
+    /// Its newest live run, else its newest run; `None` until it has been run.
+    /// A forced relaunch can leave an older run live, so the newest run alone
+    /// could hide work still in flight.
+    pub current_run: Option<StoredRun>,
+}
 
 pub fn data_dir() -> PathBuf {
     // Resolution order (most to least authoritative):
@@ -33,7 +47,7 @@ pub fn data_dir() -> PathBuf {
     //   3. $XDG_DATA_HOME/openresearch — ambient system default *base*; an
     //      explicit UI choice rightly beats it, so it sits below (2).
     //   4. ~/.local/share/openresearch — hardcoded default.
-    if let Some(dir) = env_path("ORX_DATA_DIR") {
+    if let Some(dir) = data_dir_override() {
         return dir;
     }
     if let Some(dir) = crate::config::settings_data_dir() {
@@ -106,18 +120,26 @@ impl Drop for DataDirMoveLock {
     }
 }
 
-fn acquire_data_dir_move_lock(path: PathBuf) -> Result<DataDirMoveLock> {
+fn acquire_data_dir_lock(path: PathBuf, exclusive: bool) -> Result<DataDirMoveLock> {
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let thread = std::thread::spawn(move || {
         let result = (|| -> Result<()> {
             let mut lock = open_lifecycle_lock_at(&path)?;
-            let _guard = lock.try_write()?;
-            ready_tx
-                .send(Ok(()))
-                .map_err(|_| anyhow!("data-directory move lock receiver closed"))?;
-            let _ = release_rx.recv();
-            Ok(())
+            let wait = || -> Result<()> {
+                ready_tx
+                    .send(Ok(()))
+                    .map_err(|_| anyhow!("data-directory move lock receiver closed"))?;
+                let _ = release_rx.recv();
+                Ok(())
+            };
+            if exclusive {
+                let _guard = lock.try_write()?;
+                wait()
+            } else {
+                let _guard = lock.try_read()?;
+                wait()
+            }
         })();
         if let Err(error) = result {
             let _ = ready_tx.send(Err(error.to_string()));
@@ -139,6 +161,10 @@ fn acquire_data_dir_move_lock(path: PathBuf) -> Result<DataDirMoveLock> {
     }
 }
 
+pub(crate) fn acquire_data_dir_read_lock() -> Result<DataDirMoveLock> {
+    acquire_data_dir_lock(data_dir_move_lock_path(), false)
+}
+
 /// Read an env var as a path, treating unset **and empty** the same (an empty
 /// `export ORX_DATA_DIR=` is a shell footgun that must not resolve to `""`).
 fn env_path(key: &str) -> Option<PathBuf> {
@@ -147,9 +173,23 @@ fn env_path(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// `$ORX_DATA_DIR`. Under test only a fixture in the temp dir counts: one
+/// inherited from the developer's shell points at their real data.
+fn data_dir_override() -> Option<PathBuf> {
+    let dir = env_path("ORX_DATA_DIR")?;
+    #[cfg(test)]
+    if !dir.starts_with(std::env::temp_dir()) {
+        return None;
+    }
+    Some(dir)
+}
+
 /// `$XDG_DATA_HOME/openresearch` else `~/.local/share/openresearch` — the tail
 /// of the resolution chain, shared by `data_dir()` and `default_data_dir()`.
 fn xdg_default_data_dir() -> PathBuf {
+    #[cfg(test)]
+    let base = crate::config::test_home().join(".local").join("share");
+    #[cfg(not(test))]
     let base = env_path("XDG_DATA_HOME").unwrap_or_else(|| {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -164,7 +204,7 @@ fn xdg_default_data_dir() -> PathBuf {
 /// "(default)" path and offer resetting to it. `$ORX_DATA_DIR` still wins, since
 /// it's a forced override.
 pub fn default_data_dir() -> PathBuf {
-    if let Some(dir) = env_path("ORX_DATA_DIR") {
+    if let Some(dir) = data_dir_override() {
         return dir;
     }
     xdg_default_data_dir()
@@ -187,7 +227,7 @@ pub enum DataDirSource {
 
 /// Classify the current `data_dir()` resolution for the Storage settings UI.
 pub fn data_dir_source() -> DataDirSource {
-    if env_path("ORX_DATA_DIR").is_some() {
+    if data_dir_override().is_some() {
         return DataDirSource::Env;
     }
     if crate::config::settings_data_dir().is_some() {
@@ -215,13 +255,13 @@ pub fn human_bytes(n: u64) -> String {
     format!("{:.1} {}", size, UNITS[unit])
 }
 
-pub fn log_path(run_id: &str) -> PathBuf {
+pub fn log_path(data_dir: &Path, run_id: &str) -> PathBuf {
     // Sanitize the id so malformed local data cannot escape the log directory.
     let safe: String = run_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    data_dir().join("run-logs").join(format!("{safe}.log"))
+    data_dir.join("run-logs").join(format!("{safe}.log"))
 }
 
 /// A locally tracked run. `backend_json` stores the backend descriptor used by
@@ -245,7 +285,6 @@ pub struct StoredRun {
     pub result_markdown: Option<String>,
     /// Cancel intent polled by the detached supervisor.
     pub cancel_requested: bool,
-    /// Who asked for the cancel; written only by `Store::request_cancel`, never by `upsert_run`.
     pub cancel_reason: Option<String>,
     /// The `orx up` chat session that launched this run, when it was started by
     /// an agent harness child (which exports `ORX_CHAT_SESSION_ID`). `None` for
@@ -254,10 +293,146 @@ pub struct StoredRun {
     pub chat_session_id: Option<String>,
 }
 
-pub fn public_backend(value: &str) -> Option<serde_json::Value> {
+pub const TERMINAL: &str = "terminal";
+pub const ATTENTION: &str = "attention";
+pub const RECOVERED: &str = "recovered";
+pub const NOTIFY: &str = "notify";
+const TERMINAL_LOG_BYTES: u64 = 4 * 1024;
+const TERMINAL_LOG_LINES: usize = 40;
+
+pub struct SubmittingRun<'a> {
+    pub id: &'a str,
+    pub experiment_id: &'a str,
+    pub project_id: &'a str,
+    pub metadata: &'a crate::jobs::BackendDescriptor,
+    pub command: &'a str,
+    pub created_at: i64,
+    pub commit_sha: Option<&'a str>,
+    pub chat_session_id: Option<&'a str>,
+    pub spec_digest: &'a str,
+    pub launch: &'a LaunchSpec,
+}
+
+/// Where and how a run launches, durable from its first transaction so recovery after a
+/// restart can find the job.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LaunchSpec {
+    /// Backend kind, e.g. `ssh_job`.
+    pub kind: String,
+    /// Host alias, cluster, namespace or account, as the backend names it.
+    pub target: Option<String>,
+    pub options: serde_json::Value,
+}
+
+/// A run row's `(status, updated_at)` as last seen.
+pub type SeenRow = (String, i64);
+
+/// Notify-file bytes already turned into notices, with the file they came from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NotifyCursor {
+    pub ident: orx_host_proto::FileIdent,
+    pub offset: u64,
+    /// Bumped whenever the file is replaced or truncated, so offsets never collide across files.
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Contact {
+    Live,
+    Unreachable { since: i64, cause: String },
+    NeedsAuth { since: i64, cause: String },
+    Unreconciled { since: i64, detail: String },
+    Stopping { since: i64, count: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubmitterIdentity {
+    pub pid: u32,
+    pub starttime: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubmissionFence {
+    pub taken_at: i64,
+    pub submitter: Option<SubmitterIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineRunState {
+    pub started_at: Option<i64>,
+    pub contact: Contact,
+    pub cancel_unconfirmed: Option<Vec<u32>>,
+    pub spec_digest: Option<String>,
+    pub submission_attempt: u32,
+    pub submission_fence: Option<SubmissionFence>,
+    pub cancel_accepted_at: Option<i64>,
+    /// Present on every runner-2 row.
+    pub launch: Option<LaunchSpec>,
+    pub notify_cursor: Option<NotifyCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunNotice {
+    pub id: i64,
+    pub run_id: String,
+    pub chat_session_id: String,
+    pub kind: String,
+    pub dedupe: String,
+    pub body: String,
+    pub created_at: i64,
+    pub client_turn_id: String,
+}
+
+/// The descriptor a run shows, without secrets. An engine run reads as the 0.2.x descriptor of
+/// what it launched: its OpenResearch box's own, else the fields its launch intent decided.
+pub fn public_backend(value: &str, launch: Option<&LaunchSpec>) -> Option<serde_json::Value> {
     let mut backend = serde_json::from_str::<serde_json::Value>(value).ok()?;
-    if let Some(fields) = backend.as_object_mut() {
-        fields.remove("rentalLease");
+    let Some(fields) = backend.as_object_mut() else {
+        return Some(backend);
+    };
+    if fields.get("kind").and_then(serde_json::Value::as_str) == Some("engine") {
+        let descriptor = fields
+            .get("handle")
+            .and_then(|handle| handle.get("descriptor"))
+            .and_then(serde_json::Value::as_object)
+            .cloned();
+        if let Some(descriptor) = descriptor {
+            for (field, value) in descriptor {
+                if field == "kind" || !fields.contains_key(&field) {
+                    fields.insert(field, value);
+                }
+            }
+        } else if let Some(launch) = launch {
+            let options = &launch.options;
+            let directives = &options["directives"];
+            let cpus = directives["cpus-per-task"]
+                .as_str()
+                .and_then(|cpus| cpus.parse::<u64>().ok());
+            let derived = [
+                ("kind", serde_json::json!(launch.kind)),
+                ("namespace", serde_json::json!(launch.target)),
+                ("flavor", options["flavor"].clone()),
+                ("sshContainer", options["container"].clone()),
+                ("context", options["context"].clone()),
+                ("timeoutSecs", options["timeout_seconds"].clone()),
+                ("cpusPerTask", serde_json::json!(cpus)),
+                ("mem", directives["mem"].clone()),
+            ];
+            for (field, value) in derived {
+                if !value.is_null() {
+                    fields.insert(field.into(), value);
+                }
+            }
+        }
+    }
+    fields.remove("rentalLease");
+    if let Some(descriptor) = fields
+        .get_mut("handle")
+        .and_then(|handle| handle.get_mut("descriptor"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        descriptor.remove("rentalLease");
     }
     Some(backend)
 }
@@ -267,7 +442,7 @@ fn serialize_public_backend<S: serde::Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(
-        &public_backend(value)
+        &public_backend(value, None)
             .map(|value| value.to_string())
             .unwrap_or_default(),
     )
@@ -369,23 +544,75 @@ pub struct ProjectActivitySummary {
     pub last_activity_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delegation {
+    pub depth: u32,
+    /// The chat that delegated to this one; `None` for a chat the user started.
+    pub parent: Option<String>,
+    pub may_delegate: bool,
+}
+
+/// One chat's standing request to hear from another. A paused one, which the
+/// user stopped, tells nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatSubscription {
+    pub subscriber_session_id: String,
+    pub target_session_id: String,
+    pub paused: bool,
+    pub told_prompt_id: Option<String>,
+    /// The target is working, or idle after a turn the subscriber was not told.
+    pub outstanding: bool,
+}
+
+/// What a subscription tells: a finished turn, or a question its target asked.
+#[derive(Debug, Clone, Copy)]
+pub enum ToldEvent<'a> {
+    Turn(&'a str),
+    Prompt(&'a str),
+}
+
+/// A chat whose latest turn has ended since its subscriber was last told.
 #[derive(Debug, Clone)]
-pub struct RunWakeup {
-    pub run: StoredRun,
-    pub chat_session_id: String,
-    pub state: String,
-    pub monitoring_alerted: bool,
+pub struct ReadyChatSubscription {
+    pub subscriber_session_id: String,
+    pub target_session_id: String,
+    pub turn_id: String,
+    pub turn_state: String,
+    pub assistant_message_id: String,
+    subscribed_at: i64,
+    told_turn_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunWakeupRegistration {
-    Scheduled,
-    AlreadyPending,
-    AlreadyDelivered,
-}
+const CHAT_SUBSCRIPTION_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
-const RUN_WAKEUP_CLAIM_TTL_MS: i64 = 60 * 1000;
-pub(crate) const CHAT_TURN_LEASE_TTL_MS: i64 = 60 * 1000;
+/// Each subscription with its target's latest turn and whether the target is
+/// idle after it: done, and with nothing queued unless a stop held the queue.
+const LATEST_SUBSCRIBED_TURNS: &str = "subscribed AS (
+    SELECT s.subscriber_session_id, s.target_session_id, s.paused, s.told_turn_id,
+           s.told_prompt_id, s.claim_token, s.claimed_at, s.created_at,
+           t.id AS turn_id, t.state,
+           t.assistant_message_id, t.updated_at,
+           t.state = 'interrupted'
+               OR (t.state IN ('completed', 'failed') AND NOT EXISTS (
+                   SELECT 1 FROM chat_queued_messages q
+                   WHERE q.session_id = s.target_session_id
+               )) AS idle
+    FROM chat_subscriptions s
+    LEFT JOIN chat_turns t ON t.id = (
+        SELECT id FROM chat_turns WHERE session_id = s.target_session_id
+        ORDER BY created_at DESC, rowid DESC LIMIT 1
+    )
+),
+latest AS (
+    SELECT *, NOT (idle IS 1 AND told_turn_id IS turn_id) AS pending FROM subscribed
+)";
+
+pub(crate) const CHAT_TURN_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Heartbeats and claims older than this belong to an owner that is gone.
+fn expired_before(ttl: std::time::Duration) -> i64 {
+    now_ms() - crate::config::paced(ttl).as_millis() as i64
+}
 
 fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
@@ -417,7 +644,7 @@ fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
     for (session_id, prompt, requested_at) in pending {
         let leased: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND heartbeat_at > ?2)",
-            params![session_id, now_ms() - CHAT_TURN_LEASE_TTL_MS], |row| row.get(0),
+            params![session_id, expired_before(CHAT_TURN_LEASE_TTL)], |row| row.get(0),
         )?;
         if leased {
             return Err(anyhow!(
@@ -469,9 +696,152 @@ fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
 /// to ride out ordinary writer bursts, short enough that a dead writer doesn't
 /// stall a command for long.
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+/// How long submission and project deletion wait out each other or an orphan scan before failing as busy.
+#[cfg(not(test))]
+pub(crate) const RUN_ARTIFACTS_WAIT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+pub(crate) const RUN_ARTIFACTS_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const RUN_ARTIFACTS_POLL: Duration = Duration::from_millis(250);
+/// Bounds removal time per orphan pass; classification is unbudgeted but cheap for finished runs.
+const ORPHAN_PASS_BUDGET: Duration = Duration::from_secs(5);
+/// Finished runs older than each project's newest few lose their rebuildable environments
+/// (local runs) or their remote dirs (SSH and Slurm runs).
+const FULL_RUNS_PER_PROJECT: i64 = 3;
+/// Uploads are written before the message naming them, so the sweep spares recent files.
+const CHAT_ATTACHMENT_SETTLE: Duration = Duration::from_secs(24 * 60 * 60);
+/// A harness writes its session before orx records the id, so the sweep spares recent ones.
+const NATIVE_SESSION_SETTLE: Duration = Duration::from_secs(24 * 60 * 60);
+const SLIMMED_RUN_PATHS: [&[&str]; 2] = [&["repo", ".venv"], &["repo", ".cache", "uv"]];
+
+const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
+const SUPERVISOR_LOCK: (&str, &str) = ("run-logs", ".supervisor.lock");
+const CANCEL_LOCK: (&str, &str) = ("run-logs", ".cancel.lock");
+const SHARED_SSH_LOCK: (&str, &str) = ("run-logs", ".supervisor.shared-ssh.lock");
+/// The kept end of an engine run's log too large to keep whole.
+const TAIL_LOG: (&str, &str) = ("run-logs", ".tail.log");
+/// Per-run files as (data-dir root, name suffix); the supervisor lock goes last so it excludes until the end.
+const RUN_ARTIFACTS: [(&str, &str); 18] = [
+    ("local-runs", ""),
+    ("run-logs", ".log"),
+    ("run-logs", ".spool.log"),
+    ("run-logs", ".log.part"),
+    ("run-logs", ".log.part.json"),
+    TAIL_LOG,
+    ("run-logs", ".tail.log.part"),
+    ("run-logs", ".tail.log.part.json"),
+    ("run-logs", ".ranges.json"),
+    ("run-logs", ".cursor.json"),
+    ("run-logs", ".pending.json"),
+    ("run-logs", ".cursor.lock"),
+    SHARED_SSH_LOCK,
+    ("run-logs", ".supervisor.log"),
+    ("run-logs", ".supervisor.log.1"),
+    CANCEL_LOCK,
+    SUBMISSION_HANDLE,
+    SUPERVISOR_LOCK,
+];
+
+#[derive(Default)]
+pub(crate) struct OrphanPass {
+    /// The pass stopped at [`ORPHAN_PASS_BUDGET`] with artifacts left to reclaim.
+    pub more: bool,
+    /// Runs whose artifacts were kept because they could not be classified or removed.
+    pub kept: Vec<(String, crate::error::Error)>,
+}
+
+enum OrphanFate {
+    Reclaim,
+    Keep { snapshot: Option<String> },
+    KeepWithAllSnapshots,
+}
+
+/// Remote dirs waiting for removal; `deleted` entries ignore a target's keep setting.
+pub(crate) struct RemoteCleanup {
+    pub run_id: String,
+    pub backend_json: String,
+    pub deleted: bool,
+}
+
+/// Runs whose job ran in `<data dir>/local-runs/<id>`, from 0.2.x or the engine.
+const LOCAL_RUNS: &str = "CASE WHEN json_valid(backend_json) THEN
+    json_extract(backend_json, '$.kind') IN ('local_job', 'tinker_job')
+    OR json_extract(backend_json, '$.handle.type') IN ('Local', 'Tinker') END";
+/// Runs that left a run dir on an SSH or Slurm host, from 0.2.x or the engine.
+const REMOTE_RUNS: &str = "CASE WHEN json_valid(backend_json) THEN
+    json_extract(backend_json, '$.kind') IN ('ssh_job', 'slurm_job')
+    OR json_extract(backend_json, '$.handle.type') IN ('Ssh', 'Slurm') END";
+
+/// `(id, status)` of runs matching `runs` past each project's newest [`FULL_RUNS_PER_PROJECT`].
+fn runs_past_newest(runs: &'static str) -> String {
+    format!(
+        "SELECT id, status FROM (
+           SELECT id, status, ROW_NUMBER() OVER
+             (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS position
+           FROM runs
+           WHERE {runs})
+         WHERE position > {FULL_RUNS_PER_PROJECT}"
+    )
+}
+
+fn remote_cleanup_eligibility() -> String {
+    format!("NOT EXISTS (SELECT 1 FROM runs WHERE id = run_id AND
+          (contact IS NOT NULL OR status IN ('submitting','starting','running')))
+        AND NOT EXISTS (SELECT 1 FROM log_collections WHERE run_id = remote_cleanups.run_id AND done = 0)
+        AND (deleted = 1 OR run_id IN (SELECT id FROM ({})))", runs_past_newest(REMOTE_RUNS))
+}
+
+/// Queues the SSH/Slurm runs whose `column` equals `value`; deletion wins over a pending finish.
+/// An engine run's entry carries its container from the launch intent, which a deletion removes.
+fn queue_remote_cleanups(
+    conn: &Connection,
+    column: &'static str,
+    value: &str,
+    deleted: bool,
+) -> Result<()> {
+    conn.execute(
+        &format!(
+            "INSERT INTO remote_cleanups (run_id, backend_json, deleted, next_attempt_at)
+             SELECT id, CASE WHEN json_extract(launch_spec, '$.options.container') IS NULL
+                 THEN backend_json ELSE json_set(backend_json, '$.sshContainer',
+                   json(json_extract(launch_spec, '$.options.container'))) END, ?2, ?3
+             FROM runs WHERE {column} = ?1 AND {REMOTE_RUNS}
+             ON CONFLICT(run_id) DO UPDATE SET backend_json = excluded.backend_json,
+               deleted = MAX(deleted, excluded.deleted), attempts = 0,
+               next_attempt_at = excluded.next_attempt_at"
+        ),
+        params![value, deleted, now_ms()],
+    )?;
+    Ok(())
+}
+
+fn validate_deleted_runs(runs: &[StoredRun]) -> Result<()> {
+    for run in runs {
+        if run.id.is_empty()
+            || !run
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(anyhow!("Invalid run id for artifact cleanup: {}", run.id));
+        }
+    }
+    Ok(())
+}
+
+/// Log collection retries after a minute, doubling to an hour, then hourly.
+const LOG_COLLECTION_RETRY_MS: i64 = 60 * 1000;
+const LOG_COLLECTION_MAX_RETRY_MS: i64 = 60 * 60 * 1000;
+/// Failures before retries reach the cap and the collection reads as failed.
+const LOG_COLLECTION_FAILED_AFTER: u32 = 7;
+/// Failed remote cleanups retry after 5 minutes, doubling up to a day.
+const REMOTE_CLEANUP_RETRY_MS: i64 = 5 * 60 * 1000;
+const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
+/// Just past the source cache's idle window, so tars a pass had to skip are removable.
+const SOURCE_SWEEP_DELAY_MS: i64 = (crate::jobs::ssh::cleanup::SOURCE_IDLE_MINUTES + 1) * 60 * 1000;
 
 pub struct Store {
     conn: Connection,
+    data_dir: PathBuf,
     data_dir_move_lock_path: PathBuf,
 }
 
@@ -501,20 +871,10 @@ impl Store {
     }
 
     /// Open a store rooted at an explicit directory, bypassing `data_dir()`
-    /// resolution. For tests: a throwaway temp dir here avoids mutating the
-    /// process-global `$ORX_DATA_DIR`, which the localbox lifecycle test owns
-    /// (tests in different modules share env under the parallel runner).
+    /// resolution.
     pub fn open_at(dir: PathBuf) -> Result<Self> {
         let move_lock_path = dir.join(".orx-data-dir-move.lock");
         Self::open_at_with_move_lock(dir, move_lock_path, BUSY_TIMEOUT)
-    }
-
-    /// Shrink this connection's lock wait (e.g. to a wait loop's remaining
-    /// deadline). The next call can pass the default back to restore it.
-    pub(crate) fn set_busy_timeout(&self, timeout: Duration) -> Result<()> {
-        self.conn
-            .pragma_update(None, "busy_timeout", timeout.as_millis() as u64)?;
-        Ok(())
     }
 
     fn open_at_with_move_lock(
@@ -532,10 +892,32 @@ impl Store {
         std::fs::create_dir_all(dir.join("run-logs"))
             .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
         let conn = Connection::open(dir.join("orx.db"))?;
+        let has_floor: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata')",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_floor {
+            let floor: Option<i64> = conn
+                .query_row(
+                    "SELECT value FROM store_metadata WHERE key = 'min_reader_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(floor) = floor.filter(|floor| *floor > 1) {
+                return Err(anyhow!("This database requires a newer OpenResearch reader (min_reader_version {}). Update orx before opening it.", floor));
+            }
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS runs (
+            "CREATE TABLE IF NOT EXISTS store_metadata (
+                key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO store_metadata (key, value) VALUES ('min_reader_version', 1);
+            CREATE TABLE IF NOT EXISTS runs (
                 id           TEXT PRIMARY KEY,
                 experiment_id TEXT NOT NULL,
                 project_id   TEXT NOT NULL,
@@ -546,6 +928,46 @@ impl Store {
                 updated_at   INTEGER NOT NULL,
                 ended_at     INTEGER,
                 exit_code    INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS engine_host_auth (
+                alias TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS engine_hosts (
+                alias TEXT NOT NULL,
+                root TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                PRIMARY KEY(alias, root)
+            );
+            CREATE TABLE IF NOT EXISTS run_subscriptions (
+                run_id TEXT NOT NULL,
+                chat_session_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(run_id, chat_session_id)
+            );
+            CREATE TABLE IF NOT EXISTS run_notices (
+                id INTEGER PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                chat_session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                dedupe TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                client_turn_id TEXT,
+                delivered_at INTEGER,
+                delivery_failures INTEGER NOT NULL DEFAULT 0,
+                first_failure_at INTEGER,
+                next_delivery_at INTEGER,
+                delivery_error TEXT,
+                retired_at INTEGER,
+                UNIQUE(run_id, chat_session_id, dedupe)
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_notices_pending
+                ON run_notices(chat_session_id, client_turn_id, id) WHERE delivered_at IS NULL;
+            CREATE TABLE IF NOT EXISTS legacy_watches (
+                run_id TEXT PRIMARY KEY,
+                seen_status TEXT,
+                seen_updated_at INTEGER
             );
             CREATE TABLE IF NOT EXISTS native_invocation_identities (
                 harness TEXT NOT NULL,
@@ -678,6 +1100,13 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_turns_session
                 ON chat_turns(session_id, created_at);
+            CREATE TABLE IF NOT EXISTS chat_steer_receipts (
+                session_id TEXT NOT NULL,
+                client_turn_id TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                delivered INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, client_turn_id)
+            );
             CREATE TABLE IF NOT EXISTS chat_queued_messages (
                 id             TEXT PRIMARY KEY,
                 session_id     TEXT NOT NULL,
@@ -702,6 +1131,25 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_run_wakeups_requested
                 ON chat_run_wakeups(requested_at);
+            CREATE TABLE IF NOT EXISTS chat_delegates (
+                session_id        TEXT PRIMARY KEY,
+                parent_session_id TEXT NOT NULL,
+                may_delegate      INTEGER NOT NULL,
+                created_at        INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_subscriptions (
+                subscriber_session_id TEXT NOT NULL,
+                target_session_id     TEXT NOT NULL,
+                created_at            INTEGER NOT NULL,
+                paused                INTEGER NOT NULL DEFAULT 0,
+                told_turn_id          TEXT,
+                told_prompt_id        TEXT,
+                claim_token           TEXT,
+                claimed_at            INTEGER,
+                PRIMARY KEY (subscriber_session_id, target_session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_subscriptions_target
+                ON chat_subscriptions(target_session_id);
             CREATE TABLE IF NOT EXISTS chat_turn_leases (
                 chat_session_id TEXT PRIMARY KEY,
                 claim_token     TEXT NOT NULL,
@@ -720,6 +1168,28 @@ impl Store {
                 missing_tools TEXT NOT NULL DEFAULT '',
                 error     TEXT,
                 tested_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS remote_cleanups (
+                run_id          TEXT PRIMARY KEY,
+                backend_json    TEXT NOT NULL,
+                deleted         INTEGER NOT NULL,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL,
+                last_error      TEXT
+            );
+            CREATE TABLE IF NOT EXISTS log_collections (
+                run_id          TEXT PRIMARY KEY,
+                collected       INTEGER NOT NULL DEFAULT 0,
+                done            INTEGER NOT NULL DEFAULT 0,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT
+            );
+            CREATE TABLE IF NOT EXISTS remote_source_sweeps (
+                host   TEXT NOT NULL,
+                root   TEXT NOT NULL,
+                due_at INTEGER NOT NULL,
+                PRIMARY KEY (host, root)
             );
             CREATE TABLE IF NOT EXISTS overleaf_links (
                 project_id TEXT NOT NULL,
@@ -778,9 +1248,11 @@ impl Store {
             "ALTER TABLE chat_run_wakeups ADD COLUMN claimed_at INTEGER",
             "ALTER TABLE chat_run_wakeups ADD COLUMN delivered_at INTEGER",
             "ALTER TABLE chat_run_wakeups ADD COLUMN monitoring_alerted INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chat_run_wakeups ADD COLUMN engine_migrated INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_messages ADD COLUMN parent_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN base_native_session_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
+            "ALTER TABLE chat_messages ADD COLUMN native_harness TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
@@ -790,13 +1262,43 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
             "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_autonomy TEXT",
+            "ALTER TABLE ui_state ADD COLUMN nested_delegation INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
             "ALTER TABLE runs ADD COLUMN cancel_reason TEXT",
+            "ALTER TABLE runs ADD COLUMN cancel_unconfirmed TEXT",
+            "ALTER TABLE runs ADD COLUMN contact TEXT",
+            "ALTER TABLE runs ADD COLUMN spec_digest TEXT",
+            "ALTER TABLE runs ADD COLUMN submission_attempt INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE runs ADD COLUMN submission_fence TEXT",
+            "ALTER TABLE runs ADD COLUMN cancel_accepted_at INTEGER",
+            "ALTER TABLE runs ADD COLUMN launch_spec TEXT",
+            "ALTER TABLE runs ADD COLUMN notify_cursor TEXT",
+            "ALTER TABLE runs ADD COLUMN started_at INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
         }
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS delete_run_outbox AFTER DELETE ON runs BEGIN
+                 DELETE FROM run_notices WHERE run_id = OLD.id;
+                 DELETE FROM run_subscriptions WHERE run_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_chat_outbox AFTER DELETE ON chat_sessions BEGIN
+                 DELETE FROM run_notices WHERE chat_session_id = OLD.id;
+                 DELETE FROM run_subscriptions WHERE chat_session_id = OLD.id;
+             END;",
+        )?;
+        // Covers the periodic native-id scan so it never reads the large parts_json.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
+             ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
+        )?;
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
+        // A delegate that outlives its delegator, in a worktree of its own, stands as the user's.
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_delegates AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_delegates WHERE session_id = OLD.id OR parent_session_id = OLD.id; END;")?;
         conn.execute(
             "DELETE FROM native_invocation_identities WHERE session_id IS NULL AND created_at < ?1",
             [now_ms() - 7 * 24 * 60 * 60 * 1000],
@@ -846,6 +1348,7 @@ impl Store {
             tx.pragma_update(None, "user_version", 1)?;
             tx.commit()?;
         }
+        search::initialize(&conn)?;
         // Older builds of this branch created a one-root-per-project unique
         // index; multiple baselines are allowed, so make sure it's gone.
         let _ = conn.execute(
@@ -991,6 +1494,7 @@ impl Store {
         // it again before it can reach a CLI.
         Ok(Self {
             conn,
+            data_dir: dir,
             data_dir_move_lock_path,
         })
     }
@@ -1026,7 +1530,7 @@ impl Store {
             "SELECT onboarding_completed, tour_completed, preferred_harness,
                     preferred_model, preferred_service_tier,
                     preferred_permission_mode, preferred_reasoning_level, workspace_state_json,
-                    preferred_autonomy
+                    preferred_autonomy, nested_delegation
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1053,6 +1557,7 @@ impl Store {
                         .get::<_, Option<String>>(8)?
                         .as_deref()
                         .and_then(Autonomy::from_id),
+                    nested_delegation: row.get(9)?,
                 })
             },
         )?)
@@ -1100,6 +1605,14 @@ impl Store {
         self.conn.execute(
             "UPDATE ui_state SET tour_completed = ?1 WHERE id = 1",
             params![completed],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_nested_delegation(&self, allowed: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET nested_delegation = ?1 WHERE id = 1",
+            params![allowed],
         )?;
         Ok(())
     }
@@ -1237,16 +1750,67 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Count runs in an active state (`starting`/`running`) — SQL-side and
-    /// unbounded, so a long-running job older than the newest N rows still
-    /// counts. Used by the data-dir move's in-flight guard.
+    pub(crate) fn engine_runs_block_idle(&self) -> Result<bool> {
+        let mut statement = self.conn.prepare("SELECT status FROM runs")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for status in rows {
+            let status = status?;
+            let phase = crate::engine::Phase::parse(&status)
+                .ok_or_else(|| anyhow!("Unknown run status: {status}"))?;
+            if !phase.is_terminal() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn engine_idle_blocked(&self) -> Result<bool> {
+        if self.engine_runs_block_idle()? {
+            return Ok(true);
+        }
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_notices WHERE delivered_at IS NULL AND retired_at IS NULL)
+                OR EXISTS(SELECT 1 FROM chat_turns WHERE state IN ('preparing','retrying','running'))",
+            [], |row| row.get(0),
+        )?)
+    }
+
+    /// Runs or local processes that prevent moving their working directory.
     pub fn count_active_runs(&self) -> Result<usize> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM runs WHERE status IN ('starting', 'running')",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(n as usize)
+        let mut statement = self
+            .conn
+            .prepare("SELECT id FROM runs WHERE status IN ('submitting', 'starting', 'running')")?;
+        let active = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        let mut count = active.len();
+        let entries = match std::fs::read_dir(self.data_dir.join("local-runs")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(count),
+            Err(_) => return Ok(count + 1),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => return Ok(count + 1),
+            };
+            if active.contains(entry.file_name().to_string_lossy().as_ref()) {
+                continue;
+            }
+            if crate::jobs::localbox::orphaned_job_is_running(&entry.path()).unwrap_or(true) {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Runs the engine may act on: in flight, or terminal with a kill still pending.
+    pub fn list_engine_runs(&self) -> Result<Vec<StoredRun>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{SELECT_RUN} WHERE status IN ('submitting', 'starting', 'running') OR contact IS NOT NULL"
+        ))?;
+        let rows = stmt.query_map([], row_to_run)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn list_active_runs(&self) -> Result<Vec<StoredRun>> {
@@ -1265,8 +1829,6 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    // Consumed by later local-mode stages (supervise + `orx up` API).
-    #[allow(dead_code)]
     pub fn list_runs_by_experiment(&self, experiment_id: &str) -> Result<Vec<StoredRun>> {
         let mut stmt = self.conn.prepare(&format!(
             "{SELECT_RUN} WHERE experiment_id = ?1 ORDER BY created_at DESC"
@@ -1287,121 +1849,37 @@ impl Store {
         Ok(run)
     }
 
-    pub fn register_run_wakeup(
-        &self,
-        run_id: &str,
-        chat_session_id: &str,
-    ) -> Result<RunWakeupRegistration> {
-        let inserted = self.conn.execute(
-            "INSERT OR IGNORE INTO chat_run_wakeups (run_id, chat_session_id, requested_at)
-             VALUES (?1, ?2, ?3)",
-            params![run_id, chat_session_id, now_ms()],
-        )?;
-        if inserted == 1 {
-            return Ok(RunWakeupRegistration::Scheduled);
-        }
-        let state: String = self.conn.query_row(
-            "SELECT state FROM chat_run_wakeups WHERE run_id = ?1 AND chat_session_id = ?2",
-            params![run_id, chat_session_id],
-            |row| row.get(0),
-        )?;
-        Ok(if state == "delivered" {
-            RunWakeupRegistration::AlreadyDelivered
-        } else {
-            RunWakeupRegistration::AlreadyPending
-        })
-    }
-
-    pub fn remove_run_wakeup(&self, run_id: &str, chat_session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM chat_run_wakeups WHERE run_id = ?1 AND chat_session_id = ?2",
-            params![run_id, chat_session_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn prune_run_wakeups(&self) -> Result<()> {
-        self.clear_stale_data_dir_move_lease()?;
-        self.conn.execute(
-            "UPDATE chat_run_wakeups
-             SET state = 'pending', claim_token = NULL, claimed_at = NULL
-             WHERE state = 'claimed' AND claimed_at < ?1
-               AND NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
-            params![now_ms() - RUN_WAKEUP_CLAIM_TTL_MS],
-        )?;
-        self.conn.execute(
-            "DELETE FROM chat_run_wakeups
-             WHERE NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)
-               AND (
-                 NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = chat_run_wakeups.run_id)
-                OR NOT EXISTS (
-                    SELECT 1 FROM chat_sessions
-                    WHERE chat_sessions.id = chat_run_wakeups.chat_session_id
-                )
-                OR EXISTS (
-                    SELECT 1 FROM runs
-                    WHERE runs.id = chat_run_wakeups.run_id
-                      AND runs.status = 'cancelled'
-                )
-               )",
-            [],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_ready_run_wakeups(&self) -> Result<Vec<RunWakeup>> {
-        self.list_run_wakeups(
-            "w.state IN ('pending', 'claimed') AND r.status IN ('done', 'failed', 'lost')
-             ORDER BY COALESCE(r.ended_at, r.updated_at), w.requested_at, r.id",
-        )
-    }
-
-    /// Pending wake-ups whose run is still live, for monitoring alerts.
-    pub fn list_active_run_wakeups(&self) -> Result<Vec<RunWakeup>> {
-        self.list_run_wakeups(
-            "w.state = 'pending' AND r.status IN ('starting', 'running')
-             ORDER BY w.requested_at, r.id",
-        )
-    }
-
-    fn list_run_wakeups(&self, filter: &'static str) -> Result<Vec<RunWakeup>> {
+    /// The active runs each chat launched or subscribed to.
+    pub fn chat_active_runs(&self) -> Result<Vec<(String, StoredRun)>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT r.id, r.experiment_id, r.project_id, r.status, r.backend_json, r.command,
-                    r.created_at, r.updated_at, r.ended_at, r.exit_code,
-                    r.commit_sha, r.result_markdown, r.cancel_requested, r.chat_session_id,
-                    r.cancel_reason, w.chat_session_id, w.state, w.monitoring_alerted
-             FROM chat_run_wakeups w
-             JOIN runs r ON r.id = w.run_id
-             WHERE {filter}"
+            "SELECT * FROM (
+                 SELECT chat_session_id AS chat, r.* FROM ({SELECT_RUN}) r
+                 WHERE chat_session_id IS NOT NULL
+                 UNION SELECT s.chat_session_id AS chat, r.* FROM run_subscriptions s
+                 JOIN ({SELECT_RUN}) r ON r.id = s.run_id
+             ) WHERE status IN ('submitting', 'starting', 'running')
+             ORDER BY chat, id"
         ))?;
         let rows = stmt.query_map([], |row| {
-            Ok(RunWakeup {
-                run: row_to_run(row)?,
-                chat_session_id: row.get(15)?,
-                state: row.get(16)?,
-                monitoring_alerted: row.get(17)?,
-            })
+            let chat: String = row.get(0)?;
+            let run = row_to_run_at(row, 1)?;
+            Ok((chat, run))
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Flips a pending wake-up's monitoring alert flag; `true` when this call changed it,
-    /// which makes setting it an atomic claim across `orx up` processes.
-    pub fn set_run_wakeup_monitoring_alerted(
-        &self,
-        run_id: &str,
-        chat_session_id: &str,
-        alerted: bool,
-    ) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE chat_run_wakeups SET monitoring_alerted = ?3
-             WHERE run_id = ?1 AND chat_session_id = ?2
-               AND state = 'pending' AND monitoring_alerted != ?3",
-            params![run_id, chat_session_id, alerted],
+    /// A 0.2.x wake-up row, for migration fixtures.
+    #[cfg(test)]
+    pub fn register_run_wakeup(&self, run_id: &str, chat_session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO chat_run_wakeups (run_id, chat_session_id, requested_at)
+             VALUES (?1, ?2, ?3)",
+            params![run_id, chat_session_id, now_ms()],
         )?;
-        Ok(changed == 1)
+        Ok(())
     }
 
+    #[cfg(test)]
     pub fn claim_run_wakeup(&self, run_id: &str, chat_session_id: &str) -> Result<Option<String>> {
         let token = uuid::Uuid::new_v4().to_string();
         let claimed = self.conn.execute(
@@ -1413,57 +1891,260 @@ impl Store {
         Ok((claimed == 1).then_some(token))
     }
 
-    pub fn renew_run_wakeup_claim(
+    /// Record `child` as a delegate of `parent`; recording it again, as a
+    /// retried start does, changes nothing.
+    pub fn record_chat_delegate(
         &self,
-        run_id: &str,
-        chat_session_id: &str,
-        token: &str,
-    ) -> Result<bool> {
-        let renewed = self.conn.execute(
-            "UPDATE chat_run_wakeups SET claimed_at = ?4
-             WHERE run_id = ?1 AND chat_session_id = ?2
-               AND state = 'claimed' AND claim_token = ?3",
-            params![run_id, chat_session_id, token, now_ms()],
-        )?;
-        Ok(renewed == 1)
-    }
-
-    pub fn release_run_wakeup(
-        &self,
-        run_id: &str,
-        chat_session_id: &str,
-        token: &str,
+        child: &str,
+        parent: &str,
+        may_delegate: bool,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE chat_run_wakeups
-             SET state = 'pending', claim_token = NULL, claimed_at = NULL
-             WHERE run_id = ?1 AND chat_session_id = ?2
-               AND state = 'claimed' AND claim_token = ?3",
-            params![run_id, chat_session_id, token],
+            "INSERT OR IGNORE INTO chat_delegates (session_id, parent_session_id, may_delegate, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![child, parent, may_delegate, now_ms()],
         )?;
         Ok(())
     }
 
-    pub fn mark_run_wakeup_delivered(
-        &self,
-        run_id: &str,
-        chat_session_id: &str,
-        token: &str,
-    ) -> Result<bool> {
-        let delivered = self.conn.execute(
-            "UPDATE chat_run_wakeups
-             SET state = 'delivered', claim_token = NULL, claimed_at = NULL, delivered_at = ?4
-             WHERE run_id = ?1 AND chat_session_id = ?2
-               AND state = 'claimed' AND claim_token = ?3",
-            params![run_id, chat_session_id, token, now_ms()],
+    /// Forget who delegated to `id`; it stands as a chat the user started.
+    pub fn remove_chat_delegate(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM chat_delegates WHERE session_id = ?1", [id])?
+            == 1)
+    }
+
+    /// The chats `parent` delegated to, oldest first.
+    pub fn chat_delegates_of(&self, parent: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id FROM chat_delegates WHERE parent_session_id = ?1
+             ORDER BY created_at, session_id",
         )?;
-        Ok(delivered == 1)
+        let rows = stmt.query_map([parent], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// How many delegations deep `id` is, who delegated to it, and whether it
+    /// may delegate. A chat the user started is at depth 0 and may.
+    pub fn delegation(&self, id: &str) -> Result<Delegation> {
+        Ok(self.conn.query_row(
+            "WITH RECURSIVE chain(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION ALL
+                 SELECT d.parent_session_id, chain.depth + 1 FROM chain
+                 JOIN chat_delegates d ON d.session_id = chain.id
+             )
+             SELECT (SELECT MAX(depth) FROM chain), d.parent_session_id,
+                    COALESCE(d.may_delegate, 1)
+             FROM (SELECT 1) LEFT JOIN chat_delegates d ON d.session_id = ?1",
+            params![id],
+            |row| {
+                Ok(Delegation {
+                    depth: row.get(0)?,
+                    parent: row.get(1)?,
+                    may_delegate: row.get(2)?,
+                })
+            },
+        )?)
+    }
+
+    /// Subscribe `subscriber` to `target`; an existing subscription, paused
+    /// or not, stays as it is. `told_turn_id` names a turn of `target` the
+    /// subscriber already knows.
+    pub fn subscribe_chat(
+        &self,
+        subscriber: &str,
+        target: &str,
+        told_turn_id: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO chat_subscriptions
+             (subscriber_session_id, target_session_id, told_turn_id, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![subscriber, target, told_turn_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Stop `target` telling `subscriber` anything; subscribing again keeps it
+    /// stopped.
+    pub fn pause_chat_subscription(&self, subscriber: &str, target: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE chat_subscriptions SET paused = 1
+             WHERE subscriber_session_id = ?1 AND target_session_id = ?2",
+            params![subscriber, target],
+        )? == 1)
+    }
+
+    /// A subscription the user paused stays, so subscribing again cannot undo
+    /// the user's choice.
+    pub fn unsubscribe_chat(&self, subscriber: &str, target: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM chat_subscriptions
+             WHERE subscriber_session_id = ?1 AND target_session_id = ?2 AND paused = 0",
+            params![subscriber, target],
+        )? == 1)
+    }
+
+    /// Every subscription, or one subscriber's.
+    pub fn list_chat_subscriptions(
+        &self,
+        subscriber: Option<&str>,
+    ) -> Result<Vec<ChatSubscription>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH {LATEST_SUBSCRIBED_TURNS}
+             SELECT subscriber_session_id, target_session_id, paused, told_prompt_id, pending
+             FROM latest
+             WHERE ?1 IS NULL OR subscriber_session_id = ?1
+             ORDER BY created_at, target_session_id"
+        ))?;
+        let rows = stmt.query_map([subscriber], |row| {
+            Ok(ChatSubscription {
+                subscriber_session_id: row.get(0)?,
+                target_session_id: row.get(1)?,
+                paused: row.get(2)?,
+                told_prompt_id: row.get(3)?,
+                outstanding: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Subscriptions whose target is idle after a turn the subscriber has not
+    /// been told about. A delegate is still working while delegates of its own
+    /// have not answered it: a turn that ends waiting on them is not its answer.
+    pub fn list_ready_chat_subscriptions(&self) -> Result<Vec<ReadyChatSubscription>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH {LATEST_SUBSCRIBED_TURNS}
+             SELECT subscriber_session_id, target_session_id, turn_id, state,
+                    assistant_message_id, created_at, told_turn_id
+             FROM latest l
+             WHERE l.idle AND l.paused = 0
+               AND l.told_turn_id IS NOT l.turn_id
+               AND (l.claim_token IS NULL OR l.claimed_at < ?1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM latest own
+                   JOIN chat_delegates d ON d.session_id = own.target_session_id
+                       AND d.parent_session_id = own.subscriber_session_id
+                   WHERE own.subscriber_session_id = l.target_session_id
+                     AND own.pending
+               )
+             ORDER BY l.updated_at"
+        ))?;
+        let rows = stmt.query_map([expired_before(CHAT_SUBSCRIPTION_CLAIM_TTL)], |row| {
+            Ok(ReadyChatSubscription {
+                subscriber_session_id: row.get(0)?,
+                target_session_id: row.get(1)?,
+                turn_id: row.get(2)?,
+                turn_state: row.get(3)?,
+                assistant_message_id: row.get(4)?,
+                subscribed_at: row.get(5)?,
+                told_turn_id: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The answers of turns the target finished since the subscriber was last
+    /// told, before the one it is told now: a later turn started before the
+    /// subscriber was free to hear them. Oldest first.
+    pub fn untold_chat_answers(&self, ready: &ReadyChatSubscription) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.assistant_message_id FROM chat_turns e
+             JOIN chat_turns now ON now.id = ?2
+             WHERE e.session_id = ?1 AND e.id != now.id
+               AND e.state IN ('completed', 'failed', 'interrupted')
+               AND e.updated_at >= ?3
+               AND (e.created_at, e.rowid) < (now.created_at, now.rowid)
+               AND NOT EXISTS (
+                   SELECT 1 FROM chat_turns told WHERE told.id = ?4
+                     AND (e.created_at, e.rowid) <= (told.created_at, told.rowid)
+               )
+             ORDER BY e.created_at, e.rowid",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                ready.target_session_id,
+                ready.turn_id,
+                ready.subscribed_at,
+                ready.told_turn_id
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Lease a subscription to tell `event`, unless it was told already or
+    /// another sweep holds the lease.
+    pub fn claim_chat_subscription(
+        &self,
+        subscriber: &str,
+        target: &str,
+        event: ToldEvent,
+    ) -> Result<Option<String>> {
+        let token = uuid::Uuid::new_v4().to_string();
+        // A turn older than the one told already would rewind the cursor and
+        // tell the newer one twice.
+        let (told, id, newer) = match event {
+            ToldEvent::Turn(id) => (
+                "told_turn_id",
+                id,
+                "AND NOT EXISTS (
+                     SELECT 1 FROM chat_turns e JOIN chat_turns t ON t.id = told_turn_id
+                     WHERE e.id = ?3 AND (e.created_at, e.rowid) <= (t.created_at, t.rowid)
+                 )",
+            ),
+            ToldEvent::Prompt(id) => ("told_prompt_id", id, ""),
+        };
+        let claimed = self.conn.execute(
+            &format!(
+                "UPDATE chat_subscriptions SET claim_token = ?4, claimed_at = ?5
+                 WHERE subscriber_session_id = ?1 AND target_session_id = ?2
+                   AND {told} IS NOT ?3 {newer}
+                   AND (claim_token IS NULL OR claimed_at < ?6)"
+            ),
+            params![
+                subscriber,
+                target,
+                id,
+                token,
+                now_ms(),
+                expired_before(CHAT_SUBSCRIPTION_CLAIM_TTL)
+            ],
+        )?;
+        Ok((claimed == 1).then_some(token))
+    }
+
+    /// Release a claim. `told` records the event as told; without it the
+    /// event is retried on a later sweep.
+    pub fn settle_chat_subscription(
+        &self,
+        subscriber: &str,
+        target: &str,
+        token: &str,
+        told: Option<ToldEvent>,
+    ) -> Result<bool> {
+        let (turn, prompt) = match told {
+            Some(ToldEvent::Turn(id)) => (Some(id), None),
+            Some(ToldEvent::Prompt(id)) => (None, Some(id)),
+            None => (None, None),
+        };
+        let settled = self.conn.execute(
+            "UPDATE chat_subscriptions
+             SET claim_token = NULL, claimed_at = NULL,
+                 told_turn_id = COALESCE(?4, told_turn_id),
+                 told_prompt_id = COALESCE(?5, told_prompt_id)
+             WHERE subscriber_session_id = ?1 AND target_session_id = ?2 AND claim_token = ?3",
+            params![subscriber, target, token, turn, prompt],
+        )?;
+        Ok(settled == 1)
     }
 
     pub fn chat_turn_leased(&self, chat_session_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND heartbeat_at >= ?2)",
-            params![chat_session_id, now_ms() - CHAT_TURN_LEASE_TTL_MS], |row| row.get(0),
+            params![chat_session_id, expired_before(CHAT_TURN_LEASE_TTL)], |row| row.get(0),
         )?)
     }
 
@@ -1476,7 +2157,7 @@ impl Store {
                     SELECT 1 FROM chat_sessions
                     WHERE chat_sessions.id = chat_turn_leases.chat_session_id
                 )",
-            params![now_ms() - CHAT_TURN_LEASE_TTL_MS],
+            params![expired_before(CHAT_TURN_LEASE_TTL)],
         )?;
         let claimed = self.conn.execute(
             "INSERT OR IGNORE INTO chat_turn_leases
@@ -1509,7 +2190,7 @@ impl Store {
     pub fn claim_data_dir_move(&self, token: &str) -> Result<bool> {
         self.conn.execute(
             "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![now_ms() - CHAT_TURN_LEASE_TTL_MS],
+            params![expired_before(CHAT_TURN_LEASE_TTL)],
         )?;
         self.clear_stale_data_dir_move_lease()?;
         let claimed = self.conn.execute(
@@ -1522,7 +2203,7 @@ impl Store {
     }
 
     pub(crate) fn acquire_data_dir_move_lock(&self) -> Result<DataDirMoveLock> {
-        acquire_data_dir_move_lock(self.data_dir_move_lock_path.clone())
+        acquire_data_dir_lock(self.data_dir_move_lock_path.clone(), true)
     }
 
     fn clear_stale_data_dir_move_lease(&self) -> Result<()> {
@@ -1537,8 +2218,8 @@ impl Store {
         let Some(token) = token else {
             return Ok(());
         };
-        let mut lock = open_lifecycle_lock_at(&self.data_dir_move_lock_path)?;
-        match lock.try_write() {
+        let lock = open_lifecycle_lock_at(&self.data_dir_move_lock_path)?;
+        match lock.try_read() {
             Ok(_guard) => {
                 self.conn.execute(
                     "DELETE FROM data_dir_move_lease WHERE id = 1 AND claim_token = ?1",
@@ -1569,7 +2250,8 @@ impl Store {
         Ok(changed == 1)
     }
 
-    /// Keeps the reason: a live supervisor may already have acted on the request.
+    /// What a 0.2.x CLI does when its supervisor spawn fails; the reason stays.
+    #[cfg(test)]
     pub fn withdraw_cancel(&self, run_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE runs SET cancel_requested = 0, updated_at = ?2 WHERE id = ?1",
@@ -1712,8 +2394,10 @@ impl Store {
             tx.execute(
                 "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
                                             parent_id, base_native_session_id,
-                                            result_native_session_id, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                            result_native_session_id, completed_at, native_harness)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                         COALESCE(?10, (SELECT harness FROM chat_sessions WHERE id = ?2
+                             AND (?7 IS NOT NULL OR ?8 IS NOT NULL))))",
                 params![
                     message.id,
                     message.session_id,
@@ -1724,6 +2408,7 @@ impl Store {
                     message.base_native_session_id,
                     message.result_native_session_id,
                     message.completed_at,
+                    message.native_harness,
                 ],
             )?;
         }
@@ -1776,10 +2461,661 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Delete a project and everything hanging off it (chats, runs,
-    /// experiments) in one transaction. GitHub repo and cache clone are kept.
-    pub fn delete_local_project(&self, id: &str) -> Result<()> {
+    pub(crate) fn run_artifacts_lock(&self) -> Result<fd_lock::RwLock<std::fs::File>> {
+        open_lifecycle_lock_at(&self.data_dir.join("run-artifacts.lock"))
+    }
+
+    fn run_artifact_path(&self, (root, suffix): (&str, &str), run_id: &str) -> PathBuf {
+        self.data_dir.join(root).join(format!("{run_id}{suffix}"))
+    }
+
+    fn validate_run_artifact_roots(&self) -> Result<()> {
+        for name in RUN_ARTIFACTS
+            .iter()
+            .map(|(root, _)| *root)
+            .chain(["source-snapshots"])
+        {
+            let path = self.data_dir.join(name);
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    return Err(anyhow!(
+                        "Refusing artifact cleanup through {}",
+                        path.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_run_artifacts(&self, run_id: &str) -> Result<()> {
+        for entry in artifact_entries(&self.data_dir.join("run-logs"))? {
+            if entry.file_name().to_str().and_then(log_generation_run_id) == Some(run_id) {
+                remove_run_artifact(&entry.path())?;
+            }
+        }
+        for artifact in RUN_ARTIFACTS {
+            remove_run_artifact(&self.run_artifact_path(artifact, run_id))?;
+        }
+        Ok(())
+    }
+
+    /// Reclaim artifacts of deleted runs, then slim finished runs past each project's newest few.
+    pub(crate) fn cleanup_orphaned_run_artifacts(&self) -> Result<OrphanPass> {
+        let mut lock = self.run_artifacts_lock()?;
+        let _guard = match lock.try_write() {
+            Ok(guard) => guard,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(OrphanPass::default())
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Another dashboard may be copying this data directory.
+        if self.data_dir_move_claimed()? {
+            return Ok(OrphanPass::default());
+        }
+        let started = std::time::Instant::now();
+        let mut pass = self.cleanup_run_artifacts_locked(None)?;
+        if !pass.more {
+            self.slim_finished_runs_locked(started, &mut pass)?;
+        }
+        Ok(pass)
+    }
+
+    fn slim_finished_runs_locked(
+        &self,
+        started: std::time::Instant,
+        pass: &mut OrphanPass,
+    ) -> Result<()> {
+        let mut statement = self.conn.prepare(&runs_past_newest(LOCAL_RUNS))?;
+        let runs = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut remaining = runs.len();
+        for (id, status) in runs {
+            remaining -= 1;
+            if !is_terminal_status(&status) || uuid::Uuid::parse_str(&id).is_err() {
+                continue;
+            }
+            match self.slim_run(&id) {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(error) => pass.kept.push((id, error)),
+            }
+            if remaining > 0 && started.elapsed() >= ORPHAN_PASS_BUDGET {
+                pass.more = true;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns whether anything was removed.
+    fn slim_run(&self, id: &str) -> Result<bool> {
+        let root = self.data_dir.join("local-runs");
+        let mut targets = Vec::new();
+        for parts in SLIMMED_RUN_PATHS {
+            targets.extend(real_path_under(
+                &root,
+                std::iter::once(id).chain(parts.iter().copied()),
+            )?);
+        }
+        if targets.is_empty() {
+            return Ok(false);
+        }
+        if crate::jobs::localbox::orphaned_job_is_running(&root.join(id))?
+            || self.supervisor_is_held(id)?
+        {
+            return Ok(false);
+        }
+        for target in &targets {
+            remove_run_artifact(target)?;
+        }
+        Ok(true)
+    }
+
+    fn cleanup_run_artifacts_locked(
+        &self,
+        deleting_runs: Option<&std::collections::HashSet<String>>,
+    ) -> Result<OrphanPass> {
+        let started = std::time::Instant::now();
+        let mut pass = OrphanPass::default();
+        self.validate_run_artifact_roots()?;
+        let mut retained_runs = std::collections::HashSet::new();
+        let mut retained_snapshots = std::collections::HashSet::new();
+        let mut deleted_runs = std::collections::HashSet::new();
+        let mut retain_all_snapshots = false;
+        let mut statement = self.conn.prepare("SELECT id, backend_json FROM runs")?;
+        for row in statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (id, json) = row?;
+            if deleting_runs.is_some_and(|ids| ids.contains(&id)) {
+                deleted_runs.insert(id);
+                continue;
+            }
+            retained_runs.insert(id);
+            match crate::jobs::BackendDescriptor::parse(&json) {
+                Ok(descriptor) => retained_snapshots.extend(descriptor.source_digest),
+                // An unparseable row could reference any snapshot.
+                Err(_) => retain_all_snapshots = true,
+            }
+        }
+        let mut candidates = deleted_runs.clone();
+        for (root, suffix) in RUN_ARTIFACTS {
+            for entry in artifact_entries(&self.data_dir.join(root))? {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                let Some(id) = name.strip_suffix(suffix) else {
+                    continue;
+                };
+                let id = if root == "run-logs" && suffix == ".log" {
+                    log_generation_run_id(name).unwrap_or(id)
+                } else {
+                    id
+                };
+                if uuid::Uuid::parse_str(id).is_ok() && !retained_runs.contains(id) {
+                    candidates.insert(id.to_string());
+                }
+            }
+        }
+        let mut reclaimable = Vec::new();
+        for id in &candidates {
+            let deleting = deleted_runs.contains(id);
+            let fate = match self.orphan_fate(id, deleting) {
+                Ok(fate) => fate,
+                Err(error) if deleting => return Err(error),
+                // One unreadable orphan must not stall reclaiming the rest.
+                Err(error) => {
+                    pass.kept.push((id.clone(), error));
+                    OrphanFate::KeepWithAllSnapshots
+                }
+            };
+            match fate {
+                // Deletion leaves unrelated orphans to the periodic scan.
+                OrphanFate::Reclaim if deleting || deleting_runs.is_none() => reclaimable.push(id),
+                OrphanFate::Reclaim => {}
+                OrphanFate::Keep { snapshot } => retained_snapshots.extend(snapshot),
+                OrphanFate::KeepWithAllSnapshots => retain_all_snapshots = true,
+            }
+        }
+        let mut remaining = reclaimable.len();
+        for id in reclaimable {
+            match self.remove_run_artifacts(id) {
+                Ok(()) => {}
+                Err(error) if deleted_runs.contains(id) => return Err(error),
+                Err(error) => pass.kept.push((id.clone(), error)),
+            }
+            remaining -= 1;
+            // Checked after a removal so every pass makes progress.
+            if deleting_runs.is_none() && remaining > 0 && started.elapsed() >= ORPHAN_PASS_BUDGET {
+                pass.more = true;
+                return Ok(pass);
+            }
+        }
+        if !retain_all_snapshots {
+            for entry in artifact_entries(&self.data_dir.join("source-snapshots"))? {
+                let name = entry.file_name();
+                let Some((digest, extension)) =
+                    name.to_str().and_then(|name| name.rsplit_once('.'))
+                else {
+                    continue;
+                };
+                if digest.len() == 64
+                    && digest.bytes().all(|c| c.is_ascii_hexdigit())
+                    && matches!(extension, "tar" | "hf" | "zip")
+                    && !retained_snapshots.contains(digest)
+                {
+                    // ZIPs are upload-only; submit holds the shared lock until the upload finishes.
+                    remove_run_artifact(&entry.path())?;
+                }
+            }
+        }
+        Ok(pass)
+    }
+
+    /// Only a run being deleted turns a live job into an error; other errors are the caller's to absorb.
+    fn orphan_fate(&self, id: &str, deleting: bool) -> Result<OrphanFate> {
+        let live = |reason: &str| {
+            if deleting {
+                Err(anyhow!(
+                    "Run {id} {reason}; retry the deletion once it stops."
+                ))
+            } else {
+                Ok(OrphanFate::KeepWithAllSnapshots)
+            }
+        };
+        let mut fate = OrphanFate::Reclaim;
+        if !deleting {
+            match std::fs::read_to_string(self.run_artifact_path(SUBMISSION_HANDLE, id)) {
+                Ok(json) => {
+                    let descriptor = crate::jobs::BackendDescriptor::parse(&json)?;
+                    // Rowless remote handles may be the only way to cancel a still-live provider job.
+                    if !matches!(descriptor.kind.as_str(), "local_job" | "tinker_job") {
+                        fate = OrphanFate::Keep {
+                            snapshot: descriptor.source_digest,
+                        };
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let dir = self.data_dir.join("local-runs").join(id);
+        if dir.exists() && crate::jobs::localbox::orphaned_job_is_running(&dir)? {
+            return live("still has running processes");
+        }
+        let forgetting_kill = deleting && self.conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1 AND contact IS NOT NULL AND {REMOTE_RUNS})"),
+            [id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !forgetting_kill && self.supervisor_is_held(id)? {
+            return live("still has a supervisor");
+        }
+        Ok(fate)
+    }
+
+    fn supervisor_is_held(&self, id: &str) -> Result<bool> {
+        let path = self.run_artifact_path(SUPERVISOR_LOCK, id);
+        match std::fs::symlink_metadata(&path) {
+            // Probing must not create lock files for runs that never had a supervisor.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        let mut supervisor = open_lifecycle_lock_at(&path)?;
+        let probe = supervisor.try_write().map(drop);
+        match probe {
+            Ok(()) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn cleanup_deleted_run_artifacts(&self, runs: &[StoredRun], noun: &str) -> Result<()> {
+        if runs.is_empty() {
+            return Ok(());
+        }
+        if runs
+            .iter()
+            .any(|run| !crate::local::is_terminal(&run.status))
+        {
+            return Err(anyhow!(
+                "Cannot delete this {noun} while its runs are still in flight."
+            ));
+        }
+        validate_deleted_runs(runs)?;
+        let ids = runs.iter().map(|run| run.id.clone()).collect();
+        self.cleanup_run_artifacts_locked(Some(&ids))?;
+        Ok(())
+    }
+
+    /// Runs `f` holding run artifacts shared, excluding deletes and orphan scans; waits up to
+    /// [`RUN_ARTIFACTS_WAIT`].
+    pub(crate) fn with_run_artifacts_shared<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let lock = self.run_artifacts_lock()?;
+        let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
+        let _guard = loop {
+            match lock.try_read() {
+                Ok(guard) => break guard,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(RUN_ARTIFACTS_POLL);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(anyhow!(
+                        "A deletion or artifact cleanup is in progress; retry shortly."
+                    ))
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        f()
+    }
+
+    /// Runs `delete` with exclusive use of run artifacts, waiting up to [`RUN_ARTIFACTS_WAIT`].
+    fn while_deleting(&self, noun: &str, delete: impl FnOnce() -> Result<()>) -> Result<()> {
+        let mut lock = self.run_artifacts_lock()?;
+        let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
+        let _guard = loop {
+            match lock.try_write() {
+                Ok(guard) => break guard,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(RUN_ARTIFACTS_POLL);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(anyhow!("Run artifacts are busy; retry {noun} deletion."))
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        // A move can start while this waits; its copy must not race the removals below.
+        if self.data_dir_move_claimed()? {
+            return Err(anyhow!(
+                "The data directory is being moved; retry {noun} deletion afterwards."
+            ));
+        }
+        delete()
+    }
+
+    /// Delete a childless experiment with its runs' rows and local artifacts, queueing their
+    /// remote dirs. `before_rows` runs once the checks pass, so a refusal leaves it undone.
+    pub fn delete_local_experiment(
+        &self,
+        id: &str,
+        before_rows: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.while_deleting("experiment", || {
+            self.delete_local_experiment_locked(id, before_rows)
+        })
+    }
+
+    fn delete_local_experiment_locked(
+        &self,
+        id: &str,
+        before_rows: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        // A concurrent delete may have won, and a new experiment may now own its branch.
+        if self.get_local_experiment(id)?.is_none() {
+            return Err(anyhow!("Experiment {id} not found."));
+        }
+        let children: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM local_experiments WHERE parent_experiment_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if children > 0 {
+            return Err(anyhow!(
+                "Experiment {id} has {children} child experiment(s); delete them or move them with `orx exp move` first."
+            ));
+        }
+        let runs = self.list_runs_by_experiment(id)?;
+        if runs
+            .iter()
+            .any(|run| !crate::local::is_terminal(&run.status))
+        {
+            return Err(anyhow!(
+                "Cannot delete this experiment while its runs are still in flight."
+            ));
+        }
+        // Refuse what cleanup would, such as a supervisor still winding down, before `before_rows` acts.
+        validate_deleted_runs(&runs)?;
+        self.validate_run_artifact_roots()?;
+        for run in &runs {
+            self.orphan_fate(&run.id, true)?;
+        }
+        before_rows()?;
+        // Keep rows on filesystem errors so deletion can be retried with the same handles.
+        self.cleanup_deleted_run_artifacts(&runs, "experiment")?;
         let tx = self.begin()?;
+        queue_remote_cleanups(&tx, "experiment_id", id, true)?;
+        tx.execute("DELETE FROM runs WHERE experiment_id = ?1", params![id])?;
+        tx.execute("DELETE FROM local_experiments WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A terminal run owes final log and notify collection.
+    pub(crate) fn queue_log_collection(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO log_collections (run_id, next_attempt_at) VALUES (?1, ?2)",
+            params![run_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn log_output_collected(&self, run_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT collected FROM log_collections WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub(crate) fn checkpoint_log_collection(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE log_collections SET collected = 1 WHERE run_id = ?1",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
+    /// The terminal run's log and notify have both been consumed.
+    pub(crate) fn finish_log_collection(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO log_collections (run_id, done) VALUES (?1, 1)
+             ON CONFLICT(run_id) DO UPDATE SET done = 1, last_error = NULL",
+            params![run_id],
+        )?;
+        Ok(())
+    }
+
+    /// The engine owes this finished run its kept log: local copies may stop short of the end.
+    pub(crate) fn log_collection_pending(&self, run_id: &str) -> Result<bool> {
+        Ok(self.log_collection(run_id)?.is_some())
+    }
+
+    /// An unfinished collection: whether retries have reached their cap, and the last error.
+    pub(crate) fn log_collection(&self, run_id: &str) -> Result<Option<(bool, Option<String>)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT attempts >= ?2, last_error FROM log_collections
+                 WHERE run_id = ?1 AND done = 0",
+                params![run_id, LOG_COLLECTION_FAILED_AFTER],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn due_log_collections(&self, limit: usize) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT run_id FROM log_collections WHERE done = 0 AND next_attempt_at <= ?1
+             ORDER BY next_attempt_at LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![now_ms(), limit as i64], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn pending_log_collections(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT run_id FROM log_collections WHERE done = 0")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Makes one run's unfinished collection, or every one, due now.
+    pub(crate) fn retry_log_collections_now(&self, run_id: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE log_collections SET next_attempt_at = 0
+             WHERE done = 0 AND (?1 IS NULL OR run_id = ?1)",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
+    /// Schedules the next attempt; true exactly when this failure brings retries to their cap.
+    pub(crate) fn defer_log_collection(&self, run_id: &str, error: &str) -> Result<bool> {
+        let attempts: u32 = self.conn.query_row(
+            "UPDATE log_collections SET attempts = attempts + 1, last_error = ?2,
+               next_attempt_at = ?3 + MIN(?4 * (1 << MIN(attempts, 10)), ?5)
+             WHERE run_id = ?1 RETURNING attempts",
+            params![
+                run_id,
+                error,
+                now_ms(),
+                LOG_COLLECTION_RETRY_MS,
+                LOG_COLLECTION_MAX_RETRY_MS
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(attempts == LOG_COLLECTION_FAILED_AFTER)
+    }
+
+    /// Queues a finished run's remote dir for removal; non-SSH/Slurm runs are ignored.
+    pub(crate) fn queue_finished_remote_cleanup(&self, run_id: &str) -> Result<()> {
+        queue_remote_cleanups(&self.conn, "id", run_id, false)
+    }
+
+    /// Due entries; a finished run waits until newer runs push it past its project's newest few.
+    pub(crate) fn due_remote_cleanups(&self, limit: usize) -> Result<Vec<RemoteCleanup>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT run_id, backend_json, deleted FROM remote_cleanups
+             WHERE next_attempt_at <= ?1 AND {}
+             ORDER BY next_attempt_at LIMIT ?2",
+            remote_cleanup_eligibility()
+        ))?;
+        let rows = statement.query_map(params![now_ms(), limit as i64], |row| {
+            Ok(RemoteCleanup {
+                run_id: row.get(0)?,
+                backend_json: row.get(1)?,
+                deleted: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn remote_cleanup_eligible(&self, run_id: &str, deleted: bool) -> Result<bool> {
+        Ok(self.conn.query_row(&format!(
+            "SELECT EXISTS(SELECT 1 FROM remote_cleanups WHERE run_id = ?1 AND deleted = ?2 AND {})",
+            remote_cleanup_eligibility()), params![run_id, deleted], |row| row.get(0))?)
+    }
+
+    /// `deleted` is what the pass acted on; a deletion queued meanwhile stays for the next pass.
+    pub(crate) fn finish_remote_cleanup(&self, run_id: &str, deleted: bool) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM remote_cleanups WHERE run_id = ?1 AND deleted = ?2",
+            params![run_id, deleted],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn defer_remote_cleanup(
+        &self,
+        run_id: &str,
+        deleted: bool,
+        error: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE remote_cleanups SET attempts = attempts + 1, last_error = ?3,
+               next_attempt_at = ?4 + MIN(?5 * (1 << MIN(attempts, 10)), ?6)
+             WHERE run_id = ?1 AND deleted = ?2",
+            params![
+                run_id,
+                deleted,
+                error,
+                now_ms(),
+                REMOTE_CLEANUP_RETRY_MS,
+                REMOTE_CLEANUP_MAX_RETRY_MS
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Revisits a host's source cache once its tars from this pass have gone idle.
+    pub(crate) fn schedule_source_sweep(&self, host: &str, root: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO remote_source_sweeps (host, root, due_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(host, root) DO UPDATE SET due_at = excluded.due_at",
+            params![
+                host,
+                root.unwrap_or_default(),
+                now_ms() + SOURCE_SWEEP_DELAY_MS
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Due (host, root) source-cache sweeps; `None` is the default root.
+    pub(crate) fn due_source_sweeps(&self) -> Result<Vec<(String, Option<String>)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT host, root FROM remote_source_sweeps WHERE due_at <= ?1")?;
+        let rows = statement.query_map(params![now_ms()], |row| {
+            let root: String = row.get(1)?;
+            Ok((row.get(0)?, Some(root).filter(|root| !root.is_empty())))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn finish_source_sweep(&self, host: &str, root: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM remote_source_sweeps WHERE host = ?1 AND root = ?2",
+            params![host, root.unwrap_or_default()],
+        )?;
+        Ok(())
+    }
+
+    fn data_dir_move_claimed(&self) -> Result<bool> {
+        self.clear_stale_data_dir_move_lease()?;
+        self.data_dir_move_lease_exists()
+    }
+
+    fn data_dir_move_lease_exists(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    #[cfg(test)]
+    pub fn delete_local_project(&self, id: &str) -> Result<()> {
+        self.delete_local_project_with(id, None::<fn() -> Result<()>>)
+    }
+
+    /// Delete a project, its rows, run artifacts and chat attachments; its artifacts folder is the caller's. GitHub repo and cache clone are kept.
+    /// Blocks up to [`RUN_ARTIFACTS_WAIT`] while a submission or orphan scan holds the artifacts lock.
+    /// `native_purge` runs under the native-deletion lock after run-artifact cleanup, just before the rows go.
+    pub fn delete_local_project_with(
+        &self,
+        id: &str,
+        native_purge: Option<impl FnOnce() -> Result<()>>,
+    ) -> Result<()> {
+        self.while_deleting("project", || {
+            self.delete_local_project_locked(id, native_purge)
+        })
+    }
+
+    fn delete_local_project_locked(
+        &self,
+        id: &str,
+        native_purge: Option<impl FnOnce() -> Result<()>>,
+    ) -> Result<()> {
+        let _native_deletion = native_purge
+            .is_some()
+            .then(|| self.lock_native_deletion())
+            .transpose()?;
+        // Keep rows on filesystem errors so deletion can be retried with the same handles.
+        self.cleanup_deleted_run_artifacts(&self.list_runs_by_project(id)?, "project")?;
+        if let Some(purge) = native_purge {
+            purge()?;
+        }
+        let tx = self.begin()?;
+        let attachments = self
+            .chat_attachment_names_where(
+                "m.session_id IN (SELECT id FROM chat_sessions WHERE project_id = ?1)",
+                [id],
+            )
+            .unwrap_or_default();
         tx.execute(
             "DELETE FROM overleaf_links WHERE project_id = ?1",
             params![id],
@@ -1803,6 +3139,7 @@ impl Store {
             "DELETE FROM chat_sessions WHERE project_id = ?1",
             params![id],
         )?;
+        queue_remote_cleanups(&tx, "project_id", id, true)?;
         self.conn
             .execute("DELETE FROM runs WHERE project_id = ?1", params![id])?;
         self.conn.execute(
@@ -1812,6 +3149,7 @@ impl Store {
         self.conn
             .execute("DELETE FROM local_projects WHERE id = ?1", params![id])?;
         tx.commit()?;
+        self.remove_unreferenced_chat_attachments(attachments);
         Ok(())
     }
 
@@ -1881,6 +3219,58 @@ impl Store {
         ))?;
         let rows = stmt.query_map(params![project_id], LocalExperiment::from_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn list_experiments_by_chat_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionExperiment>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH related AS (
+                 SELECT id AS related_id FROM local_experiments WHERE chat_session_id = ?1
+                 UNION SELECT experiment_id FROM runs WHERE chat_session_id = ?1
+                 UNION SELECT runs.experiment_id FROM chat_run_wakeups w
+                       JOIN runs ON runs.id = w.run_id WHERE w.chat_session_id = ?1
+                 UNION SELECT runs.experiment_id FROM run_subscriptions s
+                       JOIN runs ON runs.id = s.run_id WHERE s.chat_session_id = ?1
+             ), headline AS (
+                 SELECT experiment_id AS current_experiment_id, id AS current_run_id, status AS current_status,
+                        created_at AS current_created_at, ended_at AS current_ended_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY experiment_id
+                            ORDER BY status IN ('submitting', 'starting', 'running') DESC, created_at DESC, id DESC
+                        ) AS current_rank
+                 FROM runs WHERE experiment_id IN (SELECT related_id FROM related)
+             )
+             SELECT {EXPERIMENT_COLS}, project_name, current_run_id
+             FROM local_experiments e
+             JOIN related ON related_id = e.id
+             JOIN (SELECT id AS owner_id, name AS project_name FROM local_projects)
+                  ON owner_id = e.project_id
+             LEFT JOIN headline ON current_experiment_id = e.id AND current_rank = 1
+             ORDER BY COALESCE(current_status IN ('submitting', 'starting', 'running'), 0) DESC,
+                      e.archived ASC,
+                      COALESCE(current_ended_at, current_created_at, e.created_at) DESC,
+                      e.id ASC"
+        ))?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((
+                LocalExperiment::from_row(row)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, Option<String>>(14)?,
+            ))
+        })?;
+        let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(experiment, project_name, run_id)| {
+                let current_run = run_id.map(|id| self.get_run(&id)).transpose()?.flatten();
+                Ok(SessionExperiment {
+                    experiment,
+                    project_name,
+                    current_run,
+                })
+            })
+            .collect()
     }
 
     /// Full-row update by id (title / description / run_command / agent_status).
@@ -2061,20 +3451,21 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// The session whose worktree `id` runs in: its side-chat parent while that
-    /// parent exists, else itself.
+    /// The session whose worktree `id` runs in: the top of its chain of
+    /// existing side-chat parents (a delegate can delegate again), else itself.
     pub fn chat_worktree_owner(&self, id: &str) -> Result<String> {
-        let owner: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT parent.id FROM chat_sessions side
+        Ok(self.conn.query_row(
+            "WITH RECURSIVE chain(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION ALL
+                 SELECT parent.id, chain.depth + 1 FROM chain
+                 JOIN chat_sessions side ON side.id = chain.id
                  JOIN chat_sessions parent ON parent.id = side.side_parent_session_id
-                 WHERE side.id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(owner.unwrap_or_else(|| id.to_string()))
+             )
+             SELECT id FROM chain ORDER BY depth DESC LIMIT 1",
+            params![id],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn list_chat_session_project_ids(&self) -> Result<Vec<(String, String)>> {
@@ -2154,6 +3545,74 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Hold through ownership lookup, native purge and local row deletion, across dashboard processes.
+    pub fn lock_native_deletion(&self) -> Result<std::fs::File> {
+        let path = self
+            .conn
+            .path()
+            .ok_or_else(|| anyhow!("Store has no database path"))?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(Path::new(path).with_extension("native-deletion.lock"))?;
+        lock.try_lock().map_err(|error| {
+            anyhow!(
+                "Could not lock native chat deletion; retry when other deletions finish: {error}"
+            )
+        })?;
+        Ok(lock)
+    }
+
+    pub fn native_sessions_for_deletion(
+        &self,
+        chat_ids: &[String],
+        harnesses: &[&str],
+    ) -> Result<(
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    )> {
+        let mut query = self.conn.prepare(
+            "WITH refs AS (
+                SELECT id AS chat_id, native_session_id AS native_id FROM chat_sessions
+                WHERE harness IN (SELECT value FROM json_each(?2))
+                UNION
+                SELECT s.id, m.base_native_session_id FROM chat_sessions s JOIN chat_messages m
+                ON m.session_id = s.id WHERE COALESCE(m.native_harness, s.harness) IN (SELECT value FROM json_each(?2))
+                UNION
+                SELECT s.id, m.result_native_session_id FROM chat_sessions s JOIN chat_messages m
+                ON m.session_id = s.id WHERE COALESCE(m.native_harness, s.harness) IN (SELECT value FROM json_each(?2))
+             )
+             SELECT native_id, MAX(chat_id IN (SELECT value FROM json_each(?1))),
+                 MAX(chat_id NOT IN (SELECT value FROM json_each(?1))) FROM refs
+             WHERE native_id IS NOT NULL GROUP BY native_id",
+        )?;
+        let mut deleting = std::collections::BTreeSet::new();
+        let mut retained = std::collections::BTreeSet::new();
+        for row in query.query_map(
+            [
+                serde_json::to_string(chat_ids)?,
+                serde_json::to_string(harnesses)?,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )? {
+            let (native_id, belongs_to_chat, shared) = row?;
+            if shared {
+                retained.insert(native_id);
+            } else if belongs_to_chat {
+                deleting.insert(native_id);
+            }
+        }
+        Ok((deleting, retained))
+    }
+
     pub fn delete_chat_session(&self, id: &str) -> Result<()> {
         let tx = self.begin_immediate()?;
         let has_children: bool = tx.query_row(
@@ -2164,6 +3623,9 @@ impl Store {
         if has_children {
             return Err(anyhow!("delete side chats before deleting their parent"));
         }
+        let attachments = self
+            .chat_attachment_names_where("m.session_id = ?1", [id])
+            .unwrap_or_default();
         tx.execute(
             "DELETE FROM chat_queued_messages WHERE session_id = ?1",
             params![id],
@@ -2175,7 +3637,144 @@ impl Store {
         )?;
         tx.execute("DELETE FROM chat_sessions WHERE id = ?1", params![id])?;
         tx.commit()?;
+        self.remove_unreferenced_chat_attachments(attachments);
         Ok(())
+    }
+
+    /// Attachment file names that image parts of matching messages show; only user messages carry them.
+    fn chat_attachment_names_where(
+        &self,
+        filter: &'static str,
+        params: impl rusqlite::Params,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut query = self.conn.prepare(&format!(
+            "SELECT DISTINCT json_extract(p.value, '$.text')
+             FROM chat_messages m, json_each(m.parts_json) p
+             WHERE m.role = 'user' AND json_extract(p.value, '$.type') = 'image'
+               AND json_extract(p.value, '$.text') IS NOT NULL AND {filter}"
+        ))?;
+        let names = query
+            .query_map(params, |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(names)
+    }
+
+    /// Best effort once the rows are gone; the periodic sweep retries what is left.
+    fn remove_unreferenced_chat_attachments(&self, names: std::collections::HashSet<String>) {
+        if names.is_empty() {
+            return;
+        }
+        let Ok(Some(_move_hold)) = self.hold_off_data_dir_move() else {
+            return;
+        };
+        let Ok(referenced) = self.chat_attachment_names_where("1", []) else {
+            return;
+        };
+        let dir = self.data_dir.join(crate::local::chat::ATTACHMENTS_DIR);
+        for name in names.difference(&referenced) {
+            if crate::local::chat::is_attachment_name(name) {
+                let _ = std::fs::remove_file(dir.join(name));
+            }
+        }
+    }
+
+    /// Keeps any dashboard from starting a data-dir move until dropped; `None` while a move holds or claims it.
+    fn hold_off_data_dir_move(&self) -> Result<Option<std::fs::File>> {
+        if self.data_dir_move_claimed()? {
+            return Ok(None);
+        }
+        // A move takes this lock exclusively before claiming its lease.
+        let hold = open_lifecycle_lock_at(&self.data_dir_move_lock_path)?.into_inner();
+        match hold.try_lock_shared() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        Ok((!self.data_dir_move_lease_exists()?).then_some(hold))
+    }
+
+    /// Remove attachment files no message shows; returns whether the budget ran out first.
+    pub(crate) fn cleanup_orphaned_chat_attachments(&self) -> Result<bool> {
+        self.cleanup_orphaned_chat_attachments_within(ORPHAN_PASS_BUDGET)
+    }
+
+    /// The budget starts at the first removal, so every pass makes progress; removed files leave the listing.
+    fn cleanup_orphaned_chat_attachments_within(&self, budget: Duration) -> Result<bool> {
+        let Some(_move_hold) = self.hold_off_data_dir_move()? else {
+            return Ok(false);
+        };
+        let entries =
+            match std::fs::read_dir(self.data_dir.join(crate::local::chat::ATTACHMENTS_DIR)) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+        let mut started = None;
+        let mut referenced = None;
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let settled = entry.metadata().ok().filter(|metadata| {
+                metadata.is_file()
+                    && metadata
+                        .modified()
+                        .is_ok_and(|at| at.elapsed().unwrap_or_default() >= CHAT_ATTACHMENT_SETTLE)
+            });
+            if !crate::local::chat::is_attachment_name(&name) || settled.is_none() {
+                continue;
+            }
+            let referenced = match &mut referenced {
+                Some(referenced) => referenced,
+                None => referenced.insert(self.chat_attachment_names_where("1", [])?),
+            };
+            if referenced.contains(&name) {
+                continue;
+            }
+            let started = *started.get_or_insert_with(std::time::Instant::now);
+            // A file that cannot be removed is retried next pass without stalling the rest.
+            let _ = std::fs::remove_file(entry.path());
+            if started.elapsed() >= budget {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Reclaim orx-launched agent history no chat records; returns whether the budget ran out first.
+    pub(crate) fn cleanup_orphaned_native_sessions(&self) -> Result<bool> {
+        let Some(_move_hold) = self.hold_off_data_dir_move()? else {
+            return Ok(false);
+        };
+        crate::local::native_store::sweep_isolated_sessions(
+            &self.data_dir.join("agents"),
+            self.native_ids_outside(&[])?,
+            NATIVE_SESSION_SETTLE,
+            ORPHAN_PASS_BUDGET,
+        )
+    }
+
+    /// Every native id recorded by chats other than `chat_ids`.
+    pub fn native_ids_outside(
+        &self,
+        chat_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut query = self.conn.prepare(
+            "SELECT native_session_id FROM chat_sessions
+             WHERE native_session_id IS NOT NULL AND id NOT IN (SELECT value FROM json_each(?1))
+             UNION SELECT base_native_session_id FROM chat_messages
+             WHERE base_native_session_id IS NOT NULL
+               AND session_id NOT IN (SELECT value FROM json_each(?1))
+             UNION SELECT result_native_session_id FROM chat_messages
+             WHERE result_native_session_id IS NOT NULL
+               AND session_id NOT IN (SELECT value FROM json_each(?1))",
+        )?;
+        let ids = query
+            .query_map([serde_json::to_string(chat_ids)?], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
     }
 
     /// `None` clears it, which a fork of the session's very first turn needs:
@@ -2185,6 +3784,49 @@ impl Store {
             "UPDATE chat_sessions SET native_session_id = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, native_id, now_ms()],
         )?;
+        Ok(())
+    }
+
+    pub fn switch_chat_agent(
+        &self,
+        id: &str,
+        agent: &StoredAgentSelection,
+        native_id: Option<&str>,
+        marker: &StoredChatMessage,
+        plan_mode: bool,
+    ) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        tx.execute(
+            "UPDATE chat_messages SET native_harness = (SELECT harness FROM chat_sessions WHERE id = ?1)
+             WHERE session_id = ?1 AND native_harness IS NULL
+               AND (role = 'user' OR base_native_session_id IS NOT NULL OR result_native_session_id IS NOT NULL)",
+            [id],
+        )?;
+        upsert_chat_message_with(&tx, marker)?;
+        tx.execute(
+            "UPDATE chat_sessions SET harness = ?2, model = ?3, service_tier = ?4,
+             permission_mode = ?5, reasoning_level = ?6, native_session_id = ?7,
+             context_usage_json = NULL, active_leaf_id = ?8,
+             plan_mode = ?9,
+             plan_reset_pending = (?2 = 'codex' AND ?7 IS NOT NULL AND NOT ?9),
+             updated_at = ?10 WHERE id = ?1",
+            params![
+                id,
+                agent.harness,
+                agent.model,
+                agent.service_tier,
+                agent.permission_mode,
+                agent.reasoning_level,
+                native_id,
+                marker.id,
+                plan_mode,
+                now_ms()
+            ],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -2234,20 +3876,12 @@ impl Store {
     pub fn chat_session_for_native_id(&self, native_id: &str) -> Result<Option<StoredChatSession>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE native_session_id = ?1
+             OR id IN (SELECT session_id FROM chat_messages
+                 WHERE base_native_session_id = ?1 OR result_native_session_id = ?1)
              ORDER BY created_at LIMIT 1"
         ))?;
         let mut rows = stmt.query_map(params![native_id], row_to_chat_session)?;
         Ok(rows.next().transpose()?)
-    }
-
-    /// Native ids orx already has a session for, so the `/resume` picker can
-    /// offer each of the agent's own chats exactly once.
-    pub fn native_session_ids(&self) -> Result<std::collections::HashSet<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT native_session_id FROM chat_sessions WHERE native_session_id IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        Ok(rows.flatten().collect())
     }
 
     pub fn set_chat_session_autonomy(&self, id: &str, autonomy: Autonomy) -> Result<()> {
@@ -2516,12 +4150,23 @@ impl Store {
                 ChatTurnAdmission::Conflict
             });
         }
+        let steer_exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM chat_steer_receipts WHERE session_id = ?1 AND client_turn_id = ?2)",
+            params![turn.session_id, turn.client_turn_id],
+            |row| row.get(0),
+        )?;
+        if steer_exists {
+            tx.commit()?;
+            return Ok(ChatTurnAdmission::Conflict);
+        }
         if let Some(message) = user_message {
             tx.execute(
                 "INSERT INTO chat_messages
                  (id, session_id, role, parts_json, created_at, parent_id,
-                  base_native_session_id, result_native_session_id, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  base_native_session_id, result_native_session_id, completed_at, native_harness)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                         COALESCE(?10, (SELECT harness FROM chat_sessions WHERE id = ?2
+                             AND (?7 IS NOT NULL OR ?8 IS NOT NULL))))",
                 params![
                     message.id,
                     message.session_id,
@@ -2532,6 +4177,7 @@ impl Store {
                     message.base_native_session_id,
                     message.result_native_session_id,
                     message.completed_at,
+                    message.native_harness,
                 ],
             )?;
             tx.execute(
@@ -2585,6 +4231,77 @@ impl Store {
             .optional()?)
     }
 
+    /// The turn a user message started.
+    pub fn chat_turn_for_user_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Option<StoredChatTurn>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {CHAT_TURN_COLS} FROM chat_turns
+                     WHERE session_id = ?1 AND user_message_id = ?2
+                     ORDER BY created_at, rowid LIMIT 1"
+                ),
+                params![session_id, message_id],
+                row_to_chat_turn,
+            )
+            .optional()?)
+    }
+
+    pub fn latest_chat_turn(&self, session_id: &str) -> Result<Option<StoredChatTurn>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {CHAT_TURN_COLS} FROM chat_turns WHERE session_id = ?1
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                ),
+                params![session_id],
+                row_to_chat_turn,
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn steer_receipt(
+        &self,
+        session_id: &str,
+        client_turn_id: &str,
+    ) -> Result<Option<(String, bool)>> {
+        Ok(self.conn.query_row(
+            "SELECT request_hash, delivered FROM chat_steer_receipts WHERE session_id = ?1 AND client_turn_id = ?2",
+            params![session_id, client_turn_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?)
+    }
+
+    pub(crate) fn claim_steer(
+        &self,
+        session_id: &str,
+        client_turn_id: &str,
+        request_hash: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "INSERT OR IGNORE INTO chat_steer_receipts (session_id, client_turn_id, request_hash)
+             SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ?1)
+             AND NOT EXISTS (SELECT 1 FROM chat_turns WHERE session_id = ?1 AND client_turn_id = ?2)
+             AND NOT EXISTS (SELECT 1 FROM chat_queued_messages WHERE session_id = ?1 AND client_turn_id = ?2)",
+            params![session_id, client_turn_id, request_hash],
+        )? == 1)
+    }
+
+    pub(crate) fn finish_steer(&self, session_id: &str, client_turn_id: &str) -> Result<()> {
+        self.conn.execute("UPDATE chat_steer_receipts SET delivered = 1 WHERE session_id = ?1 AND client_turn_id = ?2", params![session_id, client_turn_id])?;
+        Ok(())
+    }
+
+    pub(crate) fn discard_steer(&self, session_id: &str, client_turn_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM chat_steer_receipts WHERE session_id = ?1 AND client_turn_id = ?2 AND delivered = 0", params![session_id, client_turn_id])?;
+        Ok(())
+    }
+
     pub fn get_chat_turn_by_client_id(
         &self,
         session_id: &str,
@@ -2601,6 +4318,16 @@ impl Store {
                 row_to_chat_turn,
             )
             .optional()?)
+    }
+
+    pub fn has_chat_submission(&self, session_id: &str, client_turn_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_queued_messages WHERE session_id = ?1 AND client_turn_id = ?2)
+                 OR EXISTS(SELECT 1 FROM chat_turns WHERE session_id = ?1 AND client_turn_id = ?2)
+                 OR EXISTS(SELECT 1 FROM chat_steer_receipts WHERE session_id = ?1 AND client_turn_id = ?2 AND delivered = 1)",
+            params![session_id, client_turn_id],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn chat_native_thread_has_named_model(
@@ -2625,7 +4352,8 @@ impl Store {
             "INSERT INTO chat_queued_messages
              (id, session_id, client_turn_id, request_hash, payload_json, created_at)
              SELECT ?1, ?2, ?3, ?4, ?5, ?6
-             WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ?2)",
+             WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ?2)
+             AND NOT EXISTS (SELECT 1 FROM chat_steer_receipts WHERE session_id = ?2 AND client_turn_id = ?3)",
             params![
                 message.id,
                 message.session_id,
@@ -2636,7 +4364,9 @@ impl Store {
             ],
         )?;
         if changed == 0 {
-            return Err(anyhow!("chat session not found"));
+            return Err(anyhow!(
+                "chat session not found or message already admitted as steering"
+            ));
         }
         Ok(())
     }
@@ -2892,7 +4622,7 @@ impl Store {
         let transaction = self.conn.unchecked_transaction()?;
         transaction.execute(
             "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![now - CHAT_TURN_LEASE_TTL_MS],
+            params![expired_before(CHAT_TURN_LEASE_TTL)],
         )?;
         let newly_reconciled = {
             let mut statement = transaction.prepare(
@@ -2943,14 +4673,37 @@ impl Store {
     }
 
     pub fn list_chat_messages(&self, session_id: &str) -> Result<Vec<StoredChatMessage>> {
+        self.list_chat_messages_since(session_id, i64::MIN)
+    }
+
+    pub fn unconfirmed_chat_replies(
+        &self,
+        session_id: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut query = self.conn.prepare(
+            "SELECT assistant_message_id FROM chat_turns WHERE session_id = ?1
+             AND state != 'completed' AND delivery_state != 'accepted'",
+        )?;
+        let replies = query
+            .query_map([session_id], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(replies)
+    }
+
+    /// A chat's messages created at or after `since`, oldest first.
+    pub fn list_chat_messages_since(
+        &self,
+        session_id: &str,
+        since: i64,
+    ) -> Result<Vec<StoredChatMessage>> {
         let mut stmt = self.conn.prepare(
             // rowid tiebreak: a user message and its reply can share a millisecond.
             "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                    base_native_session_id, result_native_session_id, completed_at
+                    base_native_session_id, result_native_session_id, completed_at, native_harness
              FROM chat_messages
-             WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
+             WHERE session_id = ?1 AND created_at >= ?2 ORDER BY created_at ASC, rowid ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
+        let rows = stmt.query_map(params![session_id, since], |row| {
             Ok(StoredChatMessage {
                 id: row.get(0)?,
                 session_id: row.get(1)?,
@@ -2961,6 +4714,7 @@ impl Store {
                 parent_id: row.get(5)?,
                 base_native_session_id: row.get(6)?,
                 result_native_session_id: row.get(7)?,
+                native_harness: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -2974,6 +4728,19 @@ impl Store {
         )?)
     }
 
+    /// Message ids that start with `msg_` and `hex`, at most two: enough to
+    /// tell a unique match from an ambiguous one.
+    pub fn chat_message_ids_with_prefix(&self, hex: &str) -> Result<Vec<String>> {
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM chat_messages WHERE id GLOB ?1 LIMIT 2")?;
+        let rows = stmt.query_map([format!("msg_{hex}*")], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// A single chat message by id (used to reconcile a message's persisted
     /// state against an in-memory copy mid-turn). `None` if it doesn't exist.
     pub fn get_chat_message(&self, id: &str) -> Result<Option<StoredChatMessage>> {
@@ -2981,7 +4748,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                        base_native_session_id, result_native_session_id, completed_at
+                        base_native_session_id, result_native_session_id, completed_at, native_harness
                  FROM chat_messages WHERE id = ?1",
                 params![id],
                 |row| {
@@ -2995,6 +4762,7 @@ impl Store {
                         parent_id: row.get(5)?,
                         base_native_session_id: row.get(6)?,
                         result_native_session_id: row.get(7)?,
+                        native_harness: row.get(9)?,
                     })
                 },
             )
@@ -3166,8 +4934,8 @@ pub struct StoredChatSession {
     pub native_session_id: Option<String>,
     pub title: Option<String>,
     /// Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
-    /// (harness auto-title), `"user"` (explicitly chosen — a rename, or an
-    /// agent's `orx agent spawn --title`, neither of which auto-titling may
+    /// (harness auto-title), `"user"` (explicitly chosen — a rename, or the
+    /// title a delegating agent gave, neither of which auto-titling may
     /// overwrite). NULL on legacy rows, which the conditional setter treats as
     /// "unknown, don't overwrite".
     pub title_source: Option<String>,
@@ -3199,8 +4967,6 @@ pub struct StoredChatSession {
     /// Tip of the branch the UI is currently showing. Forked turns make the
     /// transcript a tree; this picks which path through it is live.
     pub active_leaf_id: Option<String>,
-    /// Session that spawned this one with `orx agent spawn`. `None` for
-    /// sessions the user started from the dashboard.
     /// Chat this side chat branched from. Side chats share that chat's
     /// worktree, stay out of history, and are deleted with it.
     pub side_parent_session_id: Option<String>,
@@ -3210,7 +4976,7 @@ pub struct StoredChatSession {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredAgentSelection {
     pub harness: String,
@@ -3228,6 +4994,9 @@ pub struct StoredUiState {
     pub preferred_agent: Option<StoredAgentSelection>,
     pub workspace: Option<GlobalWorkspaceState>,
     pub preferred_autonomy: Option<Autonomy>,
+    /// Whether delegates may delegate in turn unless a `delegate` call says
+    /// otherwise. Off: only chats the user started delegate.
+    pub nested_delegation: bool,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -3251,6 +5020,8 @@ pub struct StoredChatMessage {
     /// Selecting a branch restores it, so the next message continues the branch
     /// on screen rather than whichever fork ran most recently.
     pub result_native_session_id: Option<String>,
+    /// The harness that owns both native session ids on this message.
+    pub native_harness: Option<String>,
 }
 
 fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<()> {
@@ -3260,13 +5031,16 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
         // the tree.
         "INSERT INTO chat_messages
                  (id, session_id, role, parts_json, created_at, parent_id,
-                  base_native_session_id, result_native_session_id, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                  base_native_session_id, result_native_session_id, completed_at, native_harness)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                     COALESCE(?10, (SELECT harness FROM chat_sessions WHERE id = ?2
+                         AND (?7 IS NOT NULL OR ?8 IS NOT NULL))))
              ON CONFLICT(id) DO UPDATE SET
                  parts_json = excluded.parts_json,
                  completed_at = COALESCE(excluded.completed_at, completed_at),
                  result_native_session_id = COALESCE(
-                     excluded.result_native_session_id, result_native_session_id)",
+                     excluded.result_native_session_id, result_native_session_id),
+                 native_harness = COALESCE(excluded.native_harness, native_harness)",
         params![
             m.id,
             m.session_id,
@@ -3276,7 +5050,8 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
             m.parent_id,
             m.base_native_session_id,
             m.result_native_session_id,
-            m.completed_at
+            m.completed_at,
+            m.native_harness
         ],
     )?;
     Ok(())
@@ -3386,6 +5161,818 @@ fn row_to_chat_session(
     })
 }
 
+const RUN_NOTICE_RETRY_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+impl Store {
+    pub(crate) fn engine_host_auth(
+        &self,
+        alias: &str,
+    ) -> Result<crate::engine::transport::AuthState> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT state_json FROM engine_host_auth WHERE alias = ?1",
+                [alias],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    pub(crate) fn save_engine_host_auth(
+        &self,
+        alias: &str,
+        state: &crate::engine::transport::AuthState,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO engine_host_auth (alias, state_json) VALUES (?1, ?2) ON CONFLICT(alias) DO UPDATE SET state_json = excluded.state_json",
+            params![alias, serde_json::to_string(state)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn engine_hosts(
+        &self,
+    ) -> Result<Vec<(String, String, crate::engine::transport::HostState)>> {
+        let mut query = self
+            .conn
+            .prepare("SELECT alias, root FROM engine_hosts ORDER BY alias, root")?;
+        let rows = query.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (alias, root) = row?;
+            let state = self.engine_host(&alias, &root)?.unwrap();
+            Ok((alias, root, state))
+        })
+        .collect()
+    }
+
+    pub(crate) fn engine_root(
+        &self,
+        alias: &str,
+        root: &str,
+    ) -> Result<Option<crate::engine::transport::HostState>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT state_json FROM engine_hosts WHERE alias = ?1 AND root = ?2",
+                params![alias, root],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn engine_host(
+        &self,
+        alias: &str,
+        root: &str,
+    ) -> Result<Option<crate::engine::transport::HostState>> {
+        let Some(mut state) = self.engine_root(alias, root)? else {
+            return Ok(None);
+        };
+        if let Some((since, cause)) = self.engine_host_auth(alias)?.blocked {
+            state.status = crate::engine::transport::Status::NeedsAuth;
+            state.since_ms = since;
+            state.cause = Some(cause);
+            state.next_retry_ms = None;
+        }
+        Ok(Some(state))
+    }
+
+    pub fn save_engine_host(
+        &self,
+        alias: &str,
+        root: &str,
+        state: &crate::engine::transport::HostState,
+    ) -> Result<()> {
+        use crate::engine::transport::Status;
+        let blocked = state.status == Status::NeedsAuth;
+        let json = serde_json::json!({
+            "status": if blocked { &Status::Idle } else { &state.status },
+            "since_ms": state.since_ms, "failures": state.failures,
+            "last_live_ms": state.last_live_ms,
+            "next_retry_ms": state.next_retry_ms,
+            "cause": if blocked { None } else { state.cause.as_ref() },
+        });
+        self.conn.execute(
+            "INSERT INTO engine_hosts (alias, root, state_json) VALUES (?1, ?2, ?3) ON CONFLICT(alias, root) DO UPDATE SET state_json = excluded.state_json",
+            params![alias, root, json.to_string()],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_engine_host(
+        &self,
+        alias: &str,
+        root: &str,
+        class: Option<crate::engine::transport::HostClass>,
+        state: &crate::engine::transport::HostState,
+    ) -> Result<()> {
+        self.save_engine_host_auth(
+            alias,
+            &crate::engine::transport::AuthState {
+                class,
+                route: None,
+                blocked: (state.status == crate::engine::transport::Status::NeedsAuth)
+                    .then(|| (state.since_ms, state.cause.clone().unwrap_or_default())),
+            },
+        )?;
+        self.save_engine_host(alias, root, state)
+    }
+
+    pub fn insert_submitting_run(&self, run: SubmittingRun<'_>) -> Result<()> {
+        let backend_json = crate::engine::handle::backend_json(run.id, None, run.metadata)?;
+        self.conn.execute(
+            "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
+                               created_at, updated_at, commit_sha, chat_session_id, spec_digest,
+                               launch_spec)
+             VALUES (?1, ?2, ?3, 'submitting', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                run.id,
+                run.experiment_id,
+                run.project_id,
+                backend_json,
+                run.command,
+                run.created_at,
+                run.created_at,
+                run.commit_sha,
+                run.chat_session_id,
+                run.spec_digest,
+                serde_json::to_string(run.launch)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn engine_run_state(&self, run_id: &str) -> Result<Option<EngineRunState>> {
+        fn json<T: serde::de::DeserializeOwned>(value: Option<String>) -> Result<Option<T>> {
+            Ok(value.map(|json| serde_json::from_str(&json)).transpose()?)
+        }
+
+        let row = self
+            .conn
+            .query_row(
+                "SELECT contact, spec_digest, submission_attempt, submission_fence,
+                        cancel_accepted_at, launch_spec, notify_cursor, cancel_unconfirmed, started_at
+                 FROM runs WHERE id = ?1",
+                [run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<i64>>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            contact,
+            spec_digest,
+            submission_attempt,
+            fence,
+            cancel_accepted_at,
+            launch,
+            notify,
+            cancel_unconfirmed,
+            started_at,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        Ok(Some(EngineRunState {
+            started_at,
+            contact: json(contact)?.unwrap_or(Contact::Live),
+            cancel_unconfirmed: json(cancel_unconfirmed)?,
+            spec_digest,
+            submission_attempt,
+            submission_fence: json(fence)?,
+            cancel_accepted_at,
+            launch: json(launch)?,
+            notify_cursor: json(notify)?,
+        }))
+    }
+
+    pub fn set_notify_cursor(&self, run_id: &str, cursor: &NotifyCursor) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET notify_cursor = ?2 WHERE id = ?1",
+            params![run_id, serde_json::to_string(cursor)?],
+        )?;
+        Ok(())
+    }
+
+    /// Runner-1 runs an old supervisor holds, with the row as the engine last saw it. Durable,
+    /// so a run that finishes while the engine is down still gets its chat result.
+    pub fn legacy_watches(&self) -> Result<Vec<(String, Option<SeenRow>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run_id, seen_status, seen_updated_at FROM legacy_watches ORDER BY run_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let seen = match (row.get(1)?, row.get(2)?) {
+                (Some(status), Some(updated_at)) => Some((status, updated_at)),
+                _ => None,
+            };
+            Ok((row.get(0)?, seen))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// `None` starts watching without overwriting what was already seen.
+    pub fn watch_legacy_run(&self, run_id: &str, seen: Option<(&str, i64)>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO legacy_watches (run_id, seen_status, seen_updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(run_id) DO UPDATE SET
+               seen_status = COALESCE(excluded.seen_status, seen_status),
+               seen_updated_at = COALESCE(excluded.seen_updated_at, seen_updated_at)",
+            params![run_id, seen.map(|seen| seen.0), seen.map(|seen| seen.1)],
+        )?;
+        Ok(())
+    }
+
+    pub fn unwatch_legacy_run(&self, run_id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM legacy_watches WHERE run_id = ?1", [run_id])?;
+        Ok(())
+    }
+
+    pub fn last_notice_at(&self, run_id: &str, kind: &str) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(created_at) FROM run_notices WHERE run_id = ?1 AND kind = ?2",
+            params![run_id, kind],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn set_run_contact(&self, run_id: &str, contact: &Contact) -> Result<bool> {
+        let json = match contact {
+            Contact::Live => None,
+            _ => Some(serde_json::to_string(contact)?),
+        };
+        Ok(self.conn.execute(
+            "UPDATE runs SET contact = ?2 WHERE id = ?1",
+            params![run_id, json],
+        )? == 1)
+    }
+
+    pub fn set_submission_fence(
+        &self,
+        run_id: &str,
+        attempt: u32,
+        fence: &SubmissionFence,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE runs SET submission_fence = ?3
+             WHERE id = ?1 AND status = 'submitting' AND submission_attempt = ?2
+               AND submission_fence IS NULL AND cancel_accepted_at IS NULL",
+            params![run_id, attempt, serde_json::to_string(fence)?],
+        )? == 1)
+    }
+
+    /// Release only when the launch was never sent.
+    pub fn clear_submission_fence(&self, run_id: &str, attempt: u32) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE runs SET submission_fence = NULL
+             WHERE id = ?1 AND status = 'submitting' AND submission_attempt = ?2",
+            params![run_id, attempt],
+        )? == 1)
+    }
+
+    /// Call only after recovery proves absence and the previous submitter is gone.
+    pub fn advance_submission_attempt(&self, run_id: &str, attempt: u32) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE runs SET submission_attempt = submission_attempt + 1, submission_fence = NULL
+             WHERE id = ?1 AND status = 'submitting' AND submission_attempt = ?2
+               AND submission_attempt < ?3 AND cancel_accepted_at IS NULL",
+            params![run_id, attempt, u32::MAX],
+        )? == 1)
+    }
+
+    pub fn record_run_handle(
+        &self,
+        run_id: &str,
+        attempt: u32,
+        handle: &crate::engine::handle::Handle,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .is_autocommit()
+            .then(|| self.begin_immediate())
+            .transpose()?;
+        let run = self
+            .get_run(run_id)?
+            .ok_or_else(|| anyhow!("Run {run_id} not found"))?;
+        let metadata = crate::jobs::BackendDescriptor::parse(&run.backend_json)?;
+        let json = crate::engine::handle::backend_json(run_id, Some(handle), &metadata)?;
+        let changed = self.conn.execute(
+            "UPDATE runs SET backend_json = ?3,
+               status = CASE WHEN status = 'submitting' THEN 'starting' ELSE status END,
+               updated_at = ?4
+             WHERE id = ?1 AND submission_attempt = ?2 AND submission_fence IS NOT NULL
+               AND json_extract(backend_json, '$.handle') IS NULL
+               AND (status = 'submitting' OR
+                 (status IN ('done','failed','cancelled','lost') AND contact IS NOT NULL))",
+            params![run_id, attempt, json, now_ms()],
+        )?;
+        if changed == 1
+            && crate::engine::Phase::parse(&run.status)
+                .is_some_and(crate::engine::Phase::is_terminal)
+        {
+            self.queue_log_collection(run_id)?;
+        }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
+        Ok(changed == 1)
+    }
+
+    /// For a submitter subprocess of the fenced attempt, recorded before it can act.
+    pub fn record_submitter(
+        &self,
+        run_id: &str,
+        attempt: u32,
+        fence: &SubmissionFence,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE runs SET submission_fence = ?3
+             WHERE id = ?1 AND status = 'submitting' AND submission_attempt = ?2
+               AND submission_fence IS NOT NULL",
+            params![run_id, attempt, serde_json::to_string(fence)?],
+        )? == 1)
+    }
+
+    /// Compare-and-set on `status`; the engine decides which moves are legal.
+    pub fn set_engine_phase(
+        &self,
+        run_id: &str,
+        from: &str,
+        to: &str,
+        ended_at: Option<i64>,
+        exit_code: Option<i64>,
+        started_at: Option<i64>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE runs SET status = ?3, updated_at = ?4, ended_at = COALESCE(?5, ended_at),
+                             exit_code = COALESCE(?6, exit_code),
+                             started_at = COALESCE(started_at, ?7)
+             WHERE id = ?1 AND status = ?2",
+            params![run_id, from, to, now_ms(), ended_at, exit_code, started_at],
+        )? == 1;
+        if let Some(status) = RunStatus::parse(to).filter(|status| changed && status.is_terminal())
+        {
+            self.stage_run_terminal(run_id, status)?;
+        }
+        Ok(changed)
+    }
+
+    pub fn supervisor_lock_paths(&self, run_id: &str) -> Result<[PathBuf; 2]> {
+        Ok([
+            self.run_lock_path(SUPERVISOR_LOCK, run_id)?,
+            self.run_lock_path(SHARED_SSH_LOCK, run_id)?,
+        ])
+    }
+
+    fn run_lock_path(&self, artifact: (&str, &str), run_id: &str) -> Result<PathBuf> {
+        if run_id.is_empty()
+            || !run_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(anyhow!("Invalid run id: {run_id}"));
+        }
+        Ok(self.run_artifact_path(artifact, run_id))
+    }
+
+    /// Ends an outage for a chat: withdraws its attention notice if it was never sent, and
+    /// returns whether one was sent (or is in flight), so a recovery notice is owed.
+    pub fn settle_outage_notice(&self, run_id: &str, chat: &str) -> Result<bool> {
+        let dedupe = self.outage_dedupe(run_id, chat, ATTENTION)?;
+        let withdrawn = self.conn.execute(
+            "DELETE FROM run_notices WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3
+               AND client_turn_id IS NULL",
+            params![run_id, chat, dedupe],
+        )?;
+        // Retired attention keeps its audit row without reserving the next outage's key.
+        self.conn.execute(
+            "UPDATE run_notices SET dedupe = 'retired:' || client_turn_id || ':' || dedupe
+             WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3 AND retired_at IS NOT NULL",
+            params![run_id, chat, dedupe],
+        )?;
+        Ok(withdrawn == 0
+            && self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_notices
+                   WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3)",
+                params![run_id, chat, dedupe],
+                |row| row.get(0),
+            )?)
+    }
+
+    /// `None` accepts legacy intent; a reason accepts an API cancel, including during submission.
+    pub fn accept_run_cancel(&self, run_id: &str, reason: Option<&str>) -> Result<Option<i64>> {
+        let path = self.run_lock_path(CANCEL_LOCK, run_id)?;
+        let mut lock = open_lifecycle_lock_at(&path)?;
+        let _guard = lock.write()?;
+        Ok(self.conn.query_row(
+            "UPDATE runs SET cancel_accepted_at = COALESCE(cancel_accepted_at, ?2),
+                             updated_at = CASE WHEN cancel_accepted_at IS NULL THEN ?2
+                                               ELSE updated_at END,
+                             cancel_reason = CASE WHEN cancel_requested = 0 AND cancel_accepted_at IS NULL
+                                                  THEN COALESCE(?3, cancel_reason)
+                                                  ELSE cancel_reason END
+             WHERE id = ?1 AND status IN ('submitting', 'starting', 'running')
+               AND (cancel_requested = 1 OR cancel_accepted_at IS NOT NULL OR ?3 IS NOT NULL)
+             RETURNING cancel_accepted_at",
+            params![run_id, now_ms(), reason],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
+    pub fn subscribe_run(
+        &self,
+        run_id: &str,
+        chat_session_id: &str,
+        created_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO run_subscriptions (run_id, chat_session_id, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(run_id, chat_session_id) DO NOTHING",
+            params![run_id, chat_session_id, created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn run_subscribers(&self, run_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT chat_session_id FROM runs WHERE id = ?1 AND chat_session_id IS NOT NULL
+             UNION SELECT chat_session_id FROM run_subscriptions WHERE run_id = ?1
+             ORDER BY chat_session_id",
+        )?;
+        let rows = stmt.query_map([run_id], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn insert_run_notice(
+        &self,
+        run_id: &str,
+        chat_session_id: &str,
+        kind: &str,
+        dedupe: &str,
+        body: &str,
+        created_at: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "INSERT INTO run_notices (run_id, chat_session_id, kind, dedupe, body, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(run_id, chat_session_id, dedupe) DO NOTHING",
+            params![run_id, chat_session_id, kind, dedupe, body, created_at],
+        )? == 1)
+    }
+
+    pub(crate) fn queue_cancel_settled_notice(
+        &self,
+        run_id: &str,
+        chat: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let notified: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_notices WHERE run_id = ?1 AND chat_session_id = ?2
+             AND kind = ?3)",
+            params![run_id, chat, TERMINAL],
+            |row| row.get(0),
+        )?;
+        if !notified {
+            return Ok(false);
+        }
+        let run = self
+            .get_run(run_id)?
+            .ok_or_else(|| anyhow!("Run {run_id} not found"))?;
+        let view = crate::plane::Run::from_store(self, &run)?;
+        let status = view.display_status();
+        let detail = if view.cancel_unconfirmed.is_some() {
+            run.result_markdown.as_deref().unwrap_or_default()
+        } else {
+            "All remaining processes have stopped."
+        };
+        self.insert_run_notice(
+            run_id,
+            chat,
+            ATTENTION,
+            "cancel-stopped",
+            &format!("[orx] Run `{run_id}`: {status}. {detail}"),
+            now,
+        )
+    }
+
+    pub fn pending_run_notice_sessions(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT chat_session_id FROM run_notices
+             WHERE delivered_at IS NULL AND retired_at IS NULL
+             AND (next_delivery_at IS NULL OR next_delivery_at <= ?1) ORDER BY chat_session_id",
+        )?;
+        let rows = stmt.query_map([now_ms()], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn record_run_notice_failure(
+        &self,
+        chat: &str,
+        client_turn_id: &str,
+        reason: &str,
+        permanent: bool,
+        now: i64,
+    ) -> Result<Option<i64>> {
+        let tx = self.begin_immediate()?;
+        let prior: Option<(i64, Option<i64>)> = tx
+            .query_row(
+                "SELECT delivery_failures, first_failure_at FROM run_notices
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2
+             AND delivered_at IS NULL AND retired_at IS NULL LIMIT 1",
+                params![chat, client_turn_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((failures, first)) = prior else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let first = first.unwrap_or(now);
+        let deadline = first.saturating_add(RUN_NOTICE_RETRY_WINDOW_MS);
+        let retired = (permanent || now >= deadline).then_some(now);
+        let delay_minutes = match failures {
+            0 => 1,
+            1 => 5,
+            2 => 15,
+            _ => 60,
+        };
+        let next = retired
+            .is_none()
+            .then(|| now.saturating_add(delay_minutes * 60 * 1000).min(deadline));
+        let reason = if !permanent && now >= deadline {
+            format!("Retry window expired after 24 hours: {reason}")
+        } else {
+            reason.to_string()
+        };
+        tx.execute(
+            "UPDATE run_notices SET delivery_failures = ?3, first_failure_at = ?4,
+             next_delivery_at = ?5, delivery_error = ?6, retired_at = ?7
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL AND retired_at IS NULL",
+            params![chat, client_turn_id, failures + 1, first, next, reason, retired],
+        )?;
+        tx.commit()?;
+        Ok(Some(failures + 1))
+    }
+
+    /// Why the run's latest retired notice batch never reached its chat.
+    pub(crate) fn run_notice_error(&self, run_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT delivery_error FROM run_notices WHERE run_id = ?1 AND retired_at IS NOT NULL
+                 ORDER BY retired_at DESC, id DESC LIMIT 1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn expire_run_notice_batches(&self, now: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE run_notices SET retired_at = ?1, next_delivery_at = NULL,
+             delivery_error = 'Retry window expired after 24 hours: ' || delivery_error
+             WHERE delivered_at IS NULL AND retired_at IS NULL
+             AND first_failure_at <= ?1 - ?2",
+            params![now, RUN_NOTICE_RETRY_WINDOW_MS],
+        )?;
+        Ok(())
+    }
+
+    pub fn run_notice_batch(&self, chat_session_id: &str) -> Result<Vec<RunNotice>> {
+        self.run_notice_batch_at(chat_session_id, now_ms())
+    }
+
+    pub fn run_notice_batch_at(&self, chat_session_id: &str, now: i64) -> Result<Vec<RunNotice>> {
+        let tx = self.begin_immediate()?;
+        self.expire_run_notice_batches(now)?;
+        let assigned: Option<String> = tx
+            .query_row(
+                "SELECT client_turn_id FROM run_notices
+             WHERE chat_session_id = ?1 AND delivered_at IS NULL AND client_turn_id IS NOT NULL
+             AND retired_at IS NULL AND (next_delivery_at IS NULL OR next_delivery_at <= ?2)
+             ORDER BY id LIMIT 1",
+                params![chat_session_id, now],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let client_turn_id = match assigned {
+            Some(id) => id,
+            None => {
+                let id = format!("run-notice:{}", uuid::Uuid::new_v4());
+                let assigned = tx.execute(
+                    "UPDATE run_notices SET client_turn_id = ?2 WHERE chat_session_id = ?1
+                     AND delivered_at IS NULL AND retired_at IS NULL AND client_turn_id IS NULL",
+                    params![chat_session_id, id],
+                )?;
+                if assigned == 0 {
+                    tx.commit()?;
+                    return Ok(Vec::new());
+                }
+                id
+            }
+        };
+        let notices = {
+            let mut stmt = tx.prepare(
+                "SELECT id, run_id, chat_session_id, kind, dedupe, body, created_at, client_turn_id
+                 FROM run_notices WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![chat_session_id, client_turn_id], |row| {
+                Ok(RunNotice {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    chat_session_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    dedupe: row.get(4)?,
+                    body: row.get(5)?,
+                    created_at: row.get(6)?,
+                    client_turn_id: row.get(7)?,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        tx.commit()?;
+        Ok(notices)
+    }
+
+    pub fn mark_run_notice_batch_delivered(
+        &self,
+        chat_session_id: &str,
+        client_turn_id: &str,
+        delivered_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE run_notices SET delivered_at = ?3, next_delivery_at = NULL WHERE chat_session_id = ?1
+             AND client_turn_id = ?2 AND delivered_at IS NULL",
+            params![chat_session_id, client_turn_id, delivered_at],
+        )?;
+        Ok(())
+    }
+
+    /// Run under the engine lock after legacy delivery stops and before notice production.
+    pub fn migrate_run_wakeups(&self) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        let wakeups = {
+            let mut stmt = tx.prepare(
+                "SELECT run_id, chat_session_id, state, requested_at, delivered_at, monitoring_alerted
+                 FROM chat_run_wakeups WHERE engine_migrated = 0 ORDER BY run_id, chat_session_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, bool>(5)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (run_id, chat, state, requested_at, delivered_at, alerted) in wakeups {
+            let Some(run) = self.get_run(&run_id)? else {
+                continue;
+            };
+            if matches!(state.as_str(), "pending" | "claimed") {
+                if !is_terminal_status(&run.status) {
+                    self.subscribe_run(&run_id, &chat, requested_at)?;
+                } else if matches!(run.status.as_str(), "done" | "failed" | "lost") {
+                    let body = self.terminal_notice_body(&run)?;
+                    self.insert_run_notice(
+                        &run_id,
+                        &chat,
+                        TERMINAL,
+                        TERMINAL,
+                        &body,
+                        requested_at,
+                    )?;
+                }
+            } else if state == "delivered" {
+                self.insert_run_notice(&run_id, &chat, TERMINAL, TERMINAL, "", requested_at)?;
+                tx.execute(
+                    "UPDATE run_notices SET delivered_at = ?4 WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3",
+                    params![run_id, chat, TERMINAL, delivered_at.unwrap_or(requested_at)],
+                )?;
+            }
+            if alerted {
+                let dedupe = self.outage_dedupe(&run_id, &chat, ATTENTION)?;
+                self.insert_run_notice(&run_id, &chat, ATTENTION, &dedupe, "", requested_at)?;
+                tx.execute(
+                    "UPDATE run_notices SET delivered_at = ?4 WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3",
+                    params![run_id, chat, dedupe, delivered_at.unwrap_or(requested_at)],
+                )?;
+            }
+            tx.execute(
+                "UPDATE chat_run_wakeups SET engine_migrated = 1
+                 WHERE run_id = ?1 AND chat_session_id = ?2",
+                params![run_id, chat],
+            )?;
+        }
+        tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Recovery notices advance the outage generation, including outages begun by 0.2.x.
+    pub fn outage_dedupe(&self, run_id: &str, chat: &str, kind: &str) -> Result<String> {
+        let generation: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM run_notices WHERE run_id = ?1 AND chat_session_id = ?2 AND kind = ?3",
+            params![run_id, chat, RECOVERED], |row| row.get(0),
+        )?;
+        Ok(format!("{kind}:{generation}"))
+    }
+
+    pub fn terminal_notice_body(&self, run: &StoredRun) -> Result<String> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut bytes = Vec::new();
+        let ranges = crate::commands::up::api_v2::kept_ranges(&self.data_dir, &run.id)?;
+        let tail = self.run_artifact_path(TAIL_LOG, &run.id);
+        let current = if let Some(range) = ranges.iter().max_by_key(|range| range.offset) {
+            let file = std::fs::File::open(&range.file)?;
+            Ok((file, range.file.clone(), range.len))
+        } else if tail.exists() {
+            let file = std::fs::File::open(&tail)?;
+            let size = file.metadata()?.len();
+            Ok((file, tail, size))
+        } else {
+            crate::jobs::ssh::service::logs::open_current(
+                self.run_artifact_path(("run-logs", ".log"), &run.id),
+            )
+        };
+        match current {
+            Ok((mut file, _, size)) => {
+                let start = size.saturating_sub(TERMINAL_LOG_BYTES);
+                file.seek(SeekFrom::Start(start))?;
+                bytes.resize(usize::try_from(size - start)?, 0);
+                file.read_exact(&mut bytes)?;
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        let first_character = bytes
+            .iter()
+            .position(|byte| byte & 0xc0 != 0x80)
+            .unwrap_or(bytes.len());
+        let log = String::from_utf8_lossy(&bytes[first_character..]);
+        let mut start = log
+            .len()
+            .saturating_sub(usize::try_from(TERMINAL_LOG_BYTES)?);
+        while !log.is_char_boundary(start) {
+            start += 1;
+        }
+        let mut lines: Vec<_> = log[start..]
+            .lines()
+            .rev()
+            .take(TERMINAL_LOG_LINES)
+            .collect();
+        lines.reverse();
+        let tail = lines.join("\n");
+        let code = run
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unavailable".into());
+        let duration = run
+            .ended_at
+            .map(|ended| format!("{} ms", ended.saturating_sub(run.created_at).max(0)))
+            .unwrap_or_else(|| "unavailable".into());
+        let cancel_reason = run
+            .cancel_reason
+            .as_deref()
+            .filter(|_| run.status == "cancelled");
+        let reason = match (cancel_reason, run.result_markdown.as_deref()) {
+            (Some(cancel), Some(result)) => format!("{cancel} {result}"),
+            (cancel, result) => cancel.or(result).unwrap_or("unavailable").into(),
+        };
+        let view = crate::plane::Run::from_store(self, run)?;
+        let status = view.display_status();
+        Ok(format!(
+            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\nReason: {reason}\n\nRecent log:\n{tail}",
+            run.id, status,
+        ))
+    }
+}
+
 const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_json, command,
                                  created_at, updated_at, ended_at, exit_code,
                                  commit_sha, result_markdown, cancel_requested,
@@ -3399,22 +5986,30 @@ const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branc
                                updated_at, chat_session_id, archived";
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlite::Error> {
+    row_to_run_at(row, 0)
+}
+
+/// A [`SELECT_RUN`] row whose columns start at `first`.
+fn row_to_run_at(
+    row: &rusqlite::Row<'_>,
+    first: usize,
+) -> std::result::Result<StoredRun, rusqlite::Error> {
     Ok(StoredRun {
-        id: row.get(0)?,
-        experiment_id: row.get(1)?,
-        project_id: row.get(2)?,
-        status: row.get(3)?,
-        backend_json: row.get(4)?,
-        command: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        ended_at: row.get(8)?,
-        exit_code: row.get(9)?,
-        commit_sha: row.get(10)?,
-        result_markdown: row.get(11)?,
-        cancel_requested: row.get(12)?,
-        chat_session_id: row.get(13)?,
-        cancel_reason: row.get(14)?,
+        id: row.get(first)?,
+        experiment_id: row.get(first + 1)?,
+        project_id: row.get(first + 2)?,
+        status: row.get(first + 3)?,
+        backend_json: row.get(first + 4)?,
+        command: row.get(first + 5)?,
+        created_at: row.get(first + 6)?,
+        updated_at: row.get(first + 7)?,
+        ended_at: row.get(first + 8)?,
+        exit_code: row.get(first + 9)?,
+        commit_sha: row.get(first + 10)?,
+        result_markdown: row.get(first + 11)?,
+        cancel_requested: row.get(first + 12)?,
+        chat_session_id: row.get(first + 13)?,
+        cancel_reason: row.get(first + 14)?,
     })
 }
 
@@ -3425,9 +6020,1446 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn log_generation_run_id(name: &str) -> Option<&str> {
+    let (run, generation) = name.strip_suffix(".log")?.split_once('.')?;
+    uuid::Uuid::parse_str(generation).ok()?;
+    Some(run)
+}
+
+fn artifact_entries(path: &Path) -> Result<Vec<std::fs::DirEntry>> {
+    match std::fs::read_dir(path) {
+        Ok(entries) => Ok(entries.collect::<std::io::Result<Vec<_>>>()?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_run_artifact(path: &Path) -> Result<()> {
+    let result = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow!(
+            "Could not remove run artifact {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+/// Resolves `parts` under `root` through real directories only, so symlinks cannot redirect removal.
+fn real_path_under<'a>(
+    root: &Path,
+    parts: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<PathBuf>> {
+    let mut path = root.to_path_buf();
+    for part in parts {
+        path.push(part);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(Some(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn min_reader_version_refuses_before_migrations_on_every_open() {
+        let dir = std::env::temp_dir().join(format!("orx-reader-floor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = Connection::open(dir.join("orx.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE store_metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            INSERT INTO store_metadata VALUES ('min_reader_version', 2);",
+        )
+        .unwrap();
+        let error = Store::open_at(dir.clone()).err().unwrap();
+        assert!(error.to_string().contains("min_reader_version 2"));
+        let migrated: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'runs')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!migrated);
+        conn.execute("UPDATE store_metadata SET value = 1", [])
+            .unwrap();
+        drop(Store::open_at(dir.clone()).unwrap());
+        conn.execute("UPDATE store_metadata SET value = 2", [])
+            .unwrap();
+        assert!(Store::open_at(dir.clone()).is_err());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Pinned from 0.2.22 main: store.rs, commands/{supervise,up}.rs and jobs/ssh/service/mod.rs.
+    const LEGACY_SELECT_RUN: &str =
+        "SELECT id, experiment_id, project_id, status, backend_json, command,
+                                 created_at, updated_at, ended_at, exit_code,
+                                 commit_sha, result_markdown, cancel_requested,
+                                 chat_session_id, cancel_reason FROM runs";
+    const LEGACY_ACTIVE_RUNS: &str =
+        "SELECT id, experiment_id, project_id, status, backend_json, command,
+                                 created_at, updated_at, ended_at, exit_code,
+                                 commit_sha, result_markdown, cancel_requested,
+                                 chat_session_id, cancel_reason FROM runs
+         WHERE status IN ('starting', 'running') ORDER BY created_at DESC";
+    const LEGACY_REQUEST_CANCEL: &str =
+        "UPDATE runs SET cancel_requested = 1, cancel_reason = ?2, updated_at = ?3
+             WHERE id = ?1 AND cancel_requested = 0 AND status IN ('starting', 'running')";
+    const LEGACY_WITHDRAW_CANCEL: &str =
+        "UPDATE runs SET cancel_requested = 0, updated_at = ?2 WHERE id = ?1";
+    const LEGACY_SUPERVISE_DISPATCH: &[&str] = &[
+        "k8s_job",
+        "modal_job",
+        "ssh_job",
+        "slurm_job",
+        "ray_job",
+        "openresearch_job",
+        "local_job",
+        "tinker_job",
+    ];
+    const LEGACY_SUPERVISE_FALLTHROUGH: &str = "hf_job";
+    const LEGACY_SSH_SERVICE_SCAN: fn(&str, bool, bool) -> bool =
+        |kind, supervisor_running, uses_shared_ssh| {
+            matches!(kind, "ssh_job" | "slurm_job" | "openresearch_job")
+                && supervisor_running
+                && !uses_shared_ssh
+        };
+    const LEGACY_SUPERVISOR_LOCK: (&str, &str) = ("run-logs", ".supervisor.lock");
+    const LEGACY_ADOPTION: fn(bool, bool, bool, bool) -> bool =
+        |submitted, settled, local_experiment, supervisor_running| {
+            submitted && settled && local_experiment && !supervisor_running
+        };
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LegacyDescriptor {
+        kind: String,
+        job_id: Option<String>,
+        source_digest: Option<String>,
+        source_path: Option<String>,
+        source_size: Option<u64>,
+    }
+
+    fn legacy_rows(conn: &Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        conn.prepare(sql)
+            .unwrap()
+            .query_map([], |row| {
+                (0..row.as_ref().column_count())
+                    .map(|i| row.get(i))
+                    .collect()
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    fn legacy_active_runs(conn: &Connection) -> Vec<(String, LegacyDescriptor)> {
+        conn.prepare(LEGACY_ACTIVE_RUNS)
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(4)?))
+            })
+            .unwrap()
+            .map(|row| {
+                let (id, json) = row.unwrap();
+                (id, serde_json::from_str(&json).unwrap())
+            })
+            .collect()
+    }
+
+    fn test_launch() -> LaunchSpec {
+        LaunchSpec {
+            kind: "ssh_job".into(),
+            target: Some("lab".into()),
+            options: serde_json::json!({}),
+        }
+    }
+
+    fn engine_fixture() -> (PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("orx-engine-store-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = Connection::open(dir.join("orx.db")).unwrap();
+        conn.execute_batch(include_str!("../tests/fixtures/store-0.2.22.sql"))
+            .unwrap();
+        assert!(conn.prepare("SELECT contact FROM runs").is_err());
+        drop(conn);
+        let store = Store::open_at(dir.clone()).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn engine_migration_enqueues_every_finished_pending_or_claimed_result_except_cancelled() {
+        let (dir, store) = engine_fixture();
+        for phase in ["done", "failed", "lost", "cancelled"] {
+            for state in ["pending", "claimed"] {
+                let id = format!("{phase}_{state}");
+                let mut run = run_fixture(&id, phase, Some("owner"));
+                run.ended_at = Some(101);
+                run.exit_code = Some(7);
+                run.result_markdown = Some("payload ended".into());
+                store.upsert_run(&run).unwrap();
+                store.register_run_wakeup(&id, "foreign").unwrap();
+                if state == "claimed" {
+                    store.claim_run_wakeup(&id, "foreign").unwrap().unwrap();
+                }
+                std::fs::write(dir.join(format!("run-logs/{id}.log")), "result line\n").unwrap();
+            }
+        }
+        store.migrate_run_wakeups().unwrap();
+        for phase in ["done", "failed", "lost", "cancelled"] {
+            for state in ["pending", "claimed"] {
+                let id = format!("{phase}_{state}");
+                assert_eq!(
+                    store
+                        .conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM run_subscriptions WHERE run_id = ?1",
+                            [&id],
+                            |row| row.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    0
+                );
+                let notice: Option<(String, String, Option<i64>)> = store
+                    .conn
+                    .query_row(
+                        "SELECT body, dedupe, delivered_at FROM run_notices WHERE run_id = ?1",
+                        [&id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .unwrap();
+                if phase == "cancelled" {
+                    assert!(notice.is_none());
+                    continue;
+                }
+                let (body, dedupe, delivered) = notice.unwrap();
+                assert_eq!(
+                    body,
+                    store
+                        .terminal_notice_body(&store.get_run(&id).unwrap().unwrap())
+                        .unwrap()
+                );
+                assert!(body.contains(&format!("**{phase}**")));
+                assert!(body.contains("Exit code: 7\nDuration: 100 ms\nReason: payload ended"));
+                assert!(body.ends_with("Recent log:\nresult line"));
+                assert_eq!(dedupe, TERMINAL);
+                assert!(delivered.is_none());
+            }
+        }
+        let frozen = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(frozen.len(), 7);
+        store.migrate_run_wakeups().unwrap();
+        assert_eq!(store.run_notice_batch("foreign").unwrap(), frozen);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_notice_of_a_cancelled_run_gives_the_recorded_cancel_reason() {
+        let (dir, store) = engine_fixture();
+        let mut run = run_fixture("cancelled", "cancelled", None);
+        run.cancel_reason = Some("Cancel requested with `orx exp cancel`.".into());
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body.contains("\nReason: Cancel requested with `orx exp cancel`.\n"));
+        run.result_markdown = Some("Killed by signal 15.".into());
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body
+            .contains("\nReason: Cancel requested with `orx exp cancel`. Killed by signal 15.\n"));
+        run.status = "done".into();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body.contains("\nReason: Killed by signal 15.\n"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_terminal_renderer_bounds_log_bytes_and_lines_without_splitting_utf8() {
+        let (dir, store) = engine_fixture();
+        let run = store.get_run("failed").unwrap().unwrap();
+        let path = dir.join("run-logs/failed.log");
+        let lines: String = (0..100).map(|i| format!("line-{i:03}\n")).collect();
+        std::fs::write(&path, &lines).unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        let tail = body.split("Recent log:\n").nth(1).unwrap();
+        assert_eq!(tail.lines().count(), 40);
+        assert!(tail.starts_with("line-060\n"));
+        assert!(tail.ends_with("line-099"));
+        std::fs::write(&path, format!("{}a", "🦀".repeat(1500))).unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        let tail = body.split("Recent log:\n").nth(1).unwrap();
+        assert!(tail.len() <= 4096);
+        assert!(!tail.contains('\u{fffd}'));
+        assert!(tail.ends_with('a'));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_wakeup_migration_imports_new_legacy_rows_after_downgrade() {
+        let (dir, store) = engine_fixture();
+        store.migrate_run_wakeups().unwrap();
+        let delivered = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(delivered.len(), 1);
+        store
+            .mark_run_notice_batch_delivered("foreign", &delivered[0].client_turn_id, 600)
+            .unwrap();
+        drop(store);
+
+        let legacy = Connection::open(dir.join("orx.db")).unwrap();
+        legacy
+            .execute_batch(
+                "INSERT INTO chat_run_wakeups (run_id, chat_session_id, requested_at)
+                 VALUES ('slurm_job', 'foreign', 700), ('lost', 'foreign', 701);
+                 INSERT INTO chat_run_wakeups
+                     (run_id, chat_session_id, requested_at, state, delivered_at)
+                 VALUES ('done', 'foreign', 702, 'delivered', 703);",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.migrate_run_wakeups().unwrap();
+        assert!(store
+            .run_subscribers("slurm_job")
+            .unwrap()
+            .iter()
+            .any(|chat| chat == "foreign"));
+        let notices = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].run_id, "lost");
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT delivered_at FROM run_notices
+                     WHERE run_id = 'failed' AND chat_session_id = 'foreign'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            600
+        );
+        store.migrate_run_wakeups().unwrap();
+        assert_eq!(store.run_notice_batch("foreign").unwrap(), notices);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_notice_prefers_kept_ranges_to_the_published_legacy_log_generation() {
+        let (dir, store) = engine_fixture();
+        let run = store.get_run("failed").unwrap().unwrap();
+        let path = dir.join("run-logs/failed.log");
+        std::fs::write(&path, "obsolete generation\n").unwrap();
+        let generation = uuid::Uuid::new_v4();
+        let published = "UPGRADE_BEGIN\nFINAL_METRIC=0.862\nUPGRADE_END\n";
+        std::fs::write(
+            path.with_extension(format!("{generation}.log")),
+            format!("{published}unpublished bytes\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            path.with_extension("cursor.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "generation": generation.to_string(),
+                "identity": "legacy-log",
+                "boundary": "boundary",
+                "bytes": published.len(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert_eq!(
+            body.split_once("Recent log:\n").unwrap().1,
+            published.trim_end()
+        );
+        let collected = "collected after adoption\nUPGRADE_END\n";
+        std::fs::write(&path, format!("{collected}unpublished bytes\n")).unwrap();
+        let manifest = path.with_extension("ranges.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!([{
+                "offset": 0,
+                "len": collected.len(),
+                "file": &path,
+                "ident": "1-2",
+                "eof": true,
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert_eq!(
+            body.split_once("Recent log:\n").unwrap().1,
+            collected.trim_end()
+        );
+        std::fs::write(&path, "truncated").unwrap();
+        assert!(store.terminal_notice_body(&run).is_err());
+        std::fs::write(&path, collected).unwrap();
+        std::fs::remove_file(manifest).unwrap();
+        let engine_cursor = path.with_extension("engine-cursor.json");
+        std::fs::write(
+            &engine_cursor,
+            serde_json::to_vec(&serde_json::json!({"offset": collected.len()})).unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert_eq!(
+            body.split_once("Recent log:\n").unwrap().1,
+            collected.trim_end()
+        );
+        std::fs::remove_file(engine_cursor).unwrap();
+        std::fs::write(dir.join("run-logs/failed.tail.log"), "retained tail\n").unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body.ends_with("Recent log:\nretained tail"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_wakeup_migration_rolls_back_on_an_unreadable_completion_log() {
+        let (dir, store) = engine_fixture();
+        let path = dir.join("run-logs/failed.log");
+        std::fs::create_dir(&path).unwrap();
+        assert!(store.migrate_run_wakeups().is_err());
+        for table in ["run_notices", "run_subscriptions"] {
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM chat_run_wakeups WHERE engine_migrated != 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        std::fs::remove_dir(&path).unwrap();
+        store.migrate_run_wakeups().unwrap();
+        assert_eq!(store.run_notice_batch("foreign").unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_absent_recovery_advances_and_refences_only_the_current_uncancelled_attempt() {
+        let (dir, store) = engine_fixture();
+        let metadata = crate::jobs::BackendDescriptor::parse(r#"{"kind":"hf_job"}"#).unwrap();
+        store
+            .insert_submitting_run(SubmittingRun {
+                id: "retry",
+                experiment_id: "exp_1",
+                project_id: "proj_1",
+                metadata: &metadata,
+                command: "train",
+                created_at: 1,
+                commit_sha: None,
+                chat_session_id: None,
+                spec_digest: "digest",
+                launch: &test_launch(),
+            })
+            .unwrap();
+        let fence = SubmissionFence {
+            taken_at: 1,
+            submitter: Some(SubmitterIdentity {
+                pid: 4,
+                starttime: 5,
+            }),
+        };
+        assert!(store.set_submission_fence("retry", 1, &fence).unwrap());
+        assert!(store.advance_submission_attempt("retry", 1).unwrap());
+        let state = store.engine_run_state("retry").unwrap().unwrap();
+        assert_eq!(state.submission_attempt, 2);
+        assert!(state.submission_fence.is_none());
+        assert!(!store.advance_submission_attempt("retry", 1).unwrap());
+        assert!(!store.set_submission_fence("retry", 1, &fence).unwrap());
+        assert!(store.set_submission_fence("retry", 2, &fence).unwrap());
+        let handle = crate::engine::adapters::api::test_handle(
+            "hf_job",
+            Some("lab"),
+            None,
+            vec!["job".into()],
+        );
+        assert!(!store.record_run_handle("retry", 1, &handle).unwrap());
+        assert!(!store.advance_submission_attempt("ssh_job", 1).unwrap());
+        assert!(!store.advance_submission_attempt("done", 1).unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET submission_attempt = ?1 WHERE id = 'retry'",
+                [u32::MAX],
+            )
+            .unwrap();
+        assert!(!store.advance_submission_attempt("retry", u32::MAX).unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET submission_attempt = 2 WHERE id = 'retry'",
+                [],
+            )
+            .unwrap();
+        store
+            .accept_run_cancel("retry", Some("cancel"))
+            .unwrap()
+            .unwrap();
+        assert!(!store.advance_submission_attempt("retry", 2).unwrap());
+        assert_eq!(
+            store
+                .engine_run_state("retry")
+                .unwrap()
+                .unwrap()
+                .submission_fence,
+            Some(fence)
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_run_and_chat_deletion_remove_only_their_outbox_rows_transactionally() {
+        let (dir, store) = engine_fixture();
+        for (run, chat) in [("done", "owner"), ("done", "foreign"), ("failed", "owner")] {
+            store.subscribe_run(run, chat, 1).unwrap();
+            store
+                .insert_run_notice(run, chat, TERMINAL, TERMINAL, "result", 1)
+                .unwrap();
+        }
+        let tx = store.begin().unwrap();
+        tx.execute("DELETE FROM runs WHERE id = 'done'", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        tx.rollback().unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        store.delete_chat_session("foreign").unwrap();
+        for table in ["run_notices", "run_subscriptions"] {
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+        }
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id = 'done'", [])
+            .unwrap();
+        for table in ["run_notices", "run_subscriptions"] {
+            let rows: Vec<(String, String)> = store
+                .conn
+                .prepare(&format!("SELECT run_id, chat_session_id FROM {table}"))
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert_eq!(rows, [("failed".into(), "owner".into())]);
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_schema_preserves_022_runs_and_legacy_readers_and_cleanup() {
+        let old = Connection::open_in_memory().unwrap();
+        old.execute_batch(include_str!("../tests/fixtures/store-0.2.22.sql"))
+            .unwrap();
+        assert!(old.prepare("SELECT started_at FROM runs").is_err());
+        let before = legacy_rows(&old, &format!("{LEGACY_SELECT_RUN} ORDER BY id"));
+        let (dir, store) = engine_fixture();
+        let after = legacy_rows(&store.conn, &format!("{LEGACY_SELECT_RUN} ORDER BY id"));
+        assert_eq!(before, after);
+        assert_eq!(store.count_active_runs().unwrap(), 9);
+        assert!(LEGACY_SSH_SERVICE_SCAN("ssh_job", true, false));
+        assert!(!LEGACY_SSH_SERVICE_SCAN("ssh_job", true, true));
+        let active = legacy_active_runs(&store.conn);
+        assert_eq!(active.len(), 9);
+        assert_eq!(active.first().unwrap().0, "openresearch_job");
+        for run in store.list_runs(100).unwrap() {
+            assert_eq!(
+                store.engine_run_state(&run.id).unwrap().unwrap(),
+                EngineRunState {
+                    started_at: None,
+                    contact: Contact::Live,
+                    cancel_unconfirmed: None,
+                    spec_digest: None,
+                    submission_attempt: 1,
+                    submission_fence: None,
+                    cancel_accepted_at: None,
+                    launch: None,
+                    notify_cursor: None,
+                }
+            );
+        }
+        let snapshots = dir.join("source-snapshots");
+        std::fs::create_dir_all(&snapshots).unwrap();
+        for (_, descriptor) in active {
+            assert!(
+                LEGACY_SUPERVISE_DISPATCH.contains(&descriptor.kind.as_str())
+                    || descriptor.kind == LEGACY_SUPERVISE_FALLTHROUGH
+            );
+            assert!(descriptor.job_id.is_some());
+            let digest = descriptor.source_digest.unwrap();
+            for extension in ["tar", "hf", "zip"] {
+                std::fs::write(snapshots.join(format!("{digest}.{extension}")), "source").unwrap();
+            }
+        }
+        let orphan = snapshots.join(format!("{}.tar", "f".repeat(64)));
+        std::fs::write(&orphan, "unreferenced").unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!orphan.exists());
+        assert_eq!(std::fs::read_dir(&snapshots).unwrap().count(), 27);
+        assert_eq!(
+            store
+                .conn
+                .execute(
+                    LEGACY_REQUEST_CANCEL,
+                    params!["slurm_job", "old CLI", now_ms()]
+                )
+                .unwrap(),
+            1
+        );
+        store
+            .conn
+            .execute(LEGACY_WITHDRAW_CANCEL, params!["slurm_job", now_ms()])
+            .unwrap();
+        assert!(
+            !store
+                .get_run("slurm_job")
+                .unwrap()
+                .unwrap()
+                .cancel_requested
+        );
+        assert_eq!(
+            store.get_run("slurm_job").unwrap().unwrap().status,
+            "starting"
+        );
+        assert!(!store.request_cancel("done", "old CLI").unwrap());
+        drop(store);
+        let reopened = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(legacy_active_runs(&reopened.conn).len(), 9);
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_submitting_is_hidden_and_owned_handles_skip_legacy_adoption() {
+        use crate::engine::handle::Handle;
+        let (dir, store) = engine_fixture();
+        let mut run = run_fixture("engine_run", "submitting", Some("owner"));
+        run.backend_json = store.get_run("ssh_job").unwrap().unwrap().backend_json;
+        store
+            .insert_submitting_run(SubmittingRun {
+                id: &run.id,
+                experiment_id: &run.experiment_id,
+                project_id: &run.project_id,
+                metadata: &crate::jobs::BackendDescriptor::parse(&run.backend_json).unwrap(),
+                command: &run.command,
+                created_at: run.created_at,
+                commit_sha: run.commit_sha.as_deref(),
+                chat_session_id: run.chat_session_id.as_deref(),
+                spec_digest: "spec-sha",
+                launch: &test_launch(),
+            })
+            .unwrap();
+        assert!(store
+            .insert_submitting_run(SubmittingRun {
+                id: &run.id,
+                experiment_id: &run.experiment_id,
+                project_id: &run.project_id,
+                metadata: &crate::jobs::BackendDescriptor::parse(&run.backend_json).unwrap(),
+                command: &run.command,
+                created_at: run.created_at,
+                commit_sha: run.commit_sha.as_deref(),
+                chat_session_id: run.chat_session_id.as_deref(),
+                spec_digest: "spec-sha",
+                launch: &test_launch(),
+            })
+            .is_err());
+        assert_eq!(store.count_active_runs().unwrap(), 10);
+        assert!(!legacy_active_runs(&store.conn)
+            .iter()
+            .any(|(id, _)| id == &run.id));
+        assert_eq!(
+            store
+                .conn
+                .execute(LEGACY_REQUEST_CANCEL, params![run.id, "old CLI", now_ms()])
+                .unwrap(),
+            0
+        );
+        let submitting = store.get_run(&run.id).unwrap().unwrap();
+        let descriptor = crate::jobs::BackendDescriptor::parse(&submitting.backend_json).unwrap();
+        assert_eq!(descriptor.kind, "engine");
+        assert!(descriptor.job_id.is_none());
+        let handle = Handle::Ssh {
+            host: "lab".into(),
+            root: "/orx".into(),
+        };
+        assert!(!store.record_run_handle(&run.id, 1, &handle).unwrap());
+        let fence = SubmissionFence {
+            taken_at: 1000,
+            submitter: Some(SubmitterIdentity {
+                pid: 42,
+                starttime: 5678,
+            }),
+        };
+        assert!(!store.set_submission_fence(&run.id, 2, &fence).unwrap());
+        assert!(store.set_submission_fence(&run.id, 1, &fence).unwrap());
+        assert!(!store.set_submission_fence(&run.id, 1, &fence).unwrap());
+        assert!(!store.record_run_handle(&run.id, 2, &handle).unwrap());
+        let mut supervisor =
+            open_lifecycle_lock_at(&dir.join("run-logs/engine_run.supervisor.lock")).unwrap();
+        let mut shared =
+            open_lifecycle_lock_at(&dir.join("run-logs/engine_run.supervisor.shared-ssh.lock"))
+                .unwrap();
+        let supervisor_guard = supervisor.write().unwrap();
+        let shared_guard = shared.write().unwrap();
+        assert!(store.record_run_handle(&run.id, 1, &handle).unwrap());
+        assert!(!store.record_run_handle(&run.id, 1, &handle).unwrap());
+        assert!(store.supervisor_is_held(&run.id).unwrap());
+        let mut old_shared_probe =
+            open_lifecycle_lock_at(&dir.join("run-logs/engine_run.supervisor.shared-ssh.lock"))
+                .unwrap();
+        assert!(
+            matches!(old_shared_probe.try_write(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        let active = legacy_active_runs(&store.conn);
+        assert_eq!(active.len(), 10);
+        for (id, descriptor) in &active {
+            assert!(descriptor.job_id.is_some());
+            let mut probe =
+                open_lifecycle_lock_at(&store.run_artifact_path(LEGACY_SUPERVISOR_LOCK, id))
+                    .unwrap();
+            let held = matches!(probe.try_write(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+            if id == &run.id {
+                assert!(!LEGACY_ADOPTION(
+                    descriptor.job_id.is_some(),
+                    true,
+                    true,
+                    held
+                ));
+                assert!(!LEGACY_SUPERVISE_DISPATCH.contains(&descriptor.kind.as_str()));
+                assert_ne!(descriptor.kind, LEGACY_SUPERVISE_FALLTHROUGH);
+                assert!(!LEGACY_SSH_SERVICE_SCAN(&descriptor.kind, held, true));
+                assert_eq!(
+                    descriptor.source_digest.as_deref(),
+                    Some("0000000000000000000000000000000000000000000000000000000000000000")
+                );
+                assert_eq!(descriptor.source_path.as_deref(), Some("/sources/0.tar"));
+                assert_eq!(descriptor.source_size, Some(123));
+            }
+        }
+        let row = store.get_run(&run.id).unwrap().unwrap();
+        let descriptor = crate::jobs::BackendDescriptor::parse(&row.backend_json).unwrap();
+        assert_eq!(descriptor.job_id.as_deref(), Some("/orx/runs/engine_run"));
+        assert_eq!(
+            descriptor.source_digest.as_deref(),
+            Some("0000000000000000000000000000000000000000000000000000000000000000")
+        );
+        assert_eq!(descriptor.source_path.as_deref(), Some("/sources/0.tar"));
+        assert_eq!(descriptor.source_size, Some(123));
+        let digest = descriptor.source_digest.clone().unwrap();
+        let snapshot = dir.join(format!("source-snapshots/{digest}.tar"));
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        std::fs::write(&snapshot, "keep").unwrap();
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id = 'ssh_job'", [])
+            .unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(snapshot.exists());
+        let handle =
+            |json: &str| serde_json::from_str::<serde_json::Value>(json).unwrap()["handle"].take();
+        assert!(handle(&row.backend_json).is_object());
+        assert_eq!(handle(&descriptor.to_json()), handle(&row.backend_json));
+        assert!(store
+            .update_status(&run.id, RunStatus::Running, None, None)
+            .unwrap());
+        assert!(legacy_active_runs(&store.conn)
+            .iter()
+            .any(|(id, _)| id == &run.id));
+        drop(shared_guard);
+        drop(supervisor_guard);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_contact_and_submission_fence_survive_reopen() {
+        let (dir, store) = engine_fixture();
+        assert!(store.engine_run_state("missing").unwrap().is_none());
+        let mut run = run_fixture("engine_contact", "submitting", None);
+        run.backend_json = r#"{"kind":"hf_job"}"#.into();
+        store
+            .insert_submitting_run(SubmittingRun {
+                id: &run.id,
+                experiment_id: &run.experiment_id,
+                project_id: &run.project_id,
+                metadata: &crate::jobs::BackendDescriptor::parse(&run.backend_json).unwrap(),
+                command: &run.command,
+                created_at: run.created_at,
+                commit_sha: run.commit_sha.as_deref(),
+                chat_session_id: run.chat_session_id.as_deref(),
+                spec_digest: "digest",
+                launch: &test_launch(),
+            })
+            .unwrap();
+        let fence = SubmissionFence {
+            taken_at: 123,
+            submitter: Some(SubmitterIdentity {
+                pid: 1234,
+                starttime: u64::MAX,
+            }),
+        };
+        assert!(store.set_submission_fence(&run.id, 1, &fence).unwrap());
+        let contacts = [
+            Contact::Unreachable {
+                since: 100,
+                cause: "transport".into(),
+            },
+            Contact::NeedsAuth {
+                since: 200,
+                cause: "key rejected".into(),
+            },
+            Contact::Unreconciled {
+                since: 300,
+                detail: "submit unknown".into(),
+            },
+            Contact::Live,
+        ];
+        for contact in contacts {
+            assert!(store.set_run_contact(&run.id, &contact).unwrap());
+            let reopened = Store::open_at(dir.clone()).unwrap();
+            let state = reopened.engine_run_state(&run.id).unwrap().unwrap();
+            assert_eq!(state.contact, contact);
+            assert_eq!(state.spec_digest.as_deref(), Some("digest"));
+            assert_eq!(state.submission_attempt, 1);
+            assert_eq!(state.submission_fence.as_ref(), Some(&fence));
+            assert!(state.cancel_accepted_at.is_none());
+            assert_eq!(
+                reopened.get_run(&run.id).unwrap().unwrap().status,
+                "submitting"
+            );
+        }
+        assert!(store
+            .conn
+            .query_row(
+                "SELECT contact IS NULL FROM runs WHERE id = ?1",
+                [&run.id],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap());
+        assert!(!store.set_run_contact("missing", &Contact::Live).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_notice_backoff_survives_restart_and_expires_after_one_day() {
+        let (dir, store) = engine_fixture();
+        for run in ["ssh_job", "slurm_job"] {
+            store
+                .insert_run_notice(run, "owner", TERMINAL, TERMINAL, "result", 1)
+                .unwrap();
+        }
+        let start = 1_000_000;
+        let frozen = store.run_notice_batch_at("owner", start).unwrap();
+        assert_eq!(frozen.len(), 2);
+        drop(store);
+
+        let deadline = start + RUN_NOTICE_RETRY_WINDOW_MS;
+        let mut now = start;
+        let mut failures = 0;
+        while now < deadline {
+            let store = Store::open_at(dir.clone()).unwrap();
+            assert_eq!(store.run_notice_batch_at("owner", now).unwrap(), frozen);
+            failures += 1;
+            assert_eq!(
+                store
+                    .record_run_notice_failure(
+                        "owner",
+                        &frozen[0].client_turn_id,
+                        "rate limited",
+                        false,
+                        now
+                    )
+                    .unwrap(),
+                Some(failures)
+            );
+            let expected_minutes = match failures {
+                1 => 1,
+                2 => 5,
+                3 => 15,
+                _ => 60,
+            };
+            let due = (now + expected_minutes * 60_000).min(deadline);
+            let recorded: (i64, i64, Option<i64>) = store.conn.query_row(
+                "SELECT first_failure_at, next_delivery_at, retired_at FROM run_notices WHERE id = ?1",
+                [frozen[0].id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!(recorded, (start, due, None));
+            assert!(store
+                .run_notice_batch_at("owner", due - 1)
+                .unwrap()
+                .is_empty());
+            drop(store);
+            now = due;
+        }
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(store
+            .run_notice_batch_at("owner", deadline)
+            .unwrap()
+            .is_empty());
+        let retired: (i64, String) = store
+            .conn
+            .query_row(
+                "SELECT retired_at, delivery_error FROM run_notices WHERE id = ?1",
+                [frozen[0].id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            retired,
+            (
+                deadline,
+                "Retry window expired after 24 hours: rate limited".into()
+            )
+        );
+        assert_eq!(
+            store
+                .record_run_notice_failure(
+                    "owner",
+                    &frozen[0].client_turn_id,
+                    "again",
+                    false,
+                    deadline
+                )
+                .unwrap(),
+            None
+        );
+        assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_retired_notice_batch_does_not_block_idle_and_is_reported_on_its_run() {
+        let dir = std::env::temp_dir().join(format!("orx-retired-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .insert_run_notice("run", "owner", TERMINAL, TERMINAL, "done", 1)
+            .unwrap();
+        assert!(store.engine_idle_blocked().unwrap());
+        assert_eq!(store.run_notice_error("run").unwrap(), None);
+        let batch = store.run_notice_batch_at("owner", 10).unwrap();
+        store
+            .record_run_notice_failure(
+                "owner",
+                &batch[0].client_turn_id,
+                "harness removed",
+                true,
+                20,
+            )
+            .unwrap();
+        assert!(!store.engine_idle_blocked().unwrap());
+        assert_eq!(
+            store.run_notice_error("run").unwrap().as_deref(),
+            Some("harness removed")
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_permanent_notice_failure_keeps_reason_and_unblocks_later_batches() {
+        let (dir, store) = engine_fixture();
+        store
+            .insert_run_notice("ssh_job", "owner", ATTENTION, "attention:0", "outage", 1)
+            .unwrap();
+        let first = store.run_notice_batch_at("owner", 10).unwrap();
+        assert_eq!(
+            store
+                .record_run_notice_failure(
+                    "owner",
+                    &first[0].client_turn_id,
+                    "harness removed",
+                    true,
+                    20
+                )
+                .unwrap(),
+            Some(1)
+        );
+        store
+            .insert_run_notice("ssh_job", "owner", NOTIFY, "later", "later", 21)
+            .unwrap();
+        let later = store.run_notice_batch_at("owner", 21).unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].body, "later");
+        store
+            .mark_run_notice_batch_delivered("owner", &later[0].client_turn_id, 22)
+            .unwrap();
+        assert!(!store.settle_outage_notice("ssh_job", "owner").unwrap());
+        let retired: (i64, String) = store
+            .conn
+            .query_row(
+                "SELECT retired_at, delivery_error FROM run_notices WHERE id = ?1",
+                [first[0].id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retired, (20, "harness removed".into()));
+        assert!(store
+            .insert_run_notice(
+                "ssh_job",
+                "owner",
+                ATTENTION,
+                "attention:0",
+                "new outage",
+                23
+            )
+            .unwrap());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_notices_dedupe_freeze_and_retry_across_connections() {
+        let (dir, store) = engine_fixture();
+        let second = Store::open_at(dir.clone()).unwrap();
+        assert!(store.run_notice_batch("owner").unwrap().is_empty());
+        assert_eq!(store.run_subscribers("ssh_job").unwrap(), ["owner"]);
+        store.subscribe_run("ssh_job", "foreign", 1).unwrap();
+        store.subscribe_run("ssh_job", "foreign", 2).unwrap();
+        assert_eq!(
+            store.run_subscribers("ssh_job").unwrap(),
+            ["foreign", "owner"]
+        );
+        store.subscribe_run("ssh_job", "owner", 3).unwrap();
+        assert_eq!(
+            store.run_subscribers("ssh_job").unwrap(),
+            ["foreign", "owner"]
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT created_at FROM run_subscriptions WHERE chat_session_id = 'foreign'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        {
+            let tx = store.begin().unwrap();
+            store
+                .insert_run_notice("ssh_job", "owner", "terminal", "terminal", "rolled back", 1)
+                .unwrap();
+            tx.rollback().unwrap();
+        }
+        assert!(store.run_notice_batch("owner").unwrap().is_empty());
+        assert!(store
+            .insert_run_notice("ssh_job", "owner", "terminal", "terminal", "finished", 10)
+            .unwrap());
+        assert!(store
+            .insert_run_notice(
+                "slurm_job",
+                "owner",
+                "terminal",
+                "terminal",
+                "also finished",
+                11
+            )
+            .unwrap());
+        let frozen = store.run_notice_batch("owner").unwrap();
+        assert_eq!(frozen.len(), 2);
+        uuid::Uuid::parse_str(
+            frozen[0]
+                .client_turn_id
+                .strip_prefix("run-notice:")
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(frozen
+            .iter()
+            .all(|row| row.client_turn_id == frozen[0].client_turn_id));
+        assert!(!second
+            .insert_run_notice("ssh_job", "owner", "terminal", "terminal", "changed", 12)
+            .unwrap());
+        assert!(second
+            .insert_run_notice("ssh_job", "owner", "notify", "notify:1", "new bytes", 13)
+            .unwrap());
+        assert!(second
+            .insert_run_notice(
+                "ssh_job",
+                "foreign",
+                "terminal",
+                "terminal",
+                "foreign result",
+                14
+            )
+            .unwrap());
+        assert_eq!(second.run_notice_batch("owner").unwrap(), frozen);
+        assert_eq!(store.run_notice_batch("owner").unwrap(), frozen);
+        let foreign = second.run_notice_batch("foreign").unwrap();
+        assert_eq!(foreign.len(), 1);
+        assert_ne!(foreign[0].client_turn_id, frozen[0].client_turn_id);
+        let turn = frozen[0].client_turn_id.as_str();
+        second
+            .mark_run_notice_batch_delivered("foreign", turn, 15)
+            .unwrap();
+        assert_eq!(store.run_notice_batch("owner").unwrap(), frozen);
+        second
+            .mark_run_notice_batch_delivered("owner", turn, 16)
+            .unwrap();
+        store
+            .mark_run_notice_batch_delivered("owner", turn, 17)
+            .unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT MIN(delivered_at) FROM run_notices WHERE client_turn_id = ?1",
+                    [turn],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            16
+        );
+        let next = store.run_notice_batch("owner").unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].body, "new bytes");
+        assert_ne!(next[0].client_turn_id, frozen[0].client_turn_id);
+        drop(second);
+        drop(store);
+        let reopened = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(reopened.run_notice_batch("owner").unwrap(), next);
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_wakeup_migration_never_refires_and_preserves_foreign_chats() {
+        let (dir, store) = engine_fixture();
+        let claimed = store
+            .claim_run_wakeup("failed", "foreign")
+            .unwrap()
+            .unwrap();
+        assert!(!claimed.is_empty());
+        store.subscribe_run("ssh_job", "foreign", 1).unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store.migrate_run_wakeups().unwrap();
+        let subscriptions: Vec<(String, String)> = store
+            .conn
+            .prepare("SELECT run_id, chat_session_id FROM run_subscriptions ORDER BY 1,2")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            subscriptions,
+            [
+                ("ssh_job".into(), "foreign".into()),
+                ("ssh_job".into(), "owner".into())
+            ]
+        );
+        let delivered: (String, String, i64) = store
+            .conn
+            .query_row(
+                "SELECT kind, dedupe, delivered_at FROM run_notices WHERE run_id = 'done'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(delivered, ("terminal".into(), "terminal".into(), 500));
+        let alert: (String, String, i64) = store.conn.query_row(
+            "SELECT kind, chat_session_id, delivered_at FROM run_notices WHERE run_id = 'ssh_job'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(alert, ("attention".into(), "foreign".into(), 400));
+        assert!(store.run_notice_batch("owner").unwrap().is_empty());
+        let completion = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(completion.len(), 1);
+        assert_eq!(completion[0].run_id, "failed");
+        assert_eq!(
+            completion[0].body,
+            store
+                .terminal_notice_body(&store.get_run("failed").unwrap().unwrap())
+                .unwrap()
+        );
+        assert_eq!(completion[0].dedupe, TERMINAL);
+        let key = store
+            .outage_dedupe("ssh_job", "foreign", ATTENTION)
+            .unwrap();
+        assert_eq!(key, "attention:0");
+        assert!(!store
+            .insert_run_notice(
+                "ssh_job",
+                "foreign",
+                ATTENTION,
+                &key,
+                "duplicate outage",
+                500
+            )
+            .unwrap());
+        let recovered_key = store
+            .outage_dedupe("ssh_job", "foreign", RECOVERED)
+            .unwrap();
+        store
+            .insert_run_notice(
+                "ssh_job",
+                "foreign",
+                RECOVERED,
+                &recovered_key,
+                "recovered",
+                501,
+            )
+            .unwrap();
+        let next_key = store
+            .outage_dedupe("ssh_job", "foreign", ATTENTION)
+            .unwrap();
+        assert_eq!(next_key, "attention:1");
+        assert!(store
+            .insert_run_notice(
+                "ssh_job",
+                "foreign",
+                ATTENTION,
+                &next_key,
+                "next outage",
+                502
+            )
+            .unwrap());
+        assert!(!store
+            .insert_run_notice(
+                "done",
+                "owner",
+                "terminal",
+                "terminal",
+                "must not re-fire",
+                600
+            )
+            .unwrap());
+        let legacy_rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM chat_run_wakeups", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy_rows, 4);
+        store
+            .conn
+            .execute(
+                "DELETE FROM run_subscriptions WHERE chat_session_id = 'foreign'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        let reopened = Store::open_at(dir.clone()).unwrap();
+        reopened.migrate_run_wakeups().unwrap();
+        assert_eq!(
+            reopened
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM run_subscriptions WHERE chat_session_id = 'foreign'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_cancel_acceptance_survives_legacy_withdraw_and_handles_submitting() {
+        let (dir, store) = engine_fixture();
+        let path = dir.join("run-logs/slurm_job.cancel.lock");
+        let mut old_lock = open_lifecycle_lock_at(&path).unwrap();
+        let old_guard = old_lock.write().unwrap();
+        assert!(store.request_cancel("slurm_job", "old CLI").unwrap());
+        store.withdraw_cancel("slurm_job").unwrap();
+        drop(old_guard);
+        assert_eq!(store.accept_run_cancel("slurm_job", None).unwrap(), None);
+        let old_guard = old_lock.write().unwrap();
+        assert!(store.request_cancel("slurm_job", "old CLI").unwrap());
+        drop(old_guard);
+        let accepted = store.accept_run_cancel("slurm_job", None).unwrap().unwrap();
+        assert!(accepted > 0);
+        let old_guard = old_lock.write().unwrap();
+        store.withdraw_cancel("slurm_job").unwrap();
+        drop(old_guard);
+        assert_eq!(
+            store.accept_run_cancel("slurm_job", None).unwrap(),
+            Some(accepted)
+        );
+        let state = store.engine_run_state("slurm_job").unwrap().unwrap();
+        assert_eq!(state.cancel_accepted_at, Some(accepted));
+        assert!(
+            !store
+                .get_run("slurm_job")
+                .unwrap()
+                .unwrap()
+                .cancel_requested
+        );
+        let mut run = run_fixture("engine_cancel", "submitting", None);
+        run.backend_json = r#"{"kind":"modal_job"}"#.into();
+        store
+            .insert_submitting_run(SubmittingRun {
+                id: &run.id,
+                experiment_id: &run.experiment_id,
+                project_id: &run.project_id,
+                metadata: &crate::jobs::BackendDescriptor::parse(&run.backend_json).unwrap(),
+                command: &run.command,
+                created_at: run.created_at,
+                commit_sha: run.commit_sha.as_deref(),
+                chat_session_id: run.chat_session_id.as_deref(),
+                spec_digest: "digest",
+                launch: &test_launch(),
+            })
+            .unwrap();
+        assert!(!store.request_cancel(&run.id, "old CLI").unwrap());
+        assert!(store
+            .accept_run_cancel(&run.id, Some("API"))
+            .unwrap()
+            .is_some());
+        let fence = SubmissionFence {
+            taken_at: 1,
+            submitter: None,
+        };
+        assert!(!store.set_submission_fence(&run.id, 1, &fence).unwrap());
+        store
+            .accept_run_cancel(&run.id, Some("later API request"))
+            .unwrap();
+        assert_eq!(
+            store
+                .get_run(&run.id)
+                .unwrap()
+                .unwrap()
+                .cancel_reason
+                .as_deref(),
+            Some("API")
+        );
+        assert_eq!(store.accept_run_cancel("done", Some("API")).unwrap(), None);
+        assert_eq!(store.accept_run_cancel("missing", None).unwrap(), None);
+        assert!(store.accept_run_cancel("../escape", None).is_err());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_cancel_acceptance_waits_for_legacy_writer_to_commit_or_withdraw() {
+        let (dir, store) = engine_fixture();
+        let second = Store::open_at(dir.clone()).unwrap();
+        let mut old_lock =
+            open_lifecycle_lock_at(&dir.join("run-logs/slurm_job.cancel.lock")).unwrap();
+        let guard = old_lock.write().unwrap();
+        store.request_cancel("slurm_job", "old CLI").unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(second.accept_run_cancel("slurm_job", None).unwrap())
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        store.withdraw_cancel("slurm_job").unwrap();
+        drop(guard);
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            None
+        );
+        thread.join().unwrap();
+        assert!(store
+            .engine_run_state("slurm_job")
+            .unwrap()
+            .unwrap()
+            .cancel_accepted_at
+            .is_none());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
@@ -3441,6 +7473,1278 @@ mod tests {
             std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
             0o700
         );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Released binaries keep opening the store, so a column one knows keeps its
+    /// type, nullability and default, and a column it doesn't know accepts its inserts.
+    #[test]
+    fn schema_only_grows_from_the_last_release() {
+        let snapshot: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/contracts/store-schema.json")).unwrap();
+        let release = snapshot["release"].as_str().unwrap();
+        let dir = std::env::temp_dir().join(format!("orx-store-schema-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        for (table, released) in snapshot["tables"].as_object().unwrap() {
+            let mut statement = store
+                .conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let current: Vec<serde_json::Value> = statement
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "name": row.get::<_, String>(1)?,
+                        "type": row.get::<_, String>(2)?,
+                        "notnull": row.get::<_, bool>(3)?,
+                        "default": row.get::<_, Option<String>>(4)?,
+                        "pk": row.get::<_, i64>(5)?,
+                    }))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(!current.is_empty(), "{table} from {release} was dropped");
+
+            let released = released.as_array().unwrap();
+            for old in released {
+                let name = &old["name"];
+                let new = current
+                    .iter()
+                    .find(|column| &column["name"] == name)
+                    .unwrap_or_else(|| panic!("{table}.{name} from {release} was dropped"));
+                assert_eq!(new["type"], old["type"], "{table}.{name} type");
+                assert_eq!(new["pk"], old["pk"], "{table}.{name} primary key");
+                assert!(
+                    new["notnull"] == false || old["notnull"] == true,
+                    "{table}.{name} became NOT NULL"
+                );
+                assert!(
+                    old["default"].is_null() || !new["default"].is_null(),
+                    "{table}.{name} lost its default"
+                );
+            }
+            for new in &current {
+                let added = !released.iter().any(|old| old["name"] == new["name"]);
+                let insertable = new["notnull"] == false || !new["default"].is_null();
+                assert!(
+                    !added || insertable,
+                    "{table}.{} rejects inserts from {release}",
+                    new["name"]
+                );
+            }
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn project_with_run_artifacts(store: &Store, project: &str, run: &str, digest: &str) {
+        let repo = store.data_dir.join(format!("repo-{project}"));
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("keep"), "repository").unwrap();
+        store.conn.execute(
+            "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, repo_path, created_at, updated_at)
+             VALUES (?1, ?1, ?1, '', '', ?2, 1, 1)",
+            params![project, repo.to_string_lossy()],
+        ).unwrap();
+        let descriptor = serde_json::json!({
+            "kind": "local_job", "sourceDigest": digest,
+            "jobId": repo, "sourcePath": repo.join("keep"),
+        });
+        store.conn.execute(
+            "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+             VALUES (?1, 'experiment', ?2, 'done', ?3, 1, 1)",
+            params![run, project, descriptor.to_string()],
+        ).unwrap();
+        for path in [
+            store
+                .data_dir
+                .join("local-runs")
+                .join(run)
+                .join("repo/output"),
+            store.data_dir.join("run-logs").join(format!("{run}.log")),
+            store
+                .data_dir
+                .join("submission-handles")
+                .join(format!("{run}.json")),
+            store
+                .data_dir
+                .join("source-snapshots")
+                .join(format!("{digest}.tar")),
+            store
+                .data_dir
+                .join("source-snapshots")
+                .join(format!("{digest}.hf/payload")),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "artifact").unwrap();
+        }
+        std::fs::write(
+            store
+                .data_dir
+                .join("submission-handles")
+                .join(format!("{run}.json")),
+            descriptor.to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn orphan_cleanup_reclaims_rowless_local_artifacts_and_preserves_other_runs() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-orphan-artifacts-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let orphan = uuid::Uuid::new_v4().to_string();
+        let shared_orphan = uuid::Uuid::new_v4().to_string();
+        let surviving = uuid::Uuid::new_v4().to_string();
+        let abandoned = uuid::Uuid::new_v4().to_string();
+        let tinker = uuid::Uuid::new_v4().to_string();
+        let unreferenced = "a".repeat(64);
+        let shared = "b".repeat(64);
+        project_with_run_artifacts(&store, "old", &orphan, &unreferenced);
+        project_with_run_artifacts(&store, "old-shared", &shared_orphan, &shared);
+        project_with_run_artifacts(&store, "surviving", &surviving, &shared);
+        project_with_run_artifacts(&store, "abandoned", &abandoned, &unreferenced);
+        project_with_run_artifacts(&store, "tinker", &tinker, &unreferenced);
+        let tinker_handle = dir
+            .join("submission-handles")
+            .join(format!("{tinker}.json"));
+        let mut descriptor: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&tinker_handle).unwrap()).unwrap();
+        descriptor["kind"] = serde_json::json!("tinker_job");
+        std::fs::write(tinker_handle, descriptor.to_string()).unwrap();
+        let abandoned_dir = dir.join("local-runs").join(&abandoned);
+        std::fs::write(abandoned_dir.join("run.sh"), "echo never started").unwrap();
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE project_id != 'surviving'", [])
+            .unwrap();
+        for id in [&orphan, &shared_orphan, &tinker] {
+            std::fs::write(dir.join("local-runs").join(id).join("exit_code"), "0").unwrap();
+        }
+        let zip = dir
+            .join("source-snapshots")
+            .join(format!("{}.zip", "c".repeat(64)));
+        std::fs::write(&zip, "upload-only").unwrap();
+        std::fs::write(dir.join("source-snapshots/keep.txt"), "not an archive").unwrap();
+        let sidecar_only = uuid::Uuid::new_v4().to_string();
+        for name in [
+            format!("{orphan}.supervisor.log"),
+            format!("{orphan}.cancel.lock"),
+            format!("{orphan}.supervisor.lock"),
+            format!("{sidecar_only}.supervisor.log"),
+        ] {
+            std::fs::write(dir.join("run-logs").join(name), "").unwrap();
+        }
+        let staging_lock = store.run_artifacts_lock().unwrap();
+        let staging = staging_lock.read().unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(dir.join("local-runs").join(&orphan).is_dir());
+        drop(staging);
+        drop(staging_lock);
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert_eq!(
+            std::fs::read_dir(dir.join("run-logs"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            [std::ffi::OsString::from(format!("{surviving}.log"))]
+        );
+        for id in [&orphan, &shared_orphan, &abandoned, &tinker] {
+            assert!(!dir.join("local-runs").join(id).exists());
+            assert!(!dir.join("run-logs").join(format!("{id}.log")).exists());
+            assert!(!dir
+                .join("submission-handles")
+                .join(format!("{id}.json"))
+                .exists());
+        }
+        for extension in ["tar", "hf"] {
+            assert!(!dir
+                .join("source-snapshots")
+                .join(format!("{unreferenced}.{extension}"))
+                .exists());
+            assert!(dir
+                .join("source-snapshots")
+                .join(format!("{shared}.{extension}"))
+                .exists());
+        }
+        assert!(!zip.exists());
+        assert!(dir.join("source-snapshots/keep.txt").is_file());
+        assert!(dir
+            .join("local-runs")
+            .join(&surviving)
+            .join("repo/output")
+            .is_file());
+        assert!(dir.join("repo-old/keep").is_file());
+        assert!(dir.join("repo-surviving/keep").is_file());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_cleanup_slims_only_finished_runs_beyond_each_projects_newest() {
+        let dir = std::env::temp_dir().join(format!("orx-slim-runs-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run_dir = |id: &str| dir.join("local-runs").join(id);
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(outside.join("uv")).unwrap();
+        let mut runs = Vec::new();
+        for (created_at, project, status, kind) in [
+            (1, "busy", "done", "local_job"),
+            (2, "busy", "running", "local_job"),
+            (3, "busy", "failed", "local_job"),
+            (4, "busy", "cancelled", "local_job"),
+            (5, "busy", "done", "local_job"),
+            (6, "busy", "done", "local_job"),
+            (7, "busy", "done", "local_job"),
+            (8, "busy", "done", "ssh_job"),
+            (1, "quiet", "done", "local_job"),
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            store.conn.execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES (?1, 'experiment', ?2, ?3, json_object('kind', ?4), ?5, ?5)",
+                params![id, project, status, kind, created_at],
+            ).unwrap();
+            for path in ["repo/.venv/bin", "repo/.cache/nanochat", "tensorboard"] {
+                std::fs::create_dir_all(run_dir(&id).join(path)).unwrap();
+            }
+            std::fs::write(run_dir(&id).join("exit_code"), "0").unwrap();
+            runs.push(id);
+        }
+        let (oldest, running, symlinked, supervised) = (&runs[0], &runs[1], &runs[2], &runs[3]);
+        std::fs::create_dir_all(run_dir(oldest).join("repo/.cache/uv")).unwrap();
+        let symlinked_repo = run_dir(symlinked).join("repo");
+        std::fs::remove_dir_all(symlinked_repo.join(".cache")).unwrap();
+        std::os::unix::fs::symlink(&outside, symlinked_repo.join(".cache")).unwrap();
+        let mut supervisor =
+            open_lifecycle_lock_at(&store.run_artifact_path(SUPERVISOR_LOCK, supervised)).unwrap();
+        let held = supervisor.write().unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        drop(held);
+        assert!(!run_dir(oldest).join("repo/.venv").exists());
+        assert!(!run_dir(oldest).join("repo/.cache/uv").exists());
+        for kept in ["repo/.cache/nanochat", "tensorboard", "exit_code"] {
+            assert!(run_dir(oldest).join(kept).exists(), "{kept}");
+        }
+        assert!(!symlinked_repo.join(".venv").exists());
+        assert!(outside.join("uv").is_dir());
+        let newest_and_quiet = &runs[4..];
+        for kept in [running, supervised].into_iter().chain(newest_and_quiet) {
+            assert!(run_dir(kept).join("repo/.venv").is_dir(), "{kept}");
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shared_ssh_log_cleanup_preserves_retained_runs_and_removes_deleted_generations() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-ssh-log-cleanup-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let deleted = uuid::Uuid::new_v4().to_string();
+        let retained = uuid::Uuid::new_v4().to_string();
+        project_with_run_artifacts(&store, "deleted", &deleted, &"a".repeat(64));
+        project_with_run_artifacts(&store, "retained", &retained, &"b".repeat(64));
+        let suffixes = [
+            "cursor.json".to_string(),
+            "pending.json".to_string(),
+            "cursor.lock".to_string(),
+            "supervisor.shared-ssh.lock".to_string(),
+            format!("{}.log", uuid::Uuid::new_v4()),
+            format!("{}.log", uuid::Uuid::new_v4()),
+        ];
+        for run in [&deleted, &retained] {
+            for suffix in &suffixes {
+                std::fs::write(dir.join("run-logs").join(format!("{run}.{suffix}")), "log")
+                    .unwrap();
+            }
+        }
+        let orphan = dir.join("run-logs").join(format!(
+            "{}.{}.log",
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&orphan, "interrupted generation").unwrap();
+        let unrelated = dir.join("run-logs").join(format!("{deleted}.notes.log"));
+        std::fs::write(&unrelated, "unrecognized file").unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!orphan.exists());
+        for run in [&deleted, &retained] {
+            for suffix in &suffixes {
+                assert!(dir
+                    .join("run-logs")
+                    .join(format!("{run}.{suffix}"))
+                    .is_file());
+            }
+        }
+        store.delete_local_project("deleted").unwrap();
+        for suffix in &suffixes {
+            assert!(!dir
+                .join("run-logs")
+                .join(format!("{deleted}.{suffix}"))
+                .exists());
+            assert!(dir
+                .join("run-logs")
+                .join(format!("{retained}.{suffix}"))
+                .is_file());
+        }
+        assert!(unrelated.is_file());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn orphan_cleanup_skips_malformed_rows_and_keeps_every_snapshot() {
+        let dir = std::env::temp_dir().join(format!("orx-malformed-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let orphan = uuid::Uuid::new_v4().to_string();
+        let unreferenced = "f".repeat(64);
+        project_with_run_artifacts(&store, "old", &orphan, &unreferenced);
+        project_with_run_artifacts(&store, "malformed", "malformed-run", &"0".repeat(64));
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE project_id = 'old'", [])
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE runs SET backend_json = 'not json'", [])
+            .unwrap();
+        std::fs::write(dir.join("local-runs").join(&orphan).join("exit_code"), "0").unwrap();
+        let unreadable = uuid::Uuid::new_v4().to_string();
+        let unreadable_handle = dir
+            .join("submission-handles")
+            .join(format!("{unreadable}.json"));
+        std::fs::create_dir_all(&unreadable_handle).unwrap();
+        let pass = store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!pass.more);
+        assert_eq!(pass.kept.len(), 1);
+        assert_eq!(pass.kept[0].0, unreadable);
+        assert!(!dir.join("local-runs").join(&orphan).exists());
+        assert!(unreadable_handle.is_dir());
+        assert!(dir
+            .join("source-snapshots")
+            .join(format!("{unreferenced}.tar"))
+            .is_file());
+        store.delete_local_project("malformed").unwrap();
+        assert!(!dir.join("local-runs/malformed-run").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn experiment_delete_reclaims_its_run_artifacts_only_after_checks_pass() {
+        let dir = std::env::temp_dir().join(format!("orx-exp-artifacts-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        let sibling = uuid::Uuid::new_v4().to_string();
+        let (digest, shared) = ("d".repeat(64), "e".repeat(64));
+        project_with_run_artifacts(&store, "p", &run, &digest);
+        project_with_run_artifacts(&store, "q", &sibling, &shared);
+        store
+            .conn
+            .execute(
+                "INSERT INTO local_experiments (id, project_id, slug, branch_name, title, description,
+                   run_command, agent_status, created_at, updated_at)
+                 VALUES ('experiment', 'p', 'e', 'orx/e', NULL, NULL, '', 'idle', 1, 1)",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET experiment_id = 'other' WHERE id = ?1",
+                params![sibling],
+            )
+            .unwrap();
+        let refused = |store: &Store| {
+            let mut called = false;
+            assert!(store
+                .delete_local_experiment("experiment", || {
+                    called = true;
+                    Ok(())
+                })
+                .is_err());
+            assert!(!called);
+        };
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET status = 'running' WHERE id = ?1",
+                params![run],
+            )
+            .unwrap();
+        refused(&store);
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET status = 'done' WHERE id = ?1",
+                params![run],
+            )
+            .unwrap();
+        // A terminal run whose supervisor is still finishing is refused before anything is undone.
+        let mut supervisor =
+            open_lifecycle_lock_at(&dir.join("run-logs").join(format!("{run}.supervisor.lock")))
+                .unwrap();
+        let held = supervisor.write().unwrap();
+        refused(&store);
+        drop(held);
+        drop(supervisor);
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET backend_json = ?2 WHERE id = ?1",
+                params![
+                    run,
+                    r#"{"kind":"engine","handle":{"type":"Ssh","host":"dead","root":"/orx"}}"#
+                ],
+            )
+            .unwrap();
+        store
+            .set_run_contact(
+                &run,
+                &Contact::Unreachable {
+                    since: 1,
+                    cause: "host gone".into(),
+                },
+            )
+            .unwrap();
+        let mut supervisor =
+            open_lifecycle_lock_at(&dir.join("run-logs").join(format!("{run}.supervisor.lock")))
+                .unwrap();
+        let held = supervisor.write().unwrap();
+        store
+            .delete_local_experiment("experiment", || Ok(()))
+            .unwrap();
+        drop(held);
+        drop(supervisor);
+        // A repeat delete is refused before touching anything.
+        refused(&store);
+        assert!(!dir.join("local-runs").join(&run).exists());
+        assert!(!dir.join("run-logs").join(format!("{run}.log")).exists());
+        assert!(!dir
+            .join("source-snapshots")
+            .join(format!("{digest}.tar"))
+            .exists());
+        assert!(store.get_run(&run).unwrap().is_none());
+        assert!(dir
+            .join("local-runs")
+            .join(&sibling)
+            .join("repo/output")
+            .is_file());
+        assert!(dir
+            .join("source-snapshots")
+            .join(format!("{shared}.tar"))
+            .is_file());
+        assert!(store.get_run(&sibling).unwrap().is_some());
+        assert!(store.get_local_project("p").unwrap().is_some());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn remote_cleanups_keep_each_projects_newest_runs_until_project_delete() {
+        let dir = std::env::temp_dir().join(format!("orx-remote-cleanup-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "p", "local", &"d".repeat(64));
+        store
+            .conn
+            .execute("UPDATE runs SET created_at = 10 WHERE id = 'local'", [])
+            .unwrap();
+        let insert = |id: &str, status: &str, kind: &str, created_at: i64| {
+            let descriptor =
+                serde_json::json!({"kind": kind, "namespace": "lab", "sourceDigest": id});
+            store.conn.execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES (?1, 'experiment', 'p', ?2, ?3, ?4, ?4)",
+                params![id, status, descriptor.to_string(), created_at],
+            ).unwrap();
+        };
+        let due = |store: &Store| {
+            let mut entries = store
+                .due_remote_cleanups(10)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry.run_id, entry.deleted))
+                .collect::<Vec<_>>();
+            entries.sort();
+            entries
+        };
+        let finished = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| (id.to_string(), false))
+                .collect::<Vec<_>>()
+        };
+        insert("r1", "done", "ssh_job", 1);
+        insert("r2", "failed", "slurm_job", 2);
+        insert("r3", "done", "ssh_job", 3);
+        insert("box", "done", "openresearch_job", 4);
+        for id in ["r1", "r2", "r3", "box", "local"] {
+            store.queue_finished_remote_cleanup(id).unwrap();
+        }
+        // The newest three remote runs stay whole; local and other kinds don't count.
+        assert!(due(&store).is_empty());
+        insert("r4", "done", "ssh_job", 5);
+        store.queue_finished_remote_cleanup("r4").unwrap();
+        assert_eq!(due(&store), finished(&["r1"]));
+        // As locally, an unfinished newer run takes one of the slots.
+        insert("r5", "running", "slurm_job", 6);
+        assert_eq!(due(&store), finished(&["r1", "r2"]));
+        store
+            .defer_remote_cleanup("r1", false, "unreachable")
+            .unwrap();
+        assert_eq!(due(&store), finished(&["r2"]));
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'done'", [])
+            .unwrap();
+        store.delete_local_project("p").unwrap();
+        // Deletion marks every SSH/Slurm run, including the newest and one waiting to retry.
+        assert_eq!(
+            due(&store),
+            ["r1", "r2", "r3", "r4", "r5"]
+                .iter()
+                .map(|id| (id.to_string(), true))
+                .collect::<Vec<_>>()
+        );
+        // A pass that started before the deletion queued only finishes what it acted on.
+        store.finish_remote_cleanup("r2", false).unwrap();
+        store.defer_remote_cleanup("r2", false, "stale").unwrap();
+        store.finish_remote_cleanup("r1", true).unwrap();
+        assert_eq!(due(&store).len(), 4);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unfinished_log_collection_survives_retries_and_a_collected_log_stays_collected() {
+        let dir = std::env::temp_dir().join(format!("orx-collection-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(!store.log_collection_pending("legacy").unwrap());
+        // Kept before its terminal commit queues it: the queue leaves it kept.
+        store.finish_log_collection("early").unwrap();
+        store.queue_log_collection("early").unwrap();
+        assert!(!store.log_collection_pending("early").unwrap());
+
+        store.queue_log_collection("late").unwrap();
+        assert_eq!(store.log_collection("late").unwrap(), Some((false, None)));
+        assert_eq!(store.due_log_collections(10).unwrap(), ["late"]);
+        assert!(!store
+            .defer_log_collection("late", "host in backoff")
+            .unwrap());
+        assert!(store.due_log_collections(10).unwrap().is_empty());
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(store.log_collection_pending("late").unwrap());
+        // Retries reach their cap once, then go on hourly; it never stops being owed.
+        let capped: Vec<bool> = (1..LOG_COLLECTION_FAILED_AFTER + 3)
+            .map(|_| store.defer_log_collection("late", "gone").unwrap())
+            .collect();
+        assert_eq!(capped.iter().filter(|capped| **capped).count(), 1);
+        assert_eq!(
+            store.log_collection("late").unwrap(),
+            Some((true, Some("gone".into())))
+        );
+        let next: i64 = store
+            .conn
+            .query_row(
+                "SELECT next_attempt_at FROM log_collections WHERE run_id = 'late'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(next - now_ms() <= LOG_COLLECTION_MAX_RETRY_MS);
+        store.retry_log_collections_now(None).unwrap();
+        assert_eq!(store.due_log_collections(10).unwrap(), ["late"]);
+        store.finish_log_collection("late").unwrap();
+        assert!(!store.log_collection_pending("late").unwrap());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_engine_slurm_run_reads_as_the_descriptor_exp_status_shows() {
+        let launch = LaunchSpec {
+            kind: "slurm_job".into(),
+            target: Some("login".into()),
+            options: serde_json::json!({
+                "timeout_seconds": 3600,
+                "directives": {"cpus-per-task": "4", "mem": "32G", "ntasks": "1"},
+            }),
+        };
+        let stored = r#"{"kind":"engine","jobId":"7","handle":{"type":"Slurm","host":"login","root":"~/.orx/engine","job":"7"}}"#;
+        let public = public_backend(stored, Some(&launch)).unwrap();
+        let descriptor = crate::jobs::BackendDescriptor::parse(&public.to_string()).unwrap();
+        assert_eq!(descriptor.kind, "slurm_job");
+        assert_eq!(descriptor.slurm_ref().unwrap(), ("login", "7"));
+        assert_eq!(descriptor.timeout_secs, Some(3600));
+        assert_eq!(
+            crate::local::slurm::status_resources(&descriptor),
+            "requested cpus 4  mem 32G"
+        );
+        assert_eq!(public_backend(stored, None).unwrap()["kind"], "engine");
+    }
+
+    #[test]
+    fn engine_runs_queue_their_host_dir_and_container_for_cleanup() {
+        let dir = std::env::temp_dir().join(format!("orx-engine-cleanup-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let container = serde_json::json!({
+            "reference": "dev", "id": "c1", "startedAt": "t", "runDir": "/root/.orx/runs/e1"
+        });
+        for (id, handle, launch, created_at) in [
+            (
+                "e1",
+                r#"{"type":"Ssh","host":"lab","root":"~/.orx/engine"}"#,
+                serde_json::json!({"kind":"ssh_job","target":"lab","options":{"container":container}}),
+                1,
+            ),
+            (
+                "e2",
+                r#"{"type":"Slurm","host":"login","root":"~/.orx/engine","job":"7"}"#,
+                serde_json::json!({"kind":"slurm_job","target":"login","options":{}}),
+                2,
+            ),
+            (
+                "e3",
+                r#"{"type":"Api","provider":"hf_job","account":{"target":"org","context":null},"ids":["j"]}"#,
+                serde_json::json!({"kind":"hf_job","target":"org","options":{}}),
+                3,
+            ),
+        ] {
+            store.conn.execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, launch_spec, created_at, updated_at)
+                 VALUES (?1, 'experiment', 'p', 'done', ?2, ?3, ?4, ?4)",
+                params![id, format!(r#"{{"kind":"engine","handle":{handle}}}"#), launch.to_string(), created_at],
+            ).unwrap();
+            store.queue_finished_remote_cleanup(id).unwrap();
+        }
+        store.delete_local_project("p").unwrap();
+        let mut due = store.due_remote_cleanups(10).unwrap();
+        due.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+        assert_eq!(
+            due.iter()
+                .map(|entry| entry.run_id.as_str())
+                .collect::<Vec<_>>(),
+            ["e1", "e2"]
+        );
+        let queued: serde_json::Value = serde_json::from_str(&due[0].backend_json).unwrap();
+        assert_eq!(queued["sshContainer"], container);
+        assert_eq!(queued["handle"]["host"], "lab");
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn retention_rechecks_tombstones_and_output_debt_until_explicit_deletion() {
+        let (dir, store) = engine_fixture();
+        for n in 0..5 {
+            let mut run = run_fixture(&format!("retention-{n}"), "done", None);
+            run.backend_json =
+                r#"{"kind":"engine","handle":{"type":"Ssh","host":"lab","root":"/orx"}}"#.into();
+            run.created_at = n;
+            run.project_id = "retention".into();
+            store.upsert_run(&run).unwrap();
+            store.queue_finished_remote_cleanup(&run.id).unwrap();
+        }
+        let run = "retention-0";
+        assert!(store.remote_cleanup_eligible(run, false).unwrap());
+        store
+            .set_run_contact(
+                run,
+                &Contact::Unreconciled {
+                    since: 1,
+                    detail: "kill pending".into(),
+                },
+            )
+            .unwrap();
+        assert!(!store.remote_cleanup_eligible(run, false).unwrap());
+        assert!(!store
+            .due_remote_cleanups(100)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.run_id == run));
+        store.set_run_contact(run, &Contact::Live).unwrap();
+        store.queue_log_collection(run).unwrap();
+        assert!(!store.remote_cleanup_eligible(run, false).unwrap());
+        store.finish_log_collection(run).unwrap();
+        assert!(store.remote_cleanup_eligible(run, false).unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE remote_cleanups SET deleted = 1 WHERE run_id = ?1",
+                [run],
+            )
+            .unwrap();
+        store
+            .set_run_contact(
+                run,
+                &Contact::NeedsAuth {
+                    since: 1,
+                    cause: "offline".into(),
+                },
+            )
+            .unwrap();
+        assert!(!store.remote_cleanup_eligible(run, true).unwrap());
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id = ?1", [run])
+            .unwrap();
+        assert!(store.remote_cleanup_eligible(run, true).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_sweeps_come_due_after_the_idle_window() {
+        let dir = std::env::temp_dir().join(format!("orx-source-sweep-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.schedule_source_sweep("lab", None).unwrap();
+        store
+            .schedule_source_sweep("lab", Some("/scratch/orx"))
+            .unwrap();
+        assert!(store.due_source_sweeps().unwrap().is_empty());
+        store
+            .conn
+            .execute("UPDATE remote_source_sweeps SET due_at = 0", [])
+            .unwrap();
+        let mut sweeps = store.due_source_sweeps().unwrap();
+        sweeps.sort();
+        assert_eq!(
+            sweeps,
+            [
+                ("lab".to_string(), None),
+                ("lab".to_string(), Some("/scratch/orx".to_string()))
+            ]
+        );
+        store.finish_source_sweep("lab", None).unwrap();
+        assert_eq!(store.due_source_sweeps().unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_wrapper_runs_survive_slimming_orphan_reclaim_and_block_data_dir_moves() {
+        let dir = std::env::temp_dir().join(format!("orx-live-wrapper-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        project_with_run_artifacts(&store, "wrapper", &id, &"d".repeat(64));
+        let run_dir = dir.join("local-runs").join(&id);
+        std::fs::create_dir_all(run_dir.join("repo/.venv")).unwrap();
+        let script = "touch ready; sleep 60";
+        std::fs::write(run_dir.join("run.sh"), script).unwrap();
+        orx_host::publish(
+            &run_dir.join("launch.json"),
+            &orx_host_proto::LaunchIntent {
+                run: id.clone(),
+                digest: orx_host::sha(script.as_bytes()),
+                run_sh: script.into(),
+                env: Default::default(),
+                source: None,
+                cancel_sh: None,
+            },
+        )
+        .unwrap();
+        let binary = orx_test_support::host_binaries().join(format!(
+            "orx-host-{}-{}",
+            if cfg!(target_os = "macos") {
+                "darwin"
+            } else {
+                "linux"
+            },
+            std::env::consts::ARCH
+        ));
+        let mut wrapper = orx_test_support::Process::spawn(
+            crate::process::command(binary)
+                .arg("wrap")
+                .arg(&run_dir)
+                .env("ORX_TEST_FAST_STOPS", "1"),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !run_dir.join("ready").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let identity: orx_host_proto::ProcessIdentity =
+            orx_host::read_json(&run_dir.join("wrapper.json")).unwrap();
+        assert!(!store.slim_run(&id).unwrap());
+        assert!(run_dir.join("repo/.venv").is_dir());
+        assert_eq!(store.count_active_runs().unwrap(), 1);
+        std::fs::remove_file(dir.join("submission-handles").join(format!("{id}.json"))).unwrap();
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id=?1", [&id])
+            .unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(run_dir.join("repo/.venv").is_dir());
+        assert!(run_dir.join("repo/output").is_file());
+        assert_eq!(store.count_active_runs().unwrap(), 1);
+        let mut elsewhere = identity.clone();
+        elsewhere.node.push_str("-elsewhere");
+        orx_host::publish(&run_dir.join("wrapper.json"), &elsewhere).unwrap();
+        assert!(store.slim_run(&id).is_err());
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(run_dir.join("repo/.venv").is_dir());
+        assert_eq!(store.count_active_runs().unwrap(), 1);
+        orx_host::publish(&run_dir.join("wrapper.json"), &identity).unwrap();
+        orx_host::wrapper::cancel(&run_dir).unwrap();
+        wrapper.wait(Duration::from_secs(5)).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn orphan_cleanup_preserves_live_local_runs_and_remote_recovery_handles() {
+        let dir = std::env::temp_dir().join(format!("orx-live-orphan-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let live = uuid::Uuid::new_v4().to_string();
+        let remote = uuid::Uuid::new_v4().to_string();
+        let digest = "d".repeat(64);
+        project_with_run_artifacts(&store, "live", &live, &digest);
+        let run_dir = dir.join("local-runs").join(&live);
+        std::fs::write(run_dir.join("pid"), std::process::id().to_string()).unwrap();
+        let remote_handle = dir
+            .join("submission-handles")
+            .join(format!("{remote}.json"));
+        std::fs::write(
+            &remote_handle,
+            serde_json::json!({"kind": "ssh_job", "sourceDigest": "e".repeat(64)}).to_string(),
+        )
+        .unwrap();
+        let remote_snapshot = dir
+            .join("source-snapshots")
+            .join(format!("{}.tar", "e".repeat(64)));
+        std::fs::write(&remote_snapshot, "provider recovery source").unwrap();
+        store.conn.execute("DELETE FROM runs", []).unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(run_dir.join("repo/output").is_file());
+        assert!(dir.join("run-logs").join(format!("{live}.log")).is_file());
+        assert!(dir
+            .join("source-snapshots")
+            .join(format!("{digest}.tar"))
+            .is_file());
+        project_with_run_artifacts(&store, "deleting", "deleted-run", &digest);
+        store.delete_local_project("deleting").unwrap();
+        assert!(dir
+            .join("source-snapshots")
+            .join(format!("{digest}.tar"))
+            .is_file());
+        project_with_run_artifacts(&store, "deleting-remote", "deleted-remote", &"e".repeat(64));
+        store.delete_local_project("deleting-remote").unwrap();
+        assert!(remote_snapshot.is_file());
+        std::fs::write(run_dir.join("exit_code"), "0").unwrap();
+        // The pid is this test process, whose own group the probe would read as live.
+        std::fs::remove_file(run_dir.join("pid")).unwrap();
+        let path = dir.join("run-logs").join(format!("{live}.supervisor.lock"));
+        let mut supervisor = open_lifecycle_lock_at(&path).unwrap();
+        let guard = supervisor.write().unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(run_dir.is_dir());
+        drop(guard);
+        drop(supervisor);
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!run_dir.exists());
+        assert!(!dir
+            .join("source-snapshots")
+            .join(format!("{digest}.tar"))
+            .exists());
+        assert!(!path.exists());
+        assert!(remote_handle.is_file());
+        assert!(remote_snapshot.is_file());
+        assert!(!dir
+            .join("run-logs")
+            .join(format!("{remote}.supervisor.lock"))
+            .exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_cleanup_keeps_a_finished_run_while_its_process_group_lives() {
+        let dir = std::env::temp_dir().join(format!("orx-group-orphan-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        project_with_run_artifacts(&store, "cancelled", &run, &"f".repeat(64));
+        let run_dir = dir.join("local-runs").join(&run);
+        let mut survivor = crate::jobs::localbox::spawn_lingering_group(&run_dir);
+        std::fs::write(run_dir.join("exit_code"), "143").unwrap();
+        let refused = store.delete_local_project("cancelled").unwrap_err();
+        assert!(
+            refused.to_string().contains("still has running processes"),
+            "{refused}"
+        );
+        store.conn.execute("DELETE FROM runs", []).unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(run_dir.join("repo/output").is_file());
+        survivor.kill().unwrap();
+        survivor.wait().unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!run_dir.exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn project_deletion_cleans_run_artifacts_and_only_unreferenced_snapshots() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-delete-artifacts-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let shared = "a".repeat(64);
+        project_with_run_artifacts(&store, "first", "run-first", &shared);
+        project_with_run_artifacts(&store, "second", "run-second", &shared);
+        let zip = dir
+            .join("source-snapshots")
+            .join(format!("{}.zip", "f".repeat(64)));
+        std::fs::write(
+            &zip,
+            "Ray upload package with a different digest from the TAR",
+        )
+        .unwrap();
+        store.delete_local_project("first").unwrap();
+        assert!(!zip.exists());
+        for name in [
+            "local-runs/run-first",
+            "run-logs/run-first.log",
+            "submission-handles/run-first.json",
+        ] {
+            assert!(!dir.join(name).exists(), "{name}");
+        }
+        assert!(store.get_run("run-first").unwrap().is_none());
+        assert!(store.get_local_project("first").unwrap().is_none());
+        for name in [
+            "local-runs/run-second/repo/output",
+            "run-logs/run-second.log",
+            "submission-handles/run-second.json",
+            "repo-first/keep",
+            "repo-second/keep",
+        ] {
+            assert!(dir.join(name).is_file(), "{name}");
+        }
+        let snapshot = dir.join("source-snapshots").join(format!("{shared}.tar"));
+        let staging = dir.join("source-snapshots").join(format!("{shared}.hf"));
+        assert!(snapshot.is_file());
+        assert!(staging.is_dir());
+        // Partial previous cleanup and retries are harmless.
+        std::fs::remove_file(dir.join("run-logs/run-second.log")).unwrap();
+        store.delete_local_project("second").unwrap();
+        store.delete_local_project("second").unwrap();
+        assert!(!snapshot.exists());
+        assert!(!staging.exists());
+        assert!(!dir.join("local-runs/run-second").exists());
+        assert!(!dir.join("submission-handles/run-second.json").exists());
+        assert!(dir.join("repo-second/keep").is_file());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn project_deletion_preserves_active_runs_and_retries_after_staging() {
+        let dir = std::env::temp_dir().join(format!("orx-delete-busy-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "project", "run", &"b".repeat(64));
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'running'", [])
+            .unwrap();
+        assert!(store.delete_local_project("project").is_err());
+        assert!(store.get_run("run").unwrap().is_some());
+        assert!(dir.join("local-runs/run/repo/output").exists());
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'done'", [])
+            .unwrap();
+        let staging_lock = store.run_artifacts_lock().unwrap();
+        let staging = staging_lock.read().unwrap();
+        assert!(store
+            .delete_local_project("project")
+            .unwrap_err()
+            .to_string()
+            .contains("busy"));
+        assert!(store.get_local_project("project").unwrap().is_some());
+        assert!(dir.join("local-runs/run/repo/output").exists());
+        drop(staging);
+        drop(staging_lock);
+        let lock_path = dir.join("run-artifacts.lock");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock = open_lifecycle_lock_at(&lock_path).unwrap();
+            let _staging = lock.read().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        held_rx.recv().unwrap();
+        let started = std::time::Instant::now();
+        // Deletion waits out a submission that finishes within RUN_ARTIFACTS_WAIT.
+        store.delete_local_project("project").unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        holder.join().unwrap();
+        assert!(!dir.join("local-runs/run").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn refused_project_deletion_never_reaches_the_native_purge() {
+        let dir = std::env::temp_dir().join(format!("orx-delete-order-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "project", "run", &"e".repeat(64));
+        let mut session = chat_session_fixture("chat");
+        session.project_id = "project".into();
+        session.harness = "opencode".into();
+        session.native_session_id = Some("native".into());
+        store.create_chat_session(&session).unwrap();
+        let purged = std::cell::Cell::new(false);
+        let purge = || {
+            purged.set(true);
+            Ok(())
+        };
+        let refuse = |reason: &str| {
+            let error = store
+                .delete_local_project_with("project", Some(purge))
+                .unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+            assert!(!purged.get());
+            assert!(store.get_chat_session("chat").unwrap().is_some());
+        };
+
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'running'", [])
+            .unwrap();
+        refuse("in flight");
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'done'", [])
+            .unwrap();
+
+        let staging_lock = store.run_artifacts_lock().unwrap();
+        let staging = staging_lock.read().unwrap();
+        refuse("busy");
+        drop(staging);
+
+        let moving = store.acquire_data_dir_move_lock().unwrap();
+        assert!(store.claim_data_dir_move("move").unwrap());
+        refuse("being moved");
+        store.release_data_dir_move("move").unwrap();
+        drop(moving);
+
+        let native_deletion = store.lock_native_deletion().unwrap();
+        refuse("native chat deletion");
+        drop(native_deletion);
+        assert!(dir.join("local-runs/run/repo/output").is_file());
+
+        #[cfg(unix)]
+        {
+            std::fs::rename(dir.join("local-runs"), dir.join("outside")).unwrap();
+            std::os::unix::fs::symlink(dir.join("outside"), dir.join("local-runs")).unwrap();
+            refuse("Refusing artifact cleanup");
+            std::fs::remove_file(dir.join("local-runs")).unwrap();
+            std::fs::rename(dir.join("outside"), dir.join("local-runs")).unwrap();
+        }
+
+        assert!(store
+            .delete_local_project_with("project", Some(|| Err(anyhow!("purge failed"))))
+            .is_err());
+        assert!(store.get_chat_session("chat").unwrap().is_some());
+
+        store
+            .delete_local_project_with(
+                "project",
+                Some(|| {
+                    assert!(store.run_artifacts_lock()?.try_read().is_err());
+                    assert!(store.lock_native_deletion().is_err());
+                    purge()
+                }),
+            )
+            .unwrap();
+        assert!(purged.get());
+        assert!(store.get_chat_session("chat").unwrap().is_none());
+        assert!(store.get_local_project("project").unwrap().is_none());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deleting_chats_removes_only_attachments_no_other_message_shows() {
+        let dir = std::env::temp_dir().join(format!("orx-attachments-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "project", "run", &"a".repeat(64));
+        let attachments = dir.join(crate::local::chat::ATTACHMENTS_DIR);
+        std::fs::create_dir_all(&attachments).unwrap();
+        let chats: [(&str, &str, &[&str]); 3] = [
+            (
+                "first",
+                "project",
+                &["att-1__own.png", "att-2__shared.pdf", "keep.txt"],
+            ),
+            ("second", "project", &["att-3__own.png"]),
+            ("other", "elsewhere", &["att-2__shared.pdf"]),
+        ];
+        for (chat, project, files) in chats {
+            let mut session = chat_session_fixture(chat);
+            session.project_id = project.into();
+            store.create_chat_session(&session).unwrap();
+            let parts = files
+                .iter()
+                .enumerate()
+                .map(|(i, file)| serde_json::json!({ "id": format!("img{i}"), "type": "image", "text": file }))
+                .collect::<Vec<_>>();
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: format!("msg_{chat}"),
+                    session_id: chat.into(),
+                    role: "user".into(),
+                    parts_json: serde_json::Value::from(parts).to_string(),
+                    created_at: 1,
+                    completed_at: None,
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    native_harness: None,
+                })
+                .unwrap();
+        }
+        for file in [
+            "att-1__own.png",
+            "att-2__shared.pdf",
+            "att-3__own.png",
+            "keep.txt",
+        ] {
+            std::fs::write(attachments.join(file), "bytes").unwrap();
+        }
+
+        store.delete_chat_session("first").unwrap();
+        assert!(!attachments.join("att-1__own.png").exists());
+        assert!(attachments.join("att-2__shared.pdf").exists());
+        store.delete_local_project("project").unwrap();
+        assert!(!attachments.join("att-3__own.png").exists());
+        assert!(attachments.join("att-2__shared.pdf").exists());
+        store.delete_chat_session("other").unwrap();
+        assert!(!attachments.join("att-2__shared.pdf").exists());
+        assert!(attachments.join("keep.txt").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn attachment_sweep_spares_shown_recent_and_foreign_files() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-attachment-sweep-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(!store.cleanup_orphaned_chat_attachments().unwrap());
+        store
+            .create_chat_session(&chat_session_fixture("chat"))
+            .unwrap();
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: "msg".into(),
+                session_id: "chat".into(),
+                role: "user".into(),
+                parts_json: r#"[{"id":"img0","type":"image","text":"att-1__shown.png"}]"#.into(),
+                created_at: 1,
+                completed_at: None,
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+                native_harness: None,
+            })
+            .unwrap();
+        let attachments = dir.join(crate::local::chat::ATTACHMENTS_DIR);
+        std::fs::create_dir_all(&attachments).unwrap();
+        let old = std::time::SystemTime::now() - 2 * CHAT_ATTACHMENT_SETTLE;
+        for file in ["att-1__shown.png", "att-2__orphan.png", "notes.txt"] {
+            let file = std::fs::File::create(attachments.join(file)).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        std::fs::write(attachments.join("att-3__unsent.png"), "bytes").unwrap();
+
+        let moving = store.acquire_data_dir_move_lock().unwrap();
+        assert!(store.claim_data_dir_move("move").unwrap());
+        store.cleanup_orphaned_chat_attachments().unwrap();
+        assert!(attachments.join("att-2__orphan.png").exists());
+        store.release_data_dir_move("move").unwrap();
+        drop(moving);
+
+        let hold = store.hold_off_data_dir_move().unwrap().unwrap();
+        assert!(store.acquire_data_dir_move_lock().is_err());
+        drop(hold);
+
+        assert!(!store.cleanup_orphaned_chat_attachments().unwrap());
+        assert!(!attachments.join("att-2__orphan.png").exists());
+        for kept in ["att-1__shown.png", "att-3__unsent.png", "notes.txt"] {
+            assert!(attachments.join(kept).exists(), "{kept}");
+        }
+
+        let orphans = ["att-4__a.png", "att-5__b.png", "att-6__c.png"];
+        for file in orphans {
+            let file = std::fs::File::create(attachments.join(file)).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        let passes = (0..=orphans.len())
+            .take_while(|_| {
+                store
+                    .cleanup_orphaned_chat_attachments_within(Duration::ZERO)
+                    .unwrap()
+            })
+            .count();
+        assert_eq!(
+            passes,
+            orphans.len(),
+            "each exhausted pass still removes one"
+        );
+        assert!(orphans.iter().all(|file| !attachments.join(file).exists()));
+        assert!(attachments.join("att-1__shown.png").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn project_deletion_rejects_unsafe_artifact_identifiers() {
+        let dir = std::env::temp_dir().join(format!("orx-delete-unsafe-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "project", "run", &"c".repeat(64));
+        store
+            .conn
+            .execute("UPDATE runs SET id = '../repo-project'", [])
+            .unwrap();
+        assert!(store.delete_local_project("project").is_err());
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET id = 'run', backend_json = ?1",
+                [r#"{"kind":"local_job","sourceDigest":"../repo-project"}"#],
+            )
+            .unwrap();
+        // Snapshot removal works from directory names, so a bad digest cannot steer it.
+        store.delete_local_project("project").unwrap();
+        assert!(dir.join("repo-project/keep").is_file());
+        assert!(!dir.join("local-runs/run").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_deletion_does_not_follow_symlinked_artifact_roots() {
+        let dir = std::env::temp_dir().join(format!("orx-delete-symlink-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "project", "run", &"d".repeat(64));
+        std::fs::rename(dir.join("local-runs"), dir.join("outside")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("local-runs")).unwrap();
+        assert!(store.delete_local_project("project").is_err());
+        assert!(store.get_run("run").unwrap().is_some());
+        assert!(dir.join("outside/run/repo/output").is_file());
+        assert!(dir.join("run-logs/run.log").is_file());
+        assert!(store.cleanup_orphaned_run_artifacts().is_err());
+        std::fs::remove_file(dir.join("local-runs")).unwrap();
+        std::fs::rename(dir.join("outside"), dir.join("local-runs")).unwrap();
+        store.delete_local_project("project").unwrap();
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3582,7 +8886,7 @@ mod tests {
         let preferences = store.ui_state().unwrap();
         let global: GlobalWorkspaceState = serde_json::from_value(serde_json::json!({
             "lastLocation":"/projects/first/settings/storage", "railOpen":false,
-            "panelWidth":620, "experimentsView":"table"
+            "panelWidth":620, "railWidth":280, "experimentsView":"table"
         }))
         .unwrap();
         store.set_global_workspace_state(&global).unwrap();
@@ -3642,6 +8946,7 @@ mod tests {
                 preferred_agent: None,
                 workspace: None,
                 preferred_autonomy: None,
+                nested_delegation: false,
             }
         );
 
@@ -3665,6 +8970,7 @@ mod tests {
                 preferred_agent: Some(selection),
                 workspace: None,
                 preferred_autonomy: Some(Autonomy::Copilot),
+                nested_delegation: false,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -3713,37 +9019,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_session_context_usage_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("orx-store-ctxusage-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        store
-            .create_chat_session(&chat_session_fixture("chat_1"))
-            .unwrap();
-        // Fresh session: no usage yet.
-        assert!(store
-            .get_chat_session("chat_1")
-            .unwrap()
-            .unwrap()
-            .context_usage_json
-            .is_none());
-        // Set, then read it back verbatim.
-        let json = r#"{"usedTokens":27564,"contextWindow":200000}"#;
-        store
-            .set_chat_session_context_usage("chat_1", json)
-            .unwrap();
-        assert_eq!(
-            store
-                .get_chat_session("chat_1")
-                .unwrap()
-                .unwrap()
-                .context_usage_json
-                .as_deref(),
-            Some(json)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn permission_and_plan_migration_preserves_each_harness_native_contract() {
         let dir =
             std::env::temp_dir().join(format!("orx-store-plan-migrate-{}", uuid::Uuid::new_v4()));
@@ -3786,36 +9061,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_plan_reset_marker_roundtrips_and_clears() {
-        let dir =
-            std::env::temp_dir().join(format!("orx-store-plan-reset-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        let mut session = chat_session_fixture("codex");
-        session.harness = "codex".into();
-        session.permission_mode = Some("approve-for-me".into());
-        store.create_chat_session(&session).unwrap();
-        store
-            .set_chat_session_plan_state("codex", false, true)
-            .unwrap();
-        assert!(
-            store
-                .get_chat_session("codex")
-                .unwrap()
-                .unwrap()
-                .plan_reset_pending
-        );
-        store.clear_chat_session_plan_reset("codex").unwrap();
-        assert!(
-            !store
-                .get_chat_session("codex")
-                .unwrap()
-                .unwrap()
-                .plan_reset_pending
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn chat_message_existence_tracks_persisted_messages() {
         let dir = std::env::temp_dir().join(format!("orx-store-messages-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -3835,6 +9080,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                native_harness: None,
             })
             .unwrap();
         assert!(store.has_chat_messages("chat_1").unwrap());
@@ -3886,6 +9132,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: Some("old-thread".into()),
+                native_harness: None,
             })
             .unwrap();
         assert!(store
@@ -3915,6 +9162,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         assert_eq!(
             store.admit_chat_turn(Some(&user), &turn).unwrap(),
@@ -3951,6 +9199,41 @@ mod tests {
             "one"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn submission_lookup_uses_client_ids_for_queued_and_completed_turns() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-submissions-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        store
+            .insert_queued_chat_message(&StoredQueuedChatMessage {
+                id: "q_queue-id".into(),
+                session_id: "chat_1".into(),
+                client_turn_id: "ct_queue-id".into(),
+                request_hash: "hash".into(),
+                payload_json: "{}".into(),
+                created_at: 1,
+            })
+            .unwrap();
+        assert!(store.has_chat_submission("chat_1", "ct_queue-id").unwrap());
+        assert!(!store.has_chat_submission("chat_1", "q_queue-id").unwrap());
+        assert!(!store.has_chat_submission("another", "ct_queue-id").unwrap());
+        let mut turn = chat_turn_fixture("finished", "ct_finished");
+        turn.state = "completed".into();
+        store.admit_chat_turn(None, &turn).unwrap();
+        assert!(store.has_chat_submission("chat_1", "ct_finished").unwrap());
+        assert!(store.claim_steer("chat_1", "ct_steer", "hash").unwrap());
+        assert!(!store.has_chat_submission("chat_1", "ct_steer").unwrap());
+        store.finish_steer("chat_1", "ct_steer").unwrap();
+        assert!(store.has_chat_submission("chat_1", "ct_steer").unwrap());
+        assert!(!store.has_chat_submission("another", "ct_steer").unwrap());
+        store.delete_queued_chat_message("q_queue-id").unwrap();
+        assert!(!store.has_chat_submission("chat_1", "ct_queue-id").unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4025,7 +9308,7 @@ mod tests {
             .conn
             .execute(
                 "UPDATE chat_turn_leases SET heartbeat_at = ?1 WHERE chat_session_id = 'chat_1'",
-                params![now_ms() - CHAT_TURN_LEASE_TTL_MS - 1],
+                params![expired_before(CHAT_TURN_LEASE_TTL) - 1],
             )
             .unwrap();
         assert_eq!(
@@ -4059,6 +9342,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         store.upsert_chat_message(&message).unwrap();
         message.completed_at = None;
@@ -4103,6 +9387,7 @@ mod tests {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .unwrap();
         }
@@ -4169,6 +9454,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         store.admit_chat_turn(Some(&user), &turn).unwrap();
         assert!(store
@@ -4258,6 +9544,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         assert!(store
             .mark_chat_turn_recovered_with_message("turn_1", "recovery_1", &assistant)
@@ -4305,6 +9592,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
+            native_harness: None,
         };
         store.admit_chat_turn(Some(&user), &turn).unwrap();
         let recovery = StoredChatMessage {
@@ -4317,6 +9605,7 @@ mod tests {
             parent_id: Some(user.id.clone()),
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
+            native_harness: None,
         };
         assert!(store
             .upsert_chat_recovery_message_if_actionable(&turn.id, &recovery)
@@ -4370,6 +9659,83 @@ mod tests {
         assert!(recovered.plan_mode);
         assert_eq!(recovered.reasoning_level.as_deref(), Some("low"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steer_and_turn_admission_cannot_claim_the_same_client_id() {
+        let dir = std::env::temp_dir().join(format!("orx-steer-claim-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        assert!(store.claim_steer("chat_1", "ct1", "hash").unwrap());
+        let turn = chat_turn_fixture("turn1", "ct1");
+        assert!(matches!(
+            store.admit_chat_turn(None, &turn).unwrap(),
+            ChatTurnAdmission::Conflict
+        ));
+        let queued = StoredQueuedChatMessage {
+            id: "q1".into(),
+            session_id: "chat_1".into(),
+            client_turn_id: "ct1".into(),
+            request_hash: "hash".into(),
+            payload_json: "{}".into(),
+            created_at: 1,
+        };
+        assert!(store.insert_queued_chat_message(&queued).is_err());
+        let other = chat_turn_fixture("turn2", "ct2");
+        assert!(matches!(
+            store.admit_chat_turn(None, &other).unwrap(),
+            ChatTurnAdmission::Inserted
+        ));
+        assert!(!store.claim_steer("chat_1", "ct2", "hash").unwrap());
+        let queued_first = StoredQueuedChatMessage {
+            id: "q3".into(),
+            session_id: "chat_1".into(),
+            client_turn_id: "ct3".into(),
+            request_hash: "hash".into(),
+            payload_json: "{}".into(),
+            created_at: 1,
+        };
+        store.insert_queued_chat_message(&queued_first).unwrap();
+        assert!(!store.claim_steer("chat_1", "ct3", "hash").unwrap());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_steer_and_turn_admission_have_one_winner() {
+        let dir = std::env::temp_dir().join(format!("orx-steer-race-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        for i in 0..10 {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let steer_dir = dir.clone();
+            let turn_dir = dir.clone();
+            let steer_barrier = barrier.clone();
+            let id = format!("client-{i}");
+            let steer_id = id.clone();
+            let turn_id = id.clone();
+            let steer = std::thread::spawn(move || {
+                let store = Store::open_at(steer_dir).unwrap();
+                steer_barrier.wait();
+                store.claim_steer("chat_1", &steer_id, "hash").unwrap()
+            });
+            let turn = std::thread::spawn(move || {
+                let store = Store::open_at(turn_dir).unwrap();
+                let turn = chat_turn_fixture(&format!("turn-{i}"), &turn_id);
+                barrier.wait();
+                matches!(
+                    store.admit_chat_turn(None, &turn).unwrap(),
+                    ChatTurnAdmission::Inserted
+                )
+            });
+            assert_ne!(steer.join().unwrap(), turn.join().unwrap());
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4432,6 +9798,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         assert_eq!(
             store
@@ -4466,6 +9833,144 @@ mod tests {
             Some("m2")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_deletion_includes_inactive_branches_and_preserves_shared_sessions() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-native-delete-refs").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        for (id, harness, native_id) in [
+            ("delete", "opencode", "current"),
+            ("keep", "claude-code", "shared"),
+            ("cursor", "cursor", "current"),
+        ] {
+            let mut session = chat_session_fixture(id);
+            session.harness = harness.into();
+            session.native_session_id = Some(native_id.into());
+            store.create_chat_session(&session).unwrap();
+        }
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
+                 base_native_session_id, result_native_session_id)
+             VALUES ('branch', 'delete', 'assistant', '[]', 1, 'old', 'shared'),
+                    ('other-branch', 'keep', 'assistant', '[]', 1, NULL, 'kept-branch');",
+            )
+            .unwrap();
+        let (deleting, retained) = store
+            .native_sessions_for_deletion(&["delete".into()], &["opencode", "claude-code"])
+            .unwrap();
+        assert_eq!(deleting, ["current".into(), "old".into()].into());
+        assert_eq!(retained, ["kept-branch".into(), "shared".into()].into());
+        let (deleting, retained) = store
+            .native_sessions_for_deletion(
+                &["delete".into(), "keep".into()],
+                &["opencode", "claude-code"],
+            )
+            .unwrap();
+        assert_eq!(
+            deleting,
+            [
+                "current".into(),
+                "old".into(),
+                "kept-branch".into(),
+                "shared".into()
+            ]
+            .into()
+        );
+        assert!(retained.is_empty());
+    }
+
+    #[test]
+    fn native_ids_outside_skips_only_the_given_chats() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-native-outside").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        for (id, native_id) in [("gone", "own"), ("kept", "other")] {
+            let mut session = chat_session_fixture(id);
+            session.native_session_id = Some(native_id.into());
+            store.create_chat_session(&session).unwrap();
+        }
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
+                 base_native_session_id, result_native_session_id)
+             VALUES ('a', 'gone', 'assistant', '[]', 1, 'own-base', 'own-result'),
+                    ('b', 'kept', 'assistant', '[]', 1, 'other-base', 'other-result');",
+            )
+            .unwrap();
+        let outside = store.native_ids_outside(&["gone".into()]).unwrap();
+        assert_eq!(
+            outside,
+            ["other", "other-base", "other-result"]
+                .map(String::from)
+                .into()
+        );
+        assert_eq!(store.native_ids_outside(&[]).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn native_deletion_lock_serializes_shared_owners_across_processes() {
+        const CHILD_DIR: &str = "ORX_TEST_NATIVE_DELETE_DIR";
+        const CHILD_PHASE: &str = "ORX_TEST_NATIVE_DELETE_PHASE";
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            let store = Store::open_at(dir.into()).unwrap();
+            if std::env::var(CHILD_PHASE).unwrap() == "blocked" {
+                assert!(store.lock_native_deletion().is_err());
+            } else {
+                // A released lock lingers in children the parent's other tests forked, until
+                // they exec.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let _lock = loop {
+                    match store.lock_native_deletion() {
+                        Ok(lock) => break lock,
+                        Err(error) => assert!(std::time::Instant::now() < deadline, "{error}"),
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                let (deleting, retained) = store
+                    .native_sessions_for_deletion(&["second".into()], &["opencode", "claude-code"])
+                    .unwrap();
+                assert_eq!(deleting, ["shared".into()].into());
+                assert!(retained.is_empty());
+                store.delete_chat_session("second").unwrap();
+            }
+            return;
+        }
+        let dir = crate::local::git::TemporaryDirectory::new("orx-native-delete-lock").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        for id in ["first", "second"] {
+            let mut session = chat_session_fixture(id);
+            session.harness = "opencode".into();
+            session.native_session_id = Some("shared".into());
+            store.create_chat_session(&session).unwrap();
+        }
+        let run_child = |phase| {
+            let output = crate::process::command(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "store::tests::native_deletion_lock_serializes_shared_owners_across_processes",
+                    "--nocapture",
+                ])
+                .env(CHILD_DIR, dir.path())
+                .env(CHILD_PHASE, phase)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        let lock = store.lock_native_deletion().unwrap();
+        let (deleting, retained) = store
+            .native_sessions_for_deletion(&["first".into()], &["opencode", "claude-code"])
+            .unwrap();
+        assert!(deleting.is_empty());
+        assert_eq!(retained, ["shared".into()].into());
+        run_child("blocked");
+        store.delete_chat_session("first").unwrap();
+        drop(lock);
+        run_child("retry");
+        let _lock = store.lock_native_deletion().unwrap();
+        assert!(store.get_chat_session("second").unwrap().is_none());
     }
 
     fn chat_session_fixture(id: &str) -> StoredChatSession {
@@ -4544,6 +10049,7 @@ mod tests {
             name: "Saved agent".into(),
             executable: "original-agent".into(),
             arguments: vec!["original argument".into()],
+            unknown: Default::default(),
         };
         store.conn.execute(
             "INSERT INTO acp_sessions(session_id, launch_json, configuration_json) VALUES (?1, ?2, ?3)",
@@ -4613,6 +10119,7 @@ mod tests {
                     completed_at: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .unwrap();
         }
@@ -4657,18 +10164,67 @@ mod tests {
     }
 
     #[test]
-    fn chat_session_autonomy_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("orx-store-autonomy-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        let mut session = chat_session_fixture("chat_a");
+    fn chat_session_setters_survive_a_reopen() {
+        let dir = std::env::temp_dir().join(format!("orx-store-setters-{}", uuid::Uuid::new_v4()));
+        const USAGE: &str = r#"{"usedTokens":27564,"contextWindow":200000}"#;
+        let mut session = chat_session_fixture("chat");
         session.autonomy = Some("copilot".into());
-        store.create_chat_session(&session).unwrap();
-        let autonomy = |store: &Store| store.get_chat_session("chat_a").unwrap().unwrap().autonomy;
-        assert_eq!(autonomy(&store).as_deref(), Some("copilot"));
-        store
-            .set_chat_session_autonomy("chat_a", Autonomy::Agentic)
+        Store::open_at(dir.clone())
+            .unwrap()
+            .create_chat_session(&session)
             .unwrap();
-        assert_eq!(autonomy(&store).as_deref(), Some("agentic"));
+        let read = || {
+            let store = Store::open_at(dir.clone()).unwrap();
+            store.get_chat_session("chat").unwrap().unwrap()
+        };
+        let fresh = read();
+        assert_eq!(fresh.autonomy.as_deref(), Some("copilot"));
+        assert_eq!(fresh.context_usage_json, None);
+        assert_eq!((fresh.title, fresh.title_source), (None, None));
+        assert!(!fresh.plan_reset_pending);
+
+        type Case = (fn(&Store), fn(&StoredChatSession) -> bool);
+        let cases: [Case; 5] = [
+            (
+                |store| {
+                    store
+                        .set_chat_session_autonomy("chat", Autonomy::Agentic)
+                        .unwrap()
+                },
+                |chat| chat.autonomy.as_deref() == Some("agentic"),
+            ),
+            (
+                |store| store.set_chat_session_context_usage("chat", USAGE).unwrap(),
+                |chat| chat.context_usage_json.as_deref() == Some(USAGE),
+            ),
+            (
+                |store| {
+                    store
+                        .set_chat_session_title("chat", "First line…", "fallback")
+                        .unwrap()
+                },
+                |chat| {
+                    chat.title.as_deref() == Some("First line…")
+                        && chat.title_source.as_deref() == Some("fallback")
+                },
+            ),
+            (
+                |store| {
+                    store
+                        .set_chat_session_plan_state("chat", false, true)
+                        .unwrap()
+                },
+                |chat| chat.plan_reset_pending,
+            ),
+            (
+                |store| store.clear_chat_session_plan_reset("chat").unwrap(),
+                |chat| !chat.plan_reset_pending,
+            ),
+        ];
+        for (i, (set, check)) in cases.into_iter().enumerate() {
+            set(&Store::open_at(dir.clone()).unwrap());
+            assert!(check(&read()), "case {i}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4695,6 +10251,14 @@ mod tests {
             store.chat_worktree_owner("chat_side").unwrap(),
             "chat_parent"
         );
+        let mut nested = chat_session_fixture("chat_nested");
+        nested.side_parent_session_id = Some("chat_side".into());
+        store.create_chat_session(&nested).unwrap();
+        assert_eq!(
+            store.chat_worktree_owner("chat_nested").unwrap(),
+            "chat_parent"
+        );
+        store.delete_chat_session("chat_nested").unwrap();
         assert_eq!(store.chat_worktree_owner("chat_gone").unwrap(), "chat_gone");
         assert!(store.delete_chat_session("chat_parent").is_err());
         assert!(store.get_chat_session("chat_parent").unwrap().is_some());
@@ -4831,28 +10395,6 @@ mod tests {
             2
         );
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn title_source_roundtrips_and_defaults_to_none() {
-        let dir = std::env::temp_dir().join(format!("orx-store-titlesrc-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-
-        store
-            .create_chat_session(&chat_session_fixture("chat_1"))
-            .unwrap();
-        let fresh = store.get_chat_session("chat_1").unwrap().unwrap();
-        assert!(fresh.title.is_none());
-        assert!(fresh.title_source.is_none());
-
-        store
-            .set_chat_session_title("chat_1", "First line…", "fallback")
-            .unwrap();
-        let after = store.get_chat_session("chat_1").unwrap().unwrap();
-        assert_eq!(after.title.as_deref(), Some("First line…"));
-        assert_eq!(after.title_source.as_deref(), Some("fallback"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -5076,22 +10618,31 @@ mod tests {
     }
 
     #[test]
-    fn run_status_is_terminal_matches_the_three_absorbing_states() {
-        for status in RunStatus::ALL {
-            assert_eq!(
-                status.is_terminal(),
-                matches!(
-                    status,
-                    RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled | RunStatus::Lost
-                )
-            );
+    fn terminal_statuses_are_exactly_the_absorbing_ones() {
+        for from in RunStatus::ALL {
+            let absorbing = RunStatus::ALL
+                .into_iter()
+                .all(|to| !from.can_transition_to(to));
+            assert_eq!(from.is_terminal(), absorbing, "{from}");
         }
     }
 
+    /// Rows written by every shipped version hold these strings.
     #[test]
-    fn run_status_as_str_round_trips_through_parse() {
-        for status in RunStatus::ALL {
-            assert_eq!(RunStatus::parse(status.as_str()), Some(status));
+    fn run_status_stored_strings_are_stable() {
+        use RunStatus::*;
+        let stored = [
+            (Starting, "starting"),
+            (Running, "running"),
+            (Done, "done"),
+            (Failed, "failed"),
+            (Cancelled, "cancelled"),
+            (Lost, "lost"),
+        ];
+        assert_eq!(stored.map(|(status, _)| status), RunStatus::ALL);
+        for (status, text) in stored {
+            assert_eq!(status.as_str(), text);
+            assert_eq!(RunStatus::parse(text), Some(status));
         }
         assert_eq!(RunStatus::parse("not-a-real-status"), None);
         assert!(!is_terminal_status("not-a-real-status"));
@@ -5294,276 +10845,263 @@ mod tests {
     }
 
     #[test]
-    fn run_chat_session_id_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("orx-store-runsess-{}", uuid::Uuid::new_v4()));
+    fn news_of_a_turn_names_the_answers_it_overtook() {
+        let dir = std::env::temp_dir().join(format!("orx-store-untold-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-
-        store
-            .upsert_run(&run_fixture("run_owned", "starting", Some("chat_A")))
-            .unwrap();
-        store
-            .upsert_run(&run_fixture("run_orphan", "starting", None))
-            .unwrap();
-
-        assert_eq!(
-            store.get_run("run_owned").unwrap().unwrap().chat_session_id,
-            Some("chat_A".to_string())
-        );
-        assert_eq!(
+        for id in ["chat_parent", "chat_child"] {
             store
-                .get_run("run_orphan")
-                .unwrap()
-                .unwrap()
-                .chat_session_id,
-            None
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn lost_run_wakes_its_waiting_chat() {
-        let dir = std::env::temp_dir().join(format!("orx-lost-wake-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        store
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        store
-            .upsert_run(&run_fixture("run_lost", "lost", Some("chat_A")))
-            .unwrap();
-        store.register_run_wakeup("run_lost", "chat_A").unwrap();
-        store.prune_run_wakeups().unwrap();
-        let ready = store.list_ready_run_wakeups().unwrap();
-        assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].run.id, "run_lost");
-        drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn run_wakeups_are_idempotent_ready_only_at_success_or_failure_and_pruned() {
-        let dir = std::env::temp_dir().join(format!("orx-store-wake-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        store
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        for (id, status) in [
-            ("run_active", "running"),
-            ("run_done", "done"),
-            ("run_failed", "failed"),
-            ("run_cancelled", "cancelled"),
-        ] {
-            store
-                .upsert_run(&run_fixture(id, status, Some("chat_A")))
+                .create_chat_session(&chat_session_fixture(id))
                 .unwrap();
-            assert_eq!(
-                store.register_run_wakeup(id, "chat_A").unwrap(),
-                RunWakeupRegistration::Scheduled
-            );
-            assert_eq!(
-                store.register_run_wakeup(id, "chat_A").unwrap(),
-                RunWakeupRegistration::AlreadyPending
-            );
         }
-        store.register_run_wakeup("missing_run", "chat_A").unwrap();
+        let finish = |id: &str, created_at: i64| {
+            let mut turn = chat_turn_fixture(id, &format!("client-{id}"));
+            turn.session_id = "chat_child".into();
+            turn.created_at = created_at;
+            store.admit_chat_turn(None, &turn).unwrap();
+            store.complete_chat_turn(id).unwrap();
+        };
+        finish("history", 1);
         store
-            .register_run_wakeup("run_done", "missing_chat")
+            .subscribe_chat("chat_parent", "chat_child", Some("history"))
             .unwrap();
+        finish("one", 2);
+        finish("two", 3);
 
-        store.prune_run_wakeups().unwrap();
-        let ready = store.list_ready_run_wakeups().unwrap();
+        let ready = store.list_ready_chat_subscriptions().unwrap();
+        assert_eq!(ready[0].turn_id, "two");
         assert_eq!(
-            ready
-                .iter()
-                .map(|wakeup| wakeup.run.id.as_str())
-                .collect::<Vec<_>>(),
-            ["run_done", "run_failed"]
+            store.untold_chat_answers(&ready[0]).unwrap(),
+            ["assistant_one"],
+            "the subscriber was never told of `one`, and `history` came before it subscribed"
         );
-
-        assert!(store
-            .update_status("run_active", RunStatus::Done, Some(2), Some(0))
-            .unwrap());
-        assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 3);
-        let token = store
-            .claim_run_wakeup("run_done", "chat_A")
+        let told = store
+            .claim_chat_subscription("chat_parent", "chat_child", ToldEvent::Turn("two"))
             .unwrap()
             .unwrap();
-        assert!(store
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .is_none());
-        assert!(store
-            .list_ready_run_wakeups()
-            .unwrap()
-            .iter()
-            .any(|wakeup| wakeup.run.id == "run_done" && wakeup.state == "claimed"));
         store
-            .release_run_wakeup("run_done", "chat_A", &token)
-            .unwrap();
-        assert!(store
-            .list_ready_run_wakeups()
-            .unwrap()
-            .iter()
-            .any(|wakeup| wakeup.run.id == "run_done"));
-        let token = store
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .unwrap();
-        assert!(store
-            .mark_run_wakeup_delivered("run_done", "chat_A", &token)
-            .unwrap());
-        assert_eq!(
-            store.register_run_wakeup("run_done", "chat_A").unwrap(),
-            RunWakeupRegistration::AlreadyDelivered
-        );
-        assert!(store
-            .list_ready_run_wakeups()
-            .unwrap()
-            .iter()
-            .all(|wakeup| wakeup.run.id != "run_done"));
-
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn monitoring_alert_claims_once_and_keeps_the_terminal_wakeup() {
-        let dir = std::env::temp_dir().join(format!("orx-store-alert-{}", uuid::Uuid::new_v4()));
-        let first = Store::open_at(dir.clone()).unwrap();
-        first
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        for (id, status) in [("run_live", "starting"), ("run_done", "done")] {
-            first
-                .upsert_run(&run_fixture(id, status, Some("chat_A")))
-                .unwrap();
-            first.register_run_wakeup(id, "chat_A").unwrap();
-        }
-        let second = Store::open_at(dir.clone()).unwrap();
-
-        let active = first.list_active_run_wakeups().unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].run.id, "run_live");
-        assert!(!active[0].monitoring_alerted);
-        assert!(first
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", true)
-            .unwrap());
-        assert!(!second
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", true)
-            .unwrap());
-        assert!(second.list_active_run_wakeups().unwrap()[0].monitoring_alerted);
-
-        assert!(second
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", false)
-            .unwrap());
-        assert!(!first
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", false)
-            .unwrap());
-
-        first
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", true)
-            .unwrap();
-        assert!(first
-            .update_status("run_live", RunStatus::Done, Some(2), Some(0))
-            .unwrap());
-        assert!(first.list_active_run_wakeups().unwrap().is_empty());
-        assert!(first
-            .list_ready_run_wakeups()
-            .unwrap()
-            .iter()
-            .any(|wakeup| wakeup.run.id == "run_live" && wakeup.state == "pending"));
-        first
-            .claim_run_wakeup("run_live", "chat_A")
-            .unwrap()
-            .unwrap();
-        assert!(!first
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", false)
-            .unwrap());
-
-        drop(second);
-        drop(first);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn run_wakeup_claim_is_atomic_across_store_connections_and_recoverable() {
-        let dir = std::env::temp_dir().join(format!("orx-store-claim-{}", uuid::Uuid::new_v4()));
-        let first = Store::open_at(dir.clone()).unwrap();
-        first
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        first
-            .upsert_run(&run_fixture("run_done", "done", Some("chat_A")))
-            .unwrap();
-        first.register_run_wakeup("run_done", "chat_A").unwrap();
-        let second = Store::open_at(dir.clone()).unwrap();
-
-        let stale_token = first
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .unwrap();
-        assert!(second
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .is_none());
-        first
-            .conn
-            .execute(
-                "UPDATE chat_run_wakeups SET claimed_at = 0 WHERE run_id = 'run_done'",
-                [],
+            .settle_chat_subscription(
+                "chat_parent",
+                "chat_child",
+                &told,
+                Some(ToldEvent::Turn("two")),
             )
             .unwrap();
-        second.prune_run_wakeups().unwrap();
-        let current_token = second
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .unwrap();
-        first
-            .release_run_wakeup("run_done", "chat_A", &stale_token)
-            .unwrap();
-        assert!(!first
-            .mark_run_wakeup_delivered("run_done", "chat_A", &stale_token)
-            .unwrap());
-        assert!(second
-            .renew_run_wakeup_claim("run_done", "chat_A", &current_token)
-            .unwrap());
-        second
-            .release_run_wakeup("run_done", "chat_A", &current_token)
-            .unwrap();
-        assert!(first
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .is_some());
-
-        drop(second);
-        drop(first);
+        assert!(
+            store
+                .claim_chat_subscription("chat_parent", "chat_child", ToldEvent::Turn("one"))
+                .unwrap()
+                .is_none(),
+            "a turn older than the one told cannot rewind the subscription"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn ready_run_wakeups_are_ordered_by_terminal_time() {
-        let dir = std::env::temp_dir().join(format!("orx-store-order-{}", uuid::Uuid::new_v4()));
+    fn chat_subscriptions_tell_each_finished_turn_once_after_the_queue_drains() {
+        let dir = std::env::temp_dir().join(format!("orx-store-sub-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        store
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        for (id, ended_at) in [("run_late", 20), ("run_early", 10)] {
-            let mut run = run_fixture(id, "done", Some("chat_A"));
-            run.ended_at = Some(ended_at);
-            store.upsert_run(&run).unwrap();
-            store.register_run_wakeup(id, "chat_A").unwrap();
+        for id in ["chat_parent", "chat_child"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
         }
+        store
+            .record_chat_delegate("chat_child", "chat_parent", false)
+            .unwrap();
+        store
+            .subscribe_chat("chat_parent", "chat_child", None)
+            .unwrap();
+        store
+            .subscribe_chat("chat_parent", "chat_child", None)
+            .unwrap();
+        assert_eq!(store.list_chat_subscriptions(None).unwrap().len(), 1);
+        let ready = || store.list_ready_chat_subscriptions().unwrap();
+        let outstanding = || {
+            store
+                .list_chat_subscriptions(Some("chat_parent"))
+                .unwrap()
+                .into_iter()
+                .filter(|sub| sub.outstanding)
+                .map(|sub| sub.target_session_id)
+                .collect::<Vec<_>>()
+        };
+        let turn = |session: &str, id: &str, created_at: i64| {
+            let mut turn = chat_turn_fixture(id, &format!("client-{id}"));
+            turn.session_id = session.into();
+            turn.created_at = created_at;
+            store.admit_chat_turn(None, &turn).unwrap();
+        };
+        let claim = |ready: &ReadyChatSubscription| {
+            store.claim_chat_subscription(
+                &ready.subscriber_session_id,
+                &ready.target_session_id,
+                ToldEvent::Turn(&ready.turn_id),
+            )
+        };
+        let tell = |ready: &ReadyChatSubscription| {
+            let token = claim(ready).unwrap().unwrap();
+            assert!(store
+                .settle_chat_subscription(
+                    &ready.subscriber_session_id,
+                    &ready.target_session_id,
+                    &token,
+                    Some(ToldEvent::Turn(&ready.turn_id)),
+                )
+                .unwrap());
+        };
 
         assert_eq!(
+            outstanding(),
+            ["chat_child"],
+            "a new delegate owes an answer"
+        );
+        turn("chat_child", "one", 2);
+        assert!(ready().is_empty(), "a running turn has nothing to tell");
+        store.complete_chat_turn("one").unwrap();
+        let first = ready();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].turn_id, "one");
+        let token = claim(&first[0]).unwrap().unwrap();
+        assert!(claim(&first[0]).unwrap().is_none());
+        assert!(ready().is_empty(), "a claimed answer is in flight");
+        store
+            .settle_chat_subscription("chat_parent", "chat_child", &token, None)
+            .unwrap();
+        assert_eq!(ready().len(), 1, "an untold answer is retried");
+        tell(&first[0]);
+        assert!(ready().is_empty(), "each turn is told once");
+        assert!(outstanding().is_empty());
+
+        turn("chat_child", "two", 3);
+        store.complete_chat_turn("two").unwrap();
+        store
+            .insert_queued_chat_message(&StoredQueuedChatMessage {
+                id: "queued".into(),
+                session_id: "chat_child".into(),
+                client_turn_id: "client-queued".into(),
+                request_hash: "hash".into(),
+                payload_json: "{}".into(),
+                created_at: 4,
+            })
+            .unwrap();
+        assert!(ready().is_empty(), "a queued message means more work first");
+        store.delete_queued_chat_message("queued").unwrap();
+        assert_eq!(ready()[0].turn_id, "two");
+        tell(&ready()[0]);
+
+        // The child delegates in turn: its turn ending while its own delegate
+        // works is not an answer for the parent. An unrelated subscription of
+        // the child does not hold its answer back.
+        for id in ["chat_grandchild", "chat_elsewhere"] {
             store
-                .list_ready_run_wakeups()
-                .unwrap()
-                .iter()
-                .map(|wakeup| wakeup.run.id.as_str())
-                .collect::<Vec<_>>(),
-            ["run_early", "run_late"]
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+            store.subscribe_chat("chat_child", id, None).unwrap();
+        }
+        store
+            .record_chat_delegate("chat_grandchild", "chat_child", false)
+            .unwrap();
+        turn("chat_child", "three", 5);
+        store.complete_chat_turn("three").unwrap();
+        assert!(ready().is_empty(), "its delegate has not run yet");
+        turn("chat_grandchild", "four", 6);
+        assert!(ready().is_empty(), "its delegate is still working");
+        store.complete_chat_turn("four").unwrap();
+        let waiting = ready();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].subscriber_session_id, "chat_child");
+        tell(&waiting[0]);
+        assert_eq!(
+            ready()[0].turn_id,
+            "three",
+            "answered, the child's turn is its answer"
         );
 
-        drop(store);
+        // The user stopped the child telling its parent: neither subscribing
+        // again nor unsubscribing first undoes that.
+        assert!(store
+            .pause_chat_subscription("chat_parent", "chat_child")
+            .unwrap());
+        assert!(ready()
+            .iter()
+            .all(|ready| ready.subscriber_session_id != "chat_parent"));
+        store.unsubscribe_chat("chat_parent", "chat_child").unwrap();
+        store
+            .subscribe_chat("chat_parent", "chat_child", None)
+            .unwrap();
+        assert!(ready()
+            .iter()
+            .all(|ready| ready.subscriber_session_id != "chat_parent"));
+
+        store.delete_chat_session("chat_child").unwrap();
+        assert!(store
+            .list_chat_subscriptions(None)
+            .unwrap()
+            .iter()
+            .all(|sub| sub.subscriber_session_id != "chat_child"
+                && sub.target_session_id != "chat_child"));
+        assert!(store.chat_delegates_of("chat_parent").unwrap().is_empty());
+        assert_eq!(
+            store.delegation("chat_grandchild").unwrap().parent,
+            None,
+            "a delegate outliving its delegator is the user's"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn delegation_depth_follows_delegate_links_not_side_chats() {
+        let dir = std::env::temp_dir().join(format!("orx-store-depth-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let chat = |id: &str, side_parent: Option<&str>| {
+            let mut session = chat_session_fixture(id);
+            session.side_parent_session_id = side_parent.map(str::to_string);
+            store.create_chat_session(&session).unwrap();
+        };
+        chat("chat_root", None);
+        chat("chat_side", Some("chat_root"));
+        chat("chat_one", Some("chat_side"));
+        chat("chat_two", None);
+        store
+            .record_chat_delegate("chat_one", "chat_side", true)
+            .unwrap();
+        store
+            .record_chat_delegate("chat_two", "chat_one", false)
+            .unwrap();
+        store
+            .subscribe_chat("chat_root", "chat_side", None)
+            .unwrap();
+        let at = |id: &str| store.delegation(id).unwrap();
+        let user = Delegation {
+            depth: 0,
+            parent: None,
+            may_delegate: true,
+        };
+        assert_eq!(at("chat_root"), user);
+        assert_eq!(
+            at("chat_side"),
+            user,
+            "a side chat the user opened is not a delegate, subscribed or not"
+        );
+        assert_eq!(
+            at("chat_one"),
+            Delegation {
+                depth: 1,
+                parent: Some("chat_side".into()),
+                may_delegate: true
+            }
+        );
+        assert_eq!(
+            at("chat_two"),
+            Delegation {
+                depth: 2,
+                parent: Some("chat_one".into()),
+                may_delegate: false
+            },
+            "a delegate in its own worktree is still one level deeper"
+        );
+        assert_eq!(store.chat_worktree_owner("chat_one").unwrap(), "chat_root");
+        assert_eq!(store.chat_worktree_owner("chat_two").unwrap(), "chat_two");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5589,8 +11127,12 @@ mod tests {
         second.release_data_dir_move("move_B").unwrap();
         assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
         drop(move_lock);
+        let service_lock =
+            acquire_data_dir_lock(first.data_dir_move_lock_path.clone(), false).unwrap();
+        assert!(first.acquire_data_dir_move_lock().is_err());
         assert!(second.claim_chat_turn("chat_A", "token_B").unwrap());
 
+        drop(service_lock);
         drop(second);
         drop(first);
         let _ = std::fs::remove_dir_all(dir);
@@ -5673,6 +11215,122 @@ mod tests {
     }
 
     #[test]
+    fn session_experiments_include_creation_runs_and_wakeups_across_projects() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-session-experiments-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["proj_1", "proj_2"] {
+            store
+                .create_local_project(&LocalProject {
+                    id: id.into(),
+                    name: format!("name of {id}"),
+                    slug: id.into(),
+                    github_owner: String::new(),
+                    github_repo: String::new(),
+                    github_sync_enabled: false,
+                    baseline_branch: "main".into(),
+                    repo_path: dir.join(id).to_string_lossy().into_owned(),
+                    run_command: None,
+                    paper_id: None,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .unwrap();
+        }
+        for (id, owner, project) in [
+            ("created", Some("chat_a"), "proj_1"),
+            ("created_no_runs", Some("chat_a"), "proj_1"),
+            ("run", Some("chat_b"), "proj_2"),
+            ("both", Some("chat_a"), "proj_1"),
+            ("watched", Some("chat_b"), "proj_1"),
+            ("concurrent", Some("chat_a"), "proj_1"),
+            ("archived", Some("chat_a"), "proj_1"),
+            ("unrelated", Some("chat_b"), "proj_1"),
+            ("missing_project", Some("chat_a"), "missing"),
+            ("deleted", Some("chat_a"), "proj_1"),
+        ] {
+            let mut experiment = experiment_fixture(id, owner);
+            experiment.project_id = project.into();
+            experiment.archived = id == "archived";
+            store.create_local_experiment(&experiment).unwrap();
+        }
+        for (id, experiment, session, status, created_at, ended_at) in [
+            ("run_1", "run", "chat_a", "failed", 5, Some(6)),
+            ("run_2", "run", "chat_a", "done", 7, Some(9)),
+            ("run_3", "both", "chat_a", "done", 1, Some(2)),
+            ("run_4", "created", "chat_b", "done", 10, Some(20)),
+            ("run_5", "created", "chat_b", "running", 30, None),
+            ("run_6", "watched", "chat_b", "starting", 3, None),
+            ("run_7", "unrelated", "chat_b", "done", 4, Some(5)),
+            ("run_8", "missing_experiment", "chat_a", "done", 1, Some(2)),
+            ("run_9", "deleted", "chat_a", "done", 1, Some(2)),
+            ("run_10", "archived", "chat_a", "done", 50, Some(100)),
+            ("run_11", "concurrent", "chat_a", "running", 5, None),
+            ("run_12", "concurrent", "chat_a", "failed", 9, Some(10)),
+        ] {
+            let mut run = run_fixture(id, status, Some(session));
+            run.experiment_id = experiment.into();
+            run.created_at = created_at;
+            run.ended_at = ended_at;
+            store.upsert_run(&run).unwrap();
+        }
+        store.register_run_wakeup("run_6", "chat_a").unwrap();
+        store
+            .conn
+            .execute("DELETE FROM local_experiments WHERE id = 'deleted'", [])
+            .unwrap();
+        let rows = store.list_experiments_by_chat_session("chat_a").unwrap();
+        let summary: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.experiment.id.as_str(),
+                    row.current_run.as_ref().map(|run| run.status.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("created", Some("running")),
+                ("concurrent", Some("running")),
+                ("watched", Some("starting")),
+                ("run", Some("done")),
+                ("both", Some("done")),
+                ("created_no_runs", None),
+                ("archived", Some("done")),
+            ]
+        );
+        assert_eq!(rows[3].experiment.project_id, "proj_2");
+        assert_eq!(rows[3].project_name, "name of proj_2");
+        // An older run still in flight outranks the newer run that already failed.
+        assert_eq!(rows[1].current_run.as_ref().unwrap().created_at, 5);
+        let response = serde_json::json!({ "experiments": rows });
+        assert_eq!(
+            response["experiments"][0]["currentRun"]["status"],
+            "running"
+        );
+        assert_eq!(response["experiments"][0]["currentRun"]["createdAt"], 30);
+        assert_eq!(
+            response["experiments"][0]["currentRun"]["endedAt"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            response["experiments"][0]["experiment"]["chatSessionId"],
+            "chat_a"
+        );
+        assert_eq!(
+            response["experiments"][5]["currentRun"],
+            serde_json::Value::Null
+        );
+        assert!(store
+            .list_experiments_by_chat_session("unrelated")
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn project_activity_summaries_aggregate_lifetime_work() {
         let dir = std::env::temp_dir().join(format!(
             "orx-store-project-activity-{}",
@@ -5718,6 +11376,7 @@ mod tests {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .unwrap();
         }
@@ -5770,37 +11429,6 @@ mod tests {
     }
 
     #[test]
-    fn experiment_chat_session_id_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("orx-store-expsess-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-
-        store
-            .create_local_experiment(&experiment_fixture("exp_owned", Some("chat_x")))
-            .unwrap();
-        store
-            .create_local_experiment(&experiment_fixture("exp_orphan", None))
-            .unwrap();
-
-        assert_eq!(
-            store
-                .get_local_experiment("exp_owned")
-                .unwrap()
-                .unwrap()
-                .chat_session_id,
-            Some("chat_x".to_string())
-        );
-        assert_eq!(
-            store
-                .get_local_experiment("exp_orphan")
-                .unwrap()
-                .unwrap()
-                .chat_session_id,
-            None
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn experiment_ownership_is_immutable_across_updates() {
         let dir = std::env::temp_dir().join(format!("orx-store-expimm-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -5824,5 +11452,70 @@ mod tests {
         );
         assert_eq!(stored.parent_experiment_id, None, "only a move re-parents");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn host_roots_never_persist_alias_authorization() {
+        let dir = std::env::temp_dir().join(format!("orx-alias-store-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        use crate::engine::transport::{AuthState, HostClass, HostState, Status};
+        let auth = AuthState {
+            class: Some(HostClass::Key),
+            route: Some("approved route".into()),
+            blocked: Some((123, "auth rejected".into())),
+        };
+        store.save_engine_host_auth("lab", &auth).unwrap();
+        for root in ["ssh", "slurm"] {
+            store
+                .save_engine_host(
+                    "lab",
+                    root,
+                    &HostState {
+                        status: Status::NeedsAuth,
+                        ..HostState::default()
+                    },
+                )
+                .unwrap();
+        }
+        assert!(store
+            .engine_hosts()
+            .unwrap()
+            .iter()
+            .all(|(_, _, state)| state.status == Status::NeedsAuth));
+        let mut rows = store
+            .conn
+            .prepare("SELECT state_json FROM engine_hosts")
+            .unwrap();
+        for json in rows.query_map([], |row| row.get::<_, String>(0)).unwrap() {
+            let json: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
+            assert!(json.get("class").is_none());
+            assert!(json.get("route").is_none());
+            assert_eq!(json["status"], "Idle");
+            assert!(json["cause"].is_null());
+        }
+        drop(rows);
+        store
+            .save_engine_host_auth(
+                "lab",
+                &AuthState {
+                    blocked: None,
+                    ..auth
+                },
+            )
+            .unwrap();
+        assert!(store
+            .engine_hosts()
+            .unwrap()
+            .iter()
+            .all(|(_, _, state)| state.status == Status::Idle && state.cause.is_none()));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn log_path_keeps_the_explicit_directory_and_sanitizes_the_run_id() {
+        assert_eq!(
+            log_path(Path::new("/isolated/data"), "../run_A-1/../../x"),
+            Path::new("/isolated/data/run-logs/run_A-1x.log")
+        );
     }
 }

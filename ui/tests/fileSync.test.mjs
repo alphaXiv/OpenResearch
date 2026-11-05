@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as fileSync from "../src/fileSync.ts";
 
-import {
+const {
   conflictAfterRefresh,
   confirmFileDiscard,
-  confirmingFileDiscard,
   createFileBuffer,
   fileBufferContent,
   FileBufferSession,
   updateFileDraft,
-} from "../src/fileSync.ts";
+} = fileSync;
+
+let dialogOptions;
+let dialogError;
+const showConfirmDialog = (options) => {
+  if (dialogError) throw dialogError;
+  dialogOptions = options;
+};
 
 test("file buffers preserve line endings and only conflict after a dirty disk change", () => {
   const clean = createFileBuffer("notes.txt", "one\r\ntwo\r\n", "v1");
@@ -28,26 +35,22 @@ test("file buffers preserve line endings and only conflict after a dirty disk ch
   });
 });
 
-test("discard confirmation suppresses synchronous blur-save and always releases the guard", () => {
-  const previous = globalThis.window;
-  try {
-    for (const answer of [false, true]) {
-      let saved = false;
-      globalThis.window = { confirm: () => {
-        if (!confirmingFileDiscard) saved = true;
-        return answer;
-      } };
-      assert.equal(confirmFileDiscard("Discard?"), answer);
-      assert.equal(saved, false);
-      assert.equal(confirmingFileDiscard, false);
-    }
-    globalThis.window = { confirm: () => { throw new Error("dialog unavailable"); } };
-    assert.throws(() => confirmFileDiscard("Discard?"));
-    assert.equal(confirmingFileDiscard, false);
-  } finally {
-    if (previous === undefined) delete globalThis.window;
-    else globalThis.window = previous;
+test("discard confirmation protects blur-save until confirmed or canceled", async () => {
+  for (const answer of [false, true]) {
+    const pending = confirmFileDiscard("Discard?", showConfirmDialog);
+    assert.equal(fileSync.confirmingFileDiscard, true);
+    assert.equal(dialogOptions.description, "Discard?");
+    assert.equal(dialogOptions.destructive, true);
+    if (answer) dialogOptions.onConfirm();
+    else dialogOptions.onCancel();
+    assert.equal(await pending, answer);
+    assert.equal(fileSync.confirmingFileDiscard, false);
   }
+
+  dialogError = new Error("dialog unavailable");
+  await assert.rejects(confirmFileDiscard("Discard?", showConfirmDialog), dialogError);
+  assert.equal(fileSync.confirmingFileDiscard, false);
+  dialogError = null;
 });
 
 test("undoing to the baseline clears the conflict without changing the saved version", () => {

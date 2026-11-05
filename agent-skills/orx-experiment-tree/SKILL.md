@@ -1,6 +1,6 @@
 ---
 name: orx-experiment-tree
-description: "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/wait/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress."
+description: "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/reconcile/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress."
 ---
 
 A project is a **tree of experiment nodes**. The root (**baseline**) holds the
@@ -138,44 +138,17 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    (or omit `--backend` when a default target is set — see `orx-compute`). Remote
    backends can run siblings in parallel; `--backend local` shares this machine's
    CPU, RAM, and GPU.
-6. **Keep the round moving — drive a per-completion loop, not a wait-for-all
-   barrier.** You want control back the moment *any one* run finishes so you can
-   analyze it and either refill its slot or stop — not after the whole batch
-   drains. `orx exp wait --project <projectId>` is built for exactly this: it
-   returns on the **first** completion. Treat it as one **tick** of a loop, where
-   *you* are the loop body:
-
-   ```
-   # after launching your runs, loop until the project is drained:
-   loop:
-     orx exp wait --project <projectId>   # sleeps; returns on the first completion
-     orx runs <projectId>                 # SOURCE OF TRUTH: re-read all run states
-     # for each run now terminal that you haven't handled yet:
-     #   - read its results (step 7) and decide: launch a refill? promote it? stop?
-     #   - launch the next queued child to refill the freed slot (step 5)
-     # if `exp wait` printed "drained: no runs in flight"  → batch is done, break
-   ```
-
-   Three things make this robust — follow all of them:
-   - **`exp wait --project` is a sleep-until-change signal, not the source of
-     truth.** It only reports completions it observed *during that one call*. A
-     run that finishes while you're analyzing the previous one is already terminal
-     by the next call and **won't be reported**. So on every wake, re-read
-     `orx runs <projectId>` and reconcile against the set of runs you've already
-     handled — act on *every* newly-terminal run, not just the line `exp wait`
-     printed. (This is the one time you do look at `orx runs` in a loop — as the
-     reconcile after each wake, **not** as a tight poll in place of `exp wait`.)
-   - **Re-issue `exp wait` each tick.** One completion → one return → you decide →
-     you call it again. Don't expect a single `exp wait` to block until everything
-     is done; that's the failure mode this loop avoids.
-   - **Terminate on drained.** When no runs are in flight, `exp wait --project`
-     returns immediately printing `drained: no runs in flight`. That — or seeing
-     every run terminal in `orx runs` with no more children to launch — is your
-     exit condition. Don't keep calling it into a timeout.
-7. **Analyze each finish as it lands, then iterate.** Do the per-completion read
-   *inside the loop above*, not deferred to the end — when a run finishes,
-   **actually read its results** from the file reported by `orx logs <runId>`
-   (see `orx-logs`), then use `orx-results` to interpret the outcome. To see exactly what a finished node changed, diff its
+6. **Launch, then end your turn.** Relevant run results arrive as messages in
+   this chat once it is idle. No waiting process or live agent session is needed.
+   On each message, read `orx runs <projectId>` and reconcile every newly terminal
+   run, including those that finished while you were analyzing another result.
+   Analyze each result and refill its slot as appropriate; other runs can keep
+   going. End your turn again after launching ready children. When every run is
+   terminal and no children remain to launch, the round is complete.
+7. **Analyze each finish as it lands, then iterate.** When a result message
+   arrives, read its results from the file reported by `orx logs <runId>`
+   (see `orx-logs`) and, when it logged to Trackio, its curves with
+   `orx metrics <runId> <parentRunId>`, then use `orx-results` to interpret the outcome. To see exactly what a finished node changed, diff its
    branch against its parent's
    branch (see `orx-git`). Don't infer from status alone. Each
    completion is a decision point with four moves:
@@ -232,6 +205,7 @@ orx exp move <expId> --parent <newParentId>   # re-parent the node and its subtr
 orx exp move <expId> --baseline               # make it a new root
 orx exp archive <expId> --only                # hide superseded nodes (also --ancestors/--descendants)
 orx exp unarchive <expId> --only              # restore them
+orx exp delete <expId>                        # permanently remove a leaf node, its runs and branch
 ```
 
 - `move` changes only the tree; runs and results stay attached to the node.
@@ -240,3 +214,7 @@ orx exp unarchive <expId> --only              # restore them
   for `--baseline`). Move only nodes whose code fits the new parent.
 - Don't recreate a node that has runs just to fix its place in the tree: move
   or archive it so its results keep their provenance.
+- `delete` cannot be undone except for the branch (it prints the commit to
+  restore it from). Use it only when the user asks to remove a node
+  permanently; archive otherwise. It refuses nodes with children or active
+  runs, and branches checked out in any worktree.

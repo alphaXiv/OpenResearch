@@ -186,20 +186,69 @@ pub fn prepare_env(cmd: &mut tokio::process::Command, model: Option<&str>) -> Re
     if connections.is_empty() {
         return Ok(());
     }
+    let mut config = inline_config(cmd)?;
+    merge_config(&mut config, &connections, model)?;
+    cmd.env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&config)?);
+    Ok(())
+}
+
+fn inline_config(cmd: &tokio::process::Command) -> Result<Value> {
     let inline = cmd
         .as_std()
         .get_envs()
         .find(|(k, _)| *k == "OPENCODE_CONFIG_CONTENT")
         .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
         .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
-    let mut config: Value = match inline {
-        Some(value) => serde_json::from_str(&value).map_err(|_| {
-            anyhow!("OPENCODE_CONFIG_CONTENT must contain a JSON object to connect local models.")
-        })?,
-        None => json!({}),
+    match inline {
+        Some(value) => serde_json::from_str(&value)
+            .map_err(|_| anyhow!("OPENCODE_CONFIG_CONTENT must contain a JSON object.")),
+        None => Ok(json!({})),
+    }
+}
+
+pub(crate) fn prepare_generation_env(
+    cmd: &mut tokio::process::Command,
+    model: Option<&str>,
+    protocol: crate::local::opencode::Protocol,
+) -> Result<()> {
+    prepare_env(cmd, model)?;
+    let Some(model) = model.filter(|model| !model.trim().is_empty()) else {
+        return Ok(());
     };
-    merge_config(&mut config, &connections, model)?;
+    let mut config = inline_config(cmd)?;
+    merge_generation_models(&mut config, model, protocol)?;
     cmd.env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&config)?);
+    Ok(())
+}
+
+fn merge_generation_models(
+    config: &mut Value,
+    model: &str,
+    protocol: crate::local::opencode::Protocol,
+) -> Result<()> {
+    let config = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OpenCode inline config must be a JSON object."))?;
+    let agents_key = match protocol {
+        crate::local::opencode::Protocol::V1 => {
+            config.insert("small_model".into(), json!(model));
+            "agent"
+        }
+        crate::local::opencode::Protocol::V2 => "agents",
+    };
+    let agents = config
+        .entry(agents_key)
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OpenCode {agents_key} config must be a JSON object."))?;
+    for name in ["title", "compaction"] {
+        agents
+            .entry(name)
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("OpenCode {name} agent config must be a JSON object."))?
+            .insert("model".into(), json!(model));
+    }
     Ok(())
 }
 
@@ -236,12 +285,11 @@ pub(crate) fn merge_config(
             "options":{"baseURL":c.base_url,"apiKey":c.api_key}, "models":models}),
         );
     }
-    if let Some(model) = model.filter(|model| {
+    if model.is_some_and(|model| {
         connections
             .keys()
             .any(|id| model.starts_with(&format!("{id}/")))
     }) {
-        config.insert("small_model".into(), json!(model));
         config.insert("share".into(), json!("disabled"));
     }
     Ok(())
@@ -250,6 +298,52 @@ pub(crate) fn merge_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_pins_auxiliary_models_and_preserves_unrelated_config() {
+        use crate::local::opencode::Protocol;
+        for (protocol, key) in [(Protocol::V1, "agent"), (Protocol::V2, "agents")] {
+            for model in [
+                "orx-local-test/qwen",
+                "openrouter/anthropic/claude",
+                "custom/model",
+            ] {
+                let mut config = json!({"model":"global/default","permission":{"bash":"ask"},
+                    "small_model":"global/small",key:{"title":{"model":"global/title","hidden":true},
+                    "compaction":{"model":"global/compact","description":"Keep this"},
+                    "build":{"model":"global/build"}}});
+                merge_generation_models(&mut config, model, protocol).unwrap();
+                assert_eq!(config[key]["title"]["model"], model);
+                assert_eq!(config[key]["compaction"]["model"], model);
+                assert_eq!(config[key]["title"]["hidden"], true);
+                assert_eq!(config[key]["compaction"]["description"], "Keep this");
+                assert_eq!(config[key]["build"]["model"], "global/build");
+                assert_eq!(config["model"], "global/default");
+                assert_eq!(config["permission"]["bash"], "ask");
+                assert_eq!(
+                    config["small_model"],
+                    if protocol == Protocol::V1 {
+                        model
+                    } else {
+                        "global/small"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_agent_overrides_fail_without_replacing_them() {
+        let mut config = json!({"agents":{"title":"invalid"}});
+        assert!(merge_generation_models(
+            &mut config,
+            "custom/model",
+            crate::local::opencode::Protocol::V2
+        )
+        .is_err());
+        assert_eq!(config["agents"]["title"], "invalid");
+    }
+
     #[tokio::test]
     async fn discovers_models_and_merges_without_replacing_cloud_settings() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -301,7 +395,7 @@ mod tests {
         );
         assert_eq!(config["model"], "anthropic/claude");
         assert_eq!(config["permission"]["bash"], "ask");
-        assert_eq!(config["small_model"], "orx-local-test/mlx-community/qwen");
+        assert_eq!(config["small_model"], "anthropic/haiku");
         assert_eq!(
             config["provider"]["orx-local-test"]["models"]["mlx-community/qwen"]["limit"]
                 ["context"],

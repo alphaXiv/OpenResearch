@@ -1,46 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import test from "node:test";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import ts from "typescript";
-
-const require = createRequire(import.meta.url);
-const en = JSON.parse(readFileSync(new URL("../messages/en.json", import.meta.url), "utf8"));
-const messages = { m: new Proxy({}, { get: (_, key) => (values = {}) => en[key].replace(/\{(\w+)\}/g, (_, name) => String(values[name])) }) };
-const api = { fmtNumber: String, timeAgo: () => "1d ago", runDisplayStatus: (run) => run.status };
-const runtime = { getLocale: () => "en" };
-
-function load(file, mocks) {
-  const source = readFileSync(new URL(`../src/components/${file}`, import.meta.url), "utf8");
-  const code = ts.transpileModule(source, {
-    fileName: file,
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText;
-  const exports = {};
-  new Function("require", "exports", code)((name) => mocks[name] ?? require(name), exports);
-  return exports;
-}
-
-const model = load("experimentLineageModel.ts", {
-  "../api": api,
-  "../i18n": { ltr: (text) => text },
-  "../paraglide/messages.js": messages,
-});
-const tabPreview = load("../tabPreview.ts", {});
-
-function lineage(expanded) {
-  return load("ExperimentLineage.tsx", {
-    react: { ...React, useState: () => [expanded, () => {}], useEffect: () => {} },
-    "lucide-react": { ChevronRight: () => null },
-    "../api": api,
-    "../paraglide/messages.js": messages,
-    "../paraglide/runtime.js": runtime,
-    "./experimentLineageModel": model,
-    "../tabPreview": tabPreview,
-  });
-}
+import { act, createElement } from "react";
+import { ExperimentLineage } from "../src/components/ExperimentLineage.tsx";
+import { buildHistoryNodes } from "../src/components/experimentLineageModel.ts";
+import { statusLabel } from "../src/components/StatusBadge.tsx";
+import { m } from "../src/paraglide/messages.js";
+import { render } from "./render.mjs";
 
 const experiments = Array.from({ length: 8 }, (_, index) => ({
   id: String(index),
@@ -49,58 +14,66 @@ const experiments = Array.from({ length: 8 }, (_, index) => ({
   createdAt: index,
   parentExperimentId: index ? String(index - 1) : null,
 }));
-const nodes = model.buildHistoryNodes(experiments, []);
+const nodes = buildHistoryNodes(experiments, []);
 
-test("lineage shows four ancestors and the current experiment before folding earlier ancestors", () => {
-  const { ExperimentLineage } = lineage(false);
-  const html = renderToStaticMarkup(React.createElement(ExperimentLineage, { node: nodes[6], onSelect: () => {} }));
-  assert.match(html, /aria-expanded="false"/);
-  assert.match(html, /2 earlier:/);
-  for (let index = 2; index <= 6; index++) assert.match(html, new RegExp(`>Experiment ${index}<`));
-  assert.doesNotMatch(html, />Experiment 0</);
-  assert.match(html, /Children/);
-  assert.match(html, />Experiment 7</);
-  assert.match(html, /aria-current="true"/);
+async function lineage(node, onSelect = () => {}) {
+  const { container } = await render(createElement(ExperimentLineage, { node, onSelect }));
+  const steps = () => [...container.querySelectorAll("button:not([aria-expanded])")];
+  return {
+    container,
+    expander: () => container.querySelector("button[aria-expanded]"),
+    steps,
+    labels: () => steps().map((step) => step.textContent.match(/Experiment \d/)[0]),
+  };
+}
+
+test("lineage shows four ancestors and the current experiment before folding earlier ancestors", async () => {
+  const { expander, steps, labels } = await lineage(nodes[6]);
+  assert.equal(expander().getAttribute("aria-expanded"), "false");
+  assert.deepEqual(labels(), ["Experiment 2", "Experiment 3", "Experiment 4", "Experiment 5", "Experiment 6", "Experiment 7"]);
+  assert.equal(steps().find((step) => step.getAttribute("aria-current") === "true").textContent.includes("Experiment 6"), true);
 });
 
-test("expanded lineage retains a collapse control and shows every ancestor", () => {
-  const { ExperimentLineage } = lineage(true);
-  const html = renderToStaticMarkup(React.createElement(ExperimentLineage, { node: nodes[6], onSelect: () => {} }));
-  assert.match(html, /aria-expanded="true"/);
-  assert.match(html, /Show less/);
-  for (let index = 0; index <= 6; index++) assert.match(html, new RegExp(`>Experiment ${index}<`));
+test("expanding the lineage keeps a collapse control and shows every ancestor", async () => {
+  const { expander, labels } = await lineage(nodes[6]);
+  await act(() => expander().click());
+  assert.equal(expander().getAttribute("aria-expanded"), "true");
+  assert.deepEqual(labels(), ["Experiment 0", "Experiment 1", "Experiment 2", "Experiment 3", "Experiment 4", "Experiment 5", "Experiment 6", "Experiment 7"]);
+
+  await act(() => expander().click());
+  assert.equal(labels().length, 6);
 });
 
-test("short lineage has no unnecessary expand control", () => {
-  const { ExperimentLineage } = lineage(false);
-  const html = renderToStaticMarkup(React.createElement(ExperimentLineage, { node: nodes[4], onSelect: () => {} }));
-  assert.doesNotMatch(html, /aria-expanded/);
-  for (let index = 0; index <= 4; index++) assert.match(html, new RegExp(`>Experiment ${index}<`));
+test("short lineage has no unnecessary expand control", async () => {
+  const { expander, labels } = await lineage(nodes[4]);
+  assert.equal(expander(), null);
+  assert.deepEqual(labels(), ["Experiment 0", "Experiment 1", "Experiment 2", "Experiment 3", "Experiment 4", "Experiment 5"]);
 });
 
-test("ancestor and child rows preserve preview and keep-open gestures", () => {
-  const { ExperimentLineage } = lineage(false);
+test("ancestor and child rows preserve preview and keep-open gestures", async () => {
   const opened = [];
-  const tree = ExperimentLineage({ node: nodes[6], onSelect: (...args) => opened.push(args) });
-  const buttons = [];
-  function visit(element) {
-    if (Array.isArray(element)) return element.forEach(visit);
-    if (!React.isValidElement(element)) return;
-    if (typeof element.type === "function") return visit(element.type(element.props));
-    if (element.type === "button") buttons.push(element.props);
-    visit(element.props.children);
-  }
-  visit(tree);
+  const { steps } = await lineage(nodes[6], (...args) => opened.push(args));
   for (const id of ["5", "7"]) {
-    const row = buttons.find((props) => props.children?.[2]?.props?.children === `Experiment ${id}`);
-    assert.ok(row, `missing lineage row ${id}`);
-    row.onClick({});
-    row.onDoubleClick({});
-    row.onAuxClick({ button: 1, preventDefault() {} });
-    row.onKeyDown({ key: "Enter", preventDefault() {} });
-    row.onKeyDown({ key: " ", preventDefault() {} });
+    const row = steps().find((step) => step.textContent.includes(`Experiment ${id}`));
+    await act(() => {
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+      row.dispatchEvent(new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 }));
+      row.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" }));
+      row.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: " " }));
+    });
     assert.deepEqual(opened.splice(0), [
       [id, "preview"], [id, "keepOpen"], [id, "keepOpen"], [id, "keepOpen"], [id, "preview"],
     ]);
   }
+});
+
+test("lineage never announces Cancelled while its latest run still has survivors", async () => {
+  const [node] = buildHistoryNodes([experiments[0]], [{
+    id: "run", experimentId: experiments[0].id, status: "cancelled", createdAt: 1, host: "gpu-box", contact: { type: "stopping", since: 1, count: 2 },
+  }]);
+  const { container } = await lineage(node);
+  const text = container.textContent.replace(/[⁦-⁩]/g, "");
+  assert.ok(text.includes(statusLabel("not_fully_stopped", { count: 2, host: "gpu-box" }).replace(/[⁦-⁩]/g, "")), text);
+  assert.ok(![...container.querySelectorAll("*")].some((element) => element.textContent === m.status_cancelled()));
 });

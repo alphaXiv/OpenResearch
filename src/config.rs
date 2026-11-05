@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+#[cfg(not(test))]
+use dirs::home_dir;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
@@ -60,17 +62,15 @@ pub fn ncbi_email() -> String {
     std::env::var("NCBI_EMAIL").unwrap_or_else(|_| "orx@alphaxiv.org".to_string())
 }
 
-/// Optional contact address sent to OpenAlex as `mailto=` (`OPENALEX_MAILTO`).
-/// No default: keyless requests naming one mailto share one daily budget, so a
-/// shared address would pool every orx install into a single quota.
+/// No default: OpenAlex has pooled keyless requests by `mailto`, so a shared
+/// address would put every orx install on one daily budget.
 pub fn openalex_mailto() -> Option<String> {
     std::env::var("OPENALEX_MAILTO")
         .ok()
         .filter(|v| !v.trim().is_empty())
 }
 
-/// Optional OpenAlex API key (`OPENALEX_API_KEY`), which gives the key's own
-/// daily budget instead of the keyless per-network one.
+/// Without a key, OpenAlex shares one daily budget among everyone on the network's IP.
 pub fn openalex_api_key() -> Option<String> {
     std::env::var("OPENALEX_API_KEY")
         .ok()
@@ -86,14 +86,96 @@ pub struct Credentials {
 }
 
 pub(crate) fn config_dir() -> PathBuf {
+    #[cfg(test)]
+    let base = test_home().join(".config");
+    #[cfg(not(test))]
     let base = crate::local::shell_env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            dirs::home_dir()
+            home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".config")
         });
     base.join("openresearch")
+}
+
+#[cfg(test)]
+fn home_dir() -> Option<PathBuf> {
+    Some(test_home())
+}
+
+/// Debug builds divide background timers (run supervision, turn leases) by `ORX_TEST_SPEEDUP`,
+/// read once, so end-to-end tests finish in seconds.
+pub(crate) fn paced(wait: std::time::Duration) -> std::time::Duration {
+    if !cfg!(debug_assertions) {
+        return wait;
+    }
+    static SPEEDUP: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let speedup = SPEEDUP.get_or_init(|| {
+        std::env::var("ORX_TEST_SPEEDUP")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1)
+    });
+    wait / (*speedup).max(1)
+}
+
+/// Stands in for `$HOME` and the XDG dirs under test: one fresh directory per
+/// process, so no test reads or writes the user's config or data.
+#[cfg(test)]
+pub(crate) fn test_home() -> PathBuf {
+    static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        std::env::temp_dir().join(format!("orx-test-home-{}", uuid::Uuid::new_v4()))
+    })
+    .clone()
+}
+
+/// Runs the calling test again, alone, in a child process with its own
+/// [`test_home`] and without `cleared` vars, so its body may change
+/// process-wide env. True in that child; in the parent, asserts the child passed.
+#[cfg(test)]
+pub(crate) fn in_test_child(cleared: &[&str]) -> bool {
+    const CHILD: &str = "ORX_TEST_CHILD";
+    let thread = std::thread::current();
+    let test = thread.name().expect("libtest names each test's thread");
+    if std::env::var_os(CHILD).is_some_and(|child| child == test) {
+        return true;
+    }
+    let temp = std::env::temp_dir().join(format!("orx-test-child-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&temp).unwrap();
+    let mut command = crate::process::command(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", test])
+        .env(CHILD, test)
+        .env_remove("ORX_DATA_DIR");
+    // The child's temp dir, home included, goes away with it.
+    for var in ["TMPDIR", "TMP", "TEMP"] {
+        command.env(var, &temp);
+    }
+    for var in cleared {
+        command.env_remove(var);
+    }
+    let output = command.output().unwrap();
+    let _ = std::fs::remove_dir_all(&temp);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains(" 1 passed"),
+        "{test} in its child process:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
+/// Skips a test whose external tool this machine lacks; in CI the missing
+/// tool is the failure.
+#[cfg(test)]
+pub(crate) fn skip_without_tool(missing: &str) {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{missing}: CI must provide it"
+    );
+    eprintln!("skipped: {missing}");
 }
 
 fn credentials_path() -> PathBuf {
@@ -119,6 +201,14 @@ pub async fn load_credentials() -> Result<Option<Credentials>> {
     match serde_json::from_str::<Credentials>(&raw) {
         Ok(creds) if !creds.api_url.is_empty() && !creds.token.is_empty() => Ok(Some(creds)),
         _ => Ok(None),
+    }
+}
+
+/// The signed-in API, else the default: where public endpoints such as project links resolve.
+pub async fn openresearch_api_url() -> String {
+    match load_credentials().await {
+        Ok(Some(creds)) => creds.api_url,
+        _ => default_api_url(),
     }
 }
 
@@ -259,6 +349,20 @@ pub fn settings_data_dir() -> Option<PathBuf> {
     crate::telemetry::persisted_data_dir().map(PathBuf::from)
 }
 
+#[cfg(desktop_app)]
+pub fn desktop_zoom_percent() -> i32 {
+    crate::telemetry::load_settings()
+        .and_then(|settings| settings.desktop_zoom_percent)
+        .filter(|percent| (50..=200).contains(percent))
+        .unwrap_or(100)
+}
+
+#[cfg(desktop_app)]
+pub fn set_desktop_zoom_percent(percent: i32) -> Result<()> {
+    crate::telemetry::mutate_settings(|settings| settings.desktop_zoom_percent = Some(percent))?;
+    Ok(())
+}
+
 pub fn settings_cache_dir() -> Option<PathBuf> {
     crate::telemetry::persisted_cache_dir().map(PathBuf::from)
 }
@@ -268,6 +372,34 @@ pub fn settings_cache_dir() -> Option<PathBuf> {
 /// `None` clears it (revert to the env/XDG/default chain).
 pub fn set_settings_data_dir(data_dir: Option<String>) -> Result<()> {
     crate::telemetry::set_persisted_data_dir(data_dir)?;
+    Ok(())
+}
+
+pub fn run_engine_settings() -> Result<(bool, Option<&'static str>)> {
+    let channel = crate::updates::current_release_channel();
+    let override_value = std::env::var_os("ORX_RUN_ENGINE");
+    let saved = crate::telemetry::load_settings().and_then(|settings| settings.run_engine);
+    run_engine_settings_for(channel, override_value.as_deref(), saved)
+}
+
+fn run_engine_settings_for(
+    channel: crate::updates::ReleaseChannel,
+    override_value: Option<&std::ffi::OsStr>,
+    saved: Option<bool>,
+) -> Result<(bool, Option<&'static str>)> {
+    if channel == crate::updates::ReleaseChannel::Canary {
+        return Ok((true, Some("canary")));
+    }
+    match override_value {
+        Some(value) if value == "1" => Ok((true, Some("environment"))),
+        Some(value) if value == "0" => Ok((false, Some("environment"))),
+        None => Ok((saved.unwrap_or(false), None)),
+        Some(_) => Err(crate::error::anyhow!("ORX_RUN_ENGINE must be 1 or 0.")),
+    }
+}
+
+pub fn set_run_engine_enabled(enabled: bool) -> Result<()> {
+    crate::telemetry::mutate_settings(|settings| settings.run_engine = Some(enabled))?;
     Ok(())
 }
 
@@ -330,7 +462,7 @@ pub fn set_github_default_prompt_seen(seen: bool) -> Result<()> {
 /// format the api writes: `export KEY='value'` with `\` doubled and `'`
 /// written as `'\''`.
 pub fn synced_env_var(key: &str) -> Option<String> {
-    let path = dirs::home_dir()?.join(".openresearch").join("env");
+    let path = home_dir()?.join(".openresearch").join("env");
     let content = std::fs::read_to_string(path).ok()?;
     let prefix = format!("export {key}='");
     for line in content.lines() {
@@ -352,7 +484,7 @@ pub fn synced_env_var(key: &str) -> Option<String> {
 /// All vars in the synced env file, in file order (same format as
 /// `synced_env_var`). Malformed lines are skipped.
 pub fn list_synced_env() -> Vec<(String, String)> {
-    let Some(path) = dirs::home_dir().map(|h| h.join(".openresearch").join("env")) else {
+    let Some(path) = home_dir().map(|h| h.join(".openresearch").join("env")) else {
         return Vec::new();
     };
     let Ok(content) = std::fs::read_to_string(path) else {
@@ -380,17 +512,77 @@ pub fn list_synced_env() -> Vec<(String, String)> {
 /// Names the run inside its job, e.g. as a metric tracker's run name.
 pub const RUN_ID_ENV: &str = "ORX_RUN_ID";
 
-/// A run's environment: the synced env file plus its own run id.
+/// A run's environment: the synced env file plus what the run knows about itself.
 pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
     let mut env: std::collections::HashMap<String, String> =
         list_synced_env().into_iter().collect();
-    env.insert(RUN_ID_ENV.to_string(), run_id.to_string());
+    env.extend(run_context_env(run_id));
     env
+}
+
+/// What a launched job sees: [`run_env`] plus a configured Hugging Face token. Resolved at
+/// launch, so secrets never enter a stored launch intent.
+pub fn launch_env(run_id: &str) -> std::collections::HashMap<String, String> {
+    let mut env = run_env(run_id);
+    if let Ok(token) = crate::jobs::huggingface::resolve_token() {
+        env.entry("HF_TOKEN".to_string()).or_insert(token);
+    }
+    env
+}
+
+const EXPERIMENT_ENV: &str = "ORX_EXPERIMENT";
+const EXPERIMENT_TITLE_ENV: &str = "ORX_EXPERIMENT_TITLE";
+const PARENT_EXPERIMENT_ENV: &str = "ORX_PARENT_EXPERIMENT";
+const COMMIT_ENV: &str = "ORX_COMMIT";
+
+/// The run's id, experiment, parent, commit and Trackio project, read from its reserved row.
+pub fn run_context_env(run_id: &str) -> Vec<(String, String)> {
+    let mut env = vec![(RUN_ID_ENV.to_string(), run_id.to_string())];
+    match stored_run_context(run_id) {
+        Ok(context) => env.extend(context),
+        Err(error) => {
+            eprintln!(
+                "warning: could not read run {run_id}'s experiment for its environment: {error}"
+            )
+        }
+    }
+    env
+}
+
+fn stored_run_context(run_id: &str) -> Result<Vec<(String, String)>> {
+    let store = crate::store::Store::open()?;
+    let Some(run) = store.get_run(run_id)? else {
+        return Ok(Vec::new());
+    };
+    let mut env = Vec::new();
+    if let Some(experiment) = store.get_local_experiment(&run.experiment_id)? {
+        let parent = match &experiment.parent_experiment_id {
+            Some(id) => store.get_local_experiment(id)?,
+            None => None,
+        };
+        if let Some(parent) = parent {
+            env.push((PARENT_EXPERIMENT_ENV.to_string(), parent.slug));
+        }
+        if let Some(title) = experiment.title.filter(|title| !title.trim().is_empty()) {
+            env.push((EXPERIMENT_TITLE_ENV.to_string(), title));
+        }
+        env.push((EXPERIMENT_ENV.to_string(), experiment.slug));
+    }
+    if let Some(commit) = run.commit_sha.filter(|sha| !sha.is_empty()) {
+        env.push((COMMIT_ENV.to_string(), commit));
+    }
+    if let Some(project) = store.get_local_project(&run.project_id)? {
+        env.push((
+            crate::local::trackio::PROJECT.to_string(),
+            crate::local::trackio::project_for(&project.slug),
+        ));
+    }
+    Ok(env)
 }
 
 /// Drop `key`'s line from the synced env file. Missing file/key is a no-op.
 pub fn remove_synced_env_var(key: &str) -> Result<()> {
-    let Some(path) = dirs::home_dir().map(|h| h.join(".openresearch").join("env")) else {
+    let Some(path) = home_dir().map(|h| h.join(".openresearch").join("env")) else {
         return Ok(());
     };
     let Ok(existing) = std::fs::read_to_string(&path) else {
@@ -419,7 +611,7 @@ pub fn write_synced_env_var(key: &str, value: &str) -> Result<()> {
 
 pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
     use anyhow::anyhow;
-    let dir = dirs::home_dir()
+    let dir = home_dir()
         .ok_or_else(|| anyhow!("no home directory"))?
         .join(".openresearch");
     std::fs::create_dir_all(&dir)?;
@@ -471,6 +663,15 @@ pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 pub struct SshHostSettings {
     pub container: Option<String>,
+    /// Absolute storage root for runs and the source cache; `None` is `~/.orx`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_root: Option<String>,
+    /// Keep every finished run's remote dir, not just each project's newest few.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_remote_runs: bool,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -479,6 +680,9 @@ pub struct SshSettings {
     pub default_host: Option<String>,
     #[serde(default)]
     pub hosts: std::collections::BTreeMap<String, SshHostSettings>,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 pub fn ssh_settings() -> Result<SshSettings> {
@@ -494,4 +698,47 @@ pub fn set_ssh_host(host: String, options: SshHostSettings) -> Result<()> {
 pub fn set_ssh_default(host: Option<String>) -> Result<()> {
     crate::telemetry::set_ssh_default(host)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::updates::ReleaseChannel;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn canary_forces_the_engine_while_stable_and_dev_allow_opt_in() {
+        for saved in [None, Some(false), Some(true)] {
+            for value in [None, Some("0"), Some("1"), Some("invalid")] {
+                let value = value.map(OsStr::new);
+                assert_eq!(
+                    run_engine_settings_for(ReleaseChannel::Canary, value, saved).unwrap(),
+                    (true, Some("canary"))
+                );
+                let stable = run_engine_settings_for(ReleaseChannel::Stable, value, saved);
+                match value {
+                    None => assert_eq!(stable.unwrap(), (saved.unwrap_or(false), None)),
+                    Some(value) if value == "0" => {
+                        assert_eq!(stable.unwrap(), (false, Some("environment")))
+                    }
+                    Some(value) if value == "1" => {
+                        assert_eq!(stable.unwrap(), (true, Some("environment")))
+                    }
+                    Some(_) => assert!(stable.is_err()),
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canary_ignores_even_a_non_unicode_environment_override() {
+        use std::os::unix::ffi::OsStrExt;
+        let value = Some(OsStr::from_bytes(&[0xff]));
+        assert_eq!(
+            run_engine_settings_for(ReleaseChannel::Canary, value, None).unwrap(),
+            (true, Some("canary"))
+        );
+        assert!(run_engine_settings_for(ReleaseChannel::Stable, value, None).is_err());
+    }
 }

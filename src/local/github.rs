@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::process::Command;
 
 use crate::error::{anyhow, Result};
 
@@ -36,18 +35,12 @@ pub async fn status() -> Status {
 }
 
 async fn gh(args: &[&str], timeout: Duration) -> Result<String> {
-    let mut command = match super::shell_env::find_on_path("gh") {
-        Some(path) => Command::new(path),
-        None => Command::new("gh"),
-    };
+    let mut command = crate::process::tokio_command("gh");
     command
         .args(args)
         .env("GH_HOST", "github.com")
         .env("GH_PROMPT_DISABLED", "1")
         .kill_on_drop(true);
-    if let Some(paths) = super::shell_env::search_path() {
-        command.env("PATH", paths);
-    }
     let output = tokio::time::timeout(timeout, command.output())
         .await
         .map_err(|_| {

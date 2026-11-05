@@ -1,0 +1,12 @@
+[package]
+name = "orx-test-support"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[target.'cfg(unix)'.dependencies]
+anyhow = "1"
+libc = "0.2"
+sha2 = "0.10"
+socket2 = "0.6"
+tempfile = "3"

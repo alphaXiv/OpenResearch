@@ -6,8 +6,8 @@ use std::process::{Child, Command, Stdio};
 /// (e.g. no browser, headless) are swallowed, since the caller is expected to
 /// have already printed the URL for manual opening. The child is detached so the
 /// CLI does not block on it.
-pub fn open_browser(url: &str) {
-    launch(url);
+pub fn open_browser(url: &str, activation_token: Option<&str>) {
+    launch(url, activation_token);
 }
 
 /// [`open_browser`] for `orx up`, reporting an opener that fails to spawn or
@@ -17,7 +17,7 @@ pub fn open_dashboard(
     url: &str,
     mode: crate::telemetry::UpLaunchMode,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let Some(mut child) = launch(url) else {
+    let Some(mut child) = launch(url, None) else {
         crate::telemetry::capture_browser_open_failed(mode);
         return None;
     };
@@ -35,8 +35,12 @@ pub fn open_dashboard(
     }))
 }
 
-fn launch(url: &str) -> Option<Child> {
+fn launch(url: &str, activation_token: Option<&str>) -> Option<Child> {
     openers(url).into_iter().find_map(|mut cmd| {
+        if let Some(token) = activation_token {
+            cmd.env("XDG_ACTIVATION_TOKEN", token)
+                .env("DESKTOP_STARTUP_ID", token);
+        }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -51,7 +55,7 @@ fn launch(url: &str) -> Option<Child> {
 fn openers(url: &str) -> Vec<Command> {
     #[cfg(target_os = "macos")]
     {
-        let mut c = Command::new("open");
+        let mut c = crate::process::command("open");
         c.arg(url);
         vec![c]
     }
@@ -61,7 +65,7 @@ fn openers(url: &str) -> Vec<Command> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let mut xdg = Command::new("xdg-open");
+        let mut xdg = crate::process::command("xdg-open");
         xdg.arg(url);
         crate::local::shell_env::restore_host_gui_env(&mut xdg);
         if is_wsl() {
@@ -69,7 +73,7 @@ fn openers(url: &str) -> Vec<Command> {
             // builds re-parse it through `cmd /c start` and truncate at '&'
             // (login URLs carry one). The absolute path covers WSL configs
             // with appendWindowsPath=false — interop still executes it.
-            let mut wslview = Command::new("wslview");
+            let mut wslview = crate::process::command("wslview");
             wslview.arg(url);
             return vec![
                 rundll("rundll32.exe", url),
@@ -87,7 +91,7 @@ fn openers(url: &str) -> Vec<Command> {
 /// survives. Works on Windows and on WSL through interop.
 #[cfg(not(target_os = "macos"))]
 fn rundll(program: &str, url: &str) -> Command {
-    let mut c = Command::new(program);
+    let mut c = crate::process::command(program);
     c.args(["url.dll,FileProtocolHandler", url]);
     c
 }

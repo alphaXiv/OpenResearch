@@ -1,24 +1,20 @@
-//! Local backend — run an experiment as a detached process on this machine.
-//!
-//! The no-transport twin of `jobs/ssh.rs`: same run-dir layout
-//!   run.sh      the launcher (clone-and-run payload)
-//!   log         merged stdout/stderr
-//!   pid         the detached process-group leader
-//!   exit_code   written when the payload finishes
-//! but under the orx data dir (`<data dir>/local-runs/<run_id>/`) instead of a
-//! remote `~/.orx/runs/`. A restarted `orx supervise` reattaches purely from
-//! that directory.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{anyhow, Result};
-use crate::jobs::ssh::{sh_quote, JobState};
+use crate::jobs::ssh::sh_quote;
+
+#[derive(Debug, Clone)]
+pub struct JobState {
+    pub stage: String,
+    pub message: Option<String>,
+    pub exit_code: Option<i32>,
+}
 
 #[cfg(windows)]
-mod python;
+pub(crate) mod python;
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 
 /// The run's working directory: `<data dir>/local-runs/<run id>`.
 pub fn run_dir(run_id: &str) -> PathBuf {
@@ -41,9 +37,8 @@ pub struct LocalJobSpec {
     pub secret_env: HashMap<String, String>,
 }
 
-/// Submit the job: write run.sh, launch it detached in its own process group
-/// (pid == pgid, so cancel can TERM the whole tree), record the pid. Returns
-/// the run dir — the reattach handle stored on the descriptor.
+/// A run as orx 0.2.x launched it: run.sh detached in its own process group (pid == pgid),
+/// with its pid recorded.
 pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     let dir = run_dir(&spec.run_id);
     std::fs::create_dir_all(&dir)
@@ -81,7 +76,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         let _ = std::fs::set_permissions(&run_sh_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    let mut cmd = std::process::Command::new(crate::local::bash::program());
+    let mut cmd = crate::process::command(crate::local::bash::program());
     if let Some(path) =
         crate::local::bash::path_with_toolchain(crate::local::shell_env::search_path())
     {
@@ -144,7 +139,7 @@ fn run_alive(dir: &Path, pid: &str) -> bool {
 
 #[cfg(not(windows))]
 fn run_alive_via(ps: &str, dir: &Path, pid: &str) -> bool {
-    let Ok(output) = std::process::Command::new(ps)
+    let Ok(output) = crate::process::command(ps)
         .args(["-ww", "-o", "stat=,command=", "-p", pid])
         .stderr(std::process::Stdio::null())
         .output()
@@ -168,16 +163,21 @@ fn run_alive_via(ps: &str, dir: &Path, pid: &str) -> bool {
     }
 }
 
-/// EPERM still means the process exists, just not one we may signal.
 #[cfg(not(windows))]
 fn pid_alive(pid: &str) -> bool {
     let Ok(pid) = pid.parse::<libc::pid_t>() else {
         return false;
     };
-    // SAFETY: signal 0 only checks existence; pid > 0 excludes group and broadcast targets.
-    pid > 0
-        && (unsafe { libc::kill(pid, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+    // pid > 0 excludes group and broadcast targets.
+    pid > 0 && signal_target_exists(pid)
+}
+
+/// EPERM still means the target exists, just not one we may signal.
+#[cfg(not(windows))]
+fn signal_target_exists(target: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks existence; callers exclude broadcast targets.
+    (unsafe { libc::kill(target, 0) }) == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(windows)]
@@ -221,11 +221,13 @@ fn exit_code_state(dir: &Path) -> Option<JobState> {
         JobState {
             stage: "COMPLETED".into(),
             message: None,
+            exit_code: Some(code),
         }
     } else {
         JobState {
             stage: "ERROR".into(),
             message: Some(format!("exited with code {code}")),
+            exit_code: Some(code),
         }
     })
 }
@@ -241,6 +243,7 @@ pub fn inspect_job(dir: &Path) -> JobState {
         Ok(pid) if run_alive(dir, pid.trim()) => JobState {
             stage: "RUNNING".into(),
             message: None,
+            exit_code: None,
         },
         // Dead pid: run.sh may have written exit_code and exited between the
         // check above and the ps probe — re-read before calling it killed.
@@ -259,18 +262,99 @@ pub fn inspect_job(dir: &Path) -> JobState {
                 return JobState {
                     stage: "RUNNING".into(),
                     message: None,
+                    exit_code: None,
                 };
             }
             JobState {
                 stage: "ERROR".into(),
                 message: Some("process died without an exit code (killed?)".into()),
+                exit_code: None,
             }
         }
         // pid not written yet — just starting.
         Err(_) => JobState {
             stage: "RUNNING".into(),
             message: None,
+            exit_code: None,
         },
+    }
+}
+
+const LINGERING_GROUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Whether the run may still have live processes, including a group lingering after exit_code.
+/// Called only while submission is excluded and a supervisor lock is checked separately.
+pub fn orphaned_job_is_running(dir: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    if dir.join("launch.json").try_exists()? || dir.join("wrapper.json").try_exists()? {
+        return Ok(orx_host::wrapper::has_live_processes(dir)?);
+    }
+    #[cfg(windows)]
+    if dir.join("windows_job").try_exists()? {
+        return Ok(windows::job_is_running(dir)?);
+    }
+    if exit_code_state(dir).is_some() {
+        // Children may outlive exit_code briefly; after the window a live PGID is likely reused.
+        let age = std::fs::metadata(dir.join("exit_code"))?
+            .modified()?
+            .elapsed()
+            .unwrap_or_default();
+        return Ok(age < LINGERING_GROUP_WINDOW && process_group_alive(dir));
+    }
+    match std::fs::read_to_string(dir.join("pid")) {
+        Ok(_) => return Ok(inspect_job(dir).stage == "RUNNING"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(not(windows))]
+    {
+        let script = match dir.join("run.sh").canonicalize() {
+            Ok(script) => script,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let output = crate::process::command("ps")
+            .args(["-A", "-ww", "-o", "stat=,command="])
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow!("Could not inspect orphaned local processes"));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            line.trim()
+                .split_once(char::is_whitespace)
+                .is_some_and(|(stat, command)| {
+                    !stat.starts_with('Z')
+                        && command
+                            .strip_suffix(script.to_string_lossy().as_ref())
+                            .is_some_and(|prefix| prefix.ends_with(' '))
+                })
+        }))
+    }
+    #[cfg(windows)]
+    // The native launcher records its PID before resuming the suspended process.
+    Ok(false)
+}
+
+/// Whether any process remains in the run's group (pgid == recorded pid).
+#[cfg(not(windows))]
+pub(crate) fn process_group_alive(dir: &Path) -> bool {
+    let Ok(pid) = std::fs::read_to_string(dir.join("pid")) else {
+        return false;
+    };
+    let Ok(group) = pid.trim().parse::<libc::pid_t>() else {
+        return false;
+    };
+    // -1 would broadcast to every process.
+    group > 1 && signal_target_exists(-group)
+}
+
+/// Windows cancel waits for an empty job object; deleting files a survivor holds open fails and is retried.
+#[cfg(windows)]
+pub(crate) fn process_group_alive(dir: &Path) -> bool {
+    if dir.join("windows_job").exists() {
+        windows::job_is_running(dir).unwrap_or(true)
+    } else {
+        false
     }
 }
 
@@ -296,15 +380,15 @@ pub fn stream_logs(
 
 /// TERM the process group (pid == pgid), else the pid alone; on Windows, the process tree.
 pub fn cancel_job(dir: &Path) -> Result<()> {
-    let pid = std::fs::read_to_string(dir.join("pid"))
-        .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
-    let pid = pid.trim().to_string();
     #[cfg(windows)]
     {
-        windows::cancel(dir, &pid)
+        windows::cancel(dir)
     }
     #[cfg(not(windows))]
     {
+        let pid = std::fs::read_to_string(dir.join("pid"))
+            .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
+        let pid = pid.trim().to_string();
         if !run_alive(dir, &pid) {
             return Ok(());
         }
@@ -317,7 +401,7 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
 fn terminate_tree(pid: &str) -> Result<()> {
     // `/T` fails if any descendant already exited, so success is read from the leader's liveness.
     use std::os::windows::process::CommandExt;
-    let _ = std::process::Command::new("taskkill")
+    let _ = crate::process::command("taskkill")
         .args(["/PID", pid, "/T", "/F"])
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .stdout(std::process::Stdio::null())
@@ -334,7 +418,7 @@ fn terminate_tree(pid: &str) -> Result<()> {
 
 #[cfg(not(windows))]
 fn terminate_group(pid: &str) -> Result<()> {
-    let group = std::process::Command::new("kill")
+    let group = crate::process::command("kill")
         .args(["-TERM", "--", &format!("-{pid}")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -342,7 +426,7 @@ fn terminate_group(pid: &str) -> Result<()> {
         .map(|s| s.success())
         .unwrap_or(false);
     if !group {
-        let process = std::process::Command::new("kill")
+        let process = crate::process::command("kill")
             .args(["-TERM", pid])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -386,7 +470,7 @@ pub struct Gpu {
 /// Blocking (subprocesses); call via `spawn_blocking` from async handlers.
 pub fn hardware_info() -> LocalHardware {
     let cmd = |name: &str, args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new(name).args(args).output().ok()?;
+        let out = crate::process::command(name).args(args).output().ok()?;
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -451,9 +535,73 @@ fn parse_nvidia_smi_csv(out: &str) -> Vec<Gpu> {
         .collect()
 }
 
+/// Writes `dir/pid` for a group whose leader has exited; the caller owns and must reap the survivor.
+#[cfg(all(test, unix))]
+pub(crate) fn spawn_lingering_group(dir: &Path) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    let mut leader = crate::process::command("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let survivor = crate::process::command("sleep")
+        .arg("30")
+        .process_group(i32::try_from(leader.id()).unwrap())
+        .spawn()
+        .unwrap();
+    leader.kill().unwrap();
+    leader.wait().unwrap();
+    std::fs::write(dir.join("pid"), leader.id().to_string()).unwrap();
+    survivor
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_stays_alive_while_a_survivor_outlives_the_leader() {
+        let dir = std::env::temp_dir().join(format!("orx-group-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!process_group_alive(&dir));
+        let mut survivor = spawn_lingering_group(&dir);
+        assert!(process_group_alive(&dir));
+        std::fs::write(dir.join("exit_code"), "143").unwrap();
+        assert!(orphaned_job_is_running(&dir).unwrap());
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join("exit_code"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - 2 * LINGERING_GROUP_WINDOW)
+            .unwrap();
+        assert!(!orphaned_job_is_running(&dir).unwrap());
+        survivor.kill().unwrap();
+        survivor.wait().unwrap();
+        assert!(!process_group_alive(&dir));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_job_probe_distinguishes_an_abandoned_launch_from_a_missing_pid() {
+        let dir = std::env::temp_dir().join(format!("orx orphan probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("run.sh");
+        std::fs::write(&script, "read -r value\n").unwrap();
+        assert!(!orphaned_job_is_running(&dir).unwrap());
+        let mut child = crate::process::command(crate::local::bash::program())
+            .arg(script.canonicalize().unwrap())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let running = orphaned_job_is_running(&dir).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(running);
+        assert!(!orphaned_job_is_running(&dir).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn nvidia_smi_csv_two_gpus() {
@@ -474,12 +622,11 @@ mod tests {
         assert_eq!(odd[0].mem_mib, None);
     }
 
+    /// Generous because Git Bash spawns slowly on a Windows runner busy with the parallel suite.
     fn wait_terminal(dir: &Path) -> JobState {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut state = inspect_job(dir);
-        for _ in 0..100 {
-            if state.stage != "RUNNING" {
-                break;
-            }
+        while state.stage == "RUNNING" && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(100));
             state = inspect_job(dir);
         }
@@ -490,7 +637,7 @@ mod tests {
     fn assert_reaped(dir: &Path) {
         let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
         for _ in 0..100 {
-            let output = std::process::Command::new("ps")
+            let output = crate::process::command("ps")
                 .args(["-o", "stat=", "-p", pid.trim()])
                 .output()
                 .unwrap();
@@ -507,10 +654,7 @@ mod tests {
     fn run_alive_without_ps_probes_the_pid() {
         let dir = std::env::temp_dir();
         let unrunnable_ps = "/nonexistent/orx-test-ps";
-        let mut child = std::process::Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .unwrap();
+        let mut child = crate::process::command("sleep").arg("60").spawn().unwrap();
         let pid = child.id().to_string();
         let alive = run_alive_via(unrunnable_ps, &dir, &pid);
         child.kill().unwrap();
@@ -525,10 +669,6 @@ mod tests {
 
     #[test]
     fn local_job_lifecycle() {
-        // The only test that touches ORX_DATA_DIR, so the global env is safe.
-        let base = std::env::temp_dir().join(format!("orx-localbox-test-{}", uuid::Uuid::new_v4()));
-        std::env::set_var("ORX_DATA_DIR", &base);
-
         let dir = run_job(&LocalJobSpec {
             run_id: "lifecycle".into(),
             script: "[ -n \"$TINKER_API_KEY\" ] && echo hello-$ORX_TEST_VAR-$HF_TOKEN".into(),
@@ -709,12 +849,9 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let stale = base.join("stale-pid");
+            let stale = crate::store::data_dir().join("stale-pid");
             std::fs::create_dir_all(&stale).unwrap();
-            let mut unrelated = std::process::Command::new("sleep")
-                .arg("60")
-                .spawn()
-                .unwrap();
+            let mut unrelated = crate::process::command("sleep").arg("60").spawn().unwrap();
             std::fs::write(stale.join("pid"), unrelated.id().to_string()).unwrap();
             std::fs::write(
                 stale.join("pid_script"),
@@ -731,8 +868,5 @@ mod tests {
             cancelled.unwrap();
             assert!(alive, "cancellation must not signal a reused PID");
         }
-
-        std::env::remove_var("ORX_DATA_DIR");
-        let _ = std::fs::remove_dir_all(&base);
     }
 }
