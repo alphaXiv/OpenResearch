@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+const COLLECTION_GRACE: Duration = Duration::from_secs(15 * 60);
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Rental {
@@ -66,8 +68,7 @@ impl Duty {
                 if ended.is_none() && (finished || dir.join("exit.json").exists()) {
                     ended = Some(Instant::now());
                 }
-                if ended
-                    .is_some_and(|at| at.elapsed() >= crate::stop_duration(Duration::from_secs(60)))
+                if ended.is_some_and(|at| at.elapsed() >= crate::stop_duration(COLLECTION_GRACE))
                     || ended.is_some() && dir.join("final_collected").exists()
                 {
                     break;

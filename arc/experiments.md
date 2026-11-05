@@ -277,7 +277,7 @@ stage source + capability ─ssh─► orx-host wrap (detached)
                                  heartbeat, every 30 s ───────► (expires without)
                                  run payload, log, exit receipt
 collect kept ranges      ◄─ssh─► orx-host serve
-acknowledge collection   ─ssh─► wait for "collected", 60 s max
+acknowledge collection   ─ssh─► wait for "collected", 15 min max
                                  release ────────────────────► billing closes,
                                                                machine deleted
 ```
@@ -291,10 +291,14 @@ acknowledge collection   ─ssh─► wait for "collected", 60 s max
   wrapper start, an outage or cancellation ends that bootstrap duty.
 - `orx-host wrap` activates billing before starting the payload, keeps
   heartbeating independently of the laptop, and owns the payload under its
-  hard time limit. It writes the same log and exit receipt as an SSH run;
+  hard time limit. The lease request adds the 15-minute collection grace to
+  the payload timeout, capped at the service's seven-day maximum; runs near
+  that maximum have less collection time. The service adds 90 seconds for
+  finalization, covering the payload's 30-second forced-termination window.
+  It writes the same log and exit receipt as an SSH run;
   a lost launch response is recovered by inspecting that run's intent.
 - After the exit receipt, the wrapper waits for the laptop to acknowledge its
-  kept log and final notices, or 60 seconds, whichever comes first. It then
+  kept log and final notices, or 15 minutes, whichever comes first. It then
   stops heartbeating and retries release until accepted, even if descendants
   remain. The service closes billing and deletes the machine on its own schedule.
 - Runs already launched through a canary's `rental-supervise` retain their
@@ -317,7 +321,8 @@ acknowledge collection   ─ssh─► wait for "collected", 60 s max
 - Manual teardown follows the run engine's Cancel and Abandon path above.
 - Log collection uses the engine's kept ranges, file identities and resumable
   pages. The laptop acknowledges collection only after keeping the output and
-  final notices; a disconnect resumes from the remote file during the grace. Once deletion is verified,
+  final notices; a disconnect resumes from the remote file during the grace.
+  Live contact makes pending collection due immediately. Once deletion is verified,
   the available local copy, including an empty log, is settled. Data left only
   on the machine is lost when it is deleted, and a run whose final outcome
   could not be collected ends as

@@ -75,6 +75,7 @@ async fn isolated() -> Option<PathBuf> {
         State(root): State<PathBuf>,
         method: axum::http::Method,
         uri: axum::http::Uri,
+        body: axum::body::Bytes,
     ) -> axum::response::Response {
         use axum::response::IntoResponse;
         use std::io::Write;
@@ -90,6 +91,7 @@ async fn isolated() -> Option<PathBuf> {
             return (headers, Json(json!({}))).into_response();
         }
         if method == axum::http::Method::POST && uri.path() == "/sandboxes" {
+            std::fs::write(root.join("sandbox-request.json"), body).unwrap();
             let body = std::fs::read(root.join("sandbox-response.json")).unwrap();
             return (
                 headers,
@@ -1466,16 +1468,22 @@ async fn unsupported_leases_are_deleted_or_keep_the_known_box_handle() {
         Arc::new(|_| panic!("no SSH before a valid handle")),
     );
     let metadata = BackendDescriptor::parse(r#"{"kind":"openresearch_job"}"#).unwrap();
-    let launch = LaunchSpec {
-        kind: "openresearch_job".into(),
-        target: Some("org".into()),
-        options: json!({"flavor":"cpu5c"}),
-    };
-    for (id, lease, deletion_fails) in [
-        ("missing", Value::Null, false),
-        ("unsupported", json!({"version":2,"token":"fake"}), false),
-        ("retained", Value::Null, true),
+    for (id, lease, deletion_fails, timeout, max_active_seconds) in [
+        ("missing", Value::Null, false, None, 15_300),
+        (
+            "unsupported",
+            json!({"version":2,"token":"fake"}),
+            false,
+            Some(60),
+            960,
+        ),
+        ("retained", Value::Null, true, Some(604_800), 604_800),
     ] {
+        let launch = LaunchSpec {
+            kind: "openresearch_job".into(),
+            target: Some("org".into()),
+            options: json!({"flavor":"cpu5c", "timeout_seconds":timeout}),
+        };
         let response = json!({"sandbox":{"id":id,"organizationId":"org","status":"online","machineType":"cpu","updatedAt":"now"},"rentalLease":lease});
         std::fs::write(root.join("sandbox-response.json"), response.to_string()).unwrap();
         if deletion_fails {
@@ -1485,6 +1493,13 @@ async fn unsupported_leases_are_deleted_or_keep_the_known_box_handle() {
             .submit(&backend, pending(id, &metadata, &launch))
             .await
             .unwrap();
+        let request: Value =
+            serde_json::from_slice(&std::fs::read(root.join("sandbox-request.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            request["rentalLease"]["maxActiveSeconds"],
+            max_active_seconds
+        );
         let (run, _) = engine.load(id).unwrap();
         if deletion_fails {
             assert_eq!(run.status, "starting");
@@ -1492,6 +1507,7 @@ async fn unsupported_leases_are_deleted_or_keep_the_known_box_handle() {
                 panic!("lost paid box id");
             };
             assert_eq!(descriptor.job_id.as_deref(), Some(id));
+            assert_eq!(descriptor.timeout_secs, timeout);
             assert!(descriptor.rental_lease.is_none());
         } else {
             assert_eq!(run.status, "failed");
