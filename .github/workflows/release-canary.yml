@@ -85,17 +85,17 @@ jobs:
         with:
           name: release-ui
           path: ui/dist
-      - name: Download release hosts
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release-host
-          path: target/host-binaries
       - run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: canary-macos
           key: ${{ matrix.target }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Download release hosts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-host
+          path: target/host-binaries
       - name: Build orx
         env:
           ORX_OFFICIAL_RELEASE_BUILD: '1'
@@ -174,11 +174,6 @@ jobs:
         with:
           name: release-ui
           path: ui/dist
-      - name: Download release hosts
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release-host
-          path: target/host-binaries
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool
@@ -186,6 +181,11 @@ jobs:
         with:
           shared-key: canary-linux
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Download release hosts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-host
+          path: target/host-binaries
       - name: Build app
         env:
           ORX_OFFICIAL_RELEASE_BUILD: '1'
