@@ -464,12 +464,13 @@ pub async fn research_profile() -> Result<crate::telemetry::ResearchProfile> {
     )>;
     static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);
     let id = user_id().await?;
-    let memo = |memo: &Memo| {
-        memo.as_ref()
-            .filter(|(user, at, _)| *user == id && at.elapsed() < PROFILE_TTL)
-            .map(|(_, _, profile)| profile.clone())
-    };
-    if let Some(profile) = memo(&MEMO.lock().unwrap_or_else(|e| e.into_inner())) {
+    let cached = MEMO
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|(user, at, _)| *user == id && at.elapsed() < PROFILE_TTL)
+        .map(|(_, _, profile)| profile.clone());
+    if let Some(profile) = cached {
         return Ok(profile);
     }
     let (user_path, topics_path) = (
@@ -486,12 +487,17 @@ pub async fn research_profile() -> Result<crate::telemetry::ResearchProfile> {
             .filter(|text| !text.is_empty())
             .map(str::to_owned)
     };
-    let card = match text(&user, "researcherSlug") {
+    let slug = text(&user, "researcherSlug").filter(|slug| {
+        slug.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    });
+    let card = match &slug {
         Some(slug) => get(&format!("/researchers/v1/cards/{slug}"), &[])
             .await
             .ok(),
         None => None,
     };
+    let complete = topics.is_ok() && (slug.is_none() || card.is_some());
     let areas = card
         .as_ref()
         .and_then(|card| card.get("researchAreas"))
@@ -528,8 +534,11 @@ pub async fn research_profile() -> Result<crate::telemetry::ResearchProfile> {
         background: (!background.is_empty()).then_some(background),
         ..Default::default()
     };
-    *MEMO.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some((id, std::time::Instant::now(), profile.clone()));
+    // A partial answer is used once but not remembered, so a blip doesn't stick.
+    if complete {
+        *MEMO.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((id, std::time::Instant::now(), profile.clone()));
+    }
     Ok(profile)
 }
 

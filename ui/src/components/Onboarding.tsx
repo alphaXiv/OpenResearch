@@ -91,7 +91,7 @@ export function Onboarding(props: OnboardingProps) {
   const user = accountQuery.data?.user ?? null;
   // An OpenResearch account without an alphaXiv connection still needs to connect it.
   const connectOnly = !!user && alphaXivMe.error instanceof AlphaXivNotConnectedError;
-  const alphaXivLinked = !!user && !connectOnly;
+  const alphaXivLinked = !!user && alphaXivMe.isSuccess;
 
   const completeOnboardingMutation = useMutation({ mutationFn: completeOnboarding });
 
@@ -486,7 +486,7 @@ export function Onboarding(props: OnboardingProps) {
               user={alphaXivLinked ? user : null}
               avatarUrl={alphaXivMe.data?.avatarUrl ?? null}
               connectOnly={connectOnly}
-              disabled={accountQuery.isLoading || finishing}
+              disabled={accountQuery.isLoading || (!!user && alphaXivMe.isLoading) || finishing}
               onSignedIn={() => void latestFinish.current()}
             />
             {automaticSetup && !gitReady && (

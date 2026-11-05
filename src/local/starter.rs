@@ -17,7 +17,7 @@ use super::harness::{OneShot, OneShotQuality};
 use super::model::LocalProject;
 
 const PAPER_PDF: &str = "paper.pdf";
-const ALPHAXIV_PROFILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const ALPHAXIV_PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LISTED_FILES: usize = 5000;
 const MAX_WALK_DEPTH: usize = 4;
 /// Paths shown to the model; shallow ones first so the layout reads at a glance.

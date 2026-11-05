@@ -2261,7 +2261,6 @@ export function createApi(
   const saveGitSettings = (body: { userName?: string; userEmail?: string }) =>
     post<GitSettings>("/api/settings/git", body);
 
-
   const getLitSources = (signal?: AbortSignal) =>
     get<LitSourcesSettings>("/api/settings/lit-sources", signal);
 

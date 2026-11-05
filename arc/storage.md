@@ -168,10 +168,9 @@ endpoints out of it. Other traffic:
   profile picture alphaXiv names, and a blank project's starter prompts are
   briefed from the profile, so it reaches the agent's model provider. The
   chat's library picker loads paper thumbnails from alphaXiv's public asset
-  CDN. Agents also send research tool
-  calls to alphaXiv while signed out, limited by IP. Signed-in agents read
-  library notes and highlights and, when requested, create folders and save
-  papers to them. Tool arguments (including research queries, paper and
+  CDN. Agents also send research tool calls to alphaXiv while signed out,
+  limited by IP. Signed-in agents read library notes and highlights and, when
+  requested, create folders and save papers to them. Tool arguments (including research queries, paper and
   researcher identifiers, GitHub repository paths, folder identifiers and
   names) go to alphaXiv; tool results enter the agent's context and reach its
   model provider. The MCP proxy sends no chat transcript, project files,

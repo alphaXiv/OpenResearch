@@ -97,6 +97,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     }, queryClient);
   };
 
+  /** Fails with `AlphaXivNotConnectedError` while the account has no alphaXiv connection. */
   const useAlphaXivMe = () => {
     const account = useOpenResearchAccount();
     return useQuery({

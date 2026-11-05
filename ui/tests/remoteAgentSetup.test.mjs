@@ -24,13 +24,16 @@ function setup({ datacenter = true, lookupFails = false, delayed = false, remote
   const claude = { id: "claude-code", name: "Claude Code", installed: false, agentReady: false, models: [], options: {} };
   const data = { harnesses: harnesses ?? [ready, claude], path: { gitVersion: "git 2.49.0" }, commands: { "claude-code": { install: "install", login: "login" } }, network: lookupFails ? undefined : { ip: "192.0.2.1", isDatacenter: datacenter } };
   const queries = Object.fromEntries([
-    ["getHarnessesQuery", "harnesses"], ["getProjectPathStatusQuery", "path"], ["getHarnessSetupCommandsQuery", "commands"], ["getPublicNetworkQuery", "network"]
+    ["getHarnessesQuery", "harnesses"], ["getProjectPathStatusQuery", "path"], ["getHarnessSetupCommandsQuery", "commands"], ["getPublicNetworkQuery", "network"],
   ].map(([name, kind]) => [name, () => ({ kind })]));
   queries.refreshHarnesses = async () => data.harnesses;
   const workspace = {
     api: {
       captureUiEvent: () => { if (remote) assert.fail("remote setup is not the onboarding funnel"); },
-      completeOnboarding: () => assert.fail("remote setup must not seed a demo"),
+      completeOnboarding: async (selection) => {
+        if (remote) assert.fail("remote setup must not seed a demo");
+        return { project: { id: "demo" }, selection };
+      },
       updateUiState: async (body) => { writes.push(body); return { preferredAgent: body.preferredAgent }; },
     },
     queries,
@@ -70,7 +73,7 @@ function setup({ datacenter = true, lookupFails = false, delayed = false, remote
     "../api": { reasoningFor: () => ({ defaultId: null }), AlphaXivNotConnectedError },
     "../machineSelection": { useMachines: () => ({ owner: { queries: {
       useOpenResearchAccount: () => ({ data: { user }, isLoading: false }),
-      useAlphaXivMe: () => ({ data: alphaXivError ? undefined : { avatarUrl: null }, error: alphaXivError }),
+      useAlphaXivMe: () => ({ data: alphaXivError ? undefined : { avatarUrl: null }, error: alphaXivError, isSuccess: !alphaXivError, isLoading: false }),
     } } }) },
     "../i18n": { ltr: String },
     "../paraglide/messages.js": { m: messages },
@@ -87,7 +90,7 @@ function setup({ datacenter = true, lookupFails = false, delayed = false, remote
     effects.length = 0;
     const root = exports.Onboarding(remote
       ? { remote: true, host: "gpu-lab", preferredAgent: null, onDone: (state) => done.push(state) }
-      : { remote: false, preferredAgent: null, onDone: () => {} });
+      : { remote: false, preferredAgent: null, onDone: (project) => done.push(project) });
     root.props.ref.current = screen;
     return nodes(root);
   };
@@ -183,7 +186,7 @@ for (const [name, options, label] of [
   test(`the alphaXiv step offers to finish by skipping only until alphaXiv is linked: ${name}`, async () => {
     const app = setup({ remote: false, ...options });
     await new Promise(setImmediate);
-    const button = (label) => app.render().find((node) => node.type === "Button" && React.Children.toArray(node.props.children).includes(label));
+    const button = (text) => app.render().find((node) => node.type === "Button" && React.Children.toArray(node.props.children).includes(text));
     button("onboarding_continue").props.onClick();
     await button("onboarding_continue").props.onClick();
     const tree = app.render();
@@ -205,4 +208,16 @@ test("Continue explains when the chosen agent is still loading", async () => {
   const alert = app.render().find((node) => node.props.role === "alert");
   assert.equal(alert?.props.children, "harness_setup_not_ready");
   assert.equal(app.writes.length, 0);
+});
+
+test("finishing alphaXiv sign-in completes onboarding", async () => {
+  const app = setup({ remote: false });
+  await new Promise(setImmediate);
+  const button = (text) => app.render().find((node) => node.type === "Button" && React.Children.toArray(node.props.children).includes(text));
+  button("onboarding_continue").props.onClick();
+  await button("onboarding_continue").props.onClick();
+  const card = app.render().find((node) => typeof node.type === "function" && node.type.name === "AlphaXivAccountCard");
+  card.props.onSignedIn();
+  await new Promise(setImmediate);
+  assert.deepEqual(app.done, [{ id: "demo" }]);
 });
