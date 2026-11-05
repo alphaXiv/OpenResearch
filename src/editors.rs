@@ -23,7 +23,7 @@ fn spawn_detached(cmd: &mut Command) -> std::io::Result<()> {
 pub fn open_in_default_app(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     let mut cmd = {
-        let mut c = Command::new("open");
+        let mut c = crate::process::command("open");
         c.arg(path);
         c
     };
@@ -32,13 +32,13 @@ pub fn open_in_default_app(path: &std::path::Path) -> std::io::Result<()> {
         // `explorer.exe <path>` opens the file with its associated app (like a
         // double-click) and takes the path as one argv element — no cmd.exe
         // reparse, so a filename with shell metacharacters can't inject.
-        let mut c = Command::new("explorer.exe");
+        let mut c = crate::process::command("explorer.exe");
         c.arg(path);
         c
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let mut cmd = {
-        let mut c = Command::new("xdg-open");
+        let mut c = crate::process::command("xdg-open");
         c.arg(path);
         crate::local::shell_env::restore_host_gui_env(&mut c);
         c
@@ -52,7 +52,7 @@ fn reveal_command(path: &std::path::Path) -> Command {
     #[cfg(target_os = "macos")]
     let cmd = {
         // `open -R <path>` reveals the file in Finder with it selected.
-        let mut c = Command::new("open");
+        let mut c = crate::process::command("open");
         c.arg("-R").arg(path);
         c
     };
@@ -60,7 +60,7 @@ fn reveal_command(path: &std::path::Path) -> Command {
     let cmd = {
         // explorer splits on commas and rejects \" escapes: quote via raw_arg (NTFS bans '"').
         use std::os::windows::process::CommandExt;
-        let mut c = Command::new("explorer.exe");
+        let mut c = crate::process::command("explorer.exe");
         let mut arg = std::ffi::OsString::from("/select,\"");
         arg.push(path);
         arg.push("\"");
@@ -70,7 +70,7 @@ fn reveal_command(path: &std::path::Path) -> Command {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let cmd = {
         // No portable "select the file" opener on Linux, so open the containing directory.
-        let mut c = Command::new("xdg-open");
+        let mut c = crate::process::command("xdg-open");
         c.arg(if path.is_dir() {
             path
         } else {
@@ -99,7 +99,7 @@ pub fn file_manager_name(_locale: &str) -> Option<String> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let mut command = Command::new("xdg-mime");
+        let mut command = crate::process::command("xdg-mime");
         command.args(["query", "default", "inode/directory"]);
         crate::local::shell_env::restore_host_gui_env(&mut command);
         let output = command.output().ok()?;
@@ -208,7 +208,8 @@ mod tests {
         // Commas are legal in NTFS names but are explorer's token separator;
         // the quoted form keeps the selection target intact.
         let cmd = reveal_command(std::path::Path::new(r"C:\work\a,b.bin"));
-        assert_eq!(cmd.get_program(), "explorer.exe");
+        let program = std::path::Path::new(cmd.get_program()).file_name().unwrap();
+        assert!(program.eq_ignore_ascii_case("explorer.exe"));
         assert_eq!(args(&cmd), [r#"/select,"C:\work\a,b.bin""#]);
     }
 

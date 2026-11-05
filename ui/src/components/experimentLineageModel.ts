@@ -1,10 +1,10 @@
 import {
   backendDetail,
   backendKind,
-  runDisplayStatus,
   type Experiment,
   type Run,
 } from "../api";
+import { runActive } from "../runDisplay";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 
@@ -49,9 +49,7 @@ export type HistoryRow =
 export const NO_TASK = "__no_task";
 
 export function historyStatus(run: Run): HistoryStatus {
-  const status = runDisplayStatus(run);
-  if (status === "done" || status === "failed" || status === "cancelled" || status === "lost") return status;
-  return "running";
+  return runActive(run.status) ? "running" : run.status;
 }
 
 const CODE_PREFIX = /^([A-Z][0-9]{0,2}[a-z]?)(?:\s*[:–—-]\s*|\s+)(?=\S)/;

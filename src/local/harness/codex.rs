@@ -58,7 +58,7 @@ use crate::local::chat::{
 use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
-use crate::local::shell_env::find_on_path;
+use crate::local::shell_env::installs;
 use crate::store::{Store, StoredChatMessage};
 
 fn codex_native_usage(usage: &Value) -> crate::store::TokenUsage {
@@ -357,7 +357,7 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
     let fut = async move {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -457,10 +457,11 @@ fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<Mode
             let default = configured_effort
                 .filter(|e| efforts.contains(e))
                 .or(catalog_default);
-            let info = ModelInfo::new(id).with_label(
+            let mut info = ModelInfo::new(id).with_label(
                 m.get("displayName").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
             );
+            info.context_window = m.get("contextWindow").and_then(Value::as_u64);
             let info = info.with_service_tiers(
                 m.get("serviceTiers")
                     .and_then(Value::as_array)
@@ -556,35 +557,27 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     })
 }
 
-/// `codex` on PATH then in installer locations, in preference order, symlinks
-/// resolved — codex needs to find its `codex-code-mode-host` helper next to the
-/// real binary.
+/// Every `codex` install, in preference order, symlinks resolved — codex needs
+/// to find its `codex-code-mode-host` helper next to the real binary.
 fn codex_candidates() -> Vec<PathBuf> {
-    let drops = codex_install_dirs(dirs::home_dir().as_deref())
+    installs("codex", codex_install_dirs(dirs::home_dir().as_deref()))
         .into_iter()
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
-    find_on_path("codex")
-        .into_iter()
-        .chain(drops)
         .map(resolve_symlinks)
         .collect()
 }
 
-/// Installer locations off PATH. ChatGPT.app bundles the Codex CLI without
+/// Codex's own installer locations. ChatGPT.app bundles the Codex CLI without
 /// putting it on PATH, sometimes as the only install.
 fn codex_install_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     let chatgpt_apps = [
         Some(PathBuf::from("/Applications")),
         home.map(|home| home.join("Applications")),
     ];
-    home.map(|home| home.join(".local").join("bin"))
+    cfg!(windows)
+        .then(dirs::data_local_dir)
+        .flatten()
+        .map(|dir| dir.join("Programs/OpenAI/Codex/bin"))
         .into_iter()
-        .chain(
-            cfg!(windows)
-                .then(dirs::data_local_dir)
-                .flatten()
-                .map(|dir| dir.join("Programs/OpenAI/Codex/bin")),
-        )
         .chain(
             chatgpt_apps
                 .into_iter()
@@ -633,7 +626,7 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     };
     let message = format!("{}\n\n{}", request.system, request.prompt);
     let fut = async {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
             .args(["-c", "sandbox_mode=\"read-only\""])
             .args(["-c", "approval_policy=\"never\""])
@@ -1308,7 +1301,7 @@ impl Harness for Codex {
                 .build()
                 .ok()?;
             runtime.block_on(async {
-                let mut cmd = Command::new(bin);
+                let mut cmd = crate::process::tokio_command(bin);
                 cmd.args(["plugin", "list", "--json"])
                     .env("CODEX_HOME", &worker_home)
                     .current_dir(std::env::temp_dir())
@@ -2751,15 +2744,16 @@ fn error_message(error: Option<&Value>) -> String {
         .unwrap_or_else(|| "codex reported an error".to_string())
 }
 
-fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) {
-    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") else {
-        return;
+fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) -> Result<()> {
+    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? else {
+        return Ok(());
     };
     let instructions = setup
         .get("developerInstructions")
         .and_then(Value::as_str)
         .unwrap_or_default();
     setup["developerInstructions"] = Value::String(format!("{instructions}\n\n{recovery}"));
+    Ok(())
 }
 
 async fn ensure_codex_pre_accept(
@@ -2926,13 +2920,13 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     );
     if ctx.reset_codex_model {
         // Codex keeps the old thread model when a turn omits its model override.
-        append_native_recovery_context(ctx, &mut thread_setup);
+        append_native_recovery_context(ctx, &mut thread_setup)?;
         ctx.native_session_id = None;
     }
     let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
         (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
         (Some(_), None) => {
-            append_native_recovery_context(ctx, &mut thread_setup);
+            append_native_recovery_context(ctx, &mut thread_setup)?;
             start_thread(ctx, &client, thread_setup).await?
         }
         (Some(id), Some(session)) => {
@@ -2962,7 +2956,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         ctx.host.codex.kill_session(&ctx.session_id).await;
                         client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
                     }
-                    append_native_recovery_context(ctx, &mut thread_setup);
+                    append_native_recovery_context(ctx, &mut thread_setup)?;
                     start_thread(ctx, &client, thread_setup).await?
                 }
             }
@@ -4000,7 +3994,7 @@ fn codex_sandbox(mode: Option<PermissionMode>) -> Option<&'static str> {
 }
 
 fn codex_exec_command(bin: &Path, roots: &[PathBuf], native_id: Option<&str>) -> Command {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("exec");
     for root in roots {
         cmd.arg("--add-dir").arg(root);
@@ -4151,7 +4145,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     cmd.args(["-c", &format!("mcp_servers={servers}")]);
     let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
     if ctx.native_session_id.is_some() && native_session.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? {
             turn_text = format!("{recovery}\n\n{turn_text}");
         }
     }

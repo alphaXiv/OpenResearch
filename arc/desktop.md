@@ -48,6 +48,10 @@ single-threaded runtime would deadlock here.
   binds the same port every time. If a terminal `orx up` or another install
   holds it, the app falls back to a free port. After an update relaunch it
   keeps the port it had.
+- **One server per data directory.** If an `orx up` already owns the data
+  directory, the window opens on it instead of starting a second engine.
+  Closing the window while runs are active hides it and keeps the engine
+  running until it is idle.
 - **One app per user.** macOS enforces this itself. On Windows a named event
   and on Linux a socket in the user's private runtime directory let a second
   launch bring the running window forward, handing it any link it was opened
@@ -58,7 +62,9 @@ single-threaded runtime would deadlock here.
   (the `PATH`, the orx and XDG directory overrides, each agent's config
   location) and uses those. Otherwise it would miss agents installed through
   the shell and open a different database than a terminal `orx`
-  ([storage](storage.md)).
+  ([storage](storage.md)). Every child is built in one place that hands it
+  those variables and finds its program where detection looks, so "installed"
+  on the dashboard and "found" at spawn cannot disagree.
 - **The same locks as `orx up`.** The app takes the lifecycle lock before
   anything else, so `orx delete` from a terminal cannot remove the store from
   under a running app.

@@ -138,10 +138,10 @@ async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> 
     if status.is_success() {
         return Ok(res);
     }
-    if status.as_u16() == 401 {
+    if matches!(status.as_u16(), 401 | 403) {
         res.error_for_status_ref().map_err(|error| {
             anyhow!(error).context(format!(
-                "Hugging Face rejected the token (HTTP 401) during {what}. Check HF_TOKEN."
+                "Hugging Face rejected the token (HTTP {status}) during {what}. Check HF_TOKEN."
             ))
         })?;
     }
@@ -222,11 +222,14 @@ pub async fn whoami_details(token: &str) -> Result<WhoamiDetails> {
     Ok(WhoamiDetails { name, jobs_write })
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct JobSubmission {
     pub command: Vec<String>,
     pub docker_image: String,
     pub flavor: String,
+    #[serde(default)]
     pub environment: HashMap<String, String>,
+    #[serde(default)]
     pub secrets: HashMap<String, String>,
     pub timeout_seconds: u64,
     pub labels: HashMap<String, String>,
@@ -241,6 +244,7 @@ pub async fn run_job_with_source(
     spec: &JobSubmission,
     archive: &Path,
     digest: &str,
+    fence: Option<&crate::engine::Fence<'_>>,
 ) -> Result<JobInfo> {
     let python = CLIENT_ENV.ensure().await?;
     let source_dir = archive
@@ -266,12 +270,24 @@ pub async fn run_job_with_source(
         "timeoutSeconds": spec.timeout_seconds,
         "labels": spec.labels,
     });
-    let mut child = tokio::process::Command::new(python)
+    let mut child = crate::process::tokio_command(python)
         .args(["-c", SOURCE_LAUNCHER])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    if let Some(fence) = fence {
+        let recorded = fence.record_submitter(
+            child
+                .id()
+                .ok_or_else(|| anyhow!("HF launcher exited before fencing"))?,
+        );
+        if let Err(error) = recorded {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    }
     use tokio::io::AsyncWriteExt as _;
     child
         .stdin
@@ -339,7 +355,7 @@ pub async fn stream_logs(
     namespace: &str,
     job_id: &str,
     skip: u64,
-    idle_timeout: Duration,
+    idle_timeout: Option<Duration>,
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     #[derive(Deserialize)]
@@ -362,7 +378,11 @@ pub async fn stream_logs(
     let mut seen = 0u64;
     let mut buf: Vec<u8> = Vec::new();
     loop {
-        let chunk = match tokio::time::timeout(idle_timeout, res.chunk()).await {
+        let next = match idle_timeout {
+            Some(idle) => tokio::time::timeout(idle, res.chunk()).await,
+            None => Ok(res.chunk().await),
+        };
+        let chunk = match next {
             Err(_) => break, // idle — likely end of buffered history
             Ok(Err(e)) => return Err(anyhow!("Hugging Face log stream failed: {}", e)),
             Ok(Ok(None)) => break, // server closed
@@ -416,9 +436,47 @@ pub fn parse_timeout(value: &str) -> Result<u64> {
         })
 }
 
-/// Where to watch the job on huggingface.co.
-pub fn job_url(namespace: &str, job_id: &str) -> String {
-    format!("{}/jobs/{}/{}", endpoint(), namespace, job_id)
+pub async fn find_run(token: &str, namespace: &str, run: &str) -> Result<Vec<JobInfo>> {
+    let base = reqwest::Url::parse(&endpoint())?;
+    let mut url = base.join(&format!("/api/jobs/{namespace}"))?;
+    url.query_pairs_mut()
+        .append_pair("labels", &format!("or_run={run}"));
+    let mut visited = std::collections::HashSet::new();
+    let mut found = Vec::new();
+    loop {
+        if url.origin() != base.origin() || !visited.insert(url.clone()) {
+            return Err(anyhow!("Invalid HF pagination link"));
+        }
+        let response = check(
+            http().get(url.clone()).bearer_auth(token).send().await?,
+            "job lookup",
+        )
+        .await?;
+        let next = response
+            .headers()
+            .get("link")
+            .and_then(|header| header.to_str().ok())
+            .and_then(|links| links.split(',').find(|link| link.contains("rel=\"next\"")))
+            .map(|link| -> Result<reqwest::Url> {
+                let target = link
+                    .trim()
+                    .strip_prefix('<')
+                    .and_then(|link| link.split_once('>').map(|(target, _)| target))
+                    .ok_or_else(|| anyhow!("Invalid HF pagination link"))?;
+                Ok(url.join(target)?)
+            })
+            .transpose()?;
+        let jobs: Vec<serde_json::Value> = response.json().await?;
+        for job in jobs {
+            if job["labels"]["or_run"].as_str() == Some(run) {
+                found.push(serde_json::from_value(job)?);
+            }
+        }
+        match next {
+            Some(next) => url = next,
+            None => return Ok(found),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -427,7 +485,7 @@ mod settings_tests {
 
     #[tokio::test]
     async fn invalid_token_retains_http_status() {
-        for status in [401, 503] {
+        for status in [401, 403, 503] {
             let response = axum::http::Response::builder()
                 .status(status)
                 .body("")
@@ -437,7 +495,7 @@ mod settings_tests {
                 error
                     .downcast_ref::<reqwest::Error>()
                     .and_then(|e| e.status()),
-                (status == 401).then_some(reqwest::StatusCode::UNAUTHORIZED)
+                matches!(status, 401 | 403).then(|| reqwest::StatusCode::from_u16(status).unwrap())
             );
         }
     }
@@ -476,7 +534,7 @@ class HfApi:
             "image": "", "command": [], "environment": {}, "secrets": {}, "flavor": "",
             "timeoutSeconds": 0, "labels": {},
         });
-        let mut child = std::process::Command::new(python)
+        let mut child = crate::process::command(python)
             .args(["-c", SOURCE_LAUNCHER])
             .env("PYTHONPATH", &dir)
             .stdin(Stdio::piped())

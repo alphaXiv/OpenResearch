@@ -6,8 +6,18 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
+import { runLabelsHarness } from "./runLabelsHarness.mjs";
 
 const require = createRequire(import.meta.url);
+
+function loadRunDisplay() {
+  const code = ts.transpileModule(readFileSync(new URL("../src/runDisplay.ts", import.meta.url), "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const exports = {};
+  new Function("exports", code)(exports);
+  return exports;
+}
 const source = readFileSync(new URL("../src/components/DetailDrawer.tsx", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
@@ -15,13 +25,15 @@ const compiled = ts.transpileModule(source, {
 let trackioUrl = null;
 const mocks = {
   "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
-  "../api": { runDisplayStatus: () => "complete", runMonitoringError: (run) => run.backend?.monitoringError ?? null, timeAgo: () => "now", trackioRunUrl: () => trackioUrl },
+  "../api": { timeAgo: () => "now", trackioRunUrl: () => trackioUrl },
+  "../runDisplay": loadRunDisplay(),
   "../queries/settings": { useTrackioRuns: () => ({ data: undefined }) },
   "../tabPreview": { tabOpenGestureHandlers: () => ({}) },
   "../theme": { useResolvedTheme: () => "light" },
   "./ExperimentOverview": { ExperimentOverview: () => null },
-  "./LogTerminal": { LogTerminal: ({ runId }) => `LOG:${runId}` },
-  "./StatusBadge": { StatusBadge: () => null },
+  "./LogTerminal": { LogTerminal: ({ run }) => `LOG:${run.id}` },
+  "./RunContactNotice": { RunContactNotice: ({ run }) => `NOTICE:${run.id}` },
+  "./StatusBadge": { ...runLabelsHarness().load("components/StatusBadge"), StatusBadge: () => null },
   "./ui": {
     Button: ({ children }) => React.createElement("button", null, children),
     ButtonLink: ({ children, href }) => React.createElement("a", { href }, children),
@@ -90,14 +102,25 @@ test("the trackio view embeds the run's charts in place of its logs", () => {
 });
 
 
-test("monitoring diagnostic follows the selected run and clears after recovery", () => {
-  props.runs[1].backend = { monitoringError: "Monitoring unavailable: no exit status or scheduler record." };
-  try {
-    assert.match(render(null), /role="status"[^>]*>Monitoring unavailable:/);
-    assert.doesNotMatch(render("run-old"), /Monitoring unavailable:/);
-    props.runs[1].backend = {};
-    assert.doesNotMatch(render(null), /Monitoring unavailable:/);
-  } finally {
-    delete props.runs[1].backend;
+test("the contact notice follows the selected run", () => {
+  assert.match(render(null), /NOTICE:run-new/);
+  assert.match(render("run-old"), /NOTICE:run-old/);
+  assert.doesNotMatch(render("missing-run"), /NOTICE:/);
+});
+
+test("stop distinguishes a pending cancel from a delivered one", () => {
+  const live = { id: "run-live", experimentId: "experiment-a", createdAt: 4, status: "running", cancelling: false, contact: null };
+  const renderLive = (run) => renderToStaticMarkup(React.createElement(exports.DetailDrawer, { ...props, runs: [run], selectedRunId: null }));
+
+  assert.match(renderLive(live), />common_stop</);
+  for (const [contact, label] of [
+    [null, "Cancelling…"],
+    [{ type: "unreachable", since: 1, cause: "Offline" }, "Cancellation pending"],
+    [{ type: "needs_auth", since: 1, cause: "Connect" }, "Cancellation pending"],
+  ]) {
+    const html = renderLive({ ...live, cancelling: true, contact });
+    assert.ok(html.includes(label), html);
+    if (contact) assert.doesNotMatch(html, /Cancelling…/);
+    assert.match(renderLive({ ...live, contact }), />common_stop</);
   }
 });

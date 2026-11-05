@@ -10,7 +10,7 @@ pub(super) struct Context {
 
 impl Context {
     pub fn current() -> Self {
-        let mut command = tokio::process::Command::new("auth-probe");
+        let mut command = crate::process::tokio_command("auth-probe");
         crate::local::chat::prepare_env(&mut command);
         let mut env: HashMap<_, _> = std::env::vars_os()
             .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))

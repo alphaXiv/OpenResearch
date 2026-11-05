@@ -704,7 +704,7 @@ $path = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SOFTWARE\Micros
 if (!$path) { $path = $env:SystemRoot }
 [Environment]::ExpandEnvironmentVariables($path)
 "#;
-    let output = std::process::Command::new("powershell.exe")
+    let output = crate::process::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("ORX_SSH_CONFIG_USER", user)
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
@@ -904,8 +904,11 @@ pub(super) async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> Api
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    let running =
-        crate::jobs::ssh::service::healthy(&crate::jobs::ssh::SshTarget::alias(host)).await;
+    let running = super::api_v2::host_target(host, false).is_ok_and(|target| {
+        target.transport.is_some_and(|transport| {
+            transport.ssh.conn.state().borrow().status == crate::engine::transport::Status::Live
+        })
+    });
     Ok(Json(json!({ "running": running })))
 }
 
@@ -921,11 +924,10 @@ pub(super) async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult
     }
     let test = run_ssh_host_preflight(host.clone()).await;
     let container = if let Some(reference) = req.container {
-        let result = crate::jobs::ssh::resolve_container(
-            &crate::jobs::ssh::SshTarget::alias(&host),
-            &reference,
-        )
-        .await;
+        let result = match super::api_v2::host_target(&host, false) {
+            Ok(target) => crate::jobs::ssh::resolve_container(&target, &reference).await,
+            Err(error) => Err(error),
+        };
         Some(
             json!({"reference": reference, "ready": result.is_ok(), "error": result.err().map(|error| error.to_string())}),
         )
@@ -959,7 +961,15 @@ pub(super) async fn run_ssh_host_preflight(host: String) -> SshHostTest {
 }
 
 pub(super) async fn probe_ssh_host_preflight(host: String) -> SshHostTest {
-    let p = crate::jobs::ssh::preflight(&crate::jobs::ssh::SshTarget::alias(&host)).await;
+    let p = match super::api_v2::host_target(&host, false) {
+        Ok(target) => crate::jobs::ssh::preflight(&target).await,
+        Err(error) => crate::jobs::ssh::SshPreflight {
+            reachable: false,
+            tools_found: false,
+            missing_tools: Vec::new(),
+            error: Some(error.to_string()),
+        },
+    };
     SshHostTest {
         host,
         reachable: p.reachable,
@@ -1090,8 +1100,10 @@ pub(super) async fn slurm_preflight(Json(req): Json<SlurmPreflightReq>) -> ApiRe
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    let p = slurm::preflight(&host).await;
-    Ok(Json(slurm_preflight_value(&p)))
+    let target = super::api_v2::host_target(&host, true).map_err(bad_request)?;
+    Ok(Json(slurm_preflight_value(
+        &slurm::preflight(&target).await,
+    )))
 }
 
 pub(super) fn slurm_preflight_value(p: &slurm::SlurmPreflight) -> Value {
@@ -1978,7 +1990,7 @@ Host b
         let user = std::env::var("USERNAME").unwrap();
         #[cfg(unix)]
         let user = String::from_utf8(
-            std::process::Command::new("id")
+            crate::process::command("id")
                 .arg("-un")
                 .output()
                 .unwrap()

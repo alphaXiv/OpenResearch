@@ -114,6 +114,7 @@ export function QueryEvents() {
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
       if (inputSummaryChanged(event, promptStates)) refreshSidebar();
+      if (event.type === "branch" || event.type === "sessionDeleted" || event.type === "busy" && !event.busy) invalidateFamilies(["chatSearch"], scope);
       if (event.type === "session") markLiveUpdate(queryClient, listChatSessionsQuery(event.session.projectId).queryKey, event.session.id);
       else if (event.type === "busy" || event.type === "usage") markLiveUpdate(queryClient, [...scope, "listChatSessions"], event.sessionId);
       if (event.type === "message" || event.type === "queued" || event.type === "branch") {

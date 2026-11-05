@@ -98,3 +98,20 @@ test("retiring a workspace aborts pending work and rejects a late parsed mutatio
   await assert.rejects(write, { name: "AbortError" });
   assert.equal(beta.client.getQueryData(key)[0].name, "Beta");
 });
+
+test("engine log reads and run actions stay on their initiating machine", async (t) => {
+  const requests = [];
+  t.mock.method(globalThis, "fetch", async (url) => {
+    requests.push(url);
+    return Response.json({ kind: "data", ident: "log", start: 0, data: "", eof: true, len: 0, kept: [] });
+  });
+  const alpha = machine(t, "alpha"), beta = machine(t, "beta");
+  await alpha.api.fetchLogPage("run", 0, 10, null);
+  await beta.api.retryEngineHost("gpu-box");
+  await alpha.api.abandonRun("run");
+  assert.deepEqual(requests, [
+    "/_orx/workspaces/alpha/api/runs/run/log?start=0&end=10",
+    "/_orx/workspaces/beta/api/compute/hosts/gpu-box/retry",
+    "/_orx/workspaces/alpha/api/runs/run/abandon",
+  ]);
+});

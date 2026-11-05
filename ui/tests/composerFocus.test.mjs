@@ -72,7 +72,7 @@ function composer() {
   let nextFrame = 0;
   let cleanup;
   let previousDeps;
-  const input = {};
+  const input = { closest: () => null };
   const handle = {
     dom: { contains: (element) => element === input, scrollIntoView() {} },
     focus(at) {
@@ -120,7 +120,7 @@ for (const loading of ["contentLoading", "contentError", "historyLoading"]) {
     chat.flush();
     assert.equal(chat.document.activeElement, chat.input);
     assert.deepEqual(chat.calls, ["focus", "end"]);
-    const main = {};
+    const main = { closest: () => null };
     chat.document.activeElement = main;
     chat.render({ [loading]: true });
     chat.render({ [loading]: false });
@@ -143,6 +143,21 @@ test("a new nonce requests focus, but the default and unchanged nonce do not", (
     chat.flush();
     assert.equal(chat.calls.length, nonce * 2);
   }
+});
+
+test("search navigation consumes composer focus without leaving the search field", () => {
+  const chat = composer();
+  const search = { closest: () => ({}) };
+  chat.document.activeElement = search;
+  chat.render({ composerFocusNonce: 1 });
+  chat.flush();
+  assert.equal(chat.document.activeElement, search);
+  assert.deepEqual(chat.calls, []);
+  chat.document.activeElement = null;
+  chat.render({ historyLoading: true });
+  chat.render({ historyLoading: false });
+  chat.flush();
+  assert.deepEqual(chat.calls, []);
 });
 
 test("loading cancels scheduled focus without consuming its request", () => {

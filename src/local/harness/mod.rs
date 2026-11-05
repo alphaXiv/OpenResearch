@@ -38,8 +38,7 @@ use futures::StreamExt;
 
 use crate::error::{anyhow, Error, Result};
 use crate::local::chat::{
-    stored_to_wire, DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, SteerReceiver, TurnCtx,
-    WirePart, WirePrompt,
+    DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, SteerReceiver, TurnCtx, WirePrompt,
 };
 use crate::store::Store;
 
@@ -66,110 +65,27 @@ pub(crate) const TURN_WATCHDOG: Duration = Duration::from_secs(30 * 60);
 pub(crate) const ORX_MAX_RETRIES: u32 = 3;
 pub(crate) const ORX_MAX_ATTEMPTS: u32 = ORX_MAX_RETRIES + 1;
 pub(crate) const ORX_RETRY_BUDGET: Duration = Duration::from_secs(15);
-const RECOVERY_SNAPSHOT_BYTES: usize = 32 * 1024;
-
-fn newest_utf8_tail(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
-    }
-    let mut start = value.len() - max_bytes;
-    while !value.is_char_boundary(start) {
-        start += 1;
-    }
-    &value[start..]
-}
-
-fn recovery_part_lines(parts: &[WirePart], lines: &mut Vec<String>) {
-    for part in parts {
-        match part.kind.as_str() {
-            "text" => {
-                if let Some(text) = part.text.as_deref().filter(|text| !text.trim().is_empty()) {
-                    lines.push(text.trim().to_string());
-                }
-            }
-            "tool" => {
-                let state = part.state.as_ref();
-                let label = state
-                    .and_then(|state| state.title.as_deref())
-                    .or(part.tool.as_deref())
-                    .unwrap_or("tool");
-                let status = state
-                    .map(|state| state.status.as_str())
-                    .unwrap_or("unknown");
-                lines.push(format!("[tool: {label} — {status}]"));
-            }
-            "prompt" => {
-                if let Some(prompt) = part.prompt.as_ref() {
-                    let outcome = if prompt.resolved {
-                        "resolved"
-                    } else {
-                        "unresolved"
-                    };
-                    lines.push(format!("[{} prompt — {outcome}]", prompt.kind));
-                }
-            }
-            _ => {}
-        }
-        recovery_part_lines(&part.children, lines);
-    }
-}
-
-pub(crate) fn native_recovery_snapshot(session_id: &str, current_turn_id: &str) -> String {
-    let Ok(store) = Store::open() else {
-        return String::new();
-    };
+pub(crate) fn native_recovery_snapshot(session_id: &str, current_turn_id: &str) -> Result<String> {
+    let store = Store::open()?;
+    let session = store
+        .get_chat_session(session_id)?
+        .ok_or_else(|| anyhow!("chat session not found"))?;
     let current_user_id = store
-        .get_chat_turn(session_id, current_turn_id)
-        .ok()
-        .flatten()
+        .get_chat_turn(session_id, current_turn_id)?
         .and_then(|turn| turn.user_message_id);
-    let Ok(messages) = store.list_chat_messages(session_id) else {
-        return String::new();
-    };
-    transcript_snapshot(
-        messages
-            .iter()
-            .filter(|message| current_user_id.as_deref() != Some(message.id.as_str())),
-    )
+    let window = session
+        .context_usage_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|usage| usage["contextWindow"].as_u64());
+    crate::local::chat::handoff::context(&store, &session, current_user_id.as_deref(), None, window)
 }
 
-/// The newest [`RECOVERY_SNAPSHOT_BYTES`] of a transcript, flattened to text.
-pub(crate) fn transcript_snapshot<'a>(
-    messages: impl IntoIterator<Item = &'a crate::store::StoredChatMessage>,
-) -> String {
-    let mut entries = Vec::new();
-    for message in messages {
-        let wire = stored_to_wire(message);
-        let mut lines = Vec::new();
-        recovery_part_lines(&wire.parts, &mut lines);
-        if !lines.is_empty() {
-            entries.push(format!("{}:\n{}", wire.role, lines.join("\n")));
-        }
-    }
-    let mut selected = Vec::new();
-    let mut bytes = 0;
-    for entry in entries.into_iter().rev() {
-        let cost = entry.len() + 2;
-        if bytes + cost > RECOVERY_SNAPSHOT_BYTES {
-            if selected.is_empty() {
-                selected.push(newest_utf8_tail(&entry, RECOVERY_SNAPSHOT_BYTES).to_string());
-            }
-            break;
-        }
-        bytes += cost;
-        selected.push(entry);
-    }
-    selected.reverse();
-    selected.join("\n\n")
-}
-
-pub(crate) fn native_recovery_context(ctx: &TurnCtx, harness: &str) -> Option<String> {
-    let snapshot = native_recovery_snapshot(&ctx.session_id, &ctx.turn_id);
-    (!snapshot.is_empty()).then(|| {
-        format!(
-            "<orx-recovery-context>\nThe persisted native {harness} session was unavailable. Use this ORX transcript snapshot as prior context; do not repeat completed tool actions.\n{snapshot}\n</orx-recovery-context>"
-        )
-    })
+pub(crate) fn native_recovery_context(ctx: &TurnCtx, harness: &str) -> Result<Option<String>> {
+    let snapshot = native_recovery_snapshot(&ctx.session_id, &ctx.turn_id)?;
+    Ok((!snapshot.is_empty()).then(|| format!(
+        "<orx-recovery-context>\nThe native {harness} session was unavailable. Continue from the saved conversation and inspect completed work before repeating actions.\n{snapshot}\n</orx-recovery-context>"
+    )))
 }
 
 /// Delay before retry number 1/2/3. Jitter is deterministic per turn and
@@ -586,12 +502,8 @@ pub enum OneShotQuality {
     Standard,
 }
 
-/// The transcript a compaction summarizes: the same snapshot a lost native
-/// session is reseeded with, but for a session with no turn in flight — and so
-/// the same newest-`RECOVERY_SNAPSHOT_BYTES` cap, which on the reseed path is
-/// all the agent keeps of a long chat, and the same every-branch scope rather
-/// than the active path alone.
-pub(crate) fn compaction_snapshot(session_id: &str) -> String {
+/// The active conversation and live state, without an in-flight turn.
+pub(crate) fn compaction_snapshot(session_id: &str) -> Result<String> {
     native_recovery_snapshot(session_id, "")
 }
 
@@ -984,15 +896,6 @@ mod tests {
                 )
             })
             .collect()
-    }
-
-    #[test]
-    fn recovery_snapshot_tail_respects_utf8_byte_limit() {
-        let value = format!("old{}new", "🦀".repeat(10));
-        let tail = newest_utf8_tail(&value, 12);
-        assert!(tail.len() <= 12);
-        assert!(tail.ends_with("new"));
-        assert!(value.ends_with(tail));
     }
 
     /// Pin each harness's native permission vocabulary and Plan activation.

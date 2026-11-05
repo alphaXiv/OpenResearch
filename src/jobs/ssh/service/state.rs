@@ -151,7 +151,7 @@ async fn configuration_key(target: &SshTarget, options: &[String]) -> Result<Str
 async fn configuration(target: &SshTarget, options: &[String]) -> Result<String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::process::Command::new("ssh")
+        crate::process::tokio_command("ssh")
             .env("ORX_SSH_PROBE", "1")
             .arg("-G")
             .args(options)

@@ -18,6 +18,7 @@ mod client;
 mod commands;
 mod compute;
 mod config;
+mod engine;
 mod error;
 mod folder_picker;
 mod invocation;
@@ -29,6 +30,7 @@ mod net;
 mod output;
 mod paths;
 mod plane;
+mod process;
 mod remote;
 mod store;
 mod telemetry;
@@ -284,6 +286,8 @@ pub struct RunsArgs {
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     pub run_id: String,
+    #[arg(short, long, hide = true)]
+    pub follow: bool,
 }
 
 #[derive(Args, Debug)]
@@ -495,19 +499,28 @@ pub enum ExpCommand {
         stdin: bool,
     },
 
-    /// Launch a locally initialized experiment through an orx-supervised backend.
+    /// Launch a locally initialized experiment through the run engine.
     Run(Box<ExpRunArgs>),
 
-    /// Cancel the in-flight run.
-    Cancel { exp_id: String },
+    /// Cancel in-flight runs in an experiment, or one run with --run.
+    Cancel {
+        #[arg(required_unless_present = "run")]
+        exp_id: Option<String>,
+        /// Cancel only this run. With an experiment id, the run must belong to it.
+        #[arg(long)]
+        run: Option<String>,
+    },
 
-    /// Resume this agent after the experiment's latest run succeeds or fails.
+    /// Abandon a run whose outcome cannot be recovered; keep its cancel pending.
+    Abandon { run: String },
+
+    /// Send this chat the result of the experiment's latest run when it finishes.
     Wake { exp_id: String },
 
     /// Wait for a run to finish: one experiment (`<expId>`) or the next completion in a project (`--project`).
     Wait {
-        /// Experiment to watch; its latest run is polled until it reaches a
-        /// terminal state. Omit and pass `--project` to watch a whole project.
+        /// Experiment to watch until its latest run reaches a terminal state.
+        /// Omit and pass `--project` to watch a whole project.
         exp_id: Option<String>,
         /// Watch every run in this project and return on the FIRST one to
         /// complete (reach done/failed/cancelled) — a "slot freed" signal. Call
@@ -519,13 +532,13 @@ pub enum ExpCommand {
         /// Give up and exit non-zero after this many seconds (default 1800).
         #[arg(long)]
         timeout: Option<u64>,
-        /// Seconds between polls (default 5).
-        #[arg(long)]
+        /// Seconds between retries while the local database is busy (default 5).
+        #[arg(long, hide = true)]
         interval: Option<u64>,
     },
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExpRunArgs {
     pub exp_id: String,
     /// Disk in GB for a `--backend openresearch` instance (default 100).
@@ -546,8 +559,8 @@ pub struct ExpRunArgs {
     /// `orx login`), `tinker` (a local controller using remote Tinker model
     /// compute), or `local` (a detached process on this machine). k8s,
     /// ssh, slurm, ray, openresearch, tinker, and local are local
-    /// experiments only. orx submits the job and a detached supervisor
-    /// records status and logs locally. Omitted on a local experiment: launches on
+    /// experiments only. The run engine in the OpenResearch server submits
+    /// the job and records its status and logs locally. Omitted on a local experiment: launches on
     /// the configured default compute target, if set.
     #[arg(long)]
     pub backend: Option<String>,
@@ -617,6 +630,9 @@ pub struct ExpRunArgs {
     /// raises memory with it.
     #[arg(long)]
     pub mem: Option<String>,
+    /// Slurm partition for this run; overrides the saved default. Accepts comma-separated names.
+    #[arg(long)]
+    pub partition: Option<String>,
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
@@ -633,6 +649,10 @@ pub struct ExpRunArgs {
     pub forwarded: bool,
     #[arg(skip)]
     pub telemetry_suppressed: bool,
+    /// The caller's compute settings, which must be the server's.
+    #[arg(skip)]
+    #[serde(default)]
+    pub caller_config_dir: Option<std::path::PathBuf>,
 }
 
 /// Markers the native agent CLIs export to their shells; nested agents are `unknown`.
@@ -717,6 +737,9 @@ pub struct UpArgs {
     /// Don't open the dashboard in the browser on startup.
     #[arg(long)]
     pub no_browser: bool,
+    /// Keep the engine running without opening a window.
+    #[arg(long, hide = true)]
+    pub headless: bool,
     /// Don't spawn the opencode agent on startup (for tests).
     #[arg(long)]
     pub no_agent: bool,
@@ -995,11 +1018,17 @@ pub struct PaperArgs {
     pub full: bool,
 }
 
-// The default multi-thread runtime is load-bearing for desktop app mode: it
-// blocks the main thread in the window's run loop while the dashboard server runs
-// on worker threads. A `current_thread` flavor would deadlock. See commands::app.
+fn main() {
+    if let Err(error) = commands::remote_host::prepare_readiness_pipe() {
+        eprintln!("Could not prepare server readiness: {error}");
+        std::process::exit(1);
+    }
+    run_cli();
+}
+
+// Desktop app mode blocks the main thread while the dashboard runs on worker threads.
 #[tokio::main]
-async fn main() {
+async fn run_cli() {
     #[cfg(all(target_os = "macos", debug_assertions))]
     if std::env::args().nth(1).as_deref() == Some("--dev-desktop") {
         let port = std::env::args()
@@ -1009,6 +1038,12 @@ async fn main() {
             commands::app::run_dev(port);
         } else {
             eprintln!("--dev-desktop requires a valid UI port");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::var_os("ORX_ENGINE_ASKPASS").is_some() {
+        if engine::transport::askpass::relay().await.is_err() {
             std::process::exit(1);
         }
         return;
@@ -1203,7 +1238,7 @@ fn relaunch_as_app(no_telemetry: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     let started = std::env::current_exe().and_then(|exe| {
-        let mut app = std::process::Command::new(exe);
+        let mut app = crate::process::command(exe);
         if no_telemetry {
             app.env(commands::app::APP_NO_TELEMETRY_ENV, "1");
         }
@@ -1253,7 +1288,7 @@ fn show_error_dialog(message: &str) {
     if !commands::app::launched_as_app_bundle() || std::env::args_os().len() != 1 {
         return;
     }
-    let _ = std::process::Command::new("osascript")
+    let _ = crate::process::command("osascript")
         .args([
             "-e",
             "on run argv\ndisplay alert \"OpenResearch could not start\" message (item 1 of argv) as critical\nend run",
@@ -1278,7 +1313,7 @@ fn show_error_dialog(message: &str) {
         ),
         ("kdialog", &["--title", "OpenResearch", "--error"][..]),
     ] {
-        let mut dialog = std::process::Command::new(program);
+        let mut dialog = crate::process::command(program);
         dialog.args(args).arg(message);
         local::shell_env::restore_host_gui_env(&mut dialog);
         if dialog.status().is_ok() {
@@ -1404,10 +1439,15 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Serve(args) => commands::serve::run(args).await,
         Command::Supervise(args) => commands::supervise::run(args).await,
         Command::RentalSupervise { config } => jobs::rental::supervise(&config).await,
-        Command::Up(args) => match args.remote.clone() {
-            Some(host) => commands::up_remote::run(&host, args).await,
-            None => commands::up::run(args).await,
-        },
+        Command::Up(mut args) => {
+            if args.headless {
+                args.no_browser = true;
+            }
+            match args.remote.clone() {
+                Some(host) => commands::up_remote::run(&host, args).await,
+                None => commands::up::run(args).await,
+            }
+        }
         Command::Telemetry(args) => commands::telemetry::run(args).await,
         Command::Feedback(args) => commands::feedback::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).

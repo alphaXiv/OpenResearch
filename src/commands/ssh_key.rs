@@ -78,7 +78,7 @@ async fn ensure_default_public_key(ssh_dir: &std::path::Path) -> Result<String> 
     let private = ssh_dir.join("id_ed25519");
     let public = ssh_dir.join("id_ed25519.pub");
     if !public.try_exists()? {
-        let mut command = tokio::process::Command::new("ssh-keygen");
+        let mut command = crate::process::tokio_command("ssh-keygen");
         if private.try_exists()? {
             println!("Restoring the public-key file from the existing private key\u{2026}");
             command.args(["-y", "-P", "", "-f"]).arg(&private);
@@ -137,7 +137,7 @@ fn expand(path: &str) -> std::path::PathBuf {
 fn device_name(line: &str) -> String {
     key_comment(line)
         .or_else(|| {
-            std::process::Command::new("hostname")
+            crate::process::command("hostname")
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
@@ -283,7 +283,7 @@ mod setup_tests {
         if std::env::var("ORX_SSH_KEY_TEST_CHILD").is_err() {
             let home = std::env::temp_dir().join(format!("orx-ssh-key-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&home).unwrap();
-            let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+            let status = crate::process::tokio_command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "commands::ssh_key::setup_tests::default_key_is_created_and_registered_once",

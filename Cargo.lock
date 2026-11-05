@@ -2662,6 +2662,7 @@ dependencies = [
  "futures",
  "glob",
  "gtk",
+ "hmac",
  "httpdate",
  "hyper",
  "hyper-util",
@@ -2671,6 +2672,10 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-web-kit",
+ "once_cell",
+ "orx-host",
+ "orx-host-proto",
+ "orx-test-support",
  "pbkdf2",
  "png",
  "portable-pty",
@@ -2712,6 +2717,40 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "orx-host"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "orx-host",
+ "orx-host-proto",
+ "orx-test-support",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "orx-host-proto"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "orx-test-support"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "sha2",
+ "socket2",
+ "tempfile",
+]
 
 [[package]]
 name = "pango"
@@ -4012,6 +4051,19 @@ name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.2",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "tendril"

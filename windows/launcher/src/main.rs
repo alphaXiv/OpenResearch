@@ -5,6 +5,8 @@
 //! An `openresearch:` link it was opened with (see OpenResearch.iss) goes along.
 
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+// Its own crate, so `crate::process` is unreachable; it starts `orx.exe` by absolute path.
+#![allow(clippy::disallowed_methods)]
 
 #[cfg(windows)]
 fn main() {
