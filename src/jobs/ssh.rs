@@ -31,8 +31,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::Command;
-
 use crate::error::{anyhow, Result};
 
 const ROUTE_FIELDS: &str = "hostname|user|port|controlpath|proxyjump|proxycommand|identityfile|certificatefile|identityagent|identitiesonly|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|preferredauthentications|gssapiauthentication|hostbasedauthentication|hostkeyalias|stricthostkeychecking|userknownhostsfile|globalknownhostsfile|hostkeyalgorithms|pubkeyacceptedalgorithms|proxyusefdpass|bindaddress|bindinterface";
@@ -526,7 +524,7 @@ async fn control_master(
     options: &[String],
     operation: &str,
 ) -> Result<bool> {
-    let mut command = Command::new("ssh");
+    let mut command = crate::process::tokio_command("ssh");
     command
         .env("ORX_SSH_PROBE", "1")
         .args(["-O", operation, "-S"])
@@ -551,7 +549,7 @@ async fn master_accepts_sessions(
     path: &std::path::Path,
     options: &[String],
 ) -> Result<bool> {
-    let mut command = Command::new("ssh");
+    let mut command = crate::process::tokio_command("ssh");
     command
         .env("ORX_SSH_PROBE", "1")
         // Refused mux sessions can fall back to a new transport; this probe must not.
@@ -653,7 +651,7 @@ pub(crate) async fn direct_run_bytes(
     if target.extra_opts.is_empty() {
         prepared::prepare(target, false).await?;
     }
-    let mut cmd = Command::new("ssh");
+    let mut cmd = crate::process::tokio_command("ssh");
     cmd.env("ORX_SSH_PROBE", "1");
     cmd.args(ssh_opts(target, true))
         .arg("--")
@@ -1160,7 +1158,7 @@ mod tests {
     fn host_inspect_reports_a_vanished_run_dir_as_missing() {
         let home = crate::local::git::TemporaryDirectory::new("orx-ssh-inspect").unwrap();
         let inspect = || {
-            let out = std::process::Command::new("bash")
+            let out = crate::process::command("bash")
                 .args(["-c", &host_job_script(".orx/runs/r1")])
                 .env("HOME", home.path())
                 .output()
@@ -1182,7 +1180,7 @@ mod tests {
         let home = crate::local::git::TemporaryDirectory::new("orx-ssh-source-cache").unwrap();
         let (check, upload) = source_cache_commands(".orx/source/d.tar", 6);
         let sh = |script: &str, input: &[u8]| {
-            let mut child = std::process::Command::new("sh")
+            let mut child = crate::process::command("sh")
                 .args(["-c", script])
                 .env("HOME", home.path())
                 .stdin(Stdio::piped())
@@ -1250,7 +1248,7 @@ mod tests {
         let root = scratch.path().join("orx");
         let root = root.to_str().unwrap();
         let (_, upload) = source_cache_commands(&remote_source_cache(Some(root), "d"), 3);
-        let mut child = std::process::Command::new("sh")
+        let mut child = crate::process::command("sh")
             .args(["-c", &upload])
             .env("HOME", home.path())
             .stdin(Stdio::piped())
@@ -1265,7 +1263,7 @@ mod tests {
         let dir = remote_run_dir(Some(root), "r1");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(format!("{dir}/exit_code"), "3\n").unwrap();
-        let out = std::process::Command::new("bash")
+        let out = crate::process::command("bash")
             .args(["-c", &host_job_script(&dir)])
             .env("HOME", home.path())
             .output()
@@ -1371,7 +1369,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let script = home.path().join("run.sh");
         std::fs::write(&script, host_script("run", "", "sleep 30")).unwrap();
-        let mut command = std::process::Command::new("bash");
+        let mut command = crate::process::command("bash");
         command
             .arg(&script)
             .env("HOME", home.path())
@@ -1415,7 +1413,7 @@ mod tests {
         .unwrap();
         let bash_env = home.path().join("bash_env");
         std::fs::write(&bash_env, "ps() { return 127; }\n").unwrap();
-        let mut command = std::process::Command::new("bash");
+        let mut command = crate::process::command("bash");
         command
             .arg(&script)
             .env("HOME", home.path())
@@ -1448,7 +1446,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(marker.trim(), "143");
-        let output = std::process::Command::new("ps")
+        let output = crate::process::command("ps")
             .args(["-o", "stat=", "-p", &child_pid.to_string()])
             .output()
             .unwrap();
@@ -1475,7 +1473,7 @@ mod tests {
 
         let mut zombie = false;
         for _ in 0..100 {
-            let output = std::process::Command::new("ps")
+            let output = crate::process::command("ps")
                 .args(["-o", "stat=", "-p", &pid.to_string()])
                 .output()
                 .unwrap();
@@ -1488,7 +1486,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let alive = || {
-            std::process::Command::new("bash")
+            crate::process::command("bash")
                 .arg("-c")
                 .arg(format!("{HOST_PROCESS_HELPERS}\nhost_process_alive {pid}"))
                 .status()
@@ -1600,7 +1598,7 @@ mod tests {
         }
         assert!(leader_dead);
         let group_alive = |pgid: i32| {
-            std::process::Command::new("bash")
+            crate::process::command("bash")
                 .arg("-c")
                 .arg(format!("{HOST_PROCESS_HELPERS}\nhost_group_alive {pgid}"))
                 .status()
@@ -1608,7 +1606,7 @@ mod tests {
                 .success()
         };
         let start = std::time::Instant::now();
-        let status = std::process::Command::new("bash")
+        let status = crate::process::command("bash")
             .args(["-c", &host_cancel_script(".orx/runs/r1")])
             .env("HOME", home.path())
             .status()

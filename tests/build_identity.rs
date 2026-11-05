@@ -1,3 +1,6 @@
+// Out of the crate, so `crate::process` is unreachable; tests run from a terminal anyway.
+#![allow(clippy::disallowed_methods)]
+
 use std::process::Command;
 
 #[test]

@@ -55,7 +55,7 @@ fn launch(url: &str, activation_token: Option<&str>) -> Option<Child> {
 fn openers(url: &str) -> Vec<Command> {
     #[cfg(target_os = "macos")]
     {
-        let mut c = Command::new("open");
+        let mut c = crate::process::command("open");
         c.arg(url);
         vec![c]
     }
@@ -65,7 +65,7 @@ fn openers(url: &str) -> Vec<Command> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let mut xdg = Command::new("xdg-open");
+        let mut xdg = crate::process::command("xdg-open");
         xdg.arg(url);
         crate::local::shell_env::restore_host_gui_env(&mut xdg);
         if is_wsl() {
@@ -73,7 +73,7 @@ fn openers(url: &str) -> Vec<Command> {
             // builds re-parse it through `cmd /c start` and truncate at '&'
             // (login URLs carry one). The absolute path covers WSL configs
             // with appendWindowsPath=false — interop still executes it.
-            let mut wslview = Command::new("wslview");
+            let mut wslview = crate::process::command("wslview");
             wslview.arg(url);
             return vec![
                 rundll("rundll32.exe", url),
@@ -91,7 +91,7 @@ fn openers(url: &str) -> Vec<Command> {
 /// survives. Works on Windows and on WSL through interop.
 #[cfg(not(target_os = "macos"))]
 fn rundll(program: &str, url: &str) -> Command {
-    let mut c = Command::new(program);
+    let mut c = crate::process::command(program);
     c.args(["url.dll,FileProtocolHandler", url]);
     c
 }

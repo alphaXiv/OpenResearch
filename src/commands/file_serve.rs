@@ -481,7 +481,7 @@ mod tests {
             &["config", "user.name", "orx-test"][..],
             &["config", "user.email", "orx-test@example.com"][..],
         ] {
-            assert!(std::process::Command::new("git")
+            assert!(crate::process::command("git")
                 .current_dir(&dir)
                 .args(args)
                 .status()
@@ -493,7 +493,7 @@ mod tests {
             &["add", "sample.bin"][..],
             &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "sample"][..],
         ] {
-            assert!(std::process::Command::new("git")
+            assert!(crate::process::command("git")
                 .current_dir(&dir)
                 .args(args)
                 .status()

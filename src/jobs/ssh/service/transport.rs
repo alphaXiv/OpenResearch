@@ -115,7 +115,7 @@ pub(super) async fn connect(
     state::validate_configuration(resolved).await?;
     #[cfg(windows)]
     let mut _bridge = None;
-    let mut command = tokio::process::Command::new("ssh");
+    let mut command = crate::process::tokio_command("ssh");
     command.env("ORX_SSH_PROBE", "1");
     if let Some(agent) = &resolved.target.auth_agent {
         command.env("SSH_AUTH_SOCK", agent);

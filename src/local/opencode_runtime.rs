@@ -112,7 +112,7 @@ pub(crate) async fn resolve_binary_at(path: PathBuf) -> Result<ResolvedBinary> {
     }
     let metadata = std::fs::metadata(&path)?;
     let probe = ProbeEnvironment::new()?;
-    let mut cmd = Command::new(&path);
+    let mut cmd = crate::process::tokio_command(&path);
     crate::local::chat::prepare_env(&mut cmd);
     probe.configure(&mut cmd);
     cmd.arg("--version");
@@ -428,7 +428,7 @@ async fn prepare_database_waiting(
             backup.display()
         ));
     }
-    let mut cmd = Command::new(&binary.path);
+    let mut cmd = crate::process::tokio_command(&binary.path);
     crate::local::local_models::prepare_env(&mut cmd, None)?;
     cmd.current_dir(
         lease
@@ -662,7 +662,7 @@ mod tests {
         assert!(protocol_for_version("0.0.0-next-unknown").is_err());
         assert!(protocol_for_version("3.0.0").is_err());
         let probe = ProbeEnvironment::new().unwrap();
-        let mut cmd = Command::new("opencode");
+        let mut cmd = crate::process::tokio_command("opencode");
         cmd.env("OPENCODE_DB", "/do-not-open/user.db");
         probe.configure(&mut cmd);
         let env: std::collections::HashMap<_, _> = cmd.as_std().get_envs().collect();

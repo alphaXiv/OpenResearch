@@ -36,7 +36,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
-use tokio::process::Command;
 
 use crate::error::{anyhow, Result};
 
@@ -113,7 +112,7 @@ pub fn save_settings(settings: &K8sSettings) -> Result<()> {
 /// Run kubectl with the given args (plus `--context` when set), feeding
 /// `stdin` if provided. Non-zero exit → Err carrying stderr.
 async fn kubectl(context: Option<&str>, args: &[&str], stdin: Option<&str>) -> Result<String> {
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = crate::process::tokio_command("kubectl");
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
@@ -185,7 +184,7 @@ pub async fn preflight(context: Option<&str>, namespace: &str) -> Preflight {
     // `auth can-i` answers reachability and permission in one round trip:
     // "yes"/"no" on stdout both mean the API server responded (it exits 1 on
     // "no", so run it raw rather than through the exit-code-checking runner).
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = crate::process::tokio_command("kubectl");
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
@@ -951,7 +950,7 @@ pub async fn stream_logs(
         None => return Ok(()),
     };
 
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = crate::process::tokio_command("kubectl");
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }

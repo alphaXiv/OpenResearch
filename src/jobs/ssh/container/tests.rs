@@ -20,7 +20,7 @@ async fn prepare(
     )
     .unwrap();
     let archive = temp.path().join("source.tar");
-    assert!(std::process::Command::new("tar")
+    assert!(crate::process::command("tar")
         .arg("-cf")
         .arg(&archive)
         .arg("-C")
@@ -109,7 +109,7 @@ async fn ssh_container_lifecycle() {
         std::env::var("ORX_SSH_TEST_KEY").expect("fixture key"),
     ]);
     let connection = ssh::interactive_args(&target, None, None).await.unwrap();
-    assert!(tokio::process::Command::new("ssh")
+    assert!(crate::process::tokio_command("ssh")
         .args(&connection.args)
         .status()
         .await
@@ -531,7 +531,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
         .unwrap()
         .join(format!("orx{}", std::env::consts::EXE_SUFFIX));
     let spawn = || {
-        let mut command = tokio::process::Command::new(&executable);
+        let mut command = crate::process::tokio_command(&executable);
         command
             .args(["--no-telemetry", "supervise", id])
             .env("HOME", root)
@@ -548,7 +548,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
             .kill_on_drop(true);
         command.spawn().unwrap()
     };
-    let mut connect = tokio::process::Command::new("script");
+    let mut connect = crate::process::tokio_command("script");
     #[cfg(target_os = "macos")]
     connect.args(["-q", "/dev/null"]).arg(&executable).args([
         "--no-telemetry",
@@ -608,7 +608,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
     let output = logs(target, &dir).await;
     assert_eq!(output.matches("ONCE").count(), 1);
     assert!(output.contains("AFTER"));
-    assert!(tokio::process::Command::new(&executable)
+    assert!(crate::process::tokio_command(&executable)
         .args(["ssh-service", "stop"])
         .env("HOME", root)
         .env("ORX_DATA_DIR", root.join("data"))

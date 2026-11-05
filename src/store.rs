@@ -7158,7 +7158,7 @@ mod tests {
             store.create_chat_session(&session).unwrap();
         }
         let run_child = |phase| {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = crate::process::command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "store::tests::native_deletion_lock_serializes_shared_owners_across_processes",

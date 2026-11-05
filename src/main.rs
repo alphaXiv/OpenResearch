@@ -29,6 +29,7 @@ mod net;
 mod output;
 mod paths;
 mod plane;
+mod process;
 mod remote;
 mod store;
 mod telemetry;
@@ -1203,7 +1204,7 @@ fn relaunch_as_app(no_telemetry: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     let started = std::env::current_exe().and_then(|exe| {
-        let mut app = std::process::Command::new(exe);
+        let mut app = crate::process::command(exe);
         if no_telemetry {
             app.env(commands::app::APP_NO_TELEMETRY_ENV, "1");
         }
@@ -1253,7 +1254,7 @@ fn show_error_dialog(message: &str) {
     if !commands::app::launched_as_app_bundle() || std::env::args_os().len() != 1 {
         return;
     }
-    let _ = std::process::Command::new("osascript")
+    let _ = crate::process::command("osascript")
         .args([
             "-e",
             "on run argv\ndisplay alert \"OpenResearch could not start\" message (item 1 of argv) as critical\nend run",
@@ -1278,7 +1279,7 @@ fn show_error_dialog(message: &str) {
         ),
         ("kdialog", &["--title", "OpenResearch", "--error"][..]),
     ] {
-        let mut dialog = std::process::Command::new(program);
+        let mut dialog = crate::process::command(program);
         dialog.args(args).arg(message);
         local::shell_env::restore_host_gui_env(&mut dialog);
         if dialog.status().is_ok() {

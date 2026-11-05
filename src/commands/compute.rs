@@ -728,10 +728,10 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
 }
 
 async fn interactive_command(program: &str, args: &[String]) -> Result<()> {
-    let path = crate::local::shell_env::find_on_path(program).ok_or_else(|| {
+    let path = crate::local::shell_env::find(program).ok_or_else(|| {
         anyhow!("{program} is not installed. Install it, then retry compute connect.")
     })?;
-    let mut command = tokio::process::Command::new(path);
+    let mut command = crate::process::tokio_command(path);
     command.args(args);
     if program == "ssh" {
         command.env("ORX_SSH_PROBE", "1");
@@ -752,18 +752,18 @@ fn credential_line(value: &str) -> &str {
 
 #[cfg(unix)]
 async fn secret_prompt(label: &str) -> Result<String> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     struct RestoreEcho(String);
     impl Drop for RestoreEcho {
         fn drop(&mut self) {
-            let _ = Command::new("stty")
+            let _ = crate::process::command("stty")
                 .arg(&self.0)
                 .stdin(Stdio::inherit())
                 .status();
             eprintln!();
         }
     }
-    let original = Command::new("stty")
+    let original = crate::process::command("stty")
         .arg("-g")
         .stdin(Stdio::inherit())
         .output()?;
@@ -774,7 +774,7 @@ async fn secret_prompt(label: &str) -> Result<String> {
     }
     let original = String::from_utf8(original.stdout)?.trim().to_owned();
     eprint!("{label}: ");
-    if !Command::new("stty")
+    if !crate::process::command("stty")
         .arg("-echo")
         .stdin(Stdio::inherit())
         .status()?
@@ -797,7 +797,7 @@ async fn secret_prompt(label: &str) -> Result<String> {
 #[cfg(windows)]
 async fn secret_prompt(label: &str) -> Result<String> {
     eprintln!("{label}");
-    let output = std::process::Command::new("powershell.exe").args(["-NoProfile", "-Command", "$s = Read-Host 'Credential' -AsSecureString; [System.Net.NetworkCredential]::new('', $s).Password"]).stdin(std::process::Stdio::inherit()).output()?;
+    let output = crate::process::command("powershell.exe").args(["-NoProfile", "-Command", "$s = Read-Host 'Credential' -AsSecureString; [System.Net.NetworkCredential]::new('', $s).Password"]).stdin(std::process::Stdio::inherit()).output()?;
     if !output.status.success() {
         return Err(anyhow!(
             "Credential prompt failed; use --credentials-file instead."

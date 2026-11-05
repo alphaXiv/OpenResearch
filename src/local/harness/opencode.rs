@@ -709,7 +709,7 @@ async fn opencode_child(
 ) -> Result<std::process::Output> {
     let db = native_store::prepare_opencode(NativeStore::Isolated)?;
     let lease = crate::local::opencode::prepare_database(binary, &db).await?;
-    let mut cmd = tokio::process::Command::new(&binary.path);
+    let mut cmd = crate::process::tokio_command(&binary.path);
     cmd.args(["run", "--agent", "plan", "--pure"]);
     cmd.args(["--model", model])
         .arg(message)
@@ -727,7 +727,7 @@ async fn opencode_child(
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
-    let mut config = tokio::process::Command::new(&binary.path);
+    let mut config = crate::process::tokio_command(&binary.path);
     config
         .args(["debug", "config", "--pure"])
         .current_dir(std::env::temp_dir())
@@ -823,7 +823,7 @@ async fn opencode_child(
 /// catalog children before resolution settles — a binary swapped mid-detect
 /// just answers as whatever it now is, and the next pass re-verifies.
 async fn run_models(bin: PathBuf, args: &[&str]) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null())
@@ -2135,7 +2135,7 @@ mod tests {
             crate::local::git::TemporaryDirectory::new("orx-one-shot-generation").unwrap();
         let script = sh_script("opencode", "#!/bin/sh\ncase \"$1\" in\ndebug) printf '%s' \"$OPENCODE_CONFIG_CONTENT\";;\nrun) printf '%s\\n' \"$6\"; printf '%s' \"$OPENCODE_CONFIG_CONTENT\";;\n*) exit 99;;\nesac\n");
         let root = fixture.path();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .env_clear()
             .args(["--exact", "local::harness::opencode::tests::v1_one_shot_verifies_file_captured_config_and_generates_on_selected_model", "--nocapture"])
             .env(CHILD, &script)
@@ -2250,7 +2250,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        let mut child = crate::process::command(std::env::current_exe().unwrap());
         child.env_clear();
         for key in ["SystemRoot", "COMSPEC", "TEMP", "TMP"] {
             if let Some(value) = std::env::var_os(key) {

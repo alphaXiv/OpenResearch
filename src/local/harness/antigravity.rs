@@ -35,7 +35,7 @@ use crate::local::chat::{
     ResumeCtx, TurnCtx, WirePart, WirePrompt, WireToolState,
 };
 use crate::local::opencode::{ensure_playbook, PLAYBOOK_REL};
-use crate::local::shell_env::{find_in_dir, find_on_path};
+use crate::local::shell_env::installs;
 
 const AGY_REINSTALL: &str =
     "Reinstall Antigravity CLI via curl -fsSL https://antigravity.google/cli/install.sh | bash";
@@ -153,7 +153,7 @@ impl Harness for Antigravity {
             ensure_playbook(&project, &session_id, Antigravity.session_skills_dir())
         })
         .await??;
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.args([
             "--conversation",
             native_id,
@@ -261,23 +261,22 @@ impl Harness for Antigravity {
     }
 }
 
-/// `agy` on PATH, then common install locations under `~/.local/bin`,
-/// `~/.gemini/bin`, or `~/.gemini/antigravity-cli/bin`, in preference order.
+/// Every `agy` install, in preference order: Antigravity's own locations are
+/// `~/.gemini/bin`, `~/.gemini/antigravity-cli/bin` and the local data dir.
 fn agy_candidates() -> Vec<PathBuf> {
-    let home_dirs = dirs::home_dir().into_iter().flat_map(|home| {
-        let gemini = home.join(".gemini");
-        [
-            home.join(".local").join("bin"),
-            gemini.join("bin"),
-            gemini.join("antigravity-cli").join("bin"),
-        ]
-    });
-    let drops = home_dirs
+    let gemini = dirs::home_dir().map(|home| home.join(".gemini"));
+    let own = gemini
+        .iter()
+        .flat_map(|gemini| {
+            [
+                gemini.join("bin"),
+                gemini.join("antigravity-cli").join("bin"),
+            ]
+        })
         .chain(dirs::data_local_dir().map(|dir| dir.join("agy").join("bin")))
-        .filter_map(|dir| find_in_dir(&dir, "agy"));
-    find_on_path("agy")
+        .collect::<Vec<_>>();
+    installs("agy", own)
         .into_iter()
-        .chain(drops)
         .map(resolve_symlinks)
         .collect()
 }
@@ -294,7 +293,7 @@ pub(super) async fn find_agy_working() -> Option<(PathBuf, super::detect::BinPro
 }
 
 async fn agy_model_list(bin: &Path) -> Result<Vec<ModelInfo>> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("models")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -382,7 +381,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         prompt = first_turn_prompt(&prompt);
     }
 
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
         "--input-format",
         "stream-json",
@@ -573,7 +572,7 @@ fn stop_turn_process(pid: u32) {
     if unsafe { libc::kill(pid, libc::SIGSTOP) } != 0 {
         return;
     }
-    let snapshot = std::process::Command::new("ps")
+    let snapshot = crate::process::command("ps")
         .args(["-ww", "-axo", "pid=,ppid=,args="])
         .output();
     let supervisor_exe = crate::paths::spawnable_exe().ok();
@@ -628,7 +627,7 @@ function Stop-TurnProcess([uint32] $processId) {
 }
 Stop-TurnProcess ([uint32] $env:ORX_STOP_PID)
 "#;
-    let result = std::process::Command::new("powershell.exe")
+    let result = crate::process::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("ORX_STOP_PID", pid.to_string())
         .stdout(Stdio::null())
@@ -1058,7 +1057,7 @@ mod tests {
             ),
             (json!({"event":"result","result":{}}), "0", Some("INVALID")),
         ] {
-            let mut cmd = Command::new("sh");
+            let mut cmd = crate::process::tokio_command("sh");
             cmd.args([
                 "-c",
                 "printf '%s\\n' \"$ORX_TEST_EVENT\"; exit \"$ORX_TEST_EXIT\"",
@@ -1079,7 +1078,7 @@ mod tests {
         for cancel in [false, true] {
             let dir = crate::local::git::TemporaryDirectory::new("orx-agy-compact-stop").unwrap();
             let pid_file = dir.path().join("pid");
-            let mut cmd = Command::new("sh");
+            let mut cmd = crate::process::tokio_command("sh");
             cmd.args(["-c", "echo $$ > \"$ORX_TEST_PID\"; sleep 60"])
                 .env("ORX_TEST_PID", &pid_file);
             let task = tokio::spawn(compact_native(
@@ -1344,7 +1343,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancellation_kills_command_descendants() {
-        let mut child = Command::new("sh")
+        let mut child = crate::process::tokio_command("sh")
             .args(["-c", "sleep 60 & echo $!; wait"])
             .stdout(Stdio::piped())
             .kill_on_drop(true)
@@ -1370,13 +1369,13 @@ mod tests {
         std::fs::create_dir_all(repo.join(".agents")).unwrap();
         let path = repo.join(".agents/hooks.json");
         std::fs::write(&path, "{}").unwrap();
-        assert!(std::process::Command::new("git")
+        assert!(crate::process::command("git")
             .args(["init", "--quiet"])
             .current_dir(&repo)
             .status()
             .unwrap()
             .success());
-        assert!(std::process::Command::new("git")
+        assert!(crate::process::command("git")
             .args(["add", ".agents/hooks.json"])
             .current_dir(&repo)
             .status()

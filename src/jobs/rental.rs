@@ -112,7 +112,7 @@ async fn supervise_with_collection_grace(config: &Path, collection_grace: Durati
     let code = if directory.join("cancel_requested").exists() {
         143
     } else {
-        let mut child = tokio::process::Command::new("bash")
+        let mut child = crate::process::tokio_command("bash")
             .arg(directory.join("payload.sh"))
             .current_dir(&directory)
             .stdin(std::process::Stdio::null())
@@ -256,7 +256,7 @@ mod tests {
         let command = remote_supervisor_command("/bin/sh", temp.path().to_str().unwrap());
         let output = tokio::time::timeout(
             Duration::from_secs(1),
-            tokio::process::Command::new("/bin/sh")
+            crate::process::tokio_command("/bin/sh")
                 .args(["-c", &command])
                 .output(),
         )
@@ -277,7 +277,7 @@ mod tests {
     fn cancellation_waits_for_a_pid_or_terminal_acknowledgment() {
         let temp = crate::local::git::TemporaryDirectory::new("orx-rental-cancel").unwrap();
         let invoke = || {
-            std::process::Command::new("bash")
+            crate::process::command("bash")
                 .args(["-c", &cancel_probe_script("run")])
                 .env("HOME", temp.path())
                 .output()
@@ -297,7 +297,7 @@ mod tests {
     fn rental_bootstrap_runs_bash_syntax_through_the_posix_login_shell() {
         let home = crate::local::git::TemporaryDirectory::new("orx-rental-shell").unwrap();
         let script = remote_bash_command("values=(first second); printf '%s' \"${values[1]}\"");
-        let output = std::process::Command::new("/bin/sh")
+        let output = crate::process::command("/bin/sh")
             .args(["-c", &script])
             .env("HOME", home.path())
             .env("SHELL", "/bin/sh")

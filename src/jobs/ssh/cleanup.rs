@@ -278,7 +278,7 @@ mod tests {
         for id in ["charted", "deleted"] {
             std::fs::create_dir_all(runs.join(id).join("tensorboard")).unwrap();
         }
-        let mut sleeper = std::process::Command::new("sleep")
+        let mut sleeper = crate::process::command("sleep")
             .arg("30")
             .process_group(0)
             .spawn()
@@ -298,7 +298,7 @@ mod tests {
         for name in &names {
             std::fs::write(source.join(name), "x").unwrap();
             if !name.starts_with(&fresh) {
-                assert!(std::process::Command::new("touch")
+                assert!(crate::process::command("touch")
                     .args(["-t", "202001010000"])
                     .arg(source.join(name))
                     .status()
@@ -313,7 +313,7 @@ mod tests {
             run("charted", None, false),
             run("deleted", None, true),
         ];
-        let out = std::process::Command::new("bash")
+        let out = crate::process::command("bash")
             .args([
                 "-c",
                 &host_script(
@@ -390,7 +390,7 @@ mod tests {
             std::fs::create_dir_all(dir.join("repo")).unwrap();
             let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
             let batch = std::slice::from_ref(&container);
-            let out = std::process::Command::new("bash")
+            let out = crate::process::command("bash")
                 .args([
                     "-c",
                     &host_script(batch, &BTreeSet::new(), &BTreeSet::new()),

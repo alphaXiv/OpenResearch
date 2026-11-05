@@ -790,7 +790,7 @@ pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
     if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
         return BinProbe::Answered(Some(version));
     }
-    let mut cmd = tokio::process::Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("--version").stdin(std::process::Stdio::null());
     // An unparseable version downgrades a signed-in harness to `Unknown` —
     // which is why a synced `FORCE_COLOR` must not reach the version line.
