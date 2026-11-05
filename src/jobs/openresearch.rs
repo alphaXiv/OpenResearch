@@ -103,7 +103,7 @@ fn retained_failure_reason(
     })
 }
 
-fn is_not_found_error(message: &str) -> bool {
+pub(crate) fn is_not_found_error(message: &str) -> bool {
     message.contains("(404 ")
 }
 

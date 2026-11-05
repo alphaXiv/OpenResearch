@@ -26,3 +26,4 @@ ui/package-lock.json
 
 # Per-worktree dev data, binaries, and states (dev.ts).
 /.dev/
+/.shots/

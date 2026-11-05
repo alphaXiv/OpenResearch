@@ -896,7 +896,6 @@ mod tests {
                 .map(|item| match item {
                     News::Answer(_) => "answer",
                     News::Question { .. } => "question",
-                    News::Run(_) | News::Unmonitored(_) => "run",
                 })
                 .collect()
         };

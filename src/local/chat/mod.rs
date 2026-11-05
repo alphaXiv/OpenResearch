@@ -883,9 +883,9 @@ pub enum OrxKind {
     Answer,
     /// A subscribed chat asks a question.
     Question,
-    /// A run the chat asked to be woken for ended.
+    /// A legacy run-result message retained for stored transcripts.
     Run,
-    /// orx lost sight of runs the chat waits on.
+    /// A legacy monitoring notice retained for stored transcripts.
     Monitoring,
 }
 
@@ -8860,10 +8860,236 @@ fn materialize_unfinished_turns(
 
 // --- run watcher ----------------------------------------------------------------
 
-/// Resume explicitly subscribed agent sessions after a run finishes or a chat
-/// they subscribe to has news. Busy and draining sessions keep their durable
-/// wake-up until idle.
-pub async fn watch_runs(
+#[derive(Debug)]
+struct PermanentRunNoticeError(String);
+
+impl std::fmt::Display for PermanentRunNoticeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PermanentRunNoticeError {}
+
+async fn send_run_notice_batch(
+    chat: &Arc<ChatHost>,
+    session_id: &str,
+    notices: &[crate::store::RunNotice],
+    mut guard: TurnGuard,
+) -> Result<TurnSubmission> {
+    let store = Store::open()?;
+    let existing = store.get_chat_turn_by_client_id(session_id, &notices[0].client_turn_id)?;
+    if let Some(turn) = existing.as_ref().filter(|turn| {
+        turn.state == "failed" && matches!(turn.delivery_state.as_str(), "not_sent" | "rejected")
+    }) {
+        store.record_run_notice_failure(
+            session_id,
+            &notices[0].client_turn_id,
+            turn.error_message
+                .as_deref()
+                .unwrap_or("Notice was not accepted"),
+            false,
+            now_ms(),
+        )?;
+        guard.release().await;
+        let result = chat
+            .recover_turn(session_id, &turn.id, "retry", RecoveryOverrides::default())
+            .await?;
+        return Ok(TurnSubmission::Existing(result.turn_id));
+    }
+    if existing.is_none() {
+        let session = store
+            .get_chat_session(session_id)?
+            .ok_or_else(|| PermanentRunNoticeError("Chat was deleted".into()))?;
+        let harness: Box<dyn crate::local::harness::Harness> =
+            if session.harness.starts_with("acp:") {
+                let state = match store.acp_session_state(session_id)? {
+                    Some(state) => Some(state),
+                    None if session.native_session_id.is_some()
+                        || !crate::local::acp::registered_definitions()
+                            .iter()
+                            .any(|definition| definition.id == session.harness) =>
+                    {
+                        None
+                    }
+                    None => store.ensure_acp_session_state(session_id)?,
+                }
+                .filter(|state| state.launch.id == session.harness)
+                .ok_or_else(|| {
+                    PermanentRunNoticeError("Chat harness is no longer configured".into())
+                })?;
+                Box::new(crate::local::harness::acp::Acp(state.launch))
+            } else {
+                crate::local::harness::chat_harness(&session.harness).ok_or_else(|| {
+                    PermanentRunNoticeError("Chat harness is no longer configured".into())
+                })?
+            };
+        let info = harness
+            .detect_snapshot()
+            .await
+            .ok_or_else(|| anyhow!("Could not determine chat harness availability"))?;
+        if !info.installed {
+            return Err(
+                PermanentRunNoticeError("Chat harness is no longer installed".into()).into(),
+            );
+        }
+    }
+    let result = chat
+        .send_message_showing(session_id, run_notice_request(notices, guard))
+        .await;
+    if result.is_err() && store.get_chat_session(session_id)?.is_none() {
+        return Err(PermanentRunNoticeError("Chat was deleted".into()).into());
+    }
+    result
+}
+
+/// Frozen bodies keep the admission hash stable across later run and chat changes.
+fn run_notice_request(notices: &[crate::store::RunNotice], guard: TurnGuard) -> SendTurnRequest {
+    let text = notices
+        .iter()
+        .map(|notice| notice.body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    SendTurnRequest {
+        messages: vec![AnnotatedText {
+            text,
+            annotations: Vec::new(),
+        }],
+        prepared_input: None,
+        replace_settings: false,
+        transcript: TranscriptDisplay {
+            text: Some(String::new()),
+            annotations: None,
+            orx: Vec::new(),
+            record_user_message: false,
+        },
+        overrides: TurnOverrides::default(),
+        images: TurnAttachments::Uploaded(Vec::new()),
+        admission: TurnAdmission::Preclaimed(guard),
+        client_turn_id: Some(notices[0].client_turn_id.clone()),
+        request_hash: None,
+    }
+}
+
+async fn process_run_notices(
+    chat: &Arc<ChatHost>,
+    store: Store,
+    data_dir_move_in_progress: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
+    if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
+    store.expire_run_notice_batches(now_ms())?;
+    for session_id in store.pending_run_notice_sessions()? {
+        if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        let Some(mut guard) = TurnGuard::claim_idle(chat, &session_id).await else {
+            continue;
+        };
+        if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+            guard.release().await;
+            return Ok(());
+        }
+        let notices = store.run_notice_batch(&session_id)?;
+        if notices.is_empty() {
+            guard.release().await;
+            continue;
+        }
+        match send_run_notice_batch(chat, &session_id, &notices, guard).await {
+            Ok(TurnSubmission::Started(_) | TurnSubmission::Existing(_)) => {
+                if let Some(turn) =
+                    store.get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
+                {
+                    if turn.delivery_state == "accepted" {
+                        store.mark_run_notice_batch_delivered(
+                            &session_id,
+                            &notices[0].client_turn_id,
+                            now_ms(),
+                        )?;
+                    } else if turn.state == "failed" && turn.delivery_state == "unknown" {
+                        store.record_run_notice_failure(
+                            &session_id,
+                            &notices[0].client_turn_id,
+                            turn.error_message
+                                .as_deref()
+                                .unwrap_or("Notice delivery could not be confirmed"),
+                            true,
+                            now_ms(),
+                        )?;
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                let permanent = is_client_turn_conflict(&err)
+                    || err.downcast_ref::<PermanentRunNoticeError>().is_some();
+                if store.record_run_notice_failure(
+                    &session_id,
+                    &notices[0].client_turn_id,
+                    &err.to_string(),
+                    permanent,
+                    now_ms(),
+                )? == Some(1)
+                {
+                    eprintln!(
+                        "orx up: run notices: batch {}: {err}",
+                        notices[0].client_turn_id
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn watch_run_notices(
+    chat: Arc<ChatHost>,
+    mut runs: broadcast::Receiver<crate::engine::bus::RunEvent>,
+    data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    data_dir_gate: Arc<tokio::sync::Mutex<()>>,
+) {
+    let mut chats = chat.subscribe();
+    let mut busy: HashSet<String> = chat.busy_sessions().await.into_iter().collect();
+    let mut sweep = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        tokio::select! {
+            event = runs.recv() => match event {
+                Ok(crate::engine::bus::RunEvent::Notices { .. })
+                | Err(broadcast::error::RecvError::Lagged(_)) => {},
+                Err(broadcast::error::RecvError::Closed) => return,
+                _ => continue,
+            },
+            event = chats.recv() => match event {
+                Ok(("chat.busy", data)) => {
+                    let Some(session_id) = data["sessionId"].as_str() else { continue };
+                    if data["busy"] == true {
+                        busy.insert(session_id.to_string());
+                        continue;
+                    }
+                    if !busy.remove(session_id) {
+                        continue;
+                    }
+                },
+                Err(broadcast::error::RecvError::Lagged(_)) => {},
+                _ => continue,
+            },
+            _ = sweep.tick() => {},
+        }
+        if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+            continue;
+        }
+        let _data_dir_guard = data_dir_gate.lock().await;
+        let Ok(store) = Store::open() else { continue };
+        if let Err(err) = process_run_notices(&chat, store, &data_dir_move_in_progress).await {
+            eprintln!("orx up: run notices: {err}");
+        }
+    }
+}
+
+/// Renews chat-turn leases every 3 s and interrupts turns whose lease was lost.
+pub async fn keep_turn_leases(
     chat: Arc<ChatHost>,
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
     data_dir_gate: Arc<tokio::sync::Mutex<()>>,
@@ -8888,6 +9114,8 @@ pub async fn watch_runs(
         }
     }
 }
+
+// --- spawned agents -------------------------------------------------------------
 
 /// The PATH a child gets: this orx first, so an agent shelling out to `orx`
 /// reaches the running one.
@@ -11465,27 +11693,757 @@ mod run_wakeup_tests {
         (Store::open_at(dir.clone()).unwrap(), dir)
     }
 
-    #[test]
-    fn wakeup_messages_are_exact_and_exclude_cancellation() {
-        assert_eq!(
-            news::run_wakeup_text(&run("done")).as_deref(),
-            Some(
-                "[orx] Run `run_x` finished with status **done**. You can compare this result \
-with other project runs using `orx runs p1` and inspect the file located by `orx logs run_x`."
+    fn notice_host() -> Arc<ChatHost> {
+        Arc::new(ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ))
+    }
+
+    fn notice_harness(store: &Store) {
+        let launch = crate::local::acp::Definition {
+            id: "acp:00000000-0000-4000-8000-000000000001".into(),
+            name: "Outbox fixture".into(),
+            executable: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            arguments: vec!["--list".into()],
+        };
+        let tx = store.begin().unwrap();
+        tx.execute("UPDATE chat_sessions SET harness = ?1", [&launch.id])
+            .unwrap();
+        tx.execute(
+            "INSERT OR IGNORE INTO acp_sessions (session_id, launch_json, configuration_json)
+             SELECT id, ?1, '[]' FROM chat_sessions",
+            [serde_json::to_string(&launch).unwrap()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle() {
+        const CHILD: &str = "ORX_TEST_CHAT_OUTBOX";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = std::env::temp_dir().join(format!("orx-outbox-{}", uuid::Uuid::new_v4()));
+            for phase in ["send", "restart"] {
+                let output = crate::process::command(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "local::chat::run_wakeup_tests::outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, phase)
+                    .env("ORX_DATA_DIR", &dir)
+                    .env("ORX_NO_TELEMETRY", "1")
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(if phase == "send" { 73 } else { 0 }),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let store = Store::open().unwrap();
+        let moving = std::sync::atomic::AtomicBool::new(false);
+        let insert = |dedupe: &str, body: &str| {
+            store
+                .insert_run_notice("run_x", "owner", "terminal", dedupe, body, 1)
+                .unwrap();
+        };
+        let count_turns = || {
+            let tx = store.begin().unwrap();
+            tx.query_row("SELECT COUNT(*) FROM chat_turns", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+
+        if std::env::var(CHILD).unwrap() == "send" {
+            store
+                .create_local_project(&crate::local::model::LocalProject {
+                    id: "p1".into(),
+                    name: "outbox".into(),
+                    slug: "outbox".into(),
+                    github_owner: String::new(),
+                    github_repo: String::new(),
+                    github_sync_enabled: false,
+                    baseline_branch: "main".into(),
+                    repo_path: std::env::var("ORX_DATA_DIR").unwrap(),
+                    run_command: None,
+                    paper_id: None,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .unwrap();
+            session(&store, "owner");
+            notice_harness(&store);
+            store.upsert_run(&run("done")).unwrap();
+            let host = notice_host();
+            host.turns
+                .lock()
+                .await
+                .insert("owner".into(), TurnState::Draining);
+            insert("one", "first completion");
+            process_run_notices(&host, Store::open().unwrap(), &moving)
+                .await
+                .unwrap();
+            insert("two", "second completion");
+            process_run_notices(&host, Store::open().unwrap(), &moving)
+                .await
+                .unwrap();
+            assert_eq!(count_turns(), 0);
+            let tx = store.begin().unwrap();
+            let assigned: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM run_notices WHERE client_turn_id IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(assigned, 0);
+            tx.commit().unwrap();
+            host.turns.lock().await.remove("owner");
+
+            let frozen = store.run_notice_batch("owner").unwrap();
+            assert_eq!(frozen.len(), 2);
+            let guard = TurnGuard::claim_idle(&host, "owner").await.unwrap();
+            let submitted = host
+                .send_message_showing("owner", run_notice_request(&frozen, guard))
+                .await
+                .unwrap();
+            assert!(matches!(submitted, TurnSubmission::Started(_)));
+            let first = store
+                .get_chat_turn_by_client_id("owner", &frozen[0].client_turn_id)
+                .unwrap()
+                .unwrap();
+            assert!(first.user_message_id.is_none());
+            assert!(first
+                .prepared_input
+                .contains("first completion\n\nsecond completion"));
+            assert_eq!(count_turns(), 1);
+
+            std::process::exit(73);
+        }
+        let frozen = store.run_notice_batch("owner").unwrap();
+        assert_eq!(frozen.len(), 2);
+        let first = store
+            .get_chat_turn_by_client_id("owner", &frozen[0].client_turn_id)
+            .unwrap()
+            .unwrap();
+        let tx = store.begin().unwrap();
+        tx.execute("DELETE FROM chat_turn_leases", []).unwrap();
+        tx.commit().unwrap();
+        store
+            .fail_chat_turn(
+                &first.id,
+                "not_sent",
+                "setup",
+                "harness unavailable",
+                Some("retry"),
             )
-        );
-        assert_eq!(
-            news::run_wakeup_text(&run("failed")).as_deref(),
-            Some(
-                "[orx] Run `run_x` finished with status **failed**. You can compare this result \
-with other project runs using `orx runs p1` and inspect the file located by `orx logs run_x`."
+            .unwrap();
+        insert("three", "later arrival");
+        let restarted = notice_host();
+        process_run_notices(&restarted, Store::open().unwrap(), &moving)
+            .await
+            .unwrap();
+        assert_eq!(count_turns(), 1);
+        let retried = store
+            .get_chat_turn_by_client_id("owner", &frozen[0].client_turn_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retried.id, first.id);
+        assert_eq!(retried.client_turn_id, first.client_turn_id);
+        assert_eq!(retried.prepared_input, first.prepared_input);
+        let (failures, due): (i64, i64) = store
+            .begin()
+            .unwrap()
+            .query_row(
+                "SELECT delivery_failures, next_delivery_at FROM run_notices WHERE id = ?1",
+                [frozen[0].id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-        );
-        assert!(news::run_wakeup_text(&run("cancelled")).is_none());
+            .unwrap();
+        assert_eq!(failures, 1);
+        assert!(due > now_ms());
+
         assert_eq!(
-            news::run_wakeup_text(&run("lost")).as_deref(),
-            Some("[orx] Run `run_x` ended with **Outcome unavailable**. Its final outcome could not be collected. Inspect any partial logs using `orx logs run_x`; do not assume success or failure.")
+            store
+                .run_notice_batch_at("owner", now_ms() + 16 * 60 * 1000)
+                .unwrap(),
+            frozen
         );
+        restarted.interrupt("owner").await.unwrap();
+        let tx = store.begin().unwrap();
+        tx.execute("UPDATE chat_turns SET state = 'failed', delivery_state = 'rejected', recovery_action = 'retry' WHERE id = ?1", [&first.id]).unwrap();
+        tx.execute("DELETE FROM chat_turn_leases", []).unwrap();
+        tx.execute("UPDATE run_notices SET next_delivery_at = 0", [])
+            .unwrap();
+        tx.commit().unwrap();
+        let restarted = notice_host();
+        process_run_notices(&restarted, Store::open().unwrap(), &moving)
+            .await
+            .unwrap();
+        assert_eq!(count_turns(), 1);
+        assert_eq!(
+            store
+                .run_notice_batch_at("owner", now_ms() + 16 * 60 * 1000)
+                .unwrap(),
+            frozen
+        );
+        restarted.interrupt("owner").await.unwrap();
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_turns SET state = 'failed', delivery_state = 'unknown', error_message = 'Delivery could not be confirmed' WHERE id = ?1",
+            [&first.id],
+        )
+        .unwrap();
+        tx.execute("DELETE FROM chat_turn_leases", []).unwrap();
+        tx.execute("UPDATE run_notices SET next_delivery_at = 0", [])
+            .unwrap();
+        tx.commit().unwrap();
+        let restarted = notice_host();
+        process_run_notices(&restarted, Store::open().unwrap(), &moving)
+            .await
+            .unwrap();
+        let retired: (Option<i64>, Option<i64>) = store
+            .begin()
+            .unwrap()
+            .query_row(
+                "SELECT delivered_at, retired_at FROM run_notices WHERE id = ?1",
+                [frozen[0].id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(retired.0.is_none());
+        assert!(retired.1.is_some());
+        assert_eq!(
+            store.run_notice_error("run_x").unwrap().as_deref(),
+            Some("Delivery could not be confirmed")
+        );
+        let next = store.run_notice_batch("owner").unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].body, "later arrival");
+        assert_ne!(next[0].client_turn_id, first.client_turn_id);
+        assert_eq!(count_turns(), 1);
+        moving.store(true, std::sync::atomic::Ordering::SeqCst);
+        process_run_notices(&restarted, Store::open().unwrap(), &moving)
+            .await
+            .unwrap();
+        assert_eq!(count_turns(), 1);
+        store.delete_chat_session("owner").unwrap();
+        assert!(store.run_notice_batch("owner").unwrap().is_empty());
+    }
+
+    async fn settle_run_notices(
+        chat: &Arc<ChatHost>,
+        moving: &std::sync::atomic::AtomicBool,
+    ) -> Result<()> {
+        process_run_notices(chat, Store::open()?, moving).await?;
+        if !chat.busy_sessions().await.is_empty() {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while !chat.busy_sessions().await.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            process_run_notices(chat, Store::open()?, moving).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn outbox_wakes_on_idle_and_bus_and_retires_or_retries_delivery_failures() {
+        const CHILD: &str = "ORX_TEST_OUTBOX_EVENTS";
+        if std::env::var_os(CHILD).is_none() {
+            let dir =
+                std::env::temp_dir().join(format!("orx-outbox-events-{}", uuid::Uuid::new_v4()));
+            let output = crate::process::command(std::env::current_exe().unwrap())
+                .args(["--exact", "local::chat::run_wakeup_tests::outbox_wakes_on_idle_and_bus_and_retires_or_retries_delivery_failures", "--nocapture"])
+                .env(CHILD, "1").env("ORX_DATA_DIR", &dir).env("ORX_NO_TELEMETRY", "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr)
+                    .matches("orx up: run notices: batch ")
+                    .count(),
+                4
+            );
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let store = Store::open().unwrap();
+        let repo = crate::store::data_dir().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::local::git::initialize_own_repository(&repo).unwrap();
+        store
+            .create_local_project(&crate::local::model::LocalProject {
+                id: "p1".into(),
+                name: "outbox".into(),
+                slug: "outbox".into(),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: repo.to_string_lossy().into_owned(),
+                run_command: None,
+                paper_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        store.upsert_run(&run("done")).unwrap();
+        let restarted = notice_host();
+        let moving = std::sync::atomic::AtomicBool::new(false);
+        let count_turns = || {
+            store
+                .begin()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM chat_turns", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        session(&store, "other");
+        store
+            .insert_run_notice("run_x", "other", "terminal", "deleted", "drop me", 1)
+            .unwrap();
+        let tx = store.begin().unwrap();
+        tx.execute("DELETE FROM runs WHERE id = 'run_x'", [])
+            .unwrap();
+        tx.commit().unwrap();
+        assert!(store.run_notice_batch("other").unwrap().is_empty());
+        settle_run_notices(&restarted, &moving).await.unwrap();
+
+        store.upsert_run(&run("done")).unwrap();
+        notice_harness(&store);
+        let mut launch = store.acp_session_state("other").unwrap().unwrap().launch;
+        launch.executable = if cfg!(windows) { "python" } else { "python3" }.into();
+        launch.arguments = vec![
+            "-u".into(),
+            "-c".into(),
+            r#"
+import json, os, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request['method']
+    if 'id' not in request:
+        continue
+    if method == 'initialize':
+        result = {'protocolVersion':1, 'agentCapabilities':{'loadSession':True}}
+    elif method == 'session/new':
+        result = {'sessionId':'outbox'}
+    elif method == 'session/load':
+        result = {}
+    elif method == 'session/prompt':
+        with open(os.environ['ORX_DATA_DIR'] + '/accepted-prompts', 'a') as log:
+            log.write('accepted\n')
+        result = {'stopReason':'end_turn'}
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#
+            .into(),
+        ];
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE acp_sessions SET launch_json = ?1 WHERE session_id = 'other'",
+            [serde_json::to_string(&launch).unwrap()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        restarted
+            .turns
+            .lock()
+            .await
+            .insert("other".into(), TurnState::Draining);
+        let bus = crate::engine::bus::Bus::new();
+        let watcher = tokio::spawn(watch_run_notices(
+            restarted.clone(),
+            bus.subscribe(),
+            Arc::new(moving),
+            Arc::new(Mutex::new(())),
+        ));
+        tokio::task::yield_now().await;
+        let baseline = count_turns();
+        store
+            .insert_run_notice("run_x", "other", "terminal", "idle-one", "idle first", 1)
+            .unwrap();
+        bus.publish(crate::engine::bus::RunEvent::Notices {
+            chats: vec!["other".into()],
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(count_turns(), baseline);
+        store
+            .insert_run_notice("run_x", "other", "terminal", "idle-two", "idle second", 1)
+            .unwrap();
+        restarted.turns.lock().await.remove("other");
+        restarted.emit("chat.busy", json!({ "sessionId": "other", "busy": false }));
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while count_turns() == baseline
+                || !store.pending_run_notice_sessions().unwrap().is_empty()
+                || !restarted.busy_sessions().await.is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(count_turns(), baseline + 1);
+        assert!(store.run_notice_batch("other").unwrap().is_empty());
+        restarted.interrupt("other").await.unwrap();
+        store
+            .insert_run_notice("run_x", "other", "notify", "bus", "bus result", 1)
+            .unwrap();
+        bus.publish(crate::engine::bus::RunEvent::Notices {
+            chats: vec!["other".into()],
+        });
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while count_turns() == baseline + 1
+                || !store.pending_run_notice_sessions().unwrap().is_empty()
+                || !restarted.busy_sessions().await.is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(count_turns(), baseline + 2);
+        assert_eq!(
+            std::fs::read_to_string(crate::store::data_dir().join("accepted-prompts"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        assert!(store.run_notice_batch("other").unwrap().is_empty());
+        restarted.interrupt("other").await.unwrap();
+        watcher.abort();
+        let _ = watcher.await;
+
+        let (old_id, old_client): (i64, String) = store
+            .begin()
+            .unwrap()
+            .query_row(
+                "SELECT id, client_turn_id FROM run_notices ORDER BY id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(store
+            .get_chat_turn_by_client_id("other", &old_client)
+            .unwrap()
+            .is_some());
+        let tx = store.begin().unwrap();
+        tx.execute("DELETE FROM runs WHERE id = 'run_x'", [])
+            .unwrap();
+        tx.commit().unwrap();
+        store.upsert_run(&run("done")).unwrap();
+        store
+            .insert_run_notice("run_x", "other", "terminal", "reused", "new run result", 1)
+            .unwrap();
+        let reused = store.run_notice_batch("other").unwrap();
+        assert_eq!(reused[0].id, old_id);
+        assert_ne!(reused[0].client_turn_id, old_client);
+        let before = count_turns();
+        let moving = std::sync::atomic::AtomicBool::new(false);
+        settle_run_notices(&restarted, &moving).await.unwrap();
+        assert_eq!(count_turns(), before + 1);
+        assert!(store.run_notice_batch("other").unwrap().is_empty());
+        let delivered = store
+            .get_chat_turn_by_client_id("other", &reused[0].client_turn_id)
+            .unwrap()
+            .unwrap();
+        assert!(delivered.prepared_input.contains("new run result"));
+        restarted.interrupt("other").await.unwrap();
+
+        store
+            .insert_run_notice("run_x", "other", "notify", "conflict", "blocked", 1)
+            .unwrap();
+        let blocked = store.run_notice_batch("other").unwrap();
+        let mut conflict = delivered;
+        conflict.id = "conflicting-turn".into();
+        conflict.assistant_message_id = "conflicting-message".into();
+        conflict.client_turn_id = blocked[0].client_turn_id.clone();
+        conflict.request_hash = "different payload".into();
+        assert!(matches!(
+            store.admit_chat_turn(None, &conflict).unwrap(),
+            ChatTurnAdmission::Inserted
+        ));
+        store
+            .insert_run_notice("run_x", "other", "notify", "after-conflict", "unblocked", 2)
+            .unwrap();
+        settle_run_notices(&restarted, &moving).await.unwrap();
+        tokio::task::yield_now().await;
+        let retirement: (i64, String, i64) = store.begin().unwrap().query_row(
+            "SELECT delivery_failures, delivery_error, retired_at FROM run_notices WHERE client_turn_id = ?1",
+            [&blocked[0].client_turn_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(retirement.0, 1);
+        assert!(retirement.1.contains("clientTurnId was already used"));
+        assert!(retirement.2 > 0);
+        let later = store.run_notice_batch("other").unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].body, "unblocked");
+        settle_run_notices(&restarted, &moving).await.unwrap();
+        assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+        assert!(store
+            .get_chat_turn_by_client_id("other", &later[0].client_turn_id)
+            .unwrap()
+            .is_some());
+        restarted.interrupt("other").await.unwrap();
+
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_sessions SET harness = 'removed-harness' WHERE id = 'other'",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        store
+            .insert_run_notice(
+                "run_x",
+                "other",
+                "notify",
+                "removed-harness",
+                "not delivered",
+                3,
+            )
+            .unwrap();
+        let removed = store.run_notice_batch("other").unwrap();
+        settle_run_notices(&restarted, &moving).await.unwrap();
+        tokio::task::yield_now().await;
+        let reason: String = store
+            .begin()
+            .unwrap()
+            .query_row(
+                "SELECT delivery_error FROM run_notices WHERE id = ?1 AND retired_at IS NOT NULL",
+                [removed[0].id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "Chat harness is no longer configured");
+        notice_harness(&store);
+        let saved = store.acp_session_state("other").unwrap().unwrap();
+        let mut absent = saved.launch.clone();
+        absent.executable = crate::store::data_dir()
+            .join("missing-harness")
+            .to_string_lossy()
+            .into_owned();
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE acp_sessions SET launch_json = ?1 WHERE session_id = 'other'",
+            [serde_json::to_string(&absent).unwrap()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        store
+            .insert_run_notice(
+                "run_x",
+                "other",
+                "notify",
+                "uninstalled",
+                "missing binary",
+                3,
+            )
+            .unwrap();
+        let uninstalled = store.run_notice_batch("other").unwrap();
+        settle_run_notices(&restarted, &moving).await.unwrap();
+        tokio::task::yield_now().await;
+        let reason: String = store
+            .begin()
+            .unwrap()
+            .query_row(
+                "SELECT delivery_error FROM run_notices WHERE id = ?1 AND retired_at IS NOT NULL",
+                [uninstalled[0].id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "Chat harness is no longer installed");
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE acp_sessions SET launch_json = ?1 WHERE session_id = 'other'",
+            [serde_json::to_string(&saved.launch).unwrap()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        store
+            .insert_run_notice(
+                "run_x",
+                "other",
+                "notify",
+                "temporary",
+                "retry this result",
+                4,
+            )
+            .unwrap();
+        let retry = store.run_notice_batch("other").unwrap();
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_sessions SET project_id = 'temporarily-unavailable' WHERE id = 'other'",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        settle_run_notices(&restarted, &moving).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(store.run_notice_batch("other").unwrap().is_empty());
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_sessions SET project_id = 'p1' WHERE id = 'other'",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        store
+            .insert_run_notice(
+                "run_x",
+                "other",
+                "notify",
+                "overtake",
+                "deliver during backoff",
+                5,
+            )
+            .unwrap();
+        let overtaking = store.run_notice_batch("other").unwrap();
+        assert_eq!(overtaking.len(), 1);
+        assert_eq!(overtaking[0].body, "deliver during backoff");
+        let before = count_turns();
+        settle_run_notices(&restarted, &moving).await.unwrap();
+        assert_eq!(count_turns(), before + 1);
+        restarted.interrupt("other").await.unwrap();
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE run_notices SET next_delivery_at = ?1 WHERE client_turn_id = ?2",
+            rusqlite::params![now_ms() - 1, retry[0].client_turn_id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let host = notice_host();
+        settle_run_notices(&host, &moving).await.unwrap();
+        assert_eq!(count_turns(), before + 2);
+        host.interrupt("other").await.unwrap();
+        settle_run_notices(&host, &moving).await.unwrap();
+        assert_eq!(count_turns(), before + 2);
+        assert!(store
+            .get_chat_turn_by_client_id("other", &retry[0].client_turn_id)
+            .unwrap()
+            .is_some());
+        assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(crate::store::data_dir().join("accepted-prompts"))
+                .unwrap()
+                .lines()
+                .count(),
+            6
+        );
+        for kind in ["engine", "ssh_job"] {
+            let delegate = format!("delegate-{kind}");
+            let answer = format!("delegate answer exactly once for {kind}");
+            let result = format!("run result exactly once for {kind}");
+            session(&store, &delegate);
+            store
+                .record_chat_delegate(&delegate, "other", false)
+                .unwrap();
+            store.subscribe_chat("other", &delegate, None).unwrap();
+            let mut run = run("done");
+            run.id = format!("run-{kind}");
+            run.backend_json = json!({"kind":kind}).to_string();
+            store.upsert_run(&run).unwrap();
+            let turn = crate::store::StoredChatTurn {
+                id: format!("turn-{kind}"),
+                session_id: delegate.clone(),
+                user_message_id: None,
+                assistant_message_id: format!("answer-{kind}"),
+                client_turn_id: format!("client-{kind}"),
+                request_hash: "task".into(),
+                prepared_input: "task".into(),
+                settings_json: "{}".into(),
+                state: "preparing".into(),
+                delivery_state: "not_sent".into(),
+                attempt_count: 0,
+                next_retry_at: None,
+                error_kind: None,
+                error_message: None,
+                recovery_action: None,
+                recovered_by_turn_id: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            };
+            store.admit_chat_turn(None, &turn).unwrap();
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: turn.assistant_message_id.clone(),
+                    session_id: delegate,
+                    role: "assistant".into(),
+                    parts_json: serde_json::to_string(&[WirePart::text("answer", &answer)])
+                        .unwrap(),
+                    created_at: now_ms(),
+                    completed_at: Some(now_ms()),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                })
+                .unwrap();
+            store.complete_chat_turn(&turn.id).unwrap();
+            let tx = store.begin().unwrap();
+            tx.execute(
+                "INSERT INTO chat_run_wakeups (run_id, chat_session_id, requested_at, state) VALUES (?1, 'other', 1, 'pending')",
+                [&run.id],
+            ).unwrap();
+            tx.commit().unwrap();
+            store
+                .insert_run_notice(&run.id, "other", "terminal", "terminal", &result, now_ms())
+                .unwrap();
+            assert_eq!(news::chat_news(&store, Some("other")).unwrap().len(), 1);
+            assert_eq!(store.pending_run_notice_sessions().unwrap(), ["other"]);
+            let before = count_turns();
+            for _ in 0..3 {
+                news::deliver_news(&host, Store::open().unwrap(), None)
+                    .await
+                    .unwrap();
+                settle_run_notices(&host, &moving).await.unwrap();
+            }
+            assert_eq!(count_turns(), before + 2);
+            assert!(news::chat_news(&store, Some("other")).unwrap().is_empty());
+            assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+            let tx = store.begin().unwrap();
+            let mut statement = tx.prepare("SELECT prepared_input, user_message_id FROM chat_turns WHERE session_id = 'other'").unwrap();
+            let turns = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            let results: Vec<_> = turns
+                .iter()
+                .filter(|(input, _)| input.contains(&result))
+                .collect();
+            let answers: Vec<_> = turns
+                .iter()
+                .filter(|(input, _)| input.contains(&answer))
+                .collect();
+            assert_eq!(results.len(), 1);
+            assert!(results[0].1.is_none());
+            assert_eq!(answers.len(), 1);
+            assert!(answers[0].1.is_some());
+        }
     }
 
     #[test]
@@ -11522,37 +12480,6 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
                 ("p1", "Run run_y ended.", Some(&orx[1].source)),
             ]
         );
-    }
-
-    #[test]
-    fn each_run_that_ended_is_its_own_message() {
-        let (store, dir) = temp_store("batched");
-        let mut second = run("failed");
-        second.id = "run_y".into();
-        let news: Vec<news::News> = [run("done"), second]
-            .into_iter()
-            .map(|run| {
-                news::News::Run(Box::new(crate::store::RunWakeup {
-                    run,
-                    chat_session_id: "owner".into(),
-                    state: "pending".into(),
-                    monitoring_alerted: false,
-                }))
-            })
-            .collect();
-        let messages = news::messages(&store, &news).unwrap();
-        assert_eq!(messages.len(), 2);
-        assert!(messages[0]
-            .0
-            .starts_with("[orx] Run `run_x` finished with status **done**"));
-        assert!(messages[1]
-            .0
-            .starts_with("[orx] Run `run_y` finished with status **failed**"));
-        let status = |i: usize| messages[i].1.source.status.as_deref();
-        assert_eq!((status(0), status(1)), (Some("done"), Some("failed")));
-        assert_eq!(messages[1].1.source.from.as_deref(), Some("run_y"));
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -11650,165 +12577,6 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         assert!(reset_exhausted_queued_message(&message).is_some());
         message.dispatch_error = None;
         assert!(reset_exhausted_queued_message(&message).is_none());
-    }
-
-    #[tokio::test]
-    async fn terminal_run_without_subscription_starts_no_turn() {
-        let (store, dir) = temp_store("unsubscribed");
-        session(&store, "owner");
-        store.upsert_run(&run("done")).unwrap();
-        let host = Arc::new(ChatHost::new(
-            Arc::new(crate::local::opencode::AgentHost::new(None)),
-            Arc::new(crate::local::codex::CodexHost::new()),
-            Arc::new(crate::local::claude::ClaudeHost::new()),
-        ));
-
-        drop(store);
-        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), None)
-            .await
-            .unwrap();
-
-        assert!(!host.is_busy("owner").await);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[tokio::test]
-    async fn data_directory_move_keeps_wakeup_pending() {
-        let (store, dir) = temp_store("moving");
-        session(&store, "owner");
-        store.upsert_run(&run("done")).unwrap();
-        store.register_run_wakeup("run_x", "owner").unwrap();
-        let host = Arc::new(ChatHost::new(
-            Arc::new(crate::local::opencode::AgentHost::new(None)),
-            Arc::new(crate::local::codex::CodexHost::new()),
-            Arc::new(crate::local::claude::ClaudeHost::new()),
-        ));
-        let moving = std::sync::atomic::AtomicBool::new(true);
-
-        drop(store);
-        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), Some(&moving))
-            .await
-            .unwrap();
-
-        let store = Store::open_at(dir.clone()).unwrap();
-        assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 1);
-        assert!(!host.is_busy("owner").await);
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[tokio::test]
-    async fn draining_user_messages_keep_wakeup_pending() {
-        let (store, dir) = temp_store("draining");
-        session(&store, "owner");
-        store.upsert_run(&run("done")).unwrap();
-        store.register_run_wakeup("run_x", "owner").unwrap();
-        let host = Arc::new(ChatHost::new(
-            Arc::new(crate::local::opencode::AgentHost::new(None)),
-            Arc::new(crate::local::codex::CodexHost::new()),
-            Arc::new(crate::local::claude::ClaudeHost::new()),
-        ));
-        host.turns
-            .lock()
-            .await
-            .insert("owner".into(), TurnState::Draining);
-
-        drop(store);
-        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), None)
-            .await
-            .unwrap();
-
-        let store = Store::open_at(dir.clone()).unwrap();
-        assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 1);
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    fn unmonitored_run() -> StoredRun {
-        StoredRun {
-            backend_json:
-                r#"{"kind":"slurm_job","monitoringError":"Monitoring unavailable: ssh failed."}"#
-                    .into(),
-            ..run("starting")
-        }
-    }
-
-    #[test]
-    fn monitoring_message_names_runs_without_remote_text() {
-        let first = StoredRun {
-            backend_json: r#"{"kind":"slurm_job","monitoringError":"REMOTE_SENTINEL"}"#.into(),
-            ..run("starting")
-        };
-        let mut second = run("running");
-        second.id = "run_y".into();
-        let text = news::run_monitoring_text(&[first, second]);
-        assert!(!text.contains("REMOTE_SENTINEL"));
-        assert_eq!(
-            text,
-            "[orx] orx can no longer monitor these live runs:\n\
-- run `run_x` of experiment `exp_1` (still **starting**)\n\
-- run `run_y` of experiment `exp_1` (still **running**)\n\
-Run `orx exp status <expId>` for the reason and tell the user so they can fix it. orx wakes you \
-once it can see a run finish; until then each run keeps its current status."
-        );
-    }
-
-    #[tokio::test]
-    async fn busy_session_leaves_monitoring_alert_unclaimed() {
-        let (store, dir) = temp_store("alert-busy");
-        session(&store, "owner");
-        store.upsert_run(&unmonitored_run()).unwrap();
-        store.register_run_wakeup("run_x", "owner").unwrap();
-        let host = Arc::new(ChatHost::new(
-            Arc::new(crate::local::opencode::AgentHost::new(None)),
-            Arc::new(crate::local::codex::CodexHost::new()),
-            Arc::new(crate::local::claude::ClaudeHost::new()),
-        ));
-        host.turns
-            .lock()
-            .await
-            .insert("owner".into(), TurnState::Draining);
-
-        drop(store);
-        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), None)
-            .await
-            .unwrap();
-
-        let store = Store::open_at(dir.clone()).unwrap();
-        assert!(!store.list_active_run_wakeups().unwrap()[0].monitoring_alerted);
-        assert!(matches!(
-            host.turns.lock().await.get("owner"),
-            Some(TurnState::Draining)
-        ));
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[tokio::test]
-    async fn restored_monitoring_rearms_the_alert() {
-        let (store, dir) = temp_store("alert-restored");
-        session(&store, "owner");
-        store.upsert_run(&run("running")).unwrap();
-        store.register_run_wakeup("run_x", "owner").unwrap();
-        store
-            .set_run_wakeup_monitoring_alerted("run_x", "owner", true)
-            .unwrap();
-        let host = Arc::new(ChatHost::new(
-            Arc::new(crate::local::opencode::AgentHost::new(None)),
-            Arc::new(crate::local::codex::CodexHost::new()),
-            Arc::new(crate::local::claude::ClaudeHost::new()),
-        ));
-
-        drop(store);
-        news::deliver_news(&host, Store::open_at(dir.clone()).unwrap(), None)
-            .await
-            .unwrap();
-
-        let store = Store::open_at(dir.clone()).unwrap();
-        assert!(!store.list_active_run_wakeups().unwrap()[0].monitoring_alerted);
-        assert!(!host.is_busy("owner").await);
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

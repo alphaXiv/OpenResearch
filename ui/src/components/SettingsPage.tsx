@@ -3,6 +3,7 @@ import { useSignIn } from "./AccountChip";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
 import {
   useContext,
+  useId,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -24,6 +25,9 @@ import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarnessDialog";
 
 import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
+
+import { worstPerAlias } from "../engineHosts";
+import { runActive, runDisplay } from "../runDisplay";
 
 import {
   ArrowLeft,
@@ -50,8 +54,8 @@ import {
   fmtNumber,
   type DataDirSettings,
   type DataDirValidation,
-  runDisplayStatus,
   timeAgo,
+  type EngineHost,
   type ComputeSettings,
   type ComputeTargetId,
   type ComputeTargetSummary,
@@ -86,7 +90,7 @@ import {
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
-import { ltr } from "../i18n";
+import { fmtClock, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
@@ -1059,6 +1063,31 @@ function useSshMasterStatuses(hosts: string[]) {
   return [statuses, markRunning] as const;
 }
 
+/** The run engine's view of a host, when it has one worth showing over the last manual check. */
+function EngineHostCell({ host }: { host: EngineHost }) {
+  let badge = <Badge className="rounded-sm" variant="success">{m.settings_host_connected()}</Badge>;
+  let note: string | null = null;
+
+  if (host.status === "needs_auth") {
+    badge = <Badge className="rounded-sm" variant="warning">{m.status_needs_auth()}</Badge>;
+  } else if (host.status === "backoff") {
+    badge = <Badge className="rounded-sm" variant="warning">{m.status_unreachable()}</Badge>;
+    const since = fmtClock(host.sinceMs);
+    note = host.nextRetryMs === null
+      ? m.settings_host_since({ time: since })
+      : m.settings_host_since_next_try({ time: since, next: fmtClock(host.nextRetryMs) });
+  }
+
+  return (
+    <div className="flex flex-col items-start gap-1" role="status">
+      {badge}
+      {note && <span className="text-xs text-subtext">{note}</span>}
+    </div>
+  );
+}
+
+const ENGINE_HOST_SHOWN: ReadonlySet<EngineHost["status"]> = new Set(["live", "backoff", "needs_auth"]);
+
 function HostTestCell({ test, connecting, masterRunning, containerFailed = false }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | null | undefined; containerFailed?: boolean }) {
   if (connecting)
     return (
@@ -1091,6 +1120,10 @@ function HostTestCell({ test, connecting, masterRunning, containerFailed = false
 }
 
 function SshSection() {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+  const { useEngineHosts, setEngineHost } = useWorkspace().queries;
+  const { takeHostConnect, onHostConnectRequest } = useWorkspace().events;
+  const { retryEngineHost } = useWorkspace().api;
   const { dialogs } = useWorkspace();
   const { getSshSettingsQuery } = useWorkspace().queries;
   const { testSshExecution } = useWorkspace().api;
@@ -1113,6 +1146,10 @@ function SshSection() {
     })
     .map((host) => host.host) ?? [];
   const [masterRunning, markMasterRunning] = useSshMasterStatuses(checkedHosts);
+  const engineHosts = useEngineHosts();
+  const engineByAlias = worstPerAlias(engineHosts ?? []);
+  const [busyHost, setBusyHost] = useState<string | null>(null);
+  const [hostError, setHostError] = useState<{ host: string; message: string } | null>(null);
 
   function connect(host: string) {
     activeAttempt.current += 1;
@@ -1122,6 +1159,38 @@ function SshSection() {
     setConnectingHost(host);
     setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
   }
+
+  // A run's Connect lands here: start that host's flow and bring its row into view.
+  useEffect(() => {
+    const take = () => {
+      const host = takeHostConnect();
+      if (!host) return;
+      connect(host);
+      requestAnimationFrame(() => document.getElementById(elementId(`ssh-host-${host}`))?.scrollIntoView({ block: "center" }));
+    };
+    take();
+    return onHostConnectRequest(take);
+  }, []);
+
+  /** Retry and Test on key hosts: one request, its error shown under the host's row. */
+  async function hostAction(host: string, action: () => Promise<void>) {
+    setBusyHost(host);
+    setHostError(null);
+    try {
+      await action();
+    } catch (error) {
+      setHostError({ host, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusyHost(null);
+    }
+  }
+
+  const retry = (host: string) => hostAction(host, async () => setEngineHost(await retryEngineHost(host)));
+
+  const test = (host: string, reference: string | null) => hostAction(host, async () => {
+    const result = await testSshExecution(host, reference?.trim() || null);
+    setTests((tests) => ({ ...tests, [host]: result }));
+  });
 
   function cancelConnect() {
     activeAttempt.current += 1;
@@ -1163,12 +1232,19 @@ function SshSection() {
             const containerFailed = containerTest?.container?.ready === false;
             const connectionError = hostTest?.error || containerError;
             const connecting = connectingHost === h.host;
+            const engine = engineByAlias.get(h.host);
+            // A Test run this session speaks for a connected host; trouble on the host outranks it.
+            const engineShown = !connecting && engine !== undefined && ENGINE_HOST_SHOWN.has(engine.status)
+              && !(engine.status === "live" && executionTest) ? engine : null;
+            const keyHost = engine?.class === "key";
+            // Key hosts never need Connect: Retry while backing off, otherwise Test.
+            const keyAction = !keyHost || engineShown?.status === "needs_auth" ? null : engineShown?.status === "backoff" ? "retry" : "test";
             const open = expandedHosts[h.host] ?? false;
             const hasTerminal = connecting || Boolean(connectionError);
             const address =
               `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
             return (
-              <div key={h.host}>
+              <div key={h.host} id={elementId(`ssh-host-${h.host}`)} data-ssh-host={h.host}>
                 <div
                   className="flex items-center gap-3 py-3"
                 >
@@ -1180,7 +1256,9 @@ function SshSection() {
                   </div>
                   <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
                     <div className="flex items-center gap-2 text-start">
-                      <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={masterRunning[h.host]} containerFailed={containerFailed} />
+                      {engineShown
+                        ? <EngineHostCell host={engineShown} />
+                        : <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={keyHost ? undefined : masterRunning[h.host]} containerFailed={containerFailed} />}
                       {hasTerminal && (
                         <button
                           type="button"
@@ -1199,28 +1277,38 @@ function SshSection() {
                         </button>
                       )}
                     </div>
-                    <Button size="small"
-                      type="button"
-                      className="justify-self-end"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (connecting && !connectionFailed) cancelConnect();
-                        else connect(h.host);
-                      }}
-                      disabled={!connecting && ((connectingHost !== null && !connectionFailed) || (reference !== null && !reference.trim()))}
-                    >
-                      {connecting
-                        ? connectionFailed
-                          ? m.app_retry()
-                          : m.settings_page_cancel()
-                        : hostTest?.reachable === false || containerFailed
-                          ? m.app_retry()
-                          : hostTest
-                            ? m.settings_reconnect()
-                            : m.settings_connect()}
-                    </Button>
+                    {keyAction ? (
+                      <Button size="small" type="button" className="justify-self-end" disabled={busyHost === h.host} onClick={() => void (keyAction === "retry" ? retry(h.host) : test(h.host, reference))}>
+                        {keyAction === "retry" ? m.app_retry() : m.settings_host_test()}
+                      </Button>
+                    ) : (
+                      <Button size="small"
+                        type="button"
+                        variant={engineShown?.status === "needs_auth" ? "primary" : "default"}
+                        className="justify-self-end"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (connecting && !connectionFailed) cancelConnect();
+                          else connect(h.host);
+                        }}
+                        disabled={!connecting && ((connectingHost !== null && !connectionFailed) || (reference !== null && !reference.trim()))}
+                      >
+                        {connecting
+                          ? connectionFailed
+                            ? m.app_retry()
+                            : m.settings_page_cancel()
+                          : engineShown?.status === "needs_auth"
+                            ? m.settings_connect()
+                            : hostTest?.reachable === false || containerFailed
+                              ? m.app_retry()
+                              : hostTest
+                                ? m.settings_reconnect()
+                                : m.settings_connect()}
+                      </Button>
+                    )}
                   </div>
                 </div>
+                {hostError?.host === h.host && <p role="alert" className="m-0 pb-3 text-sm text-accent-red">{hostError.message}</p>}
                 <SshExecutionSettings host={h} connecting={connecting && !connectionFailed} reference={reference}
                   onChange={(value) => {
                     if (connecting) cancelConnect();
@@ -2109,12 +2197,15 @@ function TargetTile({
   target,
   isDefault,
   summary,
+  attention,
   onOpen,
   onOpenEnvironment,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
   summary?: string;
+  /** A problem on this target that needs the user, such as a host waiting for Connect. */
+  attention?: string;
   onOpen?: () => void;
   onOpenEnvironment: () => void;
 }) {
@@ -2165,6 +2256,7 @@ function TargetTile({
           </>
         ) : summary ?? target.summary}
       </span>
+      {attention && <span className="mt-1 text-xs font-medium text-accent-amber">{attention}</span>}
       <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-sm">
         <span className={isDefault ? "font-medium text-text" : "text-subtext"}>
           {isDefault
@@ -2267,6 +2359,40 @@ function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onE
     </DialogContent>;
 }
 
+function RunEngineSetting() {
+  const { getRunEngineQuery } = useWorkspace().queries;
+  const { setRunEngine } = useWorkspace().api;
+
+  const id = useId();
+  const engineQuery = useQuery(getRunEngineQuery());
+  const engineMutation = useMutation({ mutationFn: setRunEngine });
+
+  return (
+    <div className={SETTINGS_CARD_CLASS_NAME}>
+      <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div>
+          <div id={`run-engine-label-${id}`} className="project-default-title text-base font-medium">{m.settings_run_engine_label()}</div>
+          <div id={`run-engine-description-${id}`}>
+            <p>{m.settings_run_engine_description()}</p>
+            <p>{m.settings_run_engine_note()}</p>
+            {engineQuery.data?.forcedBy === "canary" && <p>{m.settings_run_engine_canary()}</p>}
+            {engineQuery.data?.forcedBy === "environment" && <p>{m.settings_run_engine_override()}</p>}
+          </div>
+        </div>
+        <Switch
+          type="button"
+          checked={engineQuery.data?.enabled ?? false}
+          disabled={!engineQuery.data || engineQuery.data.forcedBy !== null || engineMutation.isPending}
+          aria-labelledby={`run-engine-label-${id}`}
+          aria-describedby={`run-engine-description-${id}`}
+          onClick={() => engineMutation.mutate(!engineQuery.data?.enabled)}
+        />
+      </div>
+      {(engineQuery.error || engineMutation.error) && <div role="alert" className="error">{(engineMutation.error ?? engineQuery.error)?.message}</div>}
+    </div>
+  );
+}
+
 function ComputeTab({
   project,
   onViewHistory,
@@ -2278,6 +2404,8 @@ function ComputeTab({
   onOpenEnvironment: () => void;
   remote: boolean;
 }) {
+  const { useEngineHosts } = useWorkspace().queries;
+  const { pendingHostConnect, onHostConnectRequest } = useWorkspace().events;
   const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
 
   const { getComputeSettingsQuery, getLocalMachineQuery } = useWorkspace().queries;
@@ -2297,6 +2425,12 @@ function ComputeTab({
   const localMachine = localMachineQuery.data ?? null;
   const localMachineError = localMachineQuery.error?.message ?? null;
   useEffect(() => { setSelectedTarget(null); setError(null); }, [project?.id]);
+  useEffect(() => {
+    const open = () => { if (pendingHostConnect()) setSelectedTarget("ssh"); };
+    open();
+    return onHostConnectRequest(open);
+  }, []);
+  const needsConnect = [...worstPerAlias(useEngineHosts() ?? []).values()].filter((host) => host.status === "needs_auth");
 
   const apply = (s: ComputeSettings) => {
     setSettings(s);
@@ -2319,6 +2453,11 @@ function ComputeTab({
       target={target}
       isDefault={defaultBackend === target.id}
       summary={target.id === "local" ? localMachine ? localMachineSummary(localMachine) : localMachineError ?? m.settings_page_detecting_hardware() : undefined}
+      attention={target.id !== "ssh" || needsConnect.length === 0
+        ? undefined
+        : needsConnect.length === 1
+          ? m.settings_ssh_host_needs_connect({ host: ltr(needsConnect[0].alias) })
+          : m.settings_ssh_hosts_need_connect({ count: fmtNumber(needsConnect.length) })}
       onOpen={target.id === "local" ? undefined : () => {
         if (!QUICK_SETUP_TARGETS.includes(target.id)) {
           setSelectedTarget(target.id);
@@ -2371,6 +2510,7 @@ function ComputeTab({
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
+      <RunEngineSetting />
       <ComputeActivity projectId={project?.id} onViewHistory={onViewHistory} />
       {loadError ? (
         <div className="error">{loadError}</div>
@@ -4122,13 +4262,12 @@ function StorageTab() {
 
 // --- instances ---------------------------------------------------------------
 
-const isLive = (status: string) => status === "running" || status === "starting";
 
 /** Runtime: live instances show elapsed-so-far, finished ones total duration.
  *  Both start at submission time, so provisioning/queue time is included —
  *  that's the span the provider bills for. */
 function runtimeLabel(inst: Run): string {
-  if (isLive(inst.status)) return fmtDuration(Date.now() - inst.createdAt);
+  if (runActive(inst.status)) return fmtDuration(Date.now() - inst.createdAt);
   if (inst.endedAt) return fmtDuration(inst.endedAt - inst.createdAt);
   return "—";
 }
@@ -4174,7 +4313,7 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
                   </span>
                 </td>
                 <td>
-                  <StatusBadge status={runDisplayStatus(inst)} className="flex" />
+                  <StatusBadge {...runDisplay(inst)} className="flex" />
                 </td>
                 <td>{timeAgo(inst.createdAt)}</td>
                 <td>{runtimeLabel(inst)}</td>
@@ -4206,8 +4345,8 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
   const load = () => { if (projectId) void query.refetch(); };
 
   const byRecent = (a: Run, b: Run) => b.createdAt - a.createdAt;
-  const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
-  const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
+  const running = instances?.filter((i) => runActive(i.status)).sort(byRecent);
+  const past = instances?.filter((i) => !runActive(i.status)).sort(byRecent);
 
   return (
     <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-1 [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
@@ -4346,6 +4485,9 @@ export function SettingsView({
         <>
           <h1 tabIndex={-1}>{m.settings_page_settings()}</h1>
           <div className="settings-stack mt-4.5">
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <RunEngineSetting />
+            </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
             </section>

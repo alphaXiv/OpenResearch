@@ -59,3 +59,58 @@ test("returning to a retained workspace repairs events missed while its stream w
   assert.equal(repairs, 1);
   assert.equal(authProbes, 0);
 });
+
+test("the stream fans engine log growth to the run and host updates to their subscribers", () => {
+  const sources = [];
+  globalThis.EventSource = class {
+    listeners = new Map();
+    constructor() { sources.push(this); }
+    addEventListener(name, fn) { this.listeners.set(name, fn); }
+    close() {}
+    emit(name, data) { this.listeners.get(name)?.({ data: JSON.stringify(data) }); }
+  };
+  globalThis.window = { setTimeout: () => 0, clearTimeout: () => {} };
+  let cleanup;
+  const exports = {};
+  const code = ts.transpileModule(readFileSync(new URL("../src/events.ts", import.meta.url), "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  new Function("require", "exports", code)(() => ({
+    useRef: (current) => ({ current }),
+    useEffect: (effect) => { cleanup = effect(); },
+  }), exports);
+  try {
+    Object.assign(exports, exports.createEvents({ url: (value) => value }));
+    exports.useOrxEventStream({ onRun() {} });
+    const [source] = sources;
+    const remote = exports.createEvents({ url: (path) => `/remote${path}` });
+    const remoteHosts = [];
+    remote.onEngineHost((host) => remoteHosts.push(host));
+    exports.requestHostConnect("gpu-box");
+    assert.equal(exports.takeHostConnect(), "gpu-box");
+    assert.equal(remote.pendingHostConnect(), null);
+
+    const grown = [];
+    const stopLog = exports.onRunLog("engine-run", (event) => grown.push(event));
+    const growth = { runId: "engine-run", dataBase64: "", offset: 4096 };
+    source.emit("run.log", growth);
+    source.emit("run.log", { ...growth, runId: "other-run" });
+    assert.deepEqual(grown, [growth]);
+    stopLog();
+
+    const hosts = [];
+    const stopHosts = exports.onEngineHost((host) => hosts.push(host));
+    const host = { alias: "gpu-box", status: "backoff", class: "key", sinceMs: 1, nextRetryMs: 2, cause: "timed out" };
+    source.emit("host.updated", host);
+    source.emit("host.updated", { status: "live" });
+    assert.deepEqual(hosts, [host]);
+    assert.deepEqual(remoteHosts, []);
+    stopHosts();
+    source.emit("host.updated", host);
+    assert.equal(hosts.length, 1);
+  } finally {
+    cleanup();
+    delete globalThis.EventSource;
+    delete globalThis.window;
+  }
+});

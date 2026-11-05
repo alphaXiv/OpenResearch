@@ -108,6 +108,8 @@ fn flush_window() -> Duration {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_engine: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop_zoom_percent: Option<i32>,
     #[serde(default)]
     pub acp_harnesses: Vec<crate::local::acp::Definition>,
@@ -1335,6 +1337,25 @@ mod tests {
     }
 
     const OPT_VARS: &[&str] = &["XDG_CONFIG_HOME", "ORX_TELEMETRY_ENV", "ORX_TELEMETRY_HOST"];
+
+    #[test]
+    fn run_engine_defaults_off_and_preserves_other_settings() {
+        let _guard = EnvGuard::new(&["XDG_CONFIG_HOME"]);
+        let dir = std::env::temp_dir().join(format!("orx-engine-setting-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        assert_eq!(load_settings().unwrap_or_default().run_engine, None);
+        set_persisted_disabled(true).unwrap();
+        let untouched: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(settings_path()).unwrap()).unwrap();
+        assert!(untouched.get("runEngine").is_none());
+        crate::config::set_run_engine_enabled(true).unwrap();
+        assert_eq!(load_settings().unwrap().run_engine, Some(true));
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        crate::config::set_run_engine_enabled(false).unwrap();
+        assert_eq!(load_settings().unwrap().run_engine, Some(false));
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn environment_policy_is_fail_closed_and_downgrade_only() {

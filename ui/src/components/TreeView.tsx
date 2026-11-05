@@ -21,14 +21,21 @@ import { Archive, ChartLine, Ellipsis, FolderTree, Terminal } from "lucide-react
 
 import { Menu } from "@base-ui/react/menu";
 import { GitHubMark } from "./BackendLogos";
-
-import { githubBranchUrl, fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Project, type Run } from "../api";
+import {
+  githubBranchUrl,
+  fmtNumber,
+  timeAgo,
+  type Experiment,
+  type Project,
+  type Run,
+} from "../api";
 import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
 import { MenuItem } from "./ui";
 import { statusLabel, StatusBadge } from "./StatusBadge";
+import { runDisplay, type RunDisplay } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const EMPTY_STATE_CLASS_NAME = [
@@ -209,10 +216,11 @@ function subtreeWidth(node: DisplayNode): number {
   return Math.max(nodeWidth(node), cw);
 }
 
-function runSquareClass(status: string): string {
+function runSquareClass({ status, stale }: RunDisplay): string {
+  if (stale) return "stale";
   if (status === "done") return "pass";
   if (status === "failed") return "fail";
-  if (status === "running" || status === "starting" || status === "cancelling") return "live";
+  if (status === "submitting" || status === "running" || status === "starting" || status === "cancelling") return "live";
   return "other";
 }
 
@@ -222,8 +230,8 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
 
   useLocale();
   const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode, onArchive, onDelete, actions } = data;
-  const status = latestRun ? runDisplayStatus(latestRun) : undefined;
-  const live = status === "running" || status === "starting" || status === "cancelling";
+  const display = latestRun ? runDisplay(latestRun) : null;
+  const live = display !== null && runSquareClass(display) === "live";
   const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
   const trackio = useTrackioRuns(exp.projectId, live).data;
@@ -255,7 +263,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
       >
         <div className="node-eyebrow">
           <span>{exp.archived ? m.tree_archived() : kind}</span>
-          <StatusBadge status={status ?? "idle"} />
+          {display ? <StatusBadge {...display} /> : <StatusBadge status="idle" />}
         </div>
         <div className="node-head">
           <span className="node-slug">{exp.slug}</span>
@@ -267,13 +275,16 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           <span>{m.tree_view_runs()}</span>
           {squares.length > 0 ? (
             <span className="run-squares flex items-center gap-1">
-              {squares.map((run) => (
-                <span
-                  key={run.id}
-                  className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-danger-outline [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border ${runSquareClass(runDisplayStatus(run))}`}
-                  title={statusLabel(runDisplayStatus(run))}
-               />
-              ))}
+              {squares.map((run) => {
+                const square = runDisplay(run);
+                return (
+                  <span
+                    key={run.id}
+                    className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-danger-outline [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border [&.stale]:border-[1.5px] [&.stale]:border-accent-amber ${runSquareClass(square)}`}
+                    title={statusLabel(square.status, square.stopping)}
+                  />
+                );
+              })}
             </span>
           ) : (
             <span>{m.tree_view_no_runs()}</span>

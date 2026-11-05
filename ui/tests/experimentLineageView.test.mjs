@@ -5,11 +5,12 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
+import { runLabelsHarness } from "./runLabelsHarness.mjs";
 
 const require = createRequire(import.meta.url);
 const en = JSON.parse(readFileSync(new URL("../messages/en.json", import.meta.url), "utf8"));
 const messages = { m: new Proxy({}, { get: (_, key) => (values = {}) => en[key].replace(/\{(\w+)\}/g, (_, name) => String(values[name])) }) };
-const api = { fmtNumber: String, timeAgo: () => "1d ago", runDisplayStatus: (run) => run.status };
+const api = { fmtNumber: String, timeAgo: () => "1d ago" };
 const runtime = { getLocale: () => "en" };
 
 function load(file, mocks) {
@@ -25,6 +26,7 @@ function load(file, mocks) {
 
 const model = load("experimentLineageModel.ts", {
   "../api": api,
+  "../runDisplay": load("../runDisplay.ts", {}),
   "../i18n": { ltr: (text) => text },
   "../paraglide/messages.js": messages,
 });
@@ -35,6 +37,8 @@ function lineage(expanded) {
     react: { ...React, useState: () => [expanded, () => {}], useEffect: () => {} },
     "lucide-react": { ChevronRight: () => null },
     "../api": api,
+    "../runDisplay": load("../runDisplay.ts", {}),
+    "./StatusBadge": runLabelsHarness().load("components/StatusBadge"),
     "../paraglide/messages.js": messages,
     "../paraglide/runtime.js": runtime,
     "./experimentLineageModel": model,
@@ -103,4 +107,16 @@ test("ancestor and child rows preserve preview and keep-open gestures", () => {
       [id, "preview"], [id, "keepOpen"], [id, "keepOpen"], [id, "keepOpen"], [id, "preview"],
     ]);
   }
+});
+
+test("lineage never announces Cancelled while its latest run still has survivors", () => {
+  const { ExperimentLineage } = lineage(false);
+  const detail = "Not fully stopped · 2 processes still running on gpu-box";
+  const [node] = model.buildHistoryNodes([experiments[0]], [{
+    id: "run", experimentId: "0", status: "cancelled", createdAt: 1,
+    host: "gpu-box", contact: { type: "stopping", since: 1, count: 2 },
+  }]);
+  const html = renderToStaticMarkup(React.createElement(ExperimentLineage, { node, onSelect: () => {} }));
+  assert.ok(html.replace(/[\u2066-\u2069]/g, "").includes(detail));
+  assert.doesNotMatch(html, />Cancelled</);
 });

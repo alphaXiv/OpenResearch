@@ -29,7 +29,7 @@ export function dialogHarness() {
       },
       useLayoutEffect(effect) { if (!mounted) effect(); },
     };
-    if (name === "./components/ui") return { Dialog: "dialog", DialogContent: "content", DialogTitle: "title", DialogDescription: "description", DialogHeader: "header", DialogFooter: "footer", Button: "button", Spinner: "spinner" };
+    if (name === "./components/ui") return { Dialog: "dialog", DialogContent: ({ initialFocus, ...props }) => React.createElement("section", props), DialogTitle: "h2", DialogDescription: "p", DialogHeader: "header", DialogFooter: "footer", Button: "button", Spinner: "spinner" };
     if (name === "./paraglide/messages.js") return { m: new Proxy({}, { get: (_, key) => () => key }) };
     return require(name);
   }), exports, (callback) => callback());

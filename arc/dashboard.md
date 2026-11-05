@@ -16,14 +16,15 @@ it runs it owns the work that needs a resident process:
   ([agents](agents.md));
 - terminals, each a PTY relayed over a websocket;
 - file serving for the editor, previews and artifacts, with byte ranges;
-- background passes: agent detection and model catalogs, starting a
-  supervisor for any active run that has none, sweeping remote run
+- the run engine: watching, cancelling and reporting runs, and launching new
+  runs when enabled ([experiments](experiments.md));
+- background passes: agent detection and model catalogs, sweeping remote run
   directories and orphaned files;
 - remote workspace gateways ([remote](remote.md)).
 
-Runs are not on this list. A run's supervisor is its own process
-([experiments](experiments.md)), so a dashboard can stop or restart without
-losing a job.
+The jobs themselves are not. Each run's wrapper is its own process on the
+machine that runs it, so a dashboard can stop or restart without losing a
+job; the engine reconnects and catches up from the wrapper's receipts.
 
 ## The loopback guard
 

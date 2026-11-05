@@ -667,6 +667,16 @@ mod tests {
             })
             .unwrap();
 
+        store
+            .set_run_contact(
+                &run_id,
+                &crate::store::Contact::NeedsAuth {
+                    since: 1,
+                    cause: "host gone".into(),
+                },
+            )
+            .unwrap();
+
         assert!(delete_experiment(&store, "root")
             .err()
             .unwrap()

@@ -258,6 +258,7 @@ const errorText = (error: unknown) => ltr(error instanceof Error ? error.message
 
 export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo; projectId: string; pane?: Pane }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
+  const { onHostConnectRequest } = useWorkspace().events;
 
   const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
 
@@ -1065,7 +1066,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // Live store updates.
   useOrxEvents({
     onRunLog: (event) => {
-      if (!event.dataBase64 || streamingRunsRef.current.has(event.runId)) return;
+      // Engine runs announce growth with an empty delta at the new length.
+      const produced = event.dataBase64 !== "" || event.offset > 0;
+      if (!produced || streamingRunsRef.current.has(event.runId)) return;
       streamingRunsRef.current.add(event.runId);
       const run = autoOpenRunsRef.current.get(event.runId);
       if (!run) return;
@@ -1621,6 +1624,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     pendingViewFocus.current = currentView ? null : view;
     selectMainView(view);
   };
+  useEffect(() => onHostConnectRequest(() => selectMainView("compute")), [selectMainView]);
 
   const focusedRegion = useSyncExternalStore(subscribeCommandRegion, commandRegion);
   useHotkey(appHotkeys["tab.close"], () => {

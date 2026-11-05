@@ -9,6 +9,7 @@ import type {
   HarnessId,
   OverleafLiveStatus,
   Project,
+  EngineHost,
   QueuedMessage,
   Run,
   UpdateStatus,
@@ -23,6 +24,7 @@ export interface RunLogEvent {
 
 type LogListener = (ev: RunLogEvent) => void;
 
+type HostListener = (host: EngineHost) => void;
 // Chat events fan out the same way so ChatPanel shares the one EventSource.
 export type ChatEvent =
   | { type: "runsChanged" }
@@ -90,6 +92,36 @@ type EntityObservers = Pick<OrxEventHandlers, "onRun" | "onRunLog" | "onReconnec
 
 export function createEvents(client: WorkspaceClient) {
   const { url } = client;
+
+  let pending: string | null = null;
+  const listeners = new Set<() => void>();
+
+  function requestHostConnect(host: string) {
+    pending = host;
+    listeners.forEach((fn) => fn());
+  }
+
+  const pendingHostConnect = () => pending;
+
+  function takeHostConnect(): string | null {
+    const host = pending;
+    pending = null;
+    return host;
+  }
+
+  function onHostConnectRequest(fn: () => void): () => void {
+    listeners.add(fn);
+    return () => {
+      listeners.delete(fn);
+    };
+  }
+
+  const hostListeners = new Set<HostListener>();
+
+  function onEngineHost(fn: HostListener): () => void {
+    hostListeners.add(fn);
+    return () => { hostListeners.delete(fn); };
+  }
 
   const logListeners = new Map<string, Set<LogListener>>();
 
@@ -321,6 +353,10 @@ export function createEvents(client: WorkspaceClient) {
             emitEntity.onRunLog(d);
           }
         });
+        es.addEventListener("host.updated", (e) => {
+          const host = parse<EngineHost>(e as MessageEvent);
+          if (host?.alias) hostListeners.forEach((fn) => fn(host));
+        });
         es.addEventListener("chat.runs", () => emitChat({ type: "runsChanged" }));
         es.addEventListener("chat.session", (e) => {
           const d = parse<{ session: ChatSession }>(e as MessageEvent);
@@ -425,6 +461,11 @@ export function createEvents(client: WorkspaceClient) {
   };
 
   return {
+    requestHostConnect,
+    pendingHostConnect,
+    takeHostConnect,
+    onHostConnectRequest,
+    onEngineHost,
     onRunLog,
     onChatEvent,
     onProjectActivityEvent,

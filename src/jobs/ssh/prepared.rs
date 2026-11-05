@@ -265,8 +265,14 @@ pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepare
             return Ok(connection);
         }
     }
-    let connection =
-        resolve_with_agent(&target.dest, None, query, target.auth_agent.as_deref()).await?;
+    let config = std::env::var_os("ORX_SSH_CONFIG").map(PathBuf::from);
+    let connection = resolve_with_agent(
+        &target.dest,
+        config.as_deref(),
+        query,
+        target.auth_agent.as_deref(),
+    )
+    .await?;
     CONNECTIONS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -296,12 +302,10 @@ fn user_or_empty_config(home: &std::path::Path) -> Result<PathBuf> {
     Ok(empty)
 }
 
-#[cfg(test)]
-async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
+pub(super) async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
     resolve_with(dest, config, query).await
 }
 
-#[cfg(test)]
 async fn resolve_with<F, Fut>(
     dest: &str,
     config: Option<&std::path::Path>,

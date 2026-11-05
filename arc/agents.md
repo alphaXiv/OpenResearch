@@ -232,11 +232,12 @@ derived from the request.
 
 **Any chat can subscribe to any other.** A subscription tells its subscriber
 each finished turn of its target, and each question the target asks, as the
-first message of the subscriber's next turn. Run wake-ups go through the same
-delivery: a chat's news, from runs and chats alike, is never lost, never
-duplicated, never interrupts a running turn, and arrives as one turn however
-much of it is waiting, each piece kept in the transcript as its own message. A turn that ends while its own delegates are
-still working is not an answer yet. An agent can collect the same news inside
+first message of the subscriber's next turn. Pending chat news arrives in one
+visible turn, each piece kept in the transcript as its own message. Run results
+use the engine's durable outbox in separate hidden turns; chat-news batching
+never reads run wakeups or results. Both wait for the chat to be idle and keep
+delivery claims to avoid duplicates. A turn that ends while its own delegates
+are still working is not an answer yet. An agent can collect the same news inside
 its turn with `wait`, which marks it told. A delegator subscribes to its
 delegates. Once the user writes in a delegate, its composer lets them keep it:
 it stops reporting to the chat that started it and stands as that chat's side
@@ -244,12 +245,13 @@ chat, or on its own with its own worktree, and the delegator's later
 `subscribe` or `wait` does not undo that. A side chat reports only when its
 agent `send`s. Agents answer questions through orx; approvals stay with the user.
 
-**Agents write to each other in the open.** Everything orx or another chat's
-agent writes into a chat (a task, a message, news) reaches its agent opening
-with `[orx]`, so the agent can tell it from the user. The transcript records
-it with its kind and sender and keeps what the sender wrote, refs included;
+**Agents write to each other in the open.** A task, message or piece of chat
+news that orx or another chat's agent writes into a chat reaches its agent
+opening with `[orx]`, so the agent can tell it from the user. The transcript
+records it with its kind and sender and keeps what the sender wrote, refs included;
 only the agent reads the refs expanded and the instructions around them. The
-dashboard shows it as the sender's message, and a finished run by its outcome.
+dashboard shows it as the sender's message. Run results and monitoring notices
+reach agents in hidden turns; the transcript records only the agent's reply.
 
 **Messages travel by reference.** Each user message reaches its agent tagged
 with a short ref from its id. A ref in a task or message, the user's included,

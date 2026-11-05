@@ -1,0 +1,66 @@
+{
+  "launch": [],
+  "identity": [],
+  "exit": [
+    {
+      "code": 0,
+      "signal": null,
+      "reason": "exited",
+      "processes": [],
+      "outcome": {
+        "kind": "verified"
+      },
+      "finished_at": 1234567
+    },
+    {
+      "code": null,
+      "signal": null,
+      "reason": "cancelled",
+      "processes": [],
+      "outcome": {
+        "kind": "verified"
+      },
+      "finished_at": 1234567
+    },
+    {
+      "code": null,
+      "signal": null,
+      "reason": "spawn_failed",
+      "processes": [],
+      "outcome": {
+        "kind": "verified"
+      },
+      "finished_at": 1234567
+    },
+    {
+      "code": 0,
+      "signal": null,
+      "reason": "exited",
+      "processes": [
+        {
+          "pid": 43,
+          "starttime": 5678,
+          "state": "S"
+        }
+      ],
+      "outcome": {
+        "kind": "survivors"
+      },
+      "finished_at": 1234567
+    },
+    {
+      "code": null,
+      "signal": 15,
+      "reason": "cancelled",
+      "processes": [],
+      "outcome": {
+        "kind": "unverifiable",
+        "unreadable": [
+          44
+        ]
+      },
+      "finished_at": 1234567
+    }
+  ],
+  "cleanup": []
+}
