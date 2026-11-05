@@ -72,14 +72,16 @@ turn, preserving the original failure and the harness that owns it. A native
 thread created before delivery does not count as having seen the request.
 
 The handoff is rendered when the next turn starts, so worktree changes made
-while the chat was idle are visible. It preserves user requests and their
-message refs before the latest answer, then fills remaining space with older
-answers when they fit, or turn headlines and tool counts. Long requests keep
-their beginning and end. Tool logs stay behind refs: `read {ref: "msg_…"}`
-reads a complete stored message,
-its tool calls and attachment paths, and `read {before: "msg_…"}` pages
-backward on the active branch. The same builder supplies native-session
-recovery, compaction's fallback input, ACP branch reseeding and side chats.
+while the chat was idle are visible. The byte budget prioritizes user requests
+and their message refs, then the latest answer, and fills remaining space with
+older answers when they fit, or turn headlines and tool counts. Selected
+messages stay in conversation order, with the answering agent, switches and failed
+turns identified. Long requests keep their beginning and end. Tool logs stay
+behind refs: `read {ref: "msg_…"}` reads visible message parts, tool calls and
+attachment paths, excluding reasoning even inside nested agent calls.
+`read {before: "msg_…"}` pages backward on the active branch. The same builder
+supplies native-session recovery, compaction's fallback input, ACP branch
+reseeding and side chats.
 Agents without an exposed MCP tool send the same `read` call through
 `orx mcp` over stdio; the chat's environment supplies its identity.
 The default ceiling is 24,000 UTF-8 bytes, a conservative upper bound on text

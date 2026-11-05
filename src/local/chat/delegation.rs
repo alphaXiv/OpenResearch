@@ -365,7 +365,11 @@ pub fn author(message: &StoredChatMessage) -> String {
         }) => format!("chat `{from}`'s agent"),
         Some(_) => "orx".into(),
         None if message.role == "user" => "the user".into(),
-        None => "its agent".into(),
+        None => message
+            .native_harness
+            .as_ref()
+            .map(|harness| format!("assistant ({harness})"))
+            .unwrap_or_else(|| "assistant".into()),
     }
 }
 
@@ -547,18 +551,26 @@ pub fn transcript(
 }
 
 pub fn read_message(message: &StoredChatMessage) -> Result<String> {
+    fn visible_parts(parts: Vec<WirePart>) -> Vec<WirePart> {
+        parts
+            .into_iter()
+            .filter(|part| part.kind != "reasoning")
+            .map(|mut part| {
+                part.children = visible_parts(part.children);
+                part
+            })
+            .collect()
+    }
+
+    let parts = visible_parts(stored_to_wire(message).parts);
     let mut text = format!(
         "{} {}, in chat `{}`:\n{}",
         message_ref(&message.id),
         author(message),
         message.session_id,
-        message.parts_json
+        serde_json::to_string(&parts)?
     );
-    if stored_to_wire(message)
-        .parts
-        .iter()
-        .any(|part| part.kind == "image")
-    {
+    if parts.iter().any(|part| part.kind == "image") {
         text.push_str(&quote(message)?);
     }
     Ok(text)

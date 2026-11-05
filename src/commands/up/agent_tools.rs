@@ -128,12 +128,12 @@ fn tools() -> Value {
         },
         {
             "name": "read",
-            "description": "Read recent messages, page backward with `before`, or read one complete message and its tool calls with `ref`. Message refs identify the chat, so chatId is optional with ref or before.",
+            "description": "Read recent conversation messages with their authors, page backward with `before`, or read one message and its tool calls with `ref`. Message refs identify the chat, so chatId is optional with ref or before.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "chatId": chat_id,
-                    "ref": { "type": "string", "description": "A message ref, such as msg_3fa9c1d2. Returns the full stored message, tools and attachment paths." },
+                    "ref": { "type": "string", "description": "A message ref, such as msg_3fa9c1d2. Returns its visible message parts, tools and attachment paths." },
                     "before": { "type": "string", "description": "Read messages older than this ref on its active branch." },
                     "limit": { "type": "integer", "description": "How many messages, newest last. Default 10, at most 50." }
                 },

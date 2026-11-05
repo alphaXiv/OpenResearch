@@ -42,7 +42,7 @@ fn tool_counts(parts: &[WirePart]) -> usize {
         .sum()
 }
 
-/// User words survive before answer text; tool output stays behind its message ref.
+/// Budget user words before answers; tool output stays behind message refs.
 pub(crate) fn snapshot<'a>(
     messages: impl IntoIterator<Item = &'a StoredChatMessage>,
     bytes: usize,
@@ -50,14 +50,15 @@ pub(crate) fn snapshot<'a>(
     let messages: Vec<_> = messages.into_iter().collect();
     let users: Vec<_> = messages
         .iter()
-        .filter(|message| {
+        .enumerate()
+        .filter(|(_, message)| {
             message.role == "user"
                 || stored_to_wire(message)
                     .parts
                     .iter()
                     .any(|part| part.kind == "steer")
         })
-        .map(|message| {
+        .map(|(index, message)| {
             let wire = stored_to_wire(message);
             let mut text = if message.role == "user" {
                 delegation::message_text(message)
@@ -77,6 +78,7 @@ pub(crate) fn snapshot<'a>(
                 }
             }
             (
+                index,
                 format!(
                     "{} {}:\n",
                     delegation::message_ref(&message.id),
@@ -90,18 +92,18 @@ pub(crate) fn snapshot<'a>(
             )
         })
         .collect();
-    let latest = messages.iter().rev().find(|message| {
+    let latest = messages.iter().enumerate().rev().find(|(_, message)| {
         message.role == "assistant" && !delegation::message_text(message).is_empty()
     });
     let mut entries: Vec<_> = users
         .iter()
-        .map(|(label, text)| format!("{label}{text}\n\n"))
+        .map(|(index, label, text)| (*index, format!("{label}{text}\n\n")))
         .collect();
-    let mut used = entries.iter().map(String::len).sum::<usize>();
+    let mut used = entries.iter().map(|(_, text)| text.len()).sum::<usize>();
     if used > bytes {
         let overhead = users
             .iter()
-            .map(|(label, _)| label.len() + 2)
+            .map(|(_, label, _)| label.len() + 2)
             .sum::<usize>();
         if overhead > bytes {
             let index = messages
@@ -123,14 +125,17 @@ pub(crate) fn snapshot<'a>(
         let allowance = bytes.saturating_sub(overhead) / users.len().max(1);
         entries = users
             .iter()
-            .map(|(label, text)| format!("{label}{}\n\n", shorten(text, allowance)))
+            .map(|(index, label, text)| {
+                (*index, format!("{label}{}\n\n", shorten(text, allowance)))
+            })
             .collect();
-        used = entries.iter().map(String::len).sum();
+        used = entries.iter().map(|(_, text)| text.len()).sum();
     }
-    if let Some(message) = latest {
+    if let Some((index, message)) = latest {
         let label = format!(
-            "Latest answer — {} · {} tools:\n",
+            "{} {} — latest answer · {} tools:\n",
             delegation::message_ref(&message.id),
+            delegation::author(message),
             tool_counts(&stored_to_wire(message).parts)
         );
         let remaining = bytes.saturating_sub(used + label.len() + 2);
@@ -138,51 +143,71 @@ pub(crate) fn snapshot<'a>(
             let answer = shorten(&delegation::message_text(message), remaining);
             let entry = format!("{label}{answer}\n\n");
             used += entry.len();
-            entries.push(entry);
+            entries.push((index, entry));
         }
     }
-    let mut turns = Vec::new();
-    for message in messages
+    for (index, message) in messages
         .iter()
+        .enumerate()
         .rev()
-        .filter(|message| message.role == "assistant")
+        .filter(|(_, message)| message.role == "assistant")
     {
-        if latest.is_some_and(|latest| latest.id == message.id) {
+        if latest.is_some_and(|(_, latest)| latest.id == message.id) {
             continue;
         }
         let parts = stored_to_wire(message).parts;
-        if parts
+        let change = parts
             .iter()
-            .any(|part| part.tool.as_deref() == Some(SWITCH_TOOL))
-        {
-            continue;
+            .find(|part| part.tool.as_deref() == Some(SWITCH_TOOL))
+            .and_then(|part| part.state.as_ref()?.input.as_ref());
+        let mut text = delegation::message_text(message);
+        if let Some(change) = change {
+            text = format!(
+                "Agent switched: {} → {}.",
+                change["fromHarness"]
+                    .as_str()
+                    .or(message.native_harness.as_deref())
+                    .unwrap_or("unknown"),
+                change["harness"].as_str().unwrap_or("unknown"),
+            );
+        } else if text.is_empty() {
+            let error = parts
+                .iter()
+                .rev()
+                .find_map(|part| part.state.as_ref()?.error.as_deref());
+            text = match error {
+                Some(error) => {
+                    format!("No reply text; turn failed: {}", delegation::preview(error))
+                }
+                None => "No reply text recorded.".into(),
+            };
         }
-        let text = delegation::message_text(message);
-        let tools = tool_counts(&parts);
-        let full = format!(
-            "{}  {} · {} tools\n",
+        let mut label = format!(
+            "{} {}",
             delegation::message_ref(&message.id),
-            text,
-            tools
+            if change.is_some() {
+                "orx".into()
+            } else {
+                delegation::author(message)
+            }
         );
+        let tools = tool_counts(&parts);
+        if tools > 0 && change.is_none() {
+            let _ = write!(label, " · {tools} tools");
+        }
+        let full = format!("{label}:\n{text}\n\n");
         let line = if used + full.len() <= bytes {
             full
         } else {
-            format!(
-                "{}  {} · {} tools\n",
-                delegation::message_ref(&message.id),
-                delegation::preview(&text),
-                tools
-            )
+            format!("{label}:\n{}\n\n", delegation::preview(&text))
         };
         if used + line.len() <= bytes {
             used += line.len();
-            turns.push(line);
+            entries.push((index, line));
         }
     }
-    turns.reverse();
-    entries.extend(turns);
-    entries.concat()
+    entries.sort_by_key(|(index, _)| *index);
+    entries.into_iter().map(|(_, text)| text).collect()
 }
 
 pub(super) fn pending<'a>(
@@ -330,7 +355,24 @@ pub(crate) fn context(
     }
     let state = shorten(&state, budget(context_window) / 3);
     let cli_read = r#"printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"ref":"msg_…"}}}' | orx mcp"#;
-    let header = format!("<orx-handoff>\nYou are continuing this chat. Same user, same worktree, same conversation. Answer the current user message after this block.{} Prior tool actions already happened; inspect their results before repeating work.\nRead history with the orx MCP tool `read {{\"ref\":\"msg_…\"}}` for a complete message and its tools, or `read {{\"before\":\"msg_…\"}}` to page backward.\nIf no orx MCP tool is exposed, run `{cli_read}` in this chat's shell, replacing the ref. The same arguments support paging.\n\nState now:\n{state}\nConversation:\n", if since.is_some() { " Your native session already contains the earlier conversation; this is what happened since." } else { "" });
+    let header = format!(
+        "<orx-handoff>\n\
+         You are continuing the user's conversation in the same worktree. \
+         Earlier assistant replies name the agent that wrote them; an agent switch \
+         changes who is answering, not the conversation. Use the messages below to \
+         answer the current user message after this block.{} Prior tool actions \
+         already happened. Read history only for details missing below: \
+         `read {{\"ref\":\"msg_…\"}}` returns that message and its tools; \
+         `read {{\"before\":\"msg_…\"}}` returns older messages, excluding that message.\n\
+         If no orx MCP tool is exposed, run `{cli_read}` in this chat's shell, \
+         replacing the ref. The same arguments support paging.\n\n\
+         State now:\n{state}\nConversation (oldest first):\n",
+        if since.is_some() {
+            " Your native session already contains the earlier conversation; this is what happened since."
+        } else {
+            ""
+        }
+    );
     let footer = "</orx-handoff>";
     let transcript = snapshot(
         selected,
@@ -430,6 +472,96 @@ mod tests {
         assert!(text.contains("Choose the streaming parser to keep memory bounded."));
         assert_eq!(text.matches("Ready to implement.").count(), 1);
         assert!(text.len() <= 4000);
+    }
+
+    #[test]
+    fn a_short_handoff_identifies_who_answered_without_a_history_read() {
+        let request = message("cafe0001", "user", "What's your favorite video game?");
+        let mut answer = message("cafe0002", "assistant", "Outer Wilds.");
+        answer.native_harness = Some("claude-code".into());
+        let change = switched("cafe0003", "claude-code", "codex");
+        let text = snapshot([&request, &answer, &change], 4000);
+
+        assert!(text.contains("assistant (claude-code)"));
+        assert_eq!(text.matches("Outer Wilds.").count(), 1);
+        assert!(text.contains("Agent switched: claude-code → codex."));
+        assert!(text.find("What's your favorite").unwrap() < text.find("Outer Wilds.").unwrap());
+        assert!(text.find("Outer Wilds.").unwrap() < text.find("Agent switched").unwrap());
+    }
+
+    #[test]
+    fn an_unfinished_turn_has_a_source_and_failure_in_the_conversation() {
+        let request = message("cafe0011", "user", "What's your favorite video game?");
+        let mut answer = message("cafe0012", "assistant", "Portal 2.");
+        answer.native_harness = Some("codex".into());
+        let change = switched("cafe0013", "codex", "opencode");
+        let followup = message("cafe0014", "user", "What did the other agent say?");
+        let mut failed = message("cafe0015", "assistant", "");
+        failed.native_harness = Some("opencode".into());
+        let error = WirePart::tool(
+            "error",
+            "error",
+            "error",
+            Some("Usage limit reached.".into()),
+        );
+        failed.parts_json =
+            serde_json::to_string(&[WirePart::reasoning("thinking", "PRIVATE_SENTINEL"), error])
+                .unwrap();
+        let back = switched("cafe0016", "opencode", "claude-code");
+        let text = snapshot(
+            [&request, &answer, &change, &followup, &failed, &back],
+            4000,
+        );
+
+        assert!(text.contains("assistant (codex)"));
+        assert!(text.contains("assistant (opencode)"));
+        assert!(text.contains("No reply text; turn failed: Usage limit reached."));
+        assert!(!text.contains("PRIVATE_SENTINEL"));
+        let positions: Vec<_> = [
+            "cafe0011", "cafe0012", "cafe0013", "cafe0014", "cafe0015", "cafe0016",
+        ]
+        .iter()
+        .map(|id| text.find(id).unwrap())
+        .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn reference_reads_keep_public_parts_and_tools_without_nested_reasoning() {
+        let mut answer = message("cafe0021", "assistant", "");
+        answer.native_harness = Some("opencode".into());
+        let mut tool = WirePart::tool("run", "execute", "completed", None);
+        tool.state.as_mut().unwrap().input = Some(json!({"command":"cargo test"}));
+        tool.state.as_mut().unwrap().output = Some("42 tests passed.".into());
+        let mut nested = WirePart::tool("delegate", "delegate", "completed", None);
+        nested.children = vec![
+            WirePart::reasoning("nested-thinking", "NESTED_PRIVATE_SENTINEL"),
+            WirePart::text("nested-text", "Visible delegate answer."),
+        ];
+        tool.children = vec![
+            WirePart::reasoning("child-thinking", "CHILD_PRIVATE_SENTINEL"),
+            nested,
+        ];
+        answer.parts_json = serde_json::to_string(&[
+            WirePart::reasoning("thinking", "PRIVATE_SENTINEL"),
+            tool,
+            WirePart::text("answer", "Visible answer."),
+        ])
+        .unwrap();
+        let text = delegation::read_message(&answer).unwrap();
+
+        assert!(text.contains("assistant (opencode)"));
+        for visible in [
+            "Visible answer.",
+            "Visible delegate answer.",
+            "cargo test",
+            "42 tests passed.",
+        ] {
+            assert!(text.contains(visible));
+        }
+        assert!(!text.contains("PRIVATE_SENTINEL"));
+        assert!(!text.contains("\"reasoning\""));
+        assert!(answer.parts_json.contains("PRIVATE_SENTINEL"));
     }
 
     #[test]
