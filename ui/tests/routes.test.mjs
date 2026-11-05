@@ -108,6 +108,13 @@ test("a .orx file opened with the app reaches the import page with its path", as
   assert.deepEqual(leaf.search, { file: "/Users/ada/tiny lm.orx" });
 });
 
+test("a published link opened with the app reaches the import page with its slug", async () => {
+  const router = await match("/open?shared=a1B2c3D4e5F6");
+  const leaf = router.state.matches.at(-1);
+  assert.equal(leaf.routeId, "/open");
+  assert.deepEqual(leaf.search, { shared: "a1B2c3D4e5F6" });
+});
+
 test("project search validates every pane variant and rejects malformed panes", async () => {
   const panes = [
     { kind: "home", view: "files" },

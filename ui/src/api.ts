@@ -2372,6 +2372,7 @@ export function createApi(
   const publishProject = (projectId: string, options: ShareChoice) =>
     post<{ sharedProject: PublishedProject; skipped: string[] }>(`/api/projects/${projectId}/publish`, options);
 
+  /** What anyone with a published link sees, fetched by the machine that will open it. */
   const getPublicProject = (slug: string, signal?: AbortSignal) =>
     get<{ sharedProject: PublicProject }>(`/api/shared-projects/${encodeURIComponent(slug)}`, signal);
 

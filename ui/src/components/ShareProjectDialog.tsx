@@ -43,8 +43,8 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
   });
   const publishRef = useRef<HTMLButtonElement>(null);
   const busy = pending || publish.isPending;
-  const linkError = publish.error;
-  const ready = Boolean(chats) || Boolean(chatsQuery.error);
+  // Without the chat list the file would quietly leave every chat out, so sharing waits for it.
+  const ready = Boolean(chats);
   const save = () => { publish.reset(); confirm(choice); };
 
   return <DialogContent finalFocus={returnFocus} className="relative max-h-[calc(100vh-2.5rem)] overflow-y-auto text-text">
@@ -53,8 +53,9 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
     {!link && <p className="text-sm">{m.share_explainer()}</p>}
     {chatsQuery.error && <p role="alert" className="mt-3 break-words text-sm text-accent-red">{chatsQuery.error.message}</p>}
     <section className="mt-2 text-sm">
-      {!link && <p className="text-xs text-subtext">{remote && linkQuery.data && !signedIn ? m.share_publish_remote_sign_in() : m.share_publish_hint()}</p>}
-      {link && <div>
+      {!link ? <p className="text-xs text-subtext">
+        {linkQuery.error ? m.share_publish_unavailable() : remote && linkQuery.data && !signedIn ? m.share_publish_remote_sign_in() : m.share_publish_hint()}
+      </p> : <div>
         <label className="flex flex-col gap-1">
           <span className="font-medium">{m.share_link_label()}</span>
           <Input readOnly value={link.url} onFocus={(event) => event.currentTarget.select()} />
@@ -73,7 +74,7 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
         </div>
       </div>}
     </section>
-    {(linkError || errorMessage) && <p role="alert" className="mt-3 whitespace-pre-line break-words text-sm text-accent-red">{linkError?.message ?? errorMessage}</p>}
+    {(publish.error || errorMessage) && <p role="alert" className="mt-3 whitespace-pre-line break-words text-sm text-accent-red">{publish.error?.message ?? errorMessage}</p>}
     {!link && <div className="mt-4 flex flex-wrap justify-end gap-2">
       <Button ref={publishRef} type="button" disabled={busy || !ready || !linkQuery.data || (remote && !signedIn)} onClick={() => {
         if (signedIn) publish.mutate();
