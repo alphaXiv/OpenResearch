@@ -839,7 +839,7 @@ export class OpenResearchAccountError extends Error {
 
 export class AlphaXivNotConnectedError extends Error {}
 export interface AlphaXivFolder { id: string; name: string; parentId: string | null; paperCount: number }
-export interface AlphaXivPaper { paperGroupId: string; title: string; authors: string[]; authorCount: number; url: string; versionId: string; coverBlobId: string | null }
+export interface AlphaXivPaper { paperGroupId: string; title: string; authors: string[]; authorCount: number; url: string }
 export interface AlphaXivPage { papers: AlphaXivPaper[]; nextCursor: string | null }
 export interface OpenResearchSettings {
   loggedIn: boolean;

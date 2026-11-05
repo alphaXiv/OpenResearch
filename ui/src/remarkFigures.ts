@@ -1,5 +1,6 @@
 import { unified } from "unified";
 import remarkParse from "remark-parse";
+import { isNetworkImage } from "./markdownTarget";
 
 interface FigureNode {
   type: string;
@@ -63,7 +64,7 @@ export function remarkFigures() {
       const isImage = (node: FigureNode) => {
         const image = node.children?.[0];
         return (node.type === "paperFigure" || node.type === "paragraph" && node.children?.length === 1)
-          && image?.type === "image" && !/\.html?(?:[?#]|$)/i.test(image.url ?? "");
+          && image?.type === "image" && !/\.html?(?:[?#]|$)/i.test(image.url ?? "") && !isNetworkImage(image.url ?? "");
       };
       for (let start = 0; start < children.length; start++) {
         if (!isImage(children[start])) continue;

@@ -31,7 +31,7 @@ import { FileChip, FileReference, FileScopeContext, type OpenFile } from "./File
 import { imageWheelZoom } from "../imageZoom";
 import { CITED_ID } from "../agentMessages";
 import { CitedRef } from "./ChatLinks";
-import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, isNetworkImage, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
+import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeNetworkImages, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
 
 const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
 
@@ -46,16 +46,15 @@ export function ChatImageScope({ projectId, sessionId, children }: {
     const url = (target: NonNullable<ReturnType<typeof chatImageTarget>>) => (target.source === "absolute" ? absoluteFileUrl(target.path)
       : target.source === "artifact" ? artifactUrl(projectId, target.path)
       : projectFileUrl(projectId, target.path, { sessionId: sessionId ?? undefined })) + target.hash;
-    return (src: string): ImageCandidate[] => /^(https?:)?\/\//i.test(src) ? [{ url: src, resolveAsset: () => null }]
-      : chatImageTargets(src).map(target => ({
-        url: url(target),
-        resolveAsset: (child: string) => {
-          const absolute = chatImageTarget(child);
-          if (absolute?.source === "absolute") return url(absolute);
-          const asset = documentAssetTarget(target.path, child, true);
-          return asset ? url({ ...target, path: asset.path, hash: asset.hash }) : null;
-        },
-      }));
+    return (src: string): ImageCandidate[] => chatImageTargets(src).map(target => ({
+      url: url(target),
+      resolveAsset: (child: string) => {
+        const absolute = chatImageTarget(child);
+        if (absolute?.source === "absolute") return url(absolute);
+        const asset = documentAssetTarget(target.path, child, true);
+        return asset ? url({ ...target, path: asset.path, hash: asset.hash }) : null;
+      },
+    }));
   }, [projectId, sessionId]);
   const files = useMemo(() => ({ projectId, sessionId }), [projectId, sessionId]);
   return <ImageResolverContext value={resolver}><FileScopeContext value={files}>{children}</FileScopeContext></ImageResolverContext>;
@@ -374,6 +373,7 @@ const markdownProcessor = unified()
   .use(remarkFigures)
   .use(remarkMentions)
   .use(remarkRehype)
+  .use(rehypeNetworkImages)
   .use(rehypeSafeUrls)
   .use(rehypeKatexHealing);
 
@@ -475,8 +475,7 @@ export const Md = memo(function Md({
   const imageSrc = resolveImageSrc ?? chatImageSrc;
   // Callers pass fresh callbacks; a new `img` type would remount every image.
   const img = useMemo(() => function MarkdownImg({ node: _node, src, alt, className, ...rest }: any) {
-    const sources = useMemo(() => typeof src === "string" && src && !isNetworkImage(src) ? imageSrc?.(src) ?? [{ url: src, resolveAsset: () => null }] : [], [src, imageSrc]);
-    if (typeof src === "string" && isNetworkImage(src)) return <a href={src} target="_blank" rel="noopener noreferrer">{alt || src}</a>;
+    const sources = useMemo(() => typeof src === "string" && src ? imageSrc?.(src) ?? [{ url: src, resolveAsset: () => null }] : [], [src, imageSrc]);
     const resolved = sources[0]?.url;
     if (!resolved) return null;
     if (imageSrc && chatImageTarget(src)?.path.match(/\.html?$/i)) {

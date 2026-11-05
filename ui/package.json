@@ -12,7 +12,6 @@
     "lint:i18n": "node scripts/check-i18n.mjs",
     "lint:styles": "node scripts/check-styles.mjs",
     "test": "paraglide-js compile --silent --outdir node_modules/.cache/paraglide && node --import ./tests/register.mjs --test tests/*.test.mjs",
-    "test:browser": "node --test --test-concurrency=1 tests/browser/*.browser.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -65,7 +64,6 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^4.5.0",
     "happy-dom": "21.0.4",
-    "playwright-core": "1.64.1",
     "tailwindcss": "4.3.3",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"

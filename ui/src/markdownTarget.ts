@@ -162,9 +162,25 @@ export function chatImageTargets(src: string): NonNullable<ReturnType<typeof cha
 }
 
 interface HastNode {
+  type?: string;
   tagName?: string;
+  value?: string;
   children?: HastNode[];
   properties?: Record<string, unknown>;
+}
+
+/** Remote images become links to them, or their text inside a link, so rendering Markdown never fetches from the network. */
+export function rehypeNetworkImages() {
+  return (tree: HastNode) => {
+    const visit = (node: HastNode, insideLink: boolean) => node.children?.forEach((child, index, children) => {
+      const src = child.tagName === "img" ? String(child.properties?.src ?? "") : "";
+      if (!isNetworkImage(src)) return visit(child, insideLink || child.tagName === "a");
+
+      const text = { type: "text", value: String(child.properties?.alt || src) };
+      children[index] = insideLink ? text : { type: "element", tagName: "a", properties: { href: src }, children: [text] };
+    });
+    visit(tree, false);
+  };
 }
 
 export function rehypeSafeUrls() {
