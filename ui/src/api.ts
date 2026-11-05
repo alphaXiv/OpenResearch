@@ -268,6 +268,8 @@ export interface EngineHost {
   root: string;
   status: HostStatus;
   class: "key" | "interactive" | null;
+  /** The old launcher on Windows logs in only through Connect, even with a key. */
+  connectRequired: boolean;
   sinceMs: number;
   nextRetryMs: number | null;
   cause: string | null;

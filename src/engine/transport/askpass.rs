@@ -75,6 +75,10 @@ impl Askpass {
             .env("ORX_ENGINE_ASKPASS", &self.endpoint)
             .env("ORX_ENGINE_ASKPASS_TOKEN", &self.token)
             .stdin(std::process::Stdio::null());
+        // Askpass is a console program: a detached ssh would open a window for it. Batch
+        // logins stay detached, so a ProxyJump hop fails instead of waiting on a hidden console.
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     }
 }
 
