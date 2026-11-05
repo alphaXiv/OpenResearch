@@ -508,11 +508,18 @@ export const Md = memo(function Md({
   predict?: boolean;
 }) {
   useLocale();
+  const { absoluteFileUrl } = useWorkspace().api;
   const chatImageSrc = useContext(ImageResolverContext);
   const imageSrc = resolveImageSrc ?? chatImageSrc;
   // Callers pass fresh callbacks; a new `img` type would remount every image.
   const img = useMemo(() => function MarkdownImg({ node: _node, src, alt, className, ...rest }: any) {
-    const sources = useMemo(() => typeof src === "string" && src && !isNetworkImage(src) ? imageSrc?.(src) ?? [{ url: src, resolveAsset: () => null }] : [], [src, imageSrc]);
+    const sources = useMemo(() => {
+      if (typeof src !== "string" || !src || isNetworkImage(src)) return [];
+      if (imageSrc) return imageSrc(src);
+      const target = chatImageTarget(src);
+      const url = target?.source === "absolute" ? absoluteFileUrl(target.path) + target.hash : src;
+      return [{ url, resolveAsset: () => null }];
+    }, [src, imageSrc, absoluteFileUrl]);
     const resolved = sources[0]?.url;
     if (!resolved) return null;
     if (imageSrc && chatImageTarget(src)?.path.match(/\.html?$/i)) {
@@ -529,7 +536,7 @@ export const Md = memo(function Md({
         className={`block max-w-full h-auto my-3 rounded-sm border border-border cursor-zoom-in focus-visible:outline-2 focus-visible:outline-focus ${className ?? ""}`}
      />
     );
-  }, [imageSrc]);
+  }, [absoluteFileUrl, imageSrc]);
   const components: Record<string, (props: any) => ReactNode> = useMemo(() => ({
     "image-carousel": ({ children }) => <ImageCarousel>{children}</ImageCarousel>,
     "katex-math": KatexMath,
