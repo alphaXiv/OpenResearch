@@ -560,46 +560,40 @@ fn collect_mirrored(
         accepted: 0,
         skipped: Vec::new(),
     };
-    // A plugin may point at one skill folder instead of a folder of skills.
-    let candidates = if plugin && dir.join("SKILL.md").is_file() {
-        vec![dir.to_path_buf()]
-    } else {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
+    // A plugin can name one skill folder instead of a folder of skills.
+    let only = (plugin && dir.join("SKILL.md").is_file()).then_some(dir);
+    let entries = match fs::read_dir(only.and_then(Path::parent).unwrap_or(dir)) {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.status = if error.kind() == std::io::ErrorKind::NotFound {
+                SkillRootStatus::Missing
+            } else {
+                SkillRootStatus::Unreadable
+            };
+            return report;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
             Err(error) => {
-                report.status = if error.kind() == std::io::ErrorKind::NotFound {
-                    SkillRootStatus::Missing
-                } else {
-                    SkillRootStatus::Unreadable
-                };
-                return report;
+                report.skip(dir, format!("unreadable entry ({:?})", error.kind()));
+                continue;
             }
         };
-        let mut candidates = Vec::new();
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    report.skip(dir, format!("unreadable entry ({:?})", error.kind()));
-                    continue;
-                }
-            };
-            let path = entry.path();
-            match path.metadata() {
-                Ok(metadata) if !metadata.is_dir() => continue,
-                Ok(_) => candidates.push(path),
-                Err(error) => {
-                    report.skip(&path, format!("unreadable entry ({:?})", error.kind()));
-                }
+        let path = entry.path();
+        if only.is_some_and(|only| path != only) {
+            continue;
+        }
+        match path.metadata() {
+            Ok(metadata) if !metadata.is_dir() => continue,
+            Ok(_) => {}
+            Err(error) => {
+                report.skip(&path, format!("unreadable entry ({:?})", error.kind()));
+                continue;
             }
         }
-        candidates
-    };
-    for path in candidates {
-        let dir_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let dir_name = entry.file_name().to_string_lossy().into_owned();
         if dir_name == "orx" || dir_name.starts_with("orx-") {
             report.skip(&path, "reserved name");
             continue;

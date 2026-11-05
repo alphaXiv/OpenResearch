@@ -1096,7 +1096,7 @@ fn installed_plugin_skills_dirs(config_home: &Path) -> Vec<(String, PathBuf)> {
 /// directory the manifest's `skills` field adds (a folder of skills or a single
 /// skill folder), or the root itself when it is a lone skill.
 fn plugin_skill_roots(root: &Path) -> Vec<PathBuf> {
-    let Ok(root) = root.canonicalize() else {
+    let Ok(real_root) = root.canonicalize() else {
         return Vec::new();
     };
     let manifest = root.join(".claude-plugin/plugin.json");
@@ -1114,24 +1114,28 @@ fn plugin_skill_roots(root: &Path) -> Vec<PathBuf> {
         Vec::new()
     };
     if declared.is_empty() && !root.join("skills").is_dir() && root.join("SKILL.md").is_file() {
-        return vec![root];
+        return vec![root.to_path_buf()];
     }
     let mut dirs = Vec::new();
-    for path in std::iter::once("skills").chain(declared.iter().map(String::as_str)) {
-        // A path that is missing, or a symlink out of the plugin, is skipped alone.
-        let Ok(dir) = root.join(path).canonicalize() else {
-            continue;
-        };
-        if dir.starts_with(&root) && dir.is_dir() && !dirs.contains(&dir) {
+    for dir in std::iter::once(PathBuf::from("skills"))
+        .chain(declared)
+        .map(|path| root.join(path))
+    {
+        // A missing path, or a symlink out of the plugin, is skipped alone.
+        let inside = dir
+            .canonicalize()
+            .is_ok_and(|real| real.starts_with(&real_root));
+        if inside && dir.is_dir() && !dirs.contains(&dir) {
             dirs.push(dir);
         }
     }
     dirs
 }
 
-/// The manifest's `skills` paths, or `None` when Claude Code would reject the
-/// plugin: an entry that isn't a string, isn't `./`-relative, or leaves the root.
-fn manifest_skill_paths(manifest: &Value) -> Option<Vec<String>> {
+/// The manifest's `skills` paths, normalized, or `None` when Claude Code would
+/// reject the plugin: an entry that isn't a string, isn't `./`-relative, or
+/// leaves the root.
+fn manifest_skill_paths(manifest: &Value) -> Option<Vec<PathBuf>> {
     let paths = match manifest.get("skills") {
         None => return Some(Vec::new()),
         Some(Value::String(path)) => vec![path.as_str()],
@@ -1141,17 +1145,17 @@ fn manifest_skill_paths(manifest: &Value) -> Option<Vec<String>> {
     paths
         .into_iter()
         .map(|path| {
-            let mut depth = 0usize;
+            let mut normal = PathBuf::new();
             let inside = Path::new(path).components().all(|part| match part {
                 Component::CurDir => true,
-                Component::Normal(_) => {
-                    depth += 1;
+                Component::Normal(part) => {
+                    normal.push(part);
                     true
                 }
-                Component::ParentDir => depth.checked_sub(1).map(|up| depth = up).is_some(),
+                Component::ParentDir => normal.pop(),
                 _ => false,
             });
-            ((path == "." || path.starts_with("./")) && inside).then(|| path.to_string())
+            ((path == "." || path.starts_with("./")) && inside).then_some(normal)
         })
         .collect()
 }
@@ -2729,14 +2733,8 @@ mod tests {
             installed_plugin_skills_dirs(&home),
             vec![
                 // A plugin name can itself be scoped: the marketplace is the last `@`.
-                (
-                    "@acme/tools".to_string(),
-                    scoped.canonicalize().unwrap().join("skills")
-                ),
-                (
-                    "runpod".to_string(),
-                    installed.canonicalize().unwrap().join("skills")
-                ),
+                ("@acme/tools".to_string(), scoped.join("skills")),
+                ("runpod".to_string(), installed.join("skills")),
             ]
         );
         // No manifest at all is no plugins, not an error.
@@ -2800,7 +2798,7 @@ mod tests {
         )
         .expect("write");
 
-        let root = |name: &str| cache.join(name).join("1.0.0").canonicalize().unwrap();
+        let root = |name: &str| cache.join(name).join("1.0.0");
         assert_eq!(
             installed_plugin_skills_dirs(&home),
             vec![
