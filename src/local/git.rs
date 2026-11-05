@@ -54,7 +54,7 @@ pub fn clone_path(owner: &str, repo: &str) -> PathBuf {
     clones_root().join(owner).join(repo)
 }
 
-pub(crate) fn legacy_cache_root() -> PathBuf {
+pub(crate) fn cache_root() -> PathBuf {
     crate::local::shell_env::var("ORX_CACHE_DIR")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)

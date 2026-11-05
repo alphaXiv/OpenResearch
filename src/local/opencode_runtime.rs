@@ -82,11 +82,35 @@ impl ProbeEnvironment {
     }
 }
 
+/// The user's opencode, unless orx's own copy is newer.
+pub(crate) async fn resolve_binary() -> Result<ResolvedBinary> {
+    let user = user_binary().await;
+    let Some((path, version)) = crate::local::harness::managed::installed("opencode") else {
+        return user;
+    };
+    let current = user.as_ref().is_ok_and(|binary| {
+        crate::local::harness::managed::parse(&binary.version).is_some_and(|own| own >= version)
+    });
+    if current {
+        return user;
+    }
+    // Its release directory names the version `install` confirmed, so no `--version` child.
+    let metadata = std::fs::metadata(&path)?;
+    let version = version.to_string();
+    Ok(ResolvedBinary {
+        protocol: protocol_for_version(&version)?,
+        path,
+        version,
+        modified: metadata.modified()?,
+        size: metadata.len(),
+    })
+}
+
 /// First opencode that resolves, in discovery order — picking the highest
 /// version instead would move a pinned 1.x install onto the 2.x protocol.
 /// The `--version` probes run in parallel (a cold node start can take
 /// seconds); only the pick stays discovery-ordered.
-pub(crate) async fn resolve_binary() -> Result<ResolvedBinary> {
+pub(crate) async fn user_binary() -> Result<ResolvedBinary> {
     let candidates = super::opencode_candidates();
     let results = futures::future::join_all(candidates.into_iter().map(resolve_binary_at)).await;
     let mut first_error = None;

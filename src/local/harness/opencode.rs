@@ -46,9 +46,6 @@ use crate::local::local_models::is_loopback_url;
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::{find_opencode, ResolvedBinary};
 
-const OPENCODE_REINSTALL: &str =
-    "Reinstall opencode (curl -fsSL https://opencode.ai/install | bash)";
-
 #[path = "opencode_v2.rs"]
 mod v2;
 
@@ -291,10 +288,10 @@ impl OpenCode {
             // Authentication failures are reported by user-initiated requests.
             info.models = models;
         } else if info.install_broken {
-            info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
+            info.agent_note = Some(info.broken_note("Reinstall it"));
         } else if !info.installed {
             info.agent_note = Some(
-                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then configure a local model or sign in with `opencode auth login`."
+                "Install OpenCode, then configure a local model or sign in with `opencode auth login`."
                     .to_string(),
             );
         } else if !snapshot {

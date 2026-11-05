@@ -400,11 +400,12 @@ const PHRASES: &[&str] = &[
     "running scripts is disabled on this system",
     "Unsupported platform",
     "Unsupported architecture",
-    "OpenCode has no Windows build",
-    // The OpenCode Windows installer's sources, then .NET's network faults.
-    "GitHub download failed",
-    "npm download failed",
-    "npm package checksum mismatch",
+    // orx's own installs of the agents it manages.
+    "Could not download",
+    "Could not reach",
+    "does not match its published SHA-256",
+    "Could not unpack the download",
+    // .NET's network faults, which PowerShell installers print.
     "The remote name could not be resolved",
     "The operation has timed out",
     "The underlying connection was closed",
