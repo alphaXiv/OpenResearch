@@ -107,7 +107,7 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     async onboard() {
       const agent = { name: 'E2E Agent', executable: process.execPath, arguments: [FAKE_AGENT] }
       const { id: harness } = await api<{ id: string }>('/api/harnesses/acp', agent)
-      await api('/api/onboarding/complete', { harness, researchAreas: ['AI/ML'] })
+      await api('/api/onboarding/complete', { harness })
       await api('/api/settings/ui-state', { tourCompleted: true })
     },
     /** A blank project, as the New project dialog creates one. */

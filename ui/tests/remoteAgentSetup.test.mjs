@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Activity, act, createElement } from "react";
+import { act, createElement } from "react";
 import { Onboarding } from "../src/components/Onboarding.tsx";
 import { ltr } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
 import { find, navigate, render, renderApp, serve, serveApp, settle } from "./render.mjs";
 
+/** The page's sockets; a test plays the server's side on them. */
+const sockets = [];
 globalThis.WebSocket = class extends EventTarget {
   static OPEN = 1;
   readyState = 1;
+  constructor(url) {
+    super();
+    this.url = String(url);
+    sockets.push(this);
+  }
   send() {}
   close() { this.readyState = 3; }
 };
@@ -54,8 +61,8 @@ test("remote setup starts at agents and saves only the machine's preferred agent
   const text = document.body.textContent;
   assert.ok(text.includes(m.remote_agents_title({ host: ltr("gpu-lab") })));
   assert.ok(text.includes(m.remote_agents_description({ host: ltr("gpu-lab") })));
-  for (const local of [m.onboarding_step_1_of_2(), m.onboarding_back(), m.onboarding_tell_us_about_your_research()]) assert.ok(!text.includes(local), local);
-  assert.deepEqual([...setup.requests("GET /api/settings/profile"), ...setup.requests("GET /api/project-path/status")], []);
+  for (const local of [m.onboarding_step_1_of_2(), m.onboarding_back(), m.onboarding_alphaxiv_title()]) assert.ok(!text.includes(local), local);
+  assert.deepEqual(setup.requests("GET /api/project-path/status"), []);
 
   await click(button("Codex"));
   await click(button(m.onboarding_continue()));
@@ -121,21 +128,59 @@ test("Continue explains when the chosen agent is still loading", async () => {
   assert.equal(setup.requests("POST /api/settings/ui-state").filter(({ body }) => body.preferredAgent).length, 0);
 });
 
-test("showing a hidden machine again keeps unsaved research profile answers", async () => {
-  let profileReads = 0;
-  serve((path) => {
-    if (path === "/api/settings/profile") { profileReads++; return { researchAreas: ["RL"], otherArea: null, background: "saved", papers: [] }; }
+const signedIn = { loggedIn: true, apiUrl: "https://api.example.org", user: { id: "u", firstName: "Ada", lastName: null, email: "ada@example.org", alphaxivUrl: "https://www.alphaxiv.org" } };
+const signedOut = { loggedIn: false, apiUrl: null, user: null };
+const notConnected = () => new Response("", { status: 401 });
+
+/** The local walkthrough's last step, against a backend whose account is `account` and whose alphaXiv profile answers `me`. */
+async function alphaXivStep({ account, me = () => ({ avatarUrl: null }) }) {
+  const completions = [];
+  const done = [];
+  serve((path, init) => {
+    if (path === "/_orx/runtime") return { kind: "local", version: "test", buildChannel: "stable" };
     if (path === "/api/harnesses") return { harnesses: [codex] };
     if (path === "/api/harnesses/setup/commands") return {};
     if (path === "/api/project-path/status") return { gitVersion: "git 2.49.0" };
-    if (path === "/_orx/runtime") return { kind: "local", version: "test", buildChannel: "stable" };
+    if (path === "/api/telemetry/event") return { ok: true };
+    if (path === "/api/account/openresearch") return account;
+    if (path === "/api/alphaxiv/me") return me();
+    if (path === "/api/onboarding/complete") {
+      completions.push(JSON.parse(init.body));
+      return { project: { id: "demo" }, selection: JSON.parse(init.body) };
+    }
   });
-  const page = (mode) => createElement(Activity, { mode }, createElement(Onboarding, { remote: false, preferredAgent: null, onDone() {} }));
-  const { rerender } = await render(page("visible"));
+  await render(createElement(Onboarding, { remote: false, preferredAgent: null, onDone: (project) => done.push(project) }));
   await settle();
-  assert.equal(profileReads, 1);
-  await rerender(page("hidden"));
-  await rerender(page("visible"));
+  await click(button(m.onboarding_continue()));
+  await click(button(m.onboarding_continue()));
+  assert.ok(document.body.textContent.includes(m.onboarding_alphaxiv_title()));
+  return { completions, done };
+}
+
+for (const [name, options, login] of [
+  ["signed out", { account: signedOut }, "/api/settings/openresearch/login"],
+  ["signed in to alphaXiv", { account: signedIn }, null],
+  ["signed in without an alphaXiv connection", { account: signedIn, me: notConnected }, "/api/settings/alphaxiv/login"],
+]) {
+  test(`the alphaXiv step offers to finish by skipping only until alphaXiv is linked: ${name}`, async () => {
+    await alphaXivStep(options);
+    assert.equal(!!button(m.onboarding_skip()), !!login);
+    assert.equal(!!button(m.onboarding_get_started()), !login);
+    assert.equal(document.body.textContent.includes(m.onboarding_signed_in()), !login);
+    const signIn = button(m.account_sign_in_alphaxiv());
+    assert.equal(!!signIn, !!login);
+    if (!signIn) return;
+    await click(signIn);
+    assert.equal(new URL(sockets.at(-1).url).pathname, login);
+  });
+}
+
+test("finishing alphaXiv sign-in completes onboarding with the chosen agent", async () => {
+  const step = await alphaXivStep({ account: signedOut });
+  await click(button(m.account_sign_in_alphaxiv()));
+  await act(async () => sockets.at(-1).onmessage({ data: JSON.stringify({ type: "complete" }) }));
   await settle();
-  assert.equal(profileReads, 1);
+  assert.equal(step.completions.length, 1);
+  assert.equal(step.completions[0].harness, "codex");
+  assert.deepEqual(step.done, [{ id: "demo" }]);
 });

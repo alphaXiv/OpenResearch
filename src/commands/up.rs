@@ -858,6 +858,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/alphaxiv/login", get(alphaxiv_login))
+        .route("/api/alphaxiv/me", get(alphaxiv_me))
         .route("/api/alphaxiv/folders", get(alphaxiv_folders))
         .route("/api/alphaxiv/papers", get(alphaxiv_papers))
         .route("/api/settings/commands/run", get(run_settings_command))
@@ -1053,6 +1054,7 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/openresearch/login"
             | "/api/settings/openresearch/logout"
             | "/api/settings/alphaxiv/login"
+            | "/api/alphaxiv/me"
             | "/api/alphaxiv/folders"
             | "/api/alphaxiv/papers"
             | "/api/settings/commands/run"
@@ -1268,9 +1270,6 @@ fn normalize_research_profile(
     background: Option<String>,
     papers: Vec<crate::telemetry::ProfilePaper>,
 ) -> std::result::Result<crate::telemetry::ResearchProfile, ApiError> {
-    if research_areas.is_empty() {
-        return Err(bad_request("choose at least one research area"));
-    }
     let mut normalized_areas = Vec::with_capacity(research_areas.len());
     for area in research_areas {
         let area = area.trim().to_string();
@@ -1324,15 +1323,22 @@ async fn complete_onboarding(
         permission_mode,
         reasoning_level: nonempty(req.reasoning_level),
     };
-    let profile = normalize_research_profile(
-        req.research_areas,
-        req.other_area,
-        req.background,
-        req.papers,
-    )?;
+    // A request without areas carries no profile and must not erase a saved one.
+    let profile = (!req.research_areas.is_empty())
+        .then(|| {
+            normalize_research_profile(
+                req.research_areas,
+                req.other_area,
+                req.background,
+                req.papers,
+            )
+        })
+        .transpose()?;
     let profile_for_event = profile.clone();
     let completion = tokio::task::spawn_blocking(move || -> Result<_> {
-        let _ = crate::telemetry::set_profile(profile);
+        if let Some(profile) = profile {
+            let _ = crate::telemetry::set_profile(profile);
+        }
         let completion = local::demo::complete_onboarding(selection)?;
         let store = Store::open()?;
         store.set_preferred_agent(&StoredAgentSelection {
@@ -1352,7 +1358,9 @@ async fn complete_onboarding(
     .map_err(|e| ApiError::from(anyhow!("demo seed task failed: {e}")))??;
     if completion.newly_created {
         crate::telemetry::capture_onboarding_completed();
-        crate::telemetry::capture_onboarding_research_profile(&profile_for_event);
+        if let Some(profile) = &profile_for_event {
+            crate::telemetry::capture_onboarding_research_profile(profile);
+        }
     }
     Ok(Json(json!({
         "project": project_json(&completion.project),
@@ -6806,6 +6814,13 @@ fn alphaxiv_error(error: crate::error::Error) -> ApiError {
     ApiError(status, error.to_string())
 }
 
+async fn alphaxiv_me() -> ApiResult {
+    crate::alphaxiv::me()
+        .await
+        .map(Json)
+        .map_err(alphaxiv_error)
+}
+
 pub(crate) async fn alphaxiv_folders() -> ApiResult {
     crate::alphaxiv::folders()
         .await
@@ -10355,10 +10370,7 @@ mod tests {
     }
 
     #[test]
-    fn research_profile_requires_an_area_and_other_description() {
-        let missing_area = normalize_research_profile(vec![], None, None, vec![]).unwrap_err();
-        assert_eq!(missing_area.1, "choose at least one research area");
-
+    fn research_profile_requires_an_other_description() {
         let missing_other =
             normalize_research_profile(vec!["Other".into()], Some("   ".into()), None, vec![])
                 .unwrap_err();

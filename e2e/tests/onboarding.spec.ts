@@ -18,8 +18,8 @@ test('a first run connects an agent, creates a project and streams its first rep
     await dialog.getByRole('button', { name: 'Save' }).click()
     await expect(page.getByRole('button', { name: /^E2E Agent via ACP/ })).toHaveAttribute('aria-pressed', 'true')
     await page.getByRole('button', { name: 'Continue', exact: true }).click()
-    await page.getByRole('checkbox', { name: 'AI/ML' }).check()
-    await page.getByRole('button', { name: 'Get started' }).click()
+    await expect(page.getByRole('heading', { name: 'Bring your alphaXiv library' })).toBeVisible()
+    await page.getByRole('button', { name: 'Skip' }).click()
   })
 
   await test.step('a new project opens on a new chat with that agent', async () => {
