@@ -41,7 +41,7 @@ use crate::{browser, UpArgs};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub(crate) const DASHBOARD_PROTOCOL: u32 = 3;
+pub(crate) const DASHBOARD_PROTOCOL: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3284,6 +3284,7 @@ mod tests {
             managed_generation: None,
             auth_agent: None,
             run_id: None,
+            transport: None,
             extra_opts: vec!["-p".into(), "2222".into()],
         };
         let args =

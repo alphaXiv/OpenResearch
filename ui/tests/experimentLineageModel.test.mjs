@@ -29,6 +29,7 @@ function load(file, mocks) {
 
 const i18n = load("i18n.ts", { "./paraglide/runtime.js": runtime });
 const api = load("api.ts", {
+  "./logWindow": {},
   "./queries/client": {},
   "./queries/invalidation": {},
   "./paraglide/messages.js": messages,
@@ -50,6 +51,7 @@ const {
   splitExperimentTitle,
 } = load("components/experimentLineageModel.ts", {
   "../api": api,
+  "../runDisplay": load("runDisplay.ts", {}),
   "../i18n": i18n,
   "../paraglide/messages.js": messages,
 });

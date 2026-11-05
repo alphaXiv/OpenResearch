@@ -65,6 +65,8 @@ impl Sandbox {
 }
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        orx_test_support::stop_server(&self.data_dir());
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -199,4 +201,56 @@ fn missing_unknown_and_removed_flags() {
 
     let flags = sandbox.run(&["logs", run_id, "--full"]);
     assert!(!flags.status.success());
+}
+
+#[test]
+fn large_kept_log_previews_tail_and_identifies_both_ranges_and_missing_middle() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let sandbox = Sandbox::new();
+    let run_id = "run-large-kept";
+    sandbox.seed_run(run_id);
+    let head = sandbox.write_log(run_id, b"SETUP_SENTINEL");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&head)
+        .unwrap()
+        .set_len(64 << 20)
+        .unwrap();
+    let tail = head.with_file_name(format!("{run_id}.tail.log"));
+    let mut file = std::fs::File::create(&tail).unwrap();
+    file.set_len(256 << 20).unwrap();
+    let result = b"TRAINING_COMPLETE_SENTINEL\n";
+    file.seek(SeekFrom::End(-(result.len() as i64))).unwrap();
+    file.write_all(result).unwrap();
+    let total: u64 = 3 << 30;
+    let ranges = serde_json::json!([
+        {"offset":0,"len":64 << 20,"file":head,"ident":"1-2","eof":false},
+        {"offset":total - (256 << 20),"len":256 << 20,"file":tail,"ident":"1-2","eof":true}
+    ]);
+    std::fs::write(
+        head.with_file_name(format!("{run_id}.ranges.json")),
+        ranges.to_string(),
+    )
+    .unwrap();
+    let output = sandbox.run(&["logs", run_id]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = lossy_stdout(&output);
+    for expected in [
+        "Original log: 3221225472 bytes.",
+        "Kept bytes 0..67108864:",
+        "Kept bytes 2952790016..3221225472:",
+        head.to_str().unwrap(),
+        tail.to_str().unwrap(),
+        "The middle of the log is not on this computer.",
+        "TRAINING_COMPLETE_SENTINEL",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected}");
+    }
+    assert!(!stdout.contains("SETUP_SENTINEL"));
+    assert!(!stdout.contains("full log file"));
 }

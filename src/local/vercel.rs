@@ -1,9 +1,4 @@
-//! Local Vercel Sandbox launch — the Vercel twin of `local/modal.rs`: the run
-//! row comes from and goes to the local store only, and the detached
-//! `orx supervise` watches the sandbox via the Vercel Python launcher. Auth is
-//! Vercel's own (VERCEL_TOKEN + VERCEL_TEAM_ID + VERCEL_PROJECT_ID, or
-//! VERCEL_OIDC_TOKEN); the sandbox runs on the user's Vercel project and is
-//! stopped and destroyed when the run ends.
+//! Vercel Sandbox launch intents. Credentials are added only at launch.
 
 use std::collections::HashMap;
 
@@ -11,32 +6,48 @@ use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
 use crate::jobs::{huggingface as hf, vercel, BackendDescriptor};
-use crate::store::{now_ms, Store, StoredRun};
+use crate::store::{now_ms, LaunchSpec, Store, StoredRun};
 
-/// Optional region override (Vercel defaults to `iad1` or the project default).
-const REGION_ENV: &str = "ORX_VERCEL_REGION";
+pub async fn launch_spec(
+    args: &crate::ExpRunArgs,
+    source: &SourceSnapshot,
+    run_id: &str,
+    command: &str,
+) -> Result<LaunchSpec> {
+    let vcpus = vercel::resolve_flavor(args.flavor.as_deref())?;
+    let limits = vercel::launch_limits().await;
+    let timeout_seconds = match &args.timeout {
+        Some(t) => hf::parse_timeout(t)?,
+        None => limits.default_timeout(),
+    };
+    vercel::check_timeout(timeout_seconds, &limits)?;
+    vercel::check_vcpus(vcpus, &limits)?;
 
-/// CLI wrapper around `submit_local_vercel`: submit, then print the summary.
-pub async fn launch_local_vercel(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = crate::compute::submit(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} Vercel sandbox submitted.");
-    println!(
-        "  sandbox {} ({})",
-        backend.namespace.as_deref().unwrap_or(""),
-        backend.flavor.as_deref().unwrap_or("cpu")
-    );
-    println!("  run     {}", run.id);
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
+    let image = args
+        .image
+        .clone()
+        .unwrap_or_else(|| vercel::DEFAULT_IMAGE.to_string());
+    let spec = vercel::VercelJobSpec {
+        name: vercel::sandbox_name(run_id),
+        script: crate::compute::gated_script("/tmp/orx-source.tar", command),
+        image,
+        vcpus,
+        env: HashMap::new(),
+        timeout_seconds,
+        session_cap: limits.session_cap(),
+        region: std::env::var("ORX_VERCEL_REGION")
+            .ok()
+            .filter(|region| !region.trim().is_empty()),
+        tags: super::run_labels(&args.exp_id, run_id)?,
+        source_archive: Some(source.path.clone()),
+    };
+    Ok(LaunchSpec {
+        kind: "vercel_job".into(),
+        target: None,
+        options: serde_json::to_value(spec)?,
+    })
 }
 
-/// Submit the local experiment's run as a Vercel Sandbox and detach a
-/// supervisor. `--flavor` is optional: `cpu` (2 vCPUs, the default),
-/// `cpu-<n>` or `<n>` vCPUs.
 pub async fn submit_local_vercel_with_source(
     args: &crate::ExpRunArgs,
     source: SourceSnapshot,
@@ -94,7 +105,7 @@ pub async fn submit_local_vercel_with_source(
         env,
         timeout_seconds,
         session_cap: limits.session_cap(),
-        region: std::env::var(REGION_ENV)
+        region: std::env::var("ORX_VERCEL_REGION")
             .ok()
             .filter(|r| !r.trim().is_empty()),
         tags,

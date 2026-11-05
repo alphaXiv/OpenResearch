@@ -1,9 +1,10 @@
 //! `orx up` — the local autoresearch dashboard server.
 //!
-//! One axum process on 127.0.0.1 serving three surfaces:
+//! One axum process on 127.0.0.1 that owns the run engine and serves:
 //!   /            embedded SPA (rust-embed over ui/dist, index.html fallback)
 //!   /api/*       JSON over the local SQLite store + run-log files
-//!   /api/events  SSE: 500ms store + log-file diff loop (serve.rs idiom)
+//!   /api/v2/*    the engine's API for the CLI and agents (`api_v2`)
+//!   /api/events  SSE: run changes from the engine, a 500ms diff for everything else
 //!
 //! Fully local: no OpenResearch api anywhere on these paths (the /api/papers
 //! routes proxy alphaXiv's public, token-free endpoints — needed because the
@@ -26,14 +27,13 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
-use futures::Stream;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 
-use crate::commands::remote_host::{DashboardLock, DashboardLockMode, HostDescriptor, RemoteAuth};
+use crate::commands::remote_host::{DashboardLock, HostDescriptor, RemoteAuth};
 use crate::commands::up_remote::RemoteSessionStatus;
 use crate::error::{anyhow, Result};
 use crate::local;
@@ -49,30 +49,36 @@ use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 mod agent_tools;
+pub(crate) mod api_v2;
 pub(crate) mod compute_settings;
 mod harness_setup;
 mod network;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    if !args.desktop_app && !args.remote_host && !args.headless {
+        let data_dir = crate::commands::remote_host::canonical_data_dir()?;
+        if let Some(server) =
+            crate::commands::remote_host::ServerDescriptor::live(&data_dir).await?
+        {
+            let url = format!("http://127.0.0.1:{}", server.port);
+            eprintln!("orx up: dashboard on {url}");
+            if !args.no_browser {
+                browser::open_dashboard(&url, crate::telemetry::UpLaunchMode::of(&args));
+            }
+            return Ok(());
+        }
+    }
     updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
-    let remote_auth = if persistent_host {
-        let callback = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-        local::chat::set_up_auth_token(callback.clone());
-        Some(RemoteAuth::new(&callback))
-    } else {
-        None
-    };
-    let dashboard_lock = DashboardLock::acquire(
-        &crate::commands::remote_host::canonical_data_dir()?,
-        if persistent_host {
-            DashboardLockMode::Exclusive
-        } else {
-            DashboardLockMode::Shared
-        },
-    )?;
+    // Agent sessions and the CLI present this bearer to the server's API.
+    let token = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    local::chat::set_up_auth_token(token.clone());
+    let remote_auth = persistent_host.then(|| RemoteAuth::new(&token));
+    let data_dir = crate::commands::remote_host::canonical_data_dir()?;
+    // The engine lock: one engine per data directory.
+    let dashboard_lock = DashboardLock::acquire(&data_dir)?;
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
     let backend_lock = tokio::task::spawn_blocking(updates::BackendLock::acquire)
@@ -93,14 +99,47 @@ pub async fn run(args: UpArgs) -> Result<()> {
     {
         let store = Store::open()?;
         local::chat::reconcile_unfinished_turns(&store)?;
-        for run in store.list_active_runs()? {
-            if store.get_local_experiment(&run.experiment_id)?.is_some() {
-                if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
-                    eprintln!("could not recover supervisor for run {}: {err}", run.id);
+        // Under the engine lock, before any notice can be produced.
+        store.migrate_run_wakeups()?;
+        if !crate::config::run_engine_settings()?.0 {
+            for run in store.list_active_runs()? {
+                if !crate::engine::is_engine_row(&run)
+                    && store.get_local_experiment(&run.experiment_id)?.is_some()
+                {
+                    store.watch_legacy_run(&run.id, None)?;
+                    if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+                        eprintln!("could not recover supervisor for run {}: {err}", run.id);
+                    }
                 }
             }
         }
     }
+    let clock: Arc<dyn crate::engine::clock::Clock> =
+        Arc::new(crate::engine::clock::SystemClock::new());
+    let engine = Arc::new(crate::engine::Engine::new(Store::open()?, clock.clone()));
+    let runtime = crate::engine::runtime::Runtime::new(
+        engine.clone(),
+        clock.clone(),
+        crate::store::data_dir(),
+        std::env::var_os("ORX_SSH_CONFIG").map(Into::into),
+    );
+    let instance = uuid::Uuid::new_v4().to_string();
+    let project_lifecycle = Arc::new(ProjectLifecycle::default());
+    let data_dir_move_in_progress = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::new(AtomicBool::new(false));
+    let api = Arc::new(api_v2::Api::new(
+        instance.clone(),
+        token.clone(),
+        engine.clone(),
+        runtime.clone(),
+        launch_admission(
+            project_lifecycle.clone(),
+            data_dir_move_in_progress.clone(),
+            stopping.clone(),
+        ),
+        crate::store::data_dir(),
+    )?);
+    api_v2::install(api.clone())?;
 
     // Harnesses spawn lazily on the first message to one of their sessions;
     // no eager agent bring-up. (--no-agent is now a no-op kept for compat.)
@@ -110,24 +149,24 @@ pub async fn run(args: UpArgs) -> Result<()> {
     claude.start_reaper();
     codex.start_reaper();
     let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
-    let stopping = Arc::new(AtomicBool::new(false));
     let state = AppState {
         agent: agent.clone(),
         chat: Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone())),
         claude: claude.clone(),
         harnesses: Arc::new(tokio::sync::Mutex::new(None)),
-        project_lifecycle: Arc::new(ProjectLifecycle::default()),
+        project_lifecycle,
         project_creation_lock: Arc::new(tokio::sync::Mutex::new(())),
         publication_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         harness_fill_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         claude_catalog_queue: Arc::new(std::sync::Mutex::new(ClaudeCatalogQueue::default())),
-        data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        data_dir_move_in_progress,
         data_dir_gate: Arc::new(tokio::sync::Mutex::new(())),
         remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
         remote_instance_id: remote_instance_id.clone(),
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
         restart: Arc::new(tokio::sync::Notify::new()),
+        reopen: Arc::default(),
         trackio: Arc::default(),
     };
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
@@ -167,12 +206,18 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let gate = state.data_dir_gate.clone();
         tokio::task::spawn_blocking(move || local::demo::prewarm(move_in_progress, gate));
     }
-    // Deliver explicitly registered run wake-ups once their chat becomes idle.
-    tokio::spawn(local::chat::watch_runs(
+    tokio::spawn(local::chat::keep_turn_leases(
         state.chat.clone(),
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
+    tokio::spawn(local::chat::watch_run_notices(
+        state.chat.clone(),
+        engine.bus.subscribe(),
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
+    runtime.start();
     tokio::spawn(adopt_orphaned_runs(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
@@ -201,6 +246,34 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
     let app = router(state.clone(), remote_auth.clone());
     let url = format!("http://127.0.0.1:{actual_port}");
+    crate::commands::remote_host::ServerDescriptor {
+        instance,
+        pid: std::process::id(),
+        starttime: crate::engine::process::identity(std::process::id())
+            .map_or(0, |identity| identity.starttime),
+        port: actual_port,
+        version: env!("CARGO_PKG_VERSION").into(),
+        proto: 2,
+        token,
+    }
+    .publish(&data_dir)?;
+    if args.headless {
+        tokio::spawn(async move {
+            let mut idle = api_v2::Idle::default();
+            let started = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                // An unreadable store is not proof of idleness.
+                if idle.check(&api, started.elapsed()).unwrap_or(false)
+                    && stop_admitting_if_idle(&api).unwrap_or(false)
+                {
+                    eprintln!("orx up: idle for ten minutes; stopping");
+                    SHUTDOWN_REQUESTED.notify_one();
+                    return;
+                }
+            }
+        });
+    }
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let control_server = if persistent_host {
         Some(
@@ -288,7 +361,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
         drop(backend_lock);
-        if !updates::updated_exe_on_disk().await {
+        if !state.reopen.load(Ordering::SeqCst) && !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
             let failures = updates::failure_count();
             if let Err(err) = updates::apply_now().await {
@@ -409,6 +482,9 @@ struct AppState {
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    /// Set with `restart` when the data directory changed: the engine reopens there, and no
+    /// update is installed first.
+    reopen: Arc<AtomicBool>,
     trackio: Arc<crate::local::trackio::LocalServer>,
 }
 
@@ -511,6 +587,29 @@ impl ProjectLifecycle {
     }
 }
 
+/// Admits a launch the way the dashboard admits every project operation.
+fn launch_admission(
+    lifecycle: Arc<ProjectLifecycle>,
+    moving: Arc<AtomicBool>,
+    stopping: Arc<AtomicBool>,
+) -> api_v2::Admit {
+    Box::new(move |project| {
+        if stopping.load(Ordering::SeqCst) {
+            return Err(anyhow!("The persistent OpenResearch host is stopping."));
+        }
+        let admission = lifecycle
+            .admit(project)
+            .ok_or_else(|| anyhow!("project deletion is in progress"))?;
+        // Checked after admitting: a move that raised its flag first counts this admission.
+        if moving.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "A data-directory move is in progress. Try again once it finishes."
+            ));
+        }
+        Ok(Box::new(admission))
+    })
+}
+
 fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
     let app = Router::new()
         .route("/api/health", get(health))
@@ -560,7 +659,6 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/instances", get(list_instances))
         .route("/api/runs/{id}/cancel", post(cancel_run))
-        .route("/api/runs/{id}/log", get(run_log))
         .route("/api/runs/{id}/logs", get(run_logs))
         .route("/api/runs/{id}/diff", get(run_diff))
         .route("/api/experiments/{id}/diff", get(experiment_diff))
@@ -641,6 +739,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/projects/{id}/terminal", get(project_terminal))
         .route("/api/events", get(events))
+        .route(
+            "/api/settings/run-engine",
+            get(run_engine_settings).post(set_run_engine),
+        )
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
         .route(
             "/api/settings/tinker",
@@ -869,6 +971,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         // above the client-side per-file limit so a full message still fits.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state);
+    server_router(app.merge(api_v2::router()), remote_auth)
+}
+
+fn server_router(app: Router, remote_auth: Option<RemoteAuth>) -> Router {
     let app = app
         .layer(middleware::from_fn(track_active))
         .layer(middleware::from_fn(
@@ -893,7 +999,11 @@ async fn require_remote_auth(
         )
         .into_response();
     }
-    if path == "/api/internal/permissions" || path == "/api/internal/mcp" {
+    // V2 checks its descriptor credential at the route layer, including the hello challenge.
+    if path.starts_with("/api/v2/")
+        || path == "/api/internal/permissions"
+        || path == "/api/internal/mcp"
+    {
         return next.run(request).await;
     }
     let provided = request
@@ -995,8 +1105,6 @@ type ApiResult = std::result::Result<Json<Value>, ApiError>;
 
 // --- wire types -----------------------------------------------------------
 
-/// The Run entity the API serves: StoredRun with `backend_json` parsed into an
-/// object and cancellation intent exposed for pending UI state.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApiRun {
@@ -1015,29 +1123,88 @@ struct ApiRun {
     created_at: i64,
     updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ended_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
-    cancel_requested: bool,
+    contact: Option<crate::store::Contact>,
+    cancelling: bool,
+    cancel_unconfirmed: Option<Vec<u32>>,
+    lost_reason: Option<String>,
+    host: Option<String>,
+    notice_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    log_collection: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    log_collection_error: Option<String>,
 }
 
-impl From<&StoredRun> for ApiRun {
-    fn from(run: &StoredRun) -> Self {
-        Self {
+pub(crate) fn run_host(store: &Store, run: &StoredRun) -> Result<Option<String>> {
+    use crate::engine::handle::Handle;
+    Ok(match crate::engine::handle_of(run) {
+        Some(Handle::Ssh { host, .. } | Handle::Slurm { host, .. }) => Some(host),
+        Some(Handle::Legacy { descriptor })
+            if matches!(descriptor.kind.as_str(), "ssh_job" | "slurm_job") =>
+        {
+            descriptor.namespace
+        }
+        _ => store
+            .engine_run_state(&run.id)?
+            .and_then(|state| state.launch)
+            .filter(|launch| matches!(launch.kind.as_str(), "ssh_job" | "slurm_job"))
+            .and_then(|launch| launch.target),
+    })
+}
+
+impl ApiRun {
+    fn new(store: &Store, run: &StoredRun) -> Result<Self> {
+        let state = store.engine_run_state(&run.id)?;
+        let state = state.filter(|_| crate::engine::is_engine_row(run));
+        let accepted = state
+            .as_ref()
+            .is_some_and(|state| state.cancel_accepted_at.is_some());
+        let launch = state.as_ref().and_then(|state| state.launch.as_ref());
+        let collection = store.log_collection(&run.id)?;
+        Ok(Self {
             id: run.id.clone(),
             experiment_id: run.experiment_id.clone(),
             project_id: run.project_id.clone(),
             status: run.status.clone(),
-            backend: crate::store::public_backend(&run.backend_json),
+            backend: crate::store::public_backend(&run.backend_json, launch),
             command: Some(run.command.clone()).filter(|c| !c.is_empty()),
             commit_sha: run.commit_sha.clone(),
             result_markdown: run.result_markdown.clone(),
             created_at: run.created_at,
             updated_at: run.updated_at,
+            started_at: state.as_ref().and_then(|state| state.started_at),
             ended_at: run.ended_at,
             exit_code: run.exit_code,
-            cancel_requested: run.cancel_requested,
-        }
+            cancel_unconfirmed: state
+                .as_ref()
+                .and_then(|state| state.cancel_unconfirmed.clone()),
+            contact: state
+                .map(|state| state.contact)
+                .filter(|contact| *contact != crate::store::Contact::Live),
+            cancelling: !is_terminal(&run.status) && (run.cancel_requested || accepted),
+            lost_reason: run
+                .result_markdown
+                .as_ref()
+                .filter(|_| run.status == "lost")
+                .map(|reason| {
+                    if reason == crate::engine::reconcile::ABANDONED {
+                        "abandoned".into()
+                    } else {
+                        reason.clone()
+                    }
+                }),
+            host: run_host(store, run)?,
+            notice_error: store.run_notice_error(&run.id)?,
+            log_collection: collection
+                .as_ref()
+                .map(|(failed, _)| if *failed { "failed" } else { "pending" }),
+            log_collection_error: collection.and_then(|(_, error)| error),
+        })
     }
 }
 
@@ -2154,11 +2321,12 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
     if !in_flight.is_empty() {
         let mut failures = Vec::new();
         for run in &in_flight {
-            if let Err(err) = crate::commands::exp::request_local_run_cancel(
-                &store,
-                &run.id,
+            if let Err(err) = api_v2::cancel_run(
+                run,
                 "Cancel requested because the project is being deleted.",
-            ) {
+            )
+            .await
+            {
                 failures.push(format!("{}: {err}", run.id));
             }
         }
@@ -2296,11 +2464,11 @@ async fn list_project_runs(Path(id): Path<String>) -> ApiResult {
     store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
-    let runs: Vec<ApiRun> = store
+    let runs = store
         .list_runs_by_project(&id)?
         .iter()
-        .map(ApiRun::from)
-        .collect();
+        .map(|run| ApiRun::new(&store, run))
+        .collect::<Result<Vec<_>>>()?;
     Ok(Json(json!({ "runs": runs })))
 }
 
@@ -2320,6 +2488,7 @@ struct CreateRunReq {
     backend: Option<String>,
     cpus: Option<u32>,
     mem: Option<String>,
+    partition: Option<String>,
     flavor: Option<String>,
     host: Option<String>,
     container: Option<String>,
@@ -2340,35 +2509,6 @@ struct CreateRunReq {
 }
 
 impl CreateRunReq {
-    fn from_run_args(args: &crate::ExpRunArgs) -> Result<Self> {
-        Ok(Self {
-            telemetry_suppressed: args.telemetry_suppressed
-                || !crate::telemetry::accounting_reports_enabled(),
-            invocation_context: args
-                .invocation_identity()?
-                .map(|identity| serde_json::to_string(&identity))
-                .transpose()?,
-            experiment_id: args.exp_id.clone(),
-            backend: args.backend.clone(),
-            cpus: args.cpus,
-            mem: args.mem.clone(),
-            flavor: args.flavor.clone(),
-            host: args.host.clone(),
-            container: args.container.clone(),
-            no_container: args.no_container,
-            manifest: args.manifest.clone(),
-            image: args.image.clone(),
-            timeout: args.timeout.clone(),
-            org: args.org.clone(),
-            provider: args.provider.clone(),
-            disk: args.disk,
-            force: args.force,
-            chat_session_id: args.launching_chat_session(),
-            agent_origin: args.agent_origin.clone(),
-            caller_config_dir: Some(absolute_config_dir()),
-        })
-    }
-
     fn into_run_args(self) -> crate::ExpRunArgs {
         let mut backend = self.backend;
         let mut flavor = self.flavor;
@@ -2390,131 +2530,25 @@ impl CreateRunReq {
             timeout: self.timeout,
             cpus: self.cpus,
             mem: self.mem,
+            partition: self.partition,
             force: self.force,
             chat_session_id: self.chat_session_id,
             agent_origin: self.agent_origin,
             forwarded: true,
+            caller_config_dir: None,
         }
     }
-}
-
-#[derive(Deserialize)]
-struct CreateRunResponse {
-    run: ApiRun,
-}
-
-pub(crate) struct RunLaunchSummary {
-    pub run_id: String,
-    pub experiment_id: String,
-    pub job_id: Option<String>,
-    pub slurm_resources: Option<String>,
-}
-
-async fn decode_local_response<T: serde::de::DeserializeOwned>(
-    response: reqwest::Response,
-    action: &str,
-) -> Result<T> {
-    let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| anyhow!("orx up {action} response failed: {error}"))?;
-    if !status.is_success() {
-        let detail = serde_json::from_slice::<Value>(&body)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .map(|error| error.trim().to_string())
-            })
-            .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
-        if detail.is_empty() {
-            return Err(anyhow!("orx up could not {action}: HTTP {status}"));
-        }
-        if status.is_client_error() {
-            return Err(anyhow!("{detail}"));
-        }
-        return Err(anyhow!("orx up could not {action}: {detail}"));
-    }
-    serde_json::from_slice(&body)
-        .map_err(|error| anyhow!("orx up returned an invalid {action} response: {error}"))
-}
-
-fn local_client() -> Result<reqwest::Client> {
-    crate::net::loopback_client()
-        .connect_timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|error| anyhow!("Could not create the orx up client: {error}"))
-}
-
-fn authenticate_up_request(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    match std::env::var(local::chat::UP_AUTH_TOKEN_ENV)
-        .ok()
-        .filter(|token| !token.is_empty())
-        .or_else(|| local::chat::up_auth_token().map(str::to_string))
-    {
-        Some(token) => builder.bearer_auth(token),
-        None => builder,
-    }
-}
-
-pub(crate) async fn submit_run_via_up(
-    port: u16,
-    args: &crate::ExpRunArgs,
-) -> Result<RunLaunchSummary> {
-    let request = CreateRunReq::from_run_args(args)?;
-    let response =
-        authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
-            .json(&request)
-            .send()
-            .await
-            .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
-    let response: CreateRunResponse = decode_local_response(response, "start the run").await?;
-    let job_id = response
-        .run
-        .backend
-        .as_ref()
-        .and_then(|backend| backend.get("jobId"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let slurm_resources = response
-        .run
-        .backend
-        .and_then(|backend| serde_json::from_value(backend).ok())
-        .and_then(|backend| local::slurm::requested_resources(&backend));
-    Ok(RunLaunchSummary {
-        run_id: response.run.id,
-        experiment_id: args.exp_id.clone(),
-        job_id,
-        slurm_resources,
-    })
-}
-
-pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
-    let response = authenticate_up_request(
-        local_client()?
-            .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
-            .json(&CancelRunReq {
-                chat_session_id: local::chat::launching_chat_session(),
-            }),
-    )
-    .send()
-    .await
-    .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
-    let _: Value = decode_local_response(response, "cancel the run").await?;
-    Ok(())
 }
 
 /// Launching with orx up's settings after the caller checked its own would
 /// submit to a different cluster or namespace than the one the caller tested.
 /// A relative `XDG_CONFIG_HOME` names a different dir in each process's working directory.
-fn absolute_config_dir() -> std::path::PathBuf {
+pub(crate) fn absolute_config_dir() -> std::path::PathBuf {
     let dir = crate::config::config_dir();
     std::path::absolute(&dir).unwrap_or(dir)
 }
 
-fn require_caller_config_dir(
+pub(crate) fn require_caller_config_dir(
     caller: Option<&std::path::Path>,
     own: &std::path::Path,
 ) -> Result<()> {
@@ -2540,49 +2574,27 @@ fn require_caller_config_dir(
     ))
 }
 
-async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
-    reject_if_stopping(&state)?;
-    reject_if_moving(&state)?;
+async fn create_run(Json(req): Json<CreateRunReq>) -> ApiResult {
     require_caller_config_dir(req.caller_config_dir.as_deref(), &absolute_config_dir())
         .map_err(bad_request)?;
     let store = Store::open()?;
-    let experiment = store
+    store
         .get_local_experiment(&req.experiment_id)?
         .ok_or_else(|| not_found("experiment"))?;
-    let _admission = state
-        .project_lifecycle
-        .admit(&experiment.project_id)
-        .ok_or_else(|| bad_request("project deletion is in progress"))?;
     // Dashboard callers may omit compute options; forwarded CLI requests arrive resolved.
-    let args = req.into_run_args();
-    crate::compute::validate_run_args(&args).map_err(bad_request)?;
-    let run = crate::compute::submit(&args).await.map_err(bad_request)?;
-    Ok(Json(json!({ "run": ApiRun::from(&run) })))
-}
-
-fn backend_for_run(
-    run: &StoredRun,
-) -> std::result::Result<Box<dyn crate::compute::ComputeBackend>, ApiError> {
-    let descriptor =
-        crate::jobs::BackendDescriptor::parse(&run.backend_json).map_err(bad_request)?;
-    let id = descriptor
-        .kind
-        .strip_suffix("_job")
-        .unwrap_or(&descriptor.kind);
-    let id = if id == "k8s" { "k8s" } else { id };
-    crate::compute::backend(id).map_err(bad_request)
+    let run = api_v2::launch(req.into_run_args())
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!({ "run": ApiRun::new(&store, &run)? })))
 }
 
 async fn get_run(Path(id): Path<String>) -> ApiResult {
-    let run = Store::open()?
-        .get_run(&id)?
-        .ok_or_else(|| not_found("run"))?;
-    let backend = backend_for_run(&run)?;
-    let run = backend.status(&run).await.map_err(bad_request)?;
+    let store = Store::open()?;
+    let run = store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
     if is_terminal(&run.status) {
-        backend.cleanup(&run).await.map_err(bad_request)?;
+        crate::compute::remove_hf_staging(&run).map_err(bad_request)?;
     }
-    Ok(Json(json!({ "run": ApiRun::from(&run) })))
+    Ok(Json(json!({ "run": ApiRun::new(&store, &run)? })))
 }
 
 /// Newest-first cap for the cross-project instances list. Generous: the store
@@ -2604,7 +2616,7 @@ async fn list_instances() -> ApiResult {
     for run in store.list_runs(INSTANCES_LIMIT)? {
         // ApiRun is a plain serializable struct, so this can't realistically
         // fail; propagate rather than emit a malformed row if it ever does.
-        let mut value = serde_json::to_value(ApiRun::from(&run))
+        let mut value = serde_json::to_value(ApiRun::new(&store, &run)?)
             .map_err(|e| anyhow!("serialize run {}: {e}", run.id))?;
         if let (Some(obj), Some(name)) = (value.as_object_mut(), names.get(&run.project_id)) {
             obj.insert("projectName".into(), json!(name));
@@ -2637,8 +2649,9 @@ async fn cancel_run(
         Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
         None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
     };
-    let backend = backend_for_run(&run)?;
-    backend.cancel(&run, &reason).await.map_err(bad_request)?;
+    api_v2::cancel_run(&run, &reason)
+        .await
+        .map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2649,39 +2662,22 @@ struct LogsQuery {
 }
 
 async fn run_logs(Path(id): Path<String>, Query(q): Query<LogsQuery>) -> ApiResult {
-    let run = Store::open()?
-        .get_run(&id)?
-        .ok_or_else(|| not_found("run"))?;
-    let batch = backend_for_run(&run)?
-        .logs(
-            &run,
-            crate::compute::LogCursor(q.cursor.unwrap_or(0), q.generation),
-        )
-        .await
-        .map_err(bad_request)?;
-    Ok(Json(json!(batch)))
-}
-
-#[derive(Deserialize)]
-struct LogQuery {
-    offset: Option<u64>,
-    generation: Option<String>,
-}
-
-async fn run_log(Path(id): Path<String>, Query(q): Query<LogQuery>) -> ApiResult {
     let store = Store::open()?;
-    store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
-    let offset = q.offset.unwrap_or(0);
-    let snapshot =
-        crate::jobs::ssh::service::logs::read(&id, offset, 4_000_000, q.generation.as_deref())?;
-    let chunk = snapshot.bytes;
-    let next_offset = snapshot.offset + chunk.len() as u64;
+    let run = store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
+    let complete = is_terminal(&run.status) && !store.log_collection_pending(&id)?;
+    let snapshot = crate::jobs::ssh::service::logs::read(
+        &run.id,
+        q.cursor.unwrap_or(0),
+        256 * 1024,
+        q.generation.as_deref(),
+    )?;
+    let next = snapshot.offset + snapshot.bytes.len() as u64;
     Ok(Json(json!({
-        "dataBase64": base64::engine::general_purpose::STANDARD.encode(&chunk),
-        "nextOffset": next_offset,
-        "eof": next_offset >= snapshot.size,
-        "offset": snapshot.offset,
         "generation": snapshot.generation,
+        "offset": snapshot.offset,
+        "dataBase64": base64::engine::general_purpose::STANDARD.encode(&snapshot.bytes),
+        "nextCursor": next,
+        "eof": complete && next >= snapshot.size,
     })))
 }
 
@@ -4682,10 +4678,24 @@ fn spawn_background_tasks(check_updates: bool) {
     });
 }
 
+#[cfg(test)]
+static ACTIVE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Requests and terminals in flight, which an automatic restart would cut off.
 static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// An automatic restart is checking for idleness; new requests wait it out.
 static DRAINING: AtomicBool = AtomicBool::new(false);
+static IDLE_EXIT: AtomicBool = AtomicBool::new(false);
+
+fn stop_admitting_if_idle(api: &api_v2::Api) -> Result<bool> {
+    IDLE_EXIT.store(true, Ordering::SeqCst);
+    let idle = api
+        .busy()
+        .map(|busy| !busy && ACTIVE.load(Ordering::SeqCst) == 0);
+    if !matches!(idle, Ok(true)) {
+        IDLE_EXIT.store(false, Ordering::SeqCst);
+    }
+    idle
+}
 
 struct Active;
 
@@ -4703,13 +4713,21 @@ impl Drop for Active {
 }
 
 pub(crate) async fn track_active(request: axum::extract::Request, next: Next) -> Response {
-    // The dashboard holds its event stream open for as long as it is open.
-    if request.uri().path() == "/api/events" {
+    if IDLE_EXIT.load(Ordering::SeqCst) {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    if matches!(
+        request.uri().path(),
+        "/api/events" | "/api/v2/events" | "/api/v2/hello"
+    ) {
         return next.run(request).await;
     }
     // Count first, then check: paired with the drain's set-then-count, one side always sees the other.
     let active = loop {
         let active = Active::new();
+        if IDLE_EXIT.load(Ordering::SeqCst) {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
         if !DRAINING.load(Ordering::SeqCst) {
             break active;
         }
@@ -4754,11 +4772,7 @@ impl axum::body::HttpBody for ActiveBody {
 
 const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 const REMOTE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
-/// SSH container launches record their handle before the job starts; leave them this long to finish.
-const ORPHANED_RUN_SETTLE_MS: i64 = 5 * 60 * 1000;
 
-/// Give a supervisor to every submitted local run that has none, so a launch
-/// whose supervisor spawn failed (OR-334) is tracked instead of stuck `starting`.
 async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
     // Runs whose spawn failure is already logged, so a stuck run logs once.
     let mut reported = HashSet::new();
@@ -4785,6 +4799,31 @@ async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mut
             Err(_) => {}
         }
     }
+}
+
+fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
+    let mut failures = Vec::new();
+    if crate::config::run_engine_settings()?.0 {
+        return Ok(failures);
+    }
+    let store = Store::open()?;
+    for run in store.list_active_runs()? {
+        // Without a job handle the launch may still be submitting, and a supervisor would fail it.
+        let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
+            .is_ok_and(|descriptor| descriptor.job_id.is_some());
+        if crate::engine::is_engine_row(&run)
+            || !submitted
+            || now_ms() - run.updated_at < crate::engine::ORPHANED_RUN_SETTLE_MS
+            || store.get_local_experiment(&run.experiment_id)?.is_none()
+            || crate::commands::supervise::supervisor_running(&run.id)
+        {
+            continue;
+        }
+        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+            failures.push((run.id, err));
+        }
+    }
+    Ok(failures)
 }
 
 /// Background task so a large first reclaim never delays startup; it releases the gate between passes.
@@ -4854,7 +4893,7 @@ async fn reclaim_orphaned_run_artifacts(
 }
 
 /// Runs `f` on a fresh store under the data-dir gate; `None` while the data dir is moving.
-async fn with_gated_store<T: Send + 'static>(
+pub(crate) async fn with_gated_store<T: Send + 'static>(
     moving: &AtomicBool,
     gate: &tokio::sync::Mutex<()>,
     f: impl FnOnce(&Store) -> Result<T> + Send + 'static,
@@ -4892,7 +4931,7 @@ async fn reclaim_remote_run_dirs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync:
                 plan_error = None;
                 report(rejected);
                 if !batches.is_empty() {
-                    let results = local::remote_cleanup::clean(batches).await;
+                    let results = local::remote_cleanup::clean(batches, &moving, &gate).await;
                     match with_gated_store(&moving, &gate, move |store| {
                         local::remote_cleanup::record(store, results)
                     })
@@ -4920,34 +4959,15 @@ async fn reclaim_remote_run_dirs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync:
     }
 }
 
-/// Spawns the missing supervisors and returns the runs whose spawn failed.
-fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
-    let store = Store::open()?;
-    let mut failures = Vec::new();
-    for run in store.list_active_runs()? {
-        // Without a job handle the launch may still be submitting, and a supervisor would fail it.
-        let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
-            .is_ok_and(|descriptor| descriptor.job_id.is_some());
-        if !submitted
-            || now_ms() - run.updated_at < ORPHANED_RUN_SETTLE_MS
-            || store.get_local_experiment(&run.experiment_id)?.is_none()
-            || crate::commands::supervise::supervisor_running(&run.id)
-        {
-            continue;
-        }
-        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
-            failures.push((run.id, err));
-        }
-    }
-    Ok(failures)
-}
-
 /// Relaunch into an update installed underneath this server once that interrupts nothing,
 /// so a long-lived `orx up` stops launching runs and building sandboxes with old code.
 fn spawn_restart_when_idle(state: AppState) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(UPDATE_SAMPLE_INTERVAL).await;
+            if crate::commands::app::windowless() {
+                continue;
+            }
             let status = updates::status();
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
@@ -5282,20 +5302,10 @@ async fn set_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq>
     .map_err(bad_request)?;
 
     let lock_path = std::path::PathBuf::from(&path);
-    let persistent_host = state.remote_instance_id.is_some();
-    let next_lock = tokio::task::spawn_blocking(move || {
-        DashboardLock::acquire(
-            &lock_path,
-            if persistent_host {
-                DashboardLockMode::Exclusive
-            } else {
-                DashboardLockMode::Shared
-            },
-        )
-    })
-    .await
-    .map_err(|e| ApiError::from(anyhow!("dashboard lock task failed: {e}")))?
-    .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
+    let next_lock = tokio::task::spawn_blocking(move || DashboardLock::acquire(&lock_path))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("dashboard lock task failed: {e}")))?
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
 
     state.chat.shutdown_harnesses().await;
     tokio::task::spawn_blocking(move || crate::config::set_settings_data_dir(Some(path)))
@@ -5303,6 +5313,8 @@ async fn set_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq>
         .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))??;
     *state.dashboard_lock.lock().unwrap() = Some(next_lock);
     state.chat.shutdown_harnesses().await;
+    state.reopen.store(true, Ordering::SeqCst);
+    state.restart.notify_one();
     Ok(Json(data_dir_json()))
 }
 
@@ -5434,18 +5446,8 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     }
 
     let lock_target = std::path::PathBuf::from(&path);
-    let persistent_host = state.remote_instance_id.is_some();
-    let next_lock = match tokio::task::spawn_blocking(move || {
-        DashboardLock::acquire(
-            &lock_target,
-            if persistent_host {
-                DashboardLockMode::Exclusive
-            } else {
-                DashboardLockMode::Shared
-            },
-        )
-    })
-    .await
+    let next_lock = match tokio::task::spawn_blocking(move || DashboardLock::acquire(&lock_target))
+        .await
     {
         Ok(Ok(lock)) => lock,
         Ok(Err(error)) => {
@@ -5469,6 +5471,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     // throttled progress onto the SSE broadcast, clear the flag when done.
     let flag = state.data_dir_move_in_progress.clone();
     let dashboard_lock = state.dashboard_lock.clone();
+    let (restart, reopen) = (state.restart.clone(), state.reopen.clone());
     let target = std::path::PathBuf::from(path);
     tokio::spawn(async move {
         let _data_dir_guard = data_dir_guard;
@@ -5500,6 +5503,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
                 // Close any child spawned while a cross-filesystem copy ran.
                 chat.shutdown_harnesses().await;
                 chat.emit_event("datadir.move.done", json!(outcome));
+                reopen.store(true, Ordering::SeqCst);
             }
             Ok(Err(e)) => chat.emit_event("datadir.move.error", json!({ "error": e.to_string() })),
             Err(e) => chat.emit_event(
@@ -5518,6 +5522,9 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
             let _ = store.release_data_dir_move(&move_token);
         }
         flag.store(false, Ordering::SeqCst);
+        if reopen.load(Ordering::SeqCst) {
+            restart.notify_one();
+        }
     });
 
     (StatusCode::ACCEPTED, Json(json!({ "started": true }))).into_response()
@@ -5555,6 +5562,26 @@ fn reject_if_stopping(state: &AppState) -> std::result::Result<(), ApiError> {
         ));
     }
     Ok(())
+}
+
+async fn run_engine_settings() -> ApiResult {
+    let (enabled, forced_by) = crate::config::run_engine_settings().map_err(bad_request)?;
+    Ok(Json(json!({"enabled": enabled, "forcedBy": forced_by})))
+}
+
+#[derive(Deserialize)]
+struct RunEngineReq {
+    enabled: bool,
+}
+
+async fn set_run_engine(Json(req): Json<RunEngineReq>) -> ApiResult {
+    match crate::config::run_engine_settings().map_err(bad_request)?.1 {
+        Some("canary") => return Err(bad_request("Canary builds always use the new experiment engine.")),
+        Some(_) => return Err(bad_request("ORX_RUN_ENGINE controls this setting. Remove it from the server environment to use this switch.")),
+        None => {}
+    }
+    crate::config::set_run_engine_enabled(req.enabled)?;
+    run_engine_settings().await
 }
 
 // --- git settings -----------------------------------------------------------
@@ -6400,91 +6427,85 @@ fn start_pty_with_env(
     })
 }
 
+/// The dashboard's Connect: the engine logs in through its own connection, and each
+/// password, passphrase or MFA question is asked in this terminal.
 async fn ssh_connect_socket(
     mut socket: WebSocket,
     host: String,
     backend: SshConnectBackend,
-    target: crate::jobs::ssh::SshTarget,
+    _target: crate::jobs::ssh::SshTarget,
 ) {
-    #[cfg(windows)]
-    if !ssh_service_connect(&mut socket, &target).await {
-        return;
-    }
-    #[cfg(unix)]
-    if !crate::jobs::ssh::service::healthy(&target).await {
-        let connection = match crate::jobs::ssh::interactive_args(&target, None, None).await {
-            Ok(connection) => connection,
-            Err(error) => {
-                send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
-                return;
-            }
-        };
-        let args = connection.args.clone();
-        let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
-            Ok(Ok(session)) => session,
-            Ok(Err(error)) => {
-                send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
-                return;
-            }
-            Err(error) => {
-                send_ssh_connect_error(
-                    &mut socket,
-                    &host,
-                    backend,
-                    format!("SSH terminal task failed: {error}"),
-                )
-                .await;
-                return;
-            }
-        };
-        let mut size = DEFAULT_PTY_SIZE;
-        let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
-            return;
-        };
-
-        match status {
-            Ok(status) if status.success() => {
-                if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
-                    let _ = socket
-                        .send(Message::Binary(
-                            format!("\r\norx: warning: {warning}\r\n")
-                                .into_bytes()
-                                .into(),
-                        ))
-                        .await;
+    type Question = (String, tokio::sync::oneshot::Sender<String>);
+    let (questions_tx, mut questions) = mpsc::channel::<Question>(1);
+    let prompt: crate::engine::transport::Prompt = Arc::new(move |question| {
+        let questions = questions_tx.clone();
+        Box::pin(async move {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            questions
+                .send((question, reply))
+                .await
+                .map_err(|_| anyhow!("The terminal closed"))?;
+            Ok(answer.await.ok())
+        })
+    });
+    let backend_name = match backend {
+        SshConnectBackend::Ssh => "ssh",
+        SshConnectBackend::Slurm => "slurm",
+    };
+    let connect = api_v2::check_compute(
+        "connect",
+        json!({"backend": backend_name, "host": host}),
+        Some(prompt),
+    );
+    tokio::pin!(connect);
+    let mut pending: Option<tokio::sync::oneshot::Sender<String>> = None;
+    let mut answer = String::new();
+    let result = loop {
+        tokio::select! {
+            result = &mut connect => break result,
+            Some((question, reply)) = questions.recv() => {
+                let clean: String = question.chars().filter(|c| !c.is_control()).collect();
+                if socket
+                    .send(Message::Binary(format!("\r\n{clean} ").into_bytes().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
                 }
+                answer.clear();
+                pending = Some(reply);
             }
-            Ok(status) => {
-                send_ssh_connect_error(
-                    &mut socket,
-                    &host,
-                    backend,
-                    format!("ssh {host} exited with code {}", status.exit_code()),
-                )
-                .await;
-                return;
-            }
-            Err(error) => {
-                send_ssh_connect_error(&mut socket, &host, backend, error).await;
-                return;
-            }
+            message = socket.recv() => match message {
+                Some(Ok(Message::Binary(bytes))) if pending.is_some() => {
+                    for character in String::from_utf8_lossy(&bytes).chars() {
+                        match character {
+                            '\r' | '\n' => {
+                                if let Some(reply) = pending.take() {
+                                    let _ = reply.send(std::mem::take(&mut answer));
+                                }
+                                let _ = socket.send(Message::Binary(b"\r\n".to_vec().into())).await;
+                                break;
+                            }
+                            '\u{8}' | '\u{7f}' => {
+                                answer.pop();
+                            }
+                            character if !character.is_control() && answer.len() < 16384 => {
+                                answer.push(character)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                _ => {}
+            },
         }
-
-        drop(connection);
-    }
-    if let Err(error) = crate::jobs::ssh::service::attach(&target).await {
-        send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
-        return;
-    }
-    let (backend_name, result, ssh_test) = match backend {
-        SshConnectBackend::Ssh => {
-            let test = probe_ssh_host_preflight(host.clone()).await;
-            let result = json!(&test);
-            ("ssh", result, Some(test))
-        }
-        SshConnectBackend::Slurm => {
-            let result = crate::jobs::slurm::preflight(&host).await;
-            ("slurm", slurm_preflight_value(&result), None)
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+            return;
         }
     };
     if socket
@@ -6496,90 +6517,8 @@ async fn ssh_connect_socket(
         .await
         .is_ok()
     {
-        if let Some(test) = ssh_test {
-            record_ssh_host_test(&test).await;
-        }
         close_socket(&mut socket).await;
     }
-}
-
-#[cfg(windows)]
-async fn ssh_service_connect(socket: &mut WebSocket, target: &crate::jobs::ssh::SshTarget) -> bool {
-    use crate::jobs::ssh::service;
-    let start = match service::request(target, json!({"op":"connect_start"})).await {
-        Ok(start) => start,
-        Err(error) => {
-            send_ws_error(socket, error.to_string()).await;
-            return false;
-        }
-    };
-    let Some(attempt) = start["attempt"].as_str() else {
-        return false;
-    };
-    let mut prompt = None;
-    let mut answer = String::new();
-    let success = loop {
-        let status =
-            match service::request(target, json!({"op":"connect_status", "attempt":attempt})).await
-            {
-                Ok(status) => status,
-                Err(error) => {
-                    send_ws_error(socket, error.to_string()).await;
-                    break false;
-                }
-            };
-        if status["done"] == true {
-            if let Some(error) = status["error"].as_str() {
-                send_ws_error(socket, error.to_owned()).await;
-                break false;
-            }
-            break true;
-        }
-        if let Some(text) = status["prompt"].as_str() {
-            if prompt.as_deref() != Some(text) {
-                prompt = Some(text.to_owned());
-                answer.clear();
-                let clean: String = text
-                    .chars()
-                    .filter(|character| !character.is_control())
-                    .collect();
-                if socket
-                    .send(Message::Binary(format!("\r\n{clean} ").into_bytes().into()))
-                    .await
-                    .is_err()
-                {
-                    break false;
-                }
-            }
-        }
-        tokio::select! {
-            message = socket.recv() => {
-                match message {
-                    Some(Ok(Message::Binary(bytes))) if prompt.is_some() => {
-                        let mut submit = false;
-                        for character in String::from_utf8_lossy(&bytes).chars() {
-                            match character {
-                                '\r' | '\n' => {submit = true; break;},
-                                '\u{8}' | '\u{7f}' => {answer.pop();},
-                                character if !character.is_control() && answer.len() < 16384 => answer.push(character),
-                                _ => {},
-                            }
-                        }
-                        if submit {
-                            let result = service::request(target, json!({"op":"connect_answer", "attempt":attempt, "answer":answer})).await;
-                            answer.clear(); prompt = None;
-                            if let Err(error) = result {send_ws_error(socket, error.to_string()).await; break false;}
-                        }
-                    }
-                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break false,
-                    _ => {},
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(150)) => {},
-        }
-    };
-    let _ = service::request(target, json!({"op":"connect_cancel", "attempt":attempt})).await;
-    success
 }
 
 async fn send_ws_error(socket: &mut WebSocket, error: String) {
@@ -6599,7 +6538,13 @@ async fn ssh_run_socket(
     target: crate::jobs::ssh::SshTarget,
     command: String,
 ) {
-    let connection = match crate::jobs::ssh::interactive_args(&target, None, Some(command)).await {
+    let connection = match crate::jobs::ssh::prepare_interactive_connection(
+        &target,
+        None,
+        Some(command),
+    )
+    .await
+    {
         Ok(connection) => connection,
         Err(error) => {
             send_ws_error(&mut socket, error.to_string()).await;
@@ -8065,32 +8010,17 @@ fn sidebar_session_json(store: &Store, session: &StoredChatSession, busy: bool) 
 }
 
 fn chat_active_runs_json(store: &Store) -> Result<Value> {
-    let mut associations: Vec<_> = store
-        .list_active_run_wakeups()?
-        .into_iter()
-        .map(|wakeup| (wakeup.chat_session_id, wakeup.run))
-        .collect();
-    for run in store.list_active_runs()? {
-        if let Some(session_id) = run.chat_session_id.clone() {
-            associations.push((session_id, run));
-        }
-    }
-    let mut seen = HashSet::new();
     let mut rows = Vec::new();
-    for (session_id, run) in associations {
-        if !seen.insert((session_id.clone(), run.id.clone())) {
-            continue;
-        }
+    for (session_id, run) in store.chat_active_runs()? {
         let experiment_name = store
             .get_local_experiment(&run.experiment_id)?
             .map(|experiment| experiment.display_name().to_string());
         rows.push(json!({
             "sessionId": session_id,
-            "run": ApiRun::from(&run),
+            "run": ApiRun::new(store, &run)?,
             "experimentName": experiment_name,
         }));
     }
-    rows.sort_by_key(|row| (row["sessionId"].to_string(), row["run"]["id"].to_string()));
     Ok(json!(rows))
 }
 
@@ -8261,9 +8191,29 @@ async fn chat_session_experiments(Path(id): Path<String>) -> ApiResult {
     store
         .get_chat_session(&id)?
         .ok_or_else(|| not_found("chat session"))?;
-    Ok(Json(
-        json!({ "experiments": store.list_experiments_by_chat_session(&id)? }),
-    ))
+    let experiments = store
+        .list_experiments_by_chat_session(&id)?
+        .into_iter()
+        .map(|row| {
+            let current_run = row
+                .current_run
+                .map(|run| {
+                    let mut value = serde_json::to_value(ApiRun::new(&store, &run)?)?;
+                    value["cancelRequested"] = json!(run.cancel_requested);
+                    value["endedAt"] = json!(run.ended_at);
+                    Ok::<_, crate::error::Error>(value)
+                })
+                .transpose()?;
+
+            Ok(json!({
+                "experiment": row.experiment,
+                "projectName": row.project_name,
+                "currentRun": current_run,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Json(json!({ "experiments": experiments })))
 }
 
 async fn create_chat_session(
@@ -9166,19 +9116,28 @@ async fn agent_status(State(state): State<AppState>) -> Json<Value> {
 
 // --- /api/events SSE ------------------------------------------------------
 
-async fn events(
-    State(state): State<AppState>,
-) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+async fn events(State(state): State<AppState>) -> Response {
+    let Ok(client) = api_v2::event_client() else {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     // Small buffer on purpose: run.log events can carry ~MB payloads, and a
     // stalled client must backpressure the loop, not queue hundreds of MB.
     let (tx, rx) = mpsc::channel::<Event>(16);
-    tokio::spawn(event_loop(tx.clone()));
-    // Chat events ride the same stream: chat.session / chat.message / chat.busy.
-    tokio::spawn(forward_chat_events(state.chat.subscribe(), tx));
-    let stream = futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|ev| (Ok(ev), rx))
+    // Subscribed before the snapshot, so no run change between them is lost.
+    let runs = api_v2::run_events().ok();
+    let chat = tx.clone();
+    tokio::spawn(async move {
+        event_loop(tx, runs).await;
+        drop(client);
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    // Chat events ride the same stream: chat.session / chat.message / chat.busy.
+    tokio::spawn(forward_chat_events(state.chat.subscribe(), chat));
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|ev| (Ok::<_, Infallible>(ev), rx))
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn forward_chat_events(
@@ -9218,7 +9177,12 @@ struct EventCursor {
     projects: HashMap<String, i64>,
     experiments: HashMap<String, i64>,
     files: HashMap<String, u64>,
-    runs: HashMap<String, (String, i64)>,
+    runs: HashMap<String, String>,
+    /// Runs whose local log file may still grow: in flight, or finished with a final
+    /// collection not yet streamed.
+    tailed: HashSet<String>,
+    /// Live engine runs, whose hosts report log growth while this stream is open.
+    followed: HashMap<String, Box<dyn Send>>,
     log_offsets: HashMap<String, u64>,
     log_generations: HashMap<String, String>,
     chat_active_runs: Option<Value>,
@@ -9233,27 +9197,65 @@ struct EventCursor {
 /// there for run logs; nothing about an update needs that resolution.
 const UPDATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 
-/// 500ms poll loop: diff the store + log files, push named events into the
-/// channel. Ends when the subscriber disconnects (send fails). Same idiom as
-/// serve.rs, extended with project/experiment diffs.
-async fn event_loop(tx: mpsc::Sender<Event>) {
+/// Run changes arrive from the engine's Bus; projects, experiments, files, updates and local
+/// log files are diffed every 500ms. Ends when the subscriber disconnects.
+async fn event_loop(
+    tx: mpsc::Sender<Event>,
+    mut runs: Option<tokio::sync::broadcast::Receiver<crate::engine::bus::RunEvent>>,
+) {
+    use tokio::sync::broadcast::error::RecvError;
     let mut cursor = EventCursor::default();
     let mut first = true;
     loop {
         if !first {
             // An idle store never sends, so a failed send can't be the only
             // disconnect signal — watch the receiver side too or the loop
-            // (and its 2Hz store polling) leaks per closed EventSource.
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            // leaks per closed EventSource.
+            let event = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(500)) => None,
                 _ = tx.closed() => return,
+                event = async {
+                    match runs.as_mut() {
+                        Some(receiver) => receiver.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => Some(event),
+            };
+            let batch = match event {
+                None => None,
+                Some(Ok(event)) => Some(
+                    Store::open().and_then(|store| run_events(&store, &mut cursor, Some(event))),
+                ),
+                // Lagged: resynchronize every run from the store.
+                Some(Err(RecvError::Lagged(_))) => {
+                    Some(Store::open().and_then(|store| run_events(&store, &mut cursor, None)))
+                }
+                Some(Err(RecvError::Closed)) => {
+                    runs = None;
+                    continue;
+                }
+            };
+            if let Some(batch) = batch {
+                for ev in batch.unwrap_or_default() {
+                    if tx.send(ev).await.is_err() {
+                        return;
+                    }
+                }
+                continue;
             }
         }
         if tx.is_closed() {
             return;
         }
         // Store hiccups (locked db) just skip a tick.
-        let batch = collect_events(&mut cursor, first).unwrap_or_default();
+        let mut batch = collect_events(&mut cursor).unwrap_or_default();
+        if first {
+            batch.extend(
+                Store::open()
+                    .and_then(|store| run_events(&store, &mut cursor, None))
+                    .unwrap_or_default(),
+            );
+        }
         first = false;
         for ev in batch {
             if tx.send(ev).await.is_err() {
@@ -9267,9 +9269,9 @@ fn json_event(name: &str, data: &Value) -> Event {
     Event::default().event(name).data(data.to_string())
 }
 
-/// One diff pass. On the first pass everything is "changed", so a fresh
+/// One non-run diff pass. On the first pass everything is "changed", so a fresh
 /// subscriber gets a full snapshot and needs no separate baseline fetches.
-fn collect_events(cursor: &mut EventCursor, first: bool) -> Result<Vec<Event>> {
+fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
     let mut out = Vec::new();
 
     // Sampled far below the 2Hz loop — the updater works on the scale of
@@ -9290,10 +9292,6 @@ fn collect_events(cursor: &mut EventCursor, first: bool) -> Result<Vec<Event>> {
     }
 
     let store = Store::open()?;
-    // Cap log bytes per tick so one pass never materializes a huge batch —
-    // remainders (whole-log replays included) stream out on later ticks.
-    let mut log_budget: u64 = 2_000_000;
-
     for project in store.list_local_projects()? {
         if cursor.projects.get(&project.id) != Some(&project.updated_at) {
             cursor
@@ -9317,41 +9315,96 @@ fn collect_events(cursor: &mut EventCursor, first: bool) -> Result<Vec<Event>> {
         }
     }
 
-    for run in store.list_runs(200)? {
-        let changed = match cursor.runs.get(&run.id) {
-            None => true,
-            Some((status, updated)) => *status != run.status || *updated != run.updated_at,
-        };
-        if changed {
-            cursor
-                .runs
-                .insert(run.id.clone(), (run.status.clone(), run.updated_at));
+    // Cap log bytes per tick so one pass never materializes a huge batch —
+    // remainders (whole-log replays included) stream out on later ticks.
+    let mut log_budget: u64 = 2_000_000;
+    let tailed: Vec<String> = cursor.tailed.iter().cloned().collect();
+    for run_id in tailed {
+        let delta = push_log_delta(&run_id, cursor, &mut out, &mut log_budget);
+        let live = cursor
+            .runs
+            .get(&run_id)
+            .is_some_and(|status| !is_terminal(status));
+        if !live && !delta {
+            cursor.tailed.remove(&run_id);
+        }
+    }
+    // Committed only now that the batch is certain to be returned.
+    if let Some(update) = sampled_update {
+        cursor.update = Some(update);
+    }
+    Ok(out)
+}
+
+/// Run events for one Bus event, or for every recent run when `event` is `None` (the first
+/// pass, or after the subscriber lagged).
+fn run_events(
+    store: &Store,
+    cursor: &mut EventCursor,
+    event: Option<crate::engine::bus::RunEvent>,
+) -> Result<Vec<Event>> {
+    use crate::engine::bus::RunEvent;
+    let first = cursor.chat_active_runs.is_none();
+    let runs = match &event {
+        None => store.list_runs(200)?,
+        Some(RunEvent::Changed { run_id, .. } | RunEvent::LogCollection { run_id }) => {
+            store.get_run(run_id)?.into_iter().collect()
+        }
+        Some(RunEvent::Grew { run_id, len, .. }) => {
+            // A followed engine run's log grew on its host; the client refetches it.
+            return Ok(vec![json_event(
+                "run.log",
+                &json!({"runId": run_id, "dataBase64": "", "offset": len}),
+            )]);
+        }
+        Some(RunEvent::Host { alias, root, state }) => {
+            return Ok(vec![json_event(
+                "host.updated",
+                &api_v2::host_view(store, alias, root, state)?,
+            )])
+        }
+        Some(RunEvent::Notices { .. }) => return Ok(Vec::new()),
+    };
+    let mut out = Vec::new();
+    if event.is_none() {
+        for (alias, root, state) in store.engine_hosts()? {
             out.push(json_event(
-                "run.updated",
-                &json!({ "run": ApiRun::from(&run) }),
+                "host.updated",
+                &api_v2::host_view(store, &alias, &root, &state)?,
             ));
         }
-        if first {
+    }
+    for run in runs {
+        if !cursor.runs.contains_key(&run.id) {
             // Live runs replay their whole log through the stream (chunked per
-            // tick); terminal runs start at EOF — backfill is /api/runs/{id}/log.
-            let start = if is_terminal(&run.status) {
+            // tick); runs already finished start at EOF — backfill is /api/runs/{id}/log.
+            let start = if first && is_terminal(&run.status) {
                 log_size(&run.id)
             } else {
                 0
             };
             cursor.log_offsets.insert(run.id.clone(), start);
         }
-        // Terminal runs were seeded at EOF above, so this is a no-op for them.
-        push_log_delta(&run, cursor, &mut out, &mut log_budget);
+        cursor.runs.insert(run.id.clone(), run.status.clone());
+        cursor.tailed.insert(run.id.clone());
+        if crate::engine::is_engine_row(&run) && !is_terminal(&run.status) {
+            if !cursor.followed.contains_key(&run.id) {
+                if let Ok(follow) = api_v2::follow_log(&run.id) {
+                    cursor.followed.insert(run.id.clone(), follow);
+                }
+            }
+        } else {
+            cursor.followed.remove(&run.id);
+        }
+        out.push(json_event(
+            "run.updated",
+            &json!({ "run": ApiRun::new(store, &run)? }),
+        ));
     }
-    let active_runs = chat_active_runs_json(&store)?;
+    let active_runs = chat_active_runs_json(store)?;
     if cursor.chat_active_runs.as_ref() != Some(&active_runs) {
         out.push(json_event("chat.runs", &json!({})));
         cursor.chat_active_runs = Some(active_runs);
-    }
-    // Committed only now that the batch is certain to be returned.
-    if let Some(update) = sampled_update {
-        cursor.update = Some(update);
     }
     Ok(out)
 }
@@ -9374,35 +9427,37 @@ fn push_experiment_events(
     Ok(())
 }
 
+/// True when this pass sent or reset anything.
 fn push_log_delta(
-    run: &StoredRun,
+    run_id: &str,
     cursor: &mut EventCursor,
     out: &mut Vec<Event>,
     budget: &mut u64,
-) {
-    let offset = *cursor.log_offsets.entry(run.id.clone()).or_insert(0);
-    let expected = cursor.log_generations.get(&run.id).map(String::as_str);
-    let Ok(snapshot) = crate::jobs::ssh::service::logs::read(&run.id, offset, *budget, expected)
+) -> bool {
+    let offset = *cursor.log_offsets.entry(run_id.to_owned()).or_insert(0);
+    let expected = cursor.log_generations.get(run_id).map(String::as_str);
+    let Ok(snapshot) = crate::jobs::ssh::service::logs::read(run_id, offset, *budget, expected)
     else {
-        return;
+        return false;
     };
     let reset = expected.is_some_and(|generation| generation != snapshot.generation)
         || snapshot.offset != offset;
     if snapshot.bytes.is_empty() && !reset {
-        return;
+        return false;
     }
     *budget -= snapshot.bytes.len() as u64;
     cursor.log_offsets.insert(
-        run.id.clone(),
+        run_id.to_owned(),
         snapshot.offset + snapshot.bytes.len() as u64,
     );
     cursor
         .log_generations
-        .insert(run.id.clone(), snapshot.generation.clone());
+        .insert(run_id.to_owned(), snapshot.generation.clone());
     out.push(json_event("run.log", &json!({
-        "runId":run.id, "dataBase64":base64::engine::general_purpose::STANDARD.encode(&snapshot.bytes),
+        "runId":run_id, "dataBase64":base64::engine::general_purpose::STANDARD.encode(&snapshot.bytes),
         "offset":snapshot.offset, "generation":snapshot.generation,
     })));
+    true
 }
 
 fn log_size(run_id: &str) -> u64 {
@@ -9483,6 +9538,174 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 mod tests {
     use super::*;
 
+    async fn event_text(events: Vec<Event>) -> String {
+        let stream = futures::stream::iter(events.into_iter().map(Ok::<_, Infallible>));
+        let bytes = axum::body::to_bytes(Sse::new(stream).into_response().into_body(), 8192)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn host_bus_events_serialize_as_dashboard_sse_and_initial_snapshot() {
+        use crate::engine::bus::{Bus, RunEvent};
+        use crate::engine::transport::{HostClass, HostState, Status};
+        let directory = std::env::temp_dir().join(format!("orx-host-sse-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(directory.clone()).unwrap();
+        let bus = Bus::new();
+        let mut receiver = bus.subscribe();
+        let mut cursor = EventCursor::default();
+        for (status, expected) in [
+            (Status::Live, "live"),
+            (Status::Backoff, "backoff"),
+            (Status::Live, "live"),
+            (Status::NeedsAuth, "needs_auth"),
+        ] {
+            let state = HostState {
+                status,
+                since_ms: 123,
+                next_retry_ms: Some(456),
+                cause: Some("fixture".into()),
+                ..HostState::default()
+            };
+            store
+                .seed_engine_host("lab", "/engine", Some(HostClass::Key), &state)
+                .unwrap();
+            bus.publish(RunEvent::Host {
+                alias: "lab".into(),
+                root: "/engine".into(),
+                state: state.clone(),
+            });
+            let events =
+                run_events(&store, &mut cursor, Some(receiver.recv().await.unwrap())).unwrap();
+            let text = event_text(events).await;
+            assert!(text.contains("event: host.updated"), "{text}");
+            let data = text
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            let value: Value = serde_json::from_str(data).unwrap();
+            assert_eq!(
+                value,
+                api_v2::host_view(&store, "lab", "/engine", &state).unwrap()
+            );
+            assert_eq!(value["status"], expected);
+        }
+        assert!(!run_events(&store, &mut cursor, None).unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_bus_events_emit_contact_and_cancel_without_a_timestamp_change() {
+        use crate::engine::bus::RunEvent;
+        use crate::engine::Phase;
+        use crate::store::Contact;
+        let directory = std::env::temp_dir().join(format!("orx-run-sse-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(directory.clone()).unwrap();
+        let run = StoredRun {
+            id: "r".into(),
+            experiment_id: "e".into(),
+            project_id: "p".into(),
+            status: "running".into(),
+            backend_json: r#"{"kind":"engine","jobId":"/r","handle":{"type":"Local","dir":"/r"}}"#
+                .into(),
+            command: "true".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        };
+        store.upsert_run(&run).unwrap();
+        store.accept_run_cancel("r", Some("user")).unwrap();
+        let updated_at = store.get_run("r").unwrap().unwrap().updated_at;
+        let mut cursor = EventCursor::default();
+        run_events(&store, &mut cursor, None).unwrap();
+        for contact in [
+            Contact::Unreachable {
+                since: 2,
+                cause: "offline".into(),
+            },
+            Contact::NeedsAuth {
+                since: 3,
+                cause: "auth".into(),
+            },
+            Contact::Live,
+        ] {
+            store.set_run_contact("r", &contact).unwrap();
+            assert_eq!(store.get_run("r").unwrap().unwrap().updated_at, updated_at);
+            let event = RunEvent::Changed {
+                run_id: "r".into(),
+                phase: Phase::Running,
+                contact: contact.clone(),
+                cancelling: true,
+            };
+            let events = run_events(&store, &mut cursor, Some(event)).unwrap();
+            let text = event_text(events).await;
+            assert!(text.contains("event: run.updated"));
+            let data = text
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            let value: Value = serde_json::from_str(data).unwrap();
+            assert_eq!(value["run"]["cancelling"], true);
+            assert_eq!(
+                value["run"]["contact"],
+                if contact == Contact::Live {
+                    Value::Null
+                } else {
+                    json!(contact)
+                }
+            );
+        }
+        store
+            .set_engine_phase("r", "running", "done", Some(10), Some(0), None)
+            .unwrap();
+        store.queue_log_collection("r").unwrap();
+        for attempt in 0..=8 {
+            if attempt == 8 {
+                store.finish_log_collection("r").unwrap();
+            } else if attempt > 0 {
+                store.defer_log_collection("r", "offline").unwrap();
+            }
+            let events = run_events(
+                &store,
+                &mut cursor,
+                Some(RunEvent::LogCollection { run_id: "r".into() }),
+            )
+            .unwrap();
+            let text = event_text(events).await;
+            assert!(text.contains("event: run.updated"));
+            let data = text
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            let value: Value = serde_json::from_str(data).unwrap();
+            if attempt == 8 {
+                assert!(value["run"].get("logCollection").is_none());
+                assert!(value["run"].get("logCollectionError").is_none());
+            } else {
+                assert_eq!(
+                    value["run"]["logCollection"],
+                    if attempt == 7 { "failed" } else { "pending" }
+                );
+                if attempt == 0 {
+                    assert!(value["run"].get("logCollectionError").is_none());
+                } else {
+                    assert_eq!(value["run"]["logCollectionError"], "offline");
+                }
+            }
+            assert_eq!(value["run"]["cancelling"], false);
+        }
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn chat_active_runs_tracks_owners_and_watchers_until_terminal() {
         let dir = std::env::temp_dir().join(format!("orx-chat-runs-{}", uuid::Uuid::new_v4()));
@@ -9505,8 +9728,8 @@ mod tests {
             chat_session_id: Some("owner".into()),
         };
         store.upsert_run(&run).unwrap();
-        store.register_run_wakeup(&run.id, "owner").unwrap();
-        store.register_run_wakeup(&run.id, "watcher").unwrap();
+        store.subscribe_run(&run.id, "owner", 1).unwrap();
+        store.subscribe_run(&run.id, "watcher", 1).unwrap();
         let rows = chat_active_runs_json(&store).unwrap();
         assert_eq!(rows.as_array().unwrap().len(), 2);
         assert_eq!(rows[0]["sessionId"], "owner");
@@ -9585,31 +9808,6 @@ mod tests {
             reasoning_level: None,
         });
         assert!(new_chat_settings("project".into(), preferences, &catalog).is_err());
-    }
-
-    #[tokio::test]
-    async fn empty_local_error_reports_the_http_status() {
-        for (status, body, expected) in [
-            (StatusCode::BAD_GATEWAY, "", "HTTP 502 Bad Gateway"),
-            (StatusCode::NOT_FOUND, "", "HTTP 404 Not Found"),
-            (
-                StatusCode::BAD_REQUEST,
-                r#"{"error":""}"#,
-                "HTTP 400 Bad Request",
-            ),
-        ] {
-            let response = axum::http::Response::builder()
-                .status(status)
-                .body(body.to_string())
-                .unwrap();
-            let error = decode_local_response::<Value>(response.into(), "start the run")
-                .await
-                .unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                format!("orx up could not start the run: {expected}")
-            );
-        }
     }
 
     #[test]
@@ -9715,7 +9913,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_events_and_hello_bypass_update_drain_without_counting_active_requests() {
+        use tower::ServiceExt;
+
+        let _guard = ACTIVE_TEST_LOCK.lock().await;
+        let app = Router::new()
+            .route("/api/v2/hello", get(|| async { "ready" }))
+            .route("/api/v2/events", get(|| async { "events" }))
+            .layer(middleware::from_fn(track_active));
+        DRAINING.store(true, Ordering::SeqCst);
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            for path in ["hello", "events"] {
+                let request = axum::http::Request::builder()
+                    .uri(format!("/api/v2/{path}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert!(response.status().is_success());
+                axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+        DRAINING.store(false, Ordering::SeqCst);
+        result.unwrap();
+        assert_eq!(ACTIVE.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn a_streaming_response_stays_active_until_its_body_is_sent() {
+        let _guard = ACTIVE_TEST_LOCK.lock().await;
         let gate = Arc::new(tokio::sync::Notify::new());
         let release = gate.clone();
         let app = Router::new()
@@ -10143,7 +10371,54 @@ mod tests {
     }
 
     #[test]
-    fn api_run_exposes_cancel_intent() {
+    fn launches_hold_their_project_against_moves_and_deletion() {
+        let lifecycle = Arc::new(ProjectLifecycle::default());
+        let moving = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let admit = launch_admission(lifecycle.clone(), moving.clone(), stopping.clone());
+        let admission = admit("p").unwrap();
+        assert_eq!(lifecycle.operation_count(), 1);
+        assert!(lifecycle.begin_delete("p").is_none());
+        drop(admission);
+        assert_eq!(lifecycle.operation_count(), 0);
+        moving.store(true, Ordering::SeqCst);
+        assert!(admit("p").err().unwrap().to_string().contains("move"));
+        assert_eq!(lifecycle.operation_count(), 0);
+        moving.store(false, Ordering::SeqCst);
+        let deleting = lifecycle.begin_delete("p").unwrap();
+        assert!(admit("p").is_err());
+        drop(deleting);
+        stopping.store(true, Ordering::SeqCst);
+        assert!(admit("p").is_err());
+    }
+
+    #[test]
+    fn create_run_request_preserves_forwarded_slurm_resources_and_attribution() {
+        let request: CreateRunReq = serde_json::from_value(json!({
+            "experimentId": "experiment-1",
+            "backend": "slurm",
+            "cpus": 8,
+            "mem": "64G",
+            "partition": "gpu",
+            "chatSessionId": "session-1",
+            "telemetrySuppressed": true,
+            "force": true,
+        }))
+        .unwrap();
+        let forwarded = request.into_run_args();
+        assert_eq!(forwarded.exp_id, "experiment-1");
+        assert_eq!(forwarded.backend.as_deref(), Some("slurm"));
+        assert_eq!(forwarded.cpus, Some(8));
+        assert_eq!(forwarded.mem.as_deref(), Some("64G"));
+        assert_eq!(forwarded.partition.as_deref(), Some("gpu"));
+        assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
+        assert!(forwarded.forwarded);
+        assert!(forwarded.telemetry_suppressed);
+        assert!(forwarded.force);
+    }
+
+    #[test]
+    fn api_run_exposes_cancel_intent_contact_and_the_launched_backend() {
         let mut backend =
             crate::jobs::BackendDescriptor::parse(r#"{"kind":"openresearch_job"}"#).unwrap();
         backend.rental_lease = Some(crate::jobs::rental::Rental {
@@ -10169,13 +10444,132 @@ mod tests {
             chat_session_id: None,
         };
 
-        let value = serde_json::to_value(ApiRun::from(&run)).unwrap();
-        assert_eq!(value["cancelRequested"], true);
+        let dir = std::env::temp_dir().join(format!("orx-api-run-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let value = serde_json::to_value(ApiRun::new(&store, &run).unwrap()).unwrap();
+        assert!(value.get("cancelRequested").is_none());
         assert_eq!(value["backend"]["kind"], "openresearch_job");
+        assert!(value["contact"].is_null());
         assert!(!value.to_string().contains("private-rental-token"));
         let legacy = serde_json::to_value(&run).unwrap();
         assert!(!legacy.to_string().contains("private-rental-token"));
         assert!(run.backend_json.contains("private-rental-token"));
+
+        // An engine run shows what it launched, its reachability, and an accepted cancel.
+        let metadata = crate::jobs::BackendDescriptor::parse(r#"{"kind":"engine"}"#).unwrap();
+        let launch = crate::store::LaunchSpec {
+            kind: "ssh_job".into(),
+            target: Some("lab".into()),
+            options: json!({"container": {"reference": "dev", "id": "c1", "startedAt": "t", "runDir": "/root/.orx/runs/e"}}),
+        };
+        store
+            .insert_submitting_run(crate::store::SubmittingRun {
+                id: "e",
+                experiment_id: "experiment-1",
+                project_id: "project-1",
+                metadata: &metadata,
+                command: "train",
+                created_at: 1,
+                commit_sha: None,
+                chat_session_id: None,
+                spec_digest: "digest",
+                launch: &launch,
+            })
+            .unwrap();
+        store
+            .set_engine_phase("e", "submitting", "running", None, None, Some(1234))
+            .unwrap();
+        store.accept_run_cancel("e", Some("user")).unwrap().unwrap();
+        let outage = crate::store::Contact::Unreachable {
+            since: 3,
+            cause: "eof".into(),
+        };
+        store.set_run_contact("e", &outage).unwrap();
+        let engine = store.get_run("e").unwrap().unwrap();
+        let value = serde_json::to_value(ApiRun::new(&store, &engine).unwrap()).unwrap();
+        assert!(value.get("cancelRequested").is_none());
+        assert_eq!(value["contact"]["type"], "unreachable");
+        assert_eq!(value["backend"]["kind"], "ssh_job");
+        assert_eq!(value["backend"]["namespace"], "lab");
+        assert_eq!(value["backend"]["sshContainer"]["reference"], "dev");
+        assert_eq!(value["cancelling"], true);
+        assert_eq!(value["startedAt"], 1234);
+        assert!(value["lostReason"].is_null());
+        assert_eq!(value["host"], "lab");
+        assert!(value["noticeError"].is_null());
+        store
+            .insert_run_notice("e", "chat", crate::store::TERMINAL, "terminal", "done", 1)
+            .unwrap();
+        let batch = store.run_notice_batch_at("chat", 2).unwrap();
+        store
+            .record_run_notice_failure(
+                "chat",
+                &batch[0].client_turn_id,
+                "Chat harness is no longer configured",
+                true,
+                3,
+            )
+            .unwrap();
+        let value = serde_json::to_value(ApiRun::new(&store, &engine).unwrap()).unwrap();
+        assert_eq!(value["noticeError"], "Chat harness is no longer configured");
+        let mut engine = engine;
+        engine.backend_json = crate::engine::handle::backend_json(
+            "e",
+            Some(&crate::engine::handle::Handle::Ssh {
+                host: "lab".into(),
+                root: "/engine".into(),
+            }),
+            &metadata,
+        )
+        .unwrap();
+        for status in [
+            "submitting",
+            "starting",
+            "running",
+            "done",
+            "failed",
+            "cancelled",
+            "lost",
+        ] {
+            engine.status = status.into();
+            engine.result_markdown = (status == "lost").then(|| "abandoned".into());
+            for contact in [
+                crate::store::Contact::Live,
+                outage.clone(),
+                crate::store::Contact::NeedsAuth {
+                    since: 4,
+                    cause: "auth".into(),
+                },
+                crate::store::Contact::Unreconciled {
+                    since: 5,
+                    detail: "unknown".into(),
+                },
+            ] {
+                store.set_run_contact("e", &contact).unwrap();
+                let value = serde_json::to_value(ApiRun::new(&store, &engine).unwrap()).unwrap();
+                assert_eq!(value["status"], status);
+                assert_eq!(value["host"], "lab");
+                assert_eq!(value["cancelling"], !is_terminal(status));
+                assert_eq!(
+                    value["lostReason"],
+                    if status == "lost" {
+                        json!("abandoned")
+                    } else {
+                        Value::Null
+                    }
+                );
+                assert_eq!(
+                    value["contact"],
+                    if contact == crate::store::Contact::Live {
+                        Value::Null
+                    } else {
+                        json!(contact)
+                    }
+                );
+            }
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -10199,48 +10593,6 @@ mod tests {
         let vercel = ids.iter().position(|id| *id == "vercel").unwrap();
         assert_eq!(ids[vercel + 1], "openresearch");
         assert!(ids.iter().position(|id| *id == "ray").unwrap() < vercel);
-    }
-
-    #[test]
-    fn create_run_request_preserves_forwarded_slurm_resources_and_attribution() {
-        let args = crate::ExpRunArgs {
-            invocation_context: None,
-            telemetry_suppressed: true,
-            forwarded: false,
-            exp_id: "experiment-1".into(),
-            disk: None,
-            provider: None,
-            backend: Some("slurm".into()),
-            flavor: None,
-            org: None,
-            host: None,
-            container: None,
-            no_container: false,
-            manifest: None,
-            image: None,
-            timeout: None,
-            cpus: Some(8),
-            mem: Some("64G".into()),
-            force: true,
-            chat_session_id: Some("session-1".into()),
-            agent_origin: None,
-        };
-        let request = CreateRunReq::from_run_args(&args).unwrap();
-
-        let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value["callerConfigDir"], json!(absolute_config_dir()));
-        assert_eq!(value["experimentId"], "experiment-1");
-        assert_eq!(value["cpus"], 8);
-        assert_eq!(value["mem"], "64G");
-        assert_eq!(value["chatSessionId"], "session-1");
-        assert_eq!(value["force"], true);
-        let forwarded = serde_json::from_value::<CreateRunReq>(value)
-            .unwrap()
-            .into_run_args();
-        assert_eq!(forwarded.cpus, Some(8));
-        assert_eq!(forwarded.mem.as_deref(), Some("64G"));
-        assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
-        assert!(forwarded.force);
     }
 
     #[test]
@@ -10345,6 +10697,7 @@ mod tests {
             stopping: Default::default(),
             dashboard_lock: Default::default(),
             restart: Default::default(),
+            reopen: Default::default(),
             trackio: Default::default(),
         };
         let error = delete_artifact(

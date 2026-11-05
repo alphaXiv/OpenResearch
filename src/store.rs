@@ -33,16 +33,7 @@ pub struct SessionExperiment {
     /// Its newest live run, else its newest run; `None` until it has been run.
     /// A forced relaunch can leave an older run live, so the newest run alone
     /// could hide work still in flight.
-    pub current_run: Option<SessionExperimentRun>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionExperimentRun {
-    pub status: String,
-    pub cancel_requested: bool,
-    pub created_at: i64,
-    pub ended_at: Option<i64>,
+    pub current_run: Option<StoredRun>,
 }
 
 pub fn data_dir() -> PathBuf {
@@ -249,13 +240,13 @@ pub fn human_bytes(n: u64) -> String {
     format!("{:.1} {}", size, UNITS[unit])
 }
 
-pub fn log_path(run_id: &str) -> PathBuf {
+pub fn log_path(data_dir: &Path, run_id: &str) -> PathBuf {
     // Sanitize the id so malformed local data cannot escape the log directory.
     let safe: String = run_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    data_dir().join("run-logs").join(format!("{safe}.log"))
+    data_dir.join("run-logs").join(format!("{safe}.log"))
 }
 
 /// A locally tracked run. `backend_json` stores the backend descriptor used by
@@ -279,7 +270,6 @@ pub struct StoredRun {
     pub result_markdown: Option<String>,
     /// Cancel intent polled by the detached supervisor.
     pub cancel_requested: bool,
-    /// Who asked for the cancel; written only by `Store::request_cancel`, never by `upsert_run`.
     pub cancel_reason: Option<String>,
     /// The `orx up` chat session that launched this run, when it was started by
     /// an agent harness child (which exports `ORX_CHAT_SESSION_ID`). `None` for
@@ -288,10 +278,146 @@ pub struct StoredRun {
     pub chat_session_id: Option<String>,
 }
 
-pub fn public_backend(value: &str) -> Option<serde_json::Value> {
+pub const TERMINAL: &str = "terminal";
+pub const ATTENTION: &str = "attention";
+pub const RECOVERED: &str = "recovered";
+pub const NOTIFY: &str = "notify";
+const TERMINAL_LOG_BYTES: u64 = 4 * 1024;
+const TERMINAL_LOG_LINES: usize = 40;
+
+pub struct SubmittingRun<'a> {
+    pub id: &'a str,
+    pub experiment_id: &'a str,
+    pub project_id: &'a str,
+    pub metadata: &'a crate::jobs::BackendDescriptor,
+    pub command: &'a str,
+    pub created_at: i64,
+    pub commit_sha: Option<&'a str>,
+    pub chat_session_id: Option<&'a str>,
+    pub spec_digest: &'a str,
+    pub launch: &'a LaunchSpec,
+}
+
+/// Where and how a run launches, durable from its first transaction so recovery after a
+/// restart can find the job.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LaunchSpec {
+    /// Backend kind, e.g. `ssh_job`.
+    pub kind: String,
+    /// Host alias, cluster, namespace or account, as the backend names it.
+    pub target: Option<String>,
+    pub options: serde_json::Value,
+}
+
+/// A run row's `(status, updated_at)` as last seen.
+pub type SeenRow = (String, i64);
+
+/// Notify-file bytes already turned into notices, with the file they came from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NotifyCursor {
+    pub ident: orx_host_proto::FileIdent,
+    pub offset: u64,
+    /// Bumped whenever the file is replaced or truncated, so offsets never collide across files.
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Contact {
+    Live,
+    Unreachable { since: i64, cause: String },
+    NeedsAuth { since: i64, cause: String },
+    Unreconciled { since: i64, detail: String },
+    Stopping { since: i64, count: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubmitterIdentity {
+    pub pid: u32,
+    pub starttime: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubmissionFence {
+    pub taken_at: i64,
+    pub submitter: Option<SubmitterIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineRunState {
+    pub started_at: Option<i64>,
+    pub contact: Contact,
+    pub cancel_unconfirmed: Option<Vec<u32>>,
+    pub spec_digest: Option<String>,
+    pub submission_attempt: u32,
+    pub submission_fence: Option<SubmissionFence>,
+    pub cancel_accepted_at: Option<i64>,
+    /// Present on every runner-2 row.
+    pub launch: Option<LaunchSpec>,
+    pub notify_cursor: Option<NotifyCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunNotice {
+    pub id: i64,
+    pub run_id: String,
+    pub chat_session_id: String,
+    pub kind: String,
+    pub dedupe: String,
+    pub body: String,
+    pub created_at: i64,
+    pub client_turn_id: String,
+}
+
+/// The descriptor a run shows, without secrets. An engine run reads as the 0.2.x descriptor of
+/// what it launched: its OpenResearch box's own, else the fields its launch intent decided.
+pub fn public_backend(value: &str, launch: Option<&LaunchSpec>) -> Option<serde_json::Value> {
     let mut backend = serde_json::from_str::<serde_json::Value>(value).ok()?;
-    if let Some(fields) = backend.as_object_mut() {
-        fields.remove("rentalLease");
+    let Some(fields) = backend.as_object_mut() else {
+        return Some(backend);
+    };
+    if fields.get("kind").and_then(serde_json::Value::as_str) == Some("engine") {
+        let descriptor = fields
+            .get("handle")
+            .and_then(|handle| handle.get("descriptor"))
+            .and_then(serde_json::Value::as_object)
+            .cloned();
+        if let Some(descriptor) = descriptor {
+            for (field, value) in descriptor {
+                if field == "kind" || !fields.contains_key(&field) {
+                    fields.insert(field, value);
+                }
+            }
+        } else if let Some(launch) = launch {
+            let options = &launch.options;
+            let directives = &options["directives"];
+            let cpus = directives["cpus-per-task"]
+                .as_str()
+                .and_then(|cpus| cpus.parse::<u64>().ok());
+            let derived = [
+                ("kind", serde_json::json!(launch.kind)),
+                ("namespace", serde_json::json!(launch.target)),
+                ("flavor", options["flavor"].clone()),
+                ("sshContainer", options["container"].clone()),
+                ("context", options["context"].clone()),
+                ("timeoutSecs", options["timeout_seconds"].clone()),
+                ("cpusPerTask", serde_json::json!(cpus)),
+                ("mem", directives["mem"].clone()),
+            ];
+            for (field, value) in derived {
+                if !value.is_null() {
+                    fields.insert(field.into(), value);
+                }
+            }
+        }
+    }
+    fields.remove("rentalLease");
+    if let Some(descriptor) = fields
+        .get_mut("handle")
+        .and_then(|handle| handle.get_mut("descriptor"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        descriptor.remove("rentalLease");
     }
     Some(backend)
 }
@@ -301,7 +427,7 @@ fn serialize_public_backend<S: serde::Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(
-        &public_backend(value)
+        &public_backend(value, None)
             .map(|value| value.to_string())
             .unwrap_or_default(),
     )
@@ -403,21 +529,6 @@ pub struct ProjectActivitySummary {
     pub last_activity_at: i64,
 }
 
-#[derive(Debug, Clone)]
-pub struct RunWakeup {
-    pub run: StoredRun,
-    pub chat_session_id: String,
-    pub state: String,
-    pub monitoring_alerted: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunWakeupRegistration {
-    Scheduled,
-    AlreadyPending,
-    AlreadyDelivered,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delegation {
     pub depth: u32,
@@ -457,6 +568,8 @@ pub struct ReadyChatSubscription {
     told_turn_id: Option<String>,
 }
 
+const CHAT_SUBSCRIPTION_CLAIM_TTL_MS: i64 = 60 * 1000;
+
 /// Each subscription with its target's latest turn and whether the target is
 /// idle after it: done, and with nothing queued unless a stop held the queue.
 const LATEST_SUBSCRIBED_TURNS: &str = "subscribed AS (
@@ -479,7 +592,6 @@ latest AS (
     SELECT *, NOT (idle IS 1 AND told_turn_id IS turn_id) AS pending FROM subscribed
 )";
 
-const RUN_WAKEUP_CLAIM_TTL_MS: i64 = 60 * 1000;
 pub(crate) const CHAT_TURN_LEASE_TTL_MS: i64 = 60 * 1000;
 
 fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
@@ -583,17 +695,28 @@ const SLIMMED_RUN_PATHS: [&[&str]; 2] = [&["repo", ".venv"], &["repo", ".cache",
 
 const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
 const SUPERVISOR_LOCK: (&str, &str) = ("run-logs", ".supervisor.lock");
+const CANCEL_LOCK: (&str, &str) = ("run-logs", ".cancel.lock");
+const SHARED_SSH_LOCK: (&str, &str) = ("run-logs", ".supervisor.shared-ssh.lock");
+/// The kept end of an engine run's log too large to keep whole.
+const TAIL_LOG: (&str, &str) = ("run-logs", ".tail.log");
 /// Per-run files as (data-dir root, name suffix); the supervisor lock goes last so it excludes until the end.
-const RUN_ARTIFACTS: [(&str, &str); 11] = [
+const RUN_ARTIFACTS: [(&str, &str); 18] = [
     ("local-runs", ""),
     ("run-logs", ".log"),
+    ("run-logs", ".spool.log"),
+    ("run-logs", ".log.part"),
+    ("run-logs", ".log.part.json"),
+    TAIL_LOG,
+    ("run-logs", ".tail.log.part"),
+    ("run-logs", ".tail.log.part.json"),
+    ("run-logs", ".ranges.json"),
     ("run-logs", ".cursor.json"),
     ("run-logs", ".pending.json"),
     ("run-logs", ".cursor.lock"),
-    ("run-logs", ".supervisor.shared-ssh.lock"),
+    SHARED_SSH_LOCK,
     ("run-logs", ".supervisor.log"),
     ("run-logs", ".supervisor.log.1"),
-    ("run-logs", ".cancel.lock"),
+    CANCEL_LOCK,
     SUBMISSION_HANDLE,
     SUPERVISOR_LOCK,
 ];
@@ -619,20 +742,36 @@ pub(crate) struct RemoteCleanup {
     pub deleted: bool,
 }
 
-/// `(id, status)` of runs of `kinds` past each project's newest [`FULL_RUNS_PER_PROJECT`].
-fn runs_past_newest(kinds: &'static str) -> String {
+/// Runs whose job ran in `<data dir>/local-runs/<id>`, from 0.2.x or the engine.
+const LOCAL_RUNS: &str = "CASE WHEN json_valid(backend_json) THEN
+    json_extract(backend_json, '$.kind') IN ('local_job', 'tinker_job')
+    OR json_extract(backend_json, '$.handle.type') IN ('Local', 'Tinker') END";
+/// Runs that left a run dir on an SSH or Slurm host, from 0.2.x or the engine.
+const REMOTE_RUNS: &str = "CASE WHEN json_valid(backend_json) THEN
+    json_extract(backend_json, '$.kind') IN ('ssh_job', 'slurm_job')
+    OR json_extract(backend_json, '$.handle.type') IN ('Ssh', 'Slurm') END";
+
+/// `(id, status)` of runs matching `runs` past each project's newest [`FULL_RUNS_PER_PROJECT`].
+fn runs_past_newest(runs: &'static str) -> String {
     format!(
         "SELECT id, status FROM (
            SELECT id, status, ROW_NUMBER() OVER
              (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS position
            FROM runs
-           WHERE CASE WHEN json_valid(backend_json) THEN json_extract(backend_json, '$.kind') END
-             IN ({kinds}))
+           WHERE {runs})
          WHERE position > {FULL_RUNS_PER_PROJECT}"
     )
 }
 
+fn remote_cleanup_eligibility() -> String {
+    format!("NOT EXISTS (SELECT 1 FROM runs WHERE id = run_id AND
+          (contact IS NOT NULL OR status IN ('submitting','starting','running')))
+        AND NOT EXISTS (SELECT 1 FROM log_collections WHERE run_id = remote_cleanups.run_id AND done = 0)
+        AND (deleted = 1 OR run_id IN (SELECT id FROM ({})))", runs_past_newest(REMOTE_RUNS))
+}
+
 /// Queues the SSH/Slurm runs whose `column` equals `value`; deletion wins over a pending finish.
+/// An engine run's entry carries its container from the launch intent, which a deletion removes.
 fn queue_remote_cleanups(
     conn: &Connection,
     column: &'static str,
@@ -642,9 +781,10 @@ fn queue_remote_cleanups(
     conn.execute(
         &format!(
             "INSERT INTO remote_cleanups (run_id, backend_json, deleted, next_attempt_at)
-             SELECT id, backend_json, ?2, ?3 FROM runs
-             WHERE {column} = ?1 AND CASE WHEN json_valid(backend_json)
-               THEN json_extract(backend_json, '$.kind') END IN ('ssh_job', 'slurm_job')
+             SELECT id, CASE WHEN json_extract(launch_spec, '$.options.container') IS NULL
+                 THEN backend_json ELSE json_set(backend_json, '$.sshContainer',
+                   json(json_extract(launch_spec, '$.options.container'))) END, ?2, ?3
+             FROM runs WHERE {column} = ?1 AND {REMOTE_RUNS}
              ON CONFLICT(run_id) DO UPDATE SET backend_json = excluded.backend_json,
                deleted = MAX(deleted, excluded.deleted), attempts = 0,
                next_attempt_at = excluded.next_attempt_at"
@@ -668,6 +808,11 @@ fn validate_deleted_runs(runs: &[StoredRun]) -> Result<()> {
     Ok(())
 }
 
+/// Log collection retries after a minute, doubling to an hour, then hourly.
+const LOG_COLLECTION_RETRY_MS: i64 = 60 * 1000;
+const LOG_COLLECTION_MAX_RETRY_MS: i64 = 60 * 60 * 1000;
+/// Failures before retries reach the cap and the collection reads as failed.
+const LOG_COLLECTION_FAILED_AFTER: u32 = 7;
 /// Failed remote cleanups retry after 5 minutes, doubling up to a day.
 const REMOTE_CLEANUP_RETRY_MS: i64 = 5 * 60 * 1000;
 const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -714,14 +859,6 @@ impl Store {
         Self::open_at_with_move_lock(dir, move_lock_path, BUSY_TIMEOUT)
     }
 
-    /// Shrink this connection's lock wait (e.g. to a wait loop's remaining
-    /// deadline). The next call can pass the default back to restore it.
-    pub(crate) fn set_busy_timeout(&self, timeout: Duration) -> Result<()> {
-        self.conn
-            .pragma_update(None, "busy_timeout", timeout.as_millis() as u64)?;
-        Ok(())
-    }
-
     fn open_at_with_move_lock(
         dir: PathBuf,
         data_dir_move_lock_path: PathBuf,
@@ -737,10 +874,32 @@ impl Store {
         std::fs::create_dir_all(dir.join("run-logs"))
             .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
         let conn = Connection::open(dir.join("orx.db"))?;
+        let has_floor: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata')",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_floor {
+            let floor: Option<i64> = conn
+                .query_row(
+                    "SELECT value FROM store_metadata WHERE key = 'min_reader_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(floor) = floor.filter(|floor| *floor > 1) {
+                return Err(anyhow!("This database requires a newer OpenResearch reader (min_reader_version {}). Update orx before opening it.", floor));
+            }
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS runs (
+            "CREATE TABLE IF NOT EXISTS store_metadata (
+                key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO store_metadata (key, value) VALUES ('min_reader_version', 1);
+            CREATE TABLE IF NOT EXISTS runs (
                 id           TEXT PRIMARY KEY,
                 experiment_id TEXT NOT NULL,
                 project_id   TEXT NOT NULL,
@@ -751,6 +910,46 @@ impl Store {
                 updated_at   INTEGER NOT NULL,
                 ended_at     INTEGER,
                 exit_code    INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS engine_host_auth (
+                alias TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS engine_hosts (
+                alias TEXT NOT NULL,
+                root TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                PRIMARY KEY(alias, root)
+            );
+            CREATE TABLE IF NOT EXISTS run_subscriptions (
+                run_id TEXT NOT NULL,
+                chat_session_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(run_id, chat_session_id)
+            );
+            CREATE TABLE IF NOT EXISTS run_notices (
+                id INTEGER PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                chat_session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                dedupe TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                client_turn_id TEXT,
+                delivered_at INTEGER,
+                delivery_failures INTEGER NOT NULL DEFAULT 0,
+                first_failure_at INTEGER,
+                next_delivery_at INTEGER,
+                delivery_error TEXT,
+                retired_at INTEGER,
+                UNIQUE(run_id, chat_session_id, dedupe)
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_notices_pending
+                ON run_notices(chat_session_id, client_turn_id, id) WHERE delivered_at IS NULL;
+            CREATE TABLE IF NOT EXISTS legacy_watches (
+                run_id TEXT PRIMARY KEY,
+                seen_status TEXT,
+                seen_updated_at INTEGER
             );
             CREATE TABLE IF NOT EXISTS native_invocation_identities (
                 harness TEXT NOT NULL,
@@ -960,6 +1159,14 @@ impl Store {
                 next_attempt_at INTEGER NOT NULL,
                 last_error      TEXT
             );
+            CREATE TABLE IF NOT EXISTS log_collections (
+                run_id          TEXT PRIMARY KEY,
+                collected       INTEGER NOT NULL DEFAULT 0,
+                done            INTEGER NOT NULL DEFAULT 0,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT
+            );
             CREATE TABLE IF NOT EXISTS remote_source_sweeps (
                 host   TEXT NOT NULL,
                 root   TEXT NOT NULL,
@@ -1023,6 +1230,7 @@ impl Store {
             "ALTER TABLE chat_run_wakeups ADD COLUMN claimed_at INTEGER",
             "ALTER TABLE chat_run_wakeups ADD COLUMN delivered_at INTEGER",
             "ALTER TABLE chat_run_wakeups ADD COLUMN monitoring_alerted INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chat_run_wakeups ADD COLUMN engine_migrated INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_messages ADD COLUMN parent_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN base_native_session_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
@@ -1038,14 +1246,34 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN nested_delegation INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
             "ALTER TABLE runs ADD COLUMN cancel_reason TEXT",
+            "ALTER TABLE runs ADD COLUMN cancel_unconfirmed TEXT",
+            "ALTER TABLE runs ADD COLUMN contact TEXT",
+            "ALTER TABLE runs ADD COLUMN spec_digest TEXT",
+            "ALTER TABLE runs ADD COLUMN submission_attempt INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE runs ADD COLUMN submission_fence TEXT",
+            "ALTER TABLE runs ADD COLUMN cancel_accepted_at INTEGER",
+            "ALTER TABLE runs ADD COLUMN launch_spec TEXT",
+            "ALTER TABLE runs ADD COLUMN notify_cursor TEXT",
+            "ALTER TABLE runs ADD COLUMN started_at INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
         }
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS delete_run_outbox AFTER DELETE ON runs BEGIN
+                 DELETE FROM run_notices WHERE run_id = OLD.id;
+                 DELETE FROM run_subscriptions WHERE run_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_chat_outbox AFTER DELETE ON chat_sessions BEGIN
+                 DELETE FROM run_notices WHERE chat_session_id = OLD.id;
+                 DELETE FROM run_subscriptions WHERE chat_session_id = OLD.id;
+             END;",
+        )?;
         // Covers the periodic native-id scan so it never reads the large parts_json.
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
              ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
@@ -1502,16 +1730,67 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Count runs in an active state (`starting`/`running`) — SQL-side and
-    /// unbounded, so a long-running job older than the newest N rows still
-    /// counts. Used by the data-dir move's in-flight guard.
+    pub(crate) fn engine_runs_block_idle(&self) -> Result<bool> {
+        let mut statement = self.conn.prepare("SELECT status FROM runs")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for status in rows {
+            let status = status?;
+            let phase = crate::engine::Phase::parse(&status)
+                .ok_or_else(|| anyhow!("Unknown run status: {status}"))?;
+            if !phase.is_terminal() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn engine_idle_blocked(&self) -> Result<bool> {
+        if self.engine_runs_block_idle()? {
+            return Ok(true);
+        }
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_notices WHERE delivered_at IS NULL AND retired_at IS NULL)
+                OR EXISTS(SELECT 1 FROM chat_turns WHERE state IN ('preparing','retrying','running'))",
+            [], |row| row.get(0),
+        )?)
+    }
+
+    /// Runs or local processes that prevent moving their working directory.
     pub fn count_active_runs(&self) -> Result<usize> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM runs WHERE status IN ('starting', 'running')",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(n as usize)
+        let mut statement = self
+            .conn
+            .prepare("SELECT id FROM runs WHERE status IN ('submitting', 'starting', 'running')")?;
+        let active = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        let mut count = active.len();
+        let entries = match std::fs::read_dir(self.data_dir.join("local-runs")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(count),
+            Err(_) => return Ok(count + 1),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => return Ok(count + 1),
+            };
+            if active.contains(entry.file_name().to_string_lossy().as_ref()) {
+                continue;
+            }
+            if crate::jobs::localbox::orphaned_job_is_running(&entry.path()).unwrap_or(true) {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Runs the engine may act on: in flight, or terminal with a kill still pending.
+    pub fn list_engine_runs(&self) -> Result<Vec<StoredRun>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{SELECT_RUN} WHERE status IN ('submitting', 'starting', 'running') OR contact IS NOT NULL"
+        ))?;
+        let rows = stmt.query_map([], row_to_run)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn list_active_runs(&self) -> Result<Vec<StoredRun>> {
@@ -1550,121 +1829,37 @@ impl Store {
         Ok(run)
     }
 
-    pub fn register_run_wakeup(
-        &self,
-        run_id: &str,
-        chat_session_id: &str,
-    ) -> Result<RunWakeupRegistration> {
-        let inserted = self.conn.execute(
-            "INSERT OR IGNORE INTO chat_run_wakeups (run_id, chat_session_id, requested_at)
-             VALUES (?1, ?2, ?3)",
-            params![run_id, chat_session_id, now_ms()],
-        )?;
-        if inserted == 1 {
-            return Ok(RunWakeupRegistration::Scheduled);
-        }
-        let state: String = self.conn.query_row(
-            "SELECT state FROM chat_run_wakeups WHERE run_id = ?1 AND chat_session_id = ?2",
-            params![run_id, chat_session_id],
-            |row| row.get(0),
-        )?;
-        Ok(if state == "delivered" {
-            RunWakeupRegistration::AlreadyDelivered
-        } else {
-            RunWakeupRegistration::AlreadyPending
-        })
-    }
-
-    pub fn remove_run_wakeup(&self, run_id: &str, chat_session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM chat_run_wakeups WHERE run_id = ?1 AND chat_session_id = ?2",
-            params![run_id, chat_session_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn prune_run_wakeups(&self) -> Result<()> {
-        self.clear_stale_data_dir_move_lease()?;
-        self.conn.execute(
-            "UPDATE chat_run_wakeups
-             SET state = 'pending', claim_token = NULL, claimed_at = NULL
-             WHERE state = 'claimed' AND claimed_at < ?1
-               AND NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
-            params![now_ms() - RUN_WAKEUP_CLAIM_TTL_MS],
-        )?;
-        self.conn.execute(
-            "DELETE FROM chat_run_wakeups
-             WHERE NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)
-               AND (
-                 NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = chat_run_wakeups.run_id)
-                OR NOT EXISTS (
-                    SELECT 1 FROM chat_sessions
-                    WHERE chat_sessions.id = chat_run_wakeups.chat_session_id
-                )
-                OR EXISTS (
-                    SELECT 1 FROM runs
-                    WHERE runs.id = chat_run_wakeups.run_id
-                      AND runs.status = 'cancelled'
-                )
-               )",
-            [],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_ready_run_wakeups(&self) -> Result<Vec<RunWakeup>> {
-        self.list_run_wakeups(
-            "w.state IN ('pending', 'claimed') AND r.status IN ('done', 'failed', 'lost')
-             ORDER BY COALESCE(r.ended_at, r.updated_at), w.requested_at, r.id",
-        )
-    }
-
-    /// Pending wake-ups whose run is still live, for monitoring alerts.
-    pub fn list_active_run_wakeups(&self) -> Result<Vec<RunWakeup>> {
-        self.list_run_wakeups(
-            "w.state = 'pending' AND r.status IN ('starting', 'running')
-             ORDER BY w.requested_at, r.id",
-        )
-    }
-
-    fn list_run_wakeups(&self, filter: &'static str) -> Result<Vec<RunWakeup>> {
+    /// The active runs each chat launched or subscribed to.
+    pub fn chat_active_runs(&self) -> Result<Vec<(String, StoredRun)>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT r.id, r.experiment_id, r.project_id, r.status, r.backend_json, r.command,
-                    r.created_at, r.updated_at, r.ended_at, r.exit_code,
-                    r.commit_sha, r.result_markdown, r.cancel_requested, r.chat_session_id,
-                    r.cancel_reason, w.chat_session_id, w.state, w.monitoring_alerted
-             FROM chat_run_wakeups w
-             JOIN runs r ON r.id = w.run_id
-             WHERE {filter}"
+            "SELECT * FROM (
+                 SELECT chat_session_id AS chat, r.* FROM ({SELECT_RUN}) r
+                 WHERE chat_session_id IS NOT NULL
+                 UNION SELECT s.chat_session_id AS chat, r.* FROM run_subscriptions s
+                 JOIN ({SELECT_RUN}) r ON r.id = s.run_id
+             ) WHERE status IN ('submitting', 'starting', 'running')
+             ORDER BY chat, id"
         ))?;
         let rows = stmt.query_map([], |row| {
-            Ok(RunWakeup {
-                run: row_to_run(row)?,
-                chat_session_id: row.get(15)?,
-                state: row.get(16)?,
-                monitoring_alerted: row.get(17)?,
-            })
+            let chat: String = row.get(0)?;
+            let run = row_to_run_at(row, 1)?;
+            Ok((chat, run))
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Flips a pending wake-up's monitoring alert flag; `true` when this call changed it,
-    /// which makes setting it an atomic claim across `orx up` processes.
-    pub fn set_run_wakeup_monitoring_alerted(
-        &self,
-        run_id: &str,
-        chat_session_id: &str,
-        alerted: bool,
-    ) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE chat_run_wakeups SET monitoring_alerted = ?3
-             WHERE run_id = ?1 AND chat_session_id = ?2
-               AND state = 'pending' AND monitoring_alerted != ?3",
-            params![run_id, chat_session_id, alerted],
+    /// A 0.2.x wake-up row, for migration fixtures.
+    #[cfg(test)]
+    pub fn register_run_wakeup(&self, run_id: &str, chat_session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO chat_run_wakeups (run_id, chat_session_id, requested_at)
+             VALUES (?1, ?2, ?3)",
+            params![run_id, chat_session_id, now_ms()],
         )?;
-        Ok(changed == 1)
+        Ok(())
     }
 
+    #[cfg(test)]
     pub fn claim_run_wakeup(&self, run_id: &str, chat_session_id: &str) -> Result<Option<String>> {
         let token = uuid::Uuid::new_v4().to_string();
         let claimed = self.conn.execute(
@@ -1674,38 +1869,6 @@ impl Store {
             params![run_id, chat_session_id, token, now_ms()],
         )?;
         Ok((claimed == 1).then_some(token))
-    }
-
-    pub fn release_run_wakeup(
-        &self,
-        run_id: &str,
-        chat_session_id: &str,
-        token: &str,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE chat_run_wakeups
-             SET state = 'pending', claim_token = NULL, claimed_at = NULL
-             WHERE run_id = ?1 AND chat_session_id = ?2
-               AND state = 'claimed' AND claim_token = ?3",
-            params![run_id, chat_session_id, token],
-        )?;
-        Ok(())
-    }
-
-    pub fn mark_run_wakeup_delivered(
-        &self,
-        run_id: &str,
-        chat_session_id: &str,
-        token: &str,
-    ) -> Result<bool> {
-        let delivered = self.conn.execute(
-            "UPDATE chat_run_wakeups
-             SET state = 'delivered', claim_token = NULL, claimed_at = NULL, delivered_at = ?4
-             WHERE run_id = ?1 AND chat_session_id = ?2
-               AND state = 'claimed' AND claim_token = ?3",
-            params![run_id, chat_session_id, token, now_ms()],
-        )?;
-        Ok(delivered == 1)
     }
 
     /// Record `child` as a delegate of `parent`; recording it again, as a
@@ -1849,7 +2012,7 @@ impl Store {
                )
              ORDER BY l.updated_at"
         ))?;
-        let rows = stmt.query_map([now_ms() - RUN_WAKEUP_CLAIM_TTL_MS], |row| {
+        let rows = stmt.query_map([now_ms() - CHAT_SUBSCRIPTION_CLAIM_TTL_MS], |row| {
             Ok(ReadyChatSubscription {
                 subscriber_session_id: row.get(0)?,
                 target_session_id: row.get(1)?,
@@ -1927,7 +2090,7 @@ impl Store {
                 id,
                 token,
                 now_ms(),
-                now_ms() - RUN_WAKEUP_CLAIM_TTL_MS
+                now_ms() - CHAT_SUBSCRIPTION_CLAIM_TTL_MS
             ],
         )?;
         Ok((claimed == 1).then_some(token))
@@ -2067,7 +2230,8 @@ impl Store {
         Ok(changed == 1)
     }
 
-    /// Keeps the reason: a live supervisor may already have acted on the request.
+    /// What a 0.2.x CLI does when its supervisor spawn fails; the reason stays.
+    #[cfg(test)]
     pub fn withdraw_cancel(&self, run_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE runs SET cancel_requested = 0, updated_at = ?2 WHERE id = ?1",
@@ -2343,9 +2507,7 @@ impl Store {
         started: std::time::Instant,
         pass: &mut OrphanPass,
     ) -> Result<()> {
-        let mut statement = self
-            .conn
-            .prepare(&runs_past_newest("'local_job', 'tinker_job'"))?;
+        let mut statement = self.conn.prepare(&runs_past_newest(LOCAL_RUNS))?;
         let runs = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -2527,7 +2689,12 @@ impl Store {
         if dir.exists() && crate::jobs::localbox::orphaned_job_is_running(&dir)? {
             return live("still has running processes");
         }
-        if self.supervisor_is_held(id)? {
+        let forgetting_kill = deleting && self.conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1 AND contact IS NOT NULL AND {REMOTE_RUNS})"),
+            [id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !forgetting_kill && self.supervisor_is_held(id)? {
             return live("still has a supervisor");
         }
         Ok(fate)
@@ -2678,6 +2845,108 @@ impl Store {
         Ok(())
     }
 
+    /// A terminal run owes final log and notify collection.
+    pub(crate) fn queue_log_collection(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO log_collections (run_id, next_attempt_at) VALUES (?1, ?2)",
+            params![run_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn log_output_collected(&self, run_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT collected FROM log_collections WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub(crate) fn checkpoint_log_collection(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE log_collections SET collected = 1 WHERE run_id = ?1",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
+    /// The terminal run's log and notify have both been consumed.
+    pub(crate) fn finish_log_collection(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO log_collections (run_id, done) VALUES (?1, 1)
+             ON CONFLICT(run_id) DO UPDATE SET done = 1, last_error = NULL",
+            params![run_id],
+        )?;
+        Ok(())
+    }
+
+    /// The engine owes this finished run its kept log: local copies may stop short of the end.
+    pub(crate) fn log_collection_pending(&self, run_id: &str) -> Result<bool> {
+        Ok(self.log_collection(run_id)?.is_some())
+    }
+
+    /// An unfinished collection: whether retries have reached their cap, and the last error.
+    pub(crate) fn log_collection(&self, run_id: &str) -> Result<Option<(bool, Option<String>)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT attempts >= ?2, last_error FROM log_collections
+                 WHERE run_id = ?1 AND done = 0",
+                params![run_id, LOG_COLLECTION_FAILED_AFTER],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn due_log_collections(&self, limit: usize) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT run_id FROM log_collections WHERE done = 0 AND next_attempt_at <= ?1
+             ORDER BY next_attempt_at LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![now_ms(), limit as i64], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn pending_log_collections(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT run_id FROM log_collections WHERE done = 0")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Makes one run's unfinished collection, or every one, due now.
+    pub(crate) fn retry_log_collections_now(&self, run_id: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE log_collections SET next_attempt_at = 0
+             WHERE done = 0 AND (?1 IS NULL OR run_id = ?1)",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
+    /// Schedules the next attempt; true exactly when this failure brings retries to their cap.
+    pub(crate) fn defer_log_collection(&self, run_id: &str, error: &str) -> Result<bool> {
+        let attempts: u32 = self.conn.query_row(
+            "UPDATE log_collections SET attempts = attempts + 1, last_error = ?2,
+               next_attempt_at = ?3 + MIN(?4 * (1 << MIN(attempts, 10)), ?5)
+             WHERE run_id = ?1 RETURNING attempts",
+            params![
+                run_id,
+                error,
+                now_ms(),
+                LOG_COLLECTION_RETRY_MS,
+                LOG_COLLECTION_MAX_RETRY_MS
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(attempts == LOG_COLLECTION_FAILED_AFTER)
+    }
+
     /// Queues a finished run's remote dir for removal; non-SSH/Slurm runs are ignored.
     pub(crate) fn queue_finished_remote_cleanup(&self, run_id: &str) -> Result<()> {
         queue_remote_cleanups(&self.conn, "id", run_id, false)
@@ -2687,10 +2956,9 @@ impl Store {
     pub(crate) fn due_remote_cleanups(&self, limit: usize) -> Result<Vec<RemoteCleanup>> {
         let mut statement = self.conn.prepare(&format!(
             "SELECT run_id, backend_json, deleted FROM remote_cleanups
-             WHERE next_attempt_at <= ?1 AND (deleted = 1 OR run_id IN
-               (SELECT id FROM ({})))
+             WHERE next_attempt_at <= ?1 AND {}
              ORDER BY next_attempt_at LIMIT ?2",
-            runs_past_newest("'ssh_job', 'slurm_job'")
+            remote_cleanup_eligibility()
         ))?;
         let rows = statement.query_map(params![now_ms(), limit as i64], |row| {
             Ok(RemoteCleanup {
@@ -2700,6 +2968,12 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn remote_cleanup_eligible(&self, run_id: &str, deleted: bool) -> Result<bool> {
+        Ok(self.conn.query_row(&format!(
+            "SELECT EXISTS(SELECT 1 FROM remote_cleanups WHERE run_id = ?1 AND deleted = ?2 AND {})",
+            remote_cleanup_eligibility()), params![run_id, deleted], |row| row.get(0))?)
     }
 
     /// `deleted` is what the pass acted on; a deletion queued meanwhile stays for the next pass.
@@ -2934,45 +3208,46 @@ impl Store {
                  UNION SELECT experiment_id FROM runs WHERE chat_session_id = ?1
                  UNION SELECT runs.experiment_id FROM chat_run_wakeups w
                        JOIN runs ON runs.id = w.run_id WHERE w.chat_session_id = ?1
+                 UNION SELECT runs.experiment_id FROM run_subscriptions s
+                       JOIN runs ON runs.id = s.run_id WHERE s.chat_session_id = ?1
              ), headline AS (
-                 SELECT experiment_id AS current_experiment_id, status AS current_status,
-                        cancel_requested AS current_cancel_requested,
+                 SELECT experiment_id AS current_experiment_id, id AS current_run_id, status AS current_status,
                         created_at AS current_created_at, ended_at AS current_ended_at,
                         ROW_NUMBER() OVER (
                             PARTITION BY experiment_id
-                            ORDER BY status IN ('starting', 'running') DESC, created_at DESC, id DESC
+                            ORDER BY status IN ('submitting', 'starting', 'running') DESC, created_at DESC, id DESC
                         ) AS current_rank
                  FROM runs WHERE experiment_id IN (SELECT related_id FROM related)
              )
-             SELECT {EXPERIMENT_COLS}, project_name, current_status,
-                    current_cancel_requested, current_created_at, current_ended_at
+             SELECT {EXPERIMENT_COLS}, project_name, current_run_id
              FROM local_experiments e
              JOIN related ON related_id = e.id
              JOIN (SELECT id AS owner_id, name AS project_name FROM local_projects)
                   ON owner_id = e.project_id
              LEFT JOIN headline ON current_experiment_id = e.id AND current_rank = 1
-             ORDER BY COALESCE(current_status IN ('starting', 'running'), 0) DESC,
+             ORDER BY COALESCE(current_status IN ('submitting', 'starting', 'running'), 0) DESC,
                       e.archived ASC,
                       COALESCE(current_ended_at, current_created_at, e.created_at) DESC,
                       e.id ASC"
         ))?;
         let rows = stmt.query_map(params![session_id], |row| {
-            let current_run = match row.get::<_, Option<String>>(14)? {
-                Some(status) => Some(SessionExperimentRun {
-                    status,
-                    cancel_requested: row.get(15)?,
-                    created_at: row.get(16)?,
-                    ended_at: row.get(17)?,
-                }),
-                None => None,
-            };
-            Ok(SessionExperiment {
-                experiment: LocalExperiment::from_row(row)?,
-                project_name: row.get(13)?,
-                current_run,
-            })
+            Ok((
+                LocalExperiment::from_row(row)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, Option<String>>(14)?,
+            ))
         })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(experiment, project_name, run_id)| {
+                let current_run = run_id.map(|id| self.get_run(&id)).transpose()?.flatten();
+                Ok(SessionExperiment {
+                    experiment,
+                    project_name,
+                    current_run,
+                })
+            })
+            .collect()
     }
 
     /// Full-row update by id (title / description / run_command / agent_status).
@@ -4803,6 +5078,818 @@ fn row_to_chat_session(
     })
 }
 
+const RUN_NOTICE_RETRY_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+impl Store {
+    pub(crate) fn engine_host_auth(
+        &self,
+        alias: &str,
+    ) -> Result<crate::engine::transport::AuthState> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT state_json FROM engine_host_auth WHERE alias = ?1",
+                [alias],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    pub(crate) fn save_engine_host_auth(
+        &self,
+        alias: &str,
+        state: &crate::engine::transport::AuthState,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO engine_host_auth (alias, state_json) VALUES (?1, ?2) ON CONFLICT(alias) DO UPDATE SET state_json = excluded.state_json",
+            params![alias, serde_json::to_string(state)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn engine_hosts(
+        &self,
+    ) -> Result<Vec<(String, String, crate::engine::transport::HostState)>> {
+        let mut query = self
+            .conn
+            .prepare("SELECT alias, root FROM engine_hosts ORDER BY alias, root")?;
+        let rows = query.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (alias, root) = row?;
+            let state = self.engine_host(&alias, &root)?.unwrap();
+            Ok((alias, root, state))
+        })
+        .collect()
+    }
+
+    pub(crate) fn engine_root(
+        &self,
+        alias: &str,
+        root: &str,
+    ) -> Result<Option<crate::engine::transport::HostState>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT state_json FROM engine_hosts WHERE alias = ?1 AND root = ?2",
+                params![alias, root],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn engine_host(
+        &self,
+        alias: &str,
+        root: &str,
+    ) -> Result<Option<crate::engine::transport::HostState>> {
+        let Some(mut state) = self.engine_root(alias, root)? else {
+            return Ok(None);
+        };
+        if let Some((since, cause)) = self.engine_host_auth(alias)?.blocked {
+            state.status = crate::engine::transport::Status::NeedsAuth;
+            state.since_ms = since;
+            state.cause = Some(cause);
+            state.next_retry_ms = None;
+        }
+        Ok(Some(state))
+    }
+
+    pub fn save_engine_host(
+        &self,
+        alias: &str,
+        root: &str,
+        state: &crate::engine::transport::HostState,
+    ) -> Result<()> {
+        use crate::engine::transport::Status;
+        let blocked = state.status == Status::NeedsAuth;
+        let json = serde_json::json!({
+            "status": if blocked { &Status::Idle } else { &state.status },
+            "since_ms": state.since_ms, "failures": state.failures,
+            "last_live_ms": state.last_live_ms,
+            "next_retry_ms": state.next_retry_ms,
+            "cause": if blocked { None } else { state.cause.as_ref() },
+        });
+        self.conn.execute(
+            "INSERT INTO engine_hosts (alias, root, state_json) VALUES (?1, ?2, ?3) ON CONFLICT(alias, root) DO UPDATE SET state_json = excluded.state_json",
+            params![alias, root, json.to_string()],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_engine_host(
+        &self,
+        alias: &str,
+        root: &str,
+        class: Option<crate::engine::transport::HostClass>,
+        state: &crate::engine::transport::HostState,
+    ) -> Result<()> {
+        self.save_engine_host_auth(
+            alias,
+            &crate::engine::transport::AuthState {
+                class,
+                route: None,
+                blocked: (state.status == crate::engine::transport::Status::NeedsAuth)
+                    .then(|| (state.since_ms, state.cause.clone().unwrap_or_default())),
+            },
+        )?;
+        self.save_engine_host(alias, root, state)
+    }
+
+    pub fn insert_submitting_run(&self, run: SubmittingRun<'_>) -> Result<()> {
+        let backend_json = crate::engine::handle::backend_json(run.id, None, run.metadata)?;
+        self.conn.execute(
+            "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
+                               created_at, updated_at, commit_sha, chat_session_id, spec_digest,
+                               launch_spec)
+             VALUES (?1, ?2, ?3, 'submitting', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                run.id,
+                run.experiment_id,
+                run.project_id,
+                backend_json,
+                run.command,
+                run.created_at,
+                run.created_at,
+                run.commit_sha,
+                run.chat_session_id,
+                run.spec_digest,
+                serde_json::to_string(run.launch)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn engine_run_state(&self, run_id: &str) -> Result<Option<EngineRunState>> {
+        fn json<T: serde::de::DeserializeOwned>(value: Option<String>) -> Result<Option<T>> {
+            Ok(value.map(|json| serde_json::from_str(&json)).transpose()?)
+        }
+
+        let row = self
+            .conn
+            .query_row(
+                "SELECT contact, spec_digest, submission_attempt, submission_fence,
+                        cancel_accepted_at, launch_spec, notify_cursor, cancel_unconfirmed, started_at
+                 FROM runs WHERE id = ?1",
+                [run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<i64>>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            contact,
+            spec_digest,
+            submission_attempt,
+            fence,
+            cancel_accepted_at,
+            launch,
+            notify,
+            cancel_unconfirmed,
+            started_at,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        Ok(Some(EngineRunState {
+            started_at,
+            contact: json(contact)?.unwrap_or(Contact::Live),
+            cancel_unconfirmed: json(cancel_unconfirmed)?,
+            spec_digest,
+            submission_attempt,
+            submission_fence: json(fence)?,
+            cancel_accepted_at,
+            launch: json(launch)?,
+            notify_cursor: json(notify)?,
+        }))
+    }
+
+    pub fn set_notify_cursor(&self, run_id: &str, cursor: &NotifyCursor) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET notify_cursor = ?2 WHERE id = ?1",
+            params![run_id, serde_json::to_string(cursor)?],
+        )?;
+        Ok(())
+    }
+
+    /// Runner-1 runs an old supervisor holds, with the row as the engine last saw it. Durable,
+    /// so a run that finishes while the engine is down still gets its chat result.
+    pub fn legacy_watches(&self) -> Result<Vec<(String, Option<SeenRow>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run_id, seen_status, seen_updated_at FROM legacy_watches ORDER BY run_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let seen = match (row.get(1)?, row.get(2)?) {
+                (Some(status), Some(updated_at)) => Some((status, updated_at)),
+                _ => None,
+            };
+            Ok((row.get(0)?, seen))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// `None` starts watching without overwriting what was already seen.
+    pub fn watch_legacy_run(&self, run_id: &str, seen: Option<(&str, i64)>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO legacy_watches (run_id, seen_status, seen_updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(run_id) DO UPDATE SET
+               seen_status = COALESCE(excluded.seen_status, seen_status),
+               seen_updated_at = COALESCE(excluded.seen_updated_at, seen_updated_at)",
+            params![run_id, seen.map(|seen| seen.0), seen.map(|seen| seen.1)],
+        )?;
+        Ok(())
+    }
+
+    pub fn unwatch_legacy_run(&self, run_id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM legacy_watches WHERE run_id = ?1", [run_id])?;
+        Ok(())
+    }
+
+    pub fn last_notice_at(&self, run_id: &str, kind: &str) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(created_at) FROM run_notices WHERE run_id = ?1 AND kind = ?2",
+            params![run_id, kind],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn set_run_contact(&self, run_id: &str, contact: &Contact) -> Result<bool> {
+        let json = match contact {
+            Contact::Live => None,
+            _ => Some(serde_json::to_string(contact)?),
+        };
+        Ok(self.conn.execute(
+            "UPDATE runs SET contact = ?2 WHERE id = ?1",
+            params![run_id, json],
+        )? == 1)
+    }
+
+    pub fn set_submission_fence(
+        &self,
+        run_id: &str,
+        attempt: u32,
+        fence: &SubmissionFence,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE runs SET submission_fence = ?3
+             WHERE id = ?1 AND status = 'submitting' AND submission_attempt = ?2
+               AND submission_fence IS NULL AND cancel_accepted_at IS NULL",
+            params![run_id, attempt, serde_json::to_string(fence)?],
+        )? == 1)
+    }
+
+    /// Release only when the launch was never sent.
+    pub fn clear_submission_fence(&self, run_id: &str, attempt: u32) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE runs SET submission_fence = NULL
+             WHERE id = ?1 AND status = 'submitting' AND submission_attempt = ?2",
+            params![run_id, attempt],
+        )? == 1)
+    }
+
+    /// Call only after recovery proves absence and the previous submitter is gone.
+    pub fn advance_submission_attempt(&self, run_id: &str, attempt: u32) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE runs SET submission_attempt = submission_attempt + 1, submission_fence = NULL
+             WHERE id = ?1 AND status = 'submitting' AND submission_attempt = ?2
+               AND submission_attempt < ?3 AND cancel_accepted_at IS NULL",
+            params![run_id, attempt, u32::MAX],
+        )? == 1)
+    }
+
+    pub fn record_run_handle(
+        &self,
+        run_id: &str,
+        attempt: u32,
+        handle: &crate::engine::handle::Handle,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .is_autocommit()
+            .then(|| self.begin_immediate())
+            .transpose()?;
+        let run = self
+            .get_run(run_id)?
+            .ok_or_else(|| anyhow!("Run {run_id} not found"))?;
+        let metadata = crate::jobs::BackendDescriptor::parse(&run.backend_json)?;
+        let json = crate::engine::handle::backend_json(run_id, Some(handle), &metadata)?;
+        let changed = self.conn.execute(
+            "UPDATE runs SET backend_json = ?3,
+               status = CASE WHEN status = 'submitting' THEN 'starting' ELSE status END,
+               updated_at = ?4
+             WHERE id = ?1 AND submission_attempt = ?2 AND submission_fence IS NOT NULL
+               AND json_extract(backend_json, '$.handle') IS NULL
+               AND (status = 'submitting' OR
+                 (status IN ('done','failed','cancelled','lost') AND contact IS NOT NULL))",
+            params![run_id, attempt, json, now_ms()],
+        )?;
+        if changed == 1
+            && crate::engine::Phase::parse(&run.status)
+                .is_some_and(crate::engine::Phase::is_terminal)
+        {
+            self.queue_log_collection(run_id)?;
+        }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
+        Ok(changed == 1)
+    }
+
+    /// For a submitter subprocess of the fenced attempt, recorded before it can act.
+    pub fn record_submitter(
+        &self,
+        run_id: &str,
+        attempt: u32,
+        fence: &SubmissionFence,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE runs SET submission_fence = ?3
+             WHERE id = ?1 AND status = 'submitting' AND submission_attempt = ?2
+               AND submission_fence IS NOT NULL",
+            params![run_id, attempt, serde_json::to_string(fence)?],
+        )? == 1)
+    }
+
+    /// Compare-and-set on `status`; the engine decides which moves are legal.
+    pub fn set_engine_phase(
+        &self,
+        run_id: &str,
+        from: &str,
+        to: &str,
+        ended_at: Option<i64>,
+        exit_code: Option<i64>,
+        started_at: Option<i64>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE runs SET status = ?3, updated_at = ?4, ended_at = COALESCE(?5, ended_at),
+                             exit_code = COALESCE(?6, exit_code),
+                             started_at = COALESCE(started_at, ?7)
+             WHERE id = ?1 AND status = ?2",
+            params![run_id, from, to, now_ms(), ended_at, exit_code, started_at],
+        )? == 1;
+        if let Some(status) = RunStatus::parse(to).filter(|status| changed && status.is_terminal())
+        {
+            self.stage_run_terminal(run_id, status)?;
+        }
+        Ok(changed)
+    }
+
+    pub fn supervisor_lock_paths(&self, run_id: &str) -> Result<[PathBuf; 2]> {
+        Ok([
+            self.run_lock_path(SUPERVISOR_LOCK, run_id)?,
+            self.run_lock_path(SHARED_SSH_LOCK, run_id)?,
+        ])
+    }
+
+    fn run_lock_path(&self, artifact: (&str, &str), run_id: &str) -> Result<PathBuf> {
+        if run_id.is_empty()
+            || !run_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(anyhow!("Invalid run id: {run_id}"));
+        }
+        Ok(self.run_artifact_path(artifact, run_id))
+    }
+
+    /// Ends an outage for a chat: withdraws its attention notice if it was never sent, and
+    /// returns whether one was sent (or is in flight), so a recovery notice is owed.
+    pub fn settle_outage_notice(&self, run_id: &str, chat: &str) -> Result<bool> {
+        let dedupe = self.outage_dedupe(run_id, chat, ATTENTION)?;
+        let withdrawn = self.conn.execute(
+            "DELETE FROM run_notices WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3
+               AND client_turn_id IS NULL",
+            params![run_id, chat, dedupe],
+        )?;
+        // Retired attention keeps its audit row without reserving the next outage's key.
+        self.conn.execute(
+            "UPDATE run_notices SET dedupe = 'retired:' || client_turn_id || ':' || dedupe
+             WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3 AND retired_at IS NOT NULL",
+            params![run_id, chat, dedupe],
+        )?;
+        Ok(withdrawn == 0
+            && self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_notices
+                   WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3)",
+                params![run_id, chat, dedupe],
+                |row| row.get(0),
+            )?)
+    }
+
+    /// `None` accepts legacy intent; a reason accepts an API cancel, including during submission.
+    pub fn accept_run_cancel(&self, run_id: &str, reason: Option<&str>) -> Result<Option<i64>> {
+        let path = self.run_lock_path(CANCEL_LOCK, run_id)?;
+        let mut lock = open_lifecycle_lock_at(&path)?;
+        let _guard = lock.write()?;
+        Ok(self.conn.query_row(
+            "UPDATE runs SET cancel_accepted_at = COALESCE(cancel_accepted_at, ?2),
+                             updated_at = CASE WHEN cancel_accepted_at IS NULL THEN ?2
+                                               ELSE updated_at END,
+                             cancel_reason = CASE WHEN cancel_requested = 0 AND cancel_accepted_at IS NULL
+                                                  THEN COALESCE(?3, cancel_reason)
+                                                  ELSE cancel_reason END
+             WHERE id = ?1 AND status IN ('submitting', 'starting', 'running')
+               AND (cancel_requested = 1 OR cancel_accepted_at IS NOT NULL OR ?3 IS NOT NULL)
+             RETURNING cancel_accepted_at",
+            params![run_id, now_ms(), reason],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
+    pub fn subscribe_run(
+        &self,
+        run_id: &str,
+        chat_session_id: &str,
+        created_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO run_subscriptions (run_id, chat_session_id, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(run_id, chat_session_id) DO NOTHING",
+            params![run_id, chat_session_id, created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn run_subscribers(&self, run_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT chat_session_id FROM runs WHERE id = ?1 AND chat_session_id IS NOT NULL
+             UNION SELECT chat_session_id FROM run_subscriptions WHERE run_id = ?1
+             ORDER BY chat_session_id",
+        )?;
+        let rows = stmt.query_map([run_id], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn insert_run_notice(
+        &self,
+        run_id: &str,
+        chat_session_id: &str,
+        kind: &str,
+        dedupe: &str,
+        body: &str,
+        created_at: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "INSERT INTO run_notices (run_id, chat_session_id, kind, dedupe, body, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(run_id, chat_session_id, dedupe) DO NOTHING",
+            params![run_id, chat_session_id, kind, dedupe, body, created_at],
+        )? == 1)
+    }
+
+    pub(crate) fn queue_cancel_settled_notice(
+        &self,
+        run_id: &str,
+        chat: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let notified: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_notices WHERE run_id = ?1 AND chat_session_id = ?2
+             AND kind = ?3)",
+            params![run_id, chat, TERMINAL],
+            |row| row.get(0),
+        )?;
+        if !notified {
+            return Ok(false);
+        }
+        let run = self
+            .get_run(run_id)?
+            .ok_or_else(|| anyhow!("Run {run_id} not found"))?;
+        let view = crate::plane::Run::from_store(self, &run)?;
+        let status = view.display_status();
+        let detail = if view.cancel_unconfirmed.is_some() {
+            run.result_markdown.as_deref().unwrap_or_default()
+        } else {
+            "All remaining processes have stopped."
+        };
+        self.insert_run_notice(
+            run_id,
+            chat,
+            ATTENTION,
+            "cancel-stopped",
+            &format!("[orx] Run `{run_id}`: {status}. {detail}"),
+            now,
+        )
+    }
+
+    pub fn pending_run_notice_sessions(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT chat_session_id FROM run_notices
+             WHERE delivered_at IS NULL AND retired_at IS NULL
+             AND (next_delivery_at IS NULL OR next_delivery_at <= ?1) ORDER BY chat_session_id",
+        )?;
+        let rows = stmt.query_map([now_ms()], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn record_run_notice_failure(
+        &self,
+        chat: &str,
+        client_turn_id: &str,
+        reason: &str,
+        permanent: bool,
+        now: i64,
+    ) -> Result<Option<i64>> {
+        let tx = self.begin_immediate()?;
+        let prior: Option<(i64, Option<i64>)> = tx
+            .query_row(
+                "SELECT delivery_failures, first_failure_at FROM run_notices
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2
+             AND delivered_at IS NULL AND retired_at IS NULL LIMIT 1",
+                params![chat, client_turn_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((failures, first)) = prior else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let first = first.unwrap_or(now);
+        let deadline = first.saturating_add(RUN_NOTICE_RETRY_WINDOW_MS);
+        let retired = (permanent || now >= deadline).then_some(now);
+        let delay_minutes = match failures {
+            0 => 1,
+            1 => 5,
+            2 => 15,
+            _ => 60,
+        };
+        let next = retired
+            .is_none()
+            .then(|| now.saturating_add(delay_minutes * 60 * 1000).min(deadline));
+        let reason = if !permanent && now >= deadline {
+            format!("Retry window expired after 24 hours: {reason}")
+        } else {
+            reason.to_string()
+        };
+        tx.execute(
+            "UPDATE run_notices SET delivery_failures = ?3, first_failure_at = ?4,
+             next_delivery_at = ?5, delivery_error = ?6, retired_at = ?7
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL AND retired_at IS NULL",
+            params![chat, client_turn_id, failures + 1, first, next, reason, retired],
+        )?;
+        tx.commit()?;
+        Ok(Some(failures + 1))
+    }
+
+    /// Why the run's latest retired notice batch never reached its chat.
+    pub(crate) fn run_notice_error(&self, run_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT delivery_error FROM run_notices WHERE run_id = ?1 AND retired_at IS NOT NULL
+                 ORDER BY retired_at DESC, id DESC LIMIT 1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn expire_run_notice_batches(&self, now: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE run_notices SET retired_at = ?1, next_delivery_at = NULL,
+             delivery_error = 'Retry window expired after 24 hours: ' || delivery_error
+             WHERE delivered_at IS NULL AND retired_at IS NULL
+             AND first_failure_at <= ?1 - ?2",
+            params![now, RUN_NOTICE_RETRY_WINDOW_MS],
+        )?;
+        Ok(())
+    }
+
+    pub fn run_notice_batch(&self, chat_session_id: &str) -> Result<Vec<RunNotice>> {
+        self.run_notice_batch_at(chat_session_id, now_ms())
+    }
+
+    pub fn run_notice_batch_at(&self, chat_session_id: &str, now: i64) -> Result<Vec<RunNotice>> {
+        let tx = self.begin_immediate()?;
+        self.expire_run_notice_batches(now)?;
+        let assigned: Option<String> = tx
+            .query_row(
+                "SELECT client_turn_id FROM run_notices
+             WHERE chat_session_id = ?1 AND delivered_at IS NULL AND client_turn_id IS NOT NULL
+             AND retired_at IS NULL AND (next_delivery_at IS NULL OR next_delivery_at <= ?2)
+             ORDER BY id LIMIT 1",
+                params![chat_session_id, now],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let client_turn_id = match assigned {
+            Some(id) => id,
+            None => {
+                let id = format!("run-notice:{}", uuid::Uuid::new_v4());
+                let assigned = tx.execute(
+                    "UPDATE run_notices SET client_turn_id = ?2 WHERE chat_session_id = ?1
+                     AND delivered_at IS NULL AND retired_at IS NULL AND client_turn_id IS NULL",
+                    params![chat_session_id, id],
+                )?;
+                if assigned == 0 {
+                    tx.commit()?;
+                    return Ok(Vec::new());
+                }
+                id
+            }
+        };
+        let notices = {
+            let mut stmt = tx.prepare(
+                "SELECT id, run_id, chat_session_id, kind, dedupe, body, created_at, client_turn_id
+                 FROM run_notices WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![chat_session_id, client_turn_id], |row| {
+                Ok(RunNotice {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    chat_session_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    dedupe: row.get(4)?,
+                    body: row.get(5)?,
+                    created_at: row.get(6)?,
+                    client_turn_id: row.get(7)?,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        tx.commit()?;
+        Ok(notices)
+    }
+
+    pub fn mark_run_notice_batch_delivered(
+        &self,
+        chat_session_id: &str,
+        client_turn_id: &str,
+        delivered_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE run_notices SET delivered_at = ?3, next_delivery_at = NULL WHERE chat_session_id = ?1
+             AND client_turn_id = ?2 AND delivered_at IS NULL",
+            params![chat_session_id, client_turn_id, delivered_at],
+        )?;
+        Ok(())
+    }
+
+    /// Run under the engine lock after legacy delivery stops and before notice production.
+    pub fn migrate_run_wakeups(&self) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        let wakeups = {
+            let mut stmt = tx.prepare(
+                "SELECT run_id, chat_session_id, state, requested_at, delivered_at, monitoring_alerted
+                 FROM chat_run_wakeups WHERE engine_migrated = 0 ORDER BY run_id, chat_session_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, bool>(5)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (run_id, chat, state, requested_at, delivered_at, alerted) in wakeups {
+            let Some(run) = self.get_run(&run_id)? else {
+                continue;
+            };
+            if matches!(state.as_str(), "pending" | "claimed") {
+                if !is_terminal_status(&run.status) {
+                    self.subscribe_run(&run_id, &chat, requested_at)?;
+                } else if matches!(run.status.as_str(), "done" | "failed" | "lost") {
+                    let body = self.terminal_notice_body(&run)?;
+                    self.insert_run_notice(
+                        &run_id,
+                        &chat,
+                        TERMINAL,
+                        TERMINAL,
+                        &body,
+                        requested_at,
+                    )?;
+                }
+            } else if state == "delivered" {
+                self.insert_run_notice(&run_id, &chat, TERMINAL, TERMINAL, "", requested_at)?;
+                tx.execute(
+                    "UPDATE run_notices SET delivered_at = ?4 WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3",
+                    params![run_id, chat, TERMINAL, delivered_at.unwrap_or(requested_at)],
+                )?;
+            }
+            if alerted {
+                let dedupe = self.outage_dedupe(&run_id, &chat, ATTENTION)?;
+                self.insert_run_notice(&run_id, &chat, ATTENTION, &dedupe, "", requested_at)?;
+                tx.execute(
+                    "UPDATE run_notices SET delivered_at = ?4 WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = ?3",
+                    params![run_id, chat, dedupe, delivered_at.unwrap_or(requested_at)],
+                )?;
+            }
+            tx.execute(
+                "UPDATE chat_run_wakeups SET engine_migrated = 1
+                 WHERE run_id = ?1 AND chat_session_id = ?2",
+                params![run_id, chat],
+            )?;
+        }
+        tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Recovery notices advance the outage generation, including outages begun by 0.2.x.
+    pub fn outage_dedupe(&self, run_id: &str, chat: &str, kind: &str) -> Result<String> {
+        let generation: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM run_notices WHERE run_id = ?1 AND chat_session_id = ?2 AND kind = ?3",
+            params![run_id, chat, RECOVERED], |row| row.get(0),
+        )?;
+        Ok(format!("{kind}:{generation}"))
+    }
+
+    pub fn terminal_notice_body(&self, run: &StoredRun) -> Result<String> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut bytes = Vec::new();
+        let ranges = crate::commands::up::api_v2::kept_ranges(&self.data_dir, &run.id)?;
+        let tail = self.run_artifact_path(TAIL_LOG, &run.id);
+        let current = if let Some(range) = ranges.iter().max_by_key(|range| range.offset) {
+            let file = std::fs::File::open(&range.file)?;
+            Ok((file, range.file.clone(), range.len))
+        } else if tail.exists() {
+            let file = std::fs::File::open(&tail)?;
+            let size = file.metadata()?.len();
+            Ok((file, tail, size))
+        } else {
+            crate::jobs::ssh::service::logs::open_current(
+                self.run_artifact_path(("run-logs", ".log"), &run.id),
+            )
+        };
+        match current {
+            Ok((mut file, _, size)) => {
+                let start = size.saturating_sub(TERMINAL_LOG_BYTES);
+                file.seek(SeekFrom::Start(start))?;
+                bytes.resize(usize::try_from(size - start)?, 0);
+                file.read_exact(&mut bytes)?;
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        let first_character = bytes
+            .iter()
+            .position(|byte| byte & 0xc0 != 0x80)
+            .unwrap_or(bytes.len());
+        let log = String::from_utf8_lossy(&bytes[first_character..]);
+        let mut start = log
+            .len()
+            .saturating_sub(usize::try_from(TERMINAL_LOG_BYTES)?);
+        while !log.is_char_boundary(start) {
+            start += 1;
+        }
+        let mut lines: Vec<_> = log[start..]
+            .lines()
+            .rev()
+            .take(TERMINAL_LOG_LINES)
+            .collect();
+        lines.reverse();
+        let tail = lines.join("\n");
+        let code = run
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unavailable".into());
+        let duration = run
+            .ended_at
+            .map(|ended| format!("{} ms", ended.saturating_sub(run.created_at).max(0)))
+            .unwrap_or_else(|| "unavailable".into());
+        let cancel_reason = run
+            .cancel_reason
+            .as_deref()
+            .filter(|_| run.status == "cancelled");
+        let reason = match (cancel_reason, run.result_markdown.as_deref()) {
+            (Some(cancel), Some(result)) => format!("{cancel} {result}"),
+            (cancel, result) => cancel.or(result).unwrap_or("unavailable").into(),
+        };
+        let view = crate::plane::Run::from_store(self, run)?;
+        let status = view.display_status();
+        Ok(format!(
+            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\nReason: {reason}\n\nRecent log:\n{tail}",
+            run.id, status,
+        ))
+    }
+}
+
 const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_json, command,
                                  created_at, updated_at, ended_at, exit_code,
                                  commit_sha, result_markdown, cancel_requested,
@@ -4816,22 +5903,30 @@ const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branc
                                updated_at, chat_session_id, archived";
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlite::Error> {
+    row_to_run_at(row, 0)
+}
+
+/// A [`SELECT_RUN`] row whose columns start at `first`.
+fn row_to_run_at(
+    row: &rusqlite::Row<'_>,
+    first: usize,
+) -> std::result::Result<StoredRun, rusqlite::Error> {
     Ok(StoredRun {
-        id: row.get(0)?,
-        experiment_id: row.get(1)?,
-        project_id: row.get(2)?,
-        status: row.get(3)?,
-        backend_json: row.get(4)?,
-        command: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        ended_at: row.get(8)?,
-        exit_code: row.get(9)?,
-        commit_sha: row.get(10)?,
-        result_markdown: row.get(11)?,
-        cancel_requested: row.get(12)?,
-        chat_session_id: row.get(13)?,
-        cancel_reason: row.get(14)?,
+        id: row.get(first)?,
+        experiment_id: row.get(first + 1)?,
+        project_id: row.get(first + 2)?,
+        status: row.get(first + 3)?,
+        backend_json: row.get(first + 4)?,
+        command: row.get(first + 5)?,
+        created_at: row.get(first + 6)?,
+        updated_at: row.get(first + 7)?,
+        ended_at: row.get(first + 8)?,
+        exit_code: row.get(first + 9)?,
+        commit_sha: row.get(first + 10)?,
+        result_markdown: row.get(first + 11)?,
+        cancel_requested: row.get(first + 12)?,
+        chat_session_id: row.get(first + 13)?,
+        cancel_reason: row.get(first + 14)?,
     })
 }
 
@@ -4893,6 +5988,1401 @@ fn real_path_under<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn min_reader_version_refuses_before_migrations_on_every_open() {
+        let dir = std::env::temp_dir().join(format!("orx-reader-floor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = Connection::open(dir.join("orx.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE store_metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            INSERT INTO store_metadata VALUES ('min_reader_version', 2);",
+        )
+        .unwrap();
+        let error = Store::open_at(dir.clone()).err().unwrap();
+        assert!(error.to_string().contains("min_reader_version 2"));
+        let migrated: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'runs')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!migrated);
+        conn.execute("UPDATE store_metadata SET value = 1", [])
+            .unwrap();
+        drop(Store::open_at(dir.clone()).unwrap());
+        conn.execute("UPDATE store_metadata SET value = 2", [])
+            .unwrap();
+        assert!(Store::open_at(dir.clone()).is_err());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Pinned from 0.2.22 main: store.rs, commands/{supervise,up}.rs and jobs/ssh/service/mod.rs.
+    const LEGACY_SELECT_RUN: &str =
+        "SELECT id, experiment_id, project_id, status, backend_json, command,
+                                 created_at, updated_at, ended_at, exit_code,
+                                 commit_sha, result_markdown, cancel_requested,
+                                 chat_session_id, cancel_reason FROM runs";
+    const LEGACY_ACTIVE_RUNS: &str =
+        "SELECT id, experiment_id, project_id, status, backend_json, command,
+                                 created_at, updated_at, ended_at, exit_code,
+                                 commit_sha, result_markdown, cancel_requested,
+                                 chat_session_id, cancel_reason FROM runs
+         WHERE status IN ('starting', 'running') ORDER BY created_at DESC";
+    const LEGACY_REQUEST_CANCEL: &str =
+        "UPDATE runs SET cancel_requested = 1, cancel_reason = ?2, updated_at = ?3
+             WHERE id = ?1 AND cancel_requested = 0 AND status IN ('starting', 'running')";
+    const LEGACY_WITHDRAW_CANCEL: &str =
+        "UPDATE runs SET cancel_requested = 0, updated_at = ?2 WHERE id = ?1";
+    const LEGACY_SUPERVISE_DISPATCH: &[&str] = &[
+        "k8s_job",
+        "modal_job",
+        "ssh_job",
+        "slurm_job",
+        "ray_job",
+        "openresearch_job",
+        "local_job",
+        "tinker_job",
+    ];
+    const LEGACY_SUPERVISE_FALLTHROUGH: &str = "hf_job";
+    const LEGACY_SSH_SERVICE_SCAN: fn(&str, bool, bool) -> bool =
+        |kind, supervisor_running, uses_shared_ssh| {
+            matches!(kind, "ssh_job" | "slurm_job" | "openresearch_job")
+                && supervisor_running
+                && !uses_shared_ssh
+        };
+    const LEGACY_SUPERVISOR_LOCK: (&str, &str) = ("run-logs", ".supervisor.lock");
+    const LEGACY_ADOPTION: fn(bool, bool, bool, bool) -> bool =
+        |submitted, settled, local_experiment, supervisor_running| {
+            submitted && settled && local_experiment && !supervisor_running
+        };
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LegacyDescriptor {
+        kind: String,
+        job_id: Option<String>,
+        source_digest: Option<String>,
+        source_path: Option<String>,
+        source_size: Option<u64>,
+    }
+
+    fn legacy_rows(conn: &Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        conn.prepare(sql)
+            .unwrap()
+            .query_map([], |row| {
+                (0..row.as_ref().column_count())
+                    .map(|i| row.get(i))
+                    .collect()
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    fn legacy_active_runs(conn: &Connection) -> Vec<(String, LegacyDescriptor)> {
+        conn.prepare(LEGACY_ACTIVE_RUNS)
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(4)?))
+            })
+            .unwrap()
+            .map(|row| {
+                let (id, json) = row.unwrap();
+                (id, serde_json::from_str(&json).unwrap())
+            })
+            .collect()
+    }
+
+    fn test_launch() -> LaunchSpec {
+        LaunchSpec {
+            kind: "ssh_job".into(),
+            target: Some("lab".into()),
+            options: serde_json::json!({}),
+        }
+    }
+
+    fn engine_fixture() -> (PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("orx-engine-store-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = Connection::open(dir.join("orx.db")).unwrap();
+        conn.execute_batch(include_str!("../tests/fixtures/store-0.2.22.sql"))
+            .unwrap();
+        assert!(conn.prepare("SELECT contact FROM runs").is_err());
+        drop(conn);
+        let store = Store::open_at(dir.clone()).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn engine_migration_enqueues_every_finished_pending_or_claimed_result_except_cancelled() {
+        let (dir, store) = engine_fixture();
+        for phase in ["done", "failed", "lost", "cancelled"] {
+            for state in ["pending", "claimed"] {
+                let id = format!("{phase}_{state}");
+                let mut run = run_fixture(&id, phase, Some("owner"));
+                run.ended_at = Some(101);
+                run.exit_code = Some(7);
+                run.result_markdown = Some("payload ended".into());
+                store.upsert_run(&run).unwrap();
+                store.register_run_wakeup(&id, "foreign").unwrap();
+                if state == "claimed" {
+                    store.claim_run_wakeup(&id, "foreign").unwrap().unwrap();
+                }
+                std::fs::write(dir.join(format!("run-logs/{id}.log")), "result line\n").unwrap();
+            }
+        }
+        store.migrate_run_wakeups().unwrap();
+        for phase in ["done", "failed", "lost", "cancelled"] {
+            for state in ["pending", "claimed"] {
+                let id = format!("{phase}_{state}");
+                assert_eq!(
+                    store
+                        .conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM run_subscriptions WHERE run_id = ?1",
+                            [&id],
+                            |row| row.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    0
+                );
+                let notice: Option<(String, String, Option<i64>)> = store
+                    .conn
+                    .query_row(
+                        "SELECT body, dedupe, delivered_at FROM run_notices WHERE run_id = ?1",
+                        [&id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .unwrap();
+                if phase == "cancelled" {
+                    assert!(notice.is_none());
+                    continue;
+                }
+                let (body, dedupe, delivered) = notice.unwrap();
+                assert_eq!(
+                    body,
+                    store
+                        .terminal_notice_body(&store.get_run(&id).unwrap().unwrap())
+                        .unwrap()
+                );
+                assert!(body.contains(&format!("**{phase}**")));
+                assert!(body.contains("Exit code: 7\nDuration: 100 ms\nReason: payload ended"));
+                assert!(body.ends_with("Recent log:\nresult line"));
+                assert_eq!(dedupe, TERMINAL);
+                assert!(delivered.is_none());
+            }
+        }
+        let frozen = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(frozen.len(), 7);
+        store.migrate_run_wakeups().unwrap();
+        assert_eq!(store.run_notice_batch("foreign").unwrap(), frozen);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_notice_of_a_cancelled_run_gives_the_recorded_cancel_reason() {
+        let (dir, store) = engine_fixture();
+        let mut run = run_fixture("cancelled", "cancelled", None);
+        run.cancel_reason = Some("Cancel requested with `orx exp cancel`.".into());
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body.contains("\nReason: Cancel requested with `orx exp cancel`.\n"));
+        run.result_markdown = Some("Killed by signal 15.".into());
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body
+            .contains("\nReason: Cancel requested with `orx exp cancel`. Killed by signal 15.\n"));
+        run.status = "done".into();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body.contains("\nReason: Killed by signal 15.\n"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_terminal_renderer_bounds_log_bytes_and_lines_without_splitting_utf8() {
+        let (dir, store) = engine_fixture();
+        let run = store.get_run("failed").unwrap().unwrap();
+        let path = dir.join("run-logs/failed.log");
+        let lines: String = (0..100).map(|i| format!("line-{i:03}\n")).collect();
+        std::fs::write(&path, &lines).unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        let tail = body.split("Recent log:\n").nth(1).unwrap();
+        assert_eq!(tail.lines().count(), 40);
+        assert!(tail.starts_with("line-060\n"));
+        assert!(tail.ends_with("line-099"));
+        std::fs::write(&path, format!("{}a", "🦀".repeat(1500))).unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        let tail = body.split("Recent log:\n").nth(1).unwrap();
+        assert!(tail.len() <= 4096);
+        assert!(!tail.contains('\u{fffd}'));
+        assert!(tail.ends_with('a'));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_wakeup_migration_imports_new_legacy_rows_after_downgrade() {
+        let (dir, store) = engine_fixture();
+        store.migrate_run_wakeups().unwrap();
+        let delivered = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(delivered.len(), 1);
+        store
+            .mark_run_notice_batch_delivered("foreign", &delivered[0].client_turn_id, 600)
+            .unwrap();
+        drop(store);
+
+        let legacy = Connection::open(dir.join("orx.db")).unwrap();
+        legacy
+            .execute_batch(
+                "INSERT INTO chat_run_wakeups (run_id, chat_session_id, requested_at)
+                 VALUES ('slurm_job', 'foreign', 700), ('lost', 'foreign', 701);
+                 INSERT INTO chat_run_wakeups
+                     (run_id, chat_session_id, requested_at, state, delivered_at)
+                 VALUES ('done', 'foreign', 702, 'delivered', 703);",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.migrate_run_wakeups().unwrap();
+        assert!(store
+            .run_subscribers("slurm_job")
+            .unwrap()
+            .iter()
+            .any(|chat| chat == "foreign"));
+        let notices = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].run_id, "lost");
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT delivered_at FROM run_notices
+                     WHERE run_id = 'failed' AND chat_session_id = 'foreign'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            600
+        );
+        store.migrate_run_wakeups().unwrap();
+        assert_eq!(store.run_notice_batch("foreign").unwrap(), notices);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_notice_prefers_kept_ranges_to_the_published_legacy_log_generation() {
+        let (dir, store) = engine_fixture();
+        let run = store.get_run("failed").unwrap().unwrap();
+        let path = dir.join("run-logs/failed.log");
+        std::fs::write(&path, "obsolete generation\n").unwrap();
+        let generation = uuid::Uuid::new_v4();
+        let published = "UPGRADE_BEGIN\nFINAL_METRIC=0.862\nUPGRADE_END\n";
+        std::fs::write(
+            path.with_extension(format!("{generation}.log")),
+            format!("{published}unpublished bytes\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            path.with_extension("cursor.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "generation": generation.to_string(),
+                "identity": "legacy-log",
+                "boundary": "boundary",
+                "bytes": published.len(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert_eq!(
+            body.split_once("Recent log:\n").unwrap().1,
+            published.trim_end()
+        );
+        let collected = "collected after adoption\nUPGRADE_END\n";
+        std::fs::write(&path, format!("{collected}unpublished bytes\n")).unwrap();
+        let manifest = path.with_extension("ranges.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!([{
+                "offset": 0,
+                "len": collected.len(),
+                "file": &path,
+                "ident": "1-2",
+                "eof": true,
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert_eq!(
+            body.split_once("Recent log:\n").unwrap().1,
+            collected.trim_end()
+        );
+        std::fs::write(&path, "truncated").unwrap();
+        assert!(store.terminal_notice_body(&run).is_err());
+        std::fs::write(&path, collected).unwrap();
+        std::fs::remove_file(manifest).unwrap();
+        let engine_cursor = path.with_extension("engine-cursor.json");
+        std::fs::write(
+            &engine_cursor,
+            serde_json::to_vec(&serde_json::json!({"offset": collected.len()})).unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert_eq!(
+            body.split_once("Recent log:\n").unwrap().1,
+            collected.trim_end()
+        );
+        std::fs::remove_file(engine_cursor).unwrap();
+        std::fs::write(dir.join("run-logs/failed.tail.log"), "retained tail\n").unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body.ends_with("Recent log:\nretained tail"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_wakeup_migration_rolls_back_on_an_unreadable_completion_log() {
+        let (dir, store) = engine_fixture();
+        let path = dir.join("run-logs/failed.log");
+        std::fs::create_dir(&path).unwrap();
+        assert!(store.migrate_run_wakeups().is_err());
+        for table in ["run_notices", "run_subscriptions"] {
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM chat_run_wakeups WHERE engine_migrated != 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        std::fs::remove_dir(&path).unwrap();
+        store.migrate_run_wakeups().unwrap();
+        assert_eq!(store.run_notice_batch("foreign").unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_absent_recovery_advances_and_refences_only_the_current_uncancelled_attempt() {
+        let (dir, store) = engine_fixture();
+        let metadata = crate::jobs::BackendDescriptor::parse(r#"{"kind":"hf_job"}"#).unwrap();
+        store
+            .insert_submitting_run(SubmittingRun {
+                id: "retry",
+                experiment_id: "exp_1",
+                project_id: "proj_1",
+                metadata: &metadata,
+                command: "train",
+                created_at: 1,
+                commit_sha: None,
+                chat_session_id: None,
+                spec_digest: "digest",
+                launch: &test_launch(),
+            })
+            .unwrap();
+        let fence = SubmissionFence {
+            taken_at: 1,
+            submitter: Some(SubmitterIdentity {
+                pid: 4,
+                starttime: 5,
+            }),
+        };
+        assert!(store.set_submission_fence("retry", 1, &fence).unwrap());
+        assert!(store.advance_submission_attempt("retry", 1).unwrap());
+        let state = store.engine_run_state("retry").unwrap().unwrap();
+        assert_eq!(state.submission_attempt, 2);
+        assert!(state.submission_fence.is_none());
+        assert!(!store.advance_submission_attempt("retry", 1).unwrap());
+        assert!(!store.set_submission_fence("retry", 1, &fence).unwrap());
+        assert!(store.set_submission_fence("retry", 2, &fence).unwrap());
+        let handle = crate::engine::adapters::api::test_handle(
+            "hf_job",
+            Some("lab"),
+            None,
+            vec!["job".into()],
+        );
+        assert!(!store.record_run_handle("retry", 1, &handle).unwrap());
+        assert!(!store.advance_submission_attempt("ssh_job", 1).unwrap());
+        assert!(!store.advance_submission_attempt("done", 1).unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET submission_attempt = ?1 WHERE id = 'retry'",
+                [u32::MAX],
+            )
+            .unwrap();
+        assert!(!store.advance_submission_attempt("retry", u32::MAX).unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET submission_attempt = 2 WHERE id = 'retry'",
+                [],
+            )
+            .unwrap();
+        store
+            .accept_run_cancel("retry", Some("cancel"))
+            .unwrap()
+            .unwrap();
+        assert!(!store.advance_submission_attempt("retry", 2).unwrap());
+        assert_eq!(
+            store
+                .engine_run_state("retry")
+                .unwrap()
+                .unwrap()
+                .submission_fence,
+            Some(fence)
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_run_and_chat_deletion_remove_only_their_outbox_rows_transactionally() {
+        let (dir, store) = engine_fixture();
+        for (run, chat) in [("done", "owner"), ("done", "foreign"), ("failed", "owner")] {
+            store.subscribe_run(run, chat, 1).unwrap();
+            store
+                .insert_run_notice(run, chat, TERMINAL, TERMINAL, "result", 1)
+                .unwrap();
+        }
+        let tx = store.begin().unwrap();
+        tx.execute("DELETE FROM runs WHERE id = 'done'", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        tx.rollback().unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        store.delete_chat_session("foreign").unwrap();
+        for table in ["run_notices", "run_subscriptions"] {
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+        }
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id = 'done'", [])
+            .unwrap();
+        for table in ["run_notices", "run_subscriptions"] {
+            let rows: Vec<(String, String)> = store
+                .conn
+                .prepare(&format!("SELECT run_id, chat_session_id FROM {table}"))
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert_eq!(rows, [("failed".into(), "owner".into())]);
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_schema_preserves_022_runs_and_legacy_readers_and_cleanup() {
+        let old = Connection::open_in_memory().unwrap();
+        old.execute_batch(include_str!("../tests/fixtures/store-0.2.22.sql"))
+            .unwrap();
+        assert!(old.prepare("SELECT started_at FROM runs").is_err());
+        let before = legacy_rows(&old, &format!("{LEGACY_SELECT_RUN} ORDER BY id"));
+        let (dir, store) = engine_fixture();
+        let after = legacy_rows(&store.conn, &format!("{LEGACY_SELECT_RUN} ORDER BY id"));
+        assert_eq!(before, after);
+        assert_eq!(store.count_active_runs().unwrap(), 9);
+        assert!(LEGACY_SSH_SERVICE_SCAN("ssh_job", true, false));
+        assert!(!LEGACY_SSH_SERVICE_SCAN("ssh_job", true, true));
+        let active = legacy_active_runs(&store.conn);
+        assert_eq!(active.len(), 9);
+        assert_eq!(active.first().unwrap().0, "openresearch_job");
+        for run in store.list_runs(100).unwrap() {
+            assert_eq!(
+                store.engine_run_state(&run.id).unwrap().unwrap(),
+                EngineRunState {
+                    started_at: None,
+                    contact: Contact::Live,
+                    cancel_unconfirmed: None,
+                    spec_digest: None,
+                    submission_attempt: 1,
+                    submission_fence: None,
+                    cancel_accepted_at: None,
+                    launch: None,
+                    notify_cursor: None,
+                }
+            );
+        }
+        let snapshots = dir.join("source-snapshots");
+        std::fs::create_dir_all(&snapshots).unwrap();
+        for (_, descriptor) in active {
+            assert!(
+                LEGACY_SUPERVISE_DISPATCH.contains(&descriptor.kind.as_str())
+                    || descriptor.kind == LEGACY_SUPERVISE_FALLTHROUGH
+            );
+            assert!(descriptor.job_id.is_some());
+            let digest = descriptor.source_digest.unwrap();
+            for extension in ["tar", "hf", "zip"] {
+                std::fs::write(snapshots.join(format!("{digest}.{extension}")), "source").unwrap();
+            }
+        }
+        let orphan = snapshots.join(format!("{}.tar", "f".repeat(64)));
+        std::fs::write(&orphan, "unreferenced").unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!orphan.exists());
+        assert_eq!(std::fs::read_dir(&snapshots).unwrap().count(), 27);
+        assert_eq!(
+            store
+                .conn
+                .execute(
+                    LEGACY_REQUEST_CANCEL,
+                    params!["slurm_job", "old CLI", now_ms()]
+                )
+                .unwrap(),
+            1
+        );
+        store
+            .conn
+            .execute(LEGACY_WITHDRAW_CANCEL, params!["slurm_job", now_ms()])
+            .unwrap();
+        assert!(
+            !store
+                .get_run("slurm_job")
+                .unwrap()
+                .unwrap()
+                .cancel_requested
+        );
+        assert_eq!(
+            store.get_run("slurm_job").unwrap().unwrap().status,
+            "starting"
+        );
+        assert!(!store.request_cancel("done", "old CLI").unwrap());
+        drop(store);
+        let reopened = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(legacy_active_runs(&reopened.conn).len(), 9);
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_submitting_is_hidden_and_owned_handles_skip_legacy_adoption() {
+        use crate::engine::handle::Handle;
+        let (dir, store) = engine_fixture();
+        let mut run = run_fixture("engine_run", "submitting", Some("owner"));
+        run.backend_json = store.get_run("ssh_job").unwrap().unwrap().backend_json;
+        store
+            .insert_submitting_run(SubmittingRun {
+                id: &run.id,
+                experiment_id: &run.experiment_id,
+                project_id: &run.project_id,
+                metadata: &crate::jobs::BackendDescriptor::parse(&run.backend_json).unwrap(),
+                command: &run.command,
+                created_at: run.created_at,
+                commit_sha: run.commit_sha.as_deref(),
+                chat_session_id: run.chat_session_id.as_deref(),
+                spec_digest: "spec-sha",
+                launch: &test_launch(),
+            })
+            .unwrap();
+        assert!(store
+            .insert_submitting_run(SubmittingRun {
+                id: &run.id,
+                experiment_id: &run.experiment_id,
+                project_id: &run.project_id,
+                metadata: &crate::jobs::BackendDescriptor::parse(&run.backend_json).unwrap(),
+                command: &run.command,
+                created_at: run.created_at,
+                commit_sha: run.commit_sha.as_deref(),
+                chat_session_id: run.chat_session_id.as_deref(),
+                spec_digest: "spec-sha",
+                launch: &test_launch(),
+            })
+            .is_err());
+        assert_eq!(store.count_active_runs().unwrap(), 10);
+        assert!(!legacy_active_runs(&store.conn)
+            .iter()
+            .any(|(id, _)| id == &run.id));
+        assert_eq!(
+            store
+                .conn
+                .execute(LEGACY_REQUEST_CANCEL, params![run.id, "old CLI", now_ms()])
+                .unwrap(),
+            0
+        );
+        let submitting = store.get_run(&run.id).unwrap().unwrap();
+        let descriptor = crate::jobs::BackendDescriptor::parse(&submitting.backend_json).unwrap();
+        assert_eq!(descriptor.kind, "engine");
+        assert!(descriptor.job_id.is_none());
+        let handle = Handle::Ssh {
+            host: "lab".into(),
+            root: "/orx".into(),
+        };
+        assert!(!store.record_run_handle(&run.id, 1, &handle).unwrap());
+        let fence = SubmissionFence {
+            taken_at: 1000,
+            submitter: Some(SubmitterIdentity {
+                pid: 42,
+                starttime: 5678,
+            }),
+        };
+        assert!(!store.set_submission_fence(&run.id, 2, &fence).unwrap());
+        assert!(store.set_submission_fence(&run.id, 1, &fence).unwrap());
+        assert!(!store.set_submission_fence(&run.id, 1, &fence).unwrap());
+        assert!(!store.record_run_handle(&run.id, 2, &handle).unwrap());
+        let mut supervisor =
+            open_lifecycle_lock_at(&dir.join("run-logs/engine_run.supervisor.lock")).unwrap();
+        let mut shared =
+            open_lifecycle_lock_at(&dir.join("run-logs/engine_run.supervisor.shared-ssh.lock"))
+                .unwrap();
+        let supervisor_guard = supervisor.write().unwrap();
+        let shared_guard = shared.write().unwrap();
+        assert!(store.record_run_handle(&run.id, 1, &handle).unwrap());
+        assert!(!store.record_run_handle(&run.id, 1, &handle).unwrap());
+        assert!(store.supervisor_is_held(&run.id).unwrap());
+        let mut old_shared_probe =
+            open_lifecycle_lock_at(&dir.join("run-logs/engine_run.supervisor.shared-ssh.lock"))
+                .unwrap();
+        assert!(
+            matches!(old_shared_probe.try_write(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        let active = legacy_active_runs(&store.conn);
+        assert_eq!(active.len(), 10);
+        for (id, descriptor) in &active {
+            assert!(descriptor.job_id.is_some());
+            let mut probe =
+                open_lifecycle_lock_at(&store.run_artifact_path(LEGACY_SUPERVISOR_LOCK, id))
+                    .unwrap();
+            let held = matches!(probe.try_write(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+            if id == &run.id {
+                assert!(!LEGACY_ADOPTION(
+                    descriptor.job_id.is_some(),
+                    true,
+                    true,
+                    held
+                ));
+                assert!(!LEGACY_SUPERVISE_DISPATCH.contains(&descriptor.kind.as_str()));
+                assert_ne!(descriptor.kind, LEGACY_SUPERVISE_FALLTHROUGH);
+                assert!(!LEGACY_SSH_SERVICE_SCAN(&descriptor.kind, held, true));
+                assert_eq!(
+                    descriptor.source_digest.as_deref(),
+                    Some("0000000000000000000000000000000000000000000000000000000000000000")
+                );
+                assert_eq!(descriptor.source_path.as_deref(), Some("/sources/0.tar"));
+                assert_eq!(descriptor.source_size, Some(123));
+            }
+        }
+        let row = store.get_run(&run.id).unwrap().unwrap();
+        let descriptor = crate::jobs::BackendDescriptor::parse(&row.backend_json).unwrap();
+        assert_eq!(descriptor.job_id.as_deref(), Some("/orx/runs/engine_run"));
+        assert_eq!(
+            descriptor.source_digest.as_deref(),
+            Some("0000000000000000000000000000000000000000000000000000000000000000")
+        );
+        assert_eq!(descriptor.source_path.as_deref(), Some("/sources/0.tar"));
+        assert_eq!(descriptor.source_size, Some(123));
+        let digest = descriptor.source_digest.clone().unwrap();
+        let snapshot = dir.join(format!("source-snapshots/{digest}.tar"));
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        std::fs::write(&snapshot, "keep").unwrap();
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id = 'ssh_job'", [])
+            .unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(snapshot.exists());
+        assert!(serde_json::from_str::<serde_json::Value>(&row.backend_json)
+            .unwrap()
+            .get("handle")
+            .is_some());
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&descriptor.to_json())
+                .unwrap()
+                .get("handle")
+                .is_none()
+        );
+        assert!(store
+            .update_status(&run.id, RunStatus::Running, None, None)
+            .unwrap());
+        assert!(legacy_active_runs(&store.conn)
+            .iter()
+            .any(|(id, _)| id == &run.id));
+        drop(shared_guard);
+        drop(supervisor_guard);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_contact_and_submission_fence_survive_reopen() {
+        let (dir, store) = engine_fixture();
+        assert!(store.engine_run_state("missing").unwrap().is_none());
+        let mut run = run_fixture("engine_contact", "submitting", None);
+        run.backend_json = r#"{"kind":"hf_job"}"#.into();
+        store
+            .insert_submitting_run(SubmittingRun {
+                id: &run.id,
+                experiment_id: &run.experiment_id,
+                project_id: &run.project_id,
+                metadata: &crate::jobs::BackendDescriptor::parse(&run.backend_json).unwrap(),
+                command: &run.command,
+                created_at: run.created_at,
+                commit_sha: run.commit_sha.as_deref(),
+                chat_session_id: run.chat_session_id.as_deref(),
+                spec_digest: "digest",
+                launch: &test_launch(),
+            })
+            .unwrap();
+        let fence = SubmissionFence {
+            taken_at: 123,
+            submitter: Some(SubmitterIdentity {
+                pid: 1234,
+                starttime: u64::MAX,
+            }),
+        };
+        assert!(store.set_submission_fence(&run.id, 1, &fence).unwrap());
+        let contacts = [
+            Contact::Unreachable {
+                since: 100,
+                cause: "transport".into(),
+            },
+            Contact::NeedsAuth {
+                since: 200,
+                cause: "key rejected".into(),
+            },
+            Contact::Unreconciled {
+                since: 300,
+                detail: "submit unknown".into(),
+            },
+            Contact::Live,
+        ];
+        for contact in contacts {
+            assert!(store.set_run_contact(&run.id, &contact).unwrap());
+            let reopened = Store::open_at(dir.clone()).unwrap();
+            let state = reopened.engine_run_state(&run.id).unwrap().unwrap();
+            assert_eq!(state.contact, contact);
+            assert_eq!(state.spec_digest.as_deref(), Some("digest"));
+            assert_eq!(state.submission_attempt, 1);
+            assert_eq!(state.submission_fence.as_ref(), Some(&fence));
+            assert!(state.cancel_accepted_at.is_none());
+            assert_eq!(
+                reopened.get_run(&run.id).unwrap().unwrap().status,
+                "submitting"
+            );
+        }
+        assert!(store
+            .conn
+            .query_row(
+                "SELECT contact IS NULL FROM runs WHERE id = ?1",
+                [&run.id],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap());
+        assert!(!store.set_run_contact("missing", &Contact::Live).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_notice_backoff_survives_restart_and_expires_after_one_day() {
+        let (dir, store) = engine_fixture();
+        for run in ["ssh_job", "slurm_job"] {
+            store
+                .insert_run_notice(run, "owner", TERMINAL, TERMINAL, "result", 1)
+                .unwrap();
+        }
+        let start = 1_000_000;
+        let frozen = store.run_notice_batch_at("owner", start).unwrap();
+        assert_eq!(frozen.len(), 2);
+        drop(store);
+
+        let deadline = start + RUN_NOTICE_RETRY_WINDOW_MS;
+        let mut now = start;
+        let mut failures = 0;
+        while now < deadline {
+            let store = Store::open_at(dir.clone()).unwrap();
+            assert_eq!(store.run_notice_batch_at("owner", now).unwrap(), frozen);
+            failures += 1;
+            assert_eq!(
+                store
+                    .record_run_notice_failure(
+                        "owner",
+                        &frozen[0].client_turn_id,
+                        "rate limited",
+                        false,
+                        now
+                    )
+                    .unwrap(),
+                Some(failures)
+            );
+            let expected_minutes = match failures {
+                1 => 1,
+                2 => 5,
+                3 => 15,
+                _ => 60,
+            };
+            let due = (now + expected_minutes * 60_000).min(deadline);
+            let recorded: (i64, i64, Option<i64>) = store.conn.query_row(
+                "SELECT first_failure_at, next_delivery_at, retired_at FROM run_notices WHERE id = ?1",
+                [frozen[0].id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!(recorded, (start, due, None));
+            assert!(store
+                .run_notice_batch_at("owner", due - 1)
+                .unwrap()
+                .is_empty());
+            drop(store);
+            now = due;
+        }
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(store
+            .run_notice_batch_at("owner", deadline)
+            .unwrap()
+            .is_empty());
+        let retired: (i64, String) = store
+            .conn
+            .query_row(
+                "SELECT retired_at, delivery_error FROM run_notices WHERE id = ?1",
+                [frozen[0].id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            retired,
+            (
+                deadline,
+                "Retry window expired after 24 hours: rate limited".into()
+            )
+        );
+        assert_eq!(
+            store
+                .record_run_notice_failure(
+                    "owner",
+                    &frozen[0].client_turn_id,
+                    "again",
+                    false,
+                    deadline
+                )
+                .unwrap(),
+            None
+        );
+        assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_retired_notice_batch_does_not_block_idle_and_is_reported_on_its_run() {
+        let dir = std::env::temp_dir().join(format!("orx-retired-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .insert_run_notice("run", "owner", TERMINAL, TERMINAL, "done", 1)
+            .unwrap();
+        assert!(store.engine_idle_blocked().unwrap());
+        assert_eq!(store.run_notice_error("run").unwrap(), None);
+        let batch = store.run_notice_batch_at("owner", 10).unwrap();
+        store
+            .record_run_notice_failure(
+                "owner",
+                &batch[0].client_turn_id,
+                "harness removed",
+                true,
+                20,
+            )
+            .unwrap();
+        assert!(!store.engine_idle_blocked().unwrap());
+        assert_eq!(
+            store.run_notice_error("run").unwrap().as_deref(),
+            Some("harness removed")
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_permanent_notice_failure_keeps_reason_and_unblocks_later_batches() {
+        let (dir, store) = engine_fixture();
+        store
+            .insert_run_notice("ssh_job", "owner", ATTENTION, "attention:0", "outage", 1)
+            .unwrap();
+        let first = store.run_notice_batch_at("owner", 10).unwrap();
+        assert_eq!(
+            store
+                .record_run_notice_failure(
+                    "owner",
+                    &first[0].client_turn_id,
+                    "harness removed",
+                    true,
+                    20
+                )
+                .unwrap(),
+            Some(1)
+        );
+        store
+            .insert_run_notice("ssh_job", "owner", NOTIFY, "later", "later", 21)
+            .unwrap();
+        let later = store.run_notice_batch_at("owner", 21).unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].body, "later");
+        store
+            .mark_run_notice_batch_delivered("owner", &later[0].client_turn_id, 22)
+            .unwrap();
+        assert!(!store.settle_outage_notice("ssh_job", "owner").unwrap());
+        let retired: (i64, String) = store
+            .conn
+            .query_row(
+                "SELECT retired_at, delivery_error FROM run_notices WHERE id = ?1",
+                [first[0].id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retired, (20, "harness removed".into()));
+        assert!(store
+            .insert_run_notice(
+                "ssh_job",
+                "owner",
+                ATTENTION,
+                "attention:0",
+                "new outage",
+                23
+            )
+            .unwrap());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_notices_dedupe_freeze_and_retry_across_connections() {
+        let (dir, store) = engine_fixture();
+        let second = Store::open_at(dir.clone()).unwrap();
+        assert!(store.run_notice_batch("owner").unwrap().is_empty());
+        assert_eq!(store.run_subscribers("ssh_job").unwrap(), ["owner"]);
+        store.subscribe_run("ssh_job", "foreign", 1).unwrap();
+        store.subscribe_run("ssh_job", "foreign", 2).unwrap();
+        assert_eq!(
+            store.run_subscribers("ssh_job").unwrap(),
+            ["foreign", "owner"]
+        );
+        store.subscribe_run("ssh_job", "owner", 3).unwrap();
+        assert_eq!(
+            store.run_subscribers("ssh_job").unwrap(),
+            ["foreign", "owner"]
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT created_at FROM run_subscriptions WHERE chat_session_id = 'foreign'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        {
+            let tx = store.begin().unwrap();
+            store
+                .insert_run_notice("ssh_job", "owner", "terminal", "terminal", "rolled back", 1)
+                .unwrap();
+            tx.rollback().unwrap();
+        }
+        assert!(store.run_notice_batch("owner").unwrap().is_empty());
+        assert!(store
+            .insert_run_notice("ssh_job", "owner", "terminal", "terminal", "finished", 10)
+            .unwrap());
+        assert!(store
+            .insert_run_notice(
+                "slurm_job",
+                "owner",
+                "terminal",
+                "terminal",
+                "also finished",
+                11
+            )
+            .unwrap());
+        let frozen = store.run_notice_batch("owner").unwrap();
+        assert_eq!(frozen.len(), 2);
+        uuid::Uuid::parse_str(
+            frozen[0]
+                .client_turn_id
+                .strip_prefix("run-notice:")
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(frozen
+            .iter()
+            .all(|row| row.client_turn_id == frozen[0].client_turn_id));
+        assert!(!second
+            .insert_run_notice("ssh_job", "owner", "terminal", "terminal", "changed", 12)
+            .unwrap());
+        assert!(second
+            .insert_run_notice("ssh_job", "owner", "notify", "notify:1", "new bytes", 13)
+            .unwrap());
+        assert!(second
+            .insert_run_notice(
+                "ssh_job",
+                "foreign",
+                "terminal",
+                "terminal",
+                "foreign result",
+                14
+            )
+            .unwrap());
+        assert_eq!(second.run_notice_batch("owner").unwrap(), frozen);
+        assert_eq!(store.run_notice_batch("owner").unwrap(), frozen);
+        let foreign = second.run_notice_batch("foreign").unwrap();
+        assert_eq!(foreign.len(), 1);
+        assert_ne!(foreign[0].client_turn_id, frozen[0].client_turn_id);
+        let turn = frozen[0].client_turn_id.as_str();
+        second
+            .mark_run_notice_batch_delivered("foreign", turn, 15)
+            .unwrap();
+        assert_eq!(store.run_notice_batch("owner").unwrap(), frozen);
+        second
+            .mark_run_notice_batch_delivered("owner", turn, 16)
+            .unwrap();
+        store
+            .mark_run_notice_batch_delivered("owner", turn, 17)
+            .unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT MIN(delivered_at) FROM run_notices WHERE client_turn_id = ?1",
+                    [turn],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            16
+        );
+        let next = store.run_notice_batch("owner").unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].body, "new bytes");
+        assert_ne!(next[0].client_turn_id, frozen[0].client_turn_id);
+        drop(second);
+        drop(store);
+        let reopened = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(reopened.run_notice_batch("owner").unwrap(), next);
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_wakeup_migration_never_refires_and_preserves_foreign_chats() {
+        let (dir, store) = engine_fixture();
+        let claimed = store
+            .claim_run_wakeup("failed", "foreign")
+            .unwrap()
+            .unwrap();
+        assert!(!claimed.is_empty());
+        store.subscribe_run("ssh_job", "foreign", 1).unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store.migrate_run_wakeups().unwrap();
+        let subscriptions: Vec<(String, String)> = store
+            .conn
+            .prepare("SELECT run_id, chat_session_id FROM run_subscriptions ORDER BY 1,2")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            subscriptions,
+            [
+                ("ssh_job".into(), "foreign".into()),
+                ("ssh_job".into(), "owner".into())
+            ]
+        );
+        let delivered: (String, String, i64) = store
+            .conn
+            .query_row(
+                "SELECT kind, dedupe, delivered_at FROM run_notices WHERE run_id = 'done'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(delivered, ("terminal".into(), "terminal".into(), 500));
+        let alert: (String, String, i64) = store.conn.query_row(
+            "SELECT kind, chat_session_id, delivered_at FROM run_notices WHERE run_id = 'ssh_job'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(alert, ("attention".into(), "foreign".into(), 400));
+        assert!(store.run_notice_batch("owner").unwrap().is_empty());
+        let completion = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(completion.len(), 1);
+        assert_eq!(completion[0].run_id, "failed");
+        assert_eq!(
+            completion[0].body,
+            store
+                .terminal_notice_body(&store.get_run("failed").unwrap().unwrap())
+                .unwrap()
+        );
+        assert_eq!(completion[0].dedupe, TERMINAL);
+        let key = store
+            .outage_dedupe("ssh_job", "foreign", ATTENTION)
+            .unwrap();
+        assert_eq!(key, "attention:0");
+        assert!(!store
+            .insert_run_notice(
+                "ssh_job",
+                "foreign",
+                ATTENTION,
+                &key,
+                "duplicate outage",
+                500
+            )
+            .unwrap());
+        let recovered_key = store
+            .outage_dedupe("ssh_job", "foreign", RECOVERED)
+            .unwrap();
+        store
+            .insert_run_notice(
+                "ssh_job",
+                "foreign",
+                RECOVERED,
+                &recovered_key,
+                "recovered",
+                501,
+            )
+            .unwrap();
+        let next_key = store
+            .outage_dedupe("ssh_job", "foreign", ATTENTION)
+            .unwrap();
+        assert_eq!(next_key, "attention:1");
+        assert!(store
+            .insert_run_notice(
+                "ssh_job",
+                "foreign",
+                ATTENTION,
+                &next_key,
+                "next outage",
+                502
+            )
+            .unwrap());
+        assert!(!store
+            .insert_run_notice(
+                "done",
+                "owner",
+                "terminal",
+                "terminal",
+                "must not re-fire",
+                600
+            )
+            .unwrap());
+        let legacy_rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM chat_run_wakeups", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy_rows, 4);
+        store
+            .conn
+            .execute(
+                "DELETE FROM run_subscriptions WHERE chat_session_id = 'foreign'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        let reopened = Store::open_at(dir.clone()).unwrap();
+        reopened.migrate_run_wakeups().unwrap();
+        assert_eq!(
+            reopened
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM run_subscriptions WHERE chat_session_id = 'foreign'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_notices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_cancel_acceptance_survives_legacy_withdraw_and_handles_submitting() {
+        let (dir, store) = engine_fixture();
+        let path = dir.join("run-logs/slurm_job.cancel.lock");
+        let mut old_lock = open_lifecycle_lock_at(&path).unwrap();
+        let old_guard = old_lock.write().unwrap();
+        assert!(store.request_cancel("slurm_job", "old CLI").unwrap());
+        store.withdraw_cancel("slurm_job").unwrap();
+        drop(old_guard);
+        assert_eq!(store.accept_run_cancel("slurm_job", None).unwrap(), None);
+        let old_guard = old_lock.write().unwrap();
+        assert!(store.request_cancel("slurm_job", "old CLI").unwrap());
+        drop(old_guard);
+        let accepted = store.accept_run_cancel("slurm_job", None).unwrap().unwrap();
+        assert!(accepted > 0);
+        let old_guard = old_lock.write().unwrap();
+        store.withdraw_cancel("slurm_job").unwrap();
+        drop(old_guard);
+        assert_eq!(
+            store.accept_run_cancel("slurm_job", None).unwrap(),
+            Some(accepted)
+        );
+        let state = store.engine_run_state("slurm_job").unwrap().unwrap();
+        assert_eq!(state.cancel_accepted_at, Some(accepted));
+        assert!(
+            !store
+                .get_run("slurm_job")
+                .unwrap()
+                .unwrap()
+                .cancel_requested
+        );
+        let mut run = run_fixture("engine_cancel", "submitting", None);
+        run.backend_json = r#"{"kind":"modal_job"}"#.into();
+        store
+            .insert_submitting_run(SubmittingRun {
+                id: &run.id,
+                experiment_id: &run.experiment_id,
+                project_id: &run.project_id,
+                metadata: &crate::jobs::BackendDescriptor::parse(&run.backend_json).unwrap(),
+                command: &run.command,
+                created_at: run.created_at,
+                commit_sha: run.commit_sha.as_deref(),
+                chat_session_id: run.chat_session_id.as_deref(),
+                spec_digest: "digest",
+                launch: &test_launch(),
+            })
+            .unwrap();
+        assert!(!store.request_cancel(&run.id, "old CLI").unwrap());
+        assert!(store
+            .accept_run_cancel(&run.id, Some("API"))
+            .unwrap()
+            .is_some());
+        let fence = SubmissionFence {
+            taken_at: 1,
+            submitter: None,
+        };
+        assert!(!store.set_submission_fence(&run.id, 1, &fence).unwrap());
+        store
+            .accept_run_cancel(&run.id, Some("later API request"))
+            .unwrap();
+        assert_eq!(
+            store
+                .get_run(&run.id)
+                .unwrap()
+                .unwrap()
+                .cancel_reason
+                .as_deref(),
+            Some("API")
+        );
+        assert_eq!(store.accept_run_cancel("done", Some("API")).unwrap(), None);
+        assert_eq!(store.accept_run_cancel("missing", None).unwrap(), None);
+        assert!(store.accept_run_cancel("../escape", None).is_err());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn engine_cancel_acceptance_waits_for_legacy_writer_to_commit_or_withdraw() {
+        let (dir, store) = engine_fixture();
+        let second = Store::open_at(dir.clone()).unwrap();
+        let mut old_lock =
+            open_lifecycle_lock_at(&dir.join("run-logs/slurm_job.cancel.lock")).unwrap();
+        let guard = old_lock.write().unwrap();
+        store.request_cancel("slurm_job", "old CLI").unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(second.accept_run_cancel("slurm_job", None).unwrap())
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        store.withdraw_cancel("slurm_job").unwrap();
+        drop(guard);
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            None
+        );
+        thread.join().unwrap();
+        assert!(store
+            .engine_run_state("slurm_job")
+            .unwrap()
+            .unwrap()
+            .cancel_accepted_at
+            .is_none());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
@@ -5265,8 +7755,33 @@ mod tests {
         drop(held);
         drop(supervisor);
         store
+            .conn
+            .execute(
+                "UPDATE runs SET backend_json = ?2 WHERE id = ?1",
+                params![
+                    run,
+                    r#"{"kind":"engine","handle":{"type":"Ssh","host":"dead","root":"/orx"}}"#
+                ],
+            )
+            .unwrap();
+        store
+            .set_run_contact(
+                &run,
+                &Contact::Unreachable {
+                    since: 1,
+                    cause: "host gone".into(),
+                },
+            )
+            .unwrap();
+        let mut supervisor =
+            open_lifecycle_lock_at(&dir.join("run-logs").join(format!("{run}.supervisor.lock")))
+                .unwrap();
+        let held = supervisor.write().unwrap();
+        store
             .delete_local_experiment("experiment", || Ok(()))
             .unwrap();
+        drop(held);
+        drop(supervisor);
         // A repeat delete is refused before touching anything.
         refused(&store);
         assert!(!dir.join("local-runs").join(&run).exists());
@@ -5366,6 +7881,185 @@ mod tests {
     }
 
     #[test]
+    fn unfinished_log_collection_survives_retries_and_a_collected_log_stays_collected() {
+        let dir = std::env::temp_dir().join(format!("orx-collection-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(!store.log_collection_pending("legacy").unwrap());
+        // Kept before its terminal commit queues it: the queue leaves it kept.
+        store.finish_log_collection("early").unwrap();
+        store.queue_log_collection("early").unwrap();
+        assert!(!store.log_collection_pending("early").unwrap());
+
+        store.queue_log_collection("late").unwrap();
+        assert_eq!(store.log_collection("late").unwrap(), Some((false, None)));
+        assert_eq!(store.due_log_collections(10).unwrap(), ["late"]);
+        assert!(!store
+            .defer_log_collection("late", "host in backoff")
+            .unwrap());
+        assert!(store.due_log_collections(10).unwrap().is_empty());
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(store.log_collection_pending("late").unwrap());
+        // Retries reach their cap once, then go on hourly; it never stops being owed.
+        let capped: Vec<bool> = (1..LOG_COLLECTION_FAILED_AFTER + 3)
+            .map(|_| store.defer_log_collection("late", "gone").unwrap())
+            .collect();
+        assert_eq!(capped.iter().filter(|capped| **capped).count(), 1);
+        assert_eq!(
+            store.log_collection("late").unwrap(),
+            Some((true, Some("gone".into())))
+        );
+        let next: i64 = store
+            .conn
+            .query_row(
+                "SELECT next_attempt_at FROM log_collections WHERE run_id = 'late'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(next - now_ms() <= LOG_COLLECTION_MAX_RETRY_MS);
+        store.retry_log_collections_now(None).unwrap();
+        assert_eq!(store.due_log_collections(10).unwrap(), ["late"]);
+        store.finish_log_collection("late").unwrap();
+        assert!(!store.log_collection_pending("late").unwrap());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_engine_slurm_run_reads_as_the_descriptor_exp_status_shows() {
+        let launch = LaunchSpec {
+            kind: "slurm_job".into(),
+            target: Some("login".into()),
+            options: serde_json::json!({
+                "timeout_seconds": 3600,
+                "directives": {"cpus-per-task": "4", "mem": "32G", "ntasks": "1"},
+            }),
+        };
+        let stored = r#"{"kind":"engine","jobId":"7","handle":{"type":"Slurm","host":"login","root":"~/.orx/engine","job":"7"}}"#;
+        let public = public_backend(stored, Some(&launch)).unwrap();
+        let descriptor = crate::jobs::BackendDescriptor::parse(&public.to_string()).unwrap();
+        assert_eq!(descriptor.kind, "slurm_job");
+        assert_eq!(descriptor.slurm_ref().unwrap(), ("login", "7"));
+        assert_eq!(descriptor.timeout_secs, Some(3600));
+        assert_eq!(
+            crate::local::slurm::status_resources(&descriptor),
+            "requested cpus 4  mem 32G"
+        );
+        assert_eq!(public_backend(stored, None).unwrap()["kind"], "engine");
+    }
+
+    #[test]
+    fn engine_runs_queue_their_host_dir_and_container_for_cleanup() {
+        let dir = std::env::temp_dir().join(format!("orx-engine-cleanup-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let container = serde_json::json!({
+            "reference": "dev", "id": "c1", "startedAt": "t", "runDir": "/root/.orx/runs/e1"
+        });
+        for (id, handle, launch, created_at) in [
+            (
+                "e1",
+                r#"{"type":"Ssh","host":"lab","root":"~/.orx/engine"}"#,
+                serde_json::json!({"kind":"ssh_job","target":"lab","options":{"container":container}}),
+                1,
+            ),
+            (
+                "e2",
+                r#"{"type":"Slurm","host":"login","root":"~/.orx/engine","job":"7"}"#,
+                serde_json::json!({"kind":"slurm_job","target":"login","options":{}}),
+                2,
+            ),
+            (
+                "e3",
+                r#"{"type":"Api","provider":"hf_job","account":{"target":"org","context":null},"ids":["j"]}"#,
+                serde_json::json!({"kind":"hf_job","target":"org","options":{}}),
+                3,
+            ),
+        ] {
+            store.conn.execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, launch_spec, created_at, updated_at)
+                 VALUES (?1, 'experiment', 'p', 'done', ?2, ?3, ?4, ?4)",
+                params![id, format!(r#"{{"kind":"engine","handle":{handle}}}"#), launch.to_string(), created_at],
+            ).unwrap();
+            store.queue_finished_remote_cleanup(id).unwrap();
+        }
+        store.delete_local_project("p").unwrap();
+        let mut due = store.due_remote_cleanups(10).unwrap();
+        due.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+        assert_eq!(
+            due.iter()
+                .map(|entry| entry.run_id.as_str())
+                .collect::<Vec<_>>(),
+            ["e1", "e2"]
+        );
+        let queued: serde_json::Value = serde_json::from_str(&due[0].backend_json).unwrap();
+        assert_eq!(queued["sshContainer"], container);
+        assert_eq!(queued["handle"]["host"], "lab");
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn retention_rechecks_tombstones_and_output_debt_until_explicit_deletion() {
+        let (dir, store) = engine_fixture();
+        for n in 0..5 {
+            let mut run = run_fixture(&format!("retention-{n}"), "done", None);
+            run.backend_json =
+                r#"{"kind":"engine","handle":{"type":"Ssh","host":"lab","root":"/orx"}}"#.into();
+            run.created_at = n;
+            run.project_id = "retention".into();
+            store.upsert_run(&run).unwrap();
+            store.queue_finished_remote_cleanup(&run.id).unwrap();
+        }
+        let run = "retention-0";
+        assert!(store.remote_cleanup_eligible(run, false).unwrap());
+        store
+            .set_run_contact(
+                run,
+                &Contact::Unreconciled {
+                    since: 1,
+                    detail: "kill pending".into(),
+                },
+            )
+            .unwrap();
+        assert!(!store.remote_cleanup_eligible(run, false).unwrap());
+        assert!(!store
+            .due_remote_cleanups(100)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.run_id == run));
+        store.set_run_contact(run, &Contact::Live).unwrap();
+        store.queue_log_collection(run).unwrap();
+        assert!(!store.remote_cleanup_eligible(run, false).unwrap());
+        store.finish_log_collection(run).unwrap();
+        assert!(store.remote_cleanup_eligible(run, false).unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE remote_cleanups SET deleted = 1 WHERE run_id = ?1",
+                [run],
+            )
+            .unwrap();
+        store
+            .set_run_contact(
+                run,
+                &Contact::NeedsAuth {
+                    since: 1,
+                    cause: "offline".into(),
+                },
+            )
+            .unwrap();
+        assert!(!store.remote_cleanup_eligible(run, true).unwrap());
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id = ?1", [run])
+            .unwrap();
+        assert!(store.remote_cleanup_eligible(run, true).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn source_sweeps_come_due_after_the_idle_window() {
         let dir = std::env::temp_dir().join(format!("orx-source-sweep-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -5389,6 +8083,78 @@ mod tests {
         );
         store.finish_source_sweep("lab", None).unwrap();
         assert_eq!(store.due_source_sweeps().unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_wrapper_runs_survive_slimming_orphan_reclaim_and_block_data_dir_moves() {
+        let dir = std::env::temp_dir().join(format!("orx-live-wrapper-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        project_with_run_artifacts(&store, "wrapper", &id, &"d".repeat(64));
+        let run_dir = dir.join("local-runs").join(&id);
+        std::fs::create_dir_all(run_dir.join("repo/.venv")).unwrap();
+        let script = "touch ready; sleep 60";
+        std::fs::write(run_dir.join("run.sh"), script).unwrap();
+        orx_host::publish(
+            &run_dir.join("launch.json"),
+            &orx_host_proto::LaunchIntent {
+                run: id.clone(),
+                digest: orx_host::sha(script.as_bytes()),
+                run_sh: script.into(),
+                env: Default::default(),
+                source: None,
+                cancel_sh: None,
+            },
+        )
+        .unwrap();
+        let binary = orx_test_support::host_binaries().join(format!(
+            "orx-host-{}-{}",
+            if cfg!(target_os = "macos") {
+                "darwin"
+            } else {
+                "linux"
+            },
+            std::env::consts::ARCH
+        ));
+        let mut wrapper = orx_test_support::Process::spawn(
+            crate::process::command(binary)
+                .arg("wrap")
+                .arg(&run_dir)
+                .env("ORX_TEST_FAST_STOPS", "1"),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !run_dir.join("ready").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let identity: orx_host_proto::ProcessIdentity =
+            orx_host::read_json(&run_dir.join("wrapper.json")).unwrap();
+        assert!(!store.slim_run(&id).unwrap());
+        assert!(run_dir.join("repo/.venv").is_dir());
+        assert_eq!(store.count_active_runs().unwrap(), 1);
+        std::fs::remove_file(dir.join("submission-handles").join(format!("{id}.json"))).unwrap();
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id=?1", [&id])
+            .unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(run_dir.join("repo/.venv").is_dir());
+        assert!(run_dir.join("repo/output").is_file());
+        assert_eq!(store.count_active_runs().unwrap(), 1);
+        let mut elsewhere = identity.clone();
+        elsewhere.node.push_str("-elsewhere");
+        orx_host::publish(&run_dir.join("wrapper.json"), &elsewhere).unwrap();
+        assert!(store.slim_run(&id).is_err());
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(run_dir.join("repo/.venv").is_dir());
+        assert_eq!(store.count_active_runs().unwrap(), 1);
+        orx_host::publish(&run_dir.join("wrapper.json"), &identity).unwrap();
+        orx_host::wrapper::cancel(&run_dir).unwrap();
+        wrapper.wait(Duration::from_secs(5)).unwrap();
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -7063,7 +9829,16 @@ mod tests {
             if std::env::var(CHILD_PHASE).unwrap() == "blocked" {
                 assert!(store.lock_native_deletion().is_err());
             } else {
-                let _lock = store.lock_native_deletion().unwrap();
+                // A released lock lingers in children the parent's other tests forked, until
+                // they exec.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let _lock = loop {
+                    match store.lock_native_deletion() {
+                        Ok(lock) => break lock,
+                        Err(error) => assert!(std::time::Instant::now() < deadline, "{error}"),
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                };
                 let (deleting, retained) = store
                     .native_sessions_for_deletion(&["second".into()], &["opencode", "claude-code"])
                     .unwrap();
@@ -7969,25 +10744,6 @@ mod tests {
     }
 
     #[test]
-    fn lost_run_wakes_its_waiting_chat() {
-        let dir = std::env::temp_dir().join(format!("orx-lost-wake-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        store
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        store
-            .upsert_run(&run_fixture("run_lost", "lost", Some("chat_A")))
-            .unwrap();
-        store.register_run_wakeup("run_lost", "chat_A").unwrap();
-        store.prune_run_wakeups().unwrap();
-        let ready = store.list_ready_run_wakeups().unwrap();
-        assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].run.id, "run_lost");
-        drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn news_of_a_turn_names_the_answers_it_overtook() {
         let dir = std::env::temp_dir().join(format!("orx-store-untold-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -8245,238 +11001,6 @@ mod tests {
         );
         assert_eq!(store.chat_worktree_owner("chat_one").unwrap(), "chat_root");
         assert_eq!(store.chat_worktree_owner("chat_two").unwrap(), "chat_two");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn run_wakeups_are_idempotent_ready_only_at_success_or_failure_and_pruned() {
-        let dir = std::env::temp_dir().join(format!("orx-store-wake-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        store
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        for (id, status) in [
-            ("run_active", "running"),
-            ("run_done", "done"),
-            ("run_failed", "failed"),
-            ("run_cancelled", "cancelled"),
-        ] {
-            store
-                .upsert_run(&run_fixture(id, status, Some("chat_A")))
-                .unwrap();
-            assert_eq!(
-                store.register_run_wakeup(id, "chat_A").unwrap(),
-                RunWakeupRegistration::Scheduled
-            );
-            assert_eq!(
-                store.register_run_wakeup(id, "chat_A").unwrap(),
-                RunWakeupRegistration::AlreadyPending
-            );
-        }
-        store.register_run_wakeup("missing_run", "chat_A").unwrap();
-        store
-            .register_run_wakeup("run_done", "missing_chat")
-            .unwrap();
-
-        store.prune_run_wakeups().unwrap();
-        let ready = store.list_ready_run_wakeups().unwrap();
-        assert_eq!(
-            ready
-                .iter()
-                .map(|wakeup| wakeup.run.id.as_str())
-                .collect::<Vec<_>>(),
-            ["run_done", "run_failed"]
-        );
-
-        assert!(store
-            .update_status("run_active", RunStatus::Done, Some(2), Some(0))
-            .unwrap());
-        assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 3);
-        let token = store
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .unwrap();
-        assert!(store
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .is_none());
-        assert!(store
-            .list_ready_run_wakeups()
-            .unwrap()
-            .iter()
-            .any(|wakeup| wakeup.run.id == "run_done" && wakeup.state == "claimed"));
-        store
-            .release_run_wakeup("run_done", "chat_A", &token)
-            .unwrap();
-        assert!(store
-            .list_ready_run_wakeups()
-            .unwrap()
-            .iter()
-            .any(|wakeup| wakeup.run.id == "run_done"));
-        let token = store
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .unwrap();
-        assert!(store
-            .mark_run_wakeup_delivered("run_done", "chat_A", &token)
-            .unwrap());
-        assert_eq!(
-            store.register_run_wakeup("run_done", "chat_A").unwrap(),
-            RunWakeupRegistration::AlreadyDelivered
-        );
-        assert!(store
-            .list_ready_run_wakeups()
-            .unwrap()
-            .iter()
-            .all(|wakeup| wakeup.run.id != "run_done"));
-
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn monitoring_alert_claims_once_and_keeps_the_terminal_wakeup() {
-        let dir = std::env::temp_dir().join(format!("orx-store-alert-{}", uuid::Uuid::new_v4()));
-        let first = Store::open_at(dir.clone()).unwrap();
-        first
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        for (id, status) in [("run_live", "starting"), ("run_done", "done")] {
-            first
-                .upsert_run(&run_fixture(id, status, Some("chat_A")))
-                .unwrap();
-            first.register_run_wakeup(id, "chat_A").unwrap();
-        }
-        let second = Store::open_at(dir.clone()).unwrap();
-
-        let active = first.list_active_run_wakeups().unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].run.id, "run_live");
-        assert!(!active[0].monitoring_alerted);
-        assert!(first
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", true)
-            .unwrap());
-        assert!(!second
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", true)
-            .unwrap());
-        assert!(second.list_active_run_wakeups().unwrap()[0].monitoring_alerted);
-
-        assert!(second
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", false)
-            .unwrap());
-        assert!(!first
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", false)
-            .unwrap());
-
-        first
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", true)
-            .unwrap();
-        assert!(first
-            .update_status("run_live", RunStatus::Done, Some(2), Some(0))
-            .unwrap());
-        assert!(first.list_active_run_wakeups().unwrap().is_empty());
-        assert!(first
-            .list_ready_run_wakeups()
-            .unwrap()
-            .iter()
-            .any(|wakeup| wakeup.run.id == "run_live" && wakeup.state == "pending"));
-        first
-            .claim_run_wakeup("run_live", "chat_A")
-            .unwrap()
-            .unwrap();
-        assert!(!first
-            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", false)
-            .unwrap());
-
-        drop(second);
-        drop(first);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn run_wakeup_claim_is_atomic_across_store_connections_and_recoverable() {
-        let dir = std::env::temp_dir().join(format!("orx-store-claim-{}", uuid::Uuid::new_v4()));
-        let first = Store::open_at(dir.clone()).unwrap();
-        first
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        first
-            .upsert_run(&run_fixture("run_done", "done", Some("chat_A")))
-            .unwrap();
-        first.register_run_wakeup("run_done", "chat_A").unwrap();
-        let second = Store::open_at(dir.clone()).unwrap();
-
-        let stale_token = first
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .unwrap();
-        assert!(second
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .is_none());
-        first
-            .conn
-            .execute(
-                "UPDATE chat_run_wakeups SET claimed_at = 0 WHERE run_id = 'run_done'",
-                [],
-            )
-            .unwrap();
-        second.prune_run_wakeups().unwrap();
-        let current_token = second
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .unwrap();
-        first
-            .release_run_wakeup("run_done", "chat_A", &stale_token)
-            .unwrap();
-        assert!(!first
-            .mark_run_wakeup_delivered("run_done", "chat_A", &stale_token)
-            .unwrap());
-        assert!(
-            first
-                .claim_run_wakeup("run_done", "chat_A")
-                .unwrap()
-                .is_none(),
-            "a stale token releases nothing"
-        );
-        second
-            .release_run_wakeup("run_done", "chat_A", &current_token)
-            .unwrap();
-        assert!(first
-            .claim_run_wakeup("run_done", "chat_A")
-            .unwrap()
-            .is_some());
-
-        drop(second);
-        drop(first);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn ready_run_wakeups_are_ordered_by_terminal_time() {
-        let dir = std::env::temp_dir().join(format!("orx-store-order-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        store
-            .create_chat_session(&chat_session_fixture("chat_A"))
-            .unwrap();
-        for (id, ended_at) in [("run_late", 20), ("run_early", 10)] {
-            let mut run = run_fixture(id, "done", Some("chat_A"));
-            run.ended_at = Some(ended_at);
-            store.upsert_run(&run).unwrap();
-            store.register_run_wakeup(id, "chat_A").unwrap();
-        }
-
-        assert_eq!(
-            store
-                .list_ready_run_wakeups()
-                .unwrap()
-                .iter()
-                .map(|wakeup| wakeup.run.id.as_str())
-                .collect::<Vec<_>>(),
-            ["run_early", "run_late"]
-        );
-
-        drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -8857,5 +11381,70 @@ mod tests {
         );
         assert_eq!(stored.parent_experiment_id, None, "only a move re-parents");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn host_roots_never_persist_alias_authorization() {
+        let dir = std::env::temp_dir().join(format!("orx-alias-store-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        use crate::engine::transport::{AuthState, HostClass, HostState, Status};
+        let auth = AuthState {
+            class: Some(HostClass::Key),
+            route: Some("approved route".into()),
+            blocked: Some((123, "auth rejected".into())),
+        };
+        store.save_engine_host_auth("lab", &auth).unwrap();
+        for root in ["ssh", "slurm"] {
+            store
+                .save_engine_host(
+                    "lab",
+                    root,
+                    &HostState {
+                        status: Status::NeedsAuth,
+                        ..HostState::default()
+                    },
+                )
+                .unwrap();
+        }
+        assert!(store
+            .engine_hosts()
+            .unwrap()
+            .iter()
+            .all(|(_, _, state)| state.status == Status::NeedsAuth));
+        let mut rows = store
+            .conn
+            .prepare("SELECT state_json FROM engine_hosts")
+            .unwrap();
+        for json in rows.query_map([], |row| row.get::<_, String>(0)).unwrap() {
+            let json: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
+            assert!(json.get("class").is_none());
+            assert!(json.get("route").is_none());
+            assert_eq!(json["status"], "Idle");
+            assert!(json["cause"].is_null());
+        }
+        drop(rows);
+        store
+            .save_engine_host_auth(
+                "lab",
+                &AuthState {
+                    blocked: None,
+                    ..auth
+                },
+            )
+            .unwrap();
+        assert!(store
+            .engine_hosts()
+            .unwrap()
+            .iter()
+            .all(|(_, _, state)| state.status == Status::Idle && state.cause.is_none()));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn log_path_keeps_the_explicit_directory_and_sanitizes_the_run_id() {
+        assert_eq!(
+            log_path(Path::new("/isolated/data"), "../run_A-1/../../x"),
+            Path::new("/isolated/data/run-logs/run_A-1x.log")
+        );
     }
 }

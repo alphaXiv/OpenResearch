@@ -65,6 +65,7 @@ def _emit_exit(code):
         out = {"stage": "COMPLETED"}
     else:
         out = {"stage": "ERROR", "message": "exited with code %d" % code}
+    out["exitCode"] = code
     print(json.dumps(out))
 
 def submit():
@@ -141,6 +142,9 @@ def status(name, pid):
     if state == "pending":
         print(json.dumps({"stage": "SCHEDULING"}))
         return
+    if state != "running" and tags.get("orx_cancelled"):
+        print(json.dumps({"stage": "CANCELED"}))
+        return
     if state != "running":
         # Only a running sandbox is queried for its process: process calls on a
         # stopped sandbox would boot a fresh session.
@@ -210,6 +214,9 @@ def cancel(name):
     sandbox, _ = _sdk()
     box = sandbox.get_sandbox(name=name)
     if _status(box) in ("pending", "running"):
+        tags = dict(box.tags or {})
+        tags["orx_cancelled"] = "1"
+        box.update(tags=tags)
         box.stop()
 
 def finish(name):
@@ -919,6 +926,7 @@ pub fn sandbox_name(run_id: &str) -> String {
     name.trim_end_matches('-').to_string()
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VercelJobSpec {
     pub name: String,
     /// `bash -c` payload (the shared snapshot-and-run script).
@@ -992,6 +1000,7 @@ pub fn session_limit(timeout_seconds: u64, session_cap: u64) -> u64 {
 pub struct JobState {
     pub stage: String,
     pub message: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 pub async fn inspect_job(sandbox_name: &str, process_id: &str) -> Result<JobState> {
@@ -1005,6 +1014,10 @@ pub async fn inspect_job(sandbox_name: &str, process_id: &str) -> Result<JobStat
             .unwrap_or("RUNNING")
             .to_string(),
         message: v.get("message").and_then(Value::as_str).map(str::to_string),
+        exit_code: v
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .and_then(|code| code.try_into().ok()),
     })
 }
 
@@ -1421,9 +1434,10 @@ mod tests {
         };
         for (probe, expected) in [
             ("running", json!({"stage": "RUNNING"})),
+            ("cancelled", json!({"stage": "CANCELED"})),
             (
                 "exited",
-                json!({"stage": "ERROR", "message": "exited with code 3"}),
+                json!({"stage": "ERROR", "message": "exited with code 7", "exitCode": 7}),
             ),
         ] {
             let dir = std::env::temp_dir().join(format!("orx-vercel-{}", uuid::Uuid::new_v4()));
@@ -1440,13 +1454,15 @@ class Done:
 class Proc:
     def __init__(self, rc): self.returncode = rc
 class Box:
-    status = "running"
-    tags = {{}}
-    def run_process(self, *a, **kw): return Done()
+    status = "stopped" if "{probe}" == "cancelled" else "running"
+    tags = {{"orx_cancelled": "1"}} if "{probe}" == "cancelled" else {{}}
+    def run_process(self, *a, **kw):
+        assert self.status == "running", "queried a stopped sandbox"
+        return Done()
     def get_process(self, pid, wait=False):
         if not wait: return Proc(None)
         assert "{probe}" == "exited", "waited on a running job"
-        return Proc(3)
+        return Proc(7)
     def update(self, tags): sys.stderr.write("tagged " + tags["orx_exit"])
 def get_sandbox(**kw): return Box()
 "#
@@ -1466,7 +1482,7 @@ def get_sandbox(**kw): return Box()
                 expected,
                 "{probe}"
             );
-            assert_eq!(stderr.contains("tagged 3"), probe == "exited", "{stderr}");
+            assert_eq!(stderr.contains("tagged 7"), probe == "exited", "{stderr}");
         }
     }
 

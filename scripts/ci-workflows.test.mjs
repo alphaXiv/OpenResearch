@@ -252,3 +252,47 @@ test('ARM PR lanes preserve desktop lint and linking; other validation remains c
     }
   }
 })
+
+test('release and canary host artifacts reach every source build', () => {
+  const builder = workflow('build-host')
+  assert.match(builder, /runs-on: macos-14/)
+  assert.match(builder, /actions\/checkout@v6/)
+  assert.match(builder, /actions\/upload-artifact@v7/)
+  assert.match(builder, /mlugg\/setup-zig@[a-f0-9]{40}/)
+  for (const target of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'x86_64-apple-darwin', 'aarch64-apple-darwin']) assert.ok(builder.includes(target))
+  assert.match(builder, /run: node scripts\/build-host\.mjs/)
+  assert.match(builder, /name: release-host\n\s+path: target\/host-binaries/)
+  for (const source of [release, canary]) {
+    const job = source.split('\n  build-host:')[1].split(/\n  [a-z]/)[0]
+    assert.match(job, /uses: \.\/\.github\/workflows\/build-host.yml/)
+    assert.match(job, /source-sha:/)
+  }
+  const local = release.split('\n  build-local-artifacts:')[1].split('\n  custom-sign-macos-cli:')[0]
+  assert.match(local, /- build-host/)
+  assert.match(local, /Build artifacts\n\s+env:\n\s+ORX_EMBED_HOST_DIR:/)
+  assert.match(local, /name: release-host\n\s+path: target\/host-binaries/)
+  for (const job of ['ci', 'macos-build', 'linux', 'windows']) {
+    const section = canary.split(`\n  ${job}:`)[1].split(/\n  [a-z]/)[0]
+    assert.match(section, /needs: \[[^\n]*build-host\]/)
+    if (job !== 'ci') {
+      assert.match(section, /name: release-host\n\s+path: target\/host-binaries/)
+      assert.match(section, /ORX_EMBED_HOST_DIR:/)
+    }
+  }
+  assert.match(ci, /Packaged binary bootstraps SSH host without a binary directory\n\s+if: inputs.release && github.event_name != 'pull_request'/)
+  assert.match(ci, /ORX_PACKAGED_BINARY: \$\{\{ github.workspace \}\}\/target\/release\/orx/)
+  assert.match(ci, /env -u ORX_HOST_BIN_DIR cargo test --locked --test packaged_host -- --ignored --nocapture/)
+  for (const name of ['Verify embedded host lookup', 'Optimized source builds disable production telemetry', 'Packaged binary bootstraps SSH host without a binary directory']) {
+    const step = ci.split(`      - name: ${name}\n`)[1].split('      - name:')[0]
+    assert.match(step, /ORX_EMBED_HOST_DIR:/)
+  }
+  assert.match(ci, /Download release hosts\n\s+if: inputs.release && github.event_name != 'pull_request'/)
+  for (const platform of ['macos', 'linux']) {
+    const source = workflow(`release-${platform}-app`)
+    assert.match(source, /ORX_EMBED_HOST_DIR:/)
+    const download = source.split('      - name: Download release hosts')[1].split('      - name:')[0]
+    assert.match(download, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/)
+    assert.match(source, /name: release-host\n\s+path: target\/host-binaries\n\s+run-id: \$\{\{ needs.check.outputs.release-run-id \}\}/)
+  }
+  assert.match(workflow('release-windows-app'), /Take orx.exe from the release/)
+})

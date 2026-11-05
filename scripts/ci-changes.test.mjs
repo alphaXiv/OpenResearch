@@ -13,7 +13,7 @@ test('frontend changes do not select Rust', () => {
   assert.deepEqual(enabled(['ui/src/App.tsx', 'ui/pnpm-lock.yaml']), ['frontend'])
 })
 test('Rust and embedded resources select all existing Rust platforms', () => {
-  for (const path of ['src/main.rs', 'tests/compute_cli.rs', 'Cargo.lock', 'build.rs', 'agent-skills/orx-compute/SKILL.md', 'demo/nanochat/base/file.txt', 'SYSTEM_PROMPT.md', 'SKILL.md']) {
+  for (const path of ['src/main.rs', 'crates/orx-host/src/main.rs', 'tests/compute_cli.rs', 'Cargo.lock', 'build.rs', 'agent-skills/orx-compute/SKILL.md', 'demo/nanochat/base/file.txt', 'SYSTEM_PROMPT.md', 'SKILL.md']) {
     assert.deepEqual(enabled([path]), ['rust', 'windows', 'linux', 'macos'], path)
   }
 })
@@ -28,7 +28,7 @@ test('helper tests are independent and combine with other changes', () => {
 })
 test('docs skip builds, workflow changes and unknown files select all', () => {
   assert.deepEqual(enabled(['README.md', 'docs/linux.md', 'LICENSE', '.github/readme-assets/banner.png', 'macos/DISTRIBUTION.md', 'windows/README.md', 'ui/README.md']), [])
-  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'new-build-input']) assert.equal(enabled([path]).length, 9)
+  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'scripts/build-host.mjs', 'scripts/build-host.test.mjs', 'new-build-input']) assert.equal(enabled([path]).length, 9)
 })
 test('embedded chart changes also run chart tests', () => {
   assert.equal(classifyChanges(['agent-skills/orx-figures/assets/orx_chart.py']).chart, true)

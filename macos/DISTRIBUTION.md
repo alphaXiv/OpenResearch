@@ -108,8 +108,10 @@ dist does not generate this job's `needs: build-local-artifacts`, so
 `dist-workspace.toml` sets `allow-dirty = ["ci"]`, which makes `dist generate`
 skip `release.yml` entirely: dist config changes no longer reach CI on their own.
 To regenerate, remove `allow-dirty`, run the pinned `dist generate`, then restore
-the shared UI build, custom signing dependencies, release-only dispatch guard,
-immutable source SHA propagation, the full-history checkout and
+the shared UI build, the `build-host` job and its `needs` edges, the host artifact
+download and `ORX_EMBED_HOST_DIR` on embedding build steps, custom signing
+dependencies, release-only dispatch guard, immutable source SHA propagation,
+the full-history checkout and
 `desktop-ancestry.json` generation, and required publication checks before
 restoring `allow-dirty`.
 Release recovery requires an explicit version tag; set `source-sha` to the original

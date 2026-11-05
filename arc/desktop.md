@@ -48,6 +48,10 @@ single-threaded runtime would deadlock here.
   binds the same port every time. If a terminal `orx up` or another install
   holds it, the app falls back to a free port. After an update relaunch it
   keeps the port it had.
+- **One server per data directory.** If an `orx up` already owns the data
+  directory, the window opens on it instead of starting a second engine.
+  Closing the window while runs are active hides it and keeps the engine
+  running until it is idle.
 - **One app per user.** macOS enforces this itself. On Windows a named event
   and on Linux a socket in the user's private runtime directory let a second
   launch bring the running window forward, handing it any link it was opened

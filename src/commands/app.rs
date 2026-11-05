@@ -178,6 +178,36 @@ fn desktop_entry(appimage: &str, icon: &str) -> String {
         .collect()
 }
 
+#[cfg_attr(not(desktop_app), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+enum CloseAction {
+    Background,
+    Quit,
+    ConfirmQuit,
+}
+
+/// A busy engine keeps running windowless after a close, and asks before an explicit Quit.
+#[cfg_attr(not(desktop_app), allow(dead_code))]
+fn close_action(explicit_quit: bool, busy: bool) -> CloseAction {
+    match (explicit_quit, busy) {
+        (_, false) => CloseAction::Quit,
+        (true, true) => CloseAction::ConfirmQuit,
+        (false, true) => CloseAction::Background,
+    }
+}
+
+static WINDOWLESS: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
+
+pub(crate) fn windowless() -> bool {
+    *WINDOWLESS.borrow()
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn native_quit_needs_confirmation(runs_busy: bool, system_reason: Option<u32>) -> bool {
+    runs_busy && system_reason.is_none()
+}
+
 #[cfg(desktop_app)]
 const APP_PORT: u16 = 4792;
 
@@ -228,6 +258,29 @@ pub async fn run() {
             return;
         }
     };
+    let discovered = match crate::commands::remote_host::canonical_data_dir() {
+        Ok(data_dir) => crate::commands::remote_host::ServerDescriptor::live(&data_dir).await,
+        Err(error) => Err(error),
+    };
+    match discovered {
+        Ok(Some(server)) => {
+            #[cfg(target_os = "macos")]
+            imp::run_event_loop(server.port, true);
+            #[cfg(not(target_os = "macos"))]
+            imp::run_event_loop(
+                server.port,
+                true,
+                focus_requests,
+                link.as_deref().and_then(link_path),
+            );
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            crate::show_error_dialog(&error.to_string());
+            return;
+        }
+    }
     // After an update relaunch, keep the previous port. Otherwise a fixed port,
     // since the window's localStorage is keyed by origin, falling back to an
     // ephemeral one when a terminal `orx up` or another app holds it.
@@ -820,11 +873,16 @@ mod imp {
 
     enum UserEvent {
         ServerReady,
+        EngineBusy(bool),
         LoadTimedOut,
         SyncZoom,
         Zoom(ZoomAction),
         #[cfg(target_os = "macos")]
         Menu(MenuId),
+        #[cfg(target_os = "macos")]
+        QuitRequested,
+        #[cfg(target_os = "macos")]
+        NativeQuitRequested,
         #[cfg(target_os = "macos")]
         MenuSpec(Vec<PageMenu>),
         #[cfg(target_os = "macos")]
@@ -882,6 +940,10 @@ mod imp {
         #[cfg(target_os = "linux")]
         gtk::glib::set_prgname(Some("OpenResearch"));
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+        #[cfg(target_os = "macos")]
+        if !external_server {
+            intercept_native_quit(event_loop.create_proxy());
+        }
 
         // Dashboard server on background workers (we're inside main's runtime).
         if !external_server {
@@ -890,6 +952,7 @@ mod imp {
                     port,
                     remote: None,
                     no_browser: true,
+                    headless: false,
                     no_agent: false,
                     model: None,
                     remote_host: false,
@@ -902,6 +965,32 @@ mod imp {
                         eprintln!("openresearch app: dashboard server exited: {err}");
                         crate::show_error_dialog(&format!("The dashboard server stopped: {err}"));
                         std::process::exit(1);
+                    }
+                }
+            });
+        }
+
+        if !external_server {
+            let lifecycle = event_loop.create_proxy();
+            let mut visibility = super::WINDOWLESS.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    while !*visibility.borrow_and_update() {
+                        if visibility.changed().await.is_err() {
+                            return;
+                        }
+                        let _ = lifecycle.send_event(UserEvent::EngineBusy(true));
+                    }
+                    let busy = crate::commands::up::api_v2::busy().unwrap_or(true);
+                    if lifecycle.send_event(UserEvent::EngineBusy(busy)).is_err() {
+                        return;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                        result = visibility.changed() => {
+                            if result.is_err() { return; }
+                            let _ = lifecycle.send_event(UserEvent::EngineBusy(true));
+                        }
                     }
                 }
             });
@@ -950,6 +1039,7 @@ mod imp {
                     _ => None,
                 };
                 let event = match action {
+                    _ if event.id.as_ref() == "app.quit" => UserEvent::QuitRequested,
                     Some(action) => UserEvent::Zoom(action),
                     None => UserEvent::Menu(event.id),
                 };
@@ -1076,7 +1166,10 @@ mod imp {
                     }
                     #[cfg(any(windows, target_os = "macos"))]
                     let _ = proxy.send_event(UserEvent::SyncWindowState);
-                    if super::is_dashboard_url(&url, &origin) && !shown.replace(true) {
+                    if super::is_dashboard_url(&url, &origin)
+                        && !super::windowless()
+                        && !shown.replace(true)
+                    {
                         window.set_visible(true);
                         window.set_focus();
                     }
@@ -1224,6 +1317,8 @@ mod imp {
         #[cfg(target_os = "macos")]
         align_traffic_lights(&window, zoom_percent);
         let mut quit = Quit::No;
+        let mut idle = crate::commands::up::api_v2::Idle::default();
+        let started = Instant::now();
         let mut links = DeepLinks {
             server_ready: false,
             page_ready,
@@ -1258,12 +1353,21 @@ mod imp {
                 }
                 Quit::ShuttingDown => *control_flow = ControlFlow::Exit,
             },
+            Event::UserEvent(UserEvent::EngineBusy(value)) if matches!(quit, Quit::No) => {
+                if idle.should_exit(started.elapsed(), !super::windowless() || value) {
+                    begin_quit(&mut quit, &window, &webview, control_flow);
+                }
+            }
             Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
+                if super::windowless() {
+                    links.server_ready = true;
+                    return;
+                }
                 let _ = webview.load_url(&format!("{origin}{}", links.on_server_ready()));
             }
             // A window that never appears is worse than a blank one.
             Event::UserEvent(UserEvent::LoadTimedOut)
-                if matches!(quit, Quit::No) && !shown.replace(true) =>
+                if matches!(quit, Quit::No) && !super::windowless() && !shown.replace(true) =>
             {
                 eprintln!("openresearch app: the dashboard has not finished loading; showing the window anyway");
                 window.set_visible(true);
@@ -1271,7 +1375,7 @@ mod imp {
             }
             #[cfg(windows)]
             Event::UserEvent(UserEvent::Close) => {
-                begin_quit(&mut quit, &window, &webview, control_flow);
+                close_window(false, external_server, &mut quit, &window, &webview, control_flow);
             }
             #[cfg(windows)]
             Event::UserEvent(UserEvent::SyncWindowState) => {
@@ -1303,12 +1407,18 @@ mod imp {
                 }
             }
             #[cfg(target_os = "macos")]
-            Event::UserEvent(UserEvent::Menu(id)) if id.as_ref() == "app.quit" => {
-                begin_quit(&mut quit, &window, &webview, control_flow);
+            Event::UserEvent(UserEvent::NativeQuitRequested) => {
+                let confirmed = !matches!(quit, Quit::No) || confirm_quit(&window);
+                NSApplication::sharedApplication(MainThreadMarker::new().unwrap())
+                    .replyToApplicationShouldTerminate(confirmed);
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::QuitRequested) => {
+                close_window(true, external_server, &mut quit, &window, &webview, control_flow);
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Menu(id)) if id.as_ref() == "window.close" => {
-                NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
+                close_window(false, external_server, &mut quit, &window, &webview, control_flow);
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::MenuSpec(spec)) => match build_menu(&spec) {
@@ -1368,6 +1478,11 @@ mod imp {
             // Even before the page loads: a launch that brings nothing up looks
             // like a broken app. While quitting it must stay hidden.
             Event::UserEvent(UserEvent::Focus(link)) if matches!(quit, Quit::No) => {
+                if super::WINDOWLESS.send_replace(false) {
+                    shown.set(false);
+                    links.reopen(&webview, &origin, link.as_deref().and_then(super::link_path));
+                    return;
+                }
                 if let Some(path) = link.as_deref().and_then(super::link_path) {
                     links.open(path, &webview, &origin);
                 }
@@ -1380,23 +1495,20 @@ mod imp {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                #[cfg(target_os = "macos")]
-                if external_server {
-                    begin_quit(&mut quit, &window, &webview, control_flow);
-                } else {
-                    // AppKit switches Spaces when hiding the app, unlike ordering out its window.
-                    NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
-                }
-                #[cfg(not(target_os = "macos"))]
-                begin_quit(&mut quit, &window, &webview, control_flow);
+                close_window(false, external_server, &mut quit, &window, &webview, control_flow);
             }
             #[cfg(target_os = "macos")]
-            Event::Reopen { .. } => {
+            Event::Reopen { .. } if matches!(quit, Quit::No) => {
+                if super::WINDOWLESS.send_replace(false) {
+                    shown.set(false);
+                    links.reopen(&webview, &origin, None);
+                    return;
+                }
                 shown.set(true);
                 window.set_visible(true);
                 window.set_focus();
             }
-            Event::UserEvent(UserEvent::PageReady) if matches!(quit, Quit::No) => {
+            Event::UserEvent(UserEvent::PageReady) if matches!(quit, Quit::No) && !super::windowless() => {
                 links.on_page_ready(&webview);
             }
             #[cfg(target_os = "macos")]
@@ -1410,7 +1522,12 @@ mod imp {
                 let Some(path) = urls.iter().find_map(super::deep_link_path) else {
                     return;
                 };
-                links.open(path, &webview, &origin);
+                if super::WINDOWLESS.send_replace(false) {
+                    shown.set(false);
+                    links.reopen(&webview, &origin, Some(path));
+                } else {
+                    links.open(path, &webview, &origin);
+                }
             }
             _ => {}
         })
@@ -1433,6 +1550,17 @@ mod imp {
         fn on_page_ready(&mut self, webview: &WebView) {
             if let Some(path) = self.pending.take() {
                 open_in_page(webview, &path);
+            }
+        }
+
+        fn reopen(&mut self, webview: &WebView, origin: &str, path: Option<String>) {
+            self.page_ready.set(false);
+            if let Some(path) = path {
+                self.pending = Some(path);
+            }
+            if self.server_ready {
+                let path = self.pending.take().unwrap_or_else(|| "/".to_string());
+                let _ = webview.load_url(&format!("{origin}{path}"));
             }
         }
 
@@ -1459,6 +1587,151 @@ mod imp {
             "window.dispatchEvent(new CustomEvent('orx:open-path', {{ detail: {} }}));",
             serde_json::Value::from(path)
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    thread_local! {
+        static QUIT_PROXY: RefCell<Option<tao::event_loop::EventLoopProxy<UserEvent>>> = const { RefCell::new(None) };
+    }
+
+    #[cfg(target_os = "macos")]
+    fn intercept_native_quit(proxy: tao::event_loop::EventLoopProxy<UserEvent>) {
+        QUIT_PROXY.with(|slot| *slot.borrow_mut() = Some(proxy));
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        unsafe {
+            let delegate: *mut AnyObject = objc2::msg_send![&*app, delegate];
+            let Some(delegate) = delegate.as_ref() else {
+                return;
+            };
+            let class: *const AnyClass = delegate.class();
+            type ShouldTerminate =
+                unsafe extern "C-unwind" fn(
+                    &AnyObject,
+                    Sel,
+                    &AnyObject,
+                )
+                    -> objc2_app_kit::NSApplicationTerminateReply;
+            let handler: ShouldTerminate = native_quit_requested;
+            objc2::ffi::class_addMethod(
+                class.cast_mut(),
+                objc2::sel!(applicationShouldTerminate:),
+                std::mem::transmute::<ShouldTerminate, objc2::runtime::Imp>(handler),
+                c"Q@:@".as_ptr(),
+            );
+            // AppKit caches optional methods when the delegate is assigned.
+            let _: () = objc2::msg_send![&*app, setDelegate: delegate];
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe extern "C-unwind" fn native_quit_requested(
+        _delegate: &AnyObject,
+        _selector: Sel,
+        _app: &AnyObject,
+    ) -> objc2_app_kit::NSApplicationTerminateReply {
+        use objc2_app_kit::NSApplicationTerminateReply;
+        use objc2_foundation::NSAppleEventManager;
+
+        let reason = NSAppleEventManager::sharedAppleEventManager()
+            .currentAppleEvent()
+            .and_then(|event| {
+                // AEKeyword is u32; the generated binding otherwise requires CoreServices.
+                let reason: Option<objc2::rc::Retained<objc2_foundation::NSAppleEventDescriptor>> = unsafe {
+                    objc2::msg_send![&*event, paramDescriptorForKeyword: u32::from_be_bytes(*b"why?")]
+                };
+                reason
+            })
+            .map(|reason| reason.enumCodeValue());
+        let busy = reason.is_none() && crate::commands::up::api_v2::runs_busy().unwrap_or(true);
+        if !super::native_quit_needs_confirmation(busy, reason) {
+            return NSApplicationTerminateReply::TerminateNow;
+        }
+        let sent = QUIT_PROXY.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|proxy| proxy.send_event(UserEvent::NativeQuitRequested).is_ok())
+        });
+        if sent {
+            NSApplicationTerminateReply::TerminateLater
+        } else {
+            NSApplicationTerminateReply::TerminateNow
+        }
+    }
+
+    fn close_window(
+        explicit_quit: bool,
+        external_server: bool,
+        quit: &mut Quit,
+        window: &Window,
+        webview: &WebView,
+        control_flow: &mut ControlFlow,
+    ) {
+        if !matches!(quit, Quit::No) {
+            return;
+        }
+        if external_server {
+            begin_quit(quit, window, webview, control_flow);
+            return;
+        }
+        let busy = if explicit_quit {
+            crate::commands::up::api_v2::runs_busy().unwrap_or(true)
+        } else {
+            crate::commands::up::api_v2::busy().unwrap_or(true)
+        };
+        match super::close_action(explicit_quit, busy) {
+            super::CloseAction::Background => {
+                super::WINDOWLESS.send_replace(true);
+                window.set_visible(false);
+                let _ = webview.load_url("about:blank");
+            }
+            super::CloseAction::ConfirmQuit => {
+                if confirm_quit(window) {
+                    begin_quit(quit, window, webview, control_flow);
+                }
+            }
+            super::CloseAction::Quit => begin_quit(quit, window, webview, control_flow),
+        }
+    }
+
+    fn confirm_quit(window: &Window) -> bool {
+        #[cfg(target_os = "macos")]
+        let _ = window;
+        let title = "Quit OpenResearch?";
+        let description = "Runs will continue on their hosts. Results will be collected the next time OpenResearch opens.";
+        #[cfg(not(target_os = "linux"))]
+        let confirmed = {
+            let dialog = rfd::MessageDialog::new()
+                .set_title(title)
+                .set_description(description)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                    "Quit".into(),
+                    "Cancel".into(),
+                ));
+            #[cfg(windows)]
+            let dialog = dialog.set_parent(window);
+            dialog.show() == rfd::MessageDialogResult::Custom("Quit".into())
+        };
+        #[cfg(target_os = "linux")]
+        let confirmed = {
+            use gtk::prelude::*;
+            use tao::platform::unix::WindowExtUnix;
+
+            let dialog = gtk::MessageDialog::builder()
+                .transient_for(window.gtk_window())
+                .modal(true)
+                .text(title)
+                .secondary_text(description)
+                .build();
+            dialog.add_buttons(&[
+                ("Cancel", gtk::ResponseType::Cancel),
+                ("Quit", gtk::ResponseType::Accept),
+            ]);
+            dialog.set_default_response(gtk::ResponseType::Cancel);
+            let confirmed = dialog.run() == gtk::ResponseType::Accept;
+            dialog.close();
+            confirmed
+        };
+        confirmed
     }
 
     fn begin_quit(
@@ -1870,6 +2143,41 @@ mod tests {
     };
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
+
+    #[test]
+    fn close_and_quit_matrix() {
+        use super::{close_action, CloseAction};
+
+        assert_eq!(close_action(false, false), CloseAction::Quit);
+        assert_eq!(close_action(true, false), CloseAction::Quit);
+        assert_eq!(close_action(false, true), CloseAction::Background);
+        assert_eq!(close_action(true, true), CloseAction::ConfirmQuit);
+    }
+
+    #[test]
+    fn native_quit_never_defers_system_termination_or_idle_quit() {
+        for busy in [false, true] {
+            assert_eq!(super::native_quit_needs_confirmation(busy, None), busy);
+            for reason in [*b"quia", *b"shut", *b"rest", *b"rlgo"] {
+                assert!(!super::native_quit_needs_confirmation(
+                    busy,
+                    Some(u32::from_be_bytes(reason))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn new_work_resets_windowless_idle_exit() {
+        let mut idle = crate::commands::up::api_v2::Idle::default();
+        let secs = std::time::Duration::from_secs;
+
+        assert!(!idle.should_exit(secs(0), false));
+        assert!(!idle.should_exit(secs(599), true));
+        assert!(!idle.should_exit(secs(600), false));
+        assert!(!idle.should_exit(secs(1199), false));
+        assert!(idle.should_exit(secs(1200), false));
+    }
 
     #[test]
     fn the_desktop_entry_launches_the_appimage_wherever_it_is() {

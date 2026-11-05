@@ -43,6 +43,7 @@ export interface ConfirmDialogOptions {
   description: ReactNode;
   destructive?: boolean;
   confirmLabel?: string;
+  cancelLabel?: string;
 }
 
 export interface TextDialogOptions {
@@ -75,6 +76,7 @@ function ConfirmDialogContent({
   description,
   destructive,
   confirmLabel,
+  cancelLabel,
   cancel,
   confirm,
   cancelable,
@@ -86,6 +88,7 @@ function ConfirmDialogContent({
   description: ReactNode;
   destructive: boolean;
   confirmLabel: string;
+  cancelLabel: string;
 }) {
   const confirmRef = useRef<HTMLButtonElement>(null);
 
@@ -99,7 +102,7 @@ function ConfirmDialogContent({
       <DialogFooter>
         {cancelable && (
           <Button onClick={cancel} disabled={isDisabled}>
-            {m.common_cancel()}
+            {cancelLabel}
           </Button>
         )}
         <Button
@@ -242,6 +245,7 @@ export function createDialogs() {
       onConfirm: opts.onConfirm,
       props: {
         confirmLabel: opts.confirmLabel ?? (opts.onCancel === "disable" ? m.common_ok() : m.common_confirm()),
+        cancelLabel: opts.cancelLabel ?? m.common_cancel(),
         description: opts.description,
         destructive: opts.destructive ?? false,
         title: opts.title,

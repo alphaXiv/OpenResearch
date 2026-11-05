@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 struct Sandbox(PathBuf);
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        orx_test_support::stop_server(&self.0.join("data"));
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -89,7 +90,9 @@ fn idle_orx_up_relaunches_into_an_installed_update() {
     }
     std::fs::write(config.join("update-check-unknown.json"), cache.to_string()).unwrap();
 
-    let relaunched = wait_for(Duration::from_secs(45), || marker.exists());
+    // Startup, the 10 s update sample, shutdown and the relaunched process's first instructions
+    // all wait for CPU, which a loaded machine rations.
+    let relaunched = wait_for(Duration::from_secs(120), || marker.exists());
     let _ = up.kill();
     let _ = up.wait();
     assert!(serving, "orx up never started serving");

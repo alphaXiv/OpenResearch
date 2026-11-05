@@ -3,8 +3,9 @@ import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { FlaskConical, CircleStop, FolderTree, Terminal } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
-import { StatusBadge } from "./StatusBadge";
+import { fmtNumber, timeAgo, type Experiment, type Run } from "../api";
+import { runActive, runDisplay } from "../runDisplay";
+import { statusLabel, StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { IconButton, Tooltip } from "./ui";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
@@ -118,26 +119,17 @@ export function ExperimentsTable({
           const experiment = row.node.experiment;
           const experimentRuns = runsByExperiment.get(experiment.id) ?? [];
           const latestRun = experimentRuns[0] ?? null;
-          const liveRun = experimentRuns.find(
-            (run) => run.status === "running" || run.status === "starting",
-          );
+          const liveRun = experimentRuns.find((run) => runActive(run.status));
           const logsRun = liveRun ?? latestRun;
-          const cancelling = Boolean(
-            liveRun && (liveRun.cancelRequested || pendingCancellation.has(liveRun.id)),
-          );
-          const status = liveRun
-            ? cancelling
-              ? "cancelling"
-              : runDisplayStatus(liveRun)
-            : latestRun
-              ? runDisplayStatus(latestRun)
-              : "idle";
+          const cancelling = Boolean(liveRun && (liveRun.cancelling || pendingCancellation.has(liveRun.id)));
+          const shownRun = liveRun && pendingCancellation.has(liveRun.id) ? { ...liveRun, cancelling: true } : logsRun;
+          const display = shownRun ? runDisplay(shownRun) : { status: "idle" };
 
           return (
             <div
               key={experiment.id}
               style={{ paddingLeft: showLineage ? railWidth + 12 : 20 }}
-              className="experiment-table-group grid min-h-11 grid-cols-[minmax(0,_1fr)_4.5rem_4rem_4rem_auto] [grid-template-areas:'name_status_attempts_latest_actions'] items-center gap-x-3 gap-y-1 py-2 pe-3 border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-surface [&:last-child]:border-b-0 [@container(max-width:640px)]:grid-cols-[auto_auto_minmax(0,_1fr)_auto] [@container(max-width:640px)]:[grid-template-areas:'name_name_name_name'_'status_attempts_latest_actions'] [@container(max-width:640px)]:gap-x-3"
+              className="experiment-table-group grid min-h-11 grid-cols-[minmax(0,_1fr)_9.5rem_4rem_4rem_auto] [grid-template-areas:'name_status_attempts_latest_actions'] items-center gap-x-3 gap-y-1 py-2 pe-3 border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-surface [&:last-child]:border-b-0 [@container(max-width:640px)]:grid-cols-[minmax(0,_1fr)_auto] [@container(max-width:640px)]:[grid-template-areas:'name_actions'_'meta_meta'] [@container(max-width:640px)]:gap-x-3"
               role="listitem"
               onClick={() => onOpen(experiment, "preview")}
               onDoubleClick={() => onOpen(experiment, "keepOpen")}
@@ -160,14 +152,17 @@ export function ExperimentsTable({
                 </button>
                 {experiment.archived && <span className="text-muted text-xs">{m.tree_archived()}</span>}
               </div>
-              <div className="experiment-table-status [grid-area:status] min-w-0">
-                <StatusBadge status={status} />
-              </div>
-              <div className="experiment-run-summary [grid-area:attempts] flex items-center gap-2 whitespace-nowrap text-sm text-subtext">
-                <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
-              </div>
-              <div className="experiment-table-latest [grid-area:latest] whitespace-nowrap text-xs tabular-nums text-subtext">
-                {latestRun ? timeAgo(latestRun.createdAt) : "–"}
+              {/* Columns when wide; one full-width line under the title when narrow, clear of the actions. */}
+              <div className="experiment-table-meta contents [@container(max-width:640px)]:flex [@container(max-width:640px)]:[grid-area:meta] [@container(max-width:640px)]:min-w-0 [@container(max-width:640px)]:items-center [@container(max-width:640px)]:gap-x-3">
+                <div className="experiment-table-status [grid-area:status] min-w-0">
+                  <StatusBadge {...display} className="max-w-full" />
+                </div>
+                <div className="experiment-run-summary [grid-area:attempts] flex items-center gap-2 whitespace-nowrap text-sm text-subtext">
+                  <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
+                </div>
+                <div className="experiment-table-latest [grid-area:latest] min-w-0 truncate text-xs tabular-nums text-subtext">
+                  {latestRun ? timeAgo(latestRun.createdAt) : "–"}
+                </div>
               </div>
               <div
                 className="experiment-table-actions [grid-area:actions] flex items-center justify-end gap-1"
@@ -201,12 +196,12 @@ export function ExperimentsTable({
                   </IconButton>
                 </Tooltip>
                 {liveRun && (
-                  <Tooltip interactive content={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}>
+                  <Tooltip interactive content={cancelling ? statusLabel(display.status) : m.experiments_stop_run()}>
                     <IconButton
                       size="small"
                       variant="stop"
                       disabled={cancelling}
-                      aria-label={cancelling ? m.common_stopping() : m.common_stop()}
+                      aria-label={cancelling ? statusLabel(display.status) : m.common_stop()}
                       onClick={() => void requestCancel(liveRun.id)}
                     >
                       <CircleStop size={16} />

@@ -66,19 +66,60 @@ fn print_compact_summary(path: &std::path::Path, total_bytes: u64, preview: &str
     Ok(())
 }
 
-/// Prints a run's local log path, size, and bounded preview.
+/// Prints a run's local log path, size, and bounded preview; follows it through the server
+/// with `-f`.
 pub async fn run(args: crate::LogsArgs) -> Result<()> {
     crate::local::chat::record_chat_target("runs", &args.run_id);
+    if args.follow {
+        return crate::plane::local_plane::ApiClient::discover()
+            .await?
+            .logs(&args.run_id, true)
+            .await;
+    }
     resolve_run(Store::open()?, &args.run_id)?;
+    let ranges = crate::commands::up::api_v2::kept_ranges(&crate::store::data_dir(), &args.run_id)?;
+    if let Some(tail) = ranges.iter().max_by_key(|range| range.offset) {
+        let total = ranges
+            .iter()
+            .map(|range| range.offset + range.len)
+            .max()
+            .unwrap();
+        let mut stdout = std::io::stdout();
+        writeln!(stdout, "Original log: {total} bytes.")?;
+        for range in &ranges {
+            writeln!(
+                stdout,
+                "Kept bytes {}..{}: {}",
+                range.offset,
+                range.offset + range.len,
+                range.file.display()
+            )?;
+        }
+        let kept: u64 = ranges.iter().map(|range| range.len).sum();
+        if kept < total {
+            writeln!(stdout, "The middle of the log is not on this computer.")?;
+        }
+        let mut file = std::fs::File::open(&tail.file)?;
+        let bytes = read_preview_suffix(&mut file, tail.len)?;
+        writeln!(stdout, "Last {PREVIEW_CHARS} characters of the kept tail:")?;
+        writeln!(stdout, "{}", trailing_char_preview(&bytes))?;
+        return Ok(());
+    }
 
-    let (mut file, path, total) = match crate::jobs::ssh::service::logs::open_current(&args.run_id)
-    {
+    let log_path = crate::store::log_path(&crate::store::data_dir(), &args.run_id);
+    let (mut file, path, total) = match crate::jobs::ssh::service::logs::open_current(log_path) {
         Ok(current) => current,
         Err(error)
             if error
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
         {
+            let live = Store::open()?
+                .get_run(&args.run_id)?
+                .is_some_and(|run| !crate::local::is_terminal(&run.status));
+            if live {
+                return host_preview(&args.run_id).await;
+            }
             eprintln!("[local file] no log captured yet for this run.");
             return Ok(());
         }
@@ -87,6 +128,57 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
     let bytes = read_preview_suffix(&mut file, total)?;
     let preview = trailing_char_preview(&bytes);
     print_compact_summary(&path, total, &preview)
+}
+
+/// A live engine run's log stays on its host until the run finishes.
+async fn host_preview(run_id: &str) -> Result<()> {
+    let client = crate::plane::local_plane::ApiClient::discover().await?;
+    let page = |start: u64, end: u64| {
+        let client = client.clone();
+        async move {
+            let page: crate::engine::LogPage = serde_json::from_value(
+                client
+                    .json(
+                        reqwest::Method::GET,
+                        &format!(
+                            "runs/{}/log?start={start}&end={end}",
+                            urlencoding::encode(run_id)
+                        ),
+                        None,
+                    )
+                    .await?,
+            )?;
+            Ok::<_, crate::error::Error>(page)
+        }
+    };
+    let total = match page(u64::MAX - 1, u64::MAX).await? {
+        crate::engine::LogPage::Reset { info: Some(info) } => info.len,
+        _ => 0,
+    };
+    let bytes = match page(total.saturating_sub(PREVIEW_SUFFIX_BYTES as u64), total).await? {
+        crate::engine::LogPage::Data { bytes, .. } => bytes,
+        crate::engine::LogPage::Reset { .. } => Vec::new(),
+    };
+    let preview = trailing_char_preview(&bytes);
+    let mut stdout = std::io::stdout();
+    writeln!(
+        stdout,
+        "This run is still running; its log is on the compute host and is kept on this computer when the run finishes."
+    )?;
+    writeln!(stdout, "It is {total} bytes so far.")?;
+    writeln!(stdout)?;
+    writeln!(stdout, "Here are the last 500 characters of the log:")?;
+    stdout.write_all(preview.as_bytes())?;
+    if preview.is_empty() || !preview.ends_with('\n') {
+        writeln!(stdout)?;
+    }
+    writeln!(
+        stdout,
+        "Follow it with `{} logs -f {run_id}`. This preview is not proof of absence.",
+        crate::invocation::orx()
+    )?;
+    stdout.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]

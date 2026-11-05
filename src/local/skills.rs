@@ -62,8 +62,9 @@ that fits the available compute. Create experiment nodes for meaningful variants
 make each change on its printed local branch, and commit it. Use the configured
 default compute target, or the explicit backend and flavor/host the user chose;
 source snapshots do not require GitHub. Keep the inherited run command fixed.
-Wait with `orx exp wait --project <project-id>`, inspect `orx runs`, and
-locate every terminal run's log with `orx logs <run-id>`, then inspect the file.
+Launch ready runs, then end your turn. Results and attention messages arrive
+in this chat. When one arrives, reconcile every newly terminal run with
+`orx runs <project-id>` and inspect the file located by `orx logs <run-id>`.
 
 Record the paper number, observed number, scale or substitutions, sample size,
 scoring method, runtime, and an honest assessment in `orx exp desc`. Repair a

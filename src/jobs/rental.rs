@@ -161,12 +161,16 @@ fn remote_bash_command(script: &str) -> String {
 
 fn remote_supervisor_command(binary: &str, directory: &str) -> String {
     use super::ssh::sh_quote;
-    // An asynchronous `cd && nohup` list keeps the SSH output pipes open.
-    format!(
-        "cd {} || exit; nohup {} rental-supervise {} </dev/null > supervisor.log 2>&1 &",
-        sh_quote(directory),
+    let launch = sh_quote(&format!(
+        "nohup {} rental-supervise {} </dev/null > supervisor.log 2>&1 &",
         sh_quote(binary),
         sh_quote(&format!("{directory}/rental.json"))
+    ));
+    // The foreground launcher establishes a session before Exec cleans up its original group.
+    format!(
+        "cd {} || exit; if command -v setsid >/dev/null 2>&1; then setsid /bin/sh -c {launch}; \
+         else python3 -c 'import os,sys; os.setsid(); os.execl(\"/bin/sh\", \"sh\", \"-c\", sys.argv[1])' {launch}; fi; exit $?",
+        sh_quote(directory),
     )
 }
 
@@ -245,32 +249,66 @@ pub async fn launch(
 mod tests {
     use super::*;
     #[cfg(unix)]
-    #[tokio::test]
-    async fn remote_launch_returns_without_waiting_for_the_supervisor() {
+    #[test]
+    fn remote_launch_survives_exec_cleanup_without_waiting_for_the_supervisor() {
+        use std::os::unix::fs::PermissionsExt;
+
         let temp = crate::local::git::TemporaryDirectory::new("orx-rental-detach").unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let python = crate::local::shell_env::find("python3").unwrap();
+        std::os::unix::fs::symlink(python, bin.join("python3")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/nohup", bin.join("nohup")).unwrap();
+        let setsid = bin.join("setsid");
         std::fs::write(
-            temp.path().join("rental-supervise"),
-            "touch started; sleep 2\n",
-        )
-        .unwrap();
-        let command = remote_supervisor_command("/bin/sh", temp.path().to_str().unwrap());
-        let output = tokio::time::timeout(
-            Duration::from_secs(1),
-            crate::process::tokio_command("/bin/sh")
-                .args(["-c", &command])
-                .output(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(output.status.success());
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !temp.path().join("started").exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            &setsid,
+            "#!/bin/sh\nexec python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1],sys.argv[1:])' \"$@\"\n",
+        ).unwrap();
+        std::fs::set_permissions(&setsid, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        for utility in [true, false] {
+            if !utility {
+                std::fs::remove_file(&setsid).unwrap();
             }
-        })
-        .await
-        .unwrap();
+            let dir = temp.path().join(if utility {
+                "with setsid"
+            } else {
+                "without setsid"
+            });
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(
+                dir.join("rental-supervise"),
+                "read -r value < \"$1\"; /bin/sleep 0.2; printf '%s' \"$value\" > survived\n",
+            )
+            .unwrap();
+            std::fs::write(dir.join("rental.json"), "detached\n").unwrap();
+
+            let command = remote_supervisor_command("/bin/sh", dir.to_str().unwrap());
+            let result = orx_host::exec::run(
+                crate::process::command("/bin/sh")
+                    .args(["-c", &command])
+                    .env("PATH", &bin),
+                &[],
+                Duration::from_secs(2),
+                None,
+            )
+            .unwrap();
+            assert_eq!(result.code, Some(0), "{result:?}");
+            assert!(!result.timed_out, "{result:?}");
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::fs::read_to_string(dir.join("survived"))
+                .ok()
+                .as_deref()
+                != Some("detached")
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "setsid available: {utility}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
     #[cfg(unix)]
     #[test]

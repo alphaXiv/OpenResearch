@@ -1,6 +1,7 @@
 import { useWorkspace } from "../workspace";
 import { EscapeScope } from "./EscapeScope";
-import { type ChatSession, type Experiment, type Run, runDisplayStatus, fmtNumber, timeAgo } from "../api";
+import { type ChatSession, type Experiment, type Run, fmtNumber, timeAgo } from "../api";
+import { runDisplay } from "../runDisplay";
 import { activeWorkspaceRuns } from "../workspaceRuns";
 import { statusLabel } from "./StatusBadge";
 
@@ -119,11 +120,14 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
                   <span className="flex w-[15px] shrink-0 justify-center"><StatusIndicator tone="success" live /></span>
                   <span>{m.workspace_active_experiments()}</span>
                 </h2>
-                {experimentRows.map((row) => (
-                  <MenuItem key={row.run.id} data-keyboard-item className="min-h-7 py-1" onClick={() => onOpenExperiment(row.experiment.id, row.run.id)}>
-                    <span className="min-w-0 truncate ps-8 text-menu text-subtext" title={`${row.experiment.title || row.experiment.slug} · ${statusLabel(runDisplayStatus(row.run))}`}>{row.experiment.title || row.experiment.slug}</span>
-                  </MenuItem>
-                ))}
+                {experimentRows.map((row) => {
+                  const display = runDisplay(row.run);
+                  return (
+                    <MenuItem key={row.run.id} data-keyboard-item className="min-h-7 py-1" onClick={() => onOpenExperiment(row.experiment.id, row.run.id)}>
+                      <span className="min-w-0 truncate ps-8 text-menu text-subtext" title={`${row.experiment.title || row.experiment.slug} · ${statusLabel(display.status, display.stopping)}`}>{row.experiment.title || row.experiment.slug}</span>
+                    </MenuItem>
+                  );
+                })}
               </div>
             )}
           </div>

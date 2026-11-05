@@ -47,12 +47,18 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   ci:
-    needs: [identity, ui]
+    needs: [identity, ui, build-host]
     uses: ./.github/workflows/ci.yml
     with:
       plan: '{}'
       source-sha: ${{ github.sha }}
       release: true
+
+  build-host:
+    needs: identity
+    uses: ./.github/workflows/build-host.yml
+    with:
+      source-sha: ${{ github.sha }}
 
   ui:
     needs: identity
@@ -78,7 +84,7 @@ jobs:
           if-no-files-found: error
 
   macos-build:
-    needs: [identity, ui]
+    needs: [identity, ui, build-host]
     if: vars.MACOS_SIGNING_ENABLED == 'true'
     strategy:
       matrix:
@@ -94,6 +100,11 @@ jobs:
         with:
           name: release-ui
           path: ui/dist
+      - name: Download release hosts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-host
+          path: target/host-binaries
       - run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
@@ -103,6 +114,7 @@ jobs:
       - name: Build orx
         env:
           ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
           ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
           ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
           ORX_DESKTOP_CANARY_CHANGES: ${{ needs.identity.outputs.changes }}
@@ -115,6 +127,7 @@ jobs:
 
   macos:
     needs: [identity, macos-build]
+    if: vars.MACOS_SIGNING_ENABLED == 'true'
     runs-on: macos-latest
     timeout-minutes: 45
     environment: release-signing
@@ -155,7 +168,7 @@ jobs:
           if-no-files-found: error
 
   linux:
-    needs: [identity, ui]
+    needs: [identity, ui, build-host]
     if: vars.LINUX_APP_ENABLED == 'true'
     strategy:
       fail-fast: false
@@ -176,6 +189,11 @@ jobs:
         with:
           name: release-ui
           path: ui/dist
+      - name: Download release hosts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-host
+          path: target/host-binaries
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool
@@ -186,6 +204,7 @@ jobs:
       - name: Build app
         env:
           ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
           ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
           ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
           ORX_DESKTOP_CANARY_CHANGES: ${{ needs.identity.outputs.changes }}
@@ -203,7 +222,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    needs: [identity, ui]
+    needs: [identity, ui, build-host]
     if: vars.WINDOWS_APP_ENABLED == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
@@ -227,9 +246,15 @@ jobs:
           workspaces: |
             . -> target
             windows/launcher -> target
+      - name: Download release hosts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-host
+          path: target/host-binaries
       - name: Build app
         env:
           ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
           ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
           ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
           ORX_DESKTOP_CANARY_CHANGES: ${{ needs.identity.outputs.changes }}
