@@ -6,6 +6,10 @@ export interface MarkdownTarget {
   hash: string;
 }
 
+export function isNetworkImage(target: string): boolean {
+  return /^(https?:)?\/\//i.test(target.trim());
+}
+
 export function isExternalMarkdownTarget(target: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("//");
 }

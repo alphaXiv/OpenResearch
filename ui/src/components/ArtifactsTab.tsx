@@ -27,6 +27,7 @@ import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
+import { isNetworkImage } from "../markdownTarget";
 import { useFileVersion } from "../useFileVersion";
 import { mdCodeComponents, remarkMathOptions } from "./Md";
 import {
@@ -176,6 +177,7 @@ export function ArtifactMarkdown({
       },
       img: ({ src, alt }) => {
         if (!src || typeof src !== "string") return null;
+        if (isNetworkImage(src)) return <a href={src} target="_blank" rel="noopener noreferrer">{alt || src}</a>;
         const url = resolve(src);
         if (!url) return null;
         return (

@@ -241,9 +241,6 @@ function SignedInLibraryPicker({
                       const checked = selected.some(
                         (item) => item.paperGroupId === paper.paperGroupId,
                       );
-                      const image = paper.coverBlobId
-                        ? `https://blog-media.assets.alphaxiv.org/covers/${paper.coverBlobId}.png`
-                        : `https://thumbnails.assets.alphaxiv.org/256/${paper.versionId}.png`;
                       return (
                         <li key={paper.paperGroupId}>
                           <button
@@ -265,16 +262,6 @@ function SignedInLibraryPicker({
                               aria-hidden="true"
                             >
                               <FileText size={21} />
-                              <img
-                                src={image}
-                                alt=""
-                                loading="lazy"
-                                draggable={false}
-                                onError={(event) => {
-                                  event.currentTarget.style.visibility = "hidden";
-                                }}
-                                className="absolute inset-0 h-full w-full object-cover object-top"
-                              />
                             </span>
                             <span className="min-w-0 flex-1">
                               <span
