@@ -1751,5 +1751,7 @@
   "chat_search_results": "検索結果",
   "chat_search_other_branch": "別の分岐",
   "chat_search_more": "さらに読み込む",
-  "chat_search_waiting_for_turn": "分岐を切り替える前に、ターンの完了を待っています。"
+  "chat_search_waiting_for_turn": "分岐を切り替える前に、ターンの完了を待っています。",
+  "chat_switched_agent": "{agent} · {model} に切り替えました",
+  "chat_switch_agent_failed": "エージェントを切り替えられません。もう一度お試しください。"
 }

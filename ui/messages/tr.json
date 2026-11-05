@@ -1751,5 +1751,7 @@
   "chat_search_results": "Arama sonuçları",
   "chat_search_other_branch": "Diğer dal",
   "chat_search_more": "Daha fazla yükle",
-  "chat_search_waiting_for_turn": "Dalı değiştirmeden önce turun bitmesi bekleniyor."
+  "chat_search_waiting_for_turn": "Dalı değiştirmeden önce turun bitmesi bekleniyor.",
+  "chat_switched_agent": "{agent} · {model} olarak değiştirildi",
+  "chat_switch_agent_failed": "Ajan değiştirilemedi. Tekrar deneyin."
 }

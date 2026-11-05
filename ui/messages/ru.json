@@ -1751,5 +1751,7 @@
   "chat_search_results": "Результаты поиска",
   "chat_search_other_branch": "Другая ветка",
   "chat_search_more": "Загрузить ещё",
-  "chat_search_waiting_for_turn": "Ожидание завершения хода перед переключением ветки."
+  "chat_search_waiting_for_turn": "Ожидание завершения хода перед переключением ветки.",
+  "chat_switched_agent": "Переключено на {agent} · {model}",
+  "chat_switch_agent_failed": "Не удалось сменить агента. Попробуйте ещё раз."
 }

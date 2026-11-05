@@ -1751,5 +1751,7 @@
   "chat_search_results": "نتائج البحث",
   "chat_search_other_branch": "فرع آخر",
   "chat_search_more": "تحميل المزيد",
-  "chat_search_waiting_for_turn": "بانتظار انتهاء الدور قبل تبديل الفروع."
+  "chat_search_waiting_for_turn": "بانتظار انتهاء الدور قبل تبديل الفروع.",
+  "chat_switched_agent": "تم التبديل إلى {agent} · {model}",
+  "chat_switch_agent_failed": "تعذر تبديل الوكيل. حاول مرة أخرى."
 }

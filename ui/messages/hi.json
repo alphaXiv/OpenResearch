@@ -1751,5 +1751,7 @@
   "chat_search_results": "खोज के परिणाम",
   "chat_search_other_branch": "दूसरी शाखा",
   "chat_search_more": "और लोड करें",
-  "chat_search_waiting_for_turn": "शाखा बदलने से पहले बारी पूरी होने की प्रतीक्षा है।"
+  "chat_search_waiting_for_turn": "शाखा बदलने से पहले बारी पूरी होने की प्रतीक्षा है।",
+  "chat_switched_agent": "{agent} · {model} पर स्विच किया गया",
+  "chat_switch_agent_failed": "एजेंट स्विच नहीं हो सका। फिर से कोशिश करें।"
 }

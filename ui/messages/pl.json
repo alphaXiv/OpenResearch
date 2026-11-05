@@ -1751,5 +1751,7 @@
   "chat_search_results": "Wyniki wyszukiwania",
   "chat_search_other_branch": "Inna gałąź",
   "chat_search_more": "Wczytaj więcej",
-  "chat_search_waiting_for_turn": "Oczekiwanie na zakończenie tury przed zmianą gałęzi."
+  "chat_search_waiting_for_turn": "Oczekiwanie na zakończenie tury przed zmianą gałęzi.",
+  "chat_switched_agent": "Przełączono na {agent} · {model}",
+  "chat_switch_agent_failed": "Nie można przełączyć agenta. Spróbuj ponownie."
 }

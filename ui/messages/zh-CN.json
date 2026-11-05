@@ -1751,5 +1751,7 @@
   "chat_search_results": "搜索结果",
   "chat_search_other_branch": "其他分支",
   "chat_search_more": "加载更多",
-  "chat_search_waiting_for_turn": "等待本轮结束后切换分支。"
+  "chat_search_waiting_for_turn": "等待本轮结束后切换分支。",
+  "chat_switched_agent": "已切换至 {agent} · {model}",
+  "chat_switch_agent_failed": "无法切换智能体，请重试。"
 }

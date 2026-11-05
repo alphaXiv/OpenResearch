@@ -1751,5 +1751,7 @@
   "chat_search_results": "Search results",
   "chat_search_other_branch": "Other branch",
   "chat_search_more": "Load more",
-  "chat_search_waiting_for_turn": "Waiting for the turn to finish before switching branches."
+  "chat_search_waiting_for_turn": "Waiting for the turn to finish before switching branches.",
+  "chat_switched_agent": "Switched to {agent} · {model}",
+  "chat_switch_agent_failed": "Unable to switch agents. Try again."
 }

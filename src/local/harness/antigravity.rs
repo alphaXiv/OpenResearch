@@ -171,7 +171,6 @@ impl Harness for Antigravity {
         prepare_env(&mut cmd);
         cmd.env("NO_COLOR", "1");
         set_chat_session_env(&mut cmd, &ctx.session_id, "antigravity", ctx.host.up_port());
-        cmd.env("ORX_SESSION_ID", &ctx.session_id);
         let log_name = format!("antigravity-compact-{}", uuid::Uuid::new_v4());
         cmd.stderr(Stdio::from(harness_log(&log_name)?));
         let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
@@ -417,7 +416,6 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
     set_chat_session_env(&mut cmd, &ctx.session_id, "antigravity", Some(up_port));
-    cmd.env("ORX_SESSION_ID", &ctx.session_id);
     if let Some(execution) = ctx.usage_execution_id() {
         cmd.env("ORX_USAGE_EXECUTION_ID", execution);
     }

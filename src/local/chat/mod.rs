@@ -9,6 +9,7 @@
 //! the message and broadcasts it as a `chat.message` SSE event.
 
 pub mod delegation;
+pub(crate) mod handoff;
 pub mod news;
 pub(crate) mod subagent;
 
@@ -1198,6 +1199,7 @@ fn imported_rows(
             parent_id: parent_id.replace(id.clone()),
             base_native_session_id: Some(native_id.to_string()),
             result_native_session_id: None,
+            native_harness: None,
             id,
         });
     }
@@ -1216,6 +1218,7 @@ fn imported_rows(
         parent_id,
         base_native_session_id: Some(native_id.to_string()),
         result_native_session_id: Some(native_id.to_string()),
+        native_harness: None,
     });
     Ok(rows)
 }
@@ -1312,23 +1315,31 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         .starts_with("acp:")
         .then(|| store?.acp_session_state(&s.id).ok().flatten())
         .flatten();
+    let pending_handoff = acp.is_some()
+        && store
+            .and_then(|store| handoff::position_for(store, s).ok())
+            .is_some_and(|position| position.switched);
+    let native_configuration = acp
+        .as_ref()
+        .filter(|_| !pending_handoff)
+        .map(|state| &state.configuration);
     let context_usage = s
         .context_usage_json
         .as_deref()
         .and_then(|j| serde_json::from_str::<Value>(j).ok());
-    let native_model = acp.as_ref().and_then(|state| {
-        state.configuration["configOptions"]
+    let native_model = native_configuration.and_then(|configuration| {
+        configuration["configOptions"]
             .as_array()
             .and_then(|options| options.iter().find(|option| option["category"] == "model"))
             .and_then(|option| option["currentValue"].as_str())
-            .or_else(|| state.configuration["models"]["currentModelId"].as_str())
+            .or_else(|| configuration["models"]["currentModelId"].as_str())
     });
     json!({
         "id": s.id,
         "projectId": s.project_id,
         "harness": s.harness,
         "harnessName": acp.as_ref().map(|state| state.launch.name.as_str()),
-        "nativeConfiguration": acp.as_ref().map(|state| &state.configuration),
+        "nativeConfiguration": native_configuration,
         "title": s.title,
         // The UI animates the reveal of a harness-generated title, so it needs
         // to tell one from a placeholder or a user rename.
@@ -1376,8 +1387,6 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
 }
 
 fn with_turn_context(
-    native_session_id: Option<&str>,
-    bootstrap_context: Option<&str>,
     goal: Option<&str>,
     autonomy: Option<&str>,
     demo_evidence_context: Option<&str>,
@@ -1385,11 +1394,6 @@ fn with_turn_context(
     text: String,
 ) -> String {
     let mut contexts = Vec::new();
-    if native_session_id.is_none() {
-        if let Some(context) = bootstrap_context {
-            contexts.push(context);
-        }
-    }
     // The goal rides every turn: the agent has to be told it again each time,
     // and it outlives compaction and a lost native session.
     let goal = goal.map(|goal| {
@@ -1656,9 +1660,116 @@ const BASH_HINT: &str = " — install Git for Windows to run shell commands.";
 const BASH_HINT: &str = "";
 
 impl ChatHost {
+    pub async fn set_agent(
+        self: &Arc<Self>,
+        session_id: &str,
+        mut agent: crate::store::StoredAgentSelection,
+        context_window: Option<u64>,
+    ) -> Result<StoredChatSession> {
+        let mut guard = TurnGuard::claim_idle(self, session_id, TurnState::Switching)
+            .await
+            .ok_or_else(|| {
+                anyhow!("Stop the turn or remove queued messages before switching agents.")
+            })?;
+        let store = Store::open()?;
+        let session = store
+            .get_chat_session(session_id)?
+            .ok_or_else(|| anyhow!("chat session not found"))?;
+        if session.harness == agent.harness {
+            if session.model == agent.model {
+                guard.release().await;
+                return Ok(session);
+            }
+            return Err(anyhow!("Change this agent's model in the model picker."));
+        }
+        if agent.harness.starts_with("acp:")
+            && store
+                .acp_session_state(session_id)?
+                .is_some_and(|state| state.launch.id != agent.harness)
+        {
+            return Err(anyhow!(
+                "This chat already uses another ACP agent. Start a new chat for this agent."
+            ));
+        }
+        if !store
+            .list_queued_chat_messages_for_session(session_id)?
+            .is_empty()
+        {
+            return Err(anyhow!(
+                "Send or remove queued messages before switching agents."
+            ));
+        }
+        let target = crate::local::harness::chat_harness(&agent.harness)
+            .ok_or_else(|| anyhow!("unknown harness `{}`", agent.harness))?;
+        let plan_mode =
+            if crate::local::harness::supports_command_plan(&session.harness) {
+                session.plan_mode
+            } else {
+                session.permission_mode.as_deref().and_then(|mode| {
+                    crate::local::harness::permission_mode_for(&session.harness, mode)
+                }) == Some(crate::local::harness::PermissionMode::Plan)
+            };
+        if plan_mode && agent.harness == "claude-code" {
+            agent.permission_mode = Some("plan".into());
+        }
+        let messages = store.list_chat_messages(session_id)?;
+        let path = session
+            .active_leaf_id
+            .as_deref()
+            .map(|leaf| active_path(&messages, Some(leaf)))
+            .unwrap_or_default();
+        let resume = path
+            .iter()
+            .rev()
+            .find(|message| message.native_harness.as_deref() == Some(&agent.harness))
+            .and_then(|message| {
+                message
+                    .result_native_session_id
+                    .as_deref()
+                    .or(message.base_native_session_id.as_deref())
+            });
+        let mut part = WirePart::tool("provider_switch", handoff::SWITCH_TOOL, "completed", None);
+        part.state.as_mut().unwrap().input = Some(json!({
+            "fromHarness": session.harness,
+            "fromModel": session.model,
+            "harness": agent.harness,
+            "name": target.name(),
+            "model": agent.model,
+            "contextWindow": context_window,
+        }));
+        let marker = StoredChatMessage {
+            id: format!("msg_{}", uuid::Uuid::new_v4()),
+            session_id: session_id.to_string(),
+            role: "assistant".into(),
+            parts_json: serde_json::to_string(&[part])?,
+            created_at: now_ms(),
+            completed_at: Some(now_ms()),
+            parent_id: session.active_leaf_id.clone(),
+            base_native_session_id: session.native_session_id.clone(),
+            result_native_session_id: None,
+            native_harness: Some(session.harness.clone()),
+        };
+        let command_plan =
+            plan_mode && crate::local::harness::supports_command_plan(&agent.harness);
+        store.switch_chat_agent(session_id, &agent, resume, &marker, command_plan)?;
+        self.claude.kill_session(session_id).await;
+        self.codex.kill_session(session_id).await;
+        self.opencode.kill_session(session_id).await;
+        self.acp.stop(session_id).await;
+        self.emit(
+            "chat.message",
+            message_json(&stored_to_wire(&marker), session_id),
+        );
+        let session = store
+            .get_chat_session(session_id)?
+            .ok_or_else(|| anyhow!("chat session not found"))?;
+        guard.release().await;
+        self.emit_session(Some(session.clone())).await;
+        Ok(session)
+    }
+
     /// Compact a session's context: the harness does it natively where it can,
-    /// and where it cannot (Cursor, legacy `codex exec`) we summarize the
-    /// transcript ourselves and reseed a fresh native session with it.
+    /// and otherwise summarize a reference handoff to reseed a fresh session.
     ///
     /// Runs as a turn — it rewrites the state a turn would be reading, takes as
     /// long as one, and Stop must be able to cancel it. Returns as soon as the
@@ -1692,7 +1803,7 @@ impl ChatHost {
         }
         // Taken before the progress row exists, so the summary never describes
         // its own compaction.
-        let snapshot = crate::local::harness::compaction_snapshot(session_id);
+        let snapshot = crate::local::harness::compaction_snapshot(session_id)?;
         if snapshot.trim().is_empty() {
             return Err(anyhow!("this chat has nothing to compact yet"));
         }
@@ -1811,8 +1922,6 @@ impl ChatHost {
         // Native id last: a crash before it lands leaves the summary unused
         // rather than a session with no context at all.
         if let Some(summary) = reseed {
-            // `bootstrap_context` is injected exactly while no native session
-            // exists, which is the state clearing the id leaves behind.
             store.set_chat_session_bootstrap_context(session_id, Some(&summary))?;
             store.set_chat_session_native_id(session_id, None)?;
         }
@@ -1849,12 +1958,7 @@ impl ChatHost {
                 "Select an OpenCode model before compacting this chat"
             ));
         }
-        let bootstrap = effective_bootstrap_context(&Store::open()?, session)?;
-        let prior = bootstrap.as_deref().unwrap_or("");
-        let prompt = format!(
-            "<orx-transcript>\n{prior}{}{snapshot}\n</orx-transcript>",
-            if prior.is_empty() { "" } else { "\n\n" }
-        );
+        let prompt = format!("<orx-transcript>\n{snapshot}\n</orx-transcript>");
         let summary = harness
             .one_shot(crate::local::harness::OneShot {
                 system: COMPACT_SYSTEM_PROMPT,
@@ -1913,6 +2017,7 @@ impl ChatHost {
             parent_id: message.parent_id.clone(),
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         if previous.is_some() {
             store.upsert_chat_message(&stored)?;
@@ -2043,6 +2148,7 @@ impl ChatHost {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         })?;
         store.touch_chat_session(session_id)?;
         self.emit("chat.message", message_json(&message, session_id));
@@ -2102,6 +2208,7 @@ mod shell_command_tests {
             parent_id: message.parent_id.clone(),
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         }
     }
 
@@ -2149,15 +2256,7 @@ mod shell_command_tests {
         assert!(context.contains("status=\"exit 1\">\ncat missing\n</command>"));
         assert!(context.contains("<stderr>\nboom\n</stderr>"));
         assert!(context.find("ls\n</command>").unwrap() < context.find("cat missing").unwrap());
-        let turn = with_turn_context(
-            Some("native"),
-            None,
-            None,
-            None,
-            None,
-            Some(&context),
-            "why?".into(),
-        );
+        let turn = with_turn_context(None, None, None, Some(&context), "why?".into());
         assert!(turn.starts_with("<user-shell-commands>"));
         assert!(turn.ends_with("<current-user-message>\nwhy?\n</current-user-message>"));
         assert!(shell_context(&[]).is_none());
@@ -2182,62 +2281,12 @@ mod initial_message_tests {
     }
 
     #[test]
-    fn bootstrap_context_is_injected_only_before_a_native_session_exists() {
-        let seeded = with_turn_context(
-            None,
-            Some("prior demo"),
-            None,
-            None,
-            None,
-            None,
-            "continue".into(),
-        );
-        assert!(seeded.contains("prior demo"));
-        assert!(seeded.contains("<current-user-message>\ncontinue"));
-        assert_eq!(
-            with_turn_context(
-                Some("native"),
-                Some("prior demo"),
-                None,
-                None,
-                None,
-                None,
-                "continue".into()
-            ),
-            "continue"
-        );
-        assert_eq!(
-            with_turn_context(None, None, None, None, None, None, "continue".into()),
-            "continue"
-        );
-    }
-
-    #[test]
-    fn the_goal_rides_every_turn_including_one_with_a_native_session() {
-        let seeded = with_turn_context(
-            Some("native"),
-            Some("prior demo"),
-            Some("ship the sweep"),
-            None,
-            None,
-            None,
-            "continue".into(),
-        );
+    fn the_goal_rides_every_turn() {
+        let seeded = with_turn_context(Some("ship the sweep"), None, None, None, "continue".into());
         assert!(seeded.contains("ship the sweep"));
-        // Unlike bootstrap context, a goal is not dropped once the harness has
-        // a session of its own — it has to be restated every turn.
-        assert!(!seeded.contains("prior demo"));
         assert!(seeded.contains("<current-user-message>\ncontinue"));
         assert_eq!(
-            with_turn_context(
-                Some("native"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                "continue".into()
-            ),
+            with_turn_context(None, None, None, None, "continue".into()),
             "continue"
         );
     }
@@ -2245,8 +2294,6 @@ mod initial_message_tests {
     #[test]
     fn autonomy_rides_every_turn_after_the_goal() {
         let turn = with_turn_context(
-            Some("native"),
-            None,
             Some("ship the sweep"),
             Autonomy::Copilot.turn_context(),
             None,
@@ -2261,40 +2308,16 @@ mod initial_message_tests {
 
     #[test]
     fn demo_evidence_context_is_injected_without_rewrapping_the_user_message() {
-        let first = with_turn_context(
-            None,
-            Some("prior demo"),
-            None,
-            None,
-            Some("demo evidence"),
-            None,
-            "first".into(),
-        );
-        let follow_up = with_turn_context(
-            Some("native"),
-            Some("prior demo"),
-            None,
-            None,
-            Some("demo evidence"),
-            None,
-            "follow up".into(),
-        );
+        let first = with_turn_context(None, None, Some("demo evidence"), None, "first".into());
+        let follow_up =
+            with_turn_context(None, None, Some("demo evidence"), None, "follow up".into());
         assert!(first.contains("demo evidence"));
-        assert!(first.contains("prior demo"));
         assert!(first.contains("<current-user-message>\nfirst"));
         assert!(follow_up.contains("demo evidence"));
         assert!(follow_up.contains("<current-user-message>\nfollow up"));
         assert_eq!(first.matches("<current-user-message>").count(), 1);
         assert_eq!(
-            with_turn_context(
-                Some("native"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                "ordinary".into()
-            ),
+            with_turn_context(None, None, None, None, "ordinary".into()),
             "ordinary"
         );
     }
@@ -2678,6 +2701,7 @@ struct GateToken {
 
 enum TurnState {
     Reserved { turn_id: Option<String> },
+    Switching,
     Draining,
     Active(ActiveTurn),
     Cancelling,
@@ -3331,8 +3355,12 @@ impl TurnGuard {
         })
     }
 
-    /// Reserve a wake-up turn only when no turn or queued user message exists.
-    async fn claim_idle(host: &Arc<ChatHost>, session_id: &str) -> Option<Self> {
+    /// Reserve an operation only when no turn or queued user message exists.
+    async fn claim_idle(
+        host: &Arc<ChatHost>,
+        session_id: &str,
+        reservation: TurnState,
+    ) -> Option<Self> {
         if host.deleting_sessions.lock().unwrap().contains(session_id) {
             return None;
         }
@@ -3349,10 +3377,7 @@ impl TurnGuard {
         if !host.claim_durable_turn(session_id) {
             return None;
         }
-        turns.insert(
-            session_id.to_string(),
-            TurnState::Reserved { turn_id: None },
-        );
+        turns.insert(session_id.to_string(), reservation);
         Some(Self {
             host: host.clone(),
             session_id: session_id.to_string(),
@@ -3374,7 +3399,7 @@ impl TurnGuard {
             let mut turns = self.host.turns.lock().await;
             if matches!(
                 turns.get(&self.session_id),
-                Some(TurnState::Reserved { .. })
+                Some(TurnState::Reserved { .. } | TurnState::Switching)
             ) {
                 let drain_queued = !self
                     .host
@@ -3428,7 +3453,10 @@ impl Drop for TurnGuard {
         tokio::spawn(async move {
             let (removed, drain_queued) = {
                 let mut turns = host.turns.lock().await;
-                if matches!(turns.get(&session_id), Some(TurnState::Reserved { .. })) {
+                if matches!(
+                    turns.get(&session_id),
+                    Some(TurnState::Reserved { .. } | TurnState::Switching)
+                ) {
                     let drain_queued = !host
                         .queue_dispatch_suppressed
                         .lock()
@@ -3749,6 +3777,7 @@ impl ChatHost {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         })?;
         self.emit("chat.message", message_json(&msg, session_id));
         self.emit_session(Store::open()?.get_chat_session(session_id)?)
@@ -4977,8 +5006,39 @@ impl ChatHost {
         }
 
         let supports_command_plan = crate::local::harness::supports_command_plan(&session.harness);
-        let mut settings: TurnOverrides =
-            serde_json::from_str(&turn.settings_json).unwrap_or_default();
+        let anchor = turn
+            .user_message_id
+            .as_deref()
+            .unwrap_or(&turn.assistant_message_id);
+        let original = store.get_chat_message(anchor)?;
+        let messages = store.list_chat_messages(session_id)?;
+        let agent_switched = messages
+            .iter()
+            .skip_while(|message| message.id != anchor)
+            .skip(1)
+            .any(|message| {
+                stored_to_wire(message)
+                    .parts
+                    .iter()
+                    .any(|part| part.tool.as_deref() == Some(handoff::SWITCH_TOOL))
+            })
+            || original
+                .as_ref()
+                .and_then(|message| message.native_harness.as_deref())
+                .is_some_and(|harness| harness != session.harness);
+        let mut settings: TurnOverrides = if agent_switched {
+            TurnOverrides {
+                model: session.model.clone(),
+                clear_model: session.model.is_none(),
+                service_tier: session.service_tier.clone(),
+                permission_mode: session.permission_mode.clone(),
+                plan_mode: supports_command_plan.then_some(session.plan_mode),
+                reasoning_level: session.reasoning_level.clone(),
+                ..TurnOverrides::default()
+            }
+        } else {
+            serde_json::from_str(&turn.settings_json).unwrap_or_default()
+        };
         if !supports_command_plan {
             settings.plan_mode = None;
             if explicit_overrides.plan_mode.is_some() {
@@ -4997,7 +5057,7 @@ impl ChatHost {
             }
         }
         match action {
-            "retry" => {
+            "retry" if !agent_switched => {
                 let project = store
                     .get_local_project(&session.project_id)?
                     .ok_or_else(|| anyhow!("project not found"))?;
@@ -5063,6 +5123,7 @@ impl ChatHost {
                             parent_id: assistant.parent_id.clone(),
                             base_native_session_id: None,
                             result_native_session_id: None,
+                            native_harness: None,
                         })
                     });
                 if let Err(error) = persist_retry {
@@ -5098,8 +5159,17 @@ impl ChatHost {
                         "action": "retry",
                     }),
                 );
-                let ctx = turn_ctx_from_stored(self.clone(), &session, project, &turn, assistant);
-                let launched = self.launch_turn_ctx(ctx, guard, None).await;
+                let launched = match turn_ctx_from_stored(
+                    self.clone(),
+                    &store,
+                    &session,
+                    project,
+                    &turn,
+                    assistant,
+                ) {
+                    Ok(ctx) => self.launch_turn_ctx(ctx, guard, None).await,
+                    Err(error) => Err(error),
+                };
                 let submission = match launched {
                     Ok(submission) => submission,
                     Err(error) => {
@@ -5124,14 +5194,18 @@ impl ChatHost {
                     _ => Err(anyhow!("turn was interrupted before it restarted")),
                 }
             }
-            "continue" => {
-                let prompt = format!(
+            "retry" | "continue" => {
+                let prompt = if action == "retry" {
+                    rebase_prepared_attachment_paths(&turn.prepared_input)
+                } else {
+                    format!(
                     "<orx-recovery>\nA previous turn ended after the request may have been accepted. \
                      Inspect the current repository and transcript state before acting. Do not \
                      repeat completed tool actions. Continue the unfinished request safely.\n\n\
                      Original request:\n{}\n</orx-recovery>",
                     rebase_prepared_attachment_paths(&turn.prepared_input)
-                );
+                )
+                };
                 let submission = self
                     .send_message_showing(
                         session_id,
@@ -5176,6 +5250,7 @@ impl ChatHost {
                         parent_id: failed_assistant.parent_id.clone(),
                         base_native_session_id: None,
                         result_native_session_id: None,
+                        native_harness: None,
                     };
                     if store.mark_chat_turn_recovered_with_message(
                         turn_id,
@@ -5198,7 +5273,7 @@ impl ChatHost {
                         "owner": "orx",
                         "reason": "terminal_turn",
                         "attempt": turn.attempt_count,
-                        "action": "continue",
+                        "action": action,
                     }),
                 );
                 Ok(SendMessageResult {
@@ -5299,21 +5374,18 @@ impl ChatHost {
             .get_chat_session(session_id)?
             .ok_or_else(|| anyhow!("chat session not found"))?;
         let acp = session.harness.starts_with("acp:");
-        let rewind = if acp {
+        let foreign = anchor
+            .native_harness
+            .as_deref()
+            .is_some_and(|harness| harness != session.harness);
+        let reseed = acp || foreign;
+        let rewind = if reseed {
             Some(None)
         } else {
             rewind_target(anchor)
         };
-        if acp {
+        if reseed {
             self.acp.stop(session_id).await;
-            let snapshot = anchor
-                .parent_id
-                .as_deref()
-                .map(|leaf| {
-                    crate::local::harness::transcript_snapshot(active_path(&messages, Some(leaf)))
-                })
-                .unwrap_or_default();
-            store.set_chat_session_bootstrap_context(session_id, Some(&snapshot))?;
         }
         store.set_chat_session_active_leaf(session_id, leaf.as_deref())?;
         if let Some(native) = &rewind {
@@ -5345,12 +5417,6 @@ impl ChatHost {
         // rewind is worse than either end state.
         let started = matches!(&submitted, Ok(TurnSubmission::Started(_)));
         if !started {
-            if acp {
-                let _ = store.set_chat_session_bootstrap_context(
-                    session_id,
-                    session.bootstrap_context.as_deref(),
-                );
-            }
             if rewind.is_some() {
                 let _ = store
                     .set_chat_session_native_id(session_id, session.native_session_id.as_deref());
@@ -5386,22 +5452,26 @@ impl ChatHost {
         // The id this branch ended at lives on its newest assistant message; a
         // branch tipped by an unanswered user message resumes from that turn's
         // own base.
-        let resume = active_path(&messages, Some(tip.id.as_str()))
-            .into_iter()
-            .rev()
-            .find_map(|m| {
-                m.result_native_session_id
-                    .clone()
-                    .or_else(|| m.base_native_session_id.clone())
-            });
         let session = store
             .get_chat_session(session_id)?
             .ok_or_else(|| anyhow!("chat session not found"))?;
+        let resume = active_path(&messages, Some(tip.id.as_str()))
+            .into_iter()
+            .rev()
+            .find(|message| {
+                message.native_harness.as_deref() == Some(&session.harness)
+                    || (message.native_harness.is_none()
+                        && (message.result_native_session_id.is_some()
+                            || message.base_native_session_id.is_some()))
+            })
+            .and_then(|message| {
+                message
+                    .result_native_session_id
+                    .clone()
+                    .or_else(|| message.base_native_session_id.clone())
+            });
         if session.harness.starts_with("acp:") {
             self.acp.stop(session_id).await;
-            let snapshot =
-                crate::local::harness::transcript_snapshot(active_path(&messages, Some(&tip.id)));
-            store.set_chat_session_bootstrap_context(session_id, Some(&snapshot))?;
             store.set_chat_session_native_id(session_id, None)?;
         } else {
             store.set_chat_session_native_id(session_id, resume.as_deref())?;
@@ -5597,6 +5667,9 @@ impl ChatHost {
                     .get(session_id)
                     .is_some_and(|queue| !queue.is_empty());
                 if turns.contains_key(session_id) || has_queued {
+                    if matches!(turns.get(session_id), Some(TurnState::Switching)) {
+                        return Err(anyhow!("Agent is switching. Send again once it finishes."));
+                    }
                     if matches!(turns.get(session_id), Some(TurnState::Cancelling)) {
                         return Err(anyhow!("session is stopping — send again once it is idle"));
                     }
@@ -5914,11 +5987,6 @@ impl ChatHost {
                 prepare_project_slash_worktree(&project, &message.text, &session.id).await;
             }
         }
-        let bootstrap = if prepared_input.is_none() && session.native_session_id.is_none() {
-            effective_bootstrap_context(&store, &session)?
-        } else {
-            None
-        };
         // A command keeps its leading `/`, and what orx writes keeps its
         // leading `[orx]`; any other message carries the ref an agent cites it by.
         let message_ref = user_msg
@@ -5948,8 +6016,6 @@ impl ChatHost {
                 expanded = format!("{message_ref}\n{expanded}");
             }
             with_turn_context(
-                session.native_session_id.as_deref(),
-                bootstrap.as_deref(),
                 session.goal.as_deref(),
                 Autonomy::from_stored(session.autonomy.as_deref()).turn_context(),
                 super::demo::turn_context(&project.id),
@@ -5988,6 +6054,7 @@ impl ChatHost {
                     parent_id: message.parent_id.clone(),
                     base_native_session_id: session.native_session_id.clone(),
                     result_native_session_id: None,
+                    native_harness: Some(session.harness.clone()),
                 })
             })
             .transpose()?;
@@ -6021,6 +6088,21 @@ impl ChatHost {
             created_at,
             updated_at: created_at,
         };
+        let ctx = turn_ctx_from_stored(
+            self.clone(),
+            &store,
+            &session,
+            project,
+            &turn,
+            WireMessage {
+                id: assistant_message_id,
+                role: "assistant".into(),
+                parts: Vec::new(),
+                created_at: now_ms(),
+                completed_at: None,
+                parent_id: None,
+            },
+        )?;
         let mut turns = self.turns.lock().await;
         let Some(TurnState::Reserved { turn_id: reserved }) = turns.get_mut(session_id) else {
             drop(turns);
@@ -6066,20 +6148,6 @@ impl ChatHost {
         self.emit(
             "chat.busy",
             json!({ "sessionId": session.id, "busy": true }),
-        );
-        let ctx = turn_ctx_from_stored(
-            self.clone(),
-            &session,
-            project,
-            &turn,
-            WireMessage {
-                id: assistant_message_id,
-                role: "assistant".into(),
-                parts: Vec::new(),
-                created_at: now_ms(),
-                completed_at: None,
-                parent_id: None,
-            },
         );
         self.launch_turn_ctx_locked(ctx, guard, title_seed, turns)
     }
@@ -6352,6 +6420,10 @@ impl ChatHost {
                     None
                 }
                 TurnState::Draining => None,
+                TurnState::Switching => {
+                    *state = TurnState::Switching;
+                    return Ok(false);
+                }
                 TurnState::Cancelling => return Ok(false),
             }
         };
@@ -6373,6 +6445,7 @@ impl ChatHost {
                         parent_id: assistant.parent_id.clone(),
                         base_native_session_id: None,
                         result_native_session_id: None,
+                        native_harness: None,
                     });
                     self.emit("chat.message", message_json(&assistant, session_id));
                 }
@@ -6508,6 +6581,7 @@ impl ChatHost {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .ok(),
             _ => None,
@@ -7677,12 +7751,28 @@ pub struct TurnCtx {
 
 fn turn_ctx_from_stored(
     host: Arc<ChatHost>,
+    store: &Store,
     session: &StoredChatSession,
     project: LocalProject,
     turn: &StoredChatTurn,
     assistant: WireMessage,
-) -> TurnCtx {
-    TurnCtx {
+) -> Result<TurnCtx> {
+    let mut text = rebase_prepared_attachment_paths(&turn.prepared_input);
+    let position = handoff::position_for(store, session)?;
+    if position.switched || position.since.is_none() {
+        let context = handoff::context(
+            store,
+            session,
+            turn.user_message_id.as_deref(),
+            position.since.as_deref(),
+            position.context_window,
+        )?;
+        if !context.is_empty() {
+            text = format!("{context}\n\n{text}");
+        }
+    }
+
+    Ok(TurnCtx {
         host,
         turn_id: turn.id.clone(),
         durable: true,
@@ -7713,7 +7803,7 @@ fn turn_ctx_from_stored(
         plan_reset_pending: session.plan_reset_pending,
         reasoning_level: session.reasoning_level.clone(),
         project,
-        text: rebase_prepared_attachment_paths(&turn.prepared_input),
+        text,
         assistant,
         context_usage: session
             .context_usage_json
@@ -7727,7 +7817,7 @@ fn turn_ctx_from_stored(
         target_event_offset: 0,
         pending_target_events: Vec::new(),
         target_event_bindings: HashMap::new(),
-    }
+    })
 }
 
 fn rebase_prepared_attachment_paths(input: &str) -> String {
@@ -8020,6 +8110,7 @@ impl TurnCtx {
                         parent_id: self.assistant.parent_id.clone(),
                         base_native_session_id: None,
                         result_native_session_id: None,
+                        native_harness: None,
                     });
                     self.host.emit(
                         "chat.message",
@@ -8422,6 +8513,7 @@ impl TurnCtx {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: self.native_session_id.clone(),
+                native_harness: Some(self.harness.clone()),
             })?;
             wire_assistant
         };
@@ -8567,7 +8659,7 @@ fn side_chat_context<'a>(
     parent: &str,
     messages: impl IntoIterator<Item = &'a StoredChatMessage>,
 ) -> Option<String> {
-    let snapshot = crate::local::harness::transcript_snapshot(messages);
+    let snapshot = handoff::snapshot(messages, handoff::budget(None));
     (!snapshot.is_empty()).then(|| format!(
         "<orx-side-chat-context>\nThis is a side chat branched from chat `{parent}`, which may still be running in this same worktree. Use this snapshot of that chat, taken when the side chat opened, to answer questions about its work. Do not modify files unless the user asks.\n{snapshot}\n</orx-side-chat-context>"
     ))
@@ -8578,7 +8670,26 @@ fn effective_bootstrap_context(
     session: &StoredChatSession,
 ) -> Result<Option<String>> {
     if let Some(context) = &session.bootstrap_context {
-        return Ok(Some(context.clone()));
+        let messages = store.list_chat_messages(&session.id)?;
+        let compacted = messages.iter().rev().find(|message| {
+            stored_to_wire(message).parts.iter().any(|part| {
+                part.tool.as_deref() == Some(COMPACTED_TOOL)
+                    && part
+                        .state
+                        .as_ref()
+                        .is_some_and(|state| state.status == "completed")
+            })
+        });
+        let retained = compacted.is_none_or(|compacted| {
+            session.active_leaf_id.as_deref().is_some_and(|leaf| {
+                active_path(&messages, Some(leaf))
+                    .iter()
+                    .any(|message| message.id == compacted.id)
+            })
+        });
+        if retained {
+            return Ok(Some(context.clone()));
+        }
     }
     let (Some(parent), Some(leaf)) = (
         &session.side_parent_session_id,
@@ -8757,6 +8868,7 @@ fn materialize_unfinished_turns(
             parent_id: message.parent_id.clone(),
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         if store.upsert_chat_recovery_message_if_actionable(&turn.id, &stored)? {
             messages.push((turn.session_id, message));
@@ -8892,7 +9004,9 @@ async fn process_run_notices(
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
-        let Some(mut guard) = TurnGuard::claim_idle(chat, &session_id).await else {
+        let Some(mut guard) =
+            TurnGuard::claim_idle(chat, &session_id, TurnState::Reserved { turn_id: None }).await
+        else {
             continue;
         };
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
@@ -9195,6 +9309,8 @@ pub fn set_chat_session_env(
     cmd.env(CHAT_SESSION_ENV, session_id);
     cmd.env(CHAT_HARNESS_ENV, harness);
     cmd.env(LOCAL_SESSION_ENV, "1");
+    cmd.env("ORX_SESSION_ID", session_id);
+    cmd.env("ORX_AGENT_TOKEN", delegation::agent_token(session_id));
     // Never let a child inherit a port owned by some outer orx up process.
     match up_port {
         Some(port) => {
@@ -9769,6 +9885,23 @@ mod cap_tests {
             updated_at: 1,
         };
         store.create_chat_session(&adopted).unwrap();
+        for row in imported_rows(
+            &adopted.id,
+            "native-1",
+            vec![crate::local::native_chats::NativeMessage {
+                role: "assistant",
+                text: "Earlier answer".into(),
+                created_at: 1,
+            }],
+        )
+        .unwrap()
+        {
+            store.upsert_chat_message(&row).unwrap();
+        }
+        store
+            .set_chat_session_native_id(&adopted.id, Some("another-agent-native"))
+            .unwrap();
+        assert!(store.native_ids_outside(&[]).unwrap().contains("native-1"));
         // Adopting the same chat again returns the session that already owns
         // it — two sessions driving one native chat would split the history.
         let again = import_native_chat(&store, "proj_1", "claude-code", "native-1", None).unwrap();
@@ -9845,16 +9978,9 @@ mod cap_tests {
             !session.archived,
             "compacting is activity, which unarchives"
         );
-        assert!(with_turn_context(
-            session.native_session_id.as_deref(),
-            session.bootstrap_context.as_deref(),
-            None,
-            None,
-            None,
-            None,
-            "next".into(),
-        )
-        .contains("the summary"));
+        assert!(handoff::context(&store, &session, None, None, None)
+            .unwrap()
+            .contains("the summary"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -10668,6 +10794,7 @@ mod bridge_tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                native_harness: None,
             })
             .unwrap();
         ctx.assistant.parts = vec![card(WirePrompt {
@@ -10725,6 +10852,501 @@ mod bridge_tests {
         }
     }
 
+    #[test]
+    fn provider_switches_resume_each_harness_and_deliver_only_its_delta() {
+        const CHILD: &str = "ORX_TEST_PROVIDER_SWITCHES";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let host = Arc::new(test_host());
+                let store = Store::open().unwrap();
+                let acp = crate::local::acp::presets().remove(0).launch;
+                for source in ["claude-code", "codex", "opencode", acp.id.as_str()] {
+                    for target in ["claude-code", "codex", "opencode"] {
+                        if source == target {
+                            continue;
+                        }
+                        let mut session = bare_session();
+                        session.id = format!("chat_{}", uuid::Uuid::new_v4());
+                        session.harness = source.into();
+                        session.native_session_id = Some(format!("native_{source}_{target}"));
+                        if source.starts_with("acp:") {
+                            session.model = Some("second".into());
+                        }
+                        store.create_chat_session(&session).unwrap();
+                        if source.starts_with("acp:") {
+                            store.set_acp_configuration(&session.id, &json!({"configOptions":[{"id":"model", "type":"select", "category":"model", "currentValue":"first", "options":[{"value":"first", "name":"First"},{"value":"second", "name":"Second"}]}]})).unwrap();
+                        }
+                        let request = StoredChatMessage {
+                            id: format!("msg_{}", uuid::Uuid::new_v4()),
+                            session_id: session.id.clone(),
+                            role: "user".into(),
+                            parts_json: serde_json::to_string(&[WirePart::text(
+                                "request",
+                                "Preserve the parser API.",
+                            )])
+                            .unwrap(),
+                            created_at: now_ms(),
+                            completed_at: Some(now_ms()),
+                            parent_id: None,
+                            base_native_session_id: session.native_session_id.clone(),
+                            result_native_session_id: None,
+                            native_harness: Some(source.into()),
+                        };
+                        store.upsert_chat_message_on_branch(&request).unwrap();
+                        let original = StoredChatMessage {
+                            id: format!("msg_{}", uuid::Uuid::new_v4()),
+                            role: "assistant".into(),
+                            parts_json: serde_json::to_string(&[WirePart::text(
+                                "answer",
+                                "Original plan.\nKeep this earlier native detail out of the handoff.",
+                            )])
+                            .unwrap(),
+                            result_native_session_id: session.native_session_id.clone(),
+                            ..request.clone()
+                        };
+                        store.upsert_chat_message_on_branch(&original).unwrap();
+                        let agent = crate::store::StoredAgentSelection {
+                            harness: target.into(),
+                            model: Some("target-model".into()),
+                            service_tier: None,
+                            permission_mode: None,
+                            reasoning_level: None,
+                        };
+                        let switched = host
+                            .set_agent(&session.id, agent.clone(), Some(200_000))
+                            .await
+                            .unwrap();
+                        assert_eq!(switched.harness, target);
+                        assert!(!host.is_busy(&session.id).await);
+                        assert_eq!(switched.native_session_id, None);
+                        assert!(
+                            store.latest_chat_turn(&session.id).unwrap().is_none(),
+                            "a switch must not start a turn"
+                        );
+                        let mut switching =
+                            TurnGuard::claim_idle(&host, &session.id, TurnState::Switching)
+                                .await
+                                .unwrap();
+                        assert!(!host.interrupt(&session.id).await.unwrap());
+                        assert!(host.is_busy(&session.id).await);
+                        let sent = host
+                            .send_message(
+                                &session.id,
+                                "Concurrent request".into(),
+                                TurnOverrides {
+                                    model: Some("source-model".into()),
+                                    ..TurnOverrides::default()
+                                },
+                                Vec::new(),
+                                Vec::new(),
+                                None,
+                                None,
+                            )
+                            .await;
+                        assert!(sent.unwrap_err().to_string().contains("switching"));
+                        assert!(store
+                            .list_queued_chat_messages_for_session(&session.id)
+                            .unwrap()
+                            .is_empty());
+                        assert_eq!(
+                            store.get_chat_session(&session.id).unwrap().unwrap().model,
+                            agent.model
+                        );
+                        switching.release().await;
+                        assert!(!host.is_busy(&session.id).await);
+                        let messages = store.list_chat_messages(&session.id).unwrap();
+                        let path = active_path(&messages, switched.active_leaf_id.as_deref());
+                        let position = handoff::position(
+                            &switched, &path, &store.unconfirmed_chat_replies(&session.id).unwrap(),
+                        );
+                        assert!(position.since.is_none());
+                        assert_eq!(position.context_window, Some(200_000));
+                        assert!(position.switched);
+                        assert!(
+                            handoff::context(&store, &switched, None, None, Some(200_000))
+                                .unwrap()
+                                .contains("Preserve the parser API.")
+                        );
+                        let same = host
+                            .set_agent(&session.id, agent.clone(), None)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            same.active_leaf_id, switched.active_leaf_id,
+                            "a retried switch adds no row"
+                        );
+                        let answer = StoredChatMessage {
+                            id: format!("msg_{}", uuid::Uuid::new_v4()),
+                            parts_json: serde_json::to_string(&[WirePart::text(
+                                "answer",
+                                "Parser API preserved; tests passed.",
+                            )])
+                            .unwrap(),
+                            native_harness: Some(target.into()),
+                            result_native_session_id: Some(format!("target_{source}_{target}")),
+                            base_native_session_id: None,
+                            ..original.clone()
+                        };
+                        store.upsert_chat_message_on_branch(&answer).unwrap();
+                        store
+                            .set_chat_session_native_id(
+                                &session.id,
+                                answer.result_native_session_id.as_deref(),
+                            )
+                            .unwrap();
+                        let source_agent = crate::store::StoredAgentSelection {
+                            harness: source.into(),
+                            model: session.model.clone(),
+                            service_tier: None,
+                            permission_mode: None,
+                            reasoning_level: None,
+                        };
+                        let back = host
+                            .set_agent(&session.id, source_agent.clone(), Some(200_000))
+                            .await
+                            .unwrap();
+                        assert_eq!(back.native_session_id, session.native_session_id);
+                        if source.starts_with("acp:") {
+                            let wire = session_json_with(Some(&store), &back, false);
+                            assert_eq!(wire["model"], "second");
+                            assert!(wire["nativeConfiguration"].is_null());
+                        }
+                        let messages = store.list_chat_messages(&session.id).unwrap();
+                        let path = active_path(&messages, back.active_leaf_id.as_deref());
+                        let position = handoff::position(
+                            &back,
+                            &path,
+                            &store.unconfirmed_chat_replies(&session.id).unwrap(),
+                        );
+                        assert_eq!(position.since.as_deref(), Some(original.id.as_str()));
+                        let context = handoff::context(&store, &back, None, position.since.as_deref(), position.context_window).unwrap();
+                        assert!(context.contains(&format!(
+                            "through {}, your last reply as {source}",
+                            delegation::message_ref(&original.id)
+                        )));
+                        assert!(context.contains("Parser API preserved; tests passed."));
+                        assert_eq!(context.matches("Original plan.").count(), 1);
+                        assert!(!context.contains("Keep this earlier native detail"));
+                        let recovery = StoredChatTurn {
+                            id: "recovery".into(),
+                            session_id: session.id.clone(),
+                            user_message_id: Some(request.id.clone()),
+                            assistant_message_id: "recovered-answer".into(),
+                            client_turn_id: "recovery-client".into(),
+                            request_hash: "hash".into(),
+                            prepared_input: "Replay this request with its attachments.".into(),
+                            settings_json: "{}".into(),
+                            state: "failed".into(),
+                            delivery_state: "rejected".into(),
+                            attempt_count: 1,
+                            next_retry_at: None,
+                            error_kind: None,
+                            error_message: None,
+                            recovery_action: Some("retry".into()),
+                            recovered_by_turn_id: None,
+                            created_at: 1,
+                            updated_at: 1,
+                        };
+                        let ctx = turn_ctx_from_stored(
+                            host.clone(), &store, &back, TurnCtx::test_stub().project,
+                            &recovery, stored_to_wire(&answer),
+                        ).unwrap();
+                        assert_eq!(ctx.text.matches("<orx-handoff>").count(), 1);
+                        assert!(ctx.text.contains(&format!("You are the {source} agent")));
+                        assert!(!ctx.text.contains(&format!("You are the {target} agent")));
+                        assert!(ctx.text.ends_with(&recovery.prepared_input));
+                        for delivery in ["rejected", "unknown"] {
+                            let mut unprimed = bare_session();
+                            unprimed.id = format!("chat_{}", uuid::Uuid::new_v4());
+                            unprimed.harness = source.into();
+                            unprimed.native_session_id = Some(uuid::Uuid::new_v4().to_string());
+                            unprimed.bootstrap_context = Some("FROZEN_PARENT_CONTEXT".into());
+                            store.create_chat_session(&unprimed).unwrap();
+                            let first = StoredChatMessage {
+                                id: format!("msg_{}", uuid::Uuid::new_v4()),
+                                session_id: unprimed.id.clone(),
+                                parent_id: None,
+                                base_native_session_id: None,
+                                result_native_session_id: None,
+                                ..request.clone()
+                            };
+                            let first_turn = StoredChatTurn {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                session_id: unprimed.id.clone(),
+                                user_message_id: Some(first.id.clone()),
+                                assistant_message_id: format!("msg_{}", uuid::Uuid::new_v4()),
+                                state: "preparing".into(),
+                                delivery_state: "not_sent".into(),
+                                ..recovery.clone()
+                            };
+                            store.admit_chat_turn(Some(&first), &first_turn).unwrap();
+                            let action = if delivery == "rejected" { "retry" } else { "continue" };
+                            store.fail_chat_turn(&first_turn.id, delivery, "test", "Unconfirmed delivery", Some(action)).unwrap();
+                            let failure = StoredChatMessage {
+                                id: first_turn.assistant_message_id.clone(),
+                                role: "assistant".into(),
+                                result_native_session_id: unprimed.native_session_id.clone(),
+                                parts_json: serde_json::to_string(&[WirePart::tool("failure", "error", "error", Some("Unconfirmed delivery".into()))]).unwrap(),
+                                ..first.clone()
+                            };
+                            store.upsert_chat_message_on_branch(&failure).unwrap();
+                            let unprimed = store.get_chat_session(&unprimed.id).unwrap().unwrap();
+                            let position = handoff::position_for(&store, &unprimed).unwrap();
+                            assert!(position.since.is_none());
+                            assert!(!position.switched);
+                            let failed = store.get_chat_turn(&unprimed.id, &first_turn.id).unwrap().unwrap();
+                            let retry = turn_ctx_from_stored(host.clone(), &store, &unprimed, TurnCtx::test_stub().project, &failed, stored_to_wire(&failure)).unwrap();
+                            assert!(retry.text.contains("FROZEN_PARENT_CONTEXT"));
+                            assert_eq!(retry.text.matches("<orx-handoff>").count(), 1);
+
+                            if delivery == "rejected" {
+                                assert!(store.reset_chat_turn_for_retry(&first_turn.id, now_ms()).unwrap());
+                                store.update_chat_turn_progress(&first_turn.id, "running", "accepted", 2, None).unwrap();
+                                let received = handoff::position_for(&store, &unprimed).unwrap();
+                                assert_eq!(received.since.as_deref(), Some(failure.id.as_str()));
+                                assert!(!received.switched);
+                            }
+                        }
+                        let (ids, _) = store
+                            .native_sessions_for_deletion(&[session.id.clone()], &[target])
+                            .unwrap();
+                        assert!(ids.contains(answer.result_native_session_id.as_ref().unwrap()));
+
+                        if source == "codex" && target == "claude-code" {
+                            host.set_plan_mode(&session.id, true).await.unwrap();
+                            let claude = host.set_agent(&session.id, agent.clone(), None).await.unwrap();
+                            assert_eq!(claude.permission_mode.as_deref(), Some("plan"));
+                            assert!(!claude.plan_mode);
+                            host.set_permission_mode(&session.id, "auto").await.unwrap();
+                            let codex = host
+                                .set_agent(&session.id, source_agent, None)
+                                .await
+                                .unwrap();
+                            assert!(!codex.plan_mode);
+                            assert!(codex.plan_reset_pending);
+                            assert_eq!(codex.native_session_id, session.native_session_id);
+                        }
+
+                        store.set_chat_session_active_leaf(&session.id, None).unwrap();
+                        store.set_chat_session_native_id(&session.id, None).unwrap();
+                        let empty = host.set_agent(&session.id, agent, None).await.unwrap();
+                        assert!(empty.native_session_id.is_none());
+                        assert!(!handoff::context(&store, &empty, None, None, None).unwrap().contains("Original plan."));
+                    }
+                }
+            });
+            return;
+        }
+        let fixture = crate::local::git::TemporaryDirectory::new("orx-provider-switches").unwrap();
+        let output = crate::process::command(std::env::current_exe().unwrap())
+            .args(["--exact", "local::chat::bridge_tests::provider_switches_resume_each_harness_and_deliver_only_its_delta", "--nocapture"])
+            .env(CHILD, "1").env("ORX_DATA_DIR", fixture.path().join("data"))
+            .env("XDG_CONFIG_HOME", fixture.path().join("config")).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn switched_recovery_and_forks_keep_selected_settings_and_parent_context() {
+        const CHILD: &str = "ORX_TEST_SWITCHED_RECOVERY";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let host = Arc::new(test_host());
+                    let store = Store::open().unwrap();
+                    let mut project = TurnCtx::test_stub().project;
+                    project.repo_path = crate::store::data_dir()
+                        .join("absent-project")
+                        .display()
+                        .to_string();
+                    project.github_sync_enabled = false;
+                    store.create_local_project(&project).unwrap();
+                    let mut parent = bare_session();
+                    parent.id = "parent-context".into();
+                    parent.project_id = project.id.clone();
+                    store.create_chat_session(&parent).unwrap();
+                    store
+                        .upsert_chat_message_on_branch(&StoredChatMessage {
+                            id: "parent-message".into(),
+                            session_id: parent.id.clone(),
+                            role: "user".into(),
+                            parts_json: serde_json::to_string(&[WirePart::text(
+                                "parent",
+                                "FROZEN_PARENT_CONTEXT",
+                            )])
+                            .unwrap(),
+                            created_at: 1,
+                            completed_at: Some(1),
+                            parent_id: None,
+                            base_native_session_id: None,
+                            result_native_session_id: None,
+                            native_harness: None,
+                        })
+                        .unwrap();
+
+                    for action in ["recover", "recover-branch", "edit", "retry", "select"] {
+                        let mut session = bare_session();
+                        session.id = format!("chat_{action}");
+                        session.project_id = project.id.clone();
+                        session.title = Some("Test".into());
+                        session.model = Some("old-model".into());
+                        session.side_parent_session_id = Some(parent.id.clone());
+                        session.side_parent_leaf_id = Some("parent-message".into());
+                        store.create_chat_session(&session).unwrap();
+                        let request = StoredChatMessage {
+                            id: format!("request_{action}"),
+                            session_id: session.id.clone(),
+                            role: "user".into(),
+                            parts_json: serde_json::to_string(&[WirePart::text(
+                                "request",
+                                "Original request.",
+                            )])
+                            .unwrap(),
+                            created_at: 1,
+                            completed_at: Some(1),
+                            parent_id: None,
+                            base_native_session_id: None,
+                            result_native_session_id: None,
+                            native_harness: Some(session.harness.clone()),
+                        };
+                        let turn = StoredChatTurn {
+                            id: format!("turn_{action}"),
+                            session_id: session.id.clone(),
+                            client_turn_id: format!("client_{action}"),
+                            request_hash: "hash".into(),
+                            user_message_id: Some(request.id.clone()),
+                            assistant_message_id: format!("answer_{action}"),
+                            prepared_input: "Original request.".into(),
+                            settings_json: r#"{"model":"old-model"}"#.into(),
+                            state: "preparing".into(),
+                            delivery_state: "not_sent".into(),
+                            attempt_count: 1,
+                            next_retry_at: None,
+                            error_kind: None,
+                            error_message: None,
+                            recovery_action: None,
+                            recovered_by_turn_id: None,
+                            created_at: 1,
+                            updated_at: 1,
+                        };
+                        store.admit_chat_turn(Some(&request), &turn).unwrap();
+                        store
+                            .fail_chat_turn(
+                                &turn.id,
+                                "rejected",
+                                "test",
+                                "Failed request",
+                                Some("retry"),
+                            )
+                            .unwrap();
+                        let reply = StoredChatMessage {
+                            id: turn.assistant_message_id.clone(),
+                            role: "assistant".into(),
+                            parts_json: serde_json::to_string(&[WirePart::text(
+                                "reply",
+                                "Old answer.",
+                            )])
+                            .unwrap(),
+                            ..request.clone()
+                        };
+                        store.upsert_chat_message_on_branch(&reply).unwrap();
+                        let acp = crate::local::acp::presets().remove(0).launch;
+                        let agent = crate::store::StoredAgentSelection {
+                            harness: if action == "select" {
+                                acp.id
+                            } else {
+                                "codex".into()
+                            },
+                            model: Some("selected-model".into()),
+                            service_tier: None,
+                            permission_mode: None,
+                            reasoning_level: None,
+                        };
+                        host.set_agent(&session.id, agent.clone(), None)
+                            .await
+                            .unwrap();
+                        if action.starts_with("recover") {
+                            host.set_agent(
+                                &session.id,
+                                crate::store::StoredAgentSelection {
+                                    harness: session.harness.clone(),
+                                    ..agent
+                                },
+                                None,
+                            )
+                            .await
+                            .unwrap();
+                            if action == "recover-branch" {
+                                store
+                                    .set_chat_session_active_leaf(&session.id, Some(&reply.id))
+                                    .unwrap();
+                            }
+                            let recovered = host
+                                .recover_turn(
+                                    &session.id,
+                                    &turn.id,
+                                    "retry",
+                                    RecoveryOverrides::default(),
+                                )
+                                .await
+                                .unwrap();
+                            let stored = store
+                                .get_chat_turn(&session.id, &recovered.turn_id)
+                                .unwrap()
+                                .unwrap();
+                            let settings: TurnOverrides =
+                                serde_json::from_str(&stored.settings_json).unwrap();
+                            assert_eq!(settings.model.as_deref(), Some("selected-model"));
+                            assert_ne!(recovered.turn_id, turn.id);
+                        } else if action == "select" {
+                            host.select_branch(&session.id, &reply.id).await.unwrap();
+                        } else {
+                            let (id, kind) = if action == "edit" {
+                                (&request.id, ForkKind::Edit("Edited request.".into()))
+                            } else {
+                                (&reply.id, ForkKind::Retry)
+                            };
+                            assert!(host.fork_turn(&session.id, id, kind).await.unwrap());
+                        }
+                        // Abort admitted turns before this current-thread runtime polls a harness.
+                        if let Some(TurnState::Active(active)) =
+                            host.turns.try_lock().unwrap().remove(&session.id)
+                        {
+                            active.handle.abort();
+                        }
+                        let updated = store.get_chat_session(&session.id).unwrap().unwrap();
+                        assert!(updated.bootstrap_context.is_none());
+                        assert!(effective_bootstrap_context(&store, &updated)
+                            .unwrap()
+                            .unwrap()
+                            .contains("FROZEN_PARENT_CONTEXT"));
+                        assert!(handoff::context(&store, &updated, None, None, None)
+                            .unwrap()
+                            .contains("FROZEN_PARENT_CONTEXT"));
+                    }
+                });
+            return;
+        }
+        let fixture = crate::local::git::TemporaryDirectory::new("orx-switched-recovery").unwrap();
+        let output = crate::process::command(std::env::current_exe().unwrap())
+            .args(["--exact", "local::chat::bridge_tests::switched_recovery_and_forks_keep_selected_settings_and_parent_context", "--nocapture"])
+            .env(CHILD, "1").env("ORX_DATA_DIR", fixture.path().join("data"))
+            .env("XDG_CONFIG_HOME", fixture.path().join("config")).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn opencode_fallback_compaction_requires_a_model() {
         let host = test_host();
@@ -10771,6 +11393,7 @@ mod bridge_tests {
                         parent_id: None,
                         base_native_session_id: None,
                         result_native_session_id: None,
+                        native_harness: None,
                     })
                     .unwrap();
                 store
@@ -10865,6 +11488,7 @@ mod bridge_tests {
                             parent_id: None,
                             base_native_session_id: None,
                             result_native_session_id: None,
+                            native_harness: None,
                         })
                         .unwrap();
                     store
@@ -11211,7 +11835,10 @@ mod run_wakeup_tests {
 
             let frozen = store.run_notice_batch("owner").unwrap();
             assert_eq!(frozen.len(), 2);
-            let guard = TurnGuard::claim_idle(&host, "owner").await.unwrap();
+            let guard =
+                TurnGuard::claim_idle(&host, "owner", TurnState::Reserved { turn_id: None })
+                    .await
+                    .unwrap();
             let submitted = host
                 .send_message_showing("owner", run_notice_request(&frozen, guard))
                 .await
@@ -11795,6 +12422,7 @@ for line in sys.stdin:
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .unwrap();
             store.complete_chat_turn(&turn.id).unwrap();
@@ -11936,7 +12564,11 @@ for line in sys.stdin:
             }]),
         );
 
-        assert!(TurnGuard::claim_idle(&host, "owner").await.is_none());
+        assert!(
+            TurnGuard::claim_idle(&host, "owner", TurnState::Reserved { turn_id: None })
+                .await
+                .is_none()
+        );
     }
 
     #[test]
@@ -11989,6 +12621,7 @@ mod transcript_tree_tests {
             parent_id: parent.map(Into::into),
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         }
     }
 
@@ -12182,9 +12815,10 @@ mod transcript_tree_tests {
         let messages = vec![said("u1", "user", None, &"界".repeat(20_000))];
         let side = side_chat_session(&parent, &messages);
         assert_eq!(side.side_parent_leaf_id, None);
-        let expected = crate::local::harness::transcript_snapshot(messages.iter());
-        assert!(expected.len() <= 32 * 1024);
-        assert!(expected.ends_with('界'));
+        let expected = handoff::snapshot(messages.iter(), handoff::budget(None));
+        assert!(expected.len() <= handoff::budget(None));
+        assert!(expected.contains('界'));
+        assert!(expected.contains("read this message by ref"));
         assert_eq!(
             side.bootstrap_context,
             side_chat_context(&parent.id, messages.iter())

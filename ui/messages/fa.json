@@ -1751,5 +1751,7 @@
   "chat_search_results": "نتایج جستجو",
   "chat_search_other_branch": "شاخهٔ دیگر",
   "chat_search_more": "بارگذاری بیشتر",
-  "chat_search_waiting_for_turn": "پیش از تغییر شاخه، منتظر پایان نوبت هستیم."
+  "chat_search_waiting_for_turn": "پیش از تغییر شاخه، منتظر پایان نوبت هستیم.",
+  "chat_switched_agent": "به {agent} · {model} تغییر کرد",
+  "chat_switch_agent_failed": "تغییر عامل ممکن نشد. دوباره تلاش کنید."
 }

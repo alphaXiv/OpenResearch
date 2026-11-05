@@ -1751,5 +1751,7 @@
   "chat_search_results": "Resultados de búsqueda",
   "chat_search_other_branch": "Otra rama",
   "chat_search_more": "Cargar más",
-  "chat_search_waiting_for_turn": "Esperando a que termine el turno para cambiar de rama."
+  "chat_search_waiting_for_turn": "Esperando a que termine el turno para cambiar de rama.",
+  "chat_switched_agent": "Cambiaste a {agent} · {model}",
+  "chat_switch_agent_failed": "No se pudo cambiar de agente. Inténtalo de nuevo."
 }

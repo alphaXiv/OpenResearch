@@ -1751,5 +1751,7 @@
   "chat_search_results": "검색 결과",
   "chat_search_other_branch": "다른 분기",
   "chat_search_more": "더 불러오기",
-  "chat_search_waiting_for_turn": "분기를 전환하기 전에 턴이 끝나기를 기다리는 중입니다."
+  "chat_search_waiting_for_turn": "분기를 전환하기 전에 턴이 끝나기를 기다리는 중입니다.",
+  "chat_switched_agent": "{agent} · {model}(으)로 전환됨",
+  "chat_switch_agent_failed": "에이전트를 전환할 수 없습니다. 다시 시도해 주세요."
 }
