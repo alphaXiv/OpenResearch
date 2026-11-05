@@ -6,6 +6,7 @@ pub mod exec;
 pub mod legacy;
 pub mod log;
 pub mod platform;
+mod rental;
 pub mod server;
 pub mod wrapper;
 

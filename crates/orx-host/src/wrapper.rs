@@ -36,6 +36,7 @@ pub fn wrap(dir: &Path) -> io::Result<()> {
     crash_point("wrapper_identity");
     let subreaper = platform::subreaper()?;
     let intent: LaunchIntent = read_json(&dir.join("launch.json"))?;
+    let _rental = crate::rental::Duty::start(dir)?;
     let tag = format!("{}:{}", intent.run, nonce()?);
     let gate = start_gate(dir)?;
     if dir.join("cancel.req").try_exists()? {
@@ -627,7 +628,11 @@ pub fn state(dir: &Path) -> io::Result<RunState> {
         Ok(None) => {}
     }
     if alive? {
-        return Ok(RunState::Running);
+        return Ok(if dir.join("started").try_exists()? {
+            RunState::Running
+        } else {
+            RunState::Starting
+        });
     }
     if dir.join("started").try_exists()? {
         if let Ok(identity) = identity {

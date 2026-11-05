@@ -934,6 +934,183 @@ async fn openresearch_rejected_key_auto_cancel_checks_rental_and_survives_restar
     }
 }
 
+#[tokio::test]
+async fn round_one_bootstrap_heartbeat_precedes_wrapper_activation() {
+    use super::openresearch::{LegacyTransport, OpenResearch};
+    use super::ssh::Ssh;
+    use crate::engine::transport::{Config, HostConn};
+    let Some(root) = isolated().await else {
+        return;
+    };
+    crate::config::save_credentials(&crate::config::Credentials {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        token: "fake".into(),
+    })
+    .await
+    .unwrap();
+    let server = orx_test_support::Sshd::start().unwrap();
+    let shell = server.directory().join("command");
+    let command = std::fs::read_to_string(&shell).unwrap();
+    std::fs::write(
+        shell,
+        command.replacen(
+            "export HOME",
+            "export HOME\nexport PATH=\"$HOME/.local/bin:$PATH\"",
+            1,
+        ),
+    )
+    .unwrap();
+    let clock = Arc::new(TestClock::new());
+    let config = Config {
+        alias: server.alias().into(),
+        root: "~/engine-root".into(),
+        ssh_config: Some(server.config_path()),
+        control_dir: server.directory().join("cm"),
+        binary_dir: Some(orx_test_support::host_binaries()),
+        sharing_home: None,
+        askpass_executable: std::env::current_exe().unwrap(),
+    };
+    let store = Store::open_at(root.join("transport")).unwrap();
+    let auth = crate::engine::transport::Auth::new(&store, &config.alias).unwrap();
+    let conn = HostConn::start_shared(config, store, clock.clone(), auth).unwrap();
+    let transport = Arc::new(LegacyTransport::new(
+        Arc::new(Ssh::new(
+            server.alias().into(),
+            "~/engine-root".into(),
+            conn.clone(),
+        )),
+        root.join("store/run-logs"),
+    ));
+    let engine = Arc::new(engine(&root));
+    let id = uuid::Uuid::new_v4().to_string();
+    let fixture = root.join("snapshot");
+    std::fs::create_dir_all(&fixture).unwrap();
+    std::fs::write(fixture.join("README"), "snapshot").unwrap();
+    let archive = root.join("source.tar");
+    assert!(crate::process::command("tar")
+        .arg("-cf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .unwrap()
+        .success());
+    let bytes = std::fs::read(&archive).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    script(&server.home().join(".local/bin/uv"), "#!/bin/sh\nexit 0\n");
+    script(
+        &server.home().join(".local/bin/timeout"),
+        "#!/bin/sh\nshift 3\nexec \"$@\"\n",
+    );
+    let descriptor = BackendDescriptor::parse(&json!({
+        "kind":"openresearch_job", "namespace":"org", "jobId":"box",
+            "sourceDigest":digest,"sourcePath":archive,"sourceSize":bytes.len(),
+        "sshHost":"127.0.0.1", "sshPort":server.port(), "sshUser":server.user(),
+        "rentalLease":{"apiUrl":std::env::var("HF_ENDPOINT").unwrap(),"sandboxId":"box","token":"fake"}
+    }).to_string()).unwrap();
+    let launch = LaunchSpec {
+        kind: "openresearch_job".into(),
+        target: Some("org".into()),
+        options: json!({}),
+    };
+    let mut submission = pending(&id, &descriptor, &launch);
+    submission.spec_digest = &digest;
+    submission.command = "printf 'before disconnect\\n'; sleep 2; printf 'final result\\n'; exit 7";
+    submission.created_at = engine.clock.wall_ms();
+    engine.insert(submission).unwrap();
+    let watched = WatchedRun {
+        id: id.clone(),
+        handle: Handle::OpenResearch {
+            descriptor: Box::new(descriptor),
+        },
+    };
+    engine
+        .store()
+        .set_submission_fence(
+            &id,
+            1,
+            &crate::store::SubmissionFence {
+                taken_at: 1,
+                submitter: None,
+            },
+        )
+        .unwrap();
+    assert!(engine
+        .store()
+        .record_run_handle(&id, 1, &watched.handle)
+        .unwrap());
+    let factory: super::openresearch::TransportFactory = {
+        let transport = transport.clone();
+        Arc::new(move |_| Ok(transport.clone()))
+    };
+    let adapter = OpenResearch::new(engine.clone(), factory.clone());
+    let directory = server.home().join(format!("engine-root/runs/{id}"));
+    tokio::time::timeout(Duration::from_secs(25), async {
+        while !directory.join("started").exists() {
+            engine
+                .observe_runs(&adapter, std::slice::from_ref(&watched), Duration::ZERO)
+                .await
+                .unwrap();
+            clock.advance(Duration::from_secs(10));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let requests = std::fs::read_to_string(root.join("http.log")).unwrap();
+    let heartbeat = requests
+        .find("POST /sandboxes/box/lease/heartbeat")
+        .expect("bootstrap heartbeat");
+    let activated = requests
+        .find("POST /sandboxes/box/lease/activate")
+        .expect("wrapper activation");
+    assert!(heartbeat < activated, "{requests}");
+    server.proxy().reset().unwrap();
+    drop(adapter);
+    let adapter = OpenResearch::new(engine.clone(), factory);
+    tokio::time::timeout(Duration::from_secs(25), async {
+        while !phase_of(&engine.load(&id).unwrap().0)
+            .unwrap()
+            .is_terminal()
+        {
+            clock.advance(Duration::from_secs(60));
+            engine
+                .observe_runs(&adapter, std::slice::from_ref(&watched), Duration::ZERO)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let (run, state) = engine.load(&id).unwrap();
+    assert_eq!(run.status, "failed");
+    assert_eq!(
+        run.exit_code,
+        Some(7),
+        "{}",
+        std::fs::read_to_string(directory.join("log")).unwrap_or_default()
+    );
+    assert_eq!(state.started_at, orx_host::wrapper::started_at(&directory));
+    crate::engine::runtime::Runtime::collect_log(
+        &root.join("store"),
+        &adapter,
+        &watched,
+        &mut false,
+    )
+    .await
+    .unwrap();
+    adapter.finish(&watched).await.unwrap();
+    assert!(directory.join("final_collected").exists());
+    assert_eq!(
+        std::fs::read(root.join(format!("store/run-logs/{id}.log"))).unwrap(),
+        b"before disconnect\nfinal result\n"
+    );
+    let receipt = orx_host::wrapper::receipt(&directory).unwrap().unwrap();
+    assert_eq!(receipt.code, Some(7));
+}
+
 async fn legacy_box(root: PathBuf, initial_stage: &str) {
     use super::openresearch::{LegacyTransport, OpenResearch};
     use super::ssh::Ssh;
@@ -1053,9 +1230,25 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
             descriptor: Box::new(descriptor),
         },
     }];
-    let mut events = engine.bus.subscribe();
-    adapter.observe(&watched, Duration::from_secs(1)).await;
+    engine
+        .observe_runs(&adapter, &watched, Duration::from_secs(1))
+        .await
+        .unwrap();
     if initial_stage == "done" {
+        crate::engine::runtime::Runtime::collect_log(
+            &root.join("store"),
+            &adapter,
+            &watched[0],
+            &mut false,
+        )
+        .await
+        .unwrap();
+        let mut ranges =
+            crate::commands::up::api_v2::kept_ranges(&root.join("store"), &id).unwrap();
+        ranges.last_mut().unwrap().eof = false;
+        crate::commands::up::api_v2::keep_ranges(&root.join("store"), &id, ranges).unwrap();
+        adapter.finish(&watched[0]).await.unwrap();
+        engine.store().finish_log_collection(&id).unwrap();
         let dir = server.home().join(format!(".orx/runs/{id}"));
         tokio::time::timeout(Duration::from_secs(20), async {
             while !dir.join("final_collected").exists() {
@@ -1066,9 +1259,6 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
         .unwrap();
         assert_eq!(engine.load(&id).unwrap().0.status, "done");
         assert!(!engine.store().log_collection_pending(&id).unwrap());
-        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
-            matches!(event, crate::engine::bus::RunEvent::LogCollection { run_id } if run_id == id)
-        }));
         std::fs::remove_dir_all(dir).unwrap();
         let runtime = crate::engine::runtime::Runtime::new(
             engine.clone(),
@@ -1107,46 +1297,19 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
         return;
     }
     if watching {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                if engine.load(&id).unwrap().0.status == "running"
-                    && root.join(format!("store/run-logs/{id}.log")).exists()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
+        assert_eq!(engine.load(&id).unwrap().0.status, "running");
+        crate::engine::runtime::Runtime::collect_log(
+            &root.join("store"),
+            &adapter,
+            &watched[0],
+            &mut false,
+        )
         .await
         .unwrap();
-        // A run the engine isn't polling, so only these collects touch its log.
-        let probe = uuid::Uuid::new_v4().to_string();
-        let dir = format!(".orx/runs/{probe}");
-        let remote = server.home().join(&dir);
-        std::fs::create_dir_all(&remote).unwrap();
-        std::fs::write(remote.join("pid"), server.pid().to_string()).unwrap();
-        std::fs::write(remote.join("log"), vec![b'x'; 5000]).unwrap();
-        assert_eq!(transport.collect(&probe, &dir).await.unwrap()["eof"], true);
-        let mut changed = vec![b'x'; 5000];
-        changed[4999] = b'y';
-        std::fs::write(remote.join("log"), &changed).unwrap();
-        assert_eq!(transport.collect(&probe, &dir).await.unwrap()["eof"], false);
-        let local = root.join(format!("store/run-logs/{probe}.log"));
-        assert_eq!(std::fs::read(&local).unwrap(), vec![b'x'; 5000]);
-        let resumed = LegacyTransport::new(transport.ssh.clone(), transport.log_dir.clone());
-        assert_eq!(resumed.collect(&probe, &dir).await.unwrap()["eof"], true);
-        assert_eq!(std::fs::read(local).unwrap(), changed);
-    } else {
-        let partial = server
-            .home()
-            .join(format!("engine-root/sources/{digest}.part"));
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while !partial.exists() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .unwrap();
+        assert_eq!(
+            std::fs::read(root.join(format!("store/run-logs/{id}.log"))).unwrap(),
+            vec![b'x'; 5000]
+        );
     }
     std::fs::write(server.directory().join("authorized_keys"), "").unwrap();
     server.proxy().reset().unwrap();
@@ -1164,6 +1327,10 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
     .unwrap();
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
+            engine
+                .observe_runs(&adapter, &watched, Duration::ZERO)
+                .await
+                .unwrap();
             if matches!(
                 engine.load(&id).unwrap().1.contact,
                 crate::store::Contact::NeedsAuth { .. }
@@ -1226,6 +1393,15 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
     if watching {
         assert!(engine.cancel(&adapter, &id, "user").await.unwrap());
         assert_eq!(engine.load(&id).unwrap().0.status, "cancelled");
+        crate::engine::runtime::Runtime::collect_log(
+            &root.join("store"),
+            &adapter,
+            &watched[0],
+            &mut false,
+        )
+        .await
+        .unwrap();
+        engine.store().finish_log_collection(&id).unwrap();
         assert!(!engine.store().log_collection_pending(&id).unwrap());
     } else {
         assert!(engine.abandon(&id).unwrap());
@@ -1312,7 +1488,7 @@ async fn unsupported_leases_are_deleted_or_keep_the_known_box_handle() {
         let (run, _) = engine.load(id).unwrap();
         if deletion_fails {
             assert_eq!(run.status, "starting");
-            let Some(Handle::Legacy { descriptor }) = handle_of(&run) else {
+            let Some(Handle::OpenResearch { descriptor }) = handle_of(&run) else {
                 panic!("lost paid box id");
             };
             assert_eq!(descriptor.job_id.as_deref(), Some(id));

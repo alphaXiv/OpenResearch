@@ -49,7 +49,7 @@ which path recovers orphaned supervised runs.
 
 Engine runs keep their first payload start in `started_at` and finish in
 `ended_at`, using source timestamps when available and observation time otherwise.
-Box runs stay starting until remote inspection confirms a live payload PID.
+Box runs stay starting through staging and billing activation; the host wrapper records the payload start.
 
 The snapshot contract below applies in both modes. The engine lifecycle and
 `orx-host` sections describe engine-owned runs; supervised runs keep their
@@ -95,7 +95,7 @@ The families differ in where the job runs and how the source gets there:
 | Kubernetes | the user's cluster | copied into the pod by `kubectl` |
 | Ray | the user's Ray cluster | the job's working-directory package |
 | Hugging Face Jobs, Modal, Vercel | hosted services | a private job volume, the sandbox filesystem |
-| an OpenResearch box | a rented machine | a tar stream over SSH |
+| an OpenResearch box | a rented machine, under `orx-host` | a content-addressed upload over SSH |
 
 Which backend a launch uses comes from the command line, else the user's
 default compute target. A default flavor applies only to its own backend and
@@ -272,26 +272,35 @@ its network, or quitting never decides when billing stops.
 
 ```text
 laptop                         rented machine                  openresearch.sh
-stage source + payload  ─ssh─► rental-supervise (detached)
-                               activate ─────────────────────► billing starts
-                               heartbeat, every 30 s ────────► (expires without)
-                               run payload, log, exit code
-collect log + exit code ◄─ssh─ wait for "collected", 60 s max
-                               release ──────────────────────► billing closes,
+stage source + capability ─ssh─► orx-host wrap (detached)
+                                 activate ───────────────────► billing starts
+                                 heartbeat, every 30 s ───────► (expires without)
+                                 run payload, log, exit receipt
+collect kept ranges      ◄─ssh─► orx-host serve
+acknowledge collection   ─ssh─► wait for "collected", 60 s max
+                                 release ────────────────────► billing closes,
                                                                machine deleted
 ```
 
-- The laptop stages the source and command directly over SSH. An owner-only
-  file on the machine gives a detached `orx rental-supervise` a capability
-  scoped to that one rental; the capability never appears in API responses.
-- The remote supervisor runs the payload under a hard time limit in its own
-  process group, writes the log and an atomically renamed exit code, and
-  heartbeats the service while it works. A launch whose start is uncertain is
-  never retried; its rental expires instead.
-- After the payload exits, the supervisor waits for the laptop to acknowledge
-  that it saved the final log and exit code, or 60 seconds, whichever comes
-  first, then releases the rental, retrying until the service accepts. The
-  service closes billing and deletes the machine on its own schedule.
+- The engine stages the source through the same resumable, content-addressed
+  SSH transport used for the user's own hosts. An owner-only capability file
+  on the box scopes billing operations to that rental; the capability never
+  appears in API responses.
+- Each rental has its own observation loop. While provisioning or staging,
+  the laptop heartbeats within the engine's ten-minute preparation budget;
+  wrapper start, an outage or cancellation ends that bootstrap duty.
+- `orx-host wrap` activates billing before starting the payload, keeps
+  heartbeating independently of the laptop, and owns the payload under its
+  hard time limit. It writes the same log and exit receipt as an SSH run;
+  a lost launch response is recovered by inspecting that run's intent.
+- After the exit receipt, the wrapper waits for the laptop to acknowledge its
+  kept log and final notices, or 60 seconds, whichever comes first. It then
+  stops heartbeating and retries release until accepted, even if descendants
+  remain. The service closes billing and deletes the machine on its own schedule.
+- Runs already launched through a canary's `rental-supervise` retain their
+  supervisor and legacy receipts. The engine inspects and collects those
+  directly without launching another payload. With the setting off, the
+  0.2.x launcher and rental supervisor remain unchanged.
 - **Cancel and Abandon release the rental** from the laptop as well, so
   stopping billing never waits on the box being reachable. A successful
   release is stop proof: Cancel ends Cancelled, Abandon ends Lost with no kill
@@ -306,7 +315,11 @@ collect log + exit code ◄─ssh─ wait for "collected", 60 s max
 - **No research data crosses this protocol.** Logs, commands, source,
   experiment IDs, outcomes and artifacts never reach the billing service.
 - Manual teardown follows the run engine's Cancel and Abandon path above.
-- Collection is best effort. Data left only on the machine is lost when it is
-  deleted, and a run whose final outcome could not be collected ends as
+- Log collection uses the engine's kept ranges, file identities and resumable
+  pages. The laptop acknowledges collection only after keeping the output and
+  final notices; a disconnect resumes from the remote file during the grace. Once deletion is verified,
+  the available local copy, including an empty log, is settled. Data left only
+  on the machine is lost when it is deleted, and a run whose final outcome
+  could not be collected ends as
   **lost** ("Outcome unavailable") instead of running forever. The chat is
   told not to assume success or failure.
