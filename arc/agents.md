@@ -63,7 +63,8 @@ An idle chat can change its agent from the model picker. The switch is a
 settings change and a transcript row, with no model call. Messages record the
 harness that owns their native session ids. Returning to a harness resumes
 its last session on the active branch and supplies only the conversation
-since its last reply; a new harness gets the active conversation. Queued
+since its last reply, with that reply identified as the resume point;
+a new harness gets the active conversation. Queued
 messages must be sent or removed before switching. A chat retains its saved
 ACP launch when switching away and back; changing between two ACP launches
 requires a new chat.

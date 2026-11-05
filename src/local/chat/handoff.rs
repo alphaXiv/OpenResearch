@@ -289,7 +289,7 @@ pub(crate) fn context(
     if selected.is_empty() && prior.is_none() {
         return Ok(String::new());
     }
-    let mut state = format!("Chat: `{}`\nProvider: {}\n", session.id, session.harness);
+    let mut state = format!("Chat: `{}`\n", session.id);
     if let Some(project) = store.get_local_project(&session.project_id)? {
         let cwd = crate::local::git::existing_session_worktree_path(&project, &session.id);
         let _ = writeln!(state, "Worktree: {}", cwd.display());
@@ -357,7 +357,7 @@ pub(crate) fn context(
     let cli_read = r#"printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"ref":"msg_…"}}}' | orx mcp"#;
     let header = format!(
         "<orx-handoff>\n\
-         You are continuing the user's conversation in the same worktree. \
+         You are the {} agent, continuing the user's conversation in the same worktree. \
          Earlier assistant replies name the agent that wrote them; an agent switch \
          changes who is answering, not the conversation. Use the messages below to \
          answer the current user message after this block.{} Prior tool actions \
@@ -367,10 +367,16 @@ pub(crate) fn context(
          If no orx MCP tool is exposed, run `{cli_read}` in this chat's shell, \
          replacing the ref. The same arguments support paging.\n\n\
          State now:\n{state}\nConversation (oldest first):\n",
-        if since.is_some() {
-            " Your native session already contains the earlier conversation; this is what happened since."
+        session.harness,
+        if let Some(since) = since {
+            format!(
+                " Your native session already contains the conversation through {}, your last reply as {}. \
+                 The assistant replies in that native session are yours; this is what happened since.",
+                delegation::message_ref(since),
+                session.harness,
+            )
         } else {
-            ""
+            String::new()
         }
     );
     let footer = "</orx-handoff>";

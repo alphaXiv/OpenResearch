@@ -10856,6 +10856,10 @@ mod bridge_tests {
                         .unwrap();
                         assert_eq!(since, Some(original.id.as_str()));
                         let context = handoff::context(&store, &back, None, since, window).unwrap();
+                        assert!(context.contains(&format!(
+                            "through {}, your last reply as {source}",
+                            delegation::message_ref(&original.id)
+                        )));
                         assert!(context.contains("Parser API preserved; tests passed."));
                         assert!(!context.contains("Original plan."));
                         let (ids, _) = store
