@@ -255,7 +255,7 @@ test('ARM PR lanes preserve desktop lint and linking; other validation remains c
 
 test('release and canary host artifacts reach every source build', () => {
   const builder = workflow('build-host')
-  assert.match(builder, /runs-on: macos-14/)
+  assert.match(builder, /runs-on: macos-latest/)
   assert.match(builder, /actions\/checkout@v6/)
   assert.match(builder, /actions\/upload-artifact@v7/)
   assert.match(builder, /mlugg\/setup-zig@[a-f0-9]{40}/)
