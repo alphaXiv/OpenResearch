@@ -12,8 +12,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::Command;
-
 use crate::client::{list_ssh_keys, SshKey};
 use crate::config::Credentials;
 
@@ -119,7 +117,7 @@ pub async fn local_keys() -> Vec<LocalKey> {
     // are enough to advise with.
     let agent = tokio::time::timeout(
         Duration::from_secs(5),
-        Command::new("ssh-add")
+        crate::process::tokio_command("ssh-add")
             .arg("-L")
             .stdin(Stdio::null())
             .kill_on_drop(true)

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use crate::error::{anyhow, Result};
@@ -44,19 +44,15 @@ pub(crate) struct ResolvedRuntime {
     pub store: NativeStore,
 }
 
-/// `opencode` on PATH, then the installer's default drop location, in
-/// preference order. The native installer writes `~/.opencode/bin`, which a
-/// stale npm-style `opencode` shim earlier on PATH otherwise hides.
+/// Every `opencode` install, in preference order. The native installer writes
+/// `~/.opencode/bin`, which a stale npm-style `opencode` shim earlier on PATH
+/// otherwise hides.
 pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
-    let drop = dirs::home_dir()
-        .map(|home| home.join(".opencode").join("bin"))
-        .and_then(|dir| crate::local::shell_env::find_in_dir(&dir, "opencode"));
+    let own = dirs::home_dir().map(|home| home.join(".opencode").join("bin"));
     // Resolved and de-duplicated: the native install is both on PATH and in its
     // drop directory, and probing that one binary twice costs a 15s timeout.
     crate::local::harness::unique_bins(
-        crate::local::shell_env::find_on_path("opencode")
-            .into_iter()
-            .chain(drop)
+        crate::local::shell_env::installs("opencode", own)
             .map(|path| crate::paths::canonicalize(&path).unwrap_or(path))
             .collect(),
     )
@@ -496,7 +492,7 @@ async fn spawn_agent(
     if let Err(err) = crate::commands::install_skills::install_opencode_shim().await {
         eprintln!("warning: could not install the orx opencode skill: {err}");
     }
-    let mut cmd = Command::new(&binary.path);
+    let mut cmd = crate::process::tokio_command(&binary.path);
     cmd.current_dir(&repo);
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
@@ -1122,7 +1118,7 @@ mod tests {
             legacy_v2_api: false,
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let child = Command::new("sleep")
+        let child = crate::process::tokio_command("sleep")
             .arg("60")
             .kill_on_drop(true)
             .spawn()
@@ -1228,7 +1224,7 @@ mod tests {
             return;
         }
         let fixture = git::TemporaryDirectory::new("orx-missing-opencode-compaction").unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "local::opencode::tests::cold_compaction_does_not_replace_a_missing_native_session",

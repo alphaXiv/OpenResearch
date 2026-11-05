@@ -89,7 +89,7 @@ fn real_python(path: &OsStr) -> Option<PathBuf> {
 }
 
 fn py_launcher_python() -> Option<PathBuf> {
-    let py = crate::local::shell_env::find_on_path("py")?;
+    let py = crate::local::shell_env::find("py")?;
     let out = hidden(&py)
         .args(["-3", "-c", "import sys; print(sys.executable)"])
         .env("PYTHONUTF8", "1")
@@ -123,7 +123,7 @@ fn exists(path: &Path) -> bool {
 }
 
 fn hidden(program: &Path) -> Command {
-    let mut command = Command::new(program);
+    let mut command = crate::process::command(program);
     command
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -153,7 +153,7 @@ mod tests {
             path.push(";");
             path.push(rest);
         }
-        let out = Command::new(crate::local::bash::program())
+        let out = crate::process::command(crate::local::bash::program())
             .args(["-c", "python3 --version"])
             .env("PATH", path)
             .output()

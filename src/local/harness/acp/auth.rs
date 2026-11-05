@@ -109,7 +109,7 @@ pub(super) async fn detect(definition: &Definition, info: &mut HarnessInfo) {
 }
 
 async fn native_output(executable: &str, args: &[&str]) -> Option<std::process::Output> {
-    let mut command = tokio::process::Command::new(executable_path(executable)?);
+    let mut command = crate::process::tokio_command(executable_path(executable)?);
     command.args(args).stdin(std::process::Stdio::null());
     crate::local::chat::prepare_env(&mut command);
     command.env("NO_COLOR", "1");
@@ -126,7 +126,7 @@ async fn deepseek(definition: &Definition) -> Status {
     let Some(executable) = executable_path(&definition.executable) else {
         return Status::Unknown;
     };
-    let mut command = tokio::process::Command::new(node);
+    let mut command = crate::process::tokio_command(node);
     command.args(["-e", include_str!("deepseek-auth.cjs")]);
     command
         .arg(executable)
@@ -150,7 +150,7 @@ async fn zcode(definition: &Definition) -> Status {
     let Some(executable) = executable_path(&definition.executable) else {
         return Status::Unknown;
     };
-    let mut command = tokio::process::Command::new(node);
+    let mut command = crate::process::tokio_command(node);
     let script = format!(
         "{{ {} }}\n{}",
         include_str!("../../acp/zcode-runtime.cjs"),
@@ -190,7 +190,7 @@ async fn kimi_keyring(definition: &Definition, context: &Context) -> Status {
     let Some(interpreter) = interpreter else {
         return Status::Unknown;
     };
-    let mut command = tokio::process::Command::new(interpreter);
+    let mut command = crate::process::tokio_command(interpreter);
     command.args(["-c", "import json,keyring,sys; from kimi_cli.auth.oauth import KEYRING_SERVICE; raw=keyring.get_password(KEYRING_SERVICE,sys.argv[1]); print(json.dumps(json.loads(raw) if raw else {}))"]);
     command.arg(key).stdin(std::process::Stdio::null());
     crate::local::chat::prepare_env(&mut command);

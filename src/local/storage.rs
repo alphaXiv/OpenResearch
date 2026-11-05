@@ -1018,7 +1018,7 @@ mod tests {
         let source = tmp.path().join("cache");
         let data = tmp.path().join("data");
         init(&source.join("repos/o/r"));
-        assert!(std::process::Command::new("mkfifo")
+        assert!(crate::process::command("mkfifo")
             .arg(source.join("repos/pipe"))
             .status()
             .unwrap()

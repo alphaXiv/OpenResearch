@@ -1620,7 +1620,7 @@ pub(crate) fn kill_shell_group(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
-    let _ = std::process::Command::new("taskkill")
+    let _ = crate::process::command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1931,7 +1931,7 @@ impl ChatHost {
         command: String,
         cwd: PathBuf,
     ) -> Result<WireMessage> {
-        let mut spawn = tokio::process::Command::new(crate::local::bash::program());
+        let mut spawn = crate::process::tokio_command(crate::local::bash::program());
         spawn
             .arg("-c")
             .arg(&command)
@@ -8808,18 +8808,13 @@ fn child_path() -> Option<std::ffi::OsString> {
 }
 
 /// Env prep shared by the CLI adapters: this orx first on PATH (agents shell
-/// out to `orx`), the shell environment app mode imported, and the
-/// dashboard-managed env vars, real env winning. Only the starting order —
-/// [`PATH_GUARD`] is what holds it once the child's shell reads a user profile.
+/// out to `orx`) and the dashboard-managed env vars, real env winning. Only the
+/// starting order — [`PATH_GUARD`] is what holds it once the child's shell reads
+/// a user profile.
 pub fn prepare_env(cmd: &mut tokio::process::Command) {
     if let Some(path) = child_path() {
         cmd.env("PATH", path);
     }
-    // So an agent's `orx exp run` resolves the same store the dashboard is
-    // showing it, rather than re-resolving to the default.
-    crate::local::shell_env::export_to(|key, value| {
-        cmd.env(key, value);
-    });
     // Agents open browsers and editors themselves.
     crate::local::shell_env::restore_host_gui_env(cmd.as_std_mut());
     for (key, value) in crate::config::list_synced_env() {
@@ -9227,7 +9222,7 @@ mod cap_tests {
         )
         .unwrap();
 
-        let output = std::process::Command::new("bash")
+        let output = crate::process::command("bash")
             .arg("-c")
             .arg("printf '%s' \"$ORX_USER_HOOK_LOADED\"")
             .env("BASH_ENV", &shim)
@@ -9310,7 +9305,7 @@ mod cap_tests {
         .unwrap();
 
         let run = |bin_dir: Option<&std::path::Path>| {
-            let mut cmd = std::process::Command::new("bash");
+            let mut cmd = crate::process::command("bash");
             cmd.args(["-c", "orx"])
                 .env("BASH_ENV", &shim)
                 .env("PATH", &path);
@@ -9331,7 +9326,7 @@ mod cap_tests {
     #[cfg(unix)]
     #[test]
     fn path_guard_refronts_orx_after_a_zsh_startup_file_prepends_its_own_bin() {
-        if !std::process::Command::new("zsh")
+        if !crate::process::command("zsh")
             .arg("--version")
             .output()
             .is_ok_and(|out| out.status.success())
@@ -9356,7 +9351,7 @@ mod cap_tests {
         // `-d` drops the machine's own global rc files. A harness spells its tool
         // shell `-lc`; one snapshotting the user's shell reaches `.zshrc` instead.
         let run = |mode: &str, bin_dir: Option<&std::path::Path>| {
-            let mut cmd = std::process::Command::new("zsh");
+            let mut cmd = crate::process::command("zsh");
             cmd.args([mode, "orx"])
                 .env("ZDOTDIR", &shim_dir)
                 .env("PATH", &path);
@@ -10583,7 +10578,7 @@ mod bridge_tests {
         }
         let fixture =
             crate::local::git::TemporaryDirectory::new("orx-unsupported-compaction").unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "local::chat::bridge_tests::unsupported_compaction_leaves_history_unchanged",
@@ -10671,7 +10666,7 @@ mod bridge_tests {
         }
         let fixture =
             crate::local::git::TemporaryDirectory::new("orx-missing-compaction-model").unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .args(["--exact", "local::chat::bridge_tests::missing_opencode_compaction_model_leaves_history_unchanged", "--nocapture"])
             .env(CHILD,"1")
             .env("ORX_DATA_DIR",fixture.path())
@@ -11603,7 +11598,7 @@ mod steering_tests {
             return;
         }
         let dir = std::env::temp_dir().join(format!("orx-live-steer-{}", uuid::Uuid::new_v4()));
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "local::chat::steering_tests::live_steering_retries_share_the_original_admission",

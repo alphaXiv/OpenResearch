@@ -198,20 +198,16 @@ pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
     if path.is_absolute() {
         return path.is_file().then(|| path.to_path_buf());
     }
-    crate::local::shell_env::find_on_path(executable).or_else(|| {
-        let home = dirs::home_dir()?;
+    let own = dirs::home_dir().into_iter().flat_map(|home| {
         [
-            ".local/bin",
             ".grok/bin",
             ".devin/bin",
             ".minimax-code/bin",
             ".zcode/runtime/bin",
         ]
-        .iter()
-        .find_map(|directory| {
-            crate::local::shell_env::find_in_dir(&home.join(directory), executable)
-        })
-    })
+        .map(|directory| home.join(directory))
+    });
+    crate::local::shell_env::installs(executable, own).next()
 }
 
 pub fn save(definition: Definition, create: bool) -> Result<()> {
@@ -261,7 +257,7 @@ pub async fn test_connection(definition: &Definition) -> Result<serde_json::Valu
     definition.validate()?;
     let executable = executable_path(&definition.executable)
         .unwrap_or_else(|| std::path::PathBuf::from(&definition.executable));
-    let mut command = tokio::process::Command::new(executable);
+    let mut command = crate::process::tokio_command(executable);
     command
         .args(&definition.arguments)
         .stdin(std::process::Stdio::piped())

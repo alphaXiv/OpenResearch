@@ -2552,7 +2552,7 @@ pub(crate) fn ssh_forward_command(
     forward: &str,
     remote_cmd: &str,
 ) -> Result<Command> {
-    let mut cmd = Command::new("ssh");
+    let mut cmd = crate::process::tokio_command("ssh");
     cmd.env("ORX_SSH_PROBE", "1");
     cmd.args(crate::jobs::ssh::forward_args(target, forward, remote_cmd)?)
         .stdin(Stdio::null())
@@ -2977,7 +2977,7 @@ mod tests {
                 "p={};",
                 crate::jobs::ssh::sh_quote(binary.to_str().unwrap())
             ));
-            let output = std::process::Command::new("sh")
+            let output = crate::process::command("sh")
                 .arg("-c")
                 .arg(&probe)
                 .output()
@@ -3025,21 +3025,15 @@ mod tests {
             "p={};",
             crate::jobs::ssh::sh_quote(binary.to_str().unwrap())
         ));
-        let output = std::process::Command::new("sh")
+        let output = crate::process::command("sh")
             .arg("-c")
             .arg(&probe)
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         let output = String::from_utf8(output.stdout).unwrap();
-        let group = std::process::Command::new("id")
-            .arg("-gn")
-            .output()
-            .unwrap();
-        let user = std::process::Command::new("id")
-            .arg("-un")
-            .output()
-            .unwrap();
+        let group = crate::process::command("id").arg("-gn").output().unwrap();
+        let user = crate::process::command("id").arg("-un").output().unwrap();
         assert!(group.status.success() && user.status.success());
         if group.stdout == user.stdout {
             assert!(output.contains("ORX_REMOTE_VERSION="), "{output}");

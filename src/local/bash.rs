@@ -57,9 +57,8 @@ pub fn program() -> std::ffi::OsString {
 /// Git for Windows' bash, else any on PATH that is not the WSL launcher.
 #[cfg(windows)]
 fn usable_bash() -> Option<PathBuf> {
-    git_bash().or_else(|| {
-        crate::local::shell_env::find_on_path("bash").filter(|bash| !is_wsl_launcher(bash))
-    })
+    git_bash()
+        .or_else(|| crate::local::shell_env::find("bash").filter(|bash| !is_wsl_launcher(bash)))
 }
 
 /// Warn at startup rather than fail at the first run's first command.
@@ -78,7 +77,7 @@ pub fn missing_toolchain() -> Option<&'static str> {
 
 #[cfg(windows)]
 fn git_root() -> Option<PathBuf> {
-    install_root(&crate::local::shell_env::find_on_path("git")?)
+    install_root(&crate::local::shell_env::find("git")?)
 }
 
 /// `<git>\cmd\git.exe` is what the installer puts on PATH, so the install root
@@ -91,7 +90,7 @@ fn install_root(git: &Path) -> Option<PathBuf> {
         return Some(root.to_path_buf());
     }
     // `<root>/mingw64/libexec/git-core`
-    let out = std::process::Command::new(git)
+    let out = crate::process::command(git)
         .arg("--exec-path")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

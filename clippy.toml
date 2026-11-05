@@ -3,4 +3,6 @@ disallowed-methods = [
   { path = "reqwest::Client::builder", reason = "use crate::net::loopback_client() or remote_client()" },
   { path = "reqwest::ClientBuilder::new", reason = "use crate::net::loopback_client() or remote_client()" },
   { path = "reqwest::get", reason = "use crate::net::loopback_client() or remote_client()" },
+  { path = "std::process::Command::new", reason = "use crate::process::command(), which runs what the user's terminal would" },
+  { path = "tokio::process::Command::new", reason = "use crate::process::tokio_command(), which runs what the user's terminal would" },
 ]

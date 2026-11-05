@@ -119,7 +119,7 @@ $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity.User, 'Full
 $acl.SetAccessRule($rule)
 Set-Acl -LiteralPath $env:ORX_PRIVATE_DIRECTORY -AclObject $acl
 "#;
-        let status = std::process::Command::new("powershell.exe")
+        let status = crate::process::command("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             // Windows PowerShell must not load PowerShell 7's incompatible modules.
             .env_remove("PSModulePath")
@@ -226,15 +226,12 @@ async fn ensure() -> Result<Endpoint> {
         .and_then(|path| path.parent())
         .ok_or_else(|| anyhow!("Missing test binary directory"))?
         .join(format!("orx{}", std::env::consts::EXE_SUFFIX));
-    let mut command = std::process::Command::new(executable);
+    let mut command = crate::process::command(executable);
     command
         .arg("ssh-service")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    crate::local::shell_env::export_to(|key, value| {
-        command.env(key, value);
-    });
     command.env("ORX_DATA_DIR", crate::store::data_dir());
     #[cfg(unix)]
     {
@@ -951,7 +948,7 @@ FunctionsToExport = @('Get-Acl', 'Set-Acl')
         let system_modules = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join(r"System32\WindowsPowerShell\v1.0\Modules");
         let module_path = std::env::join_paths([modules, system_modules]).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "jobs::ssh::service::tests::private_directory_ignores_inherited_powershell_module_path",

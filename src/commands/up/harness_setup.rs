@@ -114,7 +114,7 @@ fn unix_install_script(url: &str, interpreter: &str) -> String {
 /// Windows install with `CreateProcessW … (os error 2)` before any installer runs.
 #[cfg(windows)]
 fn windows_powershell() -> String {
-    if crate::local::shell_env::find_on_path("powershell.exe").is_some() {
+    if crate::local::shell_env::find("powershell.exe").is_some() {
         return "powershell.exe".into();
     }
     let system_root = crate::local::shell_env::var("SystemRoot")
