@@ -41,8 +41,10 @@ From [Releases](https://github.com/alphaXiv/OpenResearch/releases), download
 administrator prompt, into `%LOCALAPPDATA%\Programs\OpenResearch`, adds
 OpenResearch to the Start menu, makes `openresearch://` links (such as Open in
 OpenResearch on openresearch.sh) open it, and installs the Microsoft Edge WebView2
-Runtime if Windows lacks it. Installs from before links need the new installer for them. The dashboard opens in its own window; closing the window
-quits OpenResearch, and starting it again while it runs brings the window back.
+Runtime if Windows lacks it. Installs from before links need the new installer for them. The dashboard opens in its own window. Closing it quits OpenResearch when
+the engine is idle; while work is active, the window closes and the engine continues
+in the background. It exits after the engine has been idle for a while. Starting
+OpenResearch again while it is running brings the window back.
 Running the installer or uninstaller while OpenResearch is open asks you to
 close it first.
 

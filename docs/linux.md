@@ -11,8 +11,10 @@ chmod +x OpenResearch-x86_64.AppImage
 ./OpenResearch-x86_64.AppImage
 ```
 
-The dashboard opens in its own window. Closing the window quits OpenResearch, and
-starting it again while it runs brings the window back. Each start adds
+The dashboard opens in its own window. Closing it quits OpenResearch when the
+engine is idle; while work is active, the window closes and the engine continues
+in the background. It exits after the engine has been idle for a while. Starting
+OpenResearch again while it is running brings the window back. Each start adds
 OpenResearch to your applications, so the dock and app grid show its name and
 icon: `~/.local/share/applications/openresearch.desktop`, pointing at wherever the
 AppImage now is, and its icon under `~/.local/share/icons`. The entry hides
