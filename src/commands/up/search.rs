@@ -26,13 +26,19 @@ pub(super) fn spawn_backfill(state: AppState) {
             let result =
                 tokio::task::spawn_blocking(|| Store::open()?.backfill_chat_search()).await;
             drop(gate);
-            match result {
+            let pause = match result {
                 Ok(Ok(false)) => return,
-                Ok(Ok(true)) => {}
-                Ok(Err(error)) => eprintln!("orx up: could not index older chats: {error}"),
-                Err(error) => eprintln!("orx up: search indexing task stopped: {error}"),
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok(Ok(true)) => Duration::from_millis(10),
+                Ok(Err(error)) => {
+                    eprintln!("orx up: could not index older chats: {error}");
+                    Duration::from_secs(60)
+                }
+                Err(error) => {
+                    eprintln!("orx up: search indexing task stopped: {error}");
+                    Duration::from_secs(60)
+                }
+            };
+            tokio::time::sleep(pause).await;
         }
     });
 }

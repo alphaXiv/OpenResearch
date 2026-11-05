@@ -100,3 +100,28 @@ test("Mod+F refocuses the existing find box while reading a preview", () => {
   assert.deepEqual(find.calls, [["expanded", true], ["focus"], ["select"]]);
   find.close();
 });
+
+test("Enter pressed while results catch up opens the first result once they arrive", () => {
+  const find = (predicate) => {
+    let found;
+    (function walk(node) { if (predicate(node)) found = node; ts.forEachChild(node, walk); })(source);
+    assert.ok(found);
+    return found;
+  };
+  const openDeclaration = find(node => ts.isVariableDeclaration(node) && node.name.getText(source) === "open").initializer;
+  const queuedEffect = find(node => ts.isCallExpression(node) && node.expression.getText(source) === "useEffect" && node.getText(source).includes("queuedOpen.current = false")).arguments[0];
+  const compile = (node) => ts.transpileModule(`return ${node.getText(source)}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const opened = [], queuedOpen = { current: false };
+  const render = (settling, hits) => {
+    const bindings = { settling, hits, queuedOpen, query: "warmup", selected: 0, setSelectedId: () => {}, setExpanded: () => {}, onOpen: hit => opened.push(hit.messageId) };
+    const open = new Function(...Object.keys(bindings), compile(openDeclaration))(...Object.values(bindings));
+    const effect = new Function(...Object.keys(bindings), "open", compile(queuedEffect))(...Object.values(bindings), open);
+    return { open, effect };
+  };
+  render(true, []).open(0);
+  assert.deepEqual(opened, []);
+  render(false, [{ messageId: "m1" }]).effect();
+  assert.deepEqual(opened, ["m1"]);
+  render(false, [{ messageId: "m1" }]).effect();
+  assert.deepEqual(opened, ["m1"], "a queued Enter opens once");
+});

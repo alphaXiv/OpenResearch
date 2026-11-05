@@ -26,6 +26,7 @@ export function SubagentTab({
   expansionState,
   searchQuery,
   searchNonce,
+  searchPartId,
   onOpenFile,
   onOpenRun,
   runExperimentName,
@@ -39,6 +40,7 @@ export function SubagentTab({
   expansionState: Map<string, boolean>;
   searchQuery?: string;
   searchNonce?: number;
+  searchPartId?: string;
   onOpenFile?: (
     path: string,
     line: number | undefined,
@@ -134,6 +136,7 @@ export function SubagentTab({
                 expansionState={expansionState}
                 searchQuery={searchQuery}
                 searchNonce={searchNonce}
+                searchPartId={searchPartId}
                 onOpenFile={onOpenFile}
                 onOpenRun={onOpenRun}
                 runExperimentName={runExperimentName}

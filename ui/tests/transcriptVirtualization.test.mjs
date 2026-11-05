@@ -161,10 +161,10 @@ test("viewport and footer resizing preserve bottom pin without moving a reader",
 test("mounting a different conversation resets both bottom-pin representations", () => {
   const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "pinTranscriptToBottom").initializer;
   const effect = find(node => ts.isCallExpression(node) && node.expression.getText(file) === "useLayoutEffect" && node.getText(file).includes("onPinToBottom()")).arguments[0];
-  const stickToBottom = { current: false }, scrollingByUser = { current: true }, scrollToEndRef = { current: null };
+  const stickToBottom = { current: false }, scrollToEndRef = { current: null };
   let atBottom = false, scrolls = 0;
   const pin = evaluate(`return ${expression.getText(file)}`, {
-    useCallback: callback => callback, stickToBottom, scrollingByUser, scrollToEndRef,
+    useCallback: callback => callback, stickToBottom, scrollToEndRef,
     setTranscriptAtBottom: value => { atBottom = value; },
   });
   const mount = evaluate(`return ${effect.getText(file)}`, {
@@ -176,4 +176,34 @@ test("mounting a different conversation resets both bottom-pin representations",
   assert.equal(scrolls, 1);
   cleanup();
   assert.equal(scrollToEndRef.current, null);
+});
+
+test("the bottom pin follows every scroll except the virtualizer's own", () => {
+  const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "updateTranscriptBottom").initializer;
+  const stickToBottom = { current: true }, programmaticScroll = { current: null };
+  const update = evaluate(`return ${expression.getText(file)}`, {
+    useCallback: callback => callback, stickToBottom, programmaticScroll, setTranscriptAtBottom: () => {},
+  });
+  const el = { scrollHeight: 5000, clientHeight: 500, scrollTop: 1200 };
+  programmaticScroll.current = 1200;
+  update(el);
+  assert.equal(stickToBottom.current, true, "measuring rows above keeps a streaming chat pinned");
+  update(el);
+  assert.equal(stickToBottom.current, false, "a screen reader or focus moving the view unpins it");
+  el.scrollTop = 4500;
+  update(el);
+  assert.equal(stickToBottom.current, true);
+});
+
+test("row estimates are computed once per response group", () => {
+  const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "estimateSize").initializer;
+  let splits = 0;
+  const groups = [[{ role: "assistant", parts: [] }], [{ role: "user", parts: [{ type: "text", text: "warmup" }] }]];
+  const estimate = evaluate(`return ${expression.getText(file)}`, {
+    useCallback: callback => callback, estimates: { current: new WeakMap() }, visibleMessages: groups, scrollRef: { current: null },
+    splitResponseParts: () => { splits++; return { answer: [{ type: "text", text: "loss 2.3" }], work: [] }; },
+  });
+  const first = [estimate(0), estimate(1)];
+  assert.deepEqual([estimate(0), estimate(1)], first);
+  assert.equal(splits, 1);
 });

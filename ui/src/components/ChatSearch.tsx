@@ -75,13 +75,22 @@ export const ChatSearch = memo(function ChatSearch({ projectId, sessionId, proje
     if (target instanceof HTMLElement && target.isConnected) target.focus({ preventScroll: true });
   }, []);
 
+  // Enter pressed while results catch up with typing opens the first one when it arrives.
+  const queuedOpen = useRef(false);
+  const settling = waiting || Boolean(query) && results.isPending;
   const open = (index: number) => {
+    if (settling) { queuedOpen.current = true; return; }
     const hit = hits[index];
-    if (!hit || waiting) return;
+    if (!hit) return;
     setSelectedId(hit.messageId);
     setExpanded(false);
     onOpen(hit, query);
   };
+  useEffect(() => {
+    if (settling || !queuedOpen.current) return;
+    queuedOpen.current = false;
+    open(selected);
+  }, [settling]);
   const move = async (direction: number, navigate: boolean) => {
     if (waiting || results.isFetchingNextPage || hits.length === 0) return;
     if (direction < 0 && selected === 0 && results.hasNextPage) return;
@@ -147,7 +156,7 @@ export const ChatSearch = memo(function ChatSearch({ projectId, sessionId, proje
         <input ref={field} type="text" role="combobox" aria-label={m.chat_search_title()} aria-keyshortcuts="Control+f Meta+f" aria-autocomplete="list" aria-expanded={expanded && hits.length > 0} aria-controls={expanded && hits.length ? listId : undefined} aria-activedescendant={expanded && hits[selected] ? `${listId}-${selected}` : undefined} aria-describedby={statusId}
           maxLength={256} autoComplete="off" spellCheck={false} value={value} placeholder={m.chat_search_placeholder()}
           className="h-8 w-full min-w-0 border-0 bg-transparent px-1 text-base text-text outline-none"
-          onChange={(event) => { setValue(event.target.value); setSelectedId(null); setExpanded(true); }}
+          onChange={(event) => { queuedOpen.current = false; setValue(event.target.value); setSelectedId(null); setExpanded(true); }}
           onKeyDown={(event) => {
             if (event.nativeEvent.isComposing) return;
             if (event.key === "Enter") { event.preventDefault(); if (expanded && !event.shiftKey) open(selected); else void move(event.shiftKey ? -1 : 1, true); }

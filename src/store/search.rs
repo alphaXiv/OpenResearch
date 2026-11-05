@@ -52,10 +52,13 @@ impl SearchRequest {
         if self.q.chars().count() > 256 {
             return Err(anyhow!("Search is limited to 256 characters."));
         }
-        let terms: Vec<_> = self.q.split_whitespace().map(str::to_lowercase).collect();
-        if terms.len() > 16 {
-            return Err(anyhow!("Search is limited to 16 words."));
-        }
+        // FTS5 folds case itself; lowercasing first breaks letters like `İ` that Rust and FTS5 fold differently.
+        let terms: Vec<_> = self
+            .q
+            .split_whitespace()
+            .take(16)
+            .map(str::to_owned)
+            .collect();
         let filter = match self.scope {
             SearchScope::Chat => SearchFilter::Chat(
                 self.session_id
@@ -153,7 +156,7 @@ impl Store {
         };
         let end: Option<i64> = tx.query_row(
             "WITH pending AS (
-                SELECT rowid, length(CAST(parts_json AS BLOB)) AS bytes FROM chat_messages
+                SELECT rowid, octet_length(parts_json) AS bytes FROM chat_messages
                 WHERE rowid > ?1 ORDER BY rowid LIMIT 100
              ), bounded AS (
                 SELECT rowid, sum(bytes) OVER (ORDER BY rowid) AS total FROM pending
@@ -197,6 +200,7 @@ impl Store {
         if query.terms.is_empty() {
             return Ok(page);
         }
+        let lowered: Vec<_> = query.terms.iter().map(|term| term.to_lowercase()).collect();
         let indexed_terms: Vec<_> = query
             .terms
             .iter()
@@ -306,7 +310,7 @@ impl Store {
                     .join("\n");
                 if scan || indexed_terms.len() != query.terms.len() {
                     let lower = text.to_lowercase();
-                    if !query.terms.iter().all(|term| lower.contains(term)) {
+                    if !lowered.iter().all(|term| lower.contains(term)) {
                         continue;
                     }
                 }
@@ -318,12 +322,12 @@ impl Store {
                     .iter()
                     .find(|part| {
                         let text = part.0.to_lowercase();
-                        query.terms.iter().all(|term| text.contains(term))
+                        lowered.iter().all(|term| text.contains(term))
                     })
                     .or_else(|| {
                         parts.iter().find(|part| {
                             let text = part.0.to_lowercase();
-                            query.terms.iter().any(|term| text.contains(term))
+                            lowered.iter().any(|term| text.contains(term))
                         })
                     });
                 if let Some(part) = target {
@@ -348,7 +352,7 @@ impl Store {
                 hit.on_active_branch = branches[&hit.session_id].contains(&hit.message_id);
                 hit.snippet = snippet(
                     target.map_or(text.as_str(), |part| part.0.as_str()),
-                    &query.terms,
+                    &lowered,
                 );
                 page.hits.push(hit);
                 last_hit = Some(cursor);
@@ -816,10 +820,11 @@ mod tests {
                 .upsert_chat_message(&message(
                     "message",
                     "chat",
-                    "ÉTÉ 中文测试 foo\"bar a*b NEAR(foo) src/optimizer.rs",
+                    "ÉTÉ 中文测试 foo\"bar a*b NEAR(foo) src/optimizer.rs İstanbul",
                 ))
                 .unwrap();
             for q in [
+                "İstanbul",
                 "été",
                 "中文测",
                 "foo\"bar",
@@ -966,6 +971,45 @@ mod tests {
         req = request("warmup", SearchScope::All, "");
         req.cursor = Some("bad-cursor".into());
         assert!(req.prepare().is_err());
+        let selection = request(&"word ".repeat(17), SearchScope::All, "");
+        assert_eq!(selection.prepare().unwrap().terms.len(), 16);
+    }
+
+    #[test]
+    fn malformed_stored_json_neither_fails_writes_nor_stalls_backfill() {
+        with_store(|store| {
+            session(&store, "chat", "project");
+            store
+                .conn
+                .execute_batch("DROP TRIGGER chat_search_insert;")
+                .unwrap();
+            store
+                .upsert_chat_message(&message("legacy", "chat", "older history"))
+                .unwrap();
+            store
+                .conn
+                .execute("UPDATE chat_messages SET parts_json = 'not json'", [])
+                .unwrap();
+            initialize(&store.conn).unwrap();
+            for (id, parts) in [
+                ("string", "[\"abc\"]"),
+                ("children", "[{\"type\":\"tool\",\"children\":\"x\"}]"),
+            ] {
+                store.conn.execute(
+                    "INSERT INTO chat_messages(id, session_id, role, parts_json, created_at) VALUES (?1, 'chat', 'user', ?2, 1)",
+                    params![id, parts],
+                ).unwrap();
+            }
+            while store.backfill_chat_search().unwrap() {}
+            assert!(
+                !store
+                    .search_chat_messages(
+                        &request("older", SearchScope::All, "").prepare().unwrap()
+                    )
+                    .unwrap()
+                    .indexing
+            );
+        });
     }
 
     #[test]

@@ -2654,6 +2654,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 expansionState={getSubagentExpansionState(subagentTab)}
                 searchQuery={focusedMessage?.spawnPartId === subagentTab.spawnPartId ? focusedMessage.query : undefined}
                 searchNonce={focusedMessage?.nonce}
+                searchPartId={focusedMessage?.partId}
                 onOpenFile={(path, line, exp, ref, intent) =>
                   openFromRightTab(subagentTab, () =>
                     openChatFile(path, subagentTab.sessionId, line, exp, ref, intent),

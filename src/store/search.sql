@@ -4,6 +4,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chat_search USING fts5(
 
 CREATE INDEX IF NOT EXISTS idx_chat_sessions_project ON chat_sessions(project_id);
 
+-- Every writer, old binaries included, runs these triggers, so the view must never fail on stored JSON.
 CREATE VIEW IF NOT EXISTS chat_search_parts AS
 SELECT m.rowid AS message_rowid,
     json_extract(p.value, '$.id') AS part_id,
@@ -11,11 +12,13 @@ SELECT m.rowid AS message_rowid,
     coalesce(json_extract(p.value, '$.text'), '') AS text
 FROM chat_messages m, json_each((
     WITH RECURSIVE parts(value, parent) AS (
-        SELECT value, NULL FROM json_each(m.parts_json)
+        SELECT value, NULL FROM json_each(CASE WHEN json_valid(m.parts_json) THEN m.parts_json END)
+        WHERE type = 'object'
         UNION ALL
         SELECT child.value, CASE WHEN json_extract(parts.value, '$.type') = 'tool'
             THEN json_extract(parts.value, '$.id') ELSE parts.parent END
         FROM parts, json_each(parts.value, '$.children') child
+        WHERE child.type = 'object'
     ), visible AS (
         SELECT value, parent,
             lower(json_extract(value, '$.tool')) IN ('subagent', 'task', 'agent')
@@ -46,7 +49,8 @@ FROM chat_messages m, json_each((
                     AND coalesce(json_extract(value, '$.state.output'), '') NOT LIKE 'Async agent launched%'
                     AND coalesce(json_extract(value, '$.state.output'), '') NOT LIKE 'The subagent is working in the background%'
                     AND NOT EXISTS (SELECT 1 FROM json_each(visible.value, '$.children') child
-                        WHERE json_extract(child.value, '$.type') = 'text'
+                        WHERE child.type = 'object'
+                            AND json_extract(child.value, '$.type') = 'text'
                             AND length(json_extract(child.value, '$.text')) > 0)
                     THEN json_extract(value, '$.state.output') END)
             WHEN 'prompt' THEN concat_ws(char(10),
