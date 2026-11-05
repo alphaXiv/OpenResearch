@@ -17,14 +17,19 @@ const ROOT = path.dirname(SCRIPT)
 const DEV = path.join(ROOT, '.dev')
 const LIVE = path.join(DEV, 'live')
 const STATES = path.join(DEV, 'states')
-const BINARY = path.join(DEV, 'bin', 'orx')
+const WINDOWS = process.platform === 'win32'
+const EXE = WINDOWS ? '.exe' : ''
+const BINARY = path.join(DEV, 'bin', `orx${EXE}`)
 const SERVER_LOG = path.join(DEV, 'server.log')
 const WORKTREE_HASH = createHash('sha256').update(ROOT).digest()
 /**
- * Outside the worktree, which can be nested deeper than a Unix socket path's ~100 bytes allow,
- * and not under TMPDIR, which differs between a person's terminal and an agent's sandbox.
+ * A named pipe on Windows. Elsewhere a socket outside the worktree, which can be nested deeper than a
+ * Unix socket path's ~100 bytes allow, and not under TMPDIR, which differs between a person's terminal
+ * and an agent's sandbox.
  */
-const SOCKET = path.join(os.homedir(), '.cache', 'orx-dev', `${WORKTREE_HASH.toString('hex', 0, 8)}.sock`)
+const SOCKET = WINDOWS
+  ? `\\\\.\\pipe\\orx-dev-${WORKTREE_HASH.toString('hex', 0, 8)}`
+  : path.join(os.homedir(), '.cache', 'orx-dev', `${WORKTREE_HASH.toString('hex', 0, 8)}.sock`)
 const LABEL = path.basename(ROOT).replaceAll(/[^a-zA-Z0-9._-]/g, '-')
 const APP_NAME = `OpenResearch ${LABEL}`
 const APP = path.join(DEV, `${APP_NAME}.app`, 'Contents')
@@ -282,6 +287,21 @@ function refuseWhileRunsAreSupervised() {
   const locks = existsSync(runLogs) ? readdirSync(runLogs).filter((name) => name.endsWith('.supervisor.lock')) : []
   if (!locks.length) return
 
+  if (WINDOWS) {
+    // No lsof: a file another process holds open refuses an open that shares nothing.
+    // libuv's UV_FS_O_EXLOCK, which Node does not export.
+    const exclusive = 0x10000000
+    const held = locks.filter((name) => {
+      try {
+        closeSync(openSync(path.join(runLogs, name), constants.O_RDONLY | exclusive))
+        return false
+      } catch {
+        return true
+      }
+    })
+    if (held.length) throw new Error(`An experiment is still running (a process holds ${held.join(', ')}); cancel it or let it finish, then load again`)
+    return
+  }
   const holders = spawnSync('lsof', ['-t', ...locks.map((name) => path.join(runLogs, name))], { encoding: 'utf8' })
   const pids = (holders.stdout ?? '').split('\n').filter(Boolean)
   if (pids.length) throw new Error(`An experiment is still running (orx supervise, pid ${pids.join(', ')}); cancel it or let it finish, then load again`)
@@ -360,7 +380,8 @@ const alive = (child: ChildProcess | null) => child !== null && child.exitCode =
 
 function start(command: string, args: string[], options: SpawnOptions = {}) {
   if (stopping) throw new Error('Stopping')
-  const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'], ...options })
+  // The detached server has no console on Windows, so each console child would open a window.
+  const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...options })
   if (child.pid === undefined) {
     // Spawn failures also emit `error`, which would otherwise crash before the message below.
     child.once('error', () => {})
@@ -421,9 +442,20 @@ async function build() {
   await run('cargo', ['build'], { cwd: ROOT })
   const target = process.env.CARGO_TARGET_DIR || path.join(ROOT, 'target')
   mkdirSync(path.dirname(BINARY), { recursive: true })
+  if (WINDOWS && existsSync(BINARY)) {
+    // Windows renames a running executable but won't replace it; old copies go once nothing runs them.
+    const old = path.join(DEV, 'bin', 'old')
+    mkdirSync(old, { recursive: true })
+    for (const name of readdirSync(old)) {
+      try {
+        rmSync(path.join(old, name))
+      } catch {}
+    }
+    renameSync(BINARY, path.join(old, `orx-${Date.now()}.exe`))
+  }
   rmSync(BINARY, { force: true })
   // A copy, so a rebuild of the worktree can't swap the binary that the running backend's hooks execute.
-  copyFileSync(path.join(target, 'debug', 'orx'), BINARY, constants.COPYFILE_FICLONE)
+  copyFileSync(path.join(target, 'debug', `orx${EXE}`), BINARY, constants.COPYFILE_FICLONE)
 }
 
 async function startBackend() {
@@ -446,12 +478,14 @@ async function startUi() {
   const installed = path.join(ui, 'node_modules', '.dev-installed')
   const installedAt = statSync(installed, { throwIfNoEntry: false })?.mtimeMs ?? 0
   if (['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml'].some((file) => statSync(path.join(ui, file)).mtimeMs > installedAt)) {
-    await run('pnpm', ['install', '--frozen-lockfile', '--reporter=silent'], { cwd: ui })
+    // Windows installs pnpm as a .cmd, which only cmd.exe runs.
+    const [pnpm, ...prefix] = WINDOWS ? ['cmd.exe', '/d', '/c', 'pnpm'] : ['pnpm']
+    await run(pnpm, [...prefix, 'install', '--frozen-lockfile', '--reporter=silent'], { cwd: ui })
     writeFileSync(installed, '')
   }
 
   // Vite's warnings and errors are on stderr; stdout is the banner and per-edit chatter.
-  const child = start(path.join(ui, 'node_modules', '.bin', 'vite'), ['--port', String(ports.ui), '--strictPort'], {
+  const child = start(process.execPath, [path.join(ui, 'node_modules', 'vite', 'bin', 'vite.js'), '--port', String(ports.ui), '--strictPort'], {
     cwd: ui,
     env: { ...env, ORX_BACKEND: `http://127.0.0.1:${ports.backend}` },
     stdio: ['ignore', 'ignore', 'pipe'],
@@ -633,7 +667,7 @@ async function load(seed: Seed) {
 }
 
 function openBrowser() {
-  spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [status().web], { stdio: 'ignore', detached: true })
+  spawn(process.platform === 'darwin' ? 'open' : WINDOWS ? 'explorer' : 'xdg-open', [status().web], { stdio: 'ignore', detached: true })
     .on('error', (error) => say(paint('red', `Could not open the browser. ${error.message}`)))
     .unref()
 }
@@ -663,7 +697,7 @@ async function shutdown(code = 0) {
   for (const socket of sockets) {
     socket.end(`${JSON.stringify({ code })}\n`)
   }
-  rmSync(SOCKET, { force: true })
+  if (!WINDOWS) rmSync(SOCKET, { force: true })
   process.exit(code)
 }
 
@@ -769,9 +803,11 @@ async function serve(seed: Seed | null) {
   }
 
   // A server killed outright leaves its window running; the ports below reclaim everything else.
-  for (const line of execFileSync('ps', ['-Ao', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n')) {
-    const [pid, ppid, ...command] = line.trim().split(/\s+/)
-    if (ppid === '1' && command.join(' ').startsWith(path.join(APP, 'MacOS') + path.sep)) process.kill(Number(pid), 'SIGTERM')
+  if (!WINDOWS) {
+    for (const line of execFileSync('ps', ['-Ao', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n')) {
+      const [pid, ppid, ...command] = line.trim().split(/\s+/)
+      if (ppid === '1' && command.join(' ').startsWith(path.join(APP, 'MacOS') + path.sep)) process.kill(Number(pid), 'SIGTERM')
+    }
   }
   try {
     ports = await choosePorts()
@@ -780,8 +816,10 @@ async function serve(seed: Seed | null) {
     process.exit(1)
   }
 
-  mkdirSync(path.dirname(SOCKET), { recursive: true, mode: 0o700 })
-  rmSync(SOCKET, { force: true })
+  if (!WINDOWS) {
+    mkdirSync(path.dirname(SOCKET), { recursive: true, mode: 0o700 })
+    rmSync(SOCKET, { force: true })
+  }
   const server = net.createServer((socket) => {
     sockets.add(socket)
     socket.once('close', () => sockets.delete(socket))
@@ -874,6 +912,7 @@ async function spawnServer(seed: Seed | null) {
     cwd: ROOT,
     detached: true,
     stdio: ['ignore', output, output],
+    windowsHide: true,
   })
   closeSync(output)
   child.unref()
