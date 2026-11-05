@@ -33,10 +33,11 @@ Linux    the AppImage's entry script ─► `orx app [link]`            ─► a
   the bundled libraries, records the session's own values so the programs
   orx opens get them back, and starts `orx app`. The app keeps a desktop
   entry installed so it appears in the launcher and handles `openresearch:`
-  links.
+  links and `.orx` files.
 
-App mode takes only an `openresearch:` link as an argument; any other
-argument list is a CLI invocation.
+App mode takes only an `openresearch:` link or a `.orx` file as an argument;
+any other argument list is a CLI invocation. A file becomes a `file:` link, so
+both travel the same way, including to a running app.
 
 ## App mode
 

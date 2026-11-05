@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as OpenRouteImport } from './routes/open'
 import { Route as ProjectsRouteImport } from './routes/projects'
 import { Route as RemoteLaunchRouteImport } from './routes/remote-launch'
 import { Route as ProjectsIndexRouteImport } from './routes/projects.index'
@@ -24,6 +25,11 @@ import { Route as ProjectsProjectIdTasksNewRouteImport } from './routes/projects
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OpenRoute = OpenRouteImport.update({
+  id: '/open',
+  path: '/open',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ProjectsRoute = ProjectsRouteImport.update({
@@ -82,6 +88,7 @@ const ProjectsProjectIdTasksNewRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/open': typeof OpenRoute
   '/projects': typeof ProjectsRouteWithChildren
   '/remote-launch': typeof RemoteLaunchRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
@@ -95,6 +102,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/open': typeof OpenRoute
   '/remote-launch': typeof RemoteLaunchRoute
   '/reproduce/$': typeof ReproduceSplatRoute
   '/projects': typeof ProjectsIndexRoute
@@ -107,6 +115,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/open': typeof OpenRoute
   '/projects': typeof ProjectsRouteWithChildren
   '/remote-launch': typeof RemoteLaunchRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
@@ -122,6 +131,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/open'
     | '/projects'
     | '/remote-launch'
     | '/projects/$projectId'
@@ -135,6 +145,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/open'
     | '/remote-launch'
     | '/reproduce/$'
     | '/projects'
@@ -146,6 +157,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/open'
     | '/projects'
     | '/remote-launch'
     | '/projects/$projectId'
@@ -160,6 +172,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  OpenRoute: typeof OpenRoute
   ProjectsRoute: typeof ProjectsRouteWithChildren
   RemoteLaunchRoute: typeof RemoteLaunchRoute
   ReproduceSplatRoute: typeof ReproduceSplatRoute
@@ -172,6 +185,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/open': {
+      id: '/open'
+      path: '/open'
+      fullPath: '/open'
+      preLoaderRoute: typeof OpenRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/projects': {
@@ -282,6 +302,7 @@ const ProjectsRouteWithChildren = ProjectsRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  OpenRoute: OpenRoute,
   ProjectsRoute: ProjectsRouteWithChildren,
   RemoteLaunchRoute: RemoteLaunchRoute,
   ReproduceSplatRoute: ReproduceSplatRoute,

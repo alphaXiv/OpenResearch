@@ -273,6 +273,35 @@ pub enum ProjectCommand {
         #[arg(long = "run-command")]
         run_command: Option<String>,
     },
+
+    /// Save a project as a .orx file a collaborator can open in OpenResearch.
+    /// Every chat is included unless narrowed with --chat or left out with --no-chats.
+    Share {
+        project_id: String,
+        /// File to write (default: ./<project>.orx).
+        #[arg(long)]
+        out: Option<String>,
+        /// Include only this chat's transcript (repeatable).
+        #[arg(long = "chat")]
+        chats: Vec<String>,
+        /// Leave every chat out.
+        #[arg(long, conflicts_with = "chats")]
+        no_chats: bool,
+        /// Leave run logs out.
+        #[arg(long)]
+        no_logs: bool,
+        /// Leave the artifacts folder out.
+        #[arg(long)]
+        no_artifacts: bool,
+    },
+
+    /// Open a shared .orx file as a new project.
+    Import {
+        file: String,
+        /// Folder to create the project in (default: ./<file name without .orx>).
+        #[arg(long)]
+        path: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
