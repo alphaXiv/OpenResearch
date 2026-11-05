@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renderAsync } from "pele/lazy";
+import { MERMAID_SOURCE_LIMIT } from "../src/mermaidLimits.ts";
 
 const options = { images: true, imageSchemes: ["file", ..."abcdefghijklmnopqrstuvwxyz"], links: true, linkSchemes: ["http", "https", "mailto", "tel", "file", ..."abcdefghijklmnopqrstuvwxyz"], idPrefix: "orx-test-" };
 
@@ -31,6 +32,14 @@ test("diagram families render with links available for explicit navigation", asy
 
 test("invalid diagrams reject for source fallback", async () => {
   await assert.rejects(renderAsync("this is not a diagram", options));
+});
+
+test("large diagrams exceed Pele's default but remain bounded", async () => {
+  const source = 'flowchart LR\n' + Array.from({ length: 2000 }, (_, i) => `N${i}[Node ${i}] --> N${i + 1}[Node ${i + 1}]`).join('\n');
+  assert.ok(source.length > 50_000);
+  const { svg } = await renderAsync(source, { ...options, limit: MERMAID_SOURCE_LIMIT });
+  assert.match(svg, /Node 2000/);
+  await assert.rejects(renderAsync(source + ' '.repeat(MERMAID_SOURCE_LIMIT), { ...options, limit: MERMAID_SOURCE_LIMIT }));
 });
 
 test("diagram directives cannot restore HTML labels or external images", async () => {
