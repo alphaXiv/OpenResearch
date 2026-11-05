@@ -24,6 +24,9 @@ function createMachine(id: string, initialLocation = "/") {
 
 type Machine = ReturnType<typeof createMachine>;
 
+// A file the desktop app was asked to open is on this computer, whichever machine is active.
+const isSharedFileOpen = (href: string) => href.startsWith("/open?");
+
 function browserLocation() {
   const target = new URL(location.href);
   target.searchParams.delete("machine");
@@ -76,7 +79,7 @@ function WorkspaceView({
       publish(action.type !== "PUSH"),
     );
     const openPath = (event: Event) => {
-      if (event instanceof CustomEvent && typeof event.detail === "string")
+      if (event instanceof CustomEvent && typeof event.detail === "string" && !isSharedFileOpen(event.detail))
         void router.navigate({ href: event.detail });
     };
     window.addEventListener("orx:open-path", openPath);
@@ -179,6 +182,16 @@ function MachineWorkspaces({
     );
     setActiveId(session.id);
   }
+
+  useEffect(() => {
+    const openShared = (event: Event) => {
+      if (!(event instanceof CustomEvent) || typeof event.detail !== "string" || !isSharedFileOpen(event.detail)) return;
+      setActiveId("local");
+      void local.router.navigate({ href: event.detail });
+    };
+    window.addEventListener("orx:open-path", openShared);
+    return () => window.removeEventListener("orx:open-path", openShared);
+  }, [local]);
 
   useEffect(() => {
     setWorkspaces((current) =>

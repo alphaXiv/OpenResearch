@@ -1,14 +1,12 @@
 //! Native folder selection for the loopback dashboard.
 
 use std::path::PathBuf;
-#[cfg(not(target_os = "windows"))]
-use std::process::Command;
 
 use crate::error::{anyhow, Result};
 
 #[cfg(target_os = "macos")]
 pub fn pick_folder() -> Result<Option<PathBuf>> {
-    let output = Command::new("osascript")
+    let output = crate::process::command("osascript")
         .args([
             "-e",
             "POSIX path of (choose folder with prompt \"Choose a project folder\")",
@@ -118,7 +116,7 @@ pub fn pick_folder() -> Result<Option<PathBuf>> {
             ][..],
         ),
     ] {
-        let mut picker = Command::new(program);
+        let mut picker = crate::process::command(program);
         picker.args(args);
         crate::local::shell_env::restore_host_gui_env(&mut picker);
         // `.` is kdialog's start folder; the app's own is inside the read-only image.

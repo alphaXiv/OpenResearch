@@ -11,10 +11,10 @@ export function classifyChanges(paths) {
   const rust = () => Object.assign(checks, { rust: true, windows: true, linux: true, macos: true })
   for (const path of paths) {
     if (['src/local/acp/zcode-runtime.cjs', 'src/commands/app.rs', 'agent-skills/orx-figures/assets/orx-chart.html'].includes(path)) checks.javascript = true
-    if (path.startsWith('.github/workflows/') || path.startsWith('.github/actions/') || path === '.github/build-setup.yml' || path.startsWith('.cargo/') || /^scripts\/ci-/.test(path)) return all()
+    if (path.startsWith('.github/workflows/') || path.startsWith('.github/actions/') || path === '.github/build-setup.yml' || path.startsWith('.cargo/') || /^scripts\/(?:ci-|build-host(?:\.test)?\.mjs$)/.test(path)) return all()
     if (/^ui\/(README\.md|project\.inlang\/README\.md)$/.test(path)) continue
     if (path.startsWith('ui/')) checks.frontend = true
-    else if (/^(src\/|tests\/|agent-skills\/|demo\/|Cargo\.(toml|lock)$|build\.rs$|SKILL\.md$|SYSTEM_PROMPT\.md$)/.test(path)) {
+    else if (/^(src\/|crates\/|tests\/|agent-skills\/|demo\/|Cargo\.(toml|lock)$|build\.rs$|SKILL\.md$|SYSTEM_PROMPT\.md$)/.test(path)) {
       rust()
       if (path.startsWith('agent-skills/orx-figures/assets/')) checks.chart = true
     }

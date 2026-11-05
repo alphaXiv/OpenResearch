@@ -146,6 +146,21 @@ pub(crate) fn assert_agent_guidance_is_ui_agnostic(label: &str, guidance: &str) 
     }
 }
 
+/// The `or_run` / `or_experiment` / `or_project` labels provider jobs carry.
+pub fn run_labels(
+    experiment_id: &str,
+    run_id: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let experiment = crate::store::Store::open()?
+        .get_local_experiment(experiment_id)?
+        .ok_or_else(|| anyhow!("Local experiment {experiment_id} not found."))?;
+    Ok(std::collections::HashMap::from([
+        ("or_run".to_string(), run_id.to_string()),
+        ("or_experiment".to_string(), experiment.id),
+        ("or_project".to_string(), experiment.project_id),
+    ]))
+}
+
 /// Fill a local-mode launch's backend/flavor from the persisted default
 /// (Settings → Compute) when the caller didn't pass them. Explicit args always
 /// win; see `resolve_compute_default` for the exact precedence.

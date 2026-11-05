@@ -318,6 +318,17 @@ test("a local send failure stands apart from the previous response", async () =>
   assert.deepEqual(groups, [[user], [answer], [failure]]);
 });
 
+test("provider switches preserve the answers on both sides as separate transcript rows", async () => {
+  const { groupResponseMessages, splitResponseParts } = await import("../src/chatRendering.ts");
+  const before = { ...message({ id: "before-text", type: "text", text: "Original answer", phase: "final_answer" }), id: "before" };
+  const switched = { ...message({ id: "switch", type: "tool", tool: "provider_switch", state: { status: "completed" } }), id: "switched" };
+  const after = { ...message({ id: "after-text", type: "text", text: "Continued answer", phase: "final_answer" }), id: "after" };
+  const groups = groupResponseMessages([before, switched, after]);
+  assert.deepEqual(groups, [[before], [switched], [after]]);
+  assert.equal(splitResponseParts(groups[0], false).answer[0].text, "Original answer");
+  assert.equal(splitResponseParts(groups[2], false).answer[0].text, "Continued answer");
+});
+
 test("a continuation retains the previous answer until a new answer arrives", async () => {
   const { splitResponseParts } = await import("../src/chatRendering.ts");
   const oldAnswer = { id: "old-answer", type: "text", phase: "final_answer", text: "Run launched" };

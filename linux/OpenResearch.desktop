@@ -7,4 +7,4 @@ Icon=OpenResearch
 Categories=Development;
 Terminal=false
 StartupWMClass=OpenResearch
-MimeType=x-scheme-handler/openresearch;
+MimeType=x-scheme-handler/openresearch;application/x-openresearch-project;

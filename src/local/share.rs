@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::git;
 use super::model::{LocalExperiment, LocalProject};
 use crate::error::{anyhow, Result};
-use crate::store::{log_path_in, now_ms, Store, StoredChatMessage, StoredChatSession, StoredRun};
+use crate::store::{log_path, now_ms, Store, StoredChatMessage, StoredChatSession, StoredRun};
 
 pub const EXTENSION: &str = "orx";
 /// Newer formats only add fields; a bump means an older orx cannot read it.
@@ -255,7 +255,7 @@ fn stage(
         .map(|run| {
             let log = options.logs
                 && copy_capped(
-                    &log_path_in(data_root, &run.id),
+                    &log_path(data_root, &run.id),
                     out,
                     &format!("logs/{}.log", run.id),
                     &mut skipped,
@@ -745,7 +745,7 @@ fn import_staged(
             experiment_id: experiment_id.clone(),
             project_id: project.id.clone(),
             status: run.status.clone(),
-            // No backend acts on this kind, so nothing ever polls or cleans up a copied run.
+            // Served by the local backend's stored-row defaults; nothing watches a finished copy.
             backend_json: serde_json::json!({ "kind": "imported", "flavor": run.flavor })
                 .to_string(),
             command: run.command.clone(),
@@ -814,31 +814,41 @@ fn shared_session(
         return Ok(None);
     };
     let shared_messages: Vec<SharedMessage> = serde_json::from_slice(&file)?;
-    let message_ids: HashMap<&str, String> = shared_messages
+    let message_ids: HashMap<&str, (usize, String)> = shared_messages
         .iter()
-        .map(|message| (message.id.as_str(), format!("msg_{}", uuid::Uuid::new_v4())))
+        .enumerate()
+        .map(|(index, message)| {
+            (
+                message.id.as_str(),
+                (index, format!("msg_{}", uuid::Uuid::new_v4())),
+            )
+        })
         .collect();
     let messages = shared_messages
         .iter()
-        .map(|message| {
+        .enumerate()
+        .map(|(index, message)| {
             let mut parts = serde_json::to_string(&message.parts)?;
             if let Some((from, to)) = artifact_links {
                 parts = parts.replace(from.as_str(), to);
             }
             Ok(StoredChatMessage {
-                id: message_ids[message.id.as_str()].clone(),
+                id: message_ids[message.id.as_str()].1.clone(),
                 session_id: id.to_string(),
                 role: message.role.clone(),
                 parts_json: parts,
                 created_at: message.created_at,
                 completed_at: message.completed_at,
+                // Only an earlier message can be a parent, so a crafted file cannot loop the transcript.
                 parent_id: message
                     .parent_id
                     .as_deref()
                     .and_then(|parent| message_ids.get(parent))
-                    .cloned(),
+                    .filter(|(parent, _)| *parent < index)
+                    .map(|(_, id)| id.clone()),
                 base_native_session_id: None,
                 result_native_session_id: None,
+                native_harness: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -846,12 +856,12 @@ fn shared_session(
         .active_leaf_id
         .as_deref()
         .and_then(|leaf| message_ids.get(leaf))
-        .cloned()
+        .map(|(_, id)| id.clone())
         .or_else(|| messages.last().map(|message| message.id.clone()));
-    let snapshot = crate::local::harness::transcript_snapshot(super::chat::active_path(
-        &messages,
-        leaf.as_deref(),
-    ));
+    let snapshot = super::chat::handoff::snapshot(
+        super::chat::active_path(&messages, leaf.as_deref()),
+        super::chat::handoff::budget(None),
+    );
     let same_harness = harness == shared.harness;
     let session = StoredChatSession {
         id: id.to_string(),
@@ -910,7 +920,7 @@ fn copy_shared_files(
         };
         let shared_log = staging.join(format!("logs/{name}.log"));
         if shared_log.is_file() {
-            let to = log_path_in(data_root, id);
+            let to = log_path(data_root, id);
             copy_into(&shared_log, &to)?;
             copied.push(to);
         }
@@ -984,6 +994,7 @@ mod tests {
             parent_id: parent.map(str::to_string),
             base_native_session_id: Some("native-before".into()),
             result_native_session_id: Some("native-after".into()),
+            native_harness: Some("claude-code".into()),
         }
     }
 
@@ -1097,6 +1108,33 @@ mod tests {
     }
 
     #[test]
+    fn looping_message_parents_cannot_hang_an_import() {
+        let staging = temp("loop");
+        std::fs::create_dir_all(staging.join("chats")).unwrap();
+        let message = |id: &str, parent: &str| serde_json::json!({ "id": id, "parentId": parent, "role": "user", "parts": [], "createdAt": 1 });
+        std::fs::write(
+            staging.join("chats/c.json"),
+            serde_json::to_vec(&[message("a", "b"), message("b", "a"), message("c", "c")]).unwrap(),
+        )
+        .unwrap();
+        let chat = SharedChat {
+            id: "c".into(),
+            title: None,
+            harness: "claude-code".into(),
+            model: None,
+            active_leaf_id: Some("c".into()),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let (_, messages) = shared_session(&staging, &chat, "chat", "p", "claude-code", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(messages[0].parent_id, None);
+        assert_eq!(messages[1].parent_id.as_ref(), Some(&messages[0].id));
+        assert_eq!(messages[2].parent_id, None);
+    }
+
+    #[test]
     fn refuses_files_that_reach_outside_their_folder() {
         let root = temp("escape");
         let file = root.join("evil.orx");
@@ -1187,7 +1225,7 @@ mod tests {
         };
         store.upsert_run(&run("done-run", "done")).unwrap();
         store.upsert_run(&run("live-run", "running")).unwrap();
-        let log = log_path_in(&sharer_data, "done-run");
+        let log = log_path(&sharer_data, "done-run");
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, "step 1 loss 0.9\n").unwrap();
         let artifacts = sharer_data.join("files").join(&project.slug);
@@ -1314,7 +1352,7 @@ mod tests {
         assert_eq!(runs[0].result_markdown.as_deref(), Some("loss 0.9"));
         assert!(runs[0].backend_json.contains(r#""kind":"imported""#));
         assert_eq!(
-            std::fs::read_to_string(log_path_in(&recipient_data, &runs[0].id)).unwrap(),
+            std::fs::read_to_string(log_path(&recipient_data, &runs[0].id)).unwrap(),
             "step 1 loss 0.9\n"
         );
         let copied = recipient_data.join("files").join(&imported.project.slug);

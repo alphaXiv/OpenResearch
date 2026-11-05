@@ -3,6 +3,16 @@ import ts from "typescript";
 import * as query from "@tanstack/react-query";
 import * as react from "react";
 
+// Dependency-free src modules the query layer imports; loaded as they are.
+const PURE_MODULES = new Set(["engineHosts", "logWindow"]);
+
+function loadPure(name) {
+  const source = readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8");
+  const exports = {};
+  new Function("exports", ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText)(exports);
+  return exports;
+}
+
 export function queryModules(api, { nativeClient = false, onChatEvent = () => () => {}, identity = 0, basePath = "" } = {}) {
   const modules = new Map();
   let workspace;
@@ -22,12 +32,14 @@ export function queryModules(api, { nativeClient = false, onChatEvent = () => ()
       if (id === "./paraglide/runtime.js") return { getLocale: () => "en" };
       if (id === "./paraglide/messages.js") return { m: new Proxy({}, { get: (_, name) => () => String(name) }) };
       if (id === "../events") return { onChatEvent };
+      if (id.startsWith("./") && PURE_MODULES.has(id.slice(2))) return loadPure(id.slice(2));
       if (id.startsWith("./")) return load(id.slice(2));
+      if (id.startsWith("../") && PURE_MODULES.has(id.slice(3))) return loadPure(id.slice(3));
       throw new Error(`Unexpected query dependency: ${id}`);
     }, exports);
     const factory = Object.values(exports).find((value) => typeof value === "function" && /^create.*(Queries|Store|Invalidation)$/.test(value.name));
     if (factory) {
-      const result = factory(workspace, name === "chatStore" ? { ...load("chat") } : api, name === "settings" ? load("invalidation") : { onChatEvent });
+      const result = factory(workspace, name === "chatStore" ? { ...load("chat") } : api, name === "settings" ? load("invalidation") : { onChatEvent }, { onEngineHost: () => () => {} });
       Object.assign(exports, result);
     }
     return exports;

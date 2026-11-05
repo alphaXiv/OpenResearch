@@ -307,6 +307,9 @@ pub fn cited_message(store: &Store, cited: &str) -> Result<Option<StoredChatMess
     let Some(hex) = cited.strip_prefix("msg_") else {
         return Ok(None);
     };
+    if let Some(message) = store.get_chat_message(cited)? {
+        return Ok(Some(message));
+    }
     let ids = store.chat_message_ids_with_prefix(hex)?;
     let [id] = ids.as_slice() else {
         return Ok(None);
@@ -362,7 +365,11 @@ pub fn author(message: &StoredChatMessage) -> String {
         }) => format!("chat `{from}`'s agent"),
         Some(_) => "orx".into(),
         None if message.role == "user" => "the user".into(),
-        None => "its agent".into(),
+        None => message
+            .native_harness
+            .as_ref()
+            .map(|harness| format!("assistant ({harness})"))
+            .unwrap_or_else(|| "assistant".into()),
     }
 }
 
@@ -494,30 +501,79 @@ pub fn status(
 }
 
 /// A chat's recent messages, oldest first, each with the ref that cites it.
-pub fn transcript(store: &Store, session_id: &str, limit: usize) -> Result<String> {
+pub fn transcript(
+    store: &Store,
+    session_id: &str,
+    limit: usize,
+    before: Option<&str>,
+) -> Result<String> {
     let messages = store.list_chat_messages(session_id)?;
-    let recent: Vec<String> = messages
+    let session = store.get_chat_session(session_id)?;
+    let path = super::active_path(
+        &messages,
+        session
+            .as_ref()
+            .and_then(|session| session.active_leaf_id.as_deref()),
+    );
+    let end = match before {
+        Some(id) => path
+            .iter()
+            .position(|message| message.id == id)
+            .ok_or_else(|| anyhow!("The message is not on this chat's active branch."))?,
+        None => path.len(),
+    };
+    let selected: Vec<_> = path[..end]
         .iter()
+        .copied()
         .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
         .rev()
         .take(limit)
-        .map(|message| {
-            format!(
-                "{} {}: {}",
-                message_ref(&message.id),
-                author(message),
-                inline(&message_text(message))
-            )
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
+        .collect();
+    let recent: Vec<String> = selected
+        .iter()
         .rev()
+        .map(|message| super::handoff::snapshot([*message], 8 * 1024))
         .collect();
     Ok(if recent.is_empty() {
         format!("Chat `{session_id}` has no messages yet.")
     } else {
-        recent.join("\n\n")
+        let mut text = recent.join("\n\n");
+        if end > selected.len() {
+            if let Some(oldest) = selected.last() {
+                text.push_str(&format!(
+                    "\n\nOlder messages: `read {{\"before\":\"{}\",\"limit\":{limit}}}`.",
+                    message_ref(&oldest.id)
+                ));
+            }
+        }
+        text
     })
+}
+
+pub fn read_message(message: &StoredChatMessage) -> Result<String> {
+    fn visible_parts(parts: Vec<WirePart>) -> Vec<WirePart> {
+        parts
+            .into_iter()
+            .filter(|part| part.kind != "reasoning")
+            .map(|mut part| {
+                part.children = visible_parts(part.children);
+                part
+            })
+            .collect()
+    }
+
+    let parts = visible_parts(stored_to_wire(message).parts);
+    let mut text = format!(
+        "{} {}, in chat `{}`:\n{}",
+        message_ref(&message.id),
+        author(message),
+        message.session_id,
+        serde_json::to_string(&parts)?
+    );
+    if parts.iter().any(|part| part.kind == "image") {
+        text.push_str(&quote(message)?);
+    }
+    Ok(text)
 }
 
 /// A delegate's link to the chat that started it, for the dashboard: whether
@@ -711,6 +767,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                native_harness: None,
             })
             .unwrap();
     }
@@ -839,7 +896,6 @@ mod tests {
                 .map(|item| match item {
                     News::Answer(_) => "answer",
                     News::Question { .. } => "question",
-                    News::Run(_) | News::Unmonitored(_) => "run",
                 })
                 .collect()
         };
@@ -876,6 +932,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                native_harness: None,
             })
             .unwrap();
         assert_eq!(

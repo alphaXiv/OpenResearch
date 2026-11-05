@@ -82,7 +82,7 @@ jobs:
           if [ -n "${expected_sha:-}" ]; then test "$sha" = "$expected_sha"; fi
           version=$(git show "$sha:Cargo.toml" | grep -m1 '^version = ' | sed -E 's/version = "(.*)"/\1/')
           test "$tag" = "v$version"
-          if [ -z "$RELEASE_RUN_ID" ] && ! git cat-file -e "$sha:ui/dist/index.html" 2>/dev/null; then
+          if [ -z "$RELEASE_RUN_ID" ] && { git cat-file -e "$sha:scripts/build-host.mjs" 2>/dev/null || ! git cat-file -e "$sha:ui/dist/index.html" 2>/dev/null; }; then
             RELEASE_RUN_ID=$(bash scripts/find-release-run.sh "$tag" "$sha")
           fi
           echo "ok=true" >> "$GITHUB_OUTPUT"
@@ -117,6 +117,15 @@ jobs:
           run-id: ${{ needs.check.outputs.release-run-id }}
           github-token: ${{ github.token }}
 
+      - name: Download release hosts
+        if: needs.check.outputs.release-run-id != '' && hashFiles('scripts/build-host.mjs') != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-host
+          path: target/host-binaries
+          run-id: ${{ needs.check.outputs.release-run-id }}
+          github-token: ${{ github.token }}
+
       - name: Take signing action from the workflow revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -140,6 +149,8 @@ jobs:
           notary-password: ${{ secrets.MACOS_NOTARY_PASSWORD }}
 
       - name: Build universal app
+        env:
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
         run: ORX_OFFICIAL_RELEASE_BUILD=1 ORX_APP_UNIVERSAL=1 bash scripts/build-macos-app.sh
 
       - name: Verify bundled production channel

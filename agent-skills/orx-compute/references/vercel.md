@@ -34,9 +34,12 @@ orx exp run <expId> --backend vercel --flavor 4 --image vercel/sandbox/universal
   `uv` and GNU `tail`. Images come from Vercel Container Registry. A custom
   image without GNU `tail --pid` (busybox or alpine) still streams logs: orx
   detects that and polls the log until the job exits. If the image cannot read
-  the log at all, the supervisor reports an error instead of an empty log.
+  the log at all, the run reports an error instead of an empty log.
 - `ORX_VERCEL_REGION` picks a region; otherwise Vercel uses the project default.
 - `orx` copies the committed snapshot into the sandbox; Vercel never needs
   repository access.
-- A detached `orx supervise` process records status and logs, then stops and
-  destroys the sandbox when the run ends; do not kill it.
+
+OpenResearch stops and destroys the sandbox once the run ends and its logs
+are collected.
+
+See [run monitoring](../SKILL.md#run-engine-setting).

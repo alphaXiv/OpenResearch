@@ -557,7 +557,7 @@ mod tests {
         // runs in a child process with its own config dir.
         if std::env::var("ORX_ALPHAXIV_TEST_CHILD").is_err() {
             let root = std::env::temp_dir().join(format!("orx-alphaxiv-{}", uuid::Uuid::new_v4()));
-            let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+            let status = crate::process::tokio_command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "alphaxiv::tests::stored_tokens_refresh_once_rotate_and_revoke",

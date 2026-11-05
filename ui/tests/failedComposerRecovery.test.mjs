@@ -53,6 +53,7 @@ function setup({ side = false, sessionId = "s", busy = false, steering = false, 
     composerSelection: { harness: "codex" }, planModeOverrideRef: { current: null }, planMutationSeq: { current: 0 },
     RejectedResponseError, pendingClientTurn: { current: null }, pendingScope: { current: null }, crypto, busy, steering,
     queueSessionMutation: (fn) => fn(), setSessionOverride: () => {}, setRecoveryOverrides: () => {}, EMPTY_RECOVERY_OVERRIDES: {},
+    setChatSessionAgentMutation: { isPending: false },
     sendChatMessage: () => new Promise((resolve, reject) => { resolveSend = resolve; rejectSend = reject; }), getChatSubmission: submission,
     openNewSession: async () => ({ id: "created" }), getChatMessagesQuery: () => ({ queryKey: [] }),
     queryClient: { fetchQuery: history, getQueryState: () => undefined }, listChatSessionsQuery: () => ({}),
@@ -74,6 +75,16 @@ function setup({ side = false, sessionId = "s", busy = false, steering = false, 
   };
 }
 async function flush() { for (let i = 0; i < 15; i++) await Promise.resolve(); }
+
+test("sending during a provider switch preserves the draft until the selected agent is ready", async () => {
+  const s = setup();
+  const original = s.state.draft;
+  s.bindings.setChatSessionAgentMutation.isPending = true;
+  await s.send();
+  assert.equal(s.state.draft, original);
+  assert.equal(s.bindings.pendingClientTurn.current, null);
+  assert.deepEqual(s.actions, []);
+});
 
 function mountComposer(s) {
   let effect;

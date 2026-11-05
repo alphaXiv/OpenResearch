@@ -3,6 +3,7 @@ import { defineAppHotkeys, getHotkeyManager, toHotkeyRegistrationView } from "@t
 
 export const appHotkeys = defineAppHotkeys({
   "task.new": { hotkey: "Mod+N", meta: { name: m.chat_panel_new_chat() } },
+  "chat.find": { hotkey: "Mod+F", meta: { name: m.chat_search_title() } },
   "tab.close": { hotkey: "Mod+W", options: { capture: true, preventDefault: "always" }, meta: { name: m.closable_tab_close_tab() } },
   "tab.keepOpen": { hotkey: ["Mod+K", "Enter"], meta: { name: m.menu_keep_open() } },
   "app.quit": { hotkey: "Mod+Q", meta: { name: m.menu_quit() } },

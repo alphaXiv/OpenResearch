@@ -3,10 +3,24 @@
 use crate::error::{anyhow, Result};
 use crate::store::{Store, StoredRun};
 
+pub(crate) static LABELS: std::sync::LazyLock<std::collections::HashMap<String, String>> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("../ui/messages/en.json"))
+            .expect("English message catalog")
+    });
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Run {
     pub id: String,
     pub experiment_id: String,
     pub status: String,
+    pub contact: crate::store::Contact,
+    #[serde(default)]
+    pub cancelling: bool,
+    #[serde(default)]
+    pub cancel_unconfirmed: Option<Vec<u32>>,
+    pub host: Option<String>,
     pub commit_sha: Option<String>,
     pub duration_secs: i64,
     pub updated_display: String,
@@ -20,6 +34,12 @@ impl From<&StoredRun> for Run {
             id: run.id.clone(),
             experiment_id: run.experiment_id.clone(),
             status: run.status.clone(),
+            contact: crate::store::Contact::Live,
+            cancelling: run.cancel_requested
+                && !crate::engine::Phase::parse(&run.status)
+                    .is_some_and(crate::engine::Phase::is_terminal),
+            cancel_unconfirmed: None,
+            host: None,
             commit_sha: run.commit_sha.clone(),
             duration_secs: crate::local::run_duration_secs(run),
             updated_display: crate::local::fmt_ago(run.updated_at),
@@ -30,9 +50,80 @@ impl From<&StoredRun> for Run {
 }
 
 impl Run {
+    pub(crate) fn from_store(store: &Store, stored: &StoredRun) -> Result<Self> {
+        let mut run = Self::from(stored);
+        if let Some(state) = store.engine_run_state(&stored.id)? {
+            run.cancelling |= state.cancel_accepted_at.is_some()
+                && !crate::engine::Phase::parse(&stored.status)
+                    .is_some_and(crate::engine::Phase::is_terminal);
+            run.contact = state.contact;
+            run.cancel_unconfirmed = state.cancel_unconfirmed;
+        }
+        run.host = crate::commands::up::run_host(store, stored)?;
+        Ok(run)
+    }
+
+    pub fn contact_detail(&self) -> Option<String> {
+        use crate::store::Contact;
+        let (contact, since, cause) = match &self.contact {
+            Contact::Live | Contact::Stopping { .. } => return None,
+            Contact::Unreachable { since, cause } => ("unreachable", since, cause),
+            Contact::NeedsAuth { since, cause } => ("needs_auth", since, cause),
+            Contact::Unreconciled { since, detail } => ("unreconciled", since, detail),
+        };
+        Some(format!(
+            "contact: {contact}, since {}: {cause}",
+            crate::telemetry::iso8601_utc(*since)
+        ))
+    }
+
+    pub fn display_status(&self) -> std::borrow::Cow<'_, str> {
+        if self.status == "cancelled" {
+            if let crate::store::Contact::Stopping { count, .. } = self.contact {
+                let host = self.host.as_deref().unwrap_or("localhost");
+                let key = if count == 1 {
+                    "status_stopping_one"
+                } else {
+                    "status_stopping_other"
+                };
+                return LABELS[key]
+                    .replace("{count}", &count.to_string())
+                    .replace("{host}", host)
+                    .into();
+            }
+            if self.cancel_unconfirmed.is_some() {
+                return LABELS["status_cancelled_unconfirmed"].as_str().into();
+            }
+            return LABELS["status_cancelled"].as_str().into();
+        }
+        if self.cancelling {
+            let pending = self.status == "submitting"
+                || matches!(
+                    self.contact,
+                    crate::store::Contact::Unreachable { .. }
+                        | crate::store::Contact::NeedsAuth { .. }
+                );
+            let key = if pending {
+                "status_cancellation_pending"
+            } else {
+                "status_cancelling"
+            };
+            return LABELS[key].as_str().into();
+        }
+        self.status.as_str().into()
+    }
+
     pub fn failure_detail(&self) -> Option<String> {
         if self.status == "cancelled" {
-            return self.cancel_reason.as_ref().map(|r| format!("reason: {r}"));
+            let reason = self
+                .cancel_reason
+                .iter()
+                .chain(self.result_markdown.iter())
+                .filter(|text| !text.trim().is_empty())
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            return (!reason.is_empty()).then(|| format!("reason: {reason}"));
         }
         if self.status != "failed" {
             return None;
@@ -73,6 +164,7 @@ pub struct ProjectEdit {
     pub run_command: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
 pub struct RunListing {
     pub runs: Vec<Run>,
     pub titles: std::collections::HashMap<String, String>,
@@ -144,6 +236,39 @@ mod tests {
             cancel_requested: false,
             cancel_reason: None,
             chat_session_id: None,
+        }
+    }
+
+    #[test]
+    fn contact_details_decode_the_v2_shape() {
+        for (contact, reason) in [
+            (
+                serde_json::json!({"type":"unreachable", "since":1000, "cause":"offline"}),
+                "offline",
+            ),
+            (
+                serde_json::json!({"type":"needs_auth", "since":1000, "cause":"key rejected"}),
+                "key rejected",
+            ),
+            (
+                serde_json::json!({"type":"unreconciled", "since":1000, "detail":"receipt unreadable"}),
+                "receipt unreadable",
+            ),
+            (serde_json::json!({"type":"live"}), ""),
+        ] {
+            let mut view = serde_json::to_value(stored_run("running", None)).unwrap();
+            view["durationSecs"] = 1.into();
+            view["updatedDisplay"] = "now".into();
+            view["contact"] = contact.clone();
+            let run: Run = serde_json::from_value(view).unwrap();
+            if reason.is_empty() {
+                assert_eq!(run.contact_detail(), None);
+            } else {
+                let detail = run.contact_detail().unwrap();
+                assert!(detail.contains(contact["type"].as_str().unwrap()));
+                assert!(detail.contains("1970-01-01T00:00:01"));
+                assert!(detail.contains(reason));
+            }
         }
     }
 
@@ -233,5 +358,65 @@ mod tests {
         assert_eq!(label("user_exp"), None);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+
+    #[test]
+    fn cli_labels_decode_the_v2_cancel_fields_without_replacing_the_phase() {
+        let mut value = serde_json::json!({
+            "id": "run", "experimentId": "exp", "status": "running", "commitSha": null,
+            "durationSecs": 1, "updatedDisplay": "now", "resultMarkdown": null, "cancelReason": null,
+            "contact": {"type":"live"}, "cancelling": true, "host": "gpu-box",
+        });
+        let run: Run = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(run.status, "running");
+        assert_eq!(run.display_status(), "Cancelling…");
+        for contact in [
+            serde_json::json!({"type":"unreachable", "since":1, "cause":"offline"}),
+            serde_json::json!({"type":"needs_auth", "since":1, "cause":"connect"}),
+        ] {
+            value["contact"] = contact;
+            let run: Run = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(run.display_status(), "Cancellation pending");
+        }
+        value["status"] = serde_json::json!("cancelled");
+        value["cancelling"] = serde_json::json!(false);
+        value["contact"] = serde_json::json!({"type":"stopping", "since":1, "count":2});
+        let run: Run = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(run.status, "cancelled");
+        assert_eq!(
+            run.display_status(),
+            "Not fully stopped · 2 processes still running on gpu-box"
+        );
+        value["contact"] = serde_json::json!({"type":"stopping", "since":1, "count":1});
+        let run: Run = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            run.display_status(),
+            "Not fully stopped · 1 process still running on gpu-box"
+        );
+        assert_eq!(run.contact_detail(), None);
+        value["contact"] = serde_json::json!({"type":"live"});
+        assert_eq!(
+            serde_json::from_value::<Run>(value.clone())
+                .unwrap()
+                .display_status(),
+            "Cancelled"
+        );
+        value["cancelUnconfirmed"] = serde_json::json!([789]);
+        value["resultMarkdown"] = "The host couldn't inspect process 789.".into();
+        let run: Run = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(run.display_status(), "Cancelled · couldn't confirm");
+        assert!(run.failure_detail().unwrap().contains("process 789"));
+        value["resultMarkdown"] = "Edited".into();
+        assert_eq!(
+            serde_json::from_value::<Run>(value)
+                .unwrap()
+                .display_status(),
+            "Cancelled · couldn't confirm"
+        );
     }
 }

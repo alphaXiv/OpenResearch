@@ -2,9 +2,11 @@
 //! console, and every console program it started would open a window of its
 //! own. So it starts the `orx.exe` beside it as `orx app` in a console no one
 //! sees, which `orx` and the git, shell, and agent processes it runs all share.
-//! An `openresearch:` link it was opened with (see OpenResearch.iss) goes along.
+//! An `openresearch:` link or `.orx` file it was opened with (see OpenResearch.iss) goes along.
 
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+// Its own crate, so `crate::process` is unreachable; it starts `orx.exe` by absolute path.
+#![allow(clippy::disallowed_methods)]
 
 #[cfg(windows)]
 fn main() {
@@ -33,15 +35,22 @@ fn main() {
     }
 }
 
-/// The first argument, if it is an `openresearch:` link: the only one orx's app takes.
+/// The first argument, if it is an `openresearch:` link or a `.orx` file: the only ones orx's app takes.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn link_arg(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<std::ffi::OsString> {
-    // LINK_SCHEME in src/commands/app.rs.
+    // LINK_SCHEME in src/commands/app.rs and EXTENSION in src/local/share.rs.
     const SCHEME: &str = "openresearch:";
+    const SHARED: &str = ".orx";
     args.next().filter(|arg| {
-        arg.to_str()
-            .and_then(|arg| arg.get(..SCHEME.len()))
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(SCHEME))
+        arg.to_str().is_some_and(|arg| {
+            let scheme = arg.get(..SCHEME.len());
+            let extension = arg
+                .len()
+                .checked_sub(SHARED.len())
+                .and_then(|at| arg.get(at..));
+            scheme.is_some_and(|scheme| scheme.eq_ignore_ascii_case(SCHEME))
+                || extension.is_some_and(|extension| extension.eq_ignore_ascii_case(SHARED))
+        })
     })
 }
 
@@ -85,5 +94,8 @@ mod tests {
         assert_eq!(link(&[]), None);
         assert_eq!(link(&["--help"]), None);
         assert_eq!(link(&["https://example.com"]), None);
+        let shared = r"C:\Users\me\Downloads\tiny lm.ORX";
+        assert_eq!(link(&[shared]), Some(shared.into()));
+        assert_eq!(link(&[r"C:\notes.txt"]), None);
     }
 }

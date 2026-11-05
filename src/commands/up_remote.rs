@@ -41,7 +41,7 @@ use crate::{browser, UpArgs};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub(crate) const DASHBOARD_PROTOCOL: u32 = 3;
+pub(crate) const DASHBOARD_PROTOCOL: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2557,7 +2557,7 @@ pub(crate) fn ssh_forward_command(
     forward: &str,
     remote_cmd: &str,
 ) -> Result<Command> {
-    let mut cmd = Command::new("ssh");
+    let mut cmd = crate::process::tokio_command("ssh");
     cmd.env("ORX_SSH_PROBE", "1");
     cmd.args(crate::jobs::ssh::forward_args(target, forward, remote_cmd)?)
         .stdin(Stdio::null())
@@ -2982,7 +2982,7 @@ mod tests {
                 "p={};",
                 crate::jobs::ssh::sh_quote(binary.to_str().unwrap())
             ));
-            let output = std::process::Command::new("sh")
+            let output = crate::process::command("sh")
                 .arg("-c")
                 .arg(&probe)
                 .output()
@@ -3030,21 +3030,15 @@ mod tests {
             "p={};",
             crate::jobs::ssh::sh_quote(binary.to_str().unwrap())
         ));
-        let output = std::process::Command::new("sh")
+        let output = crate::process::command("sh")
             .arg("-c")
             .arg(&probe)
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         let output = String::from_utf8(output.stdout).unwrap();
-        let group = std::process::Command::new("id")
-            .arg("-gn")
-            .output()
-            .unwrap();
-        let user = std::process::Command::new("id")
-            .arg("-un")
-            .output()
-            .unwrap();
+        let group = crate::process::command("id").arg("-gn").output().unwrap();
+        let user = crate::process::command("id").arg("-un").output().unwrap();
         assert!(group.status.success() && user.status.success());
         if group.stdout == user.stdout {
             assert!(output.contains("ORX_REMOTE_VERSION="), "{output}");
@@ -3295,6 +3289,7 @@ mod tests {
             managed_generation: None,
             auth_agent: None,
             run_id: None,
+            transport: None,
             extra_opts: vec!["-p".into(), "2222".into()],
         };
         let args =

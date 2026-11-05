@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn a_canonicalized_directory_is_accepted_as_a_working_directory() {
         let dir = canonicalize(std::env::temp_dir()).expect("temp dir");
-        let out = std::process::Command::new("cmd")
+        let out = crate::process::command("cmd")
             .args(["/C", "cd"])
             .current_dir(&dir)
             .output()

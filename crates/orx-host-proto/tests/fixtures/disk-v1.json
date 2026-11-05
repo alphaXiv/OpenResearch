@@ -1,0 +1,21 @@
+{
+  "launch": [
+    {"run":"r1","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","run_sh":"true","env":{},"source":null},
+    {"run":"r1","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","run_sh":"bash repo/run.sh","env":{"TOKEN":"value"},"source":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cancel_sh":"true"}
+  ],
+  "identity": [
+    {"node":"node-id","boot_id":"boot-id","pid":42,"starttime":1234}
+  ],
+  "exit": [
+    {"code":0,"signal":null,"reason":"exited","processes":[],"outcome":{"kind":"verified"}},
+    {"code":null,"signal":null,"reason":"cancelled","processes":[],"outcome":{"kind":"verified"}},
+    {"code":null,"signal":null,"reason":"spawn_failed","processes":[],"outcome":{"kind":"verified"}},
+    {"code":0,"signal":null,"reason":"exited","processes":[{"pid":43,"starttime":5678,"state":"S"}],"outcome":{"kind":"survivors"}},
+    {"code":null,"signal":15,"reason":"cancelled","processes":[],"outcome":{"kind":"unverifiable","unreadable":[44]}}
+  ],
+  "cleanup": [
+    {"processes":[],"outcome":{"kind":"verified"}},
+    {"processes":[{"pid":43,"starttime":5678,"state":"S"}],"outcome":{"kind":"survivors"}},
+    {"processes":[],"outcome":{"kind":"unverifiable","unreadable":[44]}}
+  ]
+}

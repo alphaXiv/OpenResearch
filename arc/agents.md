@@ -59,6 +59,42 @@ The providers differ in shape, and the interface absorbs three:
 | shared server | OpenCode | one `opencode serve` per dashboard; a turn posts to it and follows its event stream |
 | child per turn | Cursor, Antigravity | a print-mode process per turn, resuming the native session by id |
 
+An idle chat can change its agent from the model picker. The switch is a
+settings change and a transcript row, with no model call. Messages record the
+harness that owns their native session ids. Returning to a harness resumes
+its last session on the active branch and supplies only the conversation
+since its last reply, with that reply's ref and a brief headline as the resume point;
+a new harness gets the active conversation. Queued
+messages must be sent or removed before switching. A chat retains its saved
+ACP launch when switching away and back; changing between two ACP launches
+requires a new chat.
+Recovery after a switch uses the selected agent's settings and starts a new
+turn, preserving the original failure and the harness that owns it. A native
+thread created before delivery does not count as having seen the request.
+Saved context stays available until the native thread confirms receipt.
+The replayable request excludes agent-specific context; each launch rebuilds
+the handoff for the selected agent. An empty branch carries no discarded history.
+Saved compaction context applies only to its branch; rewinding before it keeps
+the inherited parent context and rebuilds the selected conversation.
+
+The handoff is rendered when the next turn starts, so worktree changes made
+while the chat was idle are visible. The byte budget prioritizes user requests
+and their message refs, then the latest answer, and fills remaining space with
+older answers when they fit, or turn headlines and tool counts. Selected
+messages stay in conversation order, with the answering agent, switches and failed
+turns identified. Long requests keep their beginning and end. Tool logs stay
+behind refs: `read {ref: "msg_…"}` reads visible message parts, tool calls and
+attachment paths, excluding reasoning even inside nested agent calls.
+`read {before: "msg_…"}` pages backward on the active branch. The same builder
+supplies native-session recovery, compaction's fallback input, ACP branch
+reseeding and side chats.
+Agents without an exposed MCP tool send the same `read` call through
+`orx mcp` over stdio; the chat's environment supplies its identity.
+The default ceiling is 24,000 UTF-8 bytes, a conservative upper bound on text
+tokens; when the catalog reports the target context window, the ceiling also
+stays within ten percent of it. If even the user-ref index cannot fit, the
+handoff directs the agent to page through the conversation.
+
 A resident child is respawned with its native session resumed when a setting
 it was started with changes, when it is interrupted, or when it crashes.
 Prompts flow back in one of two ways. Some agents end their turn on a
@@ -198,11 +234,12 @@ derived from the request.
 
 **Any chat can subscribe to any other.** A subscription tells its subscriber
 each finished turn of its target, and each question the target asks, as the
-first message of the subscriber's next turn. Run wake-ups go through the same
-delivery: a chat's news, from runs and chats alike, is never lost, never
-duplicated, never interrupts a running turn, and arrives as one turn however
-much of it is waiting, each piece kept in the transcript as its own message. A turn that ends while its own delegates are
-still working is not an answer yet. An agent can collect the same news inside
+first message of the subscriber's next turn. Pending chat news arrives in one
+visible turn, each piece kept in the transcript as its own message. Run results
+use the engine's durable outbox in separate hidden turns; chat-news batching
+never reads run wakeups or results. Both wait for the chat to be idle and keep
+delivery claims to avoid duplicates. A turn that ends while its own delegates
+are still working is not an answer yet. An agent can collect the same news inside
 its turn with `wait`, which marks it told. A delegator subscribes to its
 delegates. Once the user writes in a delegate, its composer lets them keep it:
 it stops reporting to the chat that started it and stands as that chat's side
@@ -210,12 +247,13 @@ chat, or on its own with its own worktree, and the delegator's later
 `subscribe` or `wait` does not undo that. A side chat reports only when its
 agent `send`s. Agents answer questions through orx; approvals stay with the user.
 
-**Agents write to each other in the open.** Everything orx or another chat's
-agent writes into a chat (a task, a message, news) reaches its agent opening
-with `[orx]`, so the agent can tell it from the user. The transcript records
-it with its kind and sender and keeps what the sender wrote, refs included;
+**Agents write to each other in the open.** A task, message or piece of chat
+news that orx or another chat's agent writes into a chat reaches its agent
+opening with `[orx]`, so the agent can tell it from the user. The transcript
+records it with its kind and sender and keeps what the sender wrote, refs included;
 only the agent reads the refs expanded and the instructions around them. The
-dashboard shows it as the sender's message, and a finished run by its outcome.
+dashboard shows it as the sender's message. Run results and monitoring notices
+reach agents in hidden turns; the transcript records only the agent's reply.
 
 **Messages travel by reference.** Each user message reaches its agent tagged
 with a short ref from its id. A ref in a task or message, the user's included,

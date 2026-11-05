@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::error::{anyhow, Result};
@@ -611,7 +611,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     let bin = find_claude().ok_or_else(|| {
         anyhow!("claude not found on PATH — install Claude Code and run `claude` once to sign in")
     })?;
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
         "--print",
         "--input-format",
@@ -1382,7 +1382,7 @@ mod tests {
         idle_since: Instant,
         shell: &str,
     ) -> Arc<ClaudeClient> {
-        let mut command = Command::new("sh");
+        let mut command = crate::process::tokio_command("sh");
         command
             .args(["-c", shell])
             .stdin(Stdio::piped())

@@ -226,7 +226,9 @@ export function groupResponseMessages(messages: ChatMessage[], previousGroups: C
   const groups: ChatMessage[][] = [];
   for (const message of messages) {
     const previous = groups.at(-1);
-    if (message.role === "assistant" && previous?.[0].role === "assistant" && message.parts[0]?.id !== LOCAL_ERROR_PART_ID) {
+    const providerChanged = message.parts.some((part) => part.tool === "provider_switch")
+      || previous?.[0].parts.some((part) => part.tool === "provider_switch");
+    if (message.role === "assistant" && previous?.[0].role === "assistant" && !providerChanged && message.parts[0]?.id !== LOCAL_ERROR_PART_ID) {
       previous.push(message);
     } else {
       groups.push([message]);
