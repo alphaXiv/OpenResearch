@@ -4340,8 +4340,10 @@ const Transcript = memo(function Transcript({
     scrollEndThreshold: 60,
     rangeExtractor,
     scrollToFn: (offset, options, instance) => {
-      programmaticScroll.current = offset + (options.adjustments ?? 0);
-      elementScroll(offset, options, instance);
+      // virtual-core passes size corrections with the last scroll event's offset; apply them to the live scrollTop so a scroll since isn't undone.
+      const target = options.adjustments === undefined ? offset : (instance.scrollElement?.scrollTop ?? offset) + options.adjustments;
+      programmaticScroll.current = target;
+      elementScroll(target, { behavior: options.behavior }, instance);
     },
   });
   const setFeed = useCallback((node: HTMLDivElement | null) => { feedRef.current = node; virtualizer.containerRef(node); }, [virtualizer]);
