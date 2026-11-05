@@ -74,8 +74,9 @@ export function statusLabel(s: string, stopping?: RunDisplay["stopping"]): strin
 /** Spread a `runDisplay(run)` into it; `stale` and `since` mark a status that was last seen, not live. */
 export function StatusBadge({ status, stopping, stale = false, since = null, className }: { status: string; stopping?: RunDisplay["stopping"]; stale?: boolean; since?: number | null; className?: string }) {
   const style = statusStyle(status);
-  const text = statusLabel(status, stopping);
-  const title = stale && since !== null ? `${text} · ${m.status_last_seen({ time: fmtClock(since) })}` : text;
+  const text = statusLabel(status);
+  const full = statusLabel(status, stopping);
+  const title = stale && since !== null ? `${full} · ${m.status_last_seen({ time: fmtClock(since) })}` : full;
   return (
     <StatusIndicator tone={style.tone} live={style.live} stale={stale} className={className}>
       <span className="min-w-0 truncate" title={title}>{text}</span>

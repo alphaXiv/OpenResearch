@@ -1,8 +1,8 @@
 import type { LogIdent, LogPage } from "./api";
 import type { RunLogEvent } from "./events";
 
-/** One request's worth of log, and what the viewer shows at once: it stays within xterm's scrollback. */
-export const LOG_WINDOW = 1024 * 1024;
+/** One request's worth of log, and what the viewer shows at once: small enough that wrapped lines stay within xterm's scrollback. */
+export const LOG_WINDOW = 256 * 1024;
 
 export interface Span {
   start: number;
@@ -86,6 +86,8 @@ export const INITIAL_LOG_VIEW: LogView = { len: null, kept: [], span: { start: 0
 export interface LogSink {
   reset(): void;
   write(text: string): void;
+  /** Called once a fixed window has been written, so it opens on the bytes its position names. */
+  scrollToTop(): void;
 }
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -200,6 +202,7 @@ export function createLogFollower({ fetchPage, sink, publish, epoch, unstableMes
       set({ span: { start: span.start, end: next } });
       if (page.eof) break;
     }
+    sink.scrollToTop();
     set({ loading: false });
   }
 

@@ -42,7 +42,12 @@ export function LogTerminal({ run }: { run: Pick<Run, "id" | "status" | "contact
     const log = createLogFollower({
       unstableMessage: m.log_generation_unstable(),
       fetchPage: (span, ident) => fetchLogPage(runId, span.start, span.end, ident),
-      sink: { reset: () => term.reset(), write: (text) => term.write(text) },
+      sink: {
+        reset: () => term.reset(),
+        write: (text) => term.write(text),
+        // xterm snaps back to the bottom unless its viewport has synced to the new rows, which takes a frame.
+        scrollToTop: () => term.write("", () => requestAnimationFrame(() => term.scrollToTop())),
+      },
       publish: setView,
       epoch: () => hostEpoch.current,
     });

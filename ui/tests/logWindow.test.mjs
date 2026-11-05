@@ -6,18 +6,19 @@ const MiB = 1024 ** 2;
 const GiB = 1024 ** 3;
 
 test("windows stay inside the log", () => {
+  const len = 10 * LOG_WINDOW;
   assert.deepEqual(windowAt(0, 300), { start: 0, end: 300 });
-  assert.deepEqual(windowAt(-5, 10 * MiB), { start: 0, end: LOG_WINDOW });
-  assert.deepEqual(windowAt(9.5 * MiB, 10 * MiB), { start: 9 * MiB, end: 10 * MiB });
-  assert.deepEqual(lastWindow(10 * MiB), { start: 9 * MiB, end: 10 * MiB });
+  assert.deepEqual(windowAt(-5, len), { start: 0, end: LOG_WINDOW });
+  assert.deepEqual(windowAt(9.5 * LOG_WINDOW, len), { start: 9 * LOG_WINDOW, end: len });
+  assert.deepEqual(lastWindow(len), { start: 9 * LOG_WINDOW, end: len });
   assert.deepEqual(lastWindow(300), { start: 0, end: 300 });
 });
 
 test("a span is kept only when one kept range covers it", () => {
   const kept = [[0, 64 * MiB], [4 * GiB - 256 * MiB, 4 * GiB]];
-  assert.equal(isKept(kept, { start: 0, end: MiB }), true);
+  assert.equal(isKept(kept, { start: 0, end: LOG_WINDOW }), true);
   assert.equal(isKept(kept, lastWindow(4 * GiB)), true);
-  assert.equal(isKept(kept, { start: 2 * GiB, end: 2 * GiB + MiB }), false);
+  assert.equal(isKept(kept, { start: 2 * GiB, end: 2 * GiB + LOG_WINDOW }), false);
   assert.equal(isKept(kept, { start: 64 * MiB - 10, end: 64 * MiB + 10 }), false);
   assert.equal(isKept([], { start: 0, end: 10 }), false);
 });
@@ -56,7 +57,7 @@ const text = (value) => new TextEncoder().encode(value);
 
 function harness(respond) {
   const requests = [];
-  const sink = { output: "", resets: 0, reset() { this.output = ""; this.resets += 1; }, write(value) { this.output += value; } };
+  const sink = { output: "", resets: 0, tops: 0, reset() { this.output = ""; this.resets += 1; }, write(value) { this.output += value; }, scrollToTop() { this.tops += 1; } };
   let view;
   let epoch = 0;
   const follower = createLogFollower({
@@ -185,6 +186,16 @@ describe("log follower", () => {
     log.follower.onLog({ dataBase64: b64([0xe2, 0x82]), offset: 0 });
     log.follower.onLog({ dataBase64: b64([0xac, 0x0a]), offset: 2 });
     assert.equal(log.sink.output, "€\n");
+  });
+
+  test("a fixed window scrolls to its top once written; following does not", async () => {
+    const log = harness((span) => data(span.start, text("line\n"), { len: 3 * LOG_WINDOW, eof: true }));
+    log.follower.goTo(0);
+    await flush();
+    assert.equal(log.sink.tops, 1);
+    log.follower.follow();
+    await flush();
+    assert.equal(log.sink.tops, 1);
   });
 
   test("a window opening on a line boundary keeps its first line", async () => {

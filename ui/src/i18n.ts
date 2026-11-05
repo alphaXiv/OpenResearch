@@ -24,7 +24,7 @@ export function fmtBytes(bytes: number): string {
   return new Intl.NumberFormat(getLocale(), {
     style: "unit",
     unit,
-    unitDisplay: "short",
+    unitDisplay: size > 1 ? "short" : "long",
     maximumFractionDigits: value < 10 && size > 1 ? 2 : 0,
   }).format(value);
 }

@@ -517,7 +517,12 @@ async fn cleanup(State(api): State<Arc<Api>>, Path(id): Path<String>) -> ApiResu
             "Cleanup requires a finished run".into(),
         ));
     }
-    let handle = handle_of(&run).ok_or_else(|| anyhow!("Run {id} has no handle"))?;
+    let handle = handle_of(&run).ok_or_else(|| {
+        Failure::Message(
+            StatusCode::CONFLICT,
+            "This run never started, so there is nothing to clean up".into(),
+        )
+    })?;
     Ok(Json(
         api.commands.cleanup(&WatchedRun { id, handle }).await?,
     ))
@@ -765,9 +770,16 @@ async fn read_log(
         });
     }
 
+    let Some(handle) = handle_of(&run) else {
+        let message = if terminal {
+            "This run never started, so it has no log"
+        } else {
+            "This run hasn't started yet, so it has no log"
+        };
+        return Err(Failure::Message(StatusCode::NOT_FOUND, message.into()));
+    };
     let fetch = async {
         let backend = api.commands.backend(&run)?;
-        let handle = handle_of(&run).ok_or_else(|| anyhow!("Run {id} has no handle"))?;
         let watched = WatchedRun {
             id: id.to_owned(),
             handle,
