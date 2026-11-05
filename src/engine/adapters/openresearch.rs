@@ -1,20 +1,17 @@
-use std::collections::HashMap;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use orx_host_proto::{LogTarget, Request, Response};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::ssh::Ssh;
-use crate::commands::supervise::RunSink;
 use crate::engine::*;
 use crate::error::{anyhow, Result};
 use crate::jobs::{ssh, BackendDescriptor};
-use crate::store::{RunStatus, StoredRun};
+use crate::store::StoredRun;
 
 pub type TransportFactory =
     Arc<dyn Fn(&ssh::SshTarget) -> Result<Arc<LegacyTransport>> + Send + Sync>;
@@ -22,7 +19,6 @@ pub type TransportFactory =
 pub struct LegacyTransport {
     pub ssh: Arc<Ssh>,
     pub log_dir: PathBuf,
-    collect: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for LegacyTransport {
@@ -33,19 +29,9 @@ impl std::fmt::Debug for LegacyTransport {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Cursor {
-    ident: Option<FileIdent>,
-    pub(crate) offset: u64,
-}
-
 impl LegacyTransport {
     pub fn new(ssh: Arc<Ssh>, log_dir: PathBuf) -> Self {
-        Self {
-            ssh,
-            log_dir,
-            collect: tokio::sync::Mutex::new(()),
-        }
+        Self { ssh, log_dir }
     }
 
     pub async fn execute(&self, command: &str, stdin: &[u8]) -> Result<String> {
@@ -90,246 +76,143 @@ impl LegacyTransport {
         )
         .await
     }
+}
 
-    pub async fn page(
-        &self,
-        dir: &str,
-        file: LogFile,
-        range: ByteRange,
-        ident: Option<FileIdent>,
-        anchor: Option<[u8; 64]>,
-    ) -> Result<LogPage> {
-        let dir = super::ssh::legacy_dir(dir);
-        match self
-            .ssh
-            .request(Request::ReadLog {
-                target: LogTarget::Dir(dir),
-                file,
-                ident,
-                range,
-                anchor,
-            })
-            .await?
+fn descriptor(handle: &Handle) -> Result<&BackendDescriptor> {
+    match handle {
+        Handle::OpenResearch { descriptor } | Handle::Legacy { descriptor }
+            if descriptor.kind == "openresearch_job" =>
         {
-            Response::ReadLog { page } => Ok(page),
-            _ => Err(anyhow!("Unexpected legacy log response")),
+            Ok(descriptor)
         }
+        _ => Err(anyhow!("Not an OpenResearch run")),
     }
+}
 
-    pub async fn collect(&self, run: &str, dir: &str) -> Result<serde_json::Value> {
-        let _guard = self.collect.lock().await;
-        uuid::Uuid::parse_str(run)?;
-        std::fs::create_dir_all(&self.log_dir)?;
-        let path = self.log_dir.join(format!("{run}.log"));
-        let cursor_path = path.with_extension("engine-cursor.json");
-        let mut cursor: Cursor = match std::fs::read(&cursor_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Cursor {
-                ident: None,
-                offset: 0,
-            },
+async fn rental_deleted(descriptor: &BackendDescriptor) -> Result<bool> {
+    let Some(creds) = crate::config::load_credentials().await? else {
+        return Ok(false);
+    };
+    Ok(crate::jobs::openresearch::box_deleted(&creds, descriptor.openresearch_ref()?.1).await)
+}
+
+fn kept_page(
+    directory: &Path,
+    run: &str,
+    range: ByteRange,
+    expected: Option<&FileIdent>,
+) -> Result<LogPage> {
+    let data_dir = directory
+        .parent()
+        .ok_or_else(|| anyhow!("Missing log parent"))?;
+    let mut kept = crate::commands::up::api_v2::kept_ranges(data_dir, run)?;
+    let mut partials = Vec::new();
+    for suffix in ["log", "tail.log"] {
+        let marker = directory.join(format!("{run}.{suffix}.part.json"));
+        let bytes = match std::fs::read(&marker) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
-        let mut anchor = None;
-        if cursor.offset != 0 {
-            match std::fs::File::open(&path) {
-                Ok(mut file) if file.metadata()?.len() >= cursor.offset => {
-                    if cursor.offset >= 64 {
-                        let mut bytes = [0; 64];
-                        file.seek(std::io::SeekFrom::Start(cursor.offset - 64))?;
-                        file.read_exact(&mut bytes)?;
-                        anchor = Some(bytes);
-                    }
-                }
-                Ok(_) => {
-                    cursor = Cursor {
-                        ident: None,
-                        offset: 0,
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    cursor = Cursor {
-                        ident: None,
-                        offset: 0,
-                    }
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        let page = self
-            .page(
-                dir,
-                LogFile::Log,
-                ByteRange {
-                    start: cursor.offset,
-                    end: cursor.offset + 256 * 1024,
-                },
-                cursor.ident.clone(),
-                anchor,
-            )
-            .await?;
-        let eof = match page {
-            LogPage::Reset { info: Some(_) } => {
-                cursor = Cursor {
-                    ident: None,
-                    offset: 0,
-                };
-                false
-            }
-            LogPage::Reset { info: None } => return Err(anyhow!("Legacy log is not available")),
-            LogPage::Data {
-                len: _,
+        let (ident, offset, synced): (FileIdent, u64, u64) = serde_json::from_slice(&bytes)?;
+        let part = directory.join(format!("{run}.{suffix}.part"));
+        let metadata = match std::fs::metadata(&part) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let len = synced.min(metadata.len());
+        if len != 0 {
+            partials.push((
+                std::fs::metadata(marker)?.modified()?,
                 ident,
-                start,
-                bytes,
-                eof,
-            } => {
-                if start != cursor.offset {
-                    return Err(anyhow!("Legacy log offset changed"));
-                }
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .write(true)
-                    .open(&path)?;
-                file.set_len(cursor.offset)?;
-                file.seek(std::io::SeekFrom::Start(cursor.offset))?;
-                file.write_all(&bytes)?;
-                file.sync_all()?;
-                cursor.ident = Some(ident);
-                cursor.offset += bytes.len() as u64;
-                eof
-            }
-        };
-        crate::local::git::atomic_write_with_mode(
-            &cursor_path,
-            &serde_json::to_vec(&cursor)?,
-            Some(0o600),
-        )?;
-        if let Some(ident) = cursor.ident {
-            crate::commands::up::api_v2::keep_ranges(
-                self.log_dir
-                    .parent()
-                    .ok_or_else(|| anyhow!("Missing log parent"))?,
-                run,
-                vec![crate::commands::up::api_v2::KeptRange {
-                    offset: 0,
-                    len: cursor.offset,
-                    file: path,
-                    ident,
-                    eof,
-                }],
-            )?;
+                offset,
+                len,
+                suffix,
+            ));
         }
-        #[cfg(unix)]
-        std::fs::File::open(&self.log_dir)?.sync_all()?;
-        Ok(serde_json::json!({ "eof": eof }))
     }
-}
-
-struct EngineSink {
-    engine: Arc<Engine>,
-}
-
-impl RunSink for EngineSink {
-    fn finish(
-        &self,
-        run: &str,
-        status: RunStatus,
-        exit_code: Option<i64>,
-        reason: Option<&str>,
-    ) -> Result<bool> {
-        let phase =
-            Phase::parse(status.as_str()).ok_or_else(|| anyhow!("Unknown legacy status"))?;
-        self.engine.commit(run, |_, state| {
-            if state.cancel_accepted_at.is_some() {
-                return reconcile::Change::default();
+    if let Some((_, generation, ..)) = partials.iter().max_by_key(|part| part.0) {
+        kept.retain(|range| range.ident == *generation);
+        for (_, ident, offset, len, suffix) in partials.iter().filter(|part| part.1 == *generation)
+        {
+            let path = directory.join(format!("{run}.{suffix}"));
+            if kept
+                .iter()
+                .any(|range| range.file == path && range.offset == *offset && range.len >= *len)
+            {
+                continue;
             }
-            reconcile::Change {
-                exit_code,
-                ..reconcile::Change::terminal(phase, reason.map(str::to_owned))
-            }
-        })?;
-        Ok(true)
-    }
-    fn get_run(&self, run: &str) -> Result<Option<StoredRun>> {
-        let store = self.engine.store();
-        let mut stored = store.get_run(run)?;
-        if let Some(stored) = &mut stored {
-            let state = store.engine_run_state(run)?;
-            stored.cancel_requested = state.is_some_and(|state| state.cancel_accepted_at.is_some());
+            let part = directory.join(format!("{run}.{suffix}.part"));
+            let file = std::fs::OpenOptions::new().write(true).open(&part)?;
+            file.set_len(*len)?;
+            file.sync_all()?;
+            std::fs::rename(part, &path)?;
+            kept.retain(|range| range.file != path);
+            kept.push(crate::commands::up::api_v2::KeptRange {
+                offset: *offset,
+                len: *len,
+                file: path,
+                ident: ident.clone(),
+                eof: false,
+            });
+            std::fs::remove_file(directory.join(format!("{run}.{suffix}.part.json")))?;
         }
-        Ok(stored)
+        kept.sort_by_key(|range| range.offset);
     }
-    fn update_status(
-        &self,
-        run: &str,
-        status: RunStatus,
-        _ended_at: Option<i64>,
-        exit_code: Option<i64>,
-    ) -> Result<bool> {
-        let observation = match status {
-            RunStatus::Starting => Observation::Queued {
-                detail: "Legacy loop starting".into(),
-            },
-            RunStatus::Running => Observation::Running { started_at: None },
-            RunStatus::Done => Observation::Exited {
-                finished_at: None,
-                code: Some(0),
-                signal: None,
-            },
-            RunStatus::Cancelled => return self.finish(run, status, exit_code, None),
-            RunStatus::Lost => Observation::Lost {
-                reason: "Legacy outcome unavailable".into(),
-            },
-            RunStatus::Failed => Observation::Exited {
-                finished_at: None,
-                code: Some(
-                    exit_code
-                        .and_then(|code| i32::try_from(code).ok())
-                        .unwrap_or(1),
-                ),
-                signal: None,
-            },
-        };
-        self.engine.observe(run, observation)?;
-        Ok(true)
+    if kept.is_empty() {
+        std::fs::create_dir_all(directory)?;
+        let path = directory.join(format!("{run}.log"));
+        crate::local::git::atomic_write_with_mode(&path, &[], Some(0o600))?;
+        kept.push(crate::commands::up::api_v2::KeptRange {
+            offset: 0,
+            len: 0,
+            file: path,
+            ident: FileIdent { dev: 0, ino: 0 },
+            eof: true,
+        });
     }
-    fn set_result_markdown(&self, run: &str, result: &str) -> Result<()> {
-        self.engine.store().set_result_markdown(run, result)
+    let last = kept.last_mut().unwrap();
+    last.eof = true;
+    let len = last.offset + last.len;
+    let ident = last.ident.clone();
+    crate::commands::up::api_v2::keep_ranges(data_dir, run, kept)?;
+    let kept = crate::commands::up::api_v2::kept_ranges(data_dir, run)?;
+    if range.start > len || expected.is_some_and(|expected| *expected != ident) {
+        return Ok(LogPage::Reset {
+            info: Some(orx_host_proto::LogInfo { ident, len }),
+        });
     }
-    fn set_backend_json(&self, run: &str, descriptor: &str) -> Result<()> {
-        let descriptor = BackendDescriptor::parse(descriptor)?;
-        let handle = Handle::Legacy {
-            descriptor: Box::new(descriptor.clone()),
-        };
-        let json = handle::backend_json(run, Some(&handle), &descriptor)?;
-        self.engine.store().set_backend_json(run, &json)
+    let mut cursor = range.start;
+    let mut bytes = Vec::new();
+    for kept in kept {
+        if kept.offset <= cursor && cursor <= kept.offset + kept.len {
+            let end = range.end.min(kept.offset + kept.len);
+            let mut file = std::fs::File::open(kept.file)?;
+            file.seek(std::io::SeekFrom::Start(cursor - kept.offset))?;
+            file.take(end - cursor).read_to_end(&mut bytes)?;
+            cursor = end;
+            if cursor == range.end || cursor == len {
+                break;
+            }
+        }
     }
-    fn queue_finished_remote_cleanup(&self, run: &str) -> Result<()> {
-        self.engine.store().queue_finished_remote_cleanup(run)
+    if bytes.is_empty() && cursor < len && range.start != range.end {
+        return Err(anyhow!("Page not on this computer"));
     }
-    fn finish_log_collection(&self, run: &str) -> Result<()> {
-        self.engine.store().finish_log_collection(run)?;
-        self.engine
-            .bus
-            .publish(crate::engine::bus::RunEvent::LogCollection { run_id: run.into() });
-        Ok(())
-    }
-    fn transport_error(&self, run: &str, target: &ssh::SshTarget, cause: &str) -> Result<()> {
-        let transport = target
-            .transport
-            .as_ref()
-            .ok_or_else(|| anyhow!("Missing engine transport"))?;
-        self.engine
-            .observe(run, transport.ssh.disconnected(cause.into()))
-    }
+    Ok(LogPage::Data {
+        ident,
+        len: Some(len),
+        start: range.start,
+        bytes,
+        eof: cursor == len,
+    })
 }
 
 pub struct OpenResearch {
     engine: Arc<Engine>,
     transport: TransportFactory,
-    loops: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    bootstrap: tokio::sync::Mutex<Option<crate::jobs::rental::Heartbeat>>,
 }
 
 const REJECTED_KEY_GRACE_MS: i64 = 15 * 60 * 1000;
@@ -361,8 +244,255 @@ impl OpenResearch {
         Self {
             engine,
             transport,
-            loops: tokio::sync::Mutex::default(),
+            bootstrap: tokio::sync::Mutex::new(None),
         }
+    }
+
+    async fn release(&self, descriptor: &BackendDescriptor) -> Result<()> {
+        if let Some(rental) = &descriptor.rental_lease {
+            match rental.operation("release").await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if rental_deleted(descriptor).await? {
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let creds = crate::config::load_credentials()
+            .await?
+            .ok_or_else(|| anyhow!("Missing OpenResearch credentials"))?;
+        crate::jobs::openresearch::teardown(&creds, descriptor.openresearch_ref()?.1).await
+    }
+
+    async fn inspect(
+        &self,
+        watched: &WatchedRun,
+        budget: Duration,
+    ) -> Result<Vec<(String, Observation)>> {
+        let (mut stored, state) = self.engine.load(&watched.id)?;
+        if state.cancel_accepted_at.is_some() || phase_of(&stored)?.is_terminal() {
+            return Ok(Vec::new());
+        }
+        let mut descriptor =
+            descriptor(&handle_of(&stored).ok_or_else(|| anyhow!("Missing box handle"))?)?.clone();
+        if self
+            .cancel_rejected_key(&stored, &state.contact, &descriptor)
+            .await?
+        {
+            return Ok(Vec::new());
+        }
+        let Some(_gate) = self.engine.try_gate(&watched.id) else {
+            return Ok(Vec::new());
+        };
+        {
+            let age = Duration::from_millis(
+                self.engine
+                    .clock
+                    .wall_ms()
+                    .saturating_sub(stored.created_at)
+                    .max(0)
+                    .unsigned_abs(),
+            );
+            let remaining = crate::engine::runtime::PREPARATION_BUDGET.saturating_sub(age);
+            let mut bootstrap = self.bootstrap.lock().await;
+            if matches!(watched.handle, Handle::OpenResearch { .. })
+                && state.started_at.is_none()
+                && state.contact == crate::store::Contact::Live
+                && !remaining.is_zero()
+            {
+                if bootstrap.is_none() {
+                    *bootstrap = descriptor
+                        .rental_lease
+                        .as_ref()
+                        .map(|rental| rental.heartbeat().bounded(remaining));
+                }
+            } else {
+                bootstrap.take();
+            }
+        }
+        if matches!(watched.handle, Handle::OpenResearch { .. })
+            && descriptor.rental_lease.is_none()
+        {
+            self.release(&descriptor).await?;
+            return Ok(vec![(
+                watched.id.clone(),
+                Observation::Failed {
+                    finished_at: None,
+                    reason: "OpenResearch returned no supported rental lease; the box was deleted"
+                        .into(),
+                },
+            )]);
+        }
+        if descriptor.openresearch_ssh_target().is_none() {
+            let creds = crate::config::load_credentials()
+                .await?
+                .ok_or_else(|| anyhow!("Missing OpenResearch credentials"))?;
+            let sandbox = match crate::client::get_sandbox(&creds, descriptor.openresearch_ref()?.1)
+                .await
+            {
+                Ok(envelope) => envelope.sandbox,
+                Err(error) if crate::jobs::openresearch::is_not_found_error(&error.to_string()) => {
+                    return Ok(vec![(
+                        watched.id.clone(),
+                        Observation::Gone {
+                            reason: crate::plane::LABELS["run_notice_rental_outcome_unavailable"]
+                                .clone(),
+                        },
+                    )]);
+                }
+                Err(error) => return Err(error),
+            };
+            if sandbox.status == "failed" {
+                return Ok(vec![(
+                    watched.id.clone(),
+                    Observation::Failed {
+                        finished_at: None,
+                        reason: sandbox
+                            .failure_message
+                            .unwrap_or_else(|| "Box provisioning failed".into()),
+                    },
+                )]);
+            }
+            if sandbox.status != "online"
+                || sandbox.ssh_hostname.is_none()
+                || sandbox.ssh_port.is_none()
+                || sandbox.ssh_username.is_none()
+            {
+                return Ok(vec![(
+                    watched.id.clone(),
+                    Observation::Queued {
+                        detail: "Provisioning box".into(),
+                    },
+                )]);
+            }
+            descriptor.ssh_host = sandbox.ssh_hostname;
+            descriptor.ssh_port = sandbox.ssh_port;
+            descriptor.ssh_user = sandbox.ssh_username;
+            let handle = if matches!(watched.handle, Handle::OpenResearch { .. }) {
+                Handle::OpenResearch {
+                    descriptor: Box::new(descriptor.clone()),
+                }
+            } else {
+                Handle::Legacy {
+                    descriptor: Box::new(descriptor.clone()),
+                }
+            };
+            let metadata = BackendDescriptor::parse(&stored.backend_json)?;
+            stored.backend_json = handle::backend_json(&stored.id, Some(&handle), &metadata)?;
+            self.engine
+                .store()
+                .set_backend_json(&stored.id, &stored.backend_json)?;
+        }
+        let target = descriptor.openresearch_ssh_target().unwrap();
+        let transport = (self.transport)(&target)?;
+        if matches!(watched.handle, Handle::Legacy { .. }) {
+            let directory = format!("~/{}", crate::jobs::openresearch::run_dir(&watched.id));
+            return match transport
+                .ssh
+                .request(Request::InspectLegacy { dir: directory })
+                .await?
+            {
+                Response::InspectLegacy { inspection } => {
+                    let observation = if let Some(code) = inspection.exit_code {
+                        Observation::Exited {
+                            finished_at: None,
+                            code: Some(code),
+                            signal: None,
+                        }
+                    } else if inspection.alive {
+                        Observation::Running { started_at: None }
+                    } else {
+                        Observation::Queued {
+                            detail: "Waiting for the rental supervisor".into(),
+                        }
+                    };
+                    Ok(vec![(watched.id.clone(), observation)])
+                }
+                _ => Err(anyhow!("Unexpected legacy inspection")),
+            };
+        }
+        let _follow = transport.ssh.follow_logs(&watched.id);
+        let mut summary = transport
+            .ssh
+            .changes(
+                std::slice::from_ref(&watched.id),
+                budget.min(Duration::from_secs(1)),
+            )
+            .await?
+            .pop()
+            .ok_or_else(|| anyhow!("Missing box summary"))?
+            .1;
+        if matches!(
+            summary.state,
+            orx_host_proto::RunState::Missing | orx_host_proto::RunState::Staging
+        ) {
+            let (current, current_state) = self.engine.load(&watched.id)?;
+            if current_state.cancel_accepted_at.is_some() || phase_of(&current)?.is_terminal() {
+                return Ok(Vec::new());
+            }
+            let mut intent = RunIntent::new(stored, &state)?;
+            intent.launch.target = Some(transport.ssh.host.clone());
+            let command = crate::compute::staged_script(&intent.run.command);
+            let script = format!("export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; if ! command -v uv >/dev/null 2>&1; then curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/0.8.22/install.sh | env UV_NO_MODIFY_PATH=1 sh || exit; fi; {command}");
+            let script = crate::jobs::openresearch::wrap_with_timeout(
+                &script,
+                descriptor.timeout_secs.unwrap_or(4 * 3600),
+            );
+            intent.launch.options = serde_json::json!({ "run_sh": script });
+            let payload = transport
+                .ssh
+                .payload(&intent, &|| {
+                    self.engine
+                        .load(&watched.id)
+                        .map_or(true, |(_, state)| state.cancel_accepted_at.is_some())
+                })
+                .await
+                .map_err(|error| anyhow!("Box staging: {error:?}"))?;
+            let rental = descriptor
+                .rental_lease
+                .as_ref()
+                .ok_or_else(|| anyhow!("Missing rental capability"))?;
+            let directory = format!("{}/runs/{}", transport.ssh.root, watched.id);
+            let directory = if let Some(relative) = directory.strip_prefix("~/") {
+                let home = transport.execute("printf '%s' \"$HOME\"", &[]).await?;
+                format!("{}/{relative}", home.trim_end_matches('/'))
+            } else {
+                directory
+            };
+            let path = ssh::sh_quote(&directory);
+            let setup = format!("umask 077; mkdir -p {path}; cat > {path}/rental.json.tmp && mv {path}/rental.json.tmp {path}/rental.json");
+            let config = crate::jobs::rental::RemoteConfig {
+                rental: rental.clone(),
+                directory,
+            };
+            transport
+                .execute(&setup, &serde_json::to_vec(&config)?)
+                .await?;
+            if self
+                .engine
+                .load(&watched.id)?
+                .1
+                .cancel_accepted_at
+                .is_some()
+            {
+                return Ok(Vec::new());
+            }
+            summary = match transport.ssh.request(Request::Launch(payload)).await? {
+                Response::Launch { summary } => summary,
+                _ => return Err(anyhow!("Unexpected box launch reply")),
+            };
+        }
+        if !matches!(
+            summary.state,
+            orx_host_proto::RunState::Missing
+                | orx_host_proto::RunState::Staging
+                | orx_host_proto::RunState::Starting
+        ) {
+            self.bootstrap.lock().await.take();
+        }
+        Ok(super::ssh::observations(watched.id.clone(), &summary))
     }
 
     async fn cancel_rejected_key(
@@ -412,10 +542,6 @@ impl OpenResearch {
         }
 
         if released {
-            if let Some(task) = self.loops.lock().await.remove(&run.id) {
-                task.abort();
-                let _ = task.await;
-            }
             self.engine.observe(
                 &run.id,
                 Observation::Gone {
@@ -433,14 +559,6 @@ impl OpenResearch {
         }
 
         Ok(true)
-    }
-}
-
-impl Drop for OpenResearch {
-    fn drop(&mut self) {
-        for task in self.loops.get_mut().values() {
-            task.abort();
-        }
     }
 }
 
@@ -509,7 +627,7 @@ impl Backend for OpenResearch {
                         "Could not delete box {} after an unsupported rental lease: {error}",
                         created.sandbox.id
                     );
-                    return Ok(Handle::Legacy {
+                    return Ok(Handle::OpenResearch {
                         descriptor: Box::new(descriptor),
                     });
                 }
@@ -521,141 +639,125 @@ impl Backend for OpenResearch {
             token: lease.token,
             unknown: Default::default(),
         });
-        Ok(Handle::Legacy {
+        Ok(Handle::OpenResearch {
             descriptor: Box::new(descriptor),
         })
     }
     async fn recover(&self, _intent: &RunIntent) -> Recovery {
         super::api::unknown("OpenResearch provisioning outcome has no recorded sandbox id")
     }
-    async fn observe(&self, runs: &[WatchedRun], _budget: Duration) -> Vec<(String, Observation)> {
-        for run in runs {
-            if !matches!(self.engine.own(&run.id), Ok(true)) {
+    async fn observe(&self, runs: &[WatchedRun], budget: Duration) -> Vec<(String, Observation)> {
+        let mut observations = Vec::new();
+        for watched in runs {
+            if !matches!(self.engine.own(&watched.id), Ok(true)) {
                 continue;
             }
-            let Handle::Legacy { .. } = &run.handle else {
-                continue;
-            };
-            let Ok((stored, state)) = self.engine.load(&run.id) else {
-                continue;
-            };
-            if stored.cancel_requested
-                || state.cancel_accepted_at.is_some()
-                || phase_of(&stored).is_ok_and(Phase::is_terminal)
-            {
-                continue;
-            }
-            let Some(Handle::Legacy { descriptor }) = handle_of(&stored) else {
-                continue;
-            };
-            let descriptor = *descriptor;
-            if descriptor.kind != "openresearch_job" {
-                continue;
-            }
-            match self
-                .cancel_rejected_key(&stored, &state.contact, &descriptor)
-                .await
-            {
-                Ok(true) => continue,
-                Ok(false) => {}
+            let result = self.inspect(watched, budget).await;
+            match result {
+                Ok(mut changes) => observations.append(&mut changes),
                 Err(error) => {
-                    eprintln!("Rental auto-cancel unavailable for {}: {error}", run.id);
-                    continue;
-                }
-            }
-            let mut tasks = self.loops.lock().await;
-            if tasks.get(&run.id).is_some_and(|task| !task.is_finished()) {
-                continue;
-            }
-            let sink = EngineSink {
-                engine: self.engine.clone(),
-            };
-            let factory = self.transport.clone();
-            let id = run.id.clone();
-            tasks.insert(
-                run.id.clone(),
-                tokio::spawn(async move {
-                    if let Err(error) = crate::commands::supervise::run_openresearch_loop(
-                        &sink,
-                        stored,
-                        descriptor,
-                        id.clone(),
-                        Some(factory),
-                    )
-                    .await
-                    {
-                        let current = sink.engine.load(&id).ok().map(|(_, state)| state.contact);
-                        if !matches!(current, Some(crate::store::Contact::NeedsAuth { .. })) {
-                            let _ = sink.engine.observe(
-                                &id,
-                                Observation::Unreachable {
-                                    cause: error.to_string(),
+                    self.bootstrap.lock().await.take();
+                    if let Ok(descriptor) = descriptor(&watched.handle) {
+                        if rental_deleted(descriptor).await.unwrap_or(false) {
+                            observations.push((
+                                watched.id.clone(),
+                                Observation::Gone {
+                                    reason: crate::plane::LABELS
+                                        ["run_notice_rental_outcome_unavailable"]
+                                        .clone(),
                                 },
-                            );
+                            ));
+                            continue;
                         }
                     }
-                }),
-            );
+                    let observation = descriptor(&watched.handle)
+                        .ok()
+                        .and_then(BackendDescriptor::openresearch_ssh_target)
+                        .and_then(|target| (self.transport)(&target).ok())
+                        .map_or_else(
+                            || Observation::Unreachable {
+                                cause: error.to_string(),
+                            },
+                            |transport| transport.ssh.disconnected(error.to_string()),
+                        );
+                    observations.push((watched.id.clone(), observation));
+                }
+            }
         }
-        vec![]
+        observations
     }
     async fn cancel(&self, run: &WatchedRun) -> CancelOutcome {
-        let Handle::Legacy { descriptor } = &run.handle else {
+        self.bootstrap.lock().await.take();
+        let Ok(descriptor) = descriptor(&run.handle) else {
             return CancelOutcome::Pending;
         };
-
-        if let Some(task) = self.loops.lock().await.remove(&run.id) {
-            task.abort();
-            let _ = task.await;
-        }
-
-        let released = async {
-            if let Some(rental) = &descriptor.rental_lease {
-                rental.operation("release").await
-            } else {
-                let (_, sandbox) = descriptor.openresearch_ref()?;
-                let creds = crate::config::load_credentials()
-                    .await?
-                    .ok_or_else(|| anyhow!("Missing OpenResearch credentials"))?;
-                crate::jobs::openresearch::teardown(&creds, sandbox).await
-            }
-        }
-        .await;
-
-        match released {
-            Ok(()) => {
-                if let Some(target) = descriptor.openresearch_ssh_target() {
-                    let kept = (|| {
-                        let transport = (self.transport)(&target)?;
-                        let data_dir = transport
-                            .log_dir
-                            .parent()
-                            .ok_or_else(|| anyhow!("Missing log parent"))?;
-                        if crate::commands::up::api_v2::kept_ranges(data_dir, &run.id)?
-                            .iter()
-                            .any(|range| range.eof)
-                        {
-                            self.engine.store().finish_log_collection(&run.id)?;
-                        }
-                        Ok::<_, crate::error::Error>(())
-                    })();
-                    if let Err(error) = kept {
-                        eprintln!("Could not settle cancelled run {}'s log: {error}", run.id);
-                    }
+        if let Some(target) = descriptor.openresearch_ssh_target() {
+            if let Ok(transport) = (self.transport)(&target) {
+                if matches!(run.handle, Handle::OpenResearch { .. }) {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        transport.ssh.request(Request::Cancel {
+                            run: run.id.clone(),
+                        }),
+                    )
+                    .await;
                 }
-                CancelOutcome::Verified
+                let mut progressed = false;
+                let collected = crate::engine::runtime::Runtime::collect_log(
+                    transport.log_dir.parent().unwrap(),
+                    self,
+                    run,
+                    &mut progressed,
+                );
+                let _ = tokio::time::timeout(Duration::from_secs(3), collected).await;
             }
+        }
+        let released = self.release(descriptor).await;
+        match released {
+            Ok(()) => CancelOutcome::Verified,
             Err(error) => CancelOutcome::Undelivered {
                 detail: error.to_string(),
             },
         }
     }
-    async fn unwatch(&self, run: &WatchedRun) {
-        let task = self.loops.lock().await.remove(&run.id);
-        if let Some(task) = task {
-            let _ = task.await;
+
+    async fn finish(&self, run: &WatchedRun) -> Result<()> {
+        self.bootstrap.lock().await.take();
+        let descriptor = descriptor(&run.handle)?;
+        let (_, state) = self.engine.load(&run.id)?;
+        if state.cancel_accepted_at.is_some() && state.contact == crate::store::Contact::Live {
+            return Ok(());
         }
+        let transport = descriptor
+            .openresearch_ssh_target()
+            .and_then(|target| (self.transport)(&target).ok());
+        if let Some(transport) = &transport {
+            let directory = match run.handle {
+                Handle::OpenResearch { .. } => format!("{}/runs/{}", transport.ssh.root, run.id),
+                _ => format!("~/{}", crate::jobs::openresearch::run_dir(&run.id)),
+            };
+            let command = format!(
+                "touch {}/final_collected",
+                ssh::shell_path(directory.strip_prefix("~/").unwrap_or(&directory))
+            );
+            let _ = tokio::time::timeout(Duration::from_secs(3), transport.execute(&command, &[]))
+                .await;
+        }
+        self.release(descriptor).await?;
+        if let Some(transport) = transport {
+            let data_dir = transport
+                .log_dir
+                .parent()
+                .ok_or_else(|| anyhow!("Missing log parent"))?;
+            let mut ranges = crate::commands::up::api_v2::kept_ranges(data_dir, &run.id)?;
+            if let Some(last) = ranges.last_mut() {
+                last.eof = true;
+                crate::commands::up::api_v2::keep_ranges(data_dir, &run.id, ranges)?;
+            }
+        }
+        Ok(())
     }
+
     async fn read_log(
         &self,
         run: &WatchedRun,
@@ -663,27 +765,157 @@ impl Backend for OpenResearch {
         range: ByteRange,
         ident: Option<&FileIdent>,
     ) -> Result<LogPage> {
-        let Handle::Legacy { descriptor } = &run.handle else {
-            return Err(anyhow!("Not a legacy run"));
+        let descriptor = descriptor(&run.handle)?;
+        let Some(target) = descriptor.openresearch_ssh_target() else {
+            return Ok(LogPage::Reset { info: None });
         };
-        let target = descriptor
-            .openresearch_ssh_target()
-            .ok_or_else(|| anyhow!("Sandbox has no SSH endpoint"))?;
-        (self.transport)(&target)?
-            .page(
-                &crate::jobs::openresearch::run_dir(&run.id),
-                file,
-                range,
-                ident.cloned(),
-                None,
-            )
-            .await
+        let transport = (self.transport)(&target)?;
+        let (stored, state) = self.engine.load(&run.id)?;
+        let released = phase_of(&stored)?.is_terminal()
+            && state.cancel_accepted_at.is_some()
+            && state.contact == crate::store::Contact::Live;
+        let page = if released {
+            Err(anyhow!("Rental released"))
+        } else if matches!(run.handle, Handle::OpenResearch { .. }) {
+            let native = WatchedRun {
+                id: run.id.clone(),
+                handle: transport.ssh.handle(),
+            };
+            transport
+                .ssh
+                .read_log(&native, file, range.clone(), ident)
+                .await
+        } else {
+            match transport
+                .ssh
+                .request(Request::ReadLog {
+                    target: LogTarget::Dir(super::ssh::legacy_dir(
+                        &crate::jobs::openresearch::run_dir(&run.id),
+                    )),
+                    file,
+                    range: range.clone(),
+                    ident: ident.cloned(),
+                    anchor: None,
+                })
+                .await
+            {
+                Ok(Response::ReadLog { page }) => Ok(page),
+                Ok(_) => Err(anyhow!("Unexpected box log reply")),
+                Err(error) => Err(error),
+            }
+        };
+        match page {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                let gone = released || rental_deleted(descriptor).await?;
+                if !gone {
+                    return Err(error);
+                }
+                if file != LogFile::Log {
+                    return Ok(LogPage::Reset { info: None });
+                }
+                kept_page(&transport.log_dir, &run.id, range, ident)
+            }
+        }
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn round_two_rotated_log_discards_obsolete_tail_partial() {
+        let root = std::env::temp_dir().join(format!("orx-rotated-part-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("run-logs");
+        std::fs::create_dir_all(&directory).unwrap();
+        let previous = FileIdent { dev: 2, ino: 1 };
+        let current = FileIdent { dev: 2, ino: 2 };
+        let payload = b"generation B\n";
+        let backend = crate::engine::fake::FakeBackend::default();
+        *backend.log.lock().unwrap() = crate::engine::fake::HostFile {
+            bytes: payload.to_vec(),
+            ino: current.ino,
+        };
+        for cached in [false, true] {
+            let run = WatchedRun {
+                id: format!("cached-{cached}"),
+                handle: Handle::Local {
+                    dir: "/unused".into(),
+                },
+            };
+            if cached {
+                crate::engine::runtime::Runtime::collect_log(&root, &backend, &run, &mut false)
+                    .await
+                    .unwrap();
+            }
+            let part = directory.join(format!("{}.tail.log.part", run.id));
+            let marker = directory.join(format!("{}.tail.log.part.json", run.id));
+            std::fs::write(&part, b"generation A tail").unwrap();
+            std::fs::write(
+                &marker,
+                serde_json::to_vec(&(&previous, 1u64 << 30, 17u64)).unwrap(),
+            )
+            .unwrap();
+            crate::engine::runtime::Runtime::collect_log(&root, &backend, &run, &mut false)
+                .await
+                .unwrap();
+            assert!(
+                matches!(kept_page(&directory, &run.id, ByteRange { start: 0, end: payload.len() as u64 }, Some(&current)).unwrap(),
+                LogPage::Data { bytes, ident, eof: true, .. } if bytes == payload && ident == current)
+            );
+            assert_eq!(
+                std::fs::read(directory.join(format!("{}.log", run.id))).unwrap(),
+                payload
+            );
+            assert!(!part.exists());
+            assert!(!marker.exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn round_one_released_rental_preserves_synced_partial_ranges() {
+        let root =
+            std::env::temp_dir().join(format!("orx-released-parts-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("run-logs");
+        std::fs::create_dir_all(&directory).unwrap();
+        let ident = FileIdent { dev: 1, ino: 2 };
+        for (run, tail) in [("short", None), ("sparse", Some((1u64 << 30) + 100))] {
+            for (suffix, offset, synced) in
+                std::iter::once(("log", 0, 49)).chain(tail.map(|offset| ("tail.log", offset, 17)))
+            {
+                std::fs::write(
+                    directory.join(format!("{run}.{suffix}.part")),
+                    vec![b'x'; synced + 31],
+                )
+                .unwrap();
+                std::fs::write(
+                    directory.join(format!("{run}.{suffix}.part.json")),
+                    serde_json::to_vec(&(&ident, offset, synced as u64)).unwrap(),
+                )
+                .unwrap();
+            }
+            let expected_len = tail.map_or(49, |offset| offset + 17);
+            assert!(
+                matches!(kept_page(&directory, run, ByteRange { start: u64::MAX - 1, end: u64::MAX }, None).unwrap(),
+                LogPage::Reset { info: Some(info) } if info.ident == ident && info.len == expected_len)
+            );
+            for (offset, len) in std::iter::once((0, 49)).chain(tail.map(|offset| (offset, 17))) {
+                assert!(
+                    matches!(kept_page(&directory, run, ByteRange { start: offset, end: offset + len }, Some(&ident)).unwrap(),
+                    LogPage::Data { bytes, .. } if bytes == vec![b'x'; len as usize])
+                );
+            }
+            let kept = crate::commands::up::api_v2::kept_ranges(&root, run).unwrap();
+            assert!(kept.last().unwrap().eof);
+            assert_eq!(
+                kept.iter().map(|range| range.len).sum::<u64>(),
+                if tail.is_some() { 66 } else { 49 }
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rejected_key_grace_requires_continuous_auth_failure_and_live_contact_in_this_run() {
@@ -824,117 +1056,5 @@ mod tests {
             &host,
             200 + 15 * 60_000
         ));
-    }
-
-    #[test]
-    fn engine_sink_records_payload_start_and_keeps_legacy_lease_and_terminal_reason() {
-        let root = std::env::temp_dir().join(format!("orx-legacy-sink-{}", uuid::Uuid::new_v4()));
-        let engine = Arc::new(super::super::api_tests::engine(&root));
-        let descriptor = BackendDescriptor::parse(r#"{"kind":"openresearch_job","namespace":"org","jobId":"box","rentalLease":{"apiUrl":"https://example.invalid","sandboxId":"box","token":"private"}}"#).unwrap();
-        let run = StoredRun {
-            id: "run".into(),
-            experiment_id: "exp".into(),
-            project_id: "proj".into(),
-            status: "starting".into(),
-            backend_json: descriptor.to_json(),
-            command: "true".into(),
-            created_at: 1,
-            updated_at: 1,
-            ended_at: None,
-            exit_code: None,
-            commit_sha: None,
-            result_markdown: None,
-            cancel_requested: false,
-            cancel_reason: None,
-            chat_session_id: Some("chat".into()),
-        };
-        engine.store().upsert_run(&run).unwrap();
-        let sink = EngineSink {
-            engine: engine.clone(),
-        };
-        sink.set_backend_json("run", &descriptor.to_json()).unwrap();
-        let stored = sink.get_run("run").unwrap().unwrap();
-        let Some(Handle::Legacy { descriptor: saved }) = handle_of(&stored) else {
-            panic!("lost legacy envelope");
-        };
-        assert_eq!(saved.rental_lease.unwrap().token, "private");
-        sink.update_status("run", RunStatus::Starting, None, None)
-            .unwrap();
-        assert_eq!(engine.load("run").unwrap().0.status, "starting");
-        assert_eq!(engine.load("run").unwrap().1.started_at, None);
-        sink.update_status("run", RunStatus::Running, None, None)
-            .unwrap();
-        assert_eq!(engine.load("run").unwrap().0.status, "running");
-        assert!(engine.load("run").unwrap().1.started_at.is_some());
-        sink.finish(
-            "run",
-            RunStatus::Failed,
-            Some(7),
-            Some("Job failed: payload exited 7"),
-        )
-        .unwrap();
-        let notices = engine.store().run_notice_batch("chat").unwrap();
-        assert_eq!(notices.len(), 1);
-        assert!(notices[0].body.contains("payload exited 7"));
-
-        let pending = StoredRun {
-            id: "pending-stop".into(),
-            status: "running".into(),
-            ..run.clone()
-        };
-        engine.store().upsert_run(&pending).unwrap();
-        engine
-            .store()
-            .accept_run_cancel(&pending.id, Some("user"))
-            .unwrap();
-        sink.finish(&pending.id, RunStatus::Failed, None, None)
-            .unwrap();
-        sink.update_status(&pending.id, RunStatus::Cancelled, None, None)
-            .unwrap();
-        assert_eq!(engine.load(&pending.id).unwrap().0.status, "running");
-
-        engine
-            .observe(
-                &pending.id,
-                Observation::Unreachable {
-                    cause: "offline".into(),
-                },
-            )
-            .unwrap();
-        assert!(engine.abandon(&pending.id).unwrap());
-        sink.finish(&pending.id, RunStatus::Cancelled, None, None)
-            .unwrap();
-        let (abandoned, state) = engine.load(&pending.id).unwrap();
-        assert_eq!(abandoned.status, "lost");
-        assert_ne!(state.contact, crate::store::Contact::Live);
-
-        // The shipped Store sink keeps the old descriptor and writes no engine notices.
-        let store = std::sync::Mutex::new(Store::open_at(root.join("legacy")).unwrap());
-        store.lock().unwrap().upsert_run(&run).unwrap();
-        store
-            .set_backend_json("run", &descriptor.to_json())
-            .unwrap();
-        store
-            .finish(
-                "run",
-                RunStatus::Failed,
-                Some(7),
-                Some("Job failed: payload exited 7"),
-            )
-            .unwrap();
-        let legacy = store.get_run("run").unwrap().unwrap();
-        assert_eq!(legacy.backend_json, descriptor.to_json());
-        assert_eq!(legacy.status, "failed");
-        assert_eq!(legacy.exit_code, Some(7));
-        assert!(store
-            .lock()
-            .unwrap()
-            .run_notice_batch("chat")
-            .unwrap()
-            .is_empty());
-        drop(store);
-        drop(sink);
-        drop(engine);
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

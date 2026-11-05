@@ -65,6 +65,14 @@ impl Rental {
 }
 
 pub struct Heartbeat(tokio::task::JoinHandle<()>);
+impl Heartbeat {
+    pub(crate) fn bounded(self, duration: Duration) -> Self {
+        Self(tokio::spawn(async move {
+            let _heartbeat = self;
+            tokio::time::sleep(duration).await;
+        }))
+    }
+}
 impl Drop for Heartbeat {
     fn drop(&mut self) {
         self.0.abort();
