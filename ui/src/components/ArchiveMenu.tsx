@@ -110,7 +110,7 @@ export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = 
                 {actions.remove && <Menu.Item nativeButton render={<MenuItem danger className="data-highlighted:bg-surface" />} onClick={() => {
                   showConfirmDialog({
                     title: m.tree_delete_experiment(),
-                    description: m.tree_delete_experiment_confirm({ name }),
+                    description: `${m.tree_delete_experiment_confirm({ name })}\n\n${m.delete_pending_stop_warning()}`,
                     destructive: true,
                     confirmLabel: m.chat_panel_delete(),
                     onConfirm: () => onDelete(id),

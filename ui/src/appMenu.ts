@@ -48,6 +48,8 @@ const appMenu: AppMenu[] = [
     { kind: "native", name: "copy", label: m.menu_copy(), hotkey: "Mod+C" },
     { kind: "native", name: "paste", label: m.menu_paste(), hotkey: "Mod+V" },
     { kind: "native", name: "select_all", label: m.menu_select_all(), hotkey: "Mod+A" },
+    { kind: "separator" },
+    command(appHotkeys["chat.find"]),
   ] },
   { id: "view", label: m.menu_view(), items: [
     command(appHotkeys["sidebar.toggle"], { checked: false }),

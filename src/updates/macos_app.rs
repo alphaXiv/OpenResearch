@@ -273,7 +273,7 @@ async fn ensure_replaceable(root: &Path) -> Result<()> {
 /// The Apple team identifier a bundle is signed by, or `None` when it is
 /// unsigned or unreadable.
 async fn team_id(root: &Path) -> Option<String> {
-    let out = tokio::process::Command::new("/usr/bin/codesign")
+    let out = crate::process::tokio_command("/usr/bin/codesign")
         .args(["-dv", "--verbose=4"])
         .arg(root)
         .output()
@@ -399,7 +399,7 @@ async fn copy_verified_app(mount: &Path, staging: &Path) -> Result<PathBuf> {
 
     // codesign proves who signed it; only Gatekeeper's assessment proves Apple
     // notarized it, which is what catches a validly-signed but revoked build.
-    let assess = tokio::process::Command::new("/usr/sbin/spctl")
+    let assess = crate::process::tokio_command("/usr/sbin/spctl")
         .args(["--assess", "--type", "exec", "-vv"])
         .arg(&source)
         .output()
@@ -513,7 +513,7 @@ fn is_leftover(name: &str, bundle: &str) -> bool {
 
 /// Mount `dmg` read-only and return its mount point.
 async fn attach(dmg: &Path) -> Result<PathBuf> {
-    let out = tokio::process::Command::new("/usr/bin/hdiutil")
+    let out = crate::process::tokio_command("/usr/bin/hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-noautoopen"])
         .arg(dmg)
         .output()
@@ -557,7 +557,7 @@ fn mount_point(stdout: &str) -> Option<PathBuf> {
 }
 
 async fn detach(mount: &Path) {
-    let _ = tokio::process::Command::new("/usr/bin/hdiutil")
+    let _ = crate::process::tokio_command("/usr/bin/hdiutil")
         .arg("detach")
         .arg(mount)
         .arg("-force")
@@ -567,7 +567,7 @@ async fn detach(mount: &Path) {
 
 /// Run a helper that must succeed, folding its stderr into `context`.
 async fn run_tool(program: &str, args: &[String], context: &str) -> Result<()> {
-    let out = tokio::process::Command::new(program)
+    let out = crate::process::tokio_command(program)
         .args(args)
         // So a timeout around this call doesn't leave a hung helper behind.
         .kill_on_drop(true)

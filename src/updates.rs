@@ -1270,23 +1270,10 @@ fn spawn_background_update() {
 }
 
 /// The `orx update --background` invocation both spawn sites use.
-///
-/// The environment is the load-bearing part: in macOS app mode the user's real
-/// `XDG_CONFIG_HOME`/`ORX_DATA_DIR` live only in this process (`shell_env::set`
-/// deliberately avoids `env::set_var`), so a child left to inherit launchd's
-/// environment would take its lock and write its cache under a *different*
-/// config dir than the parent reads — losing the restart signal and the backoff,
-/// and failing to serialize against a terminal `orx update`.
 fn updater_command() -> Result<tokio::process::Command> {
-    let mut cmd = tokio::process::Command::new(crate::paths::spawnable_exe()?);
+    let mut cmd = crate::process::tokio_command(crate::paths::spawnable_exe()?);
     cmd.args(["update", "--background"])
         .stdin(std::process::Stdio::null());
-    if let Some(path) = crate::local::shell_env::search_path() {
-        cmd.env("PATH", path);
-    }
-    crate::local::shell_env::export_to(|key, value| {
-        cmd.env(key, value);
-    });
     // Own process group, so a Ctrl-C — or an agent killing the group it spawned
     // `orx` in — can't land between the two renames that swap the binary.
     #[cfg(unix)]
@@ -1505,7 +1492,7 @@ pub async fn updated_exe_on_disk() -> bool {
         return false;
     };
     if current_channel().is_ok_and(|channel| channel.has_release_channels()) {
-        let Ok(out) = tokio::process::Command::new(exe)
+        let Ok(out) = crate::process::tokio_command(exe)
             .args(["--no-telemetry", "version", "--build-id"])
             .output()
             .await
@@ -1517,7 +1504,7 @@ pub async fn updated_exe_on_disk() -> bool {
             && !on_disk.trim().is_empty()
             && on_disk.trim() != current_build_id();
     }
-    let Ok(out) = tokio::process::Command::new(exe)
+    let Ok(out) = crate::process::tokio_command(exe)
         .arg("--version")
         .output()
         .await
@@ -1672,7 +1659,7 @@ pub fn relaunch(port: u16) -> std::io::Error {
         // AppRun adds `app`, which the exec below's `--no-browser` would undo.
         let mut app = match running_appimage() {
             Some(appimage) => {
-                let mut app = std::process::Command::new(appimage);
+                let mut app = crate::process::command(appimage);
                 // Or the new AppRun would save this image's GTK settings as the session's.
                 crate::local::shell_env::restore_host_gui_env(&mut app);
                 app
@@ -1681,7 +1668,7 @@ pub fn relaunch(port: u16) -> std::io::Error {
                 let Ok(exe) = crate::paths::spawnable_exe() else {
                     return std::io::Error::other("could not resolve the running executable");
                 };
-                let mut app = std::process::Command::new(exe);
+                let mut app = crate::process::command(exe);
                 app.arg(crate::commands::app::APP_ARG);
                 app
             }
@@ -1697,7 +1684,7 @@ pub fn relaunch(port: u16) -> std::io::Error {
     let Ok(exe) = crate::paths::spawnable_exe() else {
         return std::io::Error::other("could not resolve the running executable");
     };
-    std::process::Command::new(exe)
+    crate::process::command(exe)
         .args(relaunch_args(std::env::args_os().skip(1)))
         .exec()
 }
@@ -1728,7 +1715,7 @@ fn relaunch_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi
 
 #[cfg(target_os = "macos")]
 fn relaunch_app_bundle(root: &Path, port: u16) -> std::io::Error {
-    let spawned = std::process::Command::new("/bin/sh")
+    let spawned = crate::process::command("/bin/sh")
         .arg("-c")
         .arg(r#"while kill -0 "$1" 2>/dev/null; do sleep 0.1; done; exec open -n --env "$3" "$2""#)
         .arg("sh")

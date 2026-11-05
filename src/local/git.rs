@@ -157,21 +157,17 @@ fn long_paths() -> &'static [&'static str] {
     }
 }
 
-/// `git` resolved on, and run with, the user's shell PATH: a Finder-launched
-/// app's launchd PATH finds only `/usr/bin/git`, which needs the Xcode CLT.
+#[cfg(not(windows))]
 pub fn git_command() -> Command {
-    let mut command = match super::shell_env::find_on_path("git") {
-        Some(path) => Command::new(path),
-        None => Command::new("git"),
-    };
-    if let Some(paths) = super::shell_env::search_path() {
-        command.env("PATH", paths);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
+    crate::process::command("git")
+}
+
+/// `git`, without a console window.
+#[cfg(windows)]
+pub fn git_command() -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut command = crate::process::command("git");
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     command
 }
 
@@ -1879,7 +1875,7 @@ pub fn spawn_branch_publication(
     repo: &str,
 ) -> Result<()> {
     let executable = crate::paths::spawnable_exe()?;
-    let mut command = Command::new(executable);
+    let mut command = crate::process::command(executable);
     command
         .arg("publish-branch")
         .arg(repo_path)
@@ -1889,9 +1885,6 @@ pub fn spawn_branch_publication(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(paths) = super::shell_env::search_path() {
-        command.env("PATH", paths);
-    }
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]

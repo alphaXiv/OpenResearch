@@ -1023,7 +1023,7 @@ pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Resu
 fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
 
-    let output = std::process::Command::new("cmd")
+    let output = crate::process::command("cmd")
         .arg("/d")
         .arg("/c")
         .raw_arg(format!(

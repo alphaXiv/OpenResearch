@@ -435,7 +435,7 @@ mod tests {
 
         let home = std::env::temp_dir().join(format!("orx-login-home-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&home).unwrap();
-        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = crate::process::tokio_command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "commands::login::tests::sign_in_never_creates_or_uploads_an_ssh_key",
@@ -487,7 +487,7 @@ mod tests {
         // runs in a child process with its own config dir.
         if std::env::var("ORX_LOGIN_TEST_CHILD").is_err() {
             let root = std::env::temp_dir().join(format!("orx-login-{}", uuid::Uuid::new_v4()));
-            let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+            let status = crate::process::tokio_command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "commands::login::tests::one_browser_trip_signs_in_or_links",

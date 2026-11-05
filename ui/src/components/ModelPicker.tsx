@@ -270,8 +270,7 @@ function SettingsSubmenu({
   );
 }
 
-/** Composer selector: pick the harness + model new sessions (and same-harness
- * turns) run on. Groups mirror the Harnesses settings tab. */
+/** Composer selector for the chat's harness and model. */
 export function ModelPicker({
   value,
   onSelect,
@@ -285,6 +284,7 @@ export function ModelPicker({
   autonomy,
   onSelectAutonomy,
   lockHarness = false,
+  disabled = false,
   openRequest = 0,
   className,
   sessionHarness,
@@ -304,6 +304,7 @@ export function ModelPicker({
   autonomy?: Autonomy;
   onSelectAutonomy?: (autonomy: Autonomy) => void;
   lockHarness?: boolean;
+  disabled?: boolean;
   openRequest?: number;
   className?: string;
   sessionHarness?: Harness;
@@ -341,10 +342,11 @@ export function ModelPicker({
   useEffect(() => {
     if (openRequest === handledOpenRequest.current) return;
     handledOpenRequest.current = openRequest;
+    if (disabled) return;
     setFilter("");
     setMenu("model");
     searchRef.current?.focus();
-  }, [openRequest]);
+  }, [openRequest, disabled]);
 
   const groups = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -377,6 +379,7 @@ export function ModelPicker({
   }, [harnesses, filter, lockHarness, value]);
 
   const pick = (harness: Harness, model: string | null) => {
+    if (disabled) return;
     const previous = value?.harness === harness.id ? value : null;
 
     onSelect({
@@ -460,7 +463,7 @@ export function ModelPicker({
         data-onboarding="model-picker"
       >
         <Popover.Root
-          open={menu === "model"}
+          open={!disabled && menu === "model"}
           onOpenChange={(open) => {
             setFilter("");
             setMenu((current) => (open ? "model" : current === "model" ? null : current));
@@ -470,6 +473,7 @@ export function ModelPicker({
             <Popover.Trigger
               ref={modelTriggerRef}
               type="button"
+              disabled={disabled}
               className={cn(PILL, "max-w-full", className)}
               aria-label={m.a11y_chat_model({ label })}
               onKeyDown={(event) => {
@@ -705,11 +709,12 @@ export function ModelPicker({
         </Popover.Root>
         {(reasoningChoices.length > 0 || nativeOptions.length > 0 || fastChoice) && (
           <Menu.Root
-            open={menu === "effort"}
+            open={!disabled && menu === "effort"}
             modal={false}
             onOpenChange={(open) => setMenu((current) => (open ? "effort" : current === "effort" ? null : current))}
           >
             <Menu.Trigger
+              disabled={disabled}
               className={PILL}
               aria-label={[
                 reasoningLabel ? `${m.model_picker_effort()}: ${reasoningLabel}` : m.model_picker_effort(),
@@ -804,12 +809,13 @@ export function ModelPicker({
         )}
         {(permissionChoices.length > 0 || onSelectAutonomy) && (
           <Menu.Root
-            open={menu === "permissions"}
+            open={!disabled && menu === "permissions"}
             modal={false}
             onOpenChange={(open) => setMenu((current) => (open ? "permissions" : current === "permissions" ? null : current))}
           >
             <Tooltip interactive content={[permissionLabel, autonomyLabel].filter(Boolean).join(" · ")} className="rounded-md">
               <Menu.Trigger
+                disabled={disabled}
                 className={PILL}
                 aria-label={`${m.model_picker_permissions()}: ${[permissionLabel, autonomyLabel].filter(Boolean).join(", ")}`}
               >
@@ -862,7 +868,7 @@ export function ModelPicker({
           </Menu.Root>
         )}
       </div>
-      <EscapeScope enabled={menu !== null} onEscape={() => setMenu(null)} />
+      <EscapeScope enabled={menu !== null} onEscape={close} />
       <EscapeScope enabled={menu === "model" && legacyMenu !== null} onEscape={() => setLegacyMenu(null)} />
     </DirectionProvider>
   );

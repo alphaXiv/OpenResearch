@@ -128,6 +128,8 @@ pub enum HarnessAuthState {
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     /// Reasoning/effort choices this *specific* model accepts, led by the
     /// `Default` sentinel. `None` means "this model has no list of its own" —
     /// the composer then falls back to the harness-wide
@@ -173,6 +175,7 @@ impl ModelInfo {
     pub(super) fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            context_window: None,
             reasoning_levels: None,
             display_name: None,
             description: None,
@@ -787,7 +790,7 @@ pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
     if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
         return BinProbe::Answered(Some(version));
     }
-    let mut cmd = tokio::process::Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("--version").stdin(std::process::Stdio::null());
     // An unparseable version downgrades a signed-in harness to `Unknown` —
     // which is why a synced `FORCE_COLOR` must not reach the version line.

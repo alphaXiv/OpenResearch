@@ -189,16 +189,30 @@ impl Delegated {
         let mut command = if self.shell_commands.load(Ordering::Relaxed) && request.args.is_empty()
         {
             #[cfg(unix)]
-            let mut command = tokio::process::Command::new("/bin/sh");
+            let mut command = crate::process::tokio_command("/bin/sh");
             #[cfg(unix)]
             command.args(["-c", &request.command]);
             #[cfg(windows)]
-            let mut command = tokio::process::Command::new("cmd.exe");
+            let mut command = crate::process::tokio_command("cmd.exe");
             #[cfg(windows)]
             command.args(["/D", "/S", "/C", &request.command]);
             command
         } else {
-            tokio::process::Command::new(request.command)
+            // A PATH the agent sends picks its program, relative entries from the cwd.
+            let bare = !request.command.contains(['/', '\\']);
+            let is_path =
+                |name: &str| name == "PATH" || cfg!(windows) && name.eq_ignore_ascii_case("PATH");
+            let program = request
+                .env
+                .iter()
+                .rfind(|variable| bare && is_path(&variable.name))
+                .and_then(|path| {
+                    let dirs = std::env::split_paths(&path.value).map(|dir| cwd.join(dir));
+                    let paths = std::env::join_paths(dirs).ok()?;
+                    crate::local::shell_env::search_in(&paths, &request.command)
+                })
+                .unwrap_or_else(|| PathBuf::from(&request.command));
+            crate::process::tokio_command(program)
         };
         command
             .args(request.args)
@@ -395,6 +409,41 @@ mod tests {
             .await
             .unwrap();
         assert!(delegated.request("terminal/output", params).await.is_err());
+    }
+
+    /// The stand-in shadows a real tool, so a lookup on orx's own PATH would run that instead.
+    #[tokio::test]
+    async fn an_agent_path_picks_the_terminal_program() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-acp-path").unwrap();
+        #[cfg(unix)]
+        let (command, file, body) = ("sh", "sh", "#!/bin/sh\necho AGENT_PATH_OK\n");
+        #[cfg(windows)]
+        let (command, file, body) = ("whoami", "whoami.cmd", "@echo AGENT_PATH_OK\r\n");
+        let tool = dir.path().join("bin").join(file);
+        std::fs::create_dir(dir.path().join("bin")).unwrap();
+        std::fs::write(&tool, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let delegated = Delegated::new(dir.path());
+        let created = delegated
+            .request(
+                "terminal/create",
+                json!({"sessionId":"s", "command":command, "env":[{"name":"PATH", "value":"bin"}]}),
+            )
+            .await
+            .unwrap();
+        let params = json!({"terminalId":created["terminalId"]});
+        let exit = delegated
+            .request("terminal/wait_for_exit", params.clone())
+            .await
+            .unwrap();
+        assert_eq!(exit["exitCode"], 0);
+        let output = delegated.request("terminal/output", params).await.unwrap();
+        assert_eq!(output["output"].as_str().unwrap().trim(), "AGENT_PATH_OK");
     }
 
     #[cfg(unix)]

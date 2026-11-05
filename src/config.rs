@@ -275,6 +275,34 @@ pub fn set_settings_data_dir(data_dir: Option<String>) -> Result<()> {
     Ok(())
 }
 
+pub fn run_engine_settings() -> Result<(bool, Option<&'static str>)> {
+    let channel = crate::updates::current_release_channel();
+    let override_value = std::env::var_os("ORX_RUN_ENGINE");
+    let saved = crate::telemetry::load_settings().and_then(|settings| settings.run_engine);
+    run_engine_settings_for(channel, override_value.as_deref(), saved)
+}
+
+fn run_engine_settings_for(
+    channel: crate::updates::ReleaseChannel,
+    override_value: Option<&std::ffi::OsStr>,
+    saved: Option<bool>,
+) -> Result<(bool, Option<&'static str>)> {
+    if channel == crate::updates::ReleaseChannel::Canary {
+        return Ok((true, Some("canary")));
+    }
+    match override_value {
+        Some(value) if value == "1" => Ok((true, Some("environment"))),
+        Some(value) if value == "0" => Ok((false, Some("environment"))),
+        None => Ok((saved.unwrap_or(false), None)),
+        Some(_) => Err(crate::error::anyhow!("ORX_RUN_ENGINE must be 1 or 0.")),
+    }
+}
+
+pub fn set_run_engine_enabled(enabled: bool) -> Result<()> {
+    crate::telemetry::mutate_settings(|settings| settings.run_engine = Some(enabled))?;
+    Ok(())
+}
+
 /// The persisted default compute target for local-mode launches, if any:
 /// `(backend, flavor)`. Lives in the telemetry-owned `settings.json` for the
 /// same single-writer reason as the data dir above.
@@ -389,6 +417,16 @@ pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
     let mut env: std::collections::HashMap<String, String> =
         list_synced_env().into_iter().collect();
     env.extend(run_context_env(run_id));
+    env
+}
+
+/// What a launched job sees: [`run_env`] plus a configured Hugging Face token. Resolved at
+/// launch, so secrets never enter a stored launch intent.
+pub fn launch_env(run_id: &str) -> std::collections::HashMap<String, String> {
+    let mut env = run_env(run_id);
+    if let Ok(token) = crate::jobs::huggingface::resolve_token() {
+        env.entry("HF_TOKEN".to_string()).or_insert(token);
+    }
     env
 }
 
@@ -554,4 +592,47 @@ pub fn set_ssh_host(host: String, options: SshHostSettings) -> Result<()> {
 pub fn set_ssh_default(host: Option<String>) -> Result<()> {
     crate::telemetry::set_ssh_default(host)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::updates::ReleaseChannel;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn canary_forces_the_engine_while_stable_and_dev_allow_opt_in() {
+        for saved in [None, Some(false), Some(true)] {
+            for value in [None, Some("0"), Some("1"), Some("invalid")] {
+                let value = value.map(OsStr::new);
+                assert_eq!(
+                    run_engine_settings_for(ReleaseChannel::Canary, value, saved).unwrap(),
+                    (true, Some("canary"))
+                );
+                let stable = run_engine_settings_for(ReleaseChannel::Stable, value, saved);
+                match value {
+                    None => assert_eq!(stable.unwrap(), (saved.unwrap_or(false), None)),
+                    Some(value) if value == "0" => {
+                        assert_eq!(stable.unwrap(), (false, Some("environment")))
+                    }
+                    Some(value) if value == "1" => {
+                        assert_eq!(stable.unwrap(), (true, Some("environment")))
+                    }
+                    Some(_) => assert!(stable.is_err()),
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canary_ignores_even_a_non_unicode_environment_override() {
+        use std::os::unix::ffi::OsStrExt;
+        let value = Some(OsStr::from_bytes(&[0xff]));
+        assert_eq!(
+            run_engine_settings_for(ReleaseChannel::Canary, value, None).unwrap(),
+            (true, Some("canary"))
+        );
+        assert!(run_engine_settings_for(ReleaseChannel::Stable, value, None).is_err());
+    }
 }

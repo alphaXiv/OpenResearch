@@ -467,7 +467,7 @@ mod tests {
         let store = Store::open_at(root.clone()).unwrap();
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        assert!(std::process::Command::new("git")
+        assert!(crate::process::command("git")
             .current_dir(&repo)
             .args(["init", "-b", "main"])
             .status()
@@ -620,7 +620,7 @@ mod tests {
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::process::command("git")
                 .current_dir(&repo)
                 .args(["-c", "user.name=t", "-c", "user.email=t@t"])
                 .args(args)
@@ -665,6 +665,16 @@ mod tests {
                 cancel_reason: None,
                 chat_session_id: None,
             })
+            .unwrap();
+
+        store
+            .set_run_contact(
+                &run_id,
+                &crate::store::Contact::NeedsAuth {
+                    since: 1,
+                    cause: "host gone".into(),
+                },
+            )
             .unwrap();
 
         assert!(delete_experiment(&store, "root")

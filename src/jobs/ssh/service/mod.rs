@@ -119,7 +119,7 @@ $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity.User, 'Full
 $acl.SetAccessRule($rule)
 Set-Acl -LiteralPath $env:ORX_PRIVATE_DIRECTORY -AclObject $acl
 "#;
-        let status = std::process::Command::new("powershell.exe")
+        let status = crate::process::command("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             // Windows PowerShell must not load PowerShell 7's incompatible modules.
             .env_remove("PSModulePath")
@@ -226,15 +226,12 @@ async fn ensure() -> Result<Endpoint> {
         .and_then(|path| path.parent())
         .ok_or_else(|| anyhow!("Missing test binary directory"))?
         .join(format!("orx{}", std::env::consts::EXE_SUFFIX));
-    let mut command = std::process::Command::new(executable);
+    let mut command = crate::process::command(executable);
     command
         .arg("ssh-service")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    crate::local::shell_env::export_to(|key, value| {
-        command.env(key, value);
-    });
     command.env("ORX_DATA_DIR", crate::store::data_dir());
     #[cfg(unix)]
     {
@@ -266,24 +263,22 @@ async fn ensure() -> Result<Endpoint> {
     ))
 }
 
+pub(crate) async fn reset_existing_backoff(target: &SshTarget) -> Result<()> {
+    if !state::root().join("state.sqlite3").try_exists()? {
+        return Ok(());
+    }
+    let resolved = state::resolve(target).await?;
+    state::database()?.execute(
+        "UPDATE connections SET failures = 0, next_at = 0, last_error = NULL WHERE id = ?1",
+        [resolved.key],
+    )?;
+    Ok(())
+}
+
 pub(crate) async fn request(target: &SshTarget, operation: Value) -> Result<Value> {
     let endpoint = ensure().await?;
     // A lost response may follow a successful mutation: never replay it here.
     exchange(&endpoint, Some(target.clone()), operation).await
-}
-
-pub(crate) async fn healthy(target: &SshTarget) -> bool {
-    let Ok(endpoint) = endpoint() else {
-        return false;
-    };
-    exchange(&endpoint, Some(target.clone()), json!({"op":"status"}))
-        .await
-        .is_ok_and(|value| value["connected"] == true)
-}
-
-pub(crate) async fn attach(target: &SshTarget) -> Result<()> {
-    request(target, json!({"op":"attach"})).await?;
-    Ok(())
 }
 
 pub(crate) async fn execute(
@@ -951,7 +946,7 @@ FunctionsToExport = @('Get-Acl', 'Set-Acl')
         let system_modules = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join(r"System32\WindowsPowerShell\v1.0\Modules");
         let module_path = std::env::join_paths([modules, system_modules]).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::process::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "jobs::ssh::service::tests::private_directory_ignores_inherited_powershell_module_path",

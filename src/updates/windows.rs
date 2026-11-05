@@ -17,7 +17,6 @@
 //! the child waits on the parent's process handle before binding the port.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::LatestRelease;
@@ -52,7 +51,7 @@ pub(super) fn relaunch(args: Vec<std::ffi::OsString>, envs: &[(&str, String)]) -
     let Ok(exe) = std::env::current_exe() else {
         return std::io::Error::other("could not resolve the running executable");
     };
-    let spawned = Command::new(exe)
+    let spawned = crate::process::command(exe)
         .args(args)
         .envs(envs.iter().cloned())
         .env(RELAUNCH_WAIT_PID_ENV, std::process::id().to_string())
@@ -160,7 +159,7 @@ pub(crate) fn stage_binary(installed: &Path, release: &LatestRelease, bytes: &[u
     stage(installed, release, |scratch| {
         let staged = scratch.join("orx.exe");
         std::fs::write(&staged, bytes)?;
-        let status = Command::new(powershell())
+        let status = crate::process::command(powershell())
             .args(["-NoProfile", "-NonInteractive", "-Command", "$s = Get-AuthenticodeSignature -LiteralPath $env:ORX_UPDATE_FILE; if ($s.Status -ne 'Valid' -or $s.SignerCertificate.GetNameInfo('SimpleName', $false) -ne 'alphaXiv Inc.' -or -not $s.TimeStamperCertificate) { exit 1 }"])
             .env("ORX_UPDATE_FILE", &staged)
             .status()?;
@@ -212,7 +211,7 @@ fn with_scratch(installed: &Path, run: impl FnOnce(&Path) -> Result<()>) -> Resu
 /// where a failure just rejects the update, leaves the restart a fast second run of
 /// a binary known to start.
 fn launch_check(exe: &Path) -> Result<()> {
-    let mut child = Command::new(exe)
+    let mut child = crate::process::command(exe)
         .args(["--no-telemetry", "version", "--build-id"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -253,7 +252,7 @@ pub(crate) fn install_staged(installed: &Path) -> Result<()> {
 fn run_installer(scratch: &Path, script: &[u8], quiet: bool) -> Result<()> {
     let script_path = scratch.join("installer.ps1");
     std::fs::write(&script_path, script)?;
-    let mut cmd = Command::new(powershell());
+    let mut cmd = crate::process::command(powershell());
     cmd.args([
         "-NoProfile",
         "-NonInteractive",

@@ -792,7 +792,7 @@ pub(super) async fn detect(
     let catalog = tokio::spawn(async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let _lease = crate::local::opencode::prepare_database(&binary, &db).await?;
-        let mut cmd = tokio::process::Command::new(&binary.path);
+        let mut cmd = crate::process::tokio_command(&binary.path);
         crate::local::local_models::prepare_env(&mut cmd, None)?;
         cmd.env("OPENCODE_DB", _lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
@@ -960,7 +960,7 @@ pub(super) async fn generate(
     tokio::spawn(async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let lease = crate::local::opencode::prepare_database(&binary, &db).await?;
-        let mut cmd = tokio::process::Command::new(&binary.path);
+        let mut cmd = crate::process::tokio_command(&binary.path);
         crate::local::local_models::prepare_generation_env(
             &mut cmd,
             Some(&model),

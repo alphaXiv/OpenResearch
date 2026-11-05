@@ -21,7 +21,7 @@ export function createWorkspace(identity: string, basePath = "") {
   const queries = {
     ...createProjectQueries(client, api),
     ...createFileQueries(client, api),
-    ...createSettingsQueries(client, api, invalidation),
+    ...createSettingsQueries(client, api, invalidation, events),
     ...createChatQueries(client, api, events),
   };
   const chat = createChatStore(client, queries);
@@ -40,6 +40,7 @@ export function createWorkspace(identity: string, basePath = "") {
     dialogs,
     composers: createComposerState(),
     transcriptRowSizes: new Map<string, { size: number; width: number }>(),
+    transcriptDisclosures: new Map<string, Map<string, boolean>>(),
   };
 }
 

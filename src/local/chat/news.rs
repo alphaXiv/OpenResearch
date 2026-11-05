@@ -1,6 +1,5 @@
 //! What a chat has not been told yet: a finished turn or a question from a
-//! chat it subscribes to, and the end of a run it asked to be woken for. Each
-//! idle chat's next turn starts with all of its news at once, unless the agent
+//! chat it subscribes to. Each idle chat's next turn starts with all of its news at once, unless the agent
 //! collected chat news first with `wait`.
 
 use std::collections::BTreeMap;
@@ -12,11 +11,11 @@ use super::delegation::{
     PendingPrompt,
 };
 use super::{
-    stored_to_wire, ChatHost, OrxDisplay, OrxKind, OrxSource, TurnGuard, TurnSubmission,
+    stored_to_wire, ChatHost, OrxDisplay, OrxKind, OrxSource, TurnGuard, TurnState, TurnSubmission,
     ORX_MESSAGE_PREFIX,
 };
-use crate::error::{bail, Result};
-use crate::store::{ReadyChatSubscription, RunWakeup, Store, StoredRun, ToldEvent};
+use crate::error::Result;
+use crate::store::{ReadyChatSubscription, Store, ToldEvent};
 
 /// How much of a message the user wrote in a subscribed chat its news quotes.
 const USER_PREVIEW_CHARS: usize = 300;
@@ -28,10 +27,6 @@ pub enum News {
         target: String,
         prompt: Box<PendingPrompt>,
     },
-    /// A run the chat asked to be woken for ended.
-    Run(Box<RunWakeup>),
-    /// orx lost sight of a run the chat waits on; told once per outage.
-    Unmonitored(Box<RunWakeup>),
 }
 
 impl News {
@@ -39,16 +34,14 @@ impl News {
         match self {
             News::Answer(ready) => &ready.subscriber_session_id,
             News::Question { subscriber, .. } => subscriber,
-            News::Run(wakeup) | News::Unmonitored(wakeup) => &wakeup.chat_session_id,
         }
     }
 
-    /// The chat or run the news is about.
+    /// The chat the news is about.
     pub fn target(&self) -> &str {
         match self {
             News::Answer(ready) => &ready.target_session_id,
             News::Question { target, .. } => target,
-            News::Run(wakeup) | News::Unmonitored(wakeup) => &wakeup.run.id,
         }
     }
 
@@ -66,10 +59,6 @@ impl News {
                 self.target(),
                 ToldEvent::Prompt(&prompt.id),
             ),
-            News::Run(wakeup) => store.claim_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id),
-            News::Unmonitored(wakeup) => Ok(store
-                .set_run_wakeup_monitoring_alerted(&wakeup.run.id, &wakeup.chat_session_id, true)?
-                .then(String::new)),
         }
     }
 
@@ -86,26 +75,6 @@ impl News {
                 let event = ToldEvent::Prompt(&prompt.id);
                 let told = told.then_some(event);
                 store.settle_chat_subscription(self.subscriber(), self.target(), token, told)?;
-            }
-            News::Run(wakeup) if told => {
-                if !store.mark_run_wakeup_delivered(
-                    &wakeup.run.id,
-                    &wakeup.chat_session_id,
-                    token,
-                )? {
-                    bail!("run wake-up claim expired before delivery was recorded");
-                }
-            }
-            News::Run(wakeup) => {
-                store.release_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id, token)?
-            }
-            News::Unmonitored(_) if told => {}
-            News::Unmonitored(wakeup) => {
-                store.set_run_wakeup_monitoring_alerted(
-                    &wakeup.run.id,
-                    &wakeup.chat_session_id,
-                    false,
-                )?;
             }
         }
         Ok(())
@@ -186,40 +155,13 @@ fn echoes_its_subscriber(store: &Store, ready: &ReadyChatSubscription) -> Result
         }))
 }
 
-/// Runs that ended, and runs orx can no longer see, for the chats waiting on
-/// them. A run that is seen again re-arms its outage alert.
-fn run_news(store: &Store) -> Result<Vec<News>> {
-    store.prune_run_wakeups()?;
-    let mut news: Vec<News> = store
-        .list_ready_run_wakeups()?
-        .into_iter()
-        .filter(|wakeup| wakeup.state == "pending" && run_wakeup_text(&wakeup.run).is_some())
-        .map(|wakeup| News::Run(Box::new(wakeup)))
-        .collect();
-    for wakeup in store.list_active_run_wakeups()? {
-        let unmonitored = crate::jobs::BackendDescriptor::parse(&wakeup.run.backend_json)
-            .is_ok_and(|descriptor| descriptor.monitoring_error.is_some());
-        if unmonitored && !wakeup.monitoring_alerted {
-            news.push(News::Unmonitored(Box::new(wakeup)));
-        } else if !unmonitored && wakeup.monitoring_alerted {
-            store.set_run_wakeup_monitoring_alerted(
-                &wakeup.run.id,
-                &wakeup.chat_session_id,
-                false,
-            )?;
-        }
-    }
-    Ok(news)
-}
-
 /// What a chat is told about its news, each piece as its agent reads it and
-/// as the transcript shows it, with one for every run orx lost sight of.
+/// as the transcript shows it.
 pub fn messages<'a>(
     store: &Store,
     news: impl IntoIterator<Item = &'a News>,
 ) -> Result<Vec<(String, OrxDisplay)>> {
     let mut messages = Vec::new();
-    let mut unmonitored = Vec::new();
     for item in news {
         let model = || -> Result<String> {
             Ok(store
@@ -236,29 +178,7 @@ pub fn messages<'a>(
                 },
             )),
             News::Answer(ready) => messages.push(answer_text(store, ready, &model()?)?),
-            News::Run(wakeup) => messages.extend(run_wakeup_text(&wakeup.run).map(|text| {
-                let shown = text.trim_start_matches(ORX_MESSAGE_PREFIX).to_string();
-                let run = &wakeup.run;
-                let source = source(OrxKind::Run, Some(&run.id), Some(&run.status));
-                (
-                    text,
-                    OrxDisplay {
-                        text: shown,
-                        source,
-                    },
-                )
-            })),
-            News::Unmonitored(wakeup) => unmonitored.push(wakeup.run.clone()),
         }
-    }
-    if !unmonitored.is_empty() {
-        messages.push((
-            run_monitoring_text(&unmonitored),
-            OrxDisplay {
-                text: monitoring_lines(&unmonitored),
-                source: source(OrxKind::Monitoring, None, None),
-            },
-        ));
     }
     Ok(messages)
 }
@@ -350,46 +270,6 @@ fn answer_text(
     Ok((text.trim_end().to_string(), shown))
 }
 
-pub(super) fn run_wakeup_text(run: &StoredRun) -> Option<String> {
-    if run.status == "lost" {
-        return Some(format!(
-            "{ORX_MESSAGE_PREFIX}Run `{}` ended with **Outcome unavailable**. Its final outcome could not be \
-             collected. Inspect any partial logs using `orx logs {}`; do not assume success or failure.",
-            run.id, run.id
-        ));
-    }
-    matches!(run.status.as_str(), "done" | "failed").then(|| {
-        format!(
-            "{ORX_MESSAGE_PREFIX}Run `{}` finished with status **{}**. You can compare this result with other \
-             project runs using `orx runs {}` and inspect the file located by `orx logs {}`.",
-            run.id, run.status, run.project_id, run.id
-        )
-    })
-}
-
-// Only local identifiers here: the error text includes remote ssh stderr, so the agent reads it
-// as command output instead of inside an orx message.
-pub(super) fn run_monitoring_text(runs: &[StoredRun]) -> String {
-    let lines = monitoring_lines(runs);
-    format!(
-        "{ORX_MESSAGE_PREFIX}orx can no longer monitor these live runs:\n{lines}\nRun `orx exp status <expId>` \
-         for the reason and tell the user so they can fix it. orx wakes you once it can see a run \
-         finish; until then each run keeps its current status."
-    )
-}
-
-fn monitoring_lines(runs: &[StoredRun]) -> String {
-    runs.iter()
-        .map(|run| {
-            format!(
-                "- run `{}` of experiment `{}` (still **{}**)",
-                run.id, run.experiment_id, run.status
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Record `target`'s latest turn as told to `subscriber`, as when it stops
 /// the target itself: the stop is no news to it.
 pub fn mark_told(store: &Store, subscriber: &str, target: &str) -> Result<()> {
@@ -416,10 +296,7 @@ pub(super) async fn deliver_news(
         return Ok(());
     }
     let mut by_chat: BTreeMap<String, Vec<News>> = BTreeMap::new();
-    for item in run_news(&store)?
-        .into_iter()
-        .chain(chat_news(&store, None)?)
-    {
+    for item in chat_news(&store, None)? {
         // A turn's end races the host's own bookkeeping; tell it once quiet.
         if matches!(item, News::Answer(_)) && chat.is_busy(item.target()).await {
             continue;
@@ -430,7 +307,9 @@ pub(super) async fn deliver_news(
             .push(item);
     }
     for (session_id, items) in by_chat {
-        let Some(mut guard) = TurnGuard::claim_idle(chat, &session_id).await else {
+        let Some(mut guard) =
+            TurnGuard::claim_idle(chat, &session_id, TurnState::Reserved { turn_id: None }).await
+        else {
             continue;
         };
         if moving() {

@@ -544,14 +544,14 @@ pub(super) async fn spawn(
     let mut command = if zcode {
         let node = super::executable_path("node")
             .ok_or_else(|| anyhow!("ZCode ACP requires Node.js on PATH"))?;
-        let mut command = tokio::process::Command::new(node);
+        let mut command = crate::process::tokio_command(node);
         command
             .args(["-e", include_str!("zcode-runtime.cjs")])
             .arg(executable)
             .arg("--orx-launch");
         command
     } else {
-        tokio::process::Command::new(executable)
+        crate::process::tokio_command(executable)
     };
     command
         .args(&definition.arguments)

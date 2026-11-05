@@ -1,3 +1,5 @@
+import type { WorkspaceEvents } from "../workspace";
+import { upsertEngineHost } from "../engineHosts";
 import type { WorkspaceInvalidation } from "./invalidation";
 import type { Api } from "../api";
 import type { WorkspaceClient } from "./client";
@@ -6,8 +8,8 @@ import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import type * as api from "../api";
 
-export function createSettingsQueries(client: WorkspaceClient, api: Api, invalidation: WorkspaceInvalidation) {
-  const { workspaceKey, queryClient, isCurrentScope } = client;
+export function createSettingsQueries(client: WorkspaceClient, api: Api, invalidation: WorkspaceInvalidation, events: WorkspaceEvents) {
+  const { workspaceKey, queryClient, isCurrentScope, setScopedQueryData } = client;
   const { invalidateFamilies } = invalidation;
 
   const getFileManagerQuery = (locale: string) => queryOptions({
@@ -56,6 +58,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     queryKey: workspaceKey("getRaySettings"),
     queryFn: ({ signal }) => api.getRaySettings(signal),
     staleTime: 300_000,
+  });
+
+  const getRunEngineQuery = () => queryOptions({
+    queryKey: workspaceKey("getRunEngine"),
+    queryFn: ({ signal }) => api.getRunEngine(signal),
+    staleTime: 30_000,
   });
 
   const getComputeSettingsQuery = (projectId?: string) => queryOptions({
@@ -155,6 +163,22 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     queryFn: ({ signal }) => api.getSshSettings(signal),
     staleTime: 30_000,
   });
+
+  const getEngineHostsQuery = () => queryOptions({
+    queryKey: workspaceKey("listEngineHosts"),
+    queryFn: ({ signal }) => api.listEngineHosts(signal),
+    staleTime: 30_000,
+  });
+
+  function setEngineHost(host: api.EngineHost) {
+    setScopedQueryData(getEngineHostsQuery().queryKey, (hosts) => hosts && upsertEngineHost(hosts, host));
+  }
+
+  /** The run engine's host connections, kept current by `host.updated` events. */
+  function useEngineHosts() {
+    useEffect(() => events.onEngineHost(setEngineHost), []);
+    return useQuery(getEngineHostsQuery()).data;
+  }
 
   const getSshConfigQuery = () => queryOptions({
     queryKey: workspaceKey("getSshConfig"),
@@ -309,6 +333,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     getVercelSettingsQuery,
     getSlurmSettingsQuery,
     getRaySettingsQuery,
+    getRunEngineQuery,
     getComputeSettingsQuery,
     getLocalMachineQuery,
     getPublicNetworkQuery,
@@ -322,6 +347,8 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     useTrackioRuns,
     getDataDirQuery,
     getSshSettingsQuery,
+    setEngineHost,
+    useEngineHosts,
     getSshConfigQuery,
     getSshMasterStatusQuery,
     getRuntimeQuery,

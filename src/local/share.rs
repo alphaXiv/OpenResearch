@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::git;
 use super::model::{LocalExperiment, LocalProject};
 use crate::error::{anyhow, Result};
-use crate::store::{log_path_in, now_ms, Store, StoredChatMessage, StoredChatSession, StoredRun};
+use crate::store::{log_path, now_ms, Store, StoredChatMessage, StoredChatSession, StoredRun};
 
 pub const EXTENSION: &str = "orx";
 /// Newer formats only add fields; a bump means an older orx cannot read it.
@@ -255,7 +255,7 @@ fn stage(
         .map(|run| {
             let log = options.logs
                 && copy_capped(
-                    &log_path_in(data_root, &run.id),
+                    &log_path(data_root, &run.id),
                     out,
                     &format!("logs/{}.log", run.id),
                     &mut skipped,
@@ -848,6 +848,7 @@ fn shared_session(
                     .map(|(_, id)| id.clone()),
                 base_native_session_id: None,
                 result_native_session_id: None,
+                native_harness: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -857,10 +858,10 @@ fn shared_session(
         .and_then(|leaf| message_ids.get(leaf))
         .map(|(_, id)| id.clone())
         .or_else(|| messages.last().map(|message| message.id.clone()));
-    let snapshot = crate::local::harness::transcript_snapshot(super::chat::active_path(
-        &messages,
-        leaf.as_deref(),
-    ));
+    let snapshot = super::chat::handoff::snapshot(
+        super::chat::active_path(&messages, leaf.as_deref()),
+        super::chat::handoff::budget(None),
+    );
     let same_harness = harness == shared.harness;
     let session = StoredChatSession {
         id: id.to_string(),
@@ -919,7 +920,7 @@ fn copy_shared_files(
         };
         let shared_log = staging.join(format!("logs/{name}.log"));
         if shared_log.is_file() {
-            let to = log_path_in(data_root, id);
+            let to = log_path(data_root, id);
             copy_into(&shared_log, &to)?;
             copied.push(to);
         }
@@ -993,6 +994,7 @@ mod tests {
             parent_id: parent.map(str::to_string),
             base_native_session_id: Some("native-before".into()),
             result_native_session_id: Some("native-after".into()),
+            native_harness: Some("claude-code".into()),
         }
     }
 
@@ -1223,7 +1225,7 @@ mod tests {
         };
         store.upsert_run(&run("done-run", "done")).unwrap();
         store.upsert_run(&run("live-run", "running")).unwrap();
-        let log = log_path_in(&sharer_data, "done-run");
+        let log = log_path(&sharer_data, "done-run");
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, "step 1 loss 0.9\n").unwrap();
         let artifacts = sharer_data.join("files").join(&project.slug);
@@ -1350,7 +1352,7 @@ mod tests {
         assert_eq!(runs[0].result_markdown.as_deref(), Some("loss 0.9"));
         assert!(runs[0].backend_json.contains(r#""kind":"imported""#));
         assert_eq!(
-            std::fs::read_to_string(log_path_in(&recipient_data, &runs[0].id)).unwrap(),
+            std::fs::read_to_string(log_path(&recipient_data, &runs[0].id)).unwrap(),
             "step 1 loss 0.9\n"
         );
         let copied = recipient_data.join("files").join(&imported.project.slug);

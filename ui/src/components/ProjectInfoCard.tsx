@@ -15,7 +15,7 @@ import { Button, DialogContent, DialogTitle, Spinner, IconButton, Input, MenuIte
 
 function deleteExplanation(project: Project) {
   const synced = project.githubEnabled && (project.githubUrl || (project.githubOwner && project.githubRepo));
-  return `${m.projects_delete_from_app({ name: project.name })}\n\n${synced ? m.projects_home_local_and_github_kept() : m.projects_home_local_folder_kept()}`;
+  return `${m.projects_delete_from_app({ name: project.name })}\n\n${m.delete_pending_stop_warning()}\n\n${synced ? m.projects_home_local_and_github_kept() : m.projects_home_local_folder_kept()}`;
 }
 
 export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleCollapsed, onRemoved, onNewChat, pinned, onPin }: {

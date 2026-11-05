@@ -1,3 +1,4 @@
+import { LogPageUnavailable } from "./logWindow";
 // Typed client for the orx up local HTTP API (/api/*). All wire JSON is camelCase.
 
 import type { WorkspaceClient } from "./queries/client";
@@ -94,11 +95,16 @@ export interface SessionExperiment {
   experiment: Experiment;
   projectName: string;
   /** Its newest live run, else its newest run: a forced relaunch can leave an older run live. Null until it has been run. */
-  currentRun: Pick<Run, "status" | "cancelRequested" | "createdAt" | "endedAt"> | null;
+  currentRun: (Pick<Run, "status" | "createdAt" | "endedAt" | "contact" | "cancelling" | "cancelUnconfirmed" | "host" | "lostReason"> & { cancelRequested: boolean }) | null;
 }
 
-export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled" | "lost";
-export type RunDisplayStatus = RunStatus | "cancelling";
+export type RunStatus = "submitting" | "starting" | "running" | "done" | "failed" | "cancelled" | "lost";
+
+/** How fresh the engine's knowledge of a run is; null means live. */
+export type RunContact =
+  | { type: "unreachable" | "needs_auth"; since: number; cause: string }
+  | { type: "unreconciled"; since: number; detail: string }
+  | { type: "stopping"; since: number; count: number };
 
 export interface Run {
   id: string;
@@ -111,31 +117,20 @@ export interface Run {
   resultMarkdown?: string | null;
   createdAt: number;
   updatedAt: number;
+  startedAt?: number | null;
   endedAt?: number | null;
   exitCode?: number | null;
-  cancelRequested: boolean;
-}
-
-export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): RunDisplayStatus {
-  const live = run.status === "running" || run.status === "starting";
-  return live && run.cancelRequested ? "cancelling" : run.status;
-}
-
-/** Why the supervisor can't currently observe a live run, if it can't. */
-export function runMonitoringError(run: Pick<Run, "status" | "backend">): string | null {
-  if (run.status !== "running" && run.status !== "starting") return null;
-  const error = run.backend?.monitoringError;
-  return typeof error === "string" && error ? error : null;
-}
-
-/** The newest live run's monitoring error: a forced relaunch can leave an older run live. */
-export function experimentMonitoringError(
-  runs: Pick<Run, "status" | "backend" | "createdAt">[],
-): string | null {
-  const newestFirst = [...runs].sort((a, b) => b.createdAt - a.createdAt);
-  return (
-    newestFirst.map(runMonitoringError).find((error) => error !== null) ?? null
-  );
+  contact: RunContact | null;
+  cancelling: boolean;
+  cancelUnconfirmed?: number[] | null;
+  lostReason: string | null;
+  /** The SSH alias or Slurm login node the run's job lives on. */
+  host: string | null;
+  /** Why the run's latest notice batch was given up on, never reaching its chat. */
+  noticeError?: string | null;
+  /** Copying a finished run's log to this computer; both are absent once the log is kept. */
+  logCollection?: "pending" | "failed";
+  logCollectionError?: string;
 }
 
 export class RejectedResponseError extends Error {}
@@ -246,12 +241,36 @@ export interface Instance extends Run {
   projectName?: string;
 }
 
-export interface LogChunk {
-  generation: string;
-  offset: number;
-  dataBase64: string;
-  nextOffset: number;
-  eof: boolean;
+/** A log file's identity on its host, opaque: a different one means the file was replaced. */
+export type LogIdent = string;
+
+export type LogPage =
+  | {
+    kind: "data";
+    ident: LogIdent;
+    start: number;
+    /** Base64. */
+    data: string;
+    eof: boolean;
+    /** Null while a live run's log is still growing on its host. */
+    len: number | null;
+    /** Byte ranges kept on this computer; the rest is read from the host on demand. */
+    kept: [number, number][];
+  }
+  | { kind: "reset"; info: { ident: LogIdent; len: number } | null };
+
+export type HostStatus = "idle" | "connecting" | "live" | "backoff" | "needs_auth";
+
+/** The run engine's connection to one SSH alias. */
+export interface EngineHost {
+  alias: string;
+  /** The run directory root this connection serves; one alias can have several. */
+  root: string;
+  status: HostStatus;
+  class: "key" | "interactive" | null;
+  sinceMs: number;
+  nextRetryMs: number | null;
+  cause: string | null;
 }
 
 export interface DiffPayload {
@@ -1416,6 +1435,32 @@ export interface NativeChat {
   updatedAt: number;
 }
 
+export type ChatSearchScope = "chat" | "project" | "all";
+export interface ChatSearchParams {
+  q: string;
+  scope: ChatSearchScope;
+  sessionId?: string;
+  projectId?: string;
+}
+export interface ChatSearchHit {
+  sessionId: string;
+  projectId: string;
+  messageId: string;
+  partId: string | null;
+  spawnPartId: string | null;
+  role: string;
+  createdAt: number;
+  chatTitle: string | null;
+  archived: boolean;
+  onActiveBranch: boolean;
+  snippet: string;
+}
+export interface ChatSearchPage {
+  hits: ChatSearchHit[];
+  cursor: string | null;
+  indexing: boolean;
+  requiresLongerQuery: boolean;
+}
 export interface SidebarChatCursor { updatedAt: number; id: string }
 export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null }
 
@@ -1570,6 +1615,11 @@ export interface OpenedSharedProject {
   project: Project;
   /** Experiment branches the file named but did not carry. */
   missingBranches: string[];
+}
+
+export interface RunEngineSettings {
+  enabled: boolean;
+  forcedBy: "canary" | "environment" | null;
 }
 
 export function createApi(
@@ -1826,8 +1876,28 @@ export function createApi(
   const cancelRun = (runId: string) =>
     post<{ ok: boolean }>(`/api/runs/${runId}/cancel`).then(() => undefined);
 
-  const fetchLog = (runId: string, offset: number, generation?: string) =>
-    get<LogChunk>(`/api/runs/${runId}/log?offset=${offset}${generation ? `&generation=${encodeURIComponent(generation)}` : ""}`);
+  const cleanupRun = (runId: string) =>
+    post<"accepted" | "nothing_lingering">(`/api/runs/${runId}/cleanup`).then(() => undefined);
+
+  const abandonRun = (runId: string) => post<Run>(`/api/runs/${runId}/abandon`);
+
+  async function fetchLogPage(runId: string, start: number, end: number, ident: LogIdent | null, signal?: AbortSignal): Promise<LogPage> {
+    const query = new URLSearchParams({ start: String(start), end: String(end) });
+    if (ident !== null) query.set("ident", ident);
+    const response = await fetch(`/api/runs/${runId}/log?${query}`, { signal });
+    if (response.status === 503) {
+      const body: unknown = await response.clone().json().catch(() => null);
+      if (typeof body === "object" && body !== null && "since" in body && typeof body.since === "number" && "contact" in body && (body.contact === "unreachable" || body.contact === "needs_auth")) {
+        const host = "host" in body && typeof body.host === "string" ? body.host : null;
+        throw new LogPageUnavailable(host, body.since, body.contact);
+      }
+    }
+    return json<LogPage>(response);
+  }
+
+  const listEngineHosts = (signal?: AbortSignal) => get<EngineHost[]>("/api/compute/hosts", signal);
+
+  const retryEngineHost = (alias: string) => post<EngineHost>(`/api/compute/hosts/${encodeURIComponent(alias)}/retry`);
 
   const getRunDiff = (runId: string, signal?: AbortSignal) => get<DiffPayload>(`/api/runs/${runId}/diff`, signal);
 
@@ -2186,6 +2256,10 @@ export function createApi(
 
   const trackioPreflight = () => post<TrackioPreflight>("/api/settings/trackio/preflight", {});
 
+  const getRunEngine = (signal?: AbortSignal) => get<RunEngineSettings>("/api/settings/run-engine", signal);
+
+  const setRunEngine = (enabled: boolean) => post<RunEngineSettings>("/api/settings/run-engine", { enabled });
+
   const getComputeSettings = (projectId?: string, signal?: AbortSignal) =>
     get<ComputeSettings>(
       `/api/settings/compute${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
@@ -2226,7 +2300,6 @@ export function createApi(
 
   const logoutOpenResearch = () => post<{ ok: boolean }>("/api/settings/openresearch/logout");
   const addOpenResearchSshKey = () => post<{ ok: boolean }>("/api/settings/openresearch/ssh-key");
-
 
   const getOpenResearchSettings = (signal?: AbortSignal) =>
     get<OpenResearchSettings>("/api/settings/openresearch", signal);
@@ -2464,6 +2537,15 @@ export function createApi(
   /** Every project's sessions, newest first, for the composer's `/resume` picker. */
   const listAllChatSessions = (signal?: AbortSignal) =>
     get<{ sessions: ChatSession[] }>("/api/chat/sessions?scope=all", signal).then((r) => r.sessions);
+
+  const searchChatMessages = (query: ChatSearchParams, cursor: string | null, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ q: query.q, scope: query.scope });
+    if (query.sessionId) params.set("sessionId", query.sessionId);
+    if (query.projectId) params.set("projectId", query.projectId);
+    if (cursor) params.set("cursor", cursor);
+    return get<ChatSearchPage>(`/api/search?${params}`, signal);
+  };
+
   const listSidebarChatSessions = (filter: "active" | "archived" | "all", before: SidebarChatCursor | null, signal?: AbortSignal) => {
     const params = new URLSearchParams({ scope: "sidebar" });
     if (filter !== "all") params.set("archived", String(filter === "archived"));
@@ -2529,6 +2611,11 @@ export function createApi(
 
   const setChatSessionAutonomy = (sessionId: string, autonomy: Autonomy) =>
     patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { autonomy }).then(
+      (r) => r.session,
+    );
+
+  const setChatSessionAgent = (sessionId: string, agent: AgentSelection) =>
+    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { agent }).then(
       (r) => r.session,
     );
 
@@ -2672,7 +2759,11 @@ export function createApi(
     listRuns,
     listInstances,
     cancelRun,
-    fetchLog,
+    cleanupRun,
+    abandonRun,
+    fetchLogPage,
+    listEngineHosts,
+    retryEngineHost,
     getRunDiff,
     getExperimentDiff,
     getProjectFile,
@@ -2749,6 +2840,8 @@ export function createApi(
     rayPreflight,
     getTrackioRuns,
     trackioPreflight,
+    getRunEngine,
+    setRunEngine,
     getComputeSettings,
     setComputeDefault,
     getLocalMachine,
@@ -2806,6 +2899,7 @@ export function createApi(
     listNativeChats,
     importNativeChat,
     listAllChatSessions,
+    searchChatMessages,
     listSidebarChatSessions,
     createChatSession,
     getChatSession,
@@ -2818,6 +2912,7 @@ export function createApi(
     openSideChat,
     setChatSessionGoal,
     setChatSessionAutonomy,
+    setChatSessionAgent,
     setChatSessionPermissionMode,
     getChatMessages,
     cancelQueuedMessage,

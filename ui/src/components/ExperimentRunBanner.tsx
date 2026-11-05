@@ -1,9 +1,11 @@
 import { useWorkspace } from "../workspace";
-import { ChevronRight, CircleStop, FlaskConical, ScrollText } from "lucide-react";
+import { ChevronRight, CircleStop, FlaskConical, Plug, ScrollText } from "lucide-react";
 import { useEffect, useState } from "react";
 import { fmtDuration, type ChatActiveRun } from "../api";
 import { m } from "../paraglide/messages.js";
+import { runConnectHost, runDisplay } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+import { statusLabel } from "./StatusBadge";
 import { Button } from "./ui";
 
 type OpenTarget = (id: string, intent: TabOpenIntent) => void;
@@ -11,12 +13,18 @@ const BANNER_CLASS = "mb-2.5 rounded-lg border border-border bg-accent-green-sub
 
 function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; onOpenRun?: OpenTarget; onOpenExperiment?: OpenTarget }) {
   const { cancelRun } = useWorkspace().api;
+  const { requestHostConnect } = useWorkspace().events;
 
   const { run, experimentName } = item;
   const [now, setNow] = useState(Date.now);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const cancelling = pending || run.cancelRequested;
+  const display = runDisplay(pending ? { ...run, cancelling: true } : run);
+  const cancelling = pending || run.cancelling;
+  const label = display.stale || cancelling
+    ? statusLabel(display.status, display.stopping)
+    : run.status === "running" ? m.chat_experiment_running() : m.chat_experiment_starting();
+  const connectHost = runConnectHost(run);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -37,7 +45,7 @@ function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; on
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-2">
       <FlaskConical size={16} className="shrink-0 text-accent-green" aria-hidden="true" />
-      <span role="status" className="shrink-0 font-medium">{cancelling ? m.chat_experiment_cancelling() : run.status === "starting" ? m.chat_experiment_starting() : m.chat_experiment_running()}</span>
+      <span role="status" className="shrink-0 font-medium">{label}</span>
       <span aria-hidden="true">·</span>
       {onOpenExperiment ? (
         <button className="tool-target experiment-run-link min-w-0 truncate" {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenExperiment(run.experimentId, intent))}>
@@ -47,7 +55,13 @@ function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; on
       <div className="ms-auto flex shrink-0 items-center gap-1">
         <span className="me-2 tabular-nums text-subtext">{fmtDuration(now - run.createdAt)}</span>
         {onOpenRun && <Button size="small" variant="ghost" {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun(run.id, intent))}><ScrollText size={14} />{m.experiment_overview_logs()}</Button>}
-        <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}><CircleStop size={14} />{cancelling ? m.common_cancelling() : m.common_stop()}</Button>
+        {connectHost ? (
+          <Button size="small" variant="ghost" onClick={() => requestHostConnect(connectHost)}><Plug size={14} />{m.settings_connect()}</Button>
+        ) : (
+          <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
+            <CircleStop size={14} />{!cancelling ? m.common_stop() : statusLabel(display.status, display.stopping)}
+          </Button>
+        )}
       </div>
       {error && <span className="w-full text-accent-red" role="alert">{error}</span>}
     </div>

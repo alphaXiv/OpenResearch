@@ -1,0 +1,40 @@
+name: Build host binaries
+
+on:
+  workflow_call:
+    inputs:
+      source-sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: host-binaries
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.17.1
+      - name: Install musl cross linker
+        run: cargo install cargo-zigbuild --locked --version 0.23.4
+      - run: node scripts/build-host.mjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-host
+          path: target/host-binaries
+          if-no-files-found: error
