@@ -44,9 +44,11 @@ import { useOverleafSync } from "../useOverleafSync";
 import {
   documentAssetTarget,
   chatImageTarget,
+  citedFilePath,
   isExternalMarkdownTarget,
   markdownTargetUrl,
   resolveMarkdownTarget,
+  splitLineSuffix,
   type ImageCandidate,
 } from "../markdownTarget";
 import { CodeView } from "./CodeView";
@@ -952,7 +954,7 @@ export function FileViewer({
           </div>
         ) : isMermaid && !showSource ? (
           <MermaidBlock code={data.content} sourceToggle={false} imageResolver={resolveImageCandidates} openFile={onOpenFile ? (src, intent) => {
-            const path = resolveMarkdownFilePath(src);
+            const path = citedFilePath(splitLineSuffix(src).path, resolveMarkdownFilePath);
             if (!path) return false;
             openMarkdownFile(path, undefined, undefined, undefined, intent);
             return true;
