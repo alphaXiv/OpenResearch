@@ -56,11 +56,11 @@ test("a late mutation invalidates only its machine's cache", async (t) => {
   const pending = deferred();
   t.mock.method(globalThis, "fetch", () => pending.promise);
   const alpha = machine(t, "alpha"), beta = machine(t, "beta");
-  const alphaKey = alpha.load("settings").getProfileQuery().queryKey;
-  const betaKey = beta.load("settings").getProfileQuery().queryKey;
+  const alphaKey = alpha.load("settings").getLitSourcesQuery().queryKey;
+  const betaKey = beta.load("settings").getLitSourcesQuery().queryKey;
   alpha.client.setQueryData(alphaKey, { name: "Alpha" });
   beta.client.setQueryData(betaKey, { name: "Beta" });
-  const write = alpha.api.setProfile({ name: "Updated" });
+  const write = alpha.api.setLitSources({ name: "Updated" });
   pending.resolve(Response.json({ name: "Updated" }));
   await write;
   await new Promise(setImmediate);

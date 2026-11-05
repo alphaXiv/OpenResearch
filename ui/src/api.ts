@@ -916,20 +916,6 @@ export interface GitSettings {
   githubAuthenticated: boolean;
 }
 
-/** A paper linked to the researcher profile during onboarding. */
-export interface LinkedPaper {
-  paperId: string;
-  title: string | null;
-}
-
-/** The local researcher profile captured in onboarding (settings.json). */
-export interface Profile {
-  researchAreas: string[];
-  otherArea: string | null;
-  background: string | null;
-  papers: LinkedPaper[];
-}
-
 /** Which literature sources discovery and paper reading may use (settings.json). */
 export interface LitSourcesSettings {
   alphaxiv: boolean;
@@ -1761,11 +1747,8 @@ export function createApi(
     nestedDelegation?: boolean;
   }) => post<UiState>("/api/settings/ui-state", body);
 
-  const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>
-    post<{ project: Project; selection: OnboardingSelection }>(
-      "/api/onboarding/complete",
-      { ...selection, ...profile },
-    );
+  const completeOnboarding = (selection: OnboardingSelection) =>
+    post<{ project: Project; selection: OnboardingSelection }>("/api/onboarding/complete", selection);
 
   const getProjectPathStatus = (path = "", signal?: AbortSignal) => {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -2277,6 +2260,7 @@ export function createApi(
     if (response.status === 401) throw new AlphaXivNotConnectedError();
     return json<T>(response);
   }
+  const getAlphaXivMe = (signal?: AbortSignal) => alphaXivGet<{ avatarUrl: string | null }>("/api/alphaxiv/me", signal);
   const getAlphaXivFolders = (signal?: AbortSignal) => alphaXivGet<AlphaXivFolder[]>("/api/alphaxiv/folders", signal);
   const getAlphaXivPapers = (folder: string | null, cursor: string | null, search?: string, signal?: AbortSignal) => {
     const params = new URLSearchParams();
@@ -2349,10 +2333,6 @@ export function createApi(
 
   const saveGitSettings = (body: { userName?: string; userEmail?: string }) =>
     post<GitSettings>("/api/settings/git", body);
-
-  const getProfile = (signal?: AbortSignal) => get<Profile>("/api/settings/profile", signal);
-
-  const setProfile = (body: Profile) => post<Profile>("/api/settings/profile", body);
 
   const getLitSources = (signal?: AbortSignal) =>
     get<LitSourcesSettings>("/api/settings/lit-sources", signal);
@@ -2810,6 +2790,7 @@ export function createApi(
     getPublicNetwork,
     getOpenResearchSettings,
     getOpenResearchAccount,
+    getAlphaXivMe,
     getAlphaXivFolders,
     getAlphaXivPapers,
     logoutOpenResearch,
@@ -2822,8 +2803,6 @@ export function createApi(
     getArtifactFileMetadata,
     getGitSettings,
     saveGitSettings,
-    getProfile,
-    setProfile,
     getLitSources,
     setLitSources,
     getProjectDefaults,
