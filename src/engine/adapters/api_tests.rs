@@ -564,7 +564,7 @@ else:
     std::fs::write(root.join("resources.json"), partial.to_string()).unwrap();
     assert!(matches!(adapter.recover(&intent).await, Recovery::Absent));
     let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
-    assert!(calls.contains("delete job/primary -n default --wait=false"));
+    assert!(calls.contains("delete job/primary -n default --cascade=foreground --wait=false"));
 }
 
 #[tokio::test]
@@ -1543,10 +1543,144 @@ async fn finished_modal_logs_drain_through_pauses_before_they_are_kept() {
     assert_eq!(bytes, b"first\nlast\n");
 }
 
-/// A pod lookup that fails, or finds no pod yet, is never a closed stream: draining errs, and
-/// the log stays owed.
 #[tokio::test]
-async fn kubernetes_lookup_failures_never_complete_a_drain() {
+async fn kubernetes_cancel_keeps_the_spool_without_an_attention_notice() {
+    use super::api::Api;
+    use crate::commands::up::api_v2::Commands;
+
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/kubectl"),
+        r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['ORX_API_ROOT'])
+a = sys.argv[1:]
+if a[0] == 'delete':
+    assert '--cascade=foreground' in a and '--wait=false' in a
+    (root/'deleting').touch()
+elif a[:2] == ['get', 'job']:
+    if (root/'gone').exists() or (root/'unexpected-deletion').exists():
+        print('Error from server (NotFound): jobs.batch "job" not found', file=sys.stderr)
+        sys.exit(1)
+    metadata = {'deletionTimestamp': '2026-11-05T01:43:00Z'} if (root/'deleting').exists() else {}
+    print(json.dumps({'metadata': metadata, 'status': {'active': 1}}))
+elif a[:2] == ['get', 'pods']:
+    metadata = {'name': 'pod'}
+    if (root/'deleting').exists():
+        metadata['deletionTimestamp'] = '2026-11-05T01:43:00Z'
+    pods = [] if (root/'gone').exists() else [{'metadata': metadata, 'status': {'phase': 'Running'}}]
+    print(json.dumps({'items': pods}))
+elif a[0] == 'logs':
+    assert not (root/'gone').exists()
+    print('2026-11-05T01:42:00Z SMOKE_CANCEL_READY')
+else:
+    raise Exception(a)
+"#,
+    );
+    let engine = Arc::new(engine(&root));
+    let clock = Arc::new(TestClock::new());
+    let runtime = crate::engine::runtime::Runtime::new(
+        engine.clone(),
+        clock.clone(),
+        root.join("store"),
+        None,
+    );
+    let handle = super::api::test_handle("k8s_job", Some("default"), None, vec!["job/job".into()]);
+    let row = crate::store::StoredRun {
+        id: "run".into(),
+        experiment_id: "exp".into(),
+        project_id: "proj".into(),
+        status: "running".into(),
+        backend_json: crate::engine::handle::backend_json(
+            "run",
+            Some(&handle),
+            &BackendDescriptor::parse(r#"{"kind":"k8s_job","namespace":"default"}"#).unwrap(),
+        )
+        .unwrap(),
+        command: "sleep 180".into(),
+        created_at: 1,
+        updated_at: 1,
+        ended_at: None,
+        exit_code: None,
+        commit_sha: None,
+        result_markdown: None,
+        cancel_requested: false,
+        cancel_reason: None,
+        chat_session_id: Some("chat".into()),
+    };
+    engine.store().upsert_run(&row).unwrap();
+    engine.store().subscribe_run("run", "chat", 1).unwrap();
+    let backend = runtime.backend(&row).unwrap();
+    let run = WatchedRun {
+        id: "run".into(),
+        handle,
+    };
+    let account = K8sAccount {
+        context: None,
+        namespace: "default".into(),
+    };
+    for terminating in [false, true] {
+        std::fs::write(root.join("unexpected-deletion"), "").unwrap();
+        if terminating {
+            std::fs::write(root.join("deleting"), "").unwrap();
+        }
+        assert!(matches!(
+            account.inspect(&run).await.unwrap(),
+            Observation::Unreconciled { .. }
+        ));
+    }
+    std::fs::remove_file(root.join("unexpected-deletion")).unwrap();
+    std::fs::remove_file(root.join("deleting")).unwrap();
+
+    backend.drain_log(&run).await.unwrap();
+    assert!(engine
+        .cancel(backend.as_ref(), "run", "Dashboard stop")
+        .await
+        .unwrap());
+    engine
+        .observe_runs(
+            backend.as_ref(),
+            std::slice::from_ref(&run),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.load("run").unwrap().0.status, "running");
+    assert!(engine.store().run_notice_batch("chat").unwrap().is_empty());
+
+    backend.drain_log(&run).await.unwrap();
+    std::fs::write(root.join("gone"), "").unwrap();
+    clock.advance(Duration::from_secs(10));
+    engine
+        .observe_runs(backend.as_ref(), &[run], Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(engine.load("run").unwrap().0.status, "cancelled");
+    let notices = engine.store().run_notice_batch("chat").unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].kind, crate::store::TERMINAL);
+
+    runtime.start();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while engine.store().log_collection_pending("run").unwrap() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled log was not kept");
+    assert_eq!(
+        std::fs::read(root.join("store/run-logs/run.log")).unwrap(),
+        b"SMOKE_CANCEL_READY\n"
+    );
+    let ranges = crate::commands::up::api_v2::kept_ranges(&root.join("store"), "run").unwrap();
+    assert!(ranges.iter().any(|range| range.eof));
+}
+
+#[tokio::test]
+async fn kubernetes_missing_pods_close_logs_only_after_job_deletion() {
     use super::api::Api;
     let Some(root) = isolated().await else {
         return;
@@ -1560,9 +1694,17 @@ async fn kubernetes_lookup_failures_never_complete_a_drain() {
             vec!["job/job".into()],
         ),
     };
-    for get in [
-        "echo 'Unable to connect to the server' >&2; exit 1",
-        "printf '{\"items\":[]}'",
+    for (get, expected_closed) in [
+        ("echo 'Unable to connect to the server' >&2; exit 1", false),
+        ("printf '{\"items\":[]}'", false),
+        (
+            r#"if test "$2" = job; then echo 'Error from server (Unauthorized)' >&2; exit 1; fi; printf '{"items":[]}'"#,
+            false,
+        ),
+        (
+            r#"if test "$2" = job; then echo 'Error from server (NotFound)' >&2; exit 1; fi; printf '{"items":[]}'"#,
+            true,
+        ),
     ] {
         script(
             &root.join("bin/kubectl"),
@@ -1576,10 +1718,18 @@ async fn kubernetes_lookup_failures_never_complete_a_drain() {
         let closed = account
             .logs(&run, &mut cursor, Duration::from_secs(5), &mut |_| {})
             .await;
-        assert!(!matches!(closed, Ok(true)), "{get}: {closed:?}");
+        assert_eq!(
+            matches!(closed, Ok(true)),
+            expected_closed,
+            "{get}: {closed:?}"
+        );
         let backend =
             super::api::Adapter::new(account, Arc::new(TestClock::new()), root.join("spools"));
-        assert!(backend.drain_log(&run).await.is_err(), "{get}");
+        assert_eq!(
+            backend.drain_log(&run).await.is_ok(),
+            expected_closed,
+            "{get}"
+        );
     }
 }
 

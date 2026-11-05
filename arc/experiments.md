@@ -197,6 +197,9 @@ identity; a changed identity resets the reader rather than splicing different
 bytes. API backends offer no random access, so their logs stream into a local
 spool.
 
+Kubernetes cancellation keeps the deleting Job visible until its Pods are gone.
+Once both are gone, the log already spooled on this computer becomes the kept log.
+
 When a run ends, keeping its log becomes an obligation recorded in the same
 transaction as the terminal phase:
 
