@@ -106,8 +106,10 @@ data directory, `files/<project slug>/`.
 
 For a report, figure, or other output you want to find in **Artifacts**, ask the
 agent to write it to the artifacts directory named in its session playbook, or
-copy the finished file there. Keep files that belong in the repository, such as
-source code and reproducibility scripts, in the worktree as appropriate.
+copy the finished file there. If an output does not appear in **Artifacts**,
+check the session worktree; the agent may have written it there instead. Keep
+files that belong in the repository, such as source code and reproducibility
+scripts, in the worktree as appropriate.
 Changing the data directory in Storage settings also changes the artifacts
 location; `ORX_DATA_DIR`, when set, takes precedence over that setting.
 
