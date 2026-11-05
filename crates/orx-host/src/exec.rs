@@ -234,4 +234,29 @@ mod tests {
         assert_eq!(result.signal, Some(libc::SIGKILL));
         assert!(start.elapsed() < Duration::from_secs(2));
     }
+
+    #[test]
+    fn detached_child_survives_command_group_cleanup() {
+        let dir = std::env::temp_dir().join(format!("orx-exec-detach-{}", crate::nonce().unwrap()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let launch = "python3 -c 'import os,subprocess; os.setsid(); subprocess.Popen([\"/bin/sh\", \"-c\", \"sleep 0.2; echo survived > marker\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)'; exit $?";
+        let result = run(
+            Command::new("/bin/sh")
+                .args(["-c", launch])
+                .current_dir(&dir),
+            &[],
+            Duration::from_secs(2),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0), "{result:?}");
+        assert!(!result.timed_out);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while std::fs::read_to_string(dir.join("marker")).ok().as_deref() != Some("survived\n") {
+            assert!(Instant::now() < deadline, "detached child was killed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
