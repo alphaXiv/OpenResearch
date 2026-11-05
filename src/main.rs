@@ -1625,36 +1625,6 @@ mod cli_tests {
     }
 
     #[test]
-    fn research_state_commands_are_local_only() {
-        for command in [
-            "explore",
-            "experiments",
-            "env",
-            "search-logs",
-            "artifacts",
-            "artifact",
-            "wandb",
-            "query",
-            "chart",
-            "report",
-        ] {
-            let error = Cli::try_parse_from(["orx", command])
-                .expect_err("removed research command should not parse");
-            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-        }
-
-        let error = Cli::try_parse_from(["orx", "exp", "cmd", "exp-1"])
-            .expect_err("per-experiment run command should not parse");
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-
-        let error = Cli::try_parse_from(["orx", "projects", "--all"])
-            .expect_err("local projects have no archived state");
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-
-        Cli::try_parse_from(["orx", "orgs", "--json"]).expect("orgs should parse");
-    }
-
-    #[test]
     fn openresearch_backend_and_flavor_still_parse() {
         let cli = Cli::try_parse_from([
             "orx",

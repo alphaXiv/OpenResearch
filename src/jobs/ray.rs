@@ -26,6 +26,9 @@ pub struct RaySettings {
     /// `resolve_address`.
     #[serde(default)]
     pub address: Option<String>,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 fn settings_path() -> std::path::PathBuf {

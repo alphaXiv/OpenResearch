@@ -60,6 +60,9 @@ pub struct SlurmSettings {
     /// Keep every finished run's remote dir, not just each project's newest few.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_remote_runs: bool,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 fn settings_path() -> std::path::PathBuf {

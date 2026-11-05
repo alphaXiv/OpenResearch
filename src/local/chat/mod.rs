@@ -2514,8 +2514,8 @@ pub struct ChatHost {
     turns: Mutex<HashMap<String, TurnState>>,
     /// Cross-process ownership tokens for locally active turn slots.
     durable_turns: std::sync::Mutex<HashMap<String, String>>,
-    /// Set once `orx up` commits to restarting into an update; no turn starts after.
-    restarting: std::sync::atomic::AtomicBool,
+    /// Set once `orx up` commits to exiting; no turn starts after, and queues wait for the next start.
+    exiting: std::sync::atomic::AtomicBool,
     deleting_sessions: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Per-session serialization for `respond`. Answering a prompt reads the
     /// card, delivers the answer (a non-idempotent POST for inline harnesses),
@@ -3401,25 +3401,7 @@ impl TurnGuard {
                 turns.get(&self.session_id),
                 Some(TurnState::Reserved { .. } | TurnState::Switching)
             ) {
-                let drain_queued = !self
-                    .host
-                    .queue_dispatch_suppressed
-                    .lock()
-                    .unwrap()
-                    .contains(&self.session_id)
-                    && !self
-                        .host
-                        .queue_dispatch_cancelled
-                        .lock()
-                        .unwrap()
-                        .contains(&self.session_id)
-                    && self
-                        .host
-                        .queued
-                        .lock()
-                        .unwrap()
-                        .get(&self.session_id)
-                        .is_some_and(|queue| !queue.is_empty());
+                let drain_queued = self.host.drains_queue(&self.session_id);
                 if drain_queued {
                     turns.insert(self.session_id.clone(), TurnState::Draining);
                 } else {
@@ -3457,22 +3439,7 @@ impl Drop for TurnGuard {
                     turns.get(&session_id),
                     Some(TurnState::Reserved { .. } | TurnState::Switching)
                 ) {
-                    let drain_queued = !host
-                        .queue_dispatch_suppressed
-                        .lock()
-                        .unwrap()
-                        .contains(&session_id)
-                        && !host
-                            .queue_dispatch_cancelled
-                            .lock()
-                            .unwrap()
-                            .contains(&session_id)
-                        && host
-                            .queued
-                            .lock()
-                            .unwrap()
-                            .get(&session_id)
-                            .is_some_and(|queue| !queue.is_empty());
+                    let drain_queued = host.drains_queue(&session_id);
                     if drain_queued {
                         turns.insert(session_id.clone(), TurnState::Draining);
                     } else {
@@ -3547,7 +3514,7 @@ impl ChatHost {
             events,
             turns: Mutex::new(HashMap::new()),
             durable_turns: std::sync::Mutex::new(HashMap::new()),
-            restarting: std::sync::atomic::AtomicBool::new(false),
+            exiting: std::sync::atomic::AtomicBool::new(false),
             deleting_sessions: Arc::new(std::sync::Mutex::new(HashSet::new())),
             respond_locks: Mutex::new(HashMap::new()),
             msg_write: std::sync::Mutex::new(()),
@@ -3958,14 +3925,54 @@ impl ChatHost {
         let idle =
             turns.is_empty() && self.queued_count() == 0 && self.pending_permission_count() == 0;
         if idle {
-            self.restarting
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.stop_admitting();
         }
         idle
     }
 
+    /// Stop admitting turns, including the next queued message of a turn that ends from here on.
+    pub fn stop_admitting(&self) {
+        self.exiting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Give up every turn lease this process holds, so the next start recovers its turns at once.
+    pub fn release_turn_leases(&self) {
+        let claims = std::mem::take(&mut *self.durable_turns.lock().unwrap());
+        let Ok(store) = Store::open() else {
+            return;
+        };
+        for (session_id, token) in claims {
+            let _ = store.release_chat_turn(&session_id, &token);
+        }
+    }
+
+    /// Whether the turn ending in `session_id` hands its slot to the next queued message.
+    fn drains_queue(&self, session_id: &str) -> bool {
+        if self.exiting.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        let cancelled = self
+            .queue_dispatch_cancelled
+            .lock()
+            .unwrap()
+            .contains(session_id);
+        let suppressed = self
+            .queue_dispatch_suppressed
+            .lock()
+            .unwrap()
+            .contains(session_id);
+        let queued = self
+            .queued
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .is_some_and(|queue| !queue.is_empty());
+        !cancelled && !suppressed && queued
+    }
+
     fn claim_durable_turn(&self, session_id: &str) -> bool {
-        if self.restarting.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.exiting.load(std::sync::atomic::Ordering::SeqCst) {
             return false;
         }
         let mut claims = self.durable_turns.lock().unwrap();
@@ -4531,7 +4538,8 @@ impl ChatHost {
                     .lock()
                     .unwrap()
                     .contains(session_id);
-                if cancelled || suppressed {
+                if cancelled || suppressed || self.exiting.load(std::sync::atomic::Ordering::SeqCst)
+                {
                     (None, None)
                 } else {
                     let _plan_changes = self.plan_changes.lock().unwrap();
@@ -6357,24 +6365,7 @@ impl ChatHost {
             if !matches {
                 return;
             }
-            let reserved_queue = message_id.is_some()
-                && refreshed
-                && !self
-                    .queue_dispatch_cancelled
-                    .lock()
-                    .unwrap()
-                    .contains(session_id)
-                && !self
-                    .queue_dispatch_suppressed
-                    .lock()
-                    .unwrap()
-                    .contains(session_id)
-                && self
-                    .queued
-                    .lock()
-                    .unwrap()
-                    .get(session_id)
-                    .is_some_and(|queue| !queue.is_empty());
+            let reserved_queue = message_id.is_some() && refreshed && self.drains_queue(session_id);
             if reserved_queue {
                 turns.insert(session_id.to_string(), TurnState::Draining);
             } else {
@@ -7741,6 +7732,8 @@ pub struct TurnCtx {
     /// harnesses that can't take mid-turn input — those park sends instead.
     pub steering: Option<SteerReceiver>,
     last_flush: Instant,
+    /// A change `maybe_flush` held back, which no later event may arrive to carry.
+    deferred_flush: bool,
     last_flushed_tool_states: Vec<(String, String)>,
     last_attempted_tool_states: Vec<(String, String)>,
     target_event_path: Option<PathBuf>,
@@ -7811,6 +7804,7 @@ fn turn_ctx_from_stored(
             .and_then(|json| serde_json::from_str(json).ok()),
         steering: None,
         last_flush: Instant::now() - FLUSH_INTERVAL,
+        deferred_flush: false,
         last_flushed_tool_states: Vec::new(),
         last_attempted_tool_states: Vec::new(),
         target_event_path: None,
@@ -8213,6 +8207,7 @@ impl TurnCtx {
             context_usage: None,
             steering: None,
             last_flush: Instant::now(),
+            deferred_flush: false,
             last_flushed_tool_states: Vec::new(),
             last_attempted_tool_states: Vec::new(),
             target_event_path: None,
@@ -8470,11 +8465,28 @@ impl TurnCtx {
         if unattempted_state || self.last_flush.elapsed() >= FLUSH_INTERVAL {
             self.last_attempted_tool_states = tool_states;
             let _ = self.flush();
+        } else {
+            self.deferred_flush = true;
+        }
+    }
+
+    /// Resolves when the change `maybe_flush` held back is due, and never if there is none, so a
+    /// harness waiting on a quiet agent can flush it. Borrows nothing, to sit beside `steering`.
+    pub fn flush_due(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let due = self
+            .deferred_flush
+            .then(|| self.last_flush + FLUSH_INTERVAL);
+        async move {
+            match due {
+                Some(due) => tokio::time::sleep_until(due.into()).await,
+                None => std::future::pending().await,
+            }
         }
     }
 
     pub fn flush(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
+        self.deferred_flush = false;
         if self.assistant.parts.is_empty() {
             return Ok(());
         }
@@ -8991,27 +9003,30 @@ fn run_notice_request(notices: &[crate::store::RunNotice], guard: TurnGuard) -> 
     }
 }
 
+/// Returns the chats whose turn slot was taken; whoever holds it reports `chat.busy` false on release.
 async fn process_run_notices(
     chat: &Arc<ChatHost>,
     store: Store,
     data_dir_move_in_progress: &std::sync::atomic::AtomicBool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut held = Vec::new();
     if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
-        return Ok(());
+        return Ok(held);
     }
     store.expire_run_notice_batches(now_ms())?;
     for session_id in store.pending_run_notice_sessions()? {
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(());
+            return Ok(held);
         }
         let Some(mut guard) =
             TurnGuard::claim_idle(chat, &session_id, TurnState::Reserved { turn_id: None }).await
         else {
+            held.push(session_id);
             continue;
         };
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
             guard.release().await;
-            return Ok(());
+            return Ok(held);
         }
         let notices = store.run_notice_batch(&session_id)?;
         if notices.is_empty() {
@@ -9062,7 +9077,7 @@ async fn process_run_notices(
             }
         }
     }
-    Ok(())
+    Ok(held)
 }
 
 pub async fn watch_run_notices(
@@ -9103,8 +9118,9 @@ pub async fn watch_run_notices(
         }
         let _data_dir_guard = data_dir_gate.lock().await;
         let Ok(store) = Store::open() else { continue };
-        if let Err(err) = process_run_notices(&chat, store, &data_dir_move_in_progress).await {
-            eprintln!("orx up: run notices: {err}");
+        match process_run_notices(&chat, store, &data_dir_move_in_progress).await {
+            Ok(held) => busy.extend(held),
+            Err(err) => eprintln!("orx up: run notices: {err}"),
         }
     }
 }
@@ -9116,7 +9132,8 @@ pub async fn keep_turn_leases(
     data_dir_gate: Arc<tokio::sync::Mutex<()>>,
 ) {
     loop {
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Also the turn leases' heartbeat, so it keeps pace with their TTL.
+        tokio::time::sleep(crate::config::paced(Duration::from_secs(3))).await;
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
             continue;
         }
@@ -9447,47 +9464,15 @@ mod session_env_tests {
         in_local_session, launching_chat_harness, trusted_up_port, CHAT_HARNESS_ENV,
         CHAT_SESSION_ENV, LOCAL_SESSION_ENV, UP_PORT_ENV,
     };
-    use std::sync::{Mutex, MutexGuard};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        saved: Vec<(&'static str, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        fn new(vars: &[&'static str]) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let saved = vars
-                .iter()
-                .map(|k| (*k, std::env::var(k).ok()))
-                .collect::<Vec<_>>();
-            for k in vars {
-                std::env::remove_var(k);
-            }
-            EnvGuard { _lock: lock, saved }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (k, v) in &self.saved {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
 
     /// The cloud box's opencode plugin exports CHAT_SESSION_ENV for experiment
     /// attribution. That must not read as a local `orx up` session, or
     /// `orx skill` serves the Local skill bodies on every cloud box.
     #[test]
     fn chat_session_alone_is_not_a_local_session() {
-        let _guard = EnvGuard::new(&[CHAT_HARNESS_ENV, CHAT_SESSION_ENV, LOCAL_SESSION_ENV]);
-
+        if !crate::config::in_test_child(&[CHAT_HARNESS_ENV, CHAT_SESSION_ENV, LOCAL_SESSION_ENV]) {
+            return;
+        }
         std::env::set_var(CHAT_SESSION_ENV, "ses_cloud_box");
         assert!(!in_local_session());
 
@@ -9502,7 +9487,9 @@ mod session_env_tests {
     /// its own environment.
     #[test]
     fn forwarded_runs_ignore_the_servers_launch_environment() {
-        let _guard = EnvGuard::new(&[CHAT_SESSION_ENV, "ORX_INVOCATION_CONTEXT"]);
+        if !crate::config::in_test_child(&[CHAT_SESSION_ENV, "ORX_INVOCATION_CONTEXT"]) {
+            return;
+        }
         std::env::set_var(CHAT_SESSION_ENV, "server-session");
         std::env::set_var(
             "ORX_INVOCATION_CONTEXT",
@@ -9524,14 +9511,18 @@ mod session_env_tests {
 
     #[test]
     fn empty_local_marker_is_not_a_local_session() {
-        let _guard = EnvGuard::new(&[CHAT_SESSION_ENV, LOCAL_SESSION_ENV]);
+        if !crate::config::in_test_child(&[CHAT_SESSION_ENV, LOCAL_SESSION_ENV]) {
+            return;
+        }
         std::env::set_var(LOCAL_SESSION_ENV, "");
         assert!(!in_local_session());
     }
 
     #[test]
     fn local_session_requires_a_valid_trusted_port() {
-        let _guard = EnvGuard::new(&[LOCAL_SESSION_ENV, UP_PORT_ENV]);
+        if !crate::config::in_test_child(&[LOCAL_SESSION_ENV, UP_PORT_ENV]) {
+            return;
+        }
         std::env::set_var(LOCAL_SESSION_ENV, "1");
         assert!(trusted_up_port().is_err());
 
@@ -9675,7 +9666,7 @@ mod cap_tests {
             .output()
             .is_ok_and(|out| out.status.success())
         {
-            eprintln!("skipping: no usable zsh on this machine");
+            crate::config::skip_without_tool("no usable zsh");
             return;
         }
         let root = std::env::temp_dir().join(format!("orx-path-guard-{}", uuid::Uuid::new_v4()));
@@ -10437,6 +10428,63 @@ mod bridge_tests {
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
         )
+    }
+
+    #[tokio::test]
+    async fn bridge_requests_need_the_live_token_and_a_running_turn() {
+        let host = Arc::new(test_host());
+        let session = format!("ses_{}", uuid::Uuid::new_v4());
+        let input = || json!({"command": "rm -rf ~"});
+        assert!(host
+            .request_permission(&session, "guess", "Bash", input())
+            .await
+            .is_err());
+
+        let stale = host.mint_gate_token(&session, false, false);
+        let live = host.mint_gate_token(&session, false, false);
+        for token in ["guess", stale.as_str()] {
+            assert!(host
+                .request_permission(&session, token, "Bash", input())
+                .await
+                .is_err());
+        }
+
+        let ended = host
+            .request_permission(&session, &live, "Bash", input())
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(ended).unwrap()["behavior"], "deny");
+        assert!(!host.has_pending_permission(&session));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_bridge_requests_deny_when_the_turn_ends_or_nobody_answers() {
+        let host = Arc::new(test_host());
+        for turn_ends in [true, false] {
+            let session = format!("ses_{}", uuid::Uuid::new_v4());
+            let token = host.mint_gate_token(&session, false, false);
+            host.turns
+                .lock()
+                .await
+                .insert(session.clone(), TurnState::Reserved { turn_id: None });
+            let held = tokio::spawn({
+                let host = host.clone();
+                let session = session.clone();
+                async move {
+                    host.request_permission(&session, &token, "Bash", json!({"command": "ls"}))
+                        .await
+                }
+            });
+            if turn_ends {
+                while !host.has_pending_permission(&session) {
+                    tokio::task::yield_now().await;
+                }
+                host.cancel_pending_permissions(&session);
+            }
+            let decision = serde_json::to_value(held.await.unwrap().unwrap()).unwrap();
+            assert_eq!(decision["behavior"], "deny", "turn ends: {turn_ends}");
+            assert!(!host.has_pending_permission(&session));
+        }
     }
 
     #[tokio::test]
@@ -11731,6 +11779,7 @@ mod run_wakeup_tests {
                 .to_string_lossy()
                 .into_owned(),
             arguments: vec!["--list".into()],
+            unknown: Default::default(),
         };
         let tx = store.begin().unwrap();
         tx.execute("UPDATE chat_sessions SET harness = ?1", [&launch.id])
@@ -12156,6 +12205,29 @@ for line in sys.stdin:
         );
         assert!(store.run_notice_batch("other").unwrap().is_empty());
         restarted.interrupt("other").await.unwrap();
+
+        // `drain_queue` holds an idle chat's slot like this after every turn, never reporting it busy.
+        let mut held = TurnGuard::claim(&restarted, "other", None).await.unwrap();
+        store
+            .insert_run_notice("run_x", "other", "notify", "held", "held result", 1)
+            .unwrap();
+        bus.publish(crate::engine::bus::RunEvent::Notices {
+            chats: vec!["other".into()],
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(count_turns(), baseline + 2);
+        held.release().await;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while count_turns() == baseline + 2
+                || !store.pending_run_notice_sessions().unwrap().is_empty()
+                || !restarted.busy_sessions().await.is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        restarted.interrupt("other").await.unwrap();
         watcher.abort();
         let _ = watcher.await;
 
@@ -12374,7 +12446,7 @@ for line in sys.stdin:
                 .unwrap()
                 .lines()
                 .count(),
-            6
+            7
         );
         for kind in ["engine", "ssh_job"] {
             let delegate = format!("delegate-{kind}");
@@ -12569,6 +12641,74 @@ for line in sys.stdin:
                 .await
                 .is_none()
         );
+    }
+
+    #[test]
+    fn exiting_leaves_the_queue_for_the_next_start_and_gives_up_leases() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            session(&store, "running");
+            session(&store, "draining");
+            let host = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let running = TurnGuard::claim(&host, "running", None).await.unwrap();
+            let mut draining = TurnGuard::claim(&host, "draining", None).await.unwrap();
+            let message = QueuedMessage {
+                id: "q_1".into(),
+                client_turn_id: "ct_1".into(),
+                request_hash: "hash".into(),
+                text: "after the turn".into(),
+                transcript_text: None,
+                overrides: TurnOverrides::default(),
+                images: Vec::new(),
+                annotations: Vec::new(),
+                dispatch_attempts: 0,
+                dispatch_error: None,
+                next_retry_at: None,
+                orx: Vec::new(),
+            };
+            store
+                .insert_queued_chat_message(&crate::store::StoredQueuedChatMessage {
+                    id: message.id.clone(),
+                    session_id: "draining".into(),
+                    client_turn_id: message.client_turn_id.clone(),
+                    request_hash: message.request_hash.clone(),
+                    payload_json: serde_json::to_string(&message).unwrap(),
+                    created_at: 1,
+                })
+                .unwrap();
+            host.queued
+                .lock()
+                .unwrap()
+                .insert("draining".into(), VecDeque::from([message]));
+
+            host.stop_admitting();
+            assert!(TurnGuard::claim(&host, "idle", None).await.is_none());
+            draining.release().await;
+            assert!(!host.is_busy("draining").await);
+            let queued = host.queued_items("draining");
+            assert_eq!(queued.len(), 1);
+            assert_eq!(queued[0]["dispatchState"], "queued");
+            assert!(!store.chat_turn_leased("draining").unwrap());
+            assert_eq!(
+                store
+                    .list_queued_chat_messages_for_session("draining")
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            assert!(store.chat_turn_leased("running").unwrap());
+            host.release_turn_leases();
+            assert!(!store.chat_turn_leased("running").unwrap());
+            running.defuse();
+        });
     }
 
     #[test]

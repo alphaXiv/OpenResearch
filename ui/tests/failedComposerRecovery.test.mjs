@@ -1,689 +1,497 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
-import { citedAttachments, composerStashContent, EMPTY_COMPOSER_STASH } from "../src/composerStash.ts";
-import { queryModules } from "./queryModules.mjs";
+import { EMPTY_COMPOSER_STASH, mergeFailedComposer } from "../src/composerStash.ts";
+import { ltr } from "../src/i18n.ts";
+import { m } from "../src/paraglide/messages.js";
+import { annotate, assistantMessage, codex, composer, deferred, emit, press, refused, renderChat, session, userMessage } from "./chat.mjs";
 
-const file = ts.createSourceFile("ChatPanel.tsx", readFileSync(new URL("../src/components/ChatPanel.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-function find(name) {
-  let found;
-  function visit(node) {
-    if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node.getText(file);
-    ts.forEachChild(node, visit);
+const transcripts = { s: [userMessage("u1", "hello"), assistantMessage("a1", "Keep the old selection in mind.", "u1"), userMessage("u2", "and next?", "a1")] };
+const sideTab = (sessionId) => `?pane=${encodeURIComponent(JSON.stringify({ kind: "side", sessionId }))}`;
+const lost = () => new TypeError("Failed to fetch");
+
+/**
+ * Chat `s` with "original" citing an image and a selected passage in its composer; its first send waits on `reply`.
+ * `side` hosts `s` as a side chat of `parent`; `steering` sends text alone, which a running turn takes.
+ */
+async function compose({ busy = false, steering = false, side = false, remote = false, submission = () => ({ accepted: false }), routes = {} } = {}) {
+  const reply = deferred();
+  let sends = 0;
+  const sessions = [session("s", { busy, ...(side ? { sideParentSessionId: "parent" } : {}) }), session("other"), session("parent")];
+  const chat = await renderChat(side ? `/projects/p/tasks/parent${sideTab("s")}` : "/projects/p/tasks/s", {
+    sessions,
+    transcripts: { ...transcripts, parent: [userMessage("p1", "parent question"), assistantMessage("p2", "Parent reply.", "p1")] },
+    harnesses: [{ ...codex, supportsSteering: steering }],
+    remote,
+    routes: {
+      "POST /api/chat/sessions/s/message": () => sends++ ? { ok: true } : reply.promise,
+      "GET /api/chat/sessions/s/submissions/*": submission,
+      ...routes,
+    },
+  });
+  const input = composer(side ? 1 : 0);
+  await input.type("original");
+  if (!steering) {
+    await input.attach();
+    await annotate("old selection");
   }
-  visit(file);
-  assert.ok(found, name);
-  return found;
+  const leave = () => side ? chat.navigate(`/projects/p/tasks/parent${sideTab("other")}`) : chat.navigate("/projects/p/tasks/other");
+  const unmount = () => chat.navigate("/projects");
+  const reopen = async () => {
+    await chat.navigate(side ? `/projects/p/tasks/parent${sideTab("s")}` : "/projects/p/tasks/s");
+    return composer(side ? 1 : 0);
+  };
+  return { chat, input, original: input.draft, reply, sessions, leave, unmount, reopen };
 }
-const code = ts.transpileModule(`${find("mergeFailedComposer")}\n${find("send")}\nreturn send;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
-/** The draft cites its one attachment, as a pasted image does. */
-const ORIGINAL = "original [Image #1]";
-
-class RejectedResponseError extends Error {}
-
-function setup({ side = false, sessionId = "s", busy = false, steering = false, history = async () => ({}), submission = async () => ({ accepted: false }), deferred = false } = {}) {
-  let rejectSend, resolveSend;
-  let state = { draft: ORIGINAL, attachments: [{ id: 1, dataUrl: "data:,old", mediaType: "image/png", size: 1 }], annotations: [{ id: "a", text: "old selection" }], unconfirmedSend: null };
-  const composerLiveRef = { current: state };
-  const updates = [];
-  const stashes = new Map(), mounted = new Map(), actions = [], deleted = new Set();
-  let generation = 1;
-  const key = sessionId ? `1:${side ? "side:" : ""}${sessionId}` : `1:p:${side ? "side:parent" : "new"}`;
-  const scope = { current: { projectId: "p", activeId: sessionId, mainView: "chat" } };
-  const update = (field) => (value) => {
-    const apply = () => { state = { ...state, [field]: typeof value === "function" ? value(state[field]) : value }; };
-    if (deferred) updates.push(apply);
-    else apply();
-  };
-  const bindings = {
-    draft: state.draft, attachments: state.attachments, annotations: state.annotations,
-    stashKey: key, stashScope: "1:", embedded: side, sideParentSessionId: side ? "parent" : null,
-    projectId: "p", mainView: "chat", activeId: sessionId, composerScopeRef: scope, composerLiveRef,
-    composerMountedRef: { current: true }, sessionsOptions: { queryKey: ["workspace", 1] },
-    isCurrentScope: (key) => key[1] === generation, deletedSessionIds: deleted,
-    composerStashes: stashes, mountedComposers: mounted, composerStashContent, citedAttachments, EMPTY_COMPOSER_STASH,
-    setDraft: update("draft"), setAttachments: update("attachments"), setAnnotations: update("annotations"),
-    setUnconfirmedSend: update("unconfirmedSend"),
-    setAttachError: () => {}, setImageRefusedFor: () => {}, setGoalScope: () => {}, setSkillMenuDismissed: () => {},
-    parseComposerCommand: () => null, planActivation: null, goalArmed: false, takesArgument: () => false,
-    imageInputBlocked: false, captureUiEvent: () => {}, telemetrySurface: "chat", preparingSend: { current: false },
-    planActive: false, effectiveCommandPlanMode: () => undefined, acpMode: false, activeHarness: { id: "codex", agentReady: true },
-    composerSelection: { harness: "codex" }, planModeOverrideRef: { current: null }, planMutationSeq: { current: 0 },
-    RejectedResponseError, pendingClientTurn: { current: null }, pendingScope: { current: null }, crypto, busy, steering,
-    queueSessionMutation: (fn) => fn(), setSessionOverride: () => {}, setRecoveryOverrides: () => {}, EMPTY_RECOVERY_OVERRIDES: {},
-    setChatSessionAgentMutation: { isPending: false },
-    sendChatMessage: () => new Promise((resolve, reject) => { resolveSend = resolve; rejectSend = reject; }), getChatSubmission: submission,
-    openNewSession: async () => ({ id: "created" }), getChatMessagesQuery: () => ({ queryKey: [] }),
-    queryClient: { fetchQuery: history, getQueryState: () => undefined }, listChatSessionsQuery: () => ({}),
-    dispatch: (action) => actions.push(action), pinTranscriptToBottom: () => {}, sessionFilter: "active",
-    m: { chat_asked_about_selection: () => "selection", chat_session_not_created: () => "missing", chat_message_not_sent: ({ error }) => `failed: ${error}`, chat_send_unconfirmed: ({ error }) => `unconfirmed: ${error}` },
-    ltr: (value) => value, reseedSession: async () => {},
-  };
-  const send = new Function(...Object.keys(bindings), code)(...Object.values(bindings));
-  return {
-    send, bindings, stashes, mounted, actions, deleted, scope, key,
-    get state() { return state; },
-    render() { while (updates.length) updates.shift()(); composerLiveRef.current = state; },
-    edit(draft) { state = { ...state, draft }; composerLiveRef.current = state; },
-    switchAway() { scope.current = { projectId: "p", activeId: "other", mainView: "chat" }; },
-    unmount() { bindings.composerMountedRef.current = false; },
-    replaceWorkspace() { generation++; stashes.clear(); },
-    reject(error = new Error("rejected")) { assert.ok(rejectSend); rejectSend(error); },
-    resolve(value = {}) { assert.ok(resolveSend); resolveSend(value); },
-  };
-}
-async function flush() { for (let i = 0; i < 15; i++) await Promise.resolve(); }
-
-test("sending during a provider switch preserves the draft until the selected agent is ready", async () => {
-  const s = setup();
-  const original = s.state.draft;
-  s.bindings.setChatSessionAgentMutation.isPending = true;
-  await s.send();
-  assert.equal(s.state.draft, original);
-  assert.equal(s.bindings.pendingClientTurn.current, null);
-  assert.deepEqual(s.actions, []);
-});
-
-function mountComposer(s) {
-  let effect;
-  function visit(node) {
-    if (ts.isCallExpression(node) && node.expression.getText(file) === "useLayoutEffect"
-      && node.getText(file).includes("mountedComposers.set(stashKey")) effect = node.getText(file);
-    ts.forEachChild(node, visit);
-  }
-  visit(file);
-  assert.ok(effect);
-  let cleanup;
-  const bindings = {
-    ...s.bindings, useLayoutEffect: (callback) => { cleanup = callback(); },
-    composerPrefill: null,
-  };
-  const mount = ts.transpileModule(`${find("mergeFailedComposer")}\n${effect}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  new Function(...Object.keys(bindings), mount)(...Object.values(bindings));
-  return cleanup;
-}
+/** Whether the transcript reports that a message was not sent. */
+const reported = (error = "refused") => document.body.textContent.includes(m.chat_message_not_sent({ error: ltr(error) }));
 
 for (const busy of [false, true]) {
   for (const unmounted of [false, true]) {
-    for (const newer of [ORIGINAL, "newer"]) {
-      test(`failed ${busy ? "queued" : "normal"} send preserves ${newer === ORIGINAL ? "identical" : "different"} later draft ${unmounted ? "after unmount" : "in the active chat"}`, async () => {
-        const s = setup({ busy });
-        s.stashes.set(s.key, s.state);
-        const cleanup = mountComposer(s);
-        s.render();
-        const task = s.send();
-        await flush();
-        s.render();
-        s.edit(newer);
-        if (unmounted) { cleanup(); s.unmount(); }
-        s.reject(new RejectedResponseError("rejected"));
-        await task;
-        assert.equal(unmounted ? s.stashes.get(s.key).draft : s.state.draft, `${ORIGINAL}\n\n${newer}`);
+    for (const identical of [true, false]) {
+      test(`failed ${busy ? "queued" : "normal"} send preserves ${identical ? "identical" : "different"} later draft ${unmounted ? "after unmount" : "in the active chat"}`, async () => {
+        const chat = await compose({ busy });
+        await chat.input.send();
+        assert.equal(chat.input.draft, "");
+        const newer = identical ? chat.original : "newer";
+        await chat.input.type(newer);
+        if (unmounted) await chat.unmount();
+        await chat.reply.resolve(refused());
+        const input = unmounted ? await chat.reopen() : chat.input;
+        assert.equal(input.draft, `${chat.original}\n\n${newer}`);
       });
     }
   }
 }
 
-test("failure before the clear renders restores one draft", async () => {
-  const s = setup({ deferred: true, history: async () => { throw new Error("history unavailable"); } });
-  s.stashes.set(s.key, s.state);
-  mountComposer(s);
-  s.render();
-  await s.send();
-  assert.equal(s.bindings.composerLiveRef.current.draft, ORIGINAL);
-  s.render();
-  assert.equal(s.state.draft, ORIGINAL);
+test("a failed history read restores one copy of the draft before anything is sent", async () => {
+  const chat = await renderChat("/projects/p/tasks/s", { routes: {
+    "GET /api/chat/sessions/s/messages": () => Response.json({ error: "history unavailable" }, { status: 503 }),
+  } });
+  const input = composer();
+  await input.type("original");
+  await input.send();
+  assert.equal(input.draft, "original");
+  assert.deepEqual(chat.sent(), []);
+  assert.ok(reported("history unavailable"));
 });
 
-test("unmount before the clear renders does not stash the sent draft", async () => {
-  const s = setup({ deferred: true });
-  s.stashes.set(s.key, s.state);
-  const cleanup = mountComposer(s);
-  s.render();
-  const task = s.send();
-  await flush();
-  cleanup();
-  s.unmount();
-  s.reject(new RejectedResponseError("rejected"));
-  await task;
-  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
+test("leaving before a failed send renders its clear restores one copy of the draft", async () => {
+  const chat = await compose();
+  await chat.input.send();
+  await chat.unmount();
+  await chat.reply.resolve(refused());
+  assert.equal((await chat.reopen()).draft, chat.original);
 });
 
-test("failed plan toggle before the clear renders restores one draft", async () => {
-  const s = setup({ deferred: true });
-  s.bindings.parseComposerCommand = () => ({ name: "plan", prompt: "" });
-  s.bindings.attachments = [];
-  s.bindings.annotations = [];
-  s.bindings.planActivation = "command";
-  s.bindings.setIndependentPlanMode = async () => { throw new Error("toggle failed"); };
-  s.bindings.setSettingsError = () => {};
-  s.bindings.m.chat_toggle_plan_failed = () => "toggle failed";
-  s.stashes.set(s.key, { ...s.state, attachments: [], annotations: [] });
-  mountComposer(s);
-  s.render();
-  const send = new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings));
-  await send();
-  assert.equal(s.bindings.composerLiveRef.current.draft, ORIGINAL);
-  s.render();
-  assert.equal(s.state.draft, ORIGINAL);
-});
-
-test("failed plan toggle after unmount before the clear renders restores one draft", async () => {
-  const s = setup({ deferred: true });
-  let rejectToggle;
-  s.bindings.parseComposerCommand = () => ({ name: "plan", prompt: "" });
-  s.bindings.attachments = [];
-  s.bindings.annotations = [];
-  s.bindings.planActivation = "command";
-  s.bindings.setIndependentPlanMode = () => new Promise((_, reject) => { rejectToggle = reject; });
-  s.bindings.setSettingsError = () => {};
-  s.bindings.m.chat_toggle_plan_failed = () => "toggle failed";
-  s.stashes.set(s.key, { ...s.state, attachments: [], annotations: [] });
-  const cleanup = mountComposer(s);
-  s.render();
-  const send = new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings));
-  const task = send();
-  cleanup();
-  s.unmount();
-  rejectToggle(new Error("toggle failed"));
-  await task;
-  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
-});
+for (const unmounted of [false, true]) {
+  test(`a failed plan toggle restores one copy of the command${unmounted ? " after unmount" : ""}`, async () => {
+    const toggle = deferred();
+    const chat = await renderChat("/projects/p/tasks/s", { routes: { "PATCH /api/chat/sessions/s": () => toggle.promise } });
+    const input = composer();
+    await input.type("/plan");
+    await press("Escape", input.field());
+    await input.send();
+    if (unmounted) await chat.navigate("/projects");
+    await toggle.resolve(Response.json({ error: "toggle failed" }, { status: 500 }));
+    if (unmounted) await chat.navigate("/projects/p/tasks/s");
+    assert.equal(composer().draft, "/plan");
+    if (!unmounted) assert.match(document.body.textContent, new RegExp(m.chat_toggle_plan_failed()));
+  });
+}
 
 for (const side of [false, true]) {
-  test(`failed ${side ? "side" : "main"} send after switch restores all content to its own stash`, async () => {
-    const s = setup({ side });
-    const task = s.send();
-    await flush();
-    s.switchAway();
-    s.reject(new RejectedResponseError("rejected"));
-    await task;
-    assert.deepEqual(s.stashes.get(s.key), { draft: ORIGINAL, attachments: s.bindings.attachments, annotations: s.bindings.annotations, unconfirmedSend: null, pendingClientTurn: null });
-    assert.equal(s.actions.at(-1).sessionId, "s");
-    assert.equal(s.state.draft, "");
+  test(`failed ${side ? "side" : "main"} send after switching restores all content to its own chat`, async () => {
+    const chat = await compose({ side });
+    await chat.input.send();
+    await chat.leave();
+    await chat.reply.resolve(refused());
+    assert.equal(composer(side ? 1 : 0).draft, "");
+    const input = await chat.reopen();
+    assert.equal(input.draft, chat.original);
+    assert.equal(input.attachments, 1);
+    assert.equal(input.annotations, 1);
+    assert.ok(reported());
   });
 }
 
-test("recovery merges newer content, including non-equivalent annotation IDs", async () => {
-  const s = setup();
-  const task = s.send();
-  await flush();
-  s.switchAway();
-  const newer = { draft: "newer", attachments: [{ dataUrl: "data:,new" }], annotations: [{ id: "a", text: "new selection" }] };
-  s.stashes.set(s.key, newer);
-  s.reject(new RejectedResponseError("rejected"));
-  await task;
-  const restored = s.stashes.get(s.key);
-  assert.equal(restored.draft, `${ORIGINAL}\n\nnewer`);
-  assert.deepEqual(restored.attachments, [...s.bindings.attachments, ...newer.attachments]);
+test("recovery after switching merges content typed while the send was in flight", async () => {
+  const chat = await compose();
+  await chat.input.send();
+  await chat.input.attach("newer.png");
+  await annotate("in mind");
+  await chat.input.type("newer");
+  const newer = chat.input.draft;
+  await chat.leave();
+  await chat.reply.resolve(refused());
+  const input = await chat.reopen();
+  assert.equal(input.draft, `${chat.original}\n\n${newer}`);
+  assert.equal(input.attachments, 2);
+  assert.equal(input.annotations, 2);
+});
+
+test("recovery keeps annotations whose IDs collide but whose text differs", () => {
+  const failed = { ...EMPTY_COMPOSER_STASH, draft: "original", annotations: [{ id: "a", text: "old selection" }] };
+  const current = { ...EMPTY_COMPOSER_STASH, draft: "newer", annotations: [{ id: "a", text: "new selection" }] };
+  const restored = mergeFailedComposer(current, failed);
+  assert.equal(restored.draft, "original\n\nnewer");
   assert.deepEqual(restored.annotations.map((item) => item.text), ["old selection", "new selection"]);
   assert.notEqual(restored.annotations[0].id, restored.annotations[1].id);
+  assert.deepEqual(mergeFailedComposer(failed, failed).annotations, failed.annotations);
 });
 
-test("a newly created session receives recovery after its original composer unmounts", async () => {
-  const s = setup({ side: true, sessionId: null });
-  const task = s.send();
-  await flush();
-  s.unmount();
-  s.reject();
-  await task;
-  assert.equal(s.stashes.get("1:side:created").draft, ORIGINAL);
-  assert.equal(s.stashes.has(s.key), false);
+test("a side chat created by its first send receives recovery after its draft composer unmounts", async () => {
+  const reply = deferred();
+  const created = session("created", { sideParentSessionId: "parent" });
+  const sessions = [session("parent")];
+  const chat = await renderChat(`/projects/p/tasks/parent${sideTab(null)}`, {
+    sessions,
+    routes: {
+      "POST /api/chat/sessions/parent/side": () => { sessions.push(created); return { session: created }; },
+      "GET /api/chat/sessions/created/messages": () => ({ messages: [] }),
+      "POST /api/chat/sessions/created/message": () => reply.promise,
+    },
+  });
+  await composer(1).type("original");
+  await composer(1).send();
+  await chat.navigate("/projects");
+  await reply.resolve(refused());
+  await chat.navigate(`/projects/p/tasks/parent${sideTab("created")}`);
+  assert.equal(composer(1).draft, "original");
+  await chat.navigate(`/projects/p/tasks/parent${sideTab(null)}`);
+  assert.equal(composer(1).draft, "");
 });
 
-for (const change of ["workspace", "deleted", "deleted parent"]) {
-  test(`late failure cannot restore a ${change} chat`, async () => {
-    const s = setup({ side: true });
-    const task = s.send();
-    await flush();
-    s.switchAway();
-    if (change === "workspace") s.replaceWorkspace();
-    if (change === "deleted") s.deleted.add("s");
-    if (change === "deleted parent") s.deleted.add("parent");
-    s.reject();
-    await task;
-    assert.equal(s.stashes.size, 0);
+for (const change of ["deleted", "deleted parent"]) {
+  test(`a late failure reports nothing for a ${change} side chat`, async () => {
+    const chat = await compose({ side: true });
+    await chat.input.send();
+    await chat.leave();
+    await emit("chat.session.deleted", { sessionId: change === "deleted" ? "s" : "parent" });
+    await chat.reply.resolve(refused());
+    assert.equal(reported(), false);
   });
 }
 
-test("a successful send never restores its draft after switching", async () => {
-  const s = setup();
-  const task = s.send();
-  await flush();
-  s.switchAway();
-  s.resolve();
-  await task;
-  assert.equal(s.stashes.size, 0);
+test("a late failure after the workspace is replaced restores nothing into the new one", async () => {
+  const chat = await compose({ side: true, remote: true });
+  await chat.input.send();
+  await chat.leave();
+  await chat.chat.reconnect();
+  await chat.reply.resolve(refused());
+  assert.equal((await chat.reopen()).draft, "");
 });
 
-test("a failed queued send restores its side composer and surfaces the error", async () => {
-  const s = setup({ side: true, busy: true });
-  const task = s.send();
-  await flush();
-  s.switchAway();
-  s.reject(new RejectedResponseError("rejected"));
-  await task;
-  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
-  assert.equal(s.actions.at(-1).type, "localError");
+test("a successful send never restores its draft after switching", async () => {
+  const chat = await compose();
+  await chat.input.send();
+  await chat.leave();
+  await chat.reply.resolve({ ok: true });
+  assert.equal((await chat.reopen()).draft, "");
+});
+
+test("a failed queued side send restores its composer and reports the error", async () => {
+  const chat = await compose({ side: true, busy: true });
+  await chat.input.send();
+  await chat.leave();
+  await chat.reply.resolve(refused());
+  assert.equal((await chat.reopen()).draft, chat.original);
+  assert.ok(reported());
 });
 
 for (const update of ["event", "refresh"]) {
-  test(`an unconfirmed restored draft survives a server user message via ${update} and remount`, async (t) => {
-    const s = setup();
-    const task = s.send();
-    await flush();
-    s.unmount();
-    s.reject(new TypeError("network"));
-    await task;
-    assert.equal(s.stashes.get(s.key)?.draft, ORIGINAL);
+  test(`an unconfirmed restored draft survives a server user message via ${update} and remounts`, async () => {
+    const chat = await compose();
+    await chat.input.send();
+    await chat.unmount();
+    await chat.reply.reject(lost());
+    const accepted = userMessage("accepted", "original", "u2");
+    transcripts.s.push(accepted);
+    try {
+      if (update === "event") await emit("chat.message", { sessionId: "s", message: accepted });
+      let input = await chat.reopen();
+      if (update === "refresh") await emit("resync.required", {});
+      assert.ok(document.querySelector('[data-message-id="accepted"]'));
+      assert.equal(input.draft, chat.original);
+      assert.match(input.warning, /Failed to fetch/);
 
-    const serverMessage = { id: "server", role: "user", parts: [], createdAt: 1 };
-    const snapshot = { messages: [serverMessage], queued: [], activeLeafId: "server" };
-    const { client, load } = queryModules({ getChatMessages: async () => snapshot }, { nativeClient: true });
-    t.after(() => client.clear());
-    const options = load("chat").getChatMessagesQuery("s");
-    client.setQueryData(options.queryKey, { messages: [], queued: [], activeLeafId: null });
-    const store = load("chatStore");
-    store.dispatchChat("p", { type: "localError", sessionId: "s", text: "transient" });
-    if (update === "event") store.dispatchChat("p", { type: "upsertMessage", sessionId: "s", message: serverMessage }, true);
-    else await client.fetchQuery({ ...options, staleTime: 0 });
-    assert.deepEqual(client.getQueryData(options.queryKey).messages.map((message) => message.id), ["server"]);
-    assert.equal(s.stashes.get(s.key)?.draft, ORIGINAL);
+      await input.type("edited");
+      await chat.unmount();
+      input = await chat.reopen();
+      assert.equal(input.draft, `${chat.original}edited`);
+      assert.match(input.warning, /Failed to fetch/);
 
-    let effect;
-    function visit(node) {
-      if (ts.isCallExpression(node) && node.expression.getText(file) === "useLayoutEffect"
-        && node.getText(file).includes("mountedComposers.set(stashKey")) effect = node.getText(file);
-      ts.forEachChild(node, visit);
+      await input.dismissWarning();
+      await chat.unmount();
+      assert.equal((await chat.reopen()).warning, null);
+    } finally {
+      transcripts.s.pop();
     }
-    visit(file);
-    assert.ok(effect);
-    let current = { ...EMPTY_COMPOSER_STASH };
-    let cleanup;
-    const set = (field) => (value) => { current = { ...current, [field]: typeof value === "function" ? value(current[field]) : value }; };
-    const live = { current };
-    const bindings = {
-      useLayoutEffect: (callback) => { cleanup = callback(); }, composerStashes: s.stashes, mountedComposers: s.mounted,
-      stashKey: s.key, composerLiveRef: live, pendingClientTurn: { current: null }, pendingScope: { current: null }, EMPTY_COMPOSER_STASH, composerStashContent,
-      isCurrentScope: () => true, sessionsOptions: { queryKey: [] }, activeId: "s", sideParentSessionId: null, deletedSessionIds: s.deleted,
-      composerPrefill: null, setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setUnconfirmedSend: set("unconfirmedSend"), setImageRefusedFor: () => {}, crypto,
-    };
-    const mount = ts.transpileModule(`${find("mergeFailedComposer")}\n${effect}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-    new Function(...Object.keys(bindings), mount)(...Object.values(bindings));
-    assert.ok(cleanup);
-    assert.equal(current.draft, ORIGINAL);
-    assert.equal(current.unconfirmedSend, "network");
-    current = { ...current, draft: "edited", attachments: [], annotations: [] };
-    live.current = current;
-    cleanup();
-    assert.equal(s.stashes.get(s.key).unconfirmedSend, "network");
-    new Function(...Object.keys(bindings), mount)(...Object.values(bindings));
-    assert.equal(current.draft, "edited");
-    assert.equal(current.unconfirmedSend, "network");
-    current = { ...current, unconfirmedSend: null };
-    live.current = current;
-    cleanup();
-    assert.equal(s.stashes.get(s.key).unconfirmedSend, null);
   });
 }
 
-test("a failure after returning updates the mounted composer without losing newer edits", async () => {
-  let effect;
-  function visit(node) {
-    if (ts.isCallExpression(node) && node.expression.getText(file) === "useLayoutEffect"
-      && node.getText(file).includes("mountedComposers.set(stashKey")) effect = node.getText(file);
-    ts.forEachChild(node, visit);
-  }
-  visit(file);
-  assert.ok(effect);
-  const s = setup();
-  const task = s.send();
-  await flush();
-  let current = { draft: "newer", attachments: [{ dataUrl: "data:,new" }], annotations: [{ id: "b", text: "new selection" }] };
-  const set = (field) => (value) => { current = { ...current, [field]: typeof value === "function" ? value(current[field]) : value }; };
-  const bindings = {
-    useLayoutEffect: (callback) => { callback(); }, composerStashes: s.stashes, mountedComposers: s.mounted,
-    stashKey: s.key, composerLiveRef: { current: EMPTY_COMPOSER_STASH }, pendingClientTurn: { current: null }, pendingScope: { current: null }, EMPTY_COMPOSER_STASH, composerStashContent,
-    isCurrentScope: () => true, sessionsOptions: { queryKey: [] }, activeId: "s", sideParentSessionId: null, deletedSessionIds: s.deleted,
-    composerPrefill: null, setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setUnconfirmedSend: set("unconfirmedSend"), setImageRefusedFor: () => {}, crypto,
-  };
-  const mountCode = ts.transpileModule(`${find("mergeFailedComposer")}\n${effect}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  new Function(...Object.keys(bindings), mountCode)(...Object.values(bindings));
-  current = { draft: "newer", attachments: [{ dataUrl: "data:,new" }], annotations: [{ id: "b", text: "new selection" }] };
-  s.reject();
-  await task;
-  assert.equal(current.draft, `${ORIGINAL}\n\nnewer`);
-  assert.equal(current.attachments.length, 2);
-  assert.deepEqual(current.annotations.map((item) => item.text), ["old selection", "new selection"]);
+test("a failure after returning merges into the open composer without losing newer edits", async () => {
+  const chat = await compose();
+  await chat.input.send();
+  await chat.leave();
+  const input = await chat.reopen();
+  await input.attach("newer.png");
+  await annotate("in mind");
+  await input.type("newer");
+  const newer = input.draft;
+  await chat.reply.resolve(refused());
+  assert.equal(input.draft, `${chat.original}\n\n${newer}`);
+  assert.equal(input.attachments, 2);
+  assert.equal(input.annotations, 2);
 });
 
 for (const busy of [false, true]) {
-  test(`a confirmed rejection after unmount restores content and reports rejection (${busy ? "queued" : "normal"})`, async () => {
-    const s = setup({ busy });
-    const task = s.send();
-    await flush();
-    s.unmount();
-    s.reject(new RejectedResponseError("rejected"));
-    await task;
-    assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
-    assert.equal(s.stashes.get(s.key).attachments.length, 1);
-    assert.equal(s.stashes.get(s.key).annotations.length, 1);
-    assert.equal(s.stashes.get(s.key).unconfirmedSend, null);
-    assert.match(s.actions.at(-1).text, /^failed:/);
+  test(`a refused ${busy ? "queued" : "normal"} send after unmount restores its content and reports the refusal`, async () => {
+    const chat = await compose({ busy });
+    await chat.input.send();
+    await chat.unmount();
+    await chat.reply.resolve(refused());
+    const input = await chat.reopen();
+    assert.equal(input.draft, chat.original);
+    assert.equal(input.attachments, 1);
+    assert.equal(input.annotations, 1);
+    assert.equal(input.warning, null);
+    assert.ok(reported());
   });
 }
 
 for (const busy of [false, true]) {
-  test(`an accepted ${busy ? "queued" : "normal"} send with a lost response stays cleared`, async () => {
-    let lookup;
-    const s = setup({ busy, submission: async (sid, id) => { lookup = [sid, id]; return { accepted: true }; } });
-    const task = s.send();
-    await flush();
-    s.reject(new TypeError("network"));
-    await task;
-    assert.equal(lookup[0], "s");
-    assert.match(lookup[1], /^ct_/);
-    assert.equal(s.state.draft, "");
-    assert.equal(s.state.unconfirmedSend, null);
-    assert.equal(s.bindings.pendingClientTurn.current, null);
+  test(`an accepted ${busy ? "queued" : "normal"} send whose response was lost stays cleared`, async () => {
+    const lookups = [];
+    const chat = await compose({ busy, submission: (_, path) => { lookups.push(path); return { accepted: true }; } });
+    await chat.input.send();
+    await chat.reply.reject(lost());
+    assert.deepEqual(lookups, [`/api/chat/sessions/s/submissions/${chat.chat.sent()[0].clientTurnId}`]);
+    assert.match(chat.chat.sent()[0].clientTurnId, /^ct_/);
+    assert.equal(chat.input.draft, "");
+    assert.equal(chat.input.warning, null);
   });
 }
 
-test("an acceptance lookup cannot refresh a deleted session", async () => {
-  let finishLookup, refreshed = false;
-  const s = setup({ submission: () => new Promise((resolve) => { finishLookup = resolve; }) });
-  s.bindings.reseedSession = async () => { refreshed = true; };
-  const send = new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings));
-  const task = send();
-  await flush();
-  s.reject(new TypeError("network"));
-  await flush();
-  s.deleted.add("s");
-  finishLookup({ accepted: true });
-  await task;
-  assert.equal(refreshed, false);
-  assert.equal(s.stashes.has(s.key), false);
+test("an acceptance lookup cannot refresh a deleted chat", async () => {
+  const lookup = deferred();
+  const chat = await compose({ submission: () => lookup.promise });
+  await chat.input.send();
+  await chat.reply.reject(lost());
+  await emit("chat.session.deleted", { sessionId: "s" });
+  const reads = chat.chat.requests.length;
+  await lookup.resolve({ accepted: true });
+  assert.deepEqual(chat.chat.requests.slice(reads).filter(({ request }) => request.startsWith("GET /api/chat/sessions/s")), []);
 });
 
-test("a confirmed send after unmount clears its saved retry", async () => {
-  const s = setup({ submission: async () => ({ accepted: true }) });
-  s.stashes.set(s.key, s.state);
-  const cleanup = mountComposer(s);
-  s.render();
-  const task = s.send();
-  await flush();
-  s.render();
-  cleanup();
-  s.unmount();
-  s.reject(new TypeError("network"));
-  await task;
-  assert.equal(s.stashes.get(s.key)?.draft ?? "", "");
-  assert.equal(s.stashes.get(s.key)?.pendingClientTurn ?? null, null);
+test("a send confirmed after unmount leaves no retry behind", async () => {
+  const chat = await compose({ submission: () => ({ accepted: true }) });
+  await chat.input.send();
+  await chat.unmount();
+  await chat.reply.reject(lost());
+  const input = await chat.reopen();
+  assert.equal(input.draft, "");
+  assert.equal(input.warning, null);
 });
 
-test("a confirmed rejection does not query submission status", async () => {
-  let lookedUp = false;
-  const s = setup({ submission: async () => { lookedUp = true; return { accepted: true }; } });
-  const task = s.send();
-  await flush();
-  s.reject(new RejectedResponseError("rejected"));
-  await task;
-  assert.equal(lookedUp, false);
+test("a refused send does not ask whether it arrived", async () => {
+  const lookups = [];
+  const chat = await compose({ submission: (_, path) => { lookups.push(path); return { accepted: true }; } });
+  await chat.input.send();
+  await chat.reply.resolve(refused());
+  assert.deepEqual(lookups, []);
 });
 
 for (const busy of [false, true]) {
-  test(`unconfirmed ${busy ? "steering or queued" : "normal"} sends retain content and warn`, async () => {
-    const s = setup({ busy, steering: busy });
-    const task = s.send();
-    await flush();
-    s.unmount();
-    s.reject(new TypeError("network"));
-    await task;
-    assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
-    assert.equal(s.stashes.get(s.key).unconfirmedSend, "network");
-    assert.equal(s.actions.some((action) => action.type === "localError"), false);
+  test(`unconfirmed ${busy ? "steered" : "normal"} sends keep their content and warn`, async () => {
+    const chat = await compose({ busy, steering: busy });
+    await chat.input.send();
+    if (busy) assert.equal(chat.chat.sent()[0].mode, "steer");
+    await chat.unmount();
+    await chat.reply.reject(lost());
+    const input = await chat.reopen();
+    assert.equal(input.draft, chat.original);
+    assert.match(input.warning, /Failed to fetch/);
+    assert.equal(reported("Failed to fetch"), false);
   });
 }
 
-test("a failed history read restores before any message is submitted", async () => {
-  const s = setup({ history: async () => { throw new Error("history unavailable"); } });
-  const task = s.send();
-  s.switchAway();
-  await task;
-  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
-  assert.equal(s.actions.at(-1).type, "localError");
+test("a failed history read after switching restores the draft and reports it", async () => {
+  const history = deferred();
+  const chat = await renderChat("/projects/p/tasks/s", { sessions: [session("s"), session("other")], routes: {
+    "GET /api/chat/sessions/s/messages": () => history.promise,
+  } });
+  await composer().type("original");
+  await composer().send();
+  await chat.navigate("/projects/p/tasks/other");
+  await history.resolve(Response.json({ error: "history unavailable" }, { status: 503 }));
+  await chat.navigate("/projects/p/tasks/s");
+  assert.equal(composer().draft, "original");
+  assert.deepEqual(chat.sent(), []);
 });
 
-test("a session creation failure restores the unsaved composer and reports an error", async () => {
-  const s = setup({ sessionId: null });
-  const alerts = [];
-  s.bindings.openNewSession = async () => { throw new Error("creation failed"); };
-  s.bindings.showAlert = (message) => alerts.push(message);
-  const send = new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings));
-  const task = send();
-  s.switchAway();
-  await task;
-  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
-  assert.match(alerts[0], /creation failed/);
+test("a chat that cannot be created restores the unsent draft and reports why", async () => {
+  const chat = await renderChat("/projects/p/tasks/new", { sessions: [session("other")], routes: {
+    "POST /api/chat/sessions": () => Response.json({ error: "creation failed" }, { status: 500 }),
+  } });
+  await composer().type("original");
+  await composer().send();
+  assert.match(document.body.textContent, /creation failed/);
+  await chat.navigate("/projects/p/tasks/other");
+  await chat.navigate("/projects/p/tasks/new");
+  assert.equal(composer().draft, "original");
 });
 
-test("an unchanged retry in the same composer retains its existing client ID", async () => {
-  const s = setup();
-  const task = s.send();
-  await flush();
-  const id = s.bindings.pendingClientTurn.current.id;
-  s.reject(new TypeError("network"));
-  await task;
-  let retriedId;
-  const bindings = { ...s.bindings, sendChatMessage: async (_sid, _text, _opts, _images, _annotations, clientId) => { retriedId = clientId; return {}; } };
-  await new Function(...Object.keys(bindings), code)(...Object.values(bindings))();
-  assert.equal(retriedId, id);
-  assert.equal(s.state.unconfirmedSend, null);
+test("an unchanged retry in the same composer keeps its client ID and clears the warning", async () => {
+  const chat = await compose();
+  await chat.input.send();
+  await chat.reply.reject(lost());
+  assert.match(chat.input.warning, /Failed to fetch/);
+  await chat.input.send();
+  const [first, retry] = chat.chat.sent();
+  assert.equal(retry.clientTurnId, first.clientTurnId);
+  assert.equal(chat.input.warning, null);
 });
 
-test("sending a different message does not dismiss an earlier uncertain delivery", async () => {
-  const s = setup();
-  s.bindings.setUnconfirmedSend("previous response lost");
-  s.render();
-  const task = s.send();
-  await flush();
-  s.resolve();
-  await task;
-  assert.equal(s.state.unconfirmedSend, "previous response lost");
+test("sending a different message keeps the warning about an earlier uncertain one", async () => {
+  const chat = await compose();
+  await chat.input.send();
+  await chat.reply.reject(lost());
+  await chat.input.type("something else");
+  await chat.input.send();
+  assert.notEqual(chat.chat.sent()[1].clientTurnId, chat.chat.sent()[0].clientTurnId);
+  assert.match(chat.input.warning, /Failed to fetch/);
 });
 
-test("an accepted send in the active composer stays cleared", async () => {
-  const s = setup();
-  const task = s.send();
-  await flush();
-  s.resolve();
-  await task;
-  assert.equal(s.state.draft, "");
-  assert.deepEqual(s.state.attachments, []);
-  assert.deepEqual(s.state.annotations, []);
+test("an accepted send leaves the composer empty", async () => {
+  const chat = await compose();
+  await chat.input.send();
+  await chat.reply.resolve({ ok: true });
+  assert.equal(chat.input.draft, "");
+  assert.equal(chat.input.attachments, 0);
+  assert.equal(chat.input.annotations, 0);
 });
 
-test("deletion during history refresh cannot recreate a local error", async () => {
-  const s = setup({ side: true });
-  let finishRefresh;
-  s.bindings.reseedSession = () => new Promise((resolve) => { finishRefresh = resolve; });
-  const send = new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings));
-  const task = send();
-  await flush();
-  s.reject(new TypeError("network"));
-  await flush();
-  assert.ok(finishRefresh);
-  s.deleted.add("parent");
-  finishRefresh();
-  await task;
-  assert.equal(s.actions.some((action) => action.type === "localError"), false);
+test("deleting the parent while a refused side send refreshes its history reports nothing", async () => {
+  let reads = 0;
+  const history = deferred();
+  const chat = await compose({ side: true, routes: { "GET /api/chat/sessions/s/messages": () => ++reads === 1 ? { messages: transcripts.s } : history.promise } });
+  await chat.input.send();
+  await chat.reply.resolve(refused());
+  assert.equal(reads, 2);
+  await emit("chat.session.deleted", { sessionId: "parent" });
+  await history.resolve({ messages: transcripts.s });
+  assert.equal(reported(), false);
 });
 
 test("an uncertain send keeps its client ID after switching chats", async () => {
-  const s = setup();
-  let first;
-  s.bindings.sendChatMessage = (...args) => { first = args[5]; return Promise.reject(new Error("lost response")); };
-  mountComposer(s);
-  s.render();
-  await new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings))();
-  s.render();
-  const t = setup();
-  t.stashes.set(t.key, { ...s.state, pendingClientTurn: s.bindings.pendingClientTurn.current });
-  mountComposer(t);
-  t.render();
-  let retry;
-  t.bindings.draft = t.state.draft;
-  t.bindings.attachments = t.state.attachments;
-  t.bindings.annotations = t.state.annotations;
-  t.bindings.sendChatMessage = (...args) => { retry = args[5]; return Promise.resolve({}); };
-  await new Function(...Object.keys(t.bindings), code)(...Object.values(t.bindings))();
-  assert.equal(retry, first);
+  const chat = await compose();
+  await chat.input.send();
+  await chat.reply.reject(lost());
+  await chat.leave();
+  await (await chat.reopen()).send();
+  const [first, retry] = chat.chat.sent();
+  assert.equal(retry.clientTurnId, first.clientTurnId);
 });
 
 for (const steering of [false, true]) {
-  test(`lost ${steering ? "steering" : "queued"} response preserves ID and delivery mode after a chat switch`, async () => {
-    const original = setup({ busy: true, steering });
-    let sent;
-    original.bindings.sendChatMessage = (...args) => { sent = args; return Promise.reject(new Error("response lost")); };
-    const cleanup = mountComposer(original);
-    original.render();
-    const first = new Function(...Object.keys(original.bindings), code)(...Object.values(original.bindings));
-    const task = first();
-    await flush();
-    cleanup();
-    original.unmount();
-    await task;
-    const restored = setup({ busy: false });
-    restored.stashes.set(restored.key, original.stashes.get(original.key));
-    mountComposer(restored);
-    restored.render();
-    Object.assign(restored.bindings, { draft: restored.state.draft, attachments: restored.state.attachments, annotations: restored.state.annotations });
-    let retried;
-    restored.bindings.sendChatMessage = (...args) => { retried = args; return Promise.resolve({}); };
-    const retry = new Function(...Object.keys(restored.bindings), code)(...Object.values(restored.bindings));
-    await retry();
-    assert.equal(retried[5], sent[5]);
-    assert.equal(retried[6], sent[6]);
-    assert.deepEqual(retried[2], sent[2]);
-    if (steering) assert.equal(restored.actions.some((action) => action.type === "optimisticUser"), false);
+  test(`a lost ${steering ? "steered" : "queued"} send keeps its ID and delivery mode after a chat switch`, async () => {
+    const chat = await compose({ busy: true, steering });
+    await chat.input.send();
+    await chat.unmount();
+    await chat.reply.reject(lost());
+    chat.sessions[0].busy = false;
+    await emit("chat.busy", { sessionId: "s", busy: false });
+    const input = await chat.reopen();
+    await input.send();
+    const [first, retry] = chat.chat.sent();
+    assert.equal(retry.clientTurnId, first.clientTurnId);
+    assert.equal(retry.mode, first.mode);
+    assert.equal(retry.planMode, first.planMode);
+    assert.equal(retry.model, first.model);
+    if (steering) assert.equal(document.querySelectorAll('[data-message-id^="local-"]').length, 0);
   });
 }
 
-test("editing a recovered draft creates a new client ID", async () => {
-  const s = setup();
-  let first;
-  s.bindings.sendChatMessage = (...args) => { first = args[5]; return Promise.reject(new Error("response lost")); };
-  mountComposer(s);
-  s.render();
-  await new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings))();
-  s.render();
-  s.edit("changed request");
-  s.bindings.draft = s.state.draft;
-  let next;
-  s.bindings.sendChatMessage = (...args) => { next = args[5]; return Promise.resolve({}); };
-  await new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings))();
-  assert.notEqual(next, first);
-  assert.equal(s.state.unconfirmedSend, "response lost");
+test("editing a recovered draft sends it as a new message and keeps the warning", async () => {
+  const chat = await compose();
+  await chat.input.send();
+  await chat.reply.reject(lost());
+  await chat.input.type("changed request");
+  await chat.input.send();
+  const [first, next] = chat.chat.sent();
+  assert.notEqual(next.clientTurnId, first.clientTurnId);
+  assert.match(chat.input.warning, /Failed to fetch/);
 });
 
 test("a session settings refresh does not change the recovered request", async () => {
-  const original = setup();
-  original.bindings.composerSelection = { harness: "codex", model: "original-model", reasoningLevel: "high" };
-  let first;
-  original.bindings.sendChatMessage = (...args) => { first = args; return Promise.reject(new Error("response lost")); };
-  const cleanup = mountComposer(original);
-  original.render();
-  const task = new Function(...Object.keys(original.bindings), code)(...Object.values(original.bindings))();
-  await flush();
-  cleanup();
-  original.unmount();
-  await task;
-  const restored = setup();
-  restored.stashes.set(restored.key, original.stashes.get(original.key));
-  mountComposer(restored);
-  restored.render();
-  Object.assign(restored.bindings, { draft: restored.state.draft, attachments: restored.state.attachments, annotations: restored.state.annotations, composerSelection: { harness: "codex", model: "refreshed-model", reasoningLevel: "low" } });
-  let second;
-  restored.bindings.sendChatMessage = (...args) => { second = args; return Promise.resolve({}); };
-  await new Function(...Object.keys(restored.bindings), code)(...Object.values(restored.bindings))();
-  assert.equal(second[5], first[5]);
-  assert.deepEqual(second[2], first[2]);
+  const chat = await compose();
+  await chat.input.send();
+  await chat.unmount();
+  await chat.reply.reject(lost());
+  await emit("chat.session", { session: { ...chat.sessions[0], model: "gpt-6-astra", reasoningLevel: "low" } });
+  await (await chat.reopen()).send();
+  const [first, retry] = chat.chat.sent();
+  assert.equal(retry.clientTurnId, first.clientTurnId);
+  assert.equal(retry.model, first.model);
+  assert.equal(retry.reasoningLevel, first.reasoningLevel);
 });
 
-test("changing a picker invalidates a recovered retry but leaves its warning", () => {
-  let invalidate, select;
-  function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "invalidatePendingRetry") invalidate = node.initializer.getText(file);
-    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "selectModel") select = node.initializer.getText(file);
-    ts.forEachChild(node, visit);
-  }
-  visit(file);
-  assert.ok(invalidate && select);
-  const pending = { signature: "old", id: "ct-old", mode: null, options: { model: "old" } };
-  const live = { current: { ...EMPTY_COMPOSER_STASH, unconfirmedSend: "response lost", pendingClientTurn: pending } };
-  const ref = { current: pending };
-  const bindings = {
-    pendingClientTurn: ref, composerLiveRef: live, openSession: null, acpModel: null,
-    composerSelection: { harness: "codex", model: "old" },
-    setRecoveryOverrides: () => {}, setSelection: () => {}, onPreferredAgentChange: () => Promise.resolve(),
-    setSessionOverride: () => {},
-  };
-  const js = ts.transpileModule(`const invalidatePendingRetry = ${invalidate};\nreturn ${select};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  const choose = new Function(...Object.keys(bindings), js)(...Object.values(bindings));
-  choose({ model: "old" });
-  assert.equal(ref.current, pending);
-  choose({ model: "new" });
-  assert.equal(ref.current, null);
-  assert.equal(live.current.pendingClientTurn, null);
-  assert.equal(live.current.unconfirmedSend, "response lost");
-});
+for (const model of ["gpt-6.1-sol", "gpt-6-astra"]) {
+  const changed = model !== "gpt-6.1-sol";
+  test(`${changed ? "changing" : "re-picking"} the model ${changed ? "makes a recovered retry a new message" : "keeps a recovered retry"} and its warning`, async () => {
+    const chat = await compose();
+    await chat.input.send();
+    await chat.reply.reject(lost());
+    await chat.input.pick(model);
+    assert.match(chat.input.warning, /Failed to fetch/);
+    await chat.input.send();
+    const [first, retry] = chat.chat.sent();
+    assert.equal(retry.clientTurnId === first.clientTurnId, !changed);
+    assert.equal(retry.model, model);
+  });
+}
 
-test("a picker change while a request is in flight is not undone by a late failure", async () => {
-  const s = setup();
-  const cleanup = mountComposer(s);
-  s.render();
-  const task = s.send();
-  await flush();
-  const prior = s.bindings.pendingClientTurn.current;
-  assert.ok(prior);
-  prior.invalidated = true;
-  s.bindings.pendingClientTurn.current = null;
-  s.bindings.composerLiveRef.current = { ...s.bindings.composerLiveRef.current, pendingClientTurn: null };
-  cleanup();
-  s.unmount();
-  s.reject(new Error("response lost"));
-  await task;
-  assert.equal(s.stashes.get(s.key).pendingClientTurn, null);
-  assert.equal(s.stashes.get(s.key).unconfirmedSend, "response lost");
+test("a model change while a send is in flight is not undone by its late failure", async () => {
+  const chat = await compose();
+  await chat.input.send();
+  await chat.input.pick("gpt-6-astra");
+  await chat.unmount();
+  await chat.reply.reject(lost());
+  const input = await chat.reopen();
+  assert.match(input.warning, /Failed to fetch/);
+  await input.send();
+  const [first, retry] = chat.chat.sent();
+  assert.notEqual(retry.clientTurnId, first.clientTurnId);
 });
 
 test("retrying a failed plan message does not toggle plan a second time", async () => {
-  const original = setup();
-  original.bindings.parseComposerCommand = () => ({ name: "plan", prompt: "original" });
-  original.bindings.planActivation = "command";
-  original.bindings.setPlanModeOverride = () => {};
-  let first;
-  original.bindings.sendChatMessage = (...args) => { first = args; return Promise.reject(new Error("response lost")); };
-  const cleanup = mountComposer(original);
-  original.render();
-  const task = new Function(...Object.keys(original.bindings), code)(...Object.values(original.bindings))();
-  await flush();
-  cleanup();
-  original.unmount();
-  await task;
-  const restored = setup();
-  restored.stashes.set(restored.key, original.stashes.get(original.key));
-  restored.bindings.parseComposerCommand = () => ({ name: "plan", prompt: "original" });
-  restored.bindings.planActivation = "command";
-  restored.bindings.setPlanModeOverride = () => assert.fail("retry changed plan mode");
-  mountComposer(restored);
-  restored.render();
-  Object.assign(restored.bindings, { draft: restored.state.draft, attachments: restored.state.attachments, annotations: restored.state.annotations });
-  let second;
-  restored.bindings.sendChatMessage = (...args) => { second = args; return Promise.resolve({}); };
-  await new Function(...Object.keys(restored.bindings), code)(...Object.values(restored.bindings))();
-  assert.equal(second[5], first[5]);
-  assert.deepEqual(second[2], first[2]);
+  const chat = await compose();
+  await chat.input.type("/plan original");
+  await chat.input.send();
+  await chat.unmount();
+  await chat.reply.reject(lost());
+  await (await chat.reopen()).send();
+  const [first, retry] = chat.chat.sent();
+  assert.equal(first.planMode, true);
+  assert.equal(retry.clientTurnId, first.clientTurnId);
+  assert.equal(retry.planMode, true);
+  assert.equal(chat.chat.requests.filter(({ request }) => request === "PATCH /api/chat/sessions/s").length, 0);
+});
+
+test("sending during an agent switch keeps the draft until the new agent is ready", async () => {
+  const claude = { ...codex, id: "claude-code", name: "Claude Code", models: [{ id: "claude-model" }] };
+  const switched = deferred();
+  const chat = await renderChat("/projects/p/tasks/s", {
+    harnesses: [codex, claude],
+    routes: { "PATCH /api/chat/sessions/s": () => switched.promise },
+  });
+  const input = composer();
+  await input.type("original");
+  await input.pick("claude-model");
+  assert.deepEqual(chat.requests.filter(({ request }) => request === "PATCH /api/chat/sessions/s").map(({ body }) => body.agent.harness), ["claude-code"]);
+  await input.send();
+  assert.equal(input.draft, "original");
+  assert.deepEqual(chat.sent(), []);
+  assert.equal(document.querySelector('[data-message-id^="local-"]'), null);
 });

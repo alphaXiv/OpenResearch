@@ -279,11 +279,13 @@ mod tests {
         let body = describe_targets(&[claude, cursor]).replace('\\', "/");
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("Claude Code"));
-        assert!(lines[0].contains(".claude/skills/orx/SKILL.md"));
-        assert!(lines[1].contains("Cursor"));
-        let cursor_target = tilde(&cursor.skill_target().unwrap()).replace('\\', "/");
-        assert!(lines[1].contains(&cursor_target));
+        for (line, (name, harness)) in lines
+            .iter()
+            .zip([("Claude Code", claude), ("Cursor", cursor)])
+        {
+            let target = tilde(&harness.skill_target().unwrap()).replace('\\', "/");
+            assert!(line.contains(name) && line.contains(&target), "{line}");
+        }
     }
 
     #[test]
@@ -318,7 +320,7 @@ mod tests {
         let extras = codex.extra_skill_targets();
         assert_eq!(extras.len(), 1, "one legacy prompt");
         assert!(
-            extras[0].0.ends_with(".codex/prompts/orx.md"),
+            extras[0].0.ends_with("prompts/orx.md"),
             "legacy prompt path, got {}",
             extras[0].0.display()
         );

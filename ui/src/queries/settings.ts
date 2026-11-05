@@ -105,11 +105,23 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     }, queryClient);
   };
 
+  /** Fails with `AlphaXivNotConnectedError` while the account has no alphaXiv connection. */
+  const useAlphaXivMe = () => {
+    const account = useOpenResearchAccount();
+    return useQuery({
+      queryKey: workspaceKey("alphaXivMe", account.data?.user?.id ?? null),
+      queryFn: ({ signal }) => api.getAlphaXivMe(signal),
+      enabled: !!account.data?.user,
+      retry: false,
+    }, queryClient);
+  };
+
   const useSignOutOpenResearch = () => useMutation({
     mutationFn: async () => {
       const key = workspaceKey("getOpenResearchAccount");
       await api.logoutOpenResearch();
       queryClient.removeQueries({ queryKey: workspaceKey("alphaXivFolders") });
+      queryClient.removeQueries({ queryKey: workspaceKey("alphaXivMe") });
       queryClient.removeQueries({ queryKey: workspaceKey("alphaXivPapers") });
       await queryClient.cancelQueries({ queryKey: key });
       if (!isCurrentScope(key)) return;
@@ -213,12 +225,6 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
   const getBuildNotesQuery = () => queryOptions({
     queryKey: workspaceKey("getBuildNotes"),
     queryFn: ({ signal }) => api.getBuildNotes(signal),
-    staleTime: 300_000,
-  });
-
-  const getProfileQuery = () => queryOptions({
-    queryKey: workspaceKey("getProfile"),
-    queryFn: ({ signal }) => api.getProfile(signal),
     staleTime: 300_000,
   });
 
@@ -340,6 +346,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     getOpenResearchSettingsQuery,
     useOpenResearchAccount,
     useAlphaXivFolders,
+    useAlphaXivMe,
     useSignOutOpenResearch,
     useAddOpenResearchSshKey,
     getEnvVarsQuery,
@@ -355,7 +362,6 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     listRemoteSessionsQuery,
     getUpdateStatusQuery,
     getBuildNotesQuery,
-    getProfileQuery,
     getLitSourcesQuery,
     getProjectDefaultsQuery,
     getProjectGitStatusQuery,

@@ -57,7 +57,7 @@ permissions, and never changes a shared install itself. Installing or updating
 database and cache paths visible and changeable.
 
 A new remote machine opens agent configuration without repeating the welcome,
-research profile or demo setup. Agent installations and sign-ins belong to each
+alphaXiv sign-in or demo setup. Agent installations and sign-ins belong to each
 machine; the account picker and paper library continue to use the laptop account.
 Installing or signing in to Claude Code with a subscription first checks the
 remote's public egress IP; a known datacenter address prompts once per setup,

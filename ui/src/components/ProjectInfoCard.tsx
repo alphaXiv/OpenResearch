@@ -1,5 +1,6 @@
 import { useContext, useId, useRef, useState, type RefObject } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useQuery } from "@tanstack/react-query";
 import { useWorkspace } from "../workspace";
 import { type DialogContentProps } from "../dialog";
 import { useFileManagerLabel } from "./useFileManagerLabel";
@@ -10,7 +11,6 @@ import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings,
 import { type Project } from "../api";
 import { downloadFile } from "../download";
 import { m } from "../paraglide/messages.js";
-import { useRuntime } from "../RemoteRuntime";
 import { ShareProjectDialog } from "./ShareProjectDialog";
 import { Button, DialogContent, DialogTitle, Spinner, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
 
@@ -34,10 +34,10 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
 
   const { showCustomDialog } = useWorkspace().dialogs;
 
-  const { deleteProject, updateProject, revealFileInManager, shareProject } = useWorkspace().api;
+  const { api: { deleteProject, updateProject, revealFileInManager, shareProject }, queries: { getRuntimeQuery } } = useWorkspace();
 
   const revealLabel = useFileManagerLabel();
-  const remote = useRuntime().kind === "ssh";
+  const remote = useQuery(getRuntimeQuery()).data?.kind === "ssh";
   const [menuOpen, setMenuOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 

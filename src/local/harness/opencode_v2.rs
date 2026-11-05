@@ -867,7 +867,12 @@ pub(super) async fn detect(
 }
 
 async fn discover_models(endpoint: &AgentEndpoint) -> Result<(Value, Value)> {
-    discover_models_with_timeout(endpoint, Duration::from_secs(30)).await
+    discover_models_within(
+        endpoint,
+        Duration::from_secs(30),
+        Duration::from_millis(200),
+    )
+    .await
 }
 
 async fn catalog_get(endpoint: &AgentEndpoint, path: &str) -> Result<Option<Value>> {
@@ -899,9 +904,10 @@ async fn catalog_get(endpoint: &AgentEndpoint, path: &str) -> Result<Option<Valu
     Ok(Some(body))
 }
 
-async fn discover_models_with_timeout(
+async fn discover_models_within(
     endpoint: &AgentEndpoint,
     timeout: Duration,
+    retry: Duration,
 ) -> Result<(Value, Value)> {
     let mut catalog = None;
     let mut plugins_pending = false;
@@ -926,7 +932,7 @@ async fn discover_models_with_timeout(
                 }
             }
             // OpenCode 2.0.4 removed await-activation; cold catalogs can initially be empty.
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(retry).await;
         }
     })
     .await;
@@ -1173,6 +1179,8 @@ mod tests {
         (endpoint, server)
     }
 
+    const RETRY: Duration = Duration::from_millis(1);
+
     fn plugin_pending() -> Value {
         json!({"_tag":"ServiceUnavailableError", "service":"plugin", "message":"fixture", "extra":true})
     }
@@ -1215,7 +1223,7 @@ mod tests {
                     );
                 }
                 let (endpoint, server) = catalog_server(app, legacy).await;
-                let result = discover_models_with_timeout(&endpoint, Duration::from_secs(2)).await;
+                let result = discover_models_within(&endpoint, Duration::from_secs(2), RETRY).await;
                 server.abort();
                 let (models, integrations) = result.unwrap();
                 assert_eq!(models["data"][0]["id"], "/api/model");
@@ -1269,7 +1277,7 @@ mod tests {
                     }),
                 );
                 let (endpoint, server) = catalog_server(app, false).await;
-                let result = discover_models_with_timeout(&endpoint, Duration::from_secs(1)).await;
+                let result = discover_models_within(&endpoint, Duration::from_secs(1), RETRY).await;
                 server.abort();
                 let error = result.unwrap_err().to_string();
                 assert!(error.contains(diagnostic), "{error}");
@@ -1297,8 +1305,8 @@ mod tests {
             );
             let (endpoint, server) = catalog_server(app, false).await;
             let result = tokio::time::timeout(
-                Duration::from_secs(2),
-                discover_models_with_timeout(&endpoint, Duration::from_secs(1)),
+                Duration::from_secs(1),
+                discover_models_within(&endpoint, Duration::from_millis(100), RETRY),
             )
             .await;
             server.abort();
@@ -1306,7 +1314,7 @@ mod tests {
             if stalled {
                 assert_eq!(error, "OpenCode model discovery timed out");
             } else {
-                assert_eq!(error, "OpenCode plugins did not finish activating within 1 seconds. Re-check OpenCode.");
+                assert!(error.starts_with("OpenCode plugins did not finish activating"));
             }
         }
     }
@@ -1351,7 +1359,7 @@ mod tests {
                     }),
                 );
             let (endpoint, server) = catalog_server(app, false).await;
-            let result = discover_models_with_timeout(&endpoint, Duration::from_secs(1)).await;
+            let result = discover_models_within(&endpoint, Duration::from_millis(100), RETRY).await;
             server.abort();
             let (models, integrations) = result.unwrap();
             let expected = if plugins_reload {

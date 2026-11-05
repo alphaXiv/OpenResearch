@@ -38,6 +38,9 @@ pub struct Definition {
     pub executable: String,
     #[serde(default)]
     pub arguments: Vec<String>,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Definition {
@@ -161,6 +164,7 @@ pub fn presets() -> Vec<Preset> {
                 .iter()
                 .map(|argument| (*argument).into())
                 .collect(),
+            unknown: Default::default(),
         },
         setup_url,
     })
@@ -229,7 +233,11 @@ pub fn save(definition: Definition, create: bool) -> Result<()> {
         {
             found = true;
             if !create {
-                *saved = definition.clone();
+                let unknown = std::mem::take(&mut saved.unknown);
+                *saved = Definition {
+                    unknown,
+                    ..definition.clone()
+                };
             }
         } else if create {
             settings.acp_harnesses.push(definition);
@@ -381,6 +389,7 @@ for line in sys.stdin:
             name: "Catalog peer".into(),
             executable: if cfg!(windows) { "python" } else { "python3" }.into(),
             arguments: vec!["-u".into(), "-c".into(), peer.into()],
+            unknown: Default::default(),
         };
         let configuration = discover_models(&definition).await.unwrap();
         assert_eq!(
@@ -504,6 +513,7 @@ for line in sys.stdin:
                 "\"quoted\"".into(),
                 "$(echo untouched)".into(),
             ],
+            unknown: Default::default(),
         };
         let result = test_connection(&definition).await.unwrap();
         assert_eq!(result["status"], "connected");
@@ -542,6 +552,7 @@ for line in sys.stdin:
                 "\"quoted\"".into(),
                 "$(echo untouched)".into(),
             ],
+            unknown: Default::default(),
         };
         definition.validate().unwrap();
         let saved = serde_json::to_string(&definition).unwrap();

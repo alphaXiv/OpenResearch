@@ -609,10 +609,9 @@ impl Broker {
                 .or_default()
                 .clone();
             let mut cache = cache.lock().await;
-            if cache
-                .sampled
-                .is_none_or(|sampled| sampled.elapsed() >= Duration::from_secs(5))
-                || cache.values.get(run).is_none()
+            if cache.sampled.is_none_or(|sampled| {
+                sampled.elapsed() >= crate::config::paced(Duration::from_secs(5))
+            }) || cache.values.get(run).is_none()
             {
                 let mut jobs = vec![json!({"run":run, "job":job, "dir":operation["dir"]})];
                 let active = crate::store::Store::open()?.list_active_runs()?;

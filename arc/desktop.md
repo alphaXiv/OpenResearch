@@ -180,9 +180,9 @@ merge any  ─► canary workflow  ─► canary desktop builds, beside CI on th
 
 ## The gate on main
 
-Main accepts a merge only when three checks pass, administrators included:
-"fmt, clippy, test", "version sanity" and "linked issue". There is no merge
-queue and no requirement to be up to date with main.
+Main accepts a merge only when two checks pass, administrators included:
+"fmt, clippy, test" and "version sanity". There is no merge queue and no
+requirement to be up to date with main.
 
 - Pull request CI tests GitHub's simulated merge of the branch into main.
   It selects jobs by which files changed. The required aggregate check fails
@@ -190,7 +190,3 @@ queue and no requirement to be up to date with main.
   have run.
 - Pull requests run a lighter platform matrix. Full platform tests, optimized
   builds and packaging run only after merge.
-- "Linked issue" requires pull requests from forks to name an issue they
-  close; branches in the repository are exempt. It runs from main's copy of
-  the workflow with the target repository's permissions, so it **must never
-  check out or run the pull request's code**.

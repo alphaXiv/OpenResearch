@@ -75,6 +75,24 @@ export function composerStashContent(
   };
 }
 
+/** A failed send's content returned to a composer that may have moved on: the failed draft leads. */
+export function mergeFailedComposer(current: ComposerStash, failed: ComposerStash): ComposerStash {
+  const annotations = [...current.annotations];
+  for (const annotation of failed.annotations) {
+    if (annotations.some((item) => item.id === annotation.id && item.text === annotation.text)) continue;
+    let id = annotation.id;
+    while (annotations.some((item) => item.id === id)) id += ":recovered";
+    annotations.unshift(id === annotation.id ? annotation : { ...annotation, id });
+  }
+  return {
+    draft: [failed.draft, current.draft].filter(Boolean).join("\n\n"),
+    attachments: [...failed.attachments.filter((item) => !current.attachments.includes(item)), ...current.attachments],
+    annotations,
+    unconfirmedSend: current.unconfirmedSend ?? failed.unconfirmedSend,
+    pendingClientTurn: current.pendingClientTurn ?? failed.pendingClientTurn,
+  };
+}
+
 export function createComposerState() {
   const composerSeeds = new Map<string, string>();
   return {

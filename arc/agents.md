@@ -207,6 +207,9 @@ session; if that session is gone, the agent gets a bounded snapshot of orx's
 transcript instead, with instructions not to repeat completed tool actions.
 Queued messages are persisted before they are acknowledged and run in order
 as each turn ends, so a restart loses none of them; Stop clears the queue. A
+dashboard that is quitting starts no turn, not even the next queued one when
+shutting its agents down ends a turn, and gives up its leases on the way out,
+so the next start recovers its turns at once instead of when they expire. A
 turn silent for long enough is interrupted rather than left holding the chat
 forever.
 

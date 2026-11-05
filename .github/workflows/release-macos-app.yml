@@ -20,7 +20,7 @@
 name: Attach macOS app to release
 
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers] Release has no PR trigger and `check` admits only dispatched runs
     workflows: ["Release"]
     types: [completed]
   workflow_dispatch:
@@ -32,7 +32,7 @@ on:
 
 permissions:
   actions: read # resolve the upstream release source artifact
-  contents: write # upload release assets
+  contents: read
 
 concurrency:
   group: release-macos-app
@@ -55,8 +55,9 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
       - id: gate
         env:
@@ -85,10 +86,12 @@ jobs:
           if [ -z "$RELEASE_RUN_ID" ] && { git cat-file -e "$sha:scripts/build-host.mjs" 2>/dev/null || ! git cat-file -e "$sha:ui/dist/index.html" 2>/dev/null; }; then
             RELEASE_RUN_ID=$(bash scripts/find-release-run.sh "$tag" "$sha")
           fi
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "release-run-id=$RELEASE_RUN_ID" >> "$GITHUB_OUTPUT"
+          {
+            echo "ok=true"
+            echo "tag=$tag"
+            echo "sha=$sha"
+            echo "release-run-id=$RELEASE_RUN_ID"
+          } >> "$GITHUB_OUTPUT"
 
   macos-app:
     needs: check
@@ -100,9 +103,13 @@ jobs:
     # is never used without a human approving the run — even if an unwanted change
     # reaches main. Restrict its deployment branches to main. See DISTRIBUTION.md.
     environment: release-signing
+    permissions:
+      actions: read # download the UI the Release run built
+      contents: write # upload release assets
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.check.outputs.source-sha }}
 
       - name: Remove checked-in UI
@@ -110,7 +117,7 @@ jobs:
         run: rm -rf ui/dist
       - name: Download release UI
         if: needs.check.outputs.release-run-id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-ui
           path: ui/dist
@@ -119,7 +126,7 @@ jobs:
 
       - name: Download release hosts
         if: needs.check.outputs.release-run-id != '' && hashFiles('scripts/build-host.mjs') != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-host
           path: target/host-binaries
@@ -127,13 +134,14 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Take signing action from the workflow revision
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.workflow_sha }}
           path: signing-workflow
           sparse-checkout: .github/actions/macos-signing
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
 
