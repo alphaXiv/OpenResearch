@@ -460,10 +460,17 @@ pub(crate) fn host_view(
 ) -> Result<Value> {
     use crate::engine::transport::{HostClass, Status};
     let class = store.engine_host_auth(alias)?.class;
+    let connect_required = cfg!(windows)
+        && crate::compute::supervised_ssh_needed(
+            crate::config::run_engine_settings()?.0,
+            &store.list_active_runs()?,
+            alias,
+        );
     Ok(json!({
         "alias": alias, "root": root,
         "status": match state.status { Status::Idle => "idle", Status::Connecting => "connecting", Status::Live => "live", Status::Backoff => "backoff", Status::NeedsAuth => "needs_auth" },
         "class": class.map(|class| match class { HostClass::Key => "key", HostClass::Interactive => "interactive" }),
+        "connectRequired": connect_required,
         "sinceMs": state.since_ms, "nextRetryMs": state.next_retry_ms, "cause": state.cause,
     }))
 }

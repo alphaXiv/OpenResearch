@@ -1062,7 +1062,12 @@ async fn runs_an_old_supervisor_holds_are_watched_and_never_written() {
     assert_eq!(
         decisions,
         [
-            ("box".to_string(), Adoption::Loop),
+            (
+                "box".to_string(),
+                Adoption::Native {
+                    kind: "openresearch_job".into()
+                }
+            ),
             ("held".to_string(), Adoption::Watch),
             (
                 "hf".to_string(),

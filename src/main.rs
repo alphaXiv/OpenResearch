@@ -273,6 +273,43 @@ pub enum ProjectCommand {
         #[arg(long = "run-command")]
         run_command: Option<String>,
     },
+
+    /// Save a project as a .orx file a collaborator can open in OpenResearch,
+    /// or publish it as an openresearch.sh link with --publish.
+    /// Every chat is included unless narrowed with --chat or left out with --no-chats.
+    Share {
+        project_id: String,
+        /// File to write (default: ./<project>.orx).
+        #[arg(long, conflicts_with = "publish")]
+        out: Option<String>,
+        /// Upload the file to openresearch.sh and print a link anyone can open
+        /// (needs `orx login`). Publishing again updates the same link.
+        #[arg(long)]
+        publish: bool,
+        /// Include only this chat's transcript (repeatable).
+        #[arg(long = "chat")]
+        chats: Vec<String>,
+        /// Leave every chat out.
+        #[arg(long, conflicts_with = "chats")]
+        no_chats: bool,
+        /// Leave run logs out.
+        #[arg(long)]
+        no_logs: bool,
+        /// Leave the artifacts folder out.
+        #[arg(long)]
+        no_artifacts: bool,
+    },
+
+    /// Delete a project's published openresearch.sh link and its file.
+    Unpublish { project_id: String },
+
+    /// Open a shared .orx file, or an openresearch.sh/p/... link, as a new project.
+    Import {
+        file: String,
+        /// Folder to create the project in (default: ./<file or project name>).
+        #[arg(long)]
+        path: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]

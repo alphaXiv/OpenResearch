@@ -165,7 +165,7 @@ fn prepare_snapshot_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn digest_file(path: &Path) -> Result<(String, u64)> {
+pub(crate) fn digest_file(path: &Path) -> Result<(String, u64)> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut size = 0u64;

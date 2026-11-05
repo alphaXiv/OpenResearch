@@ -1031,3 +1031,124 @@ fn dead_wrapper_cleanup_renews_proof_without_changing_the_receipt() {
         assert_eq!(fs::read(run.directory.0.join("exit.json")).unwrap(), bytes);
     }
 }
+
+#[test]
+fn rentals_release_after_receipts_with_or_without_a_collector_and_retry_release() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+
+    let _serial = CANCELLATIONS.lock().unwrap();
+    for (code, acknowledge, cancel) in [
+        (0, true, false),
+        (7, true, false),
+        (0, false, false),
+        (0, true, true),
+    ] {
+        let mut run = Run::new(&format!(
+            "printf 'private experiment output\\n'; sleep 0.3; exit {code}\n"
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        publish(&run.directory.0.join("rental.json"), &serde_json::json!({
+            "rental": {"apiUrl":format!("http://{address}"), "sandboxId":"rental", "token":"capability"},
+            "directory":run.directory.0,
+        })).unwrap();
+        if acknowledge {
+            fs::write(run.directory.0.join("final_collected"), "").unwrap();
+        }
+        if cancel {
+            fs::write(run.directory.0.join("cancel.req"), "").unwrap();
+        }
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_requests = requests.clone();
+        let server_stop = stop.clone();
+        let dir = run.directory.0.clone();
+        let server = std::thread::spawn(move || {
+            let mut releases = 0;
+            while !server_stop.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut byte = [0];
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    bytes.push(byte[0]);
+                }
+                let headers = String::from_utf8(bytes).unwrap();
+                assert!(headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer capability\r\n"));
+                let mut body = [0; 2];
+                stream.read_exact(&mut body).unwrap();
+                assert_eq!(&body, b"{}");
+                let operation = headers
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                if operation == "activate" {
+                    assert!(!dir.join("started").exists());
+                    assert!(matches!(wrapper::state(&dir).unwrap(), RunState::Starting));
+                }
+                if operation == "release" {
+                    assert!(dir.join("exit.json").exists());
+                    releases += 1;
+                }
+                server_requests.lock().unwrap().push(operation.clone());
+                let status = if operation == "release" && releases == 1 {
+                    "503 Service Unavailable"
+                } else {
+                    "204 No Content"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        run.spawn();
+        run.wait();
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        let receipt = wrapper::receipt(&run.directory.0).unwrap().unwrap();
+        assert_eq!(receipt.code, (!cancel).then_some(code));
+        assert_eq!(
+            receipt.reason,
+            if cancel {
+                ExitReason::Cancelled
+            } else {
+                ExitReason::Exited
+            }
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.first().unwrap(), "activate");
+        assert_eq!(requests.last().unwrap(), "release");
+        assert_eq!(requests.iter().filter(|op| *op == "release").count(), 2);
+        if !cancel {
+            assert!(requests.iter().any(|op| op == "heartbeat"));
+        }
+    }
+}

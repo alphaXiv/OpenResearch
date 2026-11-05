@@ -522,7 +522,8 @@ impl Engine {
                     raise.then(|| {
                         let mut body = attention_body(run_id, &contact);
                         if matches!(contact, Contact::NeedsAuth { .. } | Contact::Unreachable { .. })
-                            && matches!(super::handle_of(&run), Some(Handle::Legacy { descriptor }) if descriptor.kind == "openresearch_job")
+                            && (matches!(super::handle_of(&run), Some(Handle::OpenResearch { .. }))
+                                || matches!(super::handle_of(&run), Some(Handle::Legacy { descriptor }) if descriptor.kind == "openresearch_job"))
                         {
                             body.push(' ');
                             body.push_str(&crate::plane::LABELS["run_notice_rental_billing"]);

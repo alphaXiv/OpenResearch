@@ -16,6 +16,7 @@ libc = "0.2"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 orx-host = { path = ".", features = ["test-hooks"] }

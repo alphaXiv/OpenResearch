@@ -107,35 +107,103 @@ fn private_directory(path: &Path) -> Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
     #[cfg(windows)]
-    {
-        let script = r#"$ErrorActionPreference = 'Stop'
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$acl = Get-Acl -LiteralPath $env:ORX_PRIVATE_DIRECTORY
-$owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-if ($owner -notin @($identity.User.Value, 'S-1-5-32-544', 'S-1-5-18')) { throw 'SSH service directory has a different owner' }
-$acl.SetAccessRuleProtection($true, $false)
-foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleAll($rule) }
-$rule = [Security.AccessControl.FileSystemAccessRule]::new($identity.User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-$acl.SetAccessRule($rule)
-Set-Acl -LiteralPath $env:ORX_PRIVATE_DIRECTORY -AclObject $acl
-"#;
-        let status = crate::process::command("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            // Windows PowerShell must not load PowerShell 7's incompatible modules.
-            .env_remove("PSModulePath")
-            .env("ORX_PRIVATE_DIRECTORY", path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err(anyhow!(
-                "Could not verify and protect the private SSH service directory."
-            ));
-        }
+    if !protect_directory(path) {
+        return Err(anyhow!(
+            "Could not verify and protect the private SSH service directory."
+        ));
     }
     verified.insert(path.to_owned());
     Ok(())
+}
+
+/// Writes only the DACL: rewriting the SACL needs a privilege normal users lack.
+#[cfg(windows)]
+fn protect_directory(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{
+        GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        AddAccessAllowedAceEx, EqualSid, GetTokenInformation, InitializeAcl, IsWellKnownSid,
+        TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid, ACL_REVISION,
+        CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // Sized for the longest SID, 68 bytes: a TOKEN_USER with its SID, and an ACL with one ACE.
+    let mut user = [0u64; 16];
+    let mut acl = [0u32; 32];
+    let mut token = null_mut();
+    let mut owner = null_mut();
+    let mut descriptor = null_mut();
+    let mut written = 0;
+
+    // SAFETY: every buffer outlives its call and its length is passed with it. `owner` points
+    // into `descriptor`, read before LocalFree; `sid` points into `user`.
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let token = OwnedHandle::from_raw_handle(token);
+        if GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            user.as_mut_ptr().cast(),
+            size_of_val(&user) as u32,
+            &mut written,
+        ) == 0
+        {
+            return false;
+        }
+        let sid = (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+
+        if GetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        ) != ERROR_SUCCESS
+        {
+            return false;
+        }
+        let trusted_owner = EqualSid(owner, sid) != 0
+            || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0
+            || IsWellKnownSid(owner, WinLocalSystemSid) != 0;
+        LocalFree(descriptor);
+
+        trusted_owner
+            && InitializeAcl(
+                acl.as_mut_ptr().cast(),
+                size_of_val(&acl) as u32,
+                ACL_REVISION,
+            ) != 0
+            && AddAccessAllowedAceEx(
+                acl.as_mut_ptr().cast(),
+                ACL_REVISION,
+                CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+                FILE_ALL_ACCESS,
+                sid,
+            ) != 0
+            && SetNamedSecurityInfoW(
+                path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                acl.as_ptr().cast(),
+                null(),
+            ) == ERROR_SUCCESS
+    }
 }
 
 fn endpoint() -> Result<Endpoint> {
@@ -915,46 +983,30 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn private_directory_ignores_inherited_powershell_module_path() {
-        const CHILD_DIR: &str = "ORX_TEST_PRIVATE_DIRECTORY_MODULE_PATH";
-        if let Some(path) = std::env::var_os(CHILD_DIR) {
-            private_directory(Path::new(&path)).unwrap();
-            return;
-        }
+    fn private_directory_grants_only_the_current_user() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-private-directory").unwrap();
+        let path = dir.path().join("ssh service");
+        let aces = |path: &Path| {
+            let output = crate::process::command("icacls")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
 
-        let dir = crate::local::git::TemporaryDirectory::new("orx-private-module-path").unwrap();
-        let modules = dir.path().join("modules with spaces");
-        let security = modules.join("Microsoft.PowerShell.Security");
-        std::fs::create_dir_all(&security).unwrap();
-        // Model an incompatible module earlier on PowerShell 7's inherited search path.
-        std::fs::write(
-            security.join("Microsoft.PowerShell.Security.psd1"),
-            r#"@{
-RootModule = 'Microsoft.PowerShell.Security.psm1'
-ModuleVersion = '99.0'
-FunctionsToExport = @('Get-Acl', 'Set-Acl')
-}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            security.join("Microsoft.PowerShell.Security.psm1"),
-            "throw 'incompatible module'\nfunction Get-Acl {}\nfunction Set-Acl {}\n",
-        )
-        .unwrap();
-        // Including the built-in path last preserves the inherited ordering on startup.
-        let system_modules = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join(r"System32\WindowsPowerShell\v1.0\Modules");
-        let module_path = std::env::join_paths([modules, system_modules]).unwrap();
-        let output = crate::process::command(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "jobs::ssh::service::tests::private_directory_ignores_inherited_powershell_module_path",
-                "--nocapture",
-            ])
-            .env(CHILD_DIR, dir.path().join("ssh service"))
-            .env("PSModulePath", module_path)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
+        private_directory(&path).unwrap();
+        // Each process protects the directory again, over the DACL the last one wrote.
+        assert!(protect_directory(&path));
+
+        let directory = aces(&path);
+        assert_eq!(directory.matches(":(").count(), 1, "{directory}");
+        assert!(directory.contains(":(OI)(CI)(F)"), "{directory}");
+
+        let child = path.join("child");
+        std::fs::write(&child, "").unwrap();
+        let child = aces(&child);
+        assert_eq!(child.matches(":(").count(), 1, "{child}");
+        assert!(child.contains(":(I)(F)"), "{child}");
     }
 }

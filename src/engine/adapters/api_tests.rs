@@ -564,7 +564,7 @@ else:
     std::fs::write(root.join("resources.json"), partial.to_string()).unwrap();
     assert!(matches!(adapter.recover(&intent).await, Recovery::Absent));
     let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
-    assert!(calls.contains("delete job/primary -n default --wait=false"));
+    assert!(calls.contains("delete job/primary -n default --cascade=foreground --wait=false"));
 }
 
 #[tokio::test]
@@ -934,7 +934,184 @@ async fn openresearch_rejected_key_auto_cancel_checks_rental_and_survives_restar
     }
 }
 
-async fn legacy_rejected_key(root: PathBuf, watching: bool) {
+#[tokio::test]
+async fn round_one_bootstrap_heartbeat_precedes_wrapper_activation() {
+    use super::openresearch::{LegacyTransport, OpenResearch};
+    use super::ssh::Ssh;
+    use crate::engine::transport::{Config, HostConn};
+    let Some(root) = isolated().await else {
+        return;
+    };
+    crate::config::save_credentials(&crate::config::Credentials {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        token: "fake".into(),
+    })
+    .await
+    .unwrap();
+    let server = orx_test_support::Sshd::start().unwrap();
+    let shell = server.directory().join("command");
+    let command = std::fs::read_to_string(&shell).unwrap();
+    std::fs::write(
+        shell,
+        command.replacen(
+            "export HOME",
+            "export HOME\nexport PATH=\"$HOME/.local/bin:$PATH\"",
+            1,
+        ),
+    )
+    .unwrap();
+    let clock = Arc::new(TestClock::new());
+    let config = Config {
+        alias: server.alias().into(),
+        root: "~/engine-root".into(),
+        ssh_config: Some(server.config_path()),
+        control_dir: server.directory().join("cm"),
+        binary_dir: Some(orx_test_support::host_binaries()),
+        sharing_home: None,
+        askpass_executable: std::env::current_exe().unwrap(),
+    };
+    let store = Store::open_at(root.join("transport")).unwrap();
+    let auth = crate::engine::transport::Auth::new(&store, &config.alias).unwrap();
+    let conn = HostConn::start_shared(config, store, clock.clone(), auth).unwrap();
+    let transport = Arc::new(LegacyTransport::new(
+        Arc::new(Ssh::new(
+            server.alias().into(),
+            "~/engine-root".into(),
+            conn.clone(),
+        )),
+        root.join("store/run-logs"),
+    ));
+    let engine = Arc::new(engine(&root));
+    let id = uuid::Uuid::new_v4().to_string();
+    let fixture = root.join("snapshot");
+    std::fs::create_dir_all(&fixture).unwrap();
+    std::fs::write(fixture.join("README"), "snapshot").unwrap();
+    let archive = root.join("source.tar");
+    assert!(crate::process::command("tar")
+        .arg("-cf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .unwrap()
+        .success());
+    let bytes = std::fs::read(&archive).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    script(&server.home().join(".local/bin/uv"), "#!/bin/sh\nexit 0\n");
+    script(
+        &server.home().join(".local/bin/timeout"),
+        "#!/bin/sh\nshift 3\nexec \"$@\"\n",
+    );
+    let descriptor = BackendDescriptor::parse(&json!({
+        "kind":"openresearch_job", "namespace":"org", "jobId":"box",
+            "sourceDigest":digest,"sourcePath":archive,"sourceSize":bytes.len(),
+        "sshHost":"127.0.0.1", "sshPort":server.port(), "sshUser":server.user(),
+        "rentalLease":{"apiUrl":std::env::var("HF_ENDPOINT").unwrap(),"sandboxId":"box","token":"fake"}
+    }).to_string()).unwrap();
+    let launch = LaunchSpec {
+        kind: "openresearch_job".into(),
+        target: Some("org".into()),
+        options: json!({}),
+    };
+    let mut submission = pending(&id, &descriptor, &launch);
+    submission.spec_digest = &digest;
+    submission.command = "printf 'before disconnect\\n'; sleep 2; printf 'final result\\n'; exit 7";
+    submission.created_at = engine.clock.wall_ms();
+    engine.insert(submission).unwrap();
+    let watched = WatchedRun {
+        id: id.clone(),
+        handle: Handle::OpenResearch {
+            descriptor: Box::new(descriptor),
+        },
+    };
+    engine
+        .store()
+        .set_submission_fence(
+            &id,
+            1,
+            &crate::store::SubmissionFence {
+                taken_at: 1,
+                submitter: None,
+            },
+        )
+        .unwrap();
+    assert!(engine
+        .store()
+        .record_run_handle(&id, 1, &watched.handle)
+        .unwrap());
+    let factory: super::openresearch::TransportFactory = {
+        let transport = transport.clone();
+        Arc::new(move |_| Ok(transport.clone()))
+    };
+    let adapter = OpenResearch::new(engine.clone(), factory.clone());
+    let directory = server.home().join(format!("engine-root/runs/{id}"));
+    tokio::time::timeout(Duration::from_secs(25), async {
+        while !directory.join("started").exists() {
+            engine
+                .observe_runs(&adapter, std::slice::from_ref(&watched), Duration::ZERO)
+                .await
+                .unwrap();
+            clock.advance(Duration::from_secs(10));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let requests = std::fs::read_to_string(root.join("http.log")).unwrap();
+    let heartbeat = requests
+        .find("POST /sandboxes/box/lease/heartbeat")
+        .expect("bootstrap heartbeat");
+    let activated = requests
+        .find("POST /sandboxes/box/lease/activate")
+        .expect("wrapper activation");
+    assert!(heartbeat < activated, "{requests}");
+    server.proxy().reset().unwrap();
+    drop(adapter);
+    let adapter = OpenResearch::new(engine.clone(), factory);
+    tokio::time::timeout(Duration::from_secs(25), async {
+        while !phase_of(&engine.load(&id).unwrap().0)
+            .unwrap()
+            .is_terminal()
+        {
+            clock.advance(Duration::from_secs(60));
+            engine
+                .observe_runs(&adapter, std::slice::from_ref(&watched), Duration::ZERO)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let (run, state) = engine.load(&id).unwrap();
+    assert_eq!(run.status, "failed");
+    assert_eq!(
+        run.exit_code,
+        Some(7),
+        "{}",
+        std::fs::read_to_string(directory.join("log")).unwrap_or_default()
+    );
+    assert_eq!(state.started_at, orx_host::wrapper::started_at(&directory));
+    crate::engine::runtime::Runtime::collect_log(
+        &root.join("store"),
+        &adapter,
+        &watched,
+        &mut false,
+    )
+    .await
+    .unwrap();
+    adapter.finish(&watched).await.unwrap();
+    assert!(directory.join("final_collected").exists());
+    assert_eq!(
+        std::fs::read(root.join(format!("store/run-logs/{id}.log"))).unwrap(),
+        b"before disconnect\nfinal result\n"
+    );
+    let receipt = orx_host::wrapper::receipt(&directory).unwrap().unwrap();
+    assert_eq!(receipt.code, Some(7));
+}
+
+async fn legacy_box(root: PathBuf, initial_stage: &str) {
     use super::openresearch::{LegacyTransport, OpenResearch};
     use super::ssh::Ssh;
     use crate::engine::transport::{Config, HostConn, Status};
@@ -942,6 +1119,7 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
     use orx_test_support::host_binaries as binaries;
     // Paces the timers the checks below outlast.
     std::env::set_var("ORX_TEST_SPEEDUP", "10");
+    let watching = initial_stage != "starting";
     let server = orx_test_support::Sshd::start().unwrap();
     crate::config::save_credentials(&crate::config::Credentials {
         api_url: std::env::var("HF_ENDPOINT").unwrap(),
@@ -1018,6 +1196,9 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("pid"), server.pid().to_string()).unwrap();
         std::fs::write(dir.join("log"), vec![b'x'; 5000]).unwrap();
+        if initial_stage == "done" {
+            std::fs::write(dir.join("exit_code"), "0\n").unwrap();
+        }
     }
     let engine = Arc::new(engine(&root));
     let stored = StoredRun {
@@ -1049,48 +1230,86 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
             descriptor: Box::new(descriptor),
         },
     }];
-    adapter.observe(&watched, Duration::from_secs(1)).await;
+    engine
+        .observe_runs(&adapter, &watched, Duration::from_secs(1))
+        .await
+        .unwrap();
+    if initial_stage == "done" {
+        crate::engine::runtime::Runtime::collect_log(
+            &root.join("store"),
+            &adapter,
+            &watched[0],
+            &mut false,
+        )
+        .await
+        .unwrap();
+        let mut ranges =
+            crate::commands::up::api_v2::kept_ranges(&root.join("store"), &id).unwrap();
+        ranges.last_mut().unwrap().eof = false;
+        crate::commands::up::api_v2::keep_ranges(&root.join("store"), &id, ranges).unwrap();
+        adapter.finish(&watched[0]).await.unwrap();
+        engine.store().finish_log_collection(&id).unwrap();
+        let dir = server.home().join(format!(".orx/runs/{id}"));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !dir.join("final_collected").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(engine.load(&id).unwrap().0.status, "done");
+        assert!(!engine.store().log_collection_pending(&id).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+        let runtime = crate::engine::runtime::Runtime::new(
+            engine.clone(),
+            Arc::new(TestClock::new()),
+            root.join("store"),
+            None,
+        );
+        let api = crate::commands::up::api_v2::Api::new(
+            "test".into(),
+            "token".into(),
+            engine,
+            runtime,
+            Box::new(|_| Ok(Box::new(()))),
+            root.join("store"),
+        )
+        .unwrap();
+        crate::commands::up::api_v2::install(Arc::new(api)).unwrap();
+        use tower::ServiceExt;
+        let response = crate::commands::up::api_v2::router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/runs/{id}/log?start=0&end=1048576"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page: LogPage = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            matches!(page, LogPage::Data { bytes, eof: true, .. } if bytes == vec![b'x'; 5000])
+        );
+        return;
+    }
     if watching {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                if engine.load(&id).unwrap().0.status == "running"
-                    && root.join(format!("store/run-logs/{id}.log")).exists()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
+        assert_eq!(engine.load(&id).unwrap().0.status, "running");
+        crate::engine::runtime::Runtime::collect_log(
+            &root.join("store"),
+            &adapter,
+            &watched[0],
+            &mut false,
+        )
         .await
         .unwrap();
-        // A run the engine isn't polling, so only these collects touch its log.
-        let probe = uuid::Uuid::new_v4().to_string();
-        let dir = format!(".orx/runs/{probe}");
-        let remote = server.home().join(&dir);
-        std::fs::create_dir_all(&remote).unwrap();
-        std::fs::write(remote.join("pid"), server.pid().to_string()).unwrap();
-        std::fs::write(remote.join("log"), vec![b'x'; 5000]).unwrap();
-        assert_eq!(transport.collect(&probe, &dir).await.unwrap()["eof"], true);
-        let mut changed = vec![b'x'; 5000];
-        changed[4999] = b'y';
-        std::fs::write(remote.join("log"), &changed).unwrap();
-        assert_eq!(transport.collect(&probe, &dir).await.unwrap()["eof"], false);
-        let local = root.join(format!("store/run-logs/{probe}.log"));
-        assert_eq!(std::fs::read(&local).unwrap(), vec![b'x'; 5000]);
-        let resumed = LegacyTransport::new(transport.ssh.clone(), transport.log_dir.clone());
-        assert_eq!(resumed.collect(&probe, &dir).await.unwrap()["eof"], true);
-        assert_eq!(std::fs::read(local).unwrap(), changed);
-    } else {
-        let partial = server
-            .home()
-            .join(format!("engine-root/sources/{digest}.part"));
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while !partial.exists() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .unwrap();
+        assert_eq!(
+            std::fs::read(root.join(format!("store/run-logs/{id}.log"))).unwrap(),
+            vec![b'x'; 5000]
+        );
     }
     std::fs::write(server.directory().join("authorized_keys"), "").unwrap();
     server.proxy().reset().unwrap();
@@ -1108,6 +1327,10 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
     .unwrap();
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
+            engine
+                .observe_runs(&adapter, &watched, Duration::ZERO)
+                .await
+                .unwrap();
             if matches!(
                 engine.load(&id).unwrap().1.contact,
                 crate::store::Contact::NeedsAuth { .. }
@@ -1170,6 +1393,16 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
     if watching {
         assert!(engine.cancel(&adapter, &id, "user").await.unwrap());
         assert_eq!(engine.load(&id).unwrap().0.status, "cancelled");
+        crate::engine::runtime::Runtime::collect_log(
+            &root.join("store"),
+            &adapter,
+            &watched[0],
+            &mut false,
+        )
+        .await
+        .unwrap();
+        engine.store().finish_log_collection(&id).unwrap();
+        assert!(!engine.store().log_collection_pending(&id).unwrap());
     } else {
         assert!(engine.abandon(&id).unwrap());
         engine
@@ -1196,7 +1429,7 @@ async fn openresearch_staging_rejected_key_needs_auth_after_one_attempt() {
     let Some(root) = isolated().await else {
         return;
     };
-    legacy_rejected_key(root, false).await;
+    legacy_box(root, "starting").await;
 }
 
 #[tokio::test]
@@ -1204,7 +1437,15 @@ async fn openresearch_watching_rejected_key_needs_auth_after_one_attempt() {
     let Some(root) = isolated().await else {
         return;
     };
-    legacy_rejected_key(root, true).await;
+    legacy_box(root, "running").await;
+}
+
+#[tokio::test]
+async fn openresearch_completed_log_is_readable_after_release() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    legacy_box(root, "done").await;
 }
 
 #[tokio::test]
@@ -1247,7 +1488,7 @@ async fn unsupported_leases_are_deleted_or_keep_the_known_box_handle() {
         let (run, _) = engine.load(id).unwrap();
         if deletion_fails {
             assert_eq!(run.status, "starting");
-            let Some(Handle::Legacy { descriptor }) = handle_of(&run) else {
+            let Some(Handle::OpenResearch { descriptor }) = handle_of(&run) else {
                 panic!("lost paid box id");
             };
             assert_eq!(descriptor.job_id.as_deref(), Some(id));
@@ -1543,10 +1784,144 @@ async fn finished_modal_logs_drain_through_pauses_before_they_are_kept() {
     assert_eq!(bytes, b"first\nlast\n");
 }
 
-/// A pod lookup that fails, or finds no pod yet, is never a closed stream: draining errs, and
-/// the log stays owed.
 #[tokio::test]
-async fn kubernetes_lookup_failures_never_complete_a_drain() {
+async fn kubernetes_cancel_keeps_the_spool_without_an_attention_notice() {
+    use super::api::Api;
+    use crate::commands::up::api_v2::Commands;
+
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/kubectl"),
+        r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['ORX_API_ROOT'])
+a = sys.argv[1:]
+if a[0] == 'delete':
+    assert '--cascade=foreground' in a and '--wait=false' in a
+    (root/'deleting').touch()
+elif a[:2] == ['get', 'job']:
+    if (root/'gone').exists() or (root/'unexpected-deletion').exists():
+        print('Error from server (NotFound): jobs.batch "job" not found', file=sys.stderr)
+        sys.exit(1)
+    metadata = {'deletionTimestamp': '2026-11-05T01:43:00Z'} if (root/'deleting').exists() else {}
+    print(json.dumps({'metadata': metadata, 'status': {'active': 1}}))
+elif a[:2] == ['get', 'pods']:
+    metadata = {'name': 'pod'}
+    if (root/'deleting').exists():
+        metadata['deletionTimestamp'] = '2026-11-05T01:43:00Z'
+    pods = [] if (root/'gone').exists() else [{'metadata': metadata, 'status': {'phase': 'Running'}}]
+    print(json.dumps({'items': pods}))
+elif a[0] == 'logs':
+    assert not (root/'gone').exists()
+    print('2026-11-05T01:42:00Z SMOKE_CANCEL_READY')
+else:
+    raise Exception(a)
+"#,
+    );
+    let engine = Arc::new(engine(&root));
+    let clock = Arc::new(TestClock::new());
+    let runtime = crate::engine::runtime::Runtime::new(
+        engine.clone(),
+        clock.clone(),
+        root.join("store"),
+        None,
+    );
+    let handle = super::api::test_handle("k8s_job", Some("default"), None, vec!["job/job".into()]);
+    let row = crate::store::StoredRun {
+        id: "run".into(),
+        experiment_id: "exp".into(),
+        project_id: "proj".into(),
+        status: "running".into(),
+        backend_json: crate::engine::handle::backend_json(
+            "run",
+            Some(&handle),
+            &BackendDescriptor::parse(r#"{"kind":"k8s_job","namespace":"default"}"#).unwrap(),
+        )
+        .unwrap(),
+        command: "sleep 180".into(),
+        created_at: 1,
+        updated_at: 1,
+        ended_at: None,
+        exit_code: None,
+        commit_sha: None,
+        result_markdown: None,
+        cancel_requested: false,
+        cancel_reason: None,
+        chat_session_id: Some("chat".into()),
+    };
+    engine.store().upsert_run(&row).unwrap();
+    engine.store().subscribe_run("run", "chat", 1).unwrap();
+    let backend = runtime.backend(&row).unwrap();
+    let run = WatchedRun {
+        id: "run".into(),
+        handle,
+    };
+    let account = K8sAccount {
+        context: None,
+        namespace: "default".into(),
+    };
+    for terminating in [false, true] {
+        std::fs::write(root.join("unexpected-deletion"), "").unwrap();
+        if terminating {
+            std::fs::write(root.join("deleting"), "").unwrap();
+        }
+        assert!(matches!(
+            account.inspect(&run).await.unwrap(),
+            Observation::Unreconciled { .. }
+        ));
+    }
+    std::fs::remove_file(root.join("unexpected-deletion")).unwrap();
+    std::fs::remove_file(root.join("deleting")).unwrap();
+
+    backend.drain_log(&run).await.unwrap();
+    assert!(engine
+        .cancel(backend.as_ref(), "run", "Dashboard stop")
+        .await
+        .unwrap());
+    engine
+        .observe_runs(
+            backend.as_ref(),
+            std::slice::from_ref(&run),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.load("run").unwrap().0.status, "running");
+    assert!(engine.store().run_notice_batch("chat").unwrap().is_empty());
+
+    backend.drain_log(&run).await.unwrap();
+    std::fs::write(root.join("gone"), "").unwrap();
+    clock.advance(Duration::from_secs(10));
+    engine
+        .observe_runs(backend.as_ref(), &[run], Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(engine.load("run").unwrap().0.status, "cancelled");
+    let notices = engine.store().run_notice_batch("chat").unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].kind, crate::store::TERMINAL);
+
+    runtime.start();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while engine.store().log_collection_pending("run").unwrap() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled log was not kept");
+    assert_eq!(
+        std::fs::read(root.join("store/run-logs/run.log")).unwrap(),
+        b"SMOKE_CANCEL_READY\n"
+    );
+    let ranges = crate::commands::up::api_v2::kept_ranges(&root.join("store"), "run").unwrap();
+    assert!(ranges.iter().any(|range| range.eof));
+}
+
+#[tokio::test]
+async fn kubernetes_missing_pods_close_logs_only_after_job_deletion() {
     use super::api::Api;
     let Some(root) = isolated().await else {
         return;
@@ -1560,9 +1935,17 @@ async fn kubernetes_lookup_failures_never_complete_a_drain() {
             vec!["job/job".into()],
         ),
     };
-    for get in [
-        "echo 'Unable to connect to the server' >&2; exit 1",
-        "printf '{\"items\":[]}'",
+    for (get, expected_closed) in [
+        ("echo 'Unable to connect to the server' >&2; exit 1", false),
+        ("printf '{\"items\":[]}'", false),
+        (
+            r#"if test "$2" = job; then echo 'Error from server (Unauthorized)' >&2; exit 1; fi; printf '{"items":[]}'"#,
+            false,
+        ),
+        (
+            r#"if test "$2" = job; then echo 'Error from server (NotFound)' >&2; exit 1; fi; printf '{"items":[]}'"#,
+            true,
+        ),
     ] {
         script(
             &root.join("bin/kubectl"),
@@ -1576,10 +1959,18 @@ async fn kubernetes_lookup_failures_never_complete_a_drain() {
         let closed = account
             .logs(&run, &mut cursor, Duration::from_secs(5), &mut |_| {})
             .await;
-        assert!(!matches!(closed, Ok(true)), "{get}: {closed:?}");
+        assert_eq!(
+            matches!(closed, Ok(true)),
+            expected_closed,
+            "{get}: {closed:?}"
+        );
         let backend =
             super::api::Adapter::new(account, Arc::new(TestClock::new()), root.join("spools"));
-        assert!(backend.drain_log(&run).await.is_err(), "{get}");
+        assert_eq!(
+            backend.drain_log(&run).await.is_ok(),
+            expected_closed,
+            "{get}"
+        );
     }
 }
 

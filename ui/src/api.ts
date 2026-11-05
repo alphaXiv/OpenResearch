@@ -268,6 +268,8 @@ export interface EngineHost {
   root: string;
   status: HostStatus;
   class: "key" | "interactive" | null;
+  /** The old launcher on Windows logs in only through Connect, even with a key. */
+  connectRequired: boolean;
   sinceMs: number;
   nextRetryMs: number | null;
   cause: string | null;
@@ -1591,6 +1593,40 @@ export interface ChatActiveRun {
   experimentName: string | null;
 }
 
+export interface ShareChoice {
+  chats: string[];
+  logs: boolean;
+  artifacts: boolean;
+}
+
+export interface OpenedSharedProject {
+  project: Project;
+  /** Experiment branches the file named but did not carry. */
+  missingBranches: string[];
+}
+
+/** A published project link on openresearch.sh. */
+export interface PublishedProject {
+  id: string;
+  slug: string;
+  url: string;
+  name: string;
+  byteSize: number;
+  publishedAt: string;
+}
+
+/** What anyone with a published link sees before opening it. */
+export interface PublicProject {
+  slug: string;
+  url: string;
+  name: string;
+  byteSize: number;
+  publisher: string | null;
+}
+
+/** Where a shared project comes from: a picked file, a file on this machine, or a published link. */
+export type SharedSource = File | string | { link: string };
+
 export interface RunEngineSettings {
   enabled: boolean;
   forcedBy: "canary" | "environment" | null;
@@ -2369,6 +2405,44 @@ export function createApi(
   const pushProjectGithub = (projectId: string) =>
     post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github/push`);
 
+  /** The project as a `.orx` file, and the archive paths left out for size. */
+  async function shareProject(projectId: string, options: ShareChoice) {
+    const res = await writeResponse(`/api/projects/${projectId}/share`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    });
+    if (!res.ok) return json<never>(res);
+    const header = res.headers.get("x-orx-share");
+    const summary: { skipped: string[] } = header ? JSON.parse(decodeURIComponent(header)) : { skipped: [] };
+    const fileName = decodeURIComponent(/filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? "project.orx");
+    return { file: await res.blob(), fileName, skipped: summary.skipped };
+  }
+
+  /** Whether the machine running the project can publish, and the project's link if it has one. */
+  const getProjectLink = (projectId: string, signal?: AbortSignal) =>
+    get<{ signedIn: boolean; sharedProject: PublishedProject | null }>(`/api/projects/${projectId}/publish`, signal);
+
+  /** Upload the project to openresearch.sh; publishing again updates the same link. */
+  const publishProject = (projectId: string, options: ShareChoice) =>
+    post<{ sharedProject: PublishedProject; skipped: string[] }>(`/api/projects/${projectId}/publish`, options);
+
+  /** What anyone with a published link sees, fetched by the machine that will open it. */
+  const getPublicProject = (slug: string, signal?: AbortSignal) =>
+    get<{ sharedProject: PublicProject }>(`/api/shared-projects/${encodeURIComponent(slug)}`, signal);
+
+  /** Open a shared project as a new project in `path`. */
+  const importSharedProject = (path: string, source: SharedSource) => {
+    const query = `path=${encodeURIComponent(path)}`;
+    if (typeof source === "string") return post<OpenedSharedProject>(`/api/projects/import?${query}&file=${encodeURIComponent(source)}`);
+    if (!(source instanceof File)) return post<OpenedSharedProject>(`/api/projects/import?${query}&shared=${encodeURIComponent(source.link)}`);
+    return writeResponse(`/api/projects/import?${query}`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: source,
+    }).then((r) => json<OpenedSharedProject>(r));
+  };
+
   const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/api/settings/telemetry", signal);
 
   const setTelemetry = (enabled: boolean) =>
@@ -2812,6 +2886,11 @@ export function createApi(
     enableProjectGithub,
     disableProjectGithub,
     pushProjectGithub,
+    shareProject,
+    getProjectLink,
+    publishProject,
+    getPublicProject,
+    importSharedProject,
     getTelemetry,
     setTelemetry,
     captureUiEvent,

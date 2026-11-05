@@ -1,4 +1,5 @@
 import { useMachines } from "../machineSelection";
+import { downloadFile } from "../download";
 import {
   createContext,
   useContext,
@@ -3172,18 +3173,6 @@ function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => st
   return { src, isPdf, name };
 }
 
-function downloadMarkdown(fileName: string, markdown: string) {
-  const url = URL.createObjectURL(new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = fileName;
-  // Safari ignores a detached anchor and cancels a download whose blob is revoked too early.
-  document.body.append(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
 /** The pager stays visible once a prompt has more than one version — hiding it
  * would leave no sign that the other versions exist. */
 function ForkControls({
@@ -4340,8 +4329,10 @@ const Transcript = memo(function Transcript({
     scrollEndThreshold: 60,
     rangeExtractor,
     scrollToFn: (offset, options, instance) => {
-      programmaticScroll.current = offset + (options.adjustments ?? 0);
-      elementScroll(offset, options, instance);
+      // virtual-core passes size corrections with the last scroll event's offset; apply them to the live scrollTop so a scroll since isn't undone.
+      const target = options.adjustments === undefined ? offset : (instance.scrollElement?.scrollTop ?? offset) + options.adjustments;
+      programmaticScroll.current = target;
+      elementScroll(target, { behavior: options.behavior }, instance);
     },
   });
   const setFeed = useCallback((node: HTMLDivElement | null) => { feedRef.current = node; virtualizer.containerRef(node); }, [virtualizer]);
@@ -6074,7 +6065,7 @@ export function ChatPanel({
             assistant: assistantLabel,
           })
           : null;
-        if (markdown) downloadMarkdown(transcriptFileName(title), markdown);
+        if (markdown) downloadFile(transcriptFileName(title), new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
         else showAlert(m.chat_nothing_to_export(), "info");
         return false;
       }

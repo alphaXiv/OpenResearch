@@ -8,7 +8,7 @@ pub(super) const SWITCH_TOOL: &str = "provider_switch";
 const MAX_TOKENS: usize = 24_000;
 
 /// UTF-8 bytes upper-bound text tokens without assuming another provider's tokenizer.
-pub(super) fn budget(context_window: Option<u64>) -> usize {
+pub(crate) fn budget(context_window: Option<u64>) -> usize {
     context_window
         .map(|window| (window / 10) as usize)
         .unwrap_or(MAX_TOKENS)
