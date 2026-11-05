@@ -260,7 +260,11 @@ pub(crate) fn open_current(base: PathBuf) -> Result<(std::fs::File, PathBuf, u64
     let paths = Paths { base };
     let lock = paths.lock()?;
     let _guard = lock.read()?;
-    let engine_cursor: Option<crate::engine::adapters::openresearch::Cursor> =
+    #[derive(Deserialize)]
+    struct EngineCursor {
+        offset: u64,
+    }
+    let engine_cursor: Option<EngineCursor> =
         match std::fs::read(paths.base.with_extension("engine-cursor.json")) {
             Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
