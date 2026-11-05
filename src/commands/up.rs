@@ -649,6 +649,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             post(disable_project_github),
         )
         .route("/api/projects/{id}/github/push", post(push_project_github))
+        .route("/api/projects/{id}/share", post(share_project))
+        .route("/api/projects/import", post(import_shared_project))
         .route("/api/github/account", get(github_account))
         .route("/api/github/organizations", get(github_organizations))
         .route(
@@ -2181,6 +2183,154 @@ async fn push_project_github(State(state): State<AppState>, Path(id): Path<Strin
     Ok(Json(
         json!({ "project": project_json(&project), "git": git_status }),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareProjectReq {
+    #[serde(default)]
+    chats: Vec<String>,
+    #[serde(default = "default_true")]
+    logs: bool,
+    #[serde(default = "default_true")]
+    artifacts: bool,
+}
+
+async fn share_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ShareProjectReq>,
+) -> std::result::Result<axum::response::Response, ApiError> {
+    reject_if_moving(&state)?;
+    let admission = state
+        .project_lifecycle
+        .admit(&id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    reject_if_moving(&state)?;
+    let project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    // The worker owns the lease: a dropped request must not let a delete or move start mid-export.
+    let (name, scratch, out, skipped) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let _admission = admission;
+        use local::share::{ChatSelection, ShareOptions};
+        let options = ShareOptions {
+            chats: if req.chats.is_empty() {
+                ChatSelection::None
+            } else {
+                ChatSelection::Only(req.chats)
+            },
+            logs: req.logs,
+            artifacts: req.artifacts,
+        };
+        let scratch = local::git::TemporaryDirectory::new("orx-share-download")?;
+        // A fixed name: project names can outgrow a file name's length limit.
+        let out = scratch.path().join("project.orx");
+        let manifest = local::share::export(&Store::open()?, &project, &options, &out)?;
+        Ok((
+            local::share::file_name(&project),
+            scratch,
+            out,
+            manifest.skipped,
+        ))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("share task failed: {error}")))?
+    .map_err(bad_request)?;
+    let file = tokio::fs::File::open(out)
+        .await
+        .map_err(|error| ApiError::from(anyhow!("Could not read the shared project: {error}")))?;
+    // Streamed from disk, since a project can outgrow memory; the stream keeps the scratch folder alive.
+    let body = futures::StreamExt::map(tokio_util::io::ReaderStream::new(file), move |chunk| {
+        let _keep = &scratch;
+        chunk
+    });
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", urlencoding::encode(&name)),
+        )
+        .header(
+            "x-orx-share",
+            urlencoding::encode(&json!({ "skipped": skipped }).to_string()).into_owned(),
+        )
+        .body(axum::body::Body::from_stream(body))
+        .map_err(|error| ApiError::from(anyhow!("share response failed: {error}")))
+}
+
+/// Most a shared project upload may be; it streams to disk, outside the JSON request cap.
+const SHARED_PROJECT_UPLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct ImportSharedProjectQuery {
+    /// Folder to create the project in.
+    path: String,
+    /// A `.orx` file on this machine; without it the request body is the file.
+    file: Option<String>,
+}
+
+async fn import_shared_project(
+    State(state): State<AppState>,
+    Query(query): Query<ImportSharedProjectQuery>,
+    body: axum::body::Body,
+) -> ApiResult {
+    use futures::StreamExt;
+    reject_if_moving(&state)?;
+    let admission = state
+        .project_lifecycle
+        .admit("__project_create__")
+        .ok_or_else(|| bad_request("project creation is unavailable"))?;
+    reject_if_moving(&state)?;
+    let (file, upload) = match query.file {
+        Some(file) => (
+            local::projects::expand_path(&file).map_err(bad_request)?,
+            None,
+        ),
+        None => {
+            let upload = local::git::TemporaryDirectory::new("orx-import")?;
+            let path = upload.path().join("upload.orx");
+            let mut out = tokio::fs::File::create(&path)
+                .await
+                .map_err(|error| ApiError::from(anyhow!("Could not stage the upload: {error}")))?;
+            let mut stream = body.into_data_stream();
+            let mut received: u64 = 0;
+            while let Some(chunk) = stream.next().await {
+                let chunk =
+                    chunk.map_err(|error| bad_request(format!("Upload failed: {error}")))?;
+                received += chunk.len() as u64;
+                if received > SHARED_PROJECT_UPLOAD_BYTES {
+                    return Err(bad_request("This project file is too large to open."));
+                }
+                tokio::io::AsyncWriteExt::write_all(&mut out, &chunk)
+                    .await
+                    .map_err(|error| {
+                        ApiError::from(anyhow!("Could not stage the upload: {error}"))
+                    })?;
+            }
+            // tokio writes in the background; the import must read the whole file.
+            tokio::io::AsyncWriteExt::flush(&mut out)
+                .await
+                .map_err(|error| ApiError::from(anyhow!("Could not stage the upload: {error}")))?;
+            drop(out);
+            (path, Some(upload))
+        }
+    };
+    let creation_guard = state.project_creation_lock.clone().lock_owned().await;
+    // The worker owns the lease and the upload: a dropped request must not delete either mid-import.
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let (_creation_guard, _admission, _upload) = (creation_guard, admission, upload);
+        let target = local::projects::expand_path(&query.path)?;
+        let imported = local::share::import(&Store::open()?, &file, &target)?;
+        Ok(json!({
+            "project": project_json(&imported.project),
+            "missingBranches": imported.missing_branches,
+        }))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("import task failed: {error}")))?
+    .map_err(bad_request)?;
+    Ok(Json(result))
 }
 
 async fn github_account() -> ApiResult {

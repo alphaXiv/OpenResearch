@@ -46,7 +46,7 @@ test("creating a project from the empty state opens it", async () => {
   });
   await act(() => find("button", m.projects_home_new_project()).click());
   await settle();
-  await type(document.querySelector('[role="dialog"] input'), "Fresh");
+  await type(document.querySelector('[role="dialog"] input:not([type="file"])'), "Fresh");
   await act(() => new Promise((resolve) => setTimeout(resolve, 250)));
   await settle();
   await act(() => document.querySelector('[role="dialog"] form').requestSubmit());

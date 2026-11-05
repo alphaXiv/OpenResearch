@@ -38,7 +38,7 @@ const COLLECTION_BUDGET: Duration = Duration::from_secs(120);
 /// How long finishing runs' logs may hold up an adapter's observations so their notices can
 /// quote them.
 const EARLY_COLLECTION_BUDGET: Duration = Duration::from_secs(3);
-const PREPARATION_BUDGET: Duration = Duration::from_secs(10 * 60);
+pub(super) const PREPARATION_BUDGET: Duration = Duration::from_secs(10 * 60);
 
 /// Engine run directories live beside, never inside, the 0.2.x `<root>/runs`.
 pub fn engine_root(remote_root: Option<&str>) -> String {
@@ -61,7 +61,9 @@ enum Key {
         provider: String,
         account: ApiAccount,
     },
-    OpenResearch,
+    OpenResearch {
+        rental: Option<String>,
+    },
 }
 
 impl Key {
@@ -87,7 +89,7 @@ impl Key {
                 root,
             },
             "local_job" | "tinker_job" => Self::Local,
-            "openresearch_job" => Self::OpenResearch,
+            "openresearch_job" => Self::OpenResearch { rental: None },
             kind => {
                 api::provider(kind)?;
                 Self::Api {
@@ -106,6 +108,9 @@ impl Key {
 
     fn of_handle(handle: &Handle) -> Result<Self> {
         Ok(match handle {
+            Handle::OpenResearch { descriptor } => Self::OpenResearch {
+                rental: descriptor.job_id.clone(),
+            },
             Handle::Ssh { host, root } => Self::Ssh {
                 host: host.clone(),
                 root: root.clone(),
@@ -121,6 +126,11 @@ impl Key {
                 provider: provider.clone(),
                 account: account.clone(),
             },
+            Handle::Legacy { descriptor } if descriptor.kind == "openresearch_job" => {
+                Self::OpenResearch {
+                    rental: descriptor.job_id.clone(),
+                }
+            }
             Handle::Legacy { descriptor } => Self::of_kind(
                 &descriptor.kind,
                 descriptor.namespace.clone(),
@@ -291,7 +301,7 @@ impl Runtime {
             Key::Api { provider, account } => {
                 (api::provider(provider)?.build)(account, clock, spools)?
             }
-            Key::OpenResearch => {
+            Key::OpenResearch { .. } => {
                 let me = self.me.clone();
                 Arc::new(openresearch::OpenResearch::new(
                     self.engine.clone(),
@@ -460,11 +470,16 @@ impl Runtime {
         }
 
         let mut senders = lock(&self.watched);
-        for (key, sender) in senders.iter() {
-            if !watch.contains_key(key) {
-                sender.send_if_modified(|runs| !std::mem::take(runs).is_empty());
+        senders.retain(|key, sender| {
+            if watch.contains_key(key) {
+                return true;
             }
-        }
+            sender.send_if_modified(|runs| !std::mem::take(runs).is_empty());
+            !matches!(key, Key::OpenResearch { rental: Some(_) })
+        });
+        lock(&self.backends).retain(|key, _| {
+            !matches!(key, Key::OpenResearch { rental: Some(_) }) || watch.contains_key(key)
+        });
         for (key, runs) in watch {
             let ids =
                 |runs: &[WatchedRun]| runs.iter().map(|run| run.id.clone()).collect::<Vec<_>>();
@@ -684,47 +699,16 @@ impl Runtime {
         Ok(())
     }
 
-    /// OpenResearch boxes keep their logs through the 0.2.x loop that drives them.
     async fn collect(
         &self,
         backend: &dyn Backend,
         run: &WatchedRun,
         budget: Duration,
     ) -> Result<bool> {
-        let mirrored = matches!(&run.handle, Handle::Legacy { descriptor } if descriptor.kind == "openresearch_job");
-        if mirrored {
-            let mut ranges = crate::commands::up::api_v2::kept_ranges(&self.data_dir, &run.id)?;
-            let (stored, state) = self.engine.load(&run.id)?;
-            if Phase::parse(&stored.status).is_some_and(Phase::is_terminal)
-                && state.cancel_accepted_at.is_some()
-                && state.contact == crate::store::Contact::Live
-            {
-                if let Some(last) = ranges.last_mut() {
-                    last.eof = true;
-                } else {
-                    let path = self
-                        .data_dir
-                        .join("run-logs")
-                        .join(format!("{}.log", run.id));
-                    std::fs::create_dir_all(path.parent().unwrap())?;
-                    crate::local::git::atomic_write_with_mode(&path, &[], Some(0o600))?;
-                    ranges.push(KeptRange {
-                        offset: 0,
-                        len: 0,
-                        file: path,
-                        ident: FileIdent { dev: 0, ino: 0 },
-                        eof: true,
-                    });
-                }
-                crate::commands::up::api_v2::keep_ranges(&self.data_dir, &run.id, ranges)?;
-                return Ok(true);
-            }
-            return Ok(ranges.iter().any(|range| range.eof));
-        }
         let mut progressed = false;
         let collected = async {
             backend.drain_log(run).await?;
-            self.collect_log(backend, run, &mut progressed).await
+            Self::collect_log(&self.data_dir, backend, run, &mut progressed).await
         };
         match tokio::time::timeout(budget, collected).await {
             Ok(result) => result?,
@@ -737,8 +721,8 @@ impl Runtime {
     /// Keeps the log by the keep policy, up to the length the host reported when collection
     /// started. A partial range resumes from the length its marker records as synced, when it
     /// was started for this generation at this offset; every page checks the generation.
-    async fn collect_log(
-        &self,
+    pub(crate) async fn collect_log(
+        data_dir: &Path,
         backend: &dyn Backend,
         run: &WatchedRun,
         progressed: &mut bool,
@@ -747,6 +731,31 @@ impl Runtime {
             return Ok(());
         };
         let ident = info.ident;
+        let directory = data_dir.join("run-logs");
+        for suffix in ["log", "tail.log"] {
+            let part = directory.join(format!("{}.{suffix}.part", run.id));
+            let marker = directory.join(format!("{}.{suffix}.part.json", run.id));
+            let obsolete = std::fs::read(&marker)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<(FileIdent, u64, u64)>(&bytes).ok())
+                .is_some_and(|(generation, _, _)| generation != ident);
+            if obsolete {
+                for path in [part, marker] {
+                    match std::fs::remove_file(path) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(error.into());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let kept = crate::commands::up::api_v2::kept_ranges(data_dir, &run.id)?;
+        if kept.last().is_some_and(|last| {
+            last.eof && last.ident == ident && last.offset + last.len == info.len
+        }) {
+            return Ok(());
+        }
         let ranges = if info.len > KEEP_WHOLE {
             vec![
                 (0, KEEP_HEAD, "log"),
@@ -756,9 +765,7 @@ impl Runtime {
             vec![(0, info.len, "log")]
         };
         let last = ranges.len() - 1;
-        let directory = self.data_dir.join("run-logs");
         std::fs::create_dir_all(&directory)?;
-        let mut kept = Vec::new();
         for (index, (start, end, suffix)) in ranges.into_iter().enumerate() {
             let path = directory.join(format!("{}.{suffix}", run.id));
             let part = directory.join(format!("{}.{suffix}.part", run.id));
@@ -820,11 +827,14 @@ impl Runtime {
             }
             drop(file);
             std::fs::rename(&part, &path)?;
-            match std::fs::remove_file(&marker) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(error.into())
-                }
-                _ => {}
+            let mut kept = crate::commands::up::api_v2::kept_ranges(data_dir, &run.id)?;
+            kept.retain(|range| {
+                range.ident == ident
+                    && range.file != path
+                    && (index != last || range.offset < start)
+            });
+            for range in &mut kept {
+                range.eof = false;
             }
             kept.push(KeptRange {
                 offset: start,
@@ -833,8 +843,16 @@ impl Runtime {
                 ident: ident.clone(),
                 eof: index == last && eof,
             });
+            kept.sort_by_key(|range| range.offset);
+            crate::commands::up::api_v2::keep_ranges(data_dir, &run.id, kept)?;
+            match std::fs::remove_file(&marker) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error.into())
+                }
+                _ => {}
+            }
         }
-        crate::commands::up::api_v2::keep_ranges(&self.data_dir, &run.id, kept)
+        Ok(())
     }
 
     async fn log_info(backend: &dyn Backend, run: &WatchedRun) -> Result<Option<LogInfo>> {
@@ -973,6 +991,16 @@ impl Commands for Runtime {
             return Ok(serde_json::to_value(
                 Local::new(self.data_dir.join("local-runs")).cleanup(run)?,
             )?);
+        }
+        if matches!(&run.handle, Handle::OpenResearch { .. }) {
+            let backend = self.backend_for(&Key::of_handle(&run.handle)?)?;
+            return match backend.cleanup(run).await {
+                super::CancelOutcome::Verified => Ok(serde_json::to_value(
+                    orx_host_proto::CleanupAck::NothingLingering,
+                )?),
+                super::CancelOutcome::Undelivered { detail } => bail!("{detail}"),
+                _ => Ok(serde_json::to_value(orx_host_proto::CleanupAck::Accepted)?),
+            };
         }
         let key = Key::of_handle(&run.handle)?;
         let ssh = self.ssh(&key)?;
@@ -1340,6 +1368,184 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn round_two_retired_rental_observer_and_adapter_are_dropped() {
+        let dir = std::env::temp_dir().join(format!("orx-retired-rental-{}", uuid::Uuid::new_v4()));
+        let runtime = collector(&dir);
+        let metadata = crate::jobs::BackendDescriptor::parse(
+            r#"{"kind":"openresearch_job","namespace":"org","jobId":"finished"}"#,
+        )
+        .unwrap();
+        let run = WatchedRun {
+            id: "finished".into(),
+            handle: Handle::OpenResearch {
+                descriptor: Box::new(metadata),
+            },
+        };
+        let key = Key::of_handle(&run.handle).unwrap();
+        let backend = Arc::new(FakeBackend::default());
+        let weak = Arc::downgrade(&backend);
+        lock(&runtime.backends).insert(key.clone(), backend);
+        let (sender, receiver) = watch::channel(vec![run]);
+        lock(&runtime.watched).insert(key.clone(), sender);
+        let observer = tokio::spawn(runtime.clone().observe(key.clone(), receiver));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak.strong_count() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        runtime.tick().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), observer)
+            .await
+            .expect("retired observer must exit")
+            .unwrap();
+        assert!(!lock(&runtime.watched).contains_key(&key));
+        assert!(!lock(&runtime.backends).contains_key(&key));
+        assert!(weak.upgrade().is_none());
+
+        let backend = runtime.backend_for(&key).unwrap();
+        let weak = Arc::downgrade(&backend);
+        drop(backend);
+        runtime.tick().unwrap();
+        assert!(!lock(&runtime.backends).contains_key(&key));
+        assert!(weak.upgrade().is_none());
+        drop(runtime);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn round_one_rentals_collect_independently_of_stalled_staging() {
+        struct Boxes(FakeBackend);
+        #[async_trait]
+        impl Backend for Boxes {
+            async fn launch(
+                &self,
+                _: &super::super::RunIntent,
+                _: &super::super::Fence<'_>,
+            ) -> std::result::Result<Handle, super::super::LaunchError> {
+                unreachable!()
+            }
+            async fn recover(&self, _: &super::super::RunIntent) -> super::super::Recovery {
+                unreachable!()
+            }
+            async fn cancel(&self, _: &WatchedRun) -> super::super::CancelOutcome {
+                unreachable!()
+            }
+            async fn observe(
+                &self,
+                runs: &[WatchedRun],
+                budget: Duration,
+            ) -> Vec<(String, Observation)> {
+                if runs.iter().any(|run| run.id == "staging") {
+                    std::future::pending::<()>().await;
+                }
+                self.0.observe(runs, budget).await
+            }
+            async fn read_log(
+                &self,
+                run: &WatchedRun,
+                file: LogFile,
+                range: ByteRange,
+                ident: Option<&FileIdent>,
+            ) -> Result<LogPage> {
+                self.0.read_log(run, file, range, ident).await
+            }
+        }
+        let dir =
+            std::env::temp_dir().join(format!("orx-independent-boxes-{}", uuid::Uuid::new_v4()));
+        let runtime = collector(&dir);
+        let backend = Arc::new(Boxes(FakeBackend::default()));
+        backend.0.log.lock().unwrap().bytes = b"result=42\n".to_vec();
+        backend.0.feed.lock().unwrap().push_back((
+            "finished".into(),
+            Observation::Exited {
+                finished_at: None,
+                code: Some(0),
+                signal: None,
+            },
+        ));
+        for id in ["staging", "finished"] {
+            let metadata = crate::jobs::BackendDescriptor::parse(
+                &json!({"kind":"openresearch_job","namespace":"org","jobId":id}).to_string(),
+            )
+            .unwrap();
+            let handle = Handle::OpenResearch {
+                descriptor: Box::new(metadata.clone()),
+            };
+            runtime
+                .engine
+                .insert(SubmittingRun {
+                    id,
+                    experiment_id: "exp",
+                    project_id: "project",
+                    metadata: &metadata,
+                    command: "true",
+                    created_at: 1,
+                    commit_sha: None,
+                    chat_session_id: None,
+                    spec_digest: "digest",
+                    launch: &LaunchSpec {
+                        kind: "openresearch_job".into(),
+                        target: Some("org".into()),
+                        options: json!({}),
+                    },
+                })
+                .unwrap();
+            runtime
+                .engine
+                .store()
+                .set_submission_fence(
+                    id,
+                    1,
+                    &crate::store::SubmissionFence {
+                        taken_at: 1,
+                        submitter: None,
+                    },
+                )
+                .unwrap();
+            assert!(runtime
+                .engine
+                .store()
+                .record_run_handle(id, 1, &handle)
+                .unwrap());
+            lock(&runtime.backends).insert(Key::of_handle(&handle).unwrap(), backend.clone());
+        }
+        runtime.tick().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while runtime.engine.load("finished").unwrap().0.status != "done" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            runtime.collect_finished("finished").await.unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(runtime.engine.load("staging").unwrap().0.status, "starting");
+        assert_eq!(
+            std::fs::read(dir.join("run-logs/finished.log")).unwrap(),
+            b"result=42\n"
+        );
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .log_collection_pending("finished")
+            .unwrap());
+        for (_, sender) in lock(&runtime.watched).drain() {
+            sender.send_replace(Vec::new());
+        }
+        let weak = Arc::downgrade(&runtime);
+        drop(runtime);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while weak.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rental observers must release the runtime");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn legacy_wakeups_accepted_while_running_are_imported_once() {
         let dir = std::env::temp_dir().join(format!("orx-live-wakeups-{}", uuid::Uuid::new_v4()));
         let runtime = collector(&dir);
@@ -1560,7 +1766,9 @@ mod tests {
             serde_json::to_vec(&(&info.ident, 0u64, 8192u64)).unwrap(),
         )
         .unwrap();
-        runtime.collect_log(&host, &run, &mut false).await.unwrap();
+        Runtime::collect_log(&dir, &host, &run, &mut false)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read(logs.join("run.log")).unwrap(), log);
         assert_eq!(host.paged.load(Ordering::SeqCst), 4096);
         drop(runtime);
@@ -1577,8 +1785,7 @@ mod tests {
         let host = Host::default();
         host.log.log.lock().unwrap().bytes = b"start\n".to_vec();
         host.grows.store(true, Ordering::SeqCst);
-        runtime
-            .collect_log(&host, &local_run(), &mut false)
+        Runtime::collect_log(&dir, &host, &local_run(), &mut false)
             .await
             .unwrap();
         let kept = std::fs::read(dir.join("run-logs/run.log")).unwrap();
@@ -1587,8 +1794,7 @@ mod tests {
         assert_eq!((range.len, range.eof), (6, false));
 
         host.grows.store(false, Ordering::SeqCst);
-        runtime
-            .collect_log(&host, &local_run(), &mut false)
+        Runtime::collect_log(&dir, &host, &local_run(), &mut false)
             .await
             .unwrap();
         let range = &kept_ranges(&dir)[0];
@@ -1678,97 +1884,6 @@ mod tests {
         assert_eq!(*backend.held.lock().unwrap(), ["kept"]);
         drop(runtime);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn released_boxes_settle_partial_and_empty_logs_only_after_stop_proof() {
-        for partial in [false, true] {
-            let dir = std::env::temp_dir().join(format!("orx-released-{}", uuid::Uuid::new_v4()));
-            let runtime = collector(&dir);
-            let descriptor = crate::jobs::BackendDescriptor::parse(
-                r#"{"kind":"openresearch_job","jobId":"box","namespace":"org"}"#,
-            )
-            .unwrap();
-            runtime
-                .engine
-                .insert(SubmittingRun {
-                    id: "run",
-                    experiment_id: "exp",
-                    project_id: "project",
-                    metadata: &descriptor,
-                    command: "true",
-                    created_at: 1,
-                    commit_sha: None,
-                    chat_session_id: None,
-                    spec_digest: "digest",
-                    launch: &LaunchSpec {
-                        kind: "openresearch_job".into(),
-                        target: Some("org".into()),
-                        options: json!({}),
-                    },
-                })
-                .unwrap();
-            let run = WatchedRun {
-                id: "run".into(),
-                handle: Handle::Legacy {
-                    descriptor: Box::new(descriptor),
-                },
-            };
-            runtime
-                .store()
-                .unwrap()
-                .record_run_handle("run", 1, &run.handle)
-                .unwrap();
-            runtime
-                .store()
-                .unwrap()
-                .accept_run_cancel("run", Some("user"))
-                .unwrap();
-            if partial {
-                let path = dir.join("run-logs/run.log");
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::write(&path, b"available copy").unwrap();
-                crate::commands::up::api_v2::keep_ranges(
-                    &dir,
-                    "run",
-                    vec![KeptRange {
-                        offset: 0,
-                        len: 14,
-                        file: path,
-                        ident: FileIdent { dev: 1, ino: 2 },
-                        eof: false,
-                    }],
-                )
-                .unwrap();
-            }
-            let backend = Host::default();
-            assert!(!runtime
-                .collect(&backend, &run, COLLECTION_BUDGET)
-                .await
-                .unwrap());
-            let stored = runtime.engine.load("run").unwrap().0;
-            runtime
-                .engine
-                .apply_cancel(&stored, super::super::CancelOutcome::Verified)
-                .unwrap();
-            assert!(runtime
-                .collect(&backend, &run, COLLECTION_BUDGET)
-                .await
-                .unwrap());
-            let ranges = kept_ranges(&dir);
-            assert_eq!(ranges.len(), 1);
-            assert!(ranges[0].eof);
-            assert_eq!(
-                std::fs::read(&ranges[0].file).unwrap(),
-                if partial {
-                    b"available copy".as_slice()
-                } else {
-                    b""
-                }
-            );
-            drop(runtime);
-            std::fs::remove_dir_all(dir).unwrap();
-        }
     }
 
     #[tokio::test]
@@ -1901,8 +2016,7 @@ mod tests {
             bytes: b"NEW:tail\n".to_vec(),
             ino: 1,
         };
-        runtime
-            .collect_log(&backend, &run, &mut false)
+        Runtime::collect_log(&dir, &backend, &run, &mut false)
             .await
             .unwrap();
         assert_eq!(std::fs::read(logs.join("run.log")).unwrap(), b"NEW:tail\n");
@@ -1922,8 +2036,7 @@ mod tests {
             serde_json::to_vec(&(&new.ident, 4u64, 5u64)).unwrap(),
         )
         .unwrap();
-        runtime
-            .collect_log(&backend, &run, &mut false)
+        Runtime::collect_log(&dir, &backend, &run, &mut false)
             .await
             .unwrap();
         assert_eq!(std::fs::read(logs.join("run.log")).unwrap(), b"NEW:tail\n");

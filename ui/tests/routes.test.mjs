@@ -56,6 +56,13 @@ test("reproduce links carry arXiv and alphaXiv-exclusive ids through the path ex
   }
 });
 
+test("a .orx file opened with the app reaches the import page with its path", async () => {
+  const router = await match("/open?file=%2FUsers%2Fada%2Ftiny%20lm.orx");
+  const leaf = router.state.matches.at(-1);
+  assert.equal(leaf.routeId, "/open");
+  assert.deepEqual(leaf.search, { file: "/Users/ada/tiny lm.orx" });
+});
+
 test("project search validates every pane variant and rejects malformed panes", async () => {
   const panes = [
     { kind: "home", view: "files" },

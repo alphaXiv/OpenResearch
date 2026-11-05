@@ -428,7 +428,8 @@ impl Engine {
         let deliverable = matches!(
             state.contact,
             Contact::Live | Contact::Unreconciled { .. } | Contact::Stopping { .. }
-        ) || matches!(&handle, Handle::Legacy { descriptor } if descriptor.kind == "openresearch_job");
+        ) || matches!(&handle, Handle::OpenResearch { .. })
+            || matches!(&handle, Handle::Legacy { descriptor } if descriptor.kind == "openresearch_job");
         if !wanted || !deliverable || self.memory().cancels_sent.contains(run_id) {
             return Ok(());
         }

@@ -8648,7 +8648,7 @@ fn branch_tip<'a>(
 /// The branch ending at `leaf`, oldest first. An absent or unknown leaf falls
 /// back to the whole list, which is exactly right for a session that has never
 /// been forked.
-fn active_path<'a>(
+pub(crate) fn active_path<'a>(
     messages: &'a [StoredChatMessage],
     leaf: Option<&str>,
 ) -> Vec<&'a StoredChatMessage> {

@@ -1593,6 +1593,18 @@ export interface ChatActiveRun {
   experimentName: string | null;
 }
 
+export interface ShareChoice {
+  chats: string[];
+  logs: boolean;
+  artifacts: boolean;
+}
+
+export interface OpenedSharedProject {
+  project: Project;
+  /** Experiment branches the file named but did not carry. */
+  missingBranches: string[];
+}
+
 export interface RunEngineSettings {
   enabled: boolean;
   forcedBy: "canary" | "environment" | null;
@@ -2371,6 +2383,32 @@ export function createApi(
   const pushProjectGithub = (projectId: string) =>
     post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github/push`);
 
+  /** The project as a `.orx` file, and the archive paths left out for size. */
+  async function shareProject(projectId: string, options: ShareChoice) {
+    const res = await writeResponse(`/api/projects/${projectId}/share`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    });
+    if (!res.ok) return json<never>(res);
+    const header = res.headers.get("x-orx-share");
+    const summary: { skipped: string[] } = header ? JSON.parse(decodeURIComponent(header)) : { skipped: [] };
+    const fileName = decodeURIComponent(/filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? "project.orx");
+    return { file: await res.blob(), fileName, skipped: summary.skipped };
+  }
+
+  /** Open a `.orx` file as a new project in `path`: one picked in the page, or one already on this machine. */
+  const importSharedProject = (path: string, source: File | string) => {
+    const query = `path=${encodeURIComponent(path)}`;
+    return typeof source === "string"
+      ? post<OpenedSharedProject>(`/api/projects/import?${query}&file=${encodeURIComponent(source)}`)
+      : writeResponse(`/api/projects/import?${query}`, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: source,
+      }).then((r) => json<OpenedSharedProject>(r));
+  };
+
   const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/api/settings/telemetry", signal);
 
   const setTelemetry = (enabled: boolean) =>
@@ -2814,6 +2852,8 @@ export function createApi(
     enableProjectGithub,
     disableProjectGithub,
     pushProjectGithub,
+    shareProject,
+    importSharedProject,
     getTelemetry,
     setTelemetry,
     captureUiEvent,
