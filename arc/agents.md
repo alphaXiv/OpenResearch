@@ -63,7 +63,7 @@ An idle chat can change its agent from the model picker. The switch is a
 settings change and a transcript row, with no model call. Messages record the
 harness that owns their native session ids. Returning to a harness resumes
 its last session on the active branch and supplies only the conversation
-since its last reply, with that reply identified as the resume point;
+since its last reply, with that reply's ref and a brief headline as the resume point;
 a new harness gets the active conversation. Queued
 messages must be sent or removed before switching. A chat retains its saved
 ACP launch when switching away and back; changing between two ACP launches
@@ -71,6 +71,7 @@ requires a new chat.
 Recovery after a switch uses the selected agent's settings and starts a new
 turn, preserving the original failure and the harness that owns it. A native
 thread created before delivery does not count as having seen the request.
+Saved context stays available until the native thread confirms receipt.
 The replayable request excludes agent-specific context; each launch rebuilds
 the handoff for the selected agent. An empty branch carries no discarded history.
 

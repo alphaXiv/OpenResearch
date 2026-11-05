@@ -231,7 +231,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
             .get_chat_session(&ctx.session_id)?
             .ok_or_else(|| anyhow!("ACP session no longer exists"))?;
 
-        crate::local::chat::handoff::pending_for(&store, &session)?.is_some()
+        crate::local::chat::handoff::position_for(&store, &session)?.switched
     };
 
     ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;

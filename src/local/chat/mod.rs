@@ -1317,8 +1317,8 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         .flatten();
     let pending_handoff = acp.is_some()
         && store
-            .and_then(|store| handoff::pending_for(store, s).ok().flatten())
-            .is_some();
+            .and_then(|store| handoff::position_for(store, s).ok())
+            .is_some_and(|position| position.switched);
     let native_configuration = acp
         .as_ref()
         .filter(|_| !pending_handoff)
@@ -7762,15 +7762,14 @@ fn turn_ctx_from_stored(
     assistant: WireMessage,
 ) -> Result<TurnCtx> {
     let mut text = rebase_prepared_attachment_paths(&turn.prepared_input);
-    let pending = handoff::pending_for(store, session)?;
-    if session.native_session_id.is_none() || pending.is_some() {
-        let (since, window) = pending.unwrap_or_default();
+    let position = handoff::position_for(store, session)?;
+    if position.switched || position.since.is_none() {
         let context = handoff::context(
             store,
             session,
             turn.user_message_id.as_deref(),
-            since.as_deref(),
-            window,
+            position.since.as_deref(),
+            position.context_window,
         )?;
         if !context.is_empty() {
             text = format!("{context}\n\n{text}");
@@ -10659,7 +10658,7 @@ mod bridge_tests {
                             role: "assistant".into(),
                             parts_json: serde_json::to_string(&[WirePart::text(
                                 "answer",
-                                "Original plan.",
+                                "Original plan.\nKeep this earlier native detail out of the handoff.",
                             )])
                             .unwrap(),
                             result_native_session_id: session.native_session_id.clone(),
@@ -10717,14 +10716,12 @@ mod bridge_tests {
                         assert!(!host.is_busy(&session.id).await);
                         let messages = store.list_chat_messages(&session.id).unwrap();
                         let path = active_path(&messages, switched.active_leaf_id.as_deref());
-                        assert_eq!(
-                            handoff::pending(
-                                &switched,
-                                &path,
-                                &store.undelivered_chat_replies(&session.id).unwrap()
-                            ),
-                            Some((None, Some(200_000)))
+                        let position = handoff::position(
+                            &switched, &path, &store.unconfirmed_chat_replies(&session.id).unwrap(),
                         );
+                        assert!(position.since.is_none());
+                        assert_eq!(position.context_window, Some(200_000));
+                        assert!(position.switched);
                         assert!(
                             handoff::context(&store, &switched, None, None, Some(200_000))
                                 .unwrap()
@@ -10776,20 +10773,20 @@ mod bridge_tests {
                         }
                         let messages = store.list_chat_messages(&session.id).unwrap();
                         let path = active_path(&messages, back.active_leaf_id.as_deref());
-                        let (since, window) = handoff::pending(
+                        let position = handoff::position(
                             &back,
                             &path,
-                            &store.undelivered_chat_replies(&session.id).unwrap(),
-                        )
-                        .unwrap();
-                        assert_eq!(since, Some(original.id.as_str()));
-                        let context = handoff::context(&store, &back, None, since, window).unwrap();
+                            &store.unconfirmed_chat_replies(&session.id).unwrap(),
+                        );
+                        assert_eq!(position.since.as_deref(), Some(original.id.as_str()));
+                        let context = handoff::context(&store, &back, None, position.since.as_deref(), position.context_window).unwrap();
                         assert!(context.contains(&format!(
                             "through {}, your last reply as {source}",
                             delegation::message_ref(&original.id)
                         )));
                         assert!(context.contains("Parser API preserved; tests passed."));
-                        assert!(!context.contains("Original plan."));
+                        assert_eq!(context.matches("Original plan.").count(), 1);
+                        assert!(!context.contains("Keep this earlier native detail"));
                         let recovery = StoredChatTurn {
                             id: "recovery".into(),
                             session_id: session.id.clone(),
@@ -10818,6 +10815,58 @@ mod bridge_tests {
                         assert!(ctx.text.contains(&format!("You are the {source} agent")));
                         assert!(!ctx.text.contains(&format!("You are the {target} agent")));
                         assert!(ctx.text.ends_with(&recovery.prepared_input));
+                        for delivery in ["rejected", "unknown"] {
+                            let mut unprimed = bare_session();
+                            unprimed.id = format!("chat_{}", uuid::Uuid::new_v4());
+                            unprimed.harness = source.into();
+                            unprimed.native_session_id = Some(uuid::Uuid::new_v4().to_string());
+                            unprimed.bootstrap_context = Some("FROZEN_PARENT_CONTEXT".into());
+                            store.create_chat_session(&unprimed).unwrap();
+                            let first = StoredChatMessage {
+                                id: format!("msg_{}", uuid::Uuid::new_v4()),
+                                session_id: unprimed.id.clone(),
+                                parent_id: None,
+                                base_native_session_id: None,
+                                result_native_session_id: None,
+                                ..request.clone()
+                            };
+                            let first_turn = StoredChatTurn {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                session_id: unprimed.id.clone(),
+                                user_message_id: Some(first.id.clone()),
+                                assistant_message_id: format!("msg_{}", uuid::Uuid::new_v4()),
+                                state: "preparing".into(),
+                                delivery_state: "not_sent".into(),
+                                ..recovery.clone()
+                            };
+                            store.admit_chat_turn(Some(&first), &first_turn).unwrap();
+                            let action = if delivery == "rejected" { "retry" } else { "continue" };
+                            store.fail_chat_turn(&first_turn.id, delivery, "test", "Unconfirmed delivery", Some(action)).unwrap();
+                            let failure = StoredChatMessage {
+                                id: first_turn.assistant_message_id.clone(),
+                                role: "assistant".into(),
+                                result_native_session_id: unprimed.native_session_id.clone(),
+                                parts_json: serde_json::to_string(&[WirePart::tool("failure", "error", "error", Some("Unconfirmed delivery".into()))]).unwrap(),
+                                ..first.clone()
+                            };
+                            store.upsert_chat_message_on_branch(&failure).unwrap();
+                            let unprimed = store.get_chat_session(&unprimed.id).unwrap().unwrap();
+                            let position = handoff::position_for(&store, &unprimed).unwrap();
+                            assert!(position.since.is_none());
+                            assert!(!position.switched);
+                            let failed = store.get_chat_turn(&unprimed.id, &first_turn.id).unwrap().unwrap();
+                            let retry = turn_ctx_from_stored(host.clone(), &store, &unprimed, TurnCtx::test_stub().project, &failed, stored_to_wire(&failure)).unwrap();
+                            assert!(retry.text.contains("FROZEN_PARENT_CONTEXT"));
+                            assert_eq!(retry.text.matches("<orx-handoff>").count(), 1);
+
+                            if delivery == "rejected" {
+                                assert!(store.reset_chat_turn_for_retry(&first_turn.id, now_ms()).unwrap());
+                                store.update_chat_turn_progress(&first_turn.id, "running", "accepted", 2, None).unwrap();
+                                let received = handoff::position_for(&store, &unprimed).unwrap();
+                                assert_eq!(received.since.as_deref(), Some(failure.id.as_str()));
+                                assert!(!received.switched);
+                            }
+                        }
                         let (ids, _) = store
                             .native_sessions_for_deletion(&[session.id.clone()], &[target])
                             .unwrap();

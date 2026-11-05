@@ -210,17 +210,28 @@ pub(crate) fn snapshot<'a>(
     entries.into_iter().map(|(_, text)| text).collect()
 }
 
-pub(super) fn pending<'a>(
+#[derive(Default)]
+pub(crate) struct Position {
+    pub since: Option<String>,
+    pub context_window: Option<u64>,
+    pub switched: bool,
+}
+
+pub(super) fn position(
     session: &StoredChatSession,
-    path: &[&'a StoredChatMessage],
-    undelivered: &HashSet<String>,
-) -> Option<(Option<&'a str>, Option<u64>)> {
+    path: &[&StoredChatMessage],
+    unconfirmed: &HashSet<String>,
+) -> Position {
     let seen = path.iter().rposition(|message| {
         message.role == "assistant"
-            && message.native_harness.as_deref() == Some(&session.harness)
+            && message
+                .native_harness
+                .as_deref()
+                .unwrap_or(&session.harness)
+                == session.harness
             && session.native_session_id.is_some()
             && message.result_native_session_id == session.native_session_id
-            && !undelivered.contains(&message.id)
+            && !unconfirmed.contains(&message.id)
     });
     let tail = &path[seen.map_or(0, |index| index + 1)..];
     let switched = tail.iter().any(|message| {
@@ -233,10 +244,7 @@ pub(super) fn pending<'a>(
                 .iter()
                 .any(|part| part.tool.as_deref() == Some(SWITCH_TOOL))
     });
-    if !switched {
-        return None;
-    }
-    let window = tail.iter().rev().find_map(|message| {
+    let context_window = tail.iter().rev().find_map(|message| {
         stored_to_wire(message)
             .parts
             .into_iter()
@@ -246,25 +254,25 @@ pub(super) fn pending<'a>(
             .filter(|input| input["harness"].as_str() == Some(&session.harness))
             .and_then(|input| input["contextWindow"].as_u64())
     });
-    Some((seen.map(|index| path[index].id.as_str()), window))
+    Position {
+        since: seen.map(|index| path[index].id.clone()),
+        context_window,
+        switched,
+    }
 }
 
-pub(crate) fn pending_for(
-    store: &Store,
-    session: &StoredChatSession,
-) -> Result<Option<(Option<String>, Option<u64>)>> {
+pub(crate) fn position_for(store: &Store, session: &StoredChatSession) -> Result<Position> {
     let Some(leaf) = session.active_leaf_id.as_deref() else {
-        return Ok(None);
+        return Ok(Position::default());
     };
     let messages = store.list_chat_messages(&session.id)?;
     let path = active_path(&messages, Some(leaf));
 
-    Ok(pending(
+    Ok(position(
         session,
         &path,
-        &store.undelivered_chat_replies(&session.id)?,
-    )
-    .map(|(since, window)| (since.map(str::to_owned), window)))
+        &store.unconfirmed_chat_replies(&session.id)?,
+    ))
 }
 
 pub(crate) fn context(
@@ -280,9 +288,8 @@ pub(crate) fn context(
         .as_deref()
         .map(|leaf| active_path(&messages, Some(leaf)))
         .unwrap_or_default();
-    let start = since
-        .and_then(|id| path.iter().position(|message| message.id == id))
-        .map_or(0, |index| index + 1);
+    let seen = since.and_then(|id| path.iter().position(|message| message.id == id));
+    let start = seen.map_or(0, |index| index + 1);
     let selected: Vec<_> = path[start..]
         .iter()
         .copied()
@@ -367,20 +374,24 @@ pub(crate) fn context(
          You are the {} agent, continuing the user's conversation in the same worktree. \
          Earlier assistant replies name the agent that wrote them; an agent switch \
          changes who is answering, not the conversation. Use the messages below to \
-         answer the current user message after this block.{} Prior tool actions \
+         answer the current user message after this block. Prior tool actions \
          already happened. Read history only for details missing below: \
          `read {{\"ref\":\"msg_…\"}}` returns that message and its tools; \
          `read {{\"before\":\"msg_…\"}}` returns older messages, excluding that message.\n\
          If no orx MCP tool is exposed, run `{cli_read}` in this chat's shell, \
-         replacing the ref. The same arguments support paging.\n\n\
+         replacing the ref. The same arguments support paging.\n\n{}\
          State now:\n{state}\nConversation (oldest first):\n",
         session.harness,
-        if let Some(since) = since {
+        if let Some(index) = seen {
+            let message = path[index];
             format!(
-                " Your native session already contains the conversation through {}, your last reply as {}. \
-                 The assistant replies in that native session are yours; this is what happened since.",
-                delegation::message_ref(since),
+                "Your native session already contains the conversation through {}, your last reply as {}. \
+                 The assistant replies in that native session are yours; this is what happened since.\n\n\
+                 Your last reply, already seen ({}):\n> {}\n\n",
+                delegation::message_ref(&message.id),
                 session.harness,
+                session.harness,
+                delegation::preview(&delegation::message_text(message)),
             )
         } else {
             String::new()
@@ -645,16 +656,18 @@ mod tests {
         codex.result_native_session_id = Some("codex_native".into());
         let back = switched("99999999", "codex", "claude-code");
         let path = [&user, &claude, &out, &changed, &codex, &back];
-        assert_eq!(
-            pending(&session, &path, &HashSet::new()),
-            Some((Some("msg_55555555"), Some(100_000)))
-        );
+        let missed = position(&session, &path, &HashSet::new());
+        assert_eq!(missed.since.as_deref(), Some("msg_55555555"));
+        assert_eq!(missed.context_window, Some(100_000));
+        assert!(missed.switched);
         let mut reply = message("aaaaaaaa", "assistant", "Continued.");
         reply.native_harness = Some("claude-code".into());
         reply.result_native_session_id = session.native_session_id.clone();
         let mut continued = path.to_vec();
         continued.push(&reply);
-        assert_eq!(pending(&session, &continued, &HashSet::new()), None);
+        let caught_up = position(&session, &continued, &HashSet::new());
+        assert_eq!(caught_up.since.as_deref(), Some("msg_aaaaaaaa"));
+        assert!(!caught_up.switched);
     }
 
     #[test]
@@ -667,12 +680,15 @@ mod tests {
         rejected.result_native_session_id = session.native_session_id.clone();
         let out = switched("eeee0003", "claude-code", "codex");
         let back = switched("eeee0004", "codex", "claude-code");
+        let unconfirmed = HashSet::from([rejected.id.clone()]);
+        let retry = position(&session, &[&request, &rejected], &unconfirmed);
+        assert!(retry.since.is_none());
+        assert!(!retry.switched);
         let path = [&request, &rejected, &out, &back];
-        let undelivered = HashSet::from([rejected.id.clone()]);
-        assert_eq!(
-            pending(&session, &path, &undelivered),
-            Some((None, Some(100_000)))
-        );
+        let returned = position(&session, &path, &unconfirmed);
+        assert!(returned.since.is_none());
+        assert_eq!(returned.context_window, Some(100_000));
+        assert!(returned.switched);
     }
 
     #[test]
@@ -704,8 +720,15 @@ mod tests {
         let side = store.get_chat_session(&side.id).unwrap().unwrap();
         let messages = store.list_chat_messages(&side.id).unwrap();
         let path = active_path(&messages, side.active_leaf_id.as_deref());
-        let (since, window) = pending(&side, &path, &HashSet::new()).unwrap();
-        let handoff = context(&store, &side, None, since, window).unwrap();
+        let position = position(&side, &path, &HashSet::new());
+        let handoff = context(
+            &store,
+            &side,
+            None,
+            position.since.as_deref(),
+            position.context_window,
+        )
+        .unwrap();
         assert!(handoff.contains("Compare the two parser designs."));
         assert!(handoff.contains("Explain the second design."));
         assert!(!handoff.contains("LATER PARENT REQUEST"));
@@ -729,7 +752,9 @@ mod tests {
             .set_chat_session_active_leaf(&session.id, None)
             .unwrap();
         let empty = store.get_chat_session(&session.id).unwrap().unwrap();
-        assert!(pending_for(&store, &empty).unwrap().is_none());
+        let position = position_for(&store, &empty).unwrap();
+        assert!(position.since.is_none());
+        assert!(!position.switched);
         assert!(context(&store, &empty, None, None, None)
             .unwrap()
             .is_empty());

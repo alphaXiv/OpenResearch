@@ -4382,13 +4382,13 @@ impl Store {
         self.list_chat_messages_since(session_id, i64::MIN)
     }
 
-    pub fn undelivered_chat_replies(
+    pub fn unconfirmed_chat_replies(
         &self,
         session_id: &str,
     ) -> Result<std::collections::HashSet<String>> {
         let mut query = self.conn.prepare(
             "SELECT assistant_message_id FROM chat_turns WHERE session_id = ?1
-             AND delivery_state IN ('not_sent', 'rejected')",
+             AND state != 'completed' AND delivery_state != 'accepted'",
         )?;
         let replies = query
             .query_map([session_id], |row| row.get(0))?
