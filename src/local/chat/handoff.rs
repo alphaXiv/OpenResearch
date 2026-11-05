@@ -253,8 +253,11 @@ pub(crate) fn pending_for(
     store: &Store,
     session: &StoredChatSession,
 ) -> Result<Option<(Option<String>, Option<u64>)>> {
+    let Some(leaf) = session.active_leaf_id.as_deref() else {
+        return Ok(None);
+    };
     let messages = store.list_chat_messages(&session.id)?;
-    let path = active_path(&messages, session.active_leaf_id.as_deref());
+    let path = active_path(&messages, Some(leaf));
 
     Ok(pending(
         session,
@@ -272,7 +275,11 @@ pub(crate) fn context(
     context_window: Option<u64>,
 ) -> Result<String> {
     let messages = store.list_chat_messages(&session.id)?;
-    let path = active_path(&messages, session.active_leaf_id.as_deref());
+    let path = session
+        .active_leaf_id
+        .as_deref()
+        .map(|leaf| active_path(&messages, Some(leaf)))
+        .unwrap_or_default();
     let start = since
         .and_then(|id| path.iter().position(|message| message.id == id))
         .map_or(0, |index| index + 1);
@@ -702,6 +709,38 @@ mod tests {
         assert!(handoff.contains("Compare the two parser designs."));
         assert!(handoff.contains("Explain the second design."));
         assert!(!handoff.contains("LATER PARENT REQUEST"));
+    }
+
+    #[test]
+    fn an_empty_branch_does_not_reintroduce_discarded_requests_or_forks() {
+        let dir = crate::local::git::TemporaryDirectory::new("handoff-empty-branch").unwrap();
+        let store = Store::open_at(dir.path().into()).unwrap();
+        let session = session();
+        store.create_chat_session(&session).unwrap();
+        for row in [
+            message("feed0001", "user", "DISCARDED REQUEST"),
+            switched("feed0002", "codex", "claude-code"),
+            message("feed0003", "assistant", "DISCARDED ANSWER"),
+            message("feed0004", "user", "OTHER FORK"),
+        ] {
+            store.upsert_chat_message_on_branch(&row).unwrap();
+        }
+        store
+            .set_chat_session_active_leaf(&session.id, None)
+            .unwrap();
+        let empty = store.get_chat_session(&session.id).unwrap().unwrap();
+        assert!(pending_for(&store, &empty).unwrap().is_none());
+        assert!(context(&store, &empty, None, None, None)
+            .unwrap()
+            .is_empty());
+
+        let replacement = message("feed0005", "user", "REPLACEMENT REQUEST");
+        store.upsert_chat_message_on_branch(&replacement).unwrap();
+        let edited = store.get_chat_session(&session.id).unwrap().unwrap();
+        let fresh = context(&store, &edited, None, None, None).unwrap();
+        assert!(fresh.contains("REPLACEMENT REQUEST"));
+        assert!(!fresh.contains("DISCARDED"));
+        assert!(!fresh.contains("OTHER FORK"));
     }
 
     #[test]

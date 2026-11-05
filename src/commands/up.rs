@@ -8353,7 +8353,7 @@ async fn create_chat_session(
 /// picker. Reading them walks the agent's store, so it stays off the executor.
 async fn list_native_chats() -> ApiResult {
     let chats = tokio::task::spawn_blocking(|| {
-        let owned = Store::open()?.native_session_ids()?;
+        let owned = Store::open()?.native_ids_outside(&[])?;
         Ok::<_, crate::error::Error>(local::native_chats::list(
             &owned,
             local::native_chats::LISTING_LIMIT,

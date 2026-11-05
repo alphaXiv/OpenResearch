@@ -3582,20 +3582,12 @@ impl Store {
     pub fn chat_session_for_native_id(&self, native_id: &str) -> Result<Option<StoredChatSession>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE native_session_id = ?1
+             OR id IN (SELECT session_id FROM chat_messages
+                 WHERE base_native_session_id = ?1 OR result_native_session_id = ?1)
              ORDER BY created_at LIMIT 1"
         ))?;
         let mut rows = stmt.query_map(params![native_id], row_to_chat_session)?;
         Ok(rows.next().transpose()?)
-    }
-
-    /// Native ids orx already has a session for, so the `/resume` picker can
-    /// offer each of the agent's own chats exactly once.
-    pub fn native_session_ids(&self) -> Result<std::collections::HashSet<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT native_session_id FROM chat_sessions WHERE native_session_id IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        Ok(rows.flatten().collect())
     }
 
     pub fn set_chat_session_autonomy(&self, id: &str, autonomy: Autonomy) -> Result<()> {

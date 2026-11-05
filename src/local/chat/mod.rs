@@ -1387,8 +1387,6 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
 }
 
 fn with_turn_context(
-    native_session_id: Option<&str>,
-    bootstrap_context: Option<&str>,
     goal: Option<&str>,
     autonomy: Option<&str>,
     demo_evidence_context: Option<&str>,
@@ -1396,11 +1394,6 @@ fn with_turn_context(
     text: String,
 ) -> String {
     let mut contexts = Vec::new();
-    if native_session_id.is_none() {
-        if let Some(context) = bootstrap_context {
-            contexts.push(context);
-        }
-    }
     // The goal rides every turn: the agent has to be told it again each time,
     // and it outlives compaction and a lost native session.
     let goal = goal.map(|goal| {
@@ -2261,15 +2254,7 @@ mod shell_command_tests {
         assert!(context.contains("status=\"exit 1\">\ncat missing\n</command>"));
         assert!(context.contains("<stderr>\nboom\n</stderr>"));
         assert!(context.find("ls\n</command>").unwrap() < context.find("cat missing").unwrap());
-        let turn = with_turn_context(
-            Some("native"),
-            None,
-            None,
-            None,
-            None,
-            Some(&context),
-            "why?".into(),
-        );
+        let turn = with_turn_context(None, None, None, Some(&context), "why?".into());
         assert!(turn.starts_with("<user-shell-commands>"));
         assert!(turn.ends_with("<current-user-message>\nwhy?\n</current-user-message>"));
         assert!(shell_context(&[]).is_none());
@@ -2294,62 +2279,12 @@ mod initial_message_tests {
     }
 
     #[test]
-    fn bootstrap_context_is_injected_only_before_a_native_session_exists() {
-        let seeded = with_turn_context(
-            None,
-            Some("prior demo"),
-            None,
-            None,
-            None,
-            None,
-            "continue".into(),
-        );
-        assert!(seeded.contains("prior demo"));
-        assert!(seeded.contains("<current-user-message>\ncontinue"));
-        assert_eq!(
-            with_turn_context(
-                Some("native"),
-                Some("prior demo"),
-                None,
-                None,
-                None,
-                None,
-                "continue".into()
-            ),
-            "continue"
-        );
-        assert_eq!(
-            with_turn_context(None, None, None, None, None, None, "continue".into()),
-            "continue"
-        );
-    }
-
-    #[test]
-    fn the_goal_rides_every_turn_including_one_with_a_native_session() {
-        let seeded = with_turn_context(
-            Some("native"),
-            Some("prior demo"),
-            Some("ship the sweep"),
-            None,
-            None,
-            None,
-            "continue".into(),
-        );
+    fn the_goal_rides_every_turn() {
+        let seeded = with_turn_context(Some("ship the sweep"), None, None, None, "continue".into());
         assert!(seeded.contains("ship the sweep"));
-        // Unlike bootstrap context, a goal is not dropped once the harness has
-        // a session of its own — it has to be restated every turn.
-        assert!(!seeded.contains("prior demo"));
         assert!(seeded.contains("<current-user-message>\ncontinue"));
         assert_eq!(
-            with_turn_context(
-                Some("native"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                "continue".into()
-            ),
+            with_turn_context(None, None, None, None, "continue".into()),
             "continue"
         );
     }
@@ -2357,8 +2292,6 @@ mod initial_message_tests {
     #[test]
     fn autonomy_rides_every_turn_after_the_goal() {
         let turn = with_turn_context(
-            Some("native"),
-            None,
             Some("ship the sweep"),
             Autonomy::Copilot.turn_context(),
             None,
@@ -2373,40 +2306,16 @@ mod initial_message_tests {
 
     #[test]
     fn demo_evidence_context_is_injected_without_rewrapping_the_user_message() {
-        let first = with_turn_context(
-            None,
-            Some("prior demo"),
-            None,
-            None,
-            Some("demo evidence"),
-            None,
-            "first".into(),
-        );
-        let follow_up = with_turn_context(
-            Some("native"),
-            Some("prior demo"),
-            None,
-            None,
-            Some("demo evidence"),
-            None,
-            "follow up".into(),
-        );
+        let first = with_turn_context(None, None, Some("demo evidence"), None, "first".into());
+        let follow_up =
+            with_turn_context(None, None, Some("demo evidence"), None, "follow up".into());
         assert!(first.contains("demo evidence"));
-        assert!(first.contains("prior demo"));
         assert!(first.contains("<current-user-message>\nfirst"));
         assert!(follow_up.contains("demo evidence"));
         assert!(follow_up.contains("<current-user-message>\nfollow up"));
         assert_eq!(first.matches("<current-user-message>").count(), 1);
         assert_eq!(
-            with_turn_context(
-                Some("native"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                "ordinary".into()
-            ),
+            with_turn_context(None, None, None, None, "ordinary".into()),
             "ordinary"
         );
     }
@@ -5237,8 +5146,17 @@ impl ChatHost {
                         "action": "retry",
                     }),
                 );
-                let ctx = turn_ctx_from_stored(self.clone(), &session, project, &turn, assistant);
-                let launched = self.launch_turn_ctx(ctx, guard, None).await;
+                let launched = match turn_ctx_from_stored(
+                    self.clone(),
+                    &store,
+                    &session,
+                    project,
+                    &turn,
+                    assistant,
+                ) {
+                    Ok(ctx) => self.launch_turn_ctx(ctx, guard, None).await,
+                    Err(error) => Err(error),
+                };
                 let submission = match launched {
                     Ok(submission) => submission,
                     Err(error) => {
@@ -6073,19 +5991,6 @@ impl ChatHost {
                 prepare_project_slash_worktree(&project, &message.text, &session.id).await;
             }
         }
-        let handoff = handoff::pending_for(&store, &session)?
-            .map(|(since, window)| {
-                handoff::context(&store, &session, None, since.as_deref(), window)
-            })
-            .transpose()?;
-        let bootstrap =
-            if prepared_input.is_none() && session.native_session_id.is_none() && handoff.is_none()
-            {
-                let context = handoff::context(&store, &session, None, None, None)?;
-                (!context.is_empty()).then_some(context)
-            } else {
-                None
-            };
         // A command keeps its leading `/`, and what orx writes keeps its
         // leading `[orx]`; any other message carries the ref an agent cites it by.
         let message_ref = user_msg
@@ -6115,8 +6020,6 @@ impl ChatHost {
                 expanded = format!("{message_ref}\n{expanded}");
             }
             with_turn_context(
-                session.native_session_id.as_deref(),
-                bootstrap.as_deref(),
                 session.goal.as_deref(),
                 Autonomy::from_stored(session.autonomy.as_deref()).turn_context(),
                 super::demo::turn_context(&project.id),
@@ -6124,9 +6027,6 @@ impl ChatHost {
                 expanded,
             )
         });
-        if let Some(context) = &handoff {
-            turn_text = format!("{context}\n\n{turn_text}");
-        }
         // Harnesses take plain text; attachments ride as on-disk paths every
         // CLI can open with its own file-reading tool (Read handles PDFs and
         // images alike).
@@ -6192,6 +6092,21 @@ impl ChatHost {
             created_at,
             updated_at: created_at,
         };
+        let ctx = turn_ctx_from_stored(
+            self.clone(),
+            &store,
+            &session,
+            project,
+            &turn,
+            WireMessage {
+                id: assistant_message_id,
+                role: "assistant".into(),
+                parts: Vec::new(),
+                created_at: now_ms(),
+                completed_at: None,
+                parent_id: None,
+            },
+        )?;
         let mut turns = self.turns.lock().await;
         let Some(TurnState::Reserved { turn_id: reserved }) = turns.get_mut(session_id) else {
             drop(turns);
@@ -6237,20 +6152,6 @@ impl ChatHost {
         self.emit(
             "chat.busy",
             json!({ "sessionId": session.id, "busy": true }),
-        );
-        let ctx = turn_ctx_from_stored(
-            self.clone(),
-            &session,
-            project,
-            &turn,
-            WireMessage {
-                id: assistant_message_id,
-                role: "assistant".into(),
-                parts: Vec::new(),
-                created_at: now_ms(),
-                completed_at: None,
-                parent_id: None,
-            },
         );
         self.launch_turn_ctx_locked(ctx, guard, title_seed, turns)
     }
@@ -7854,12 +7755,29 @@ pub struct TurnCtx {
 
 fn turn_ctx_from_stored(
     host: Arc<ChatHost>,
+    store: &Store,
     session: &StoredChatSession,
     project: LocalProject,
     turn: &StoredChatTurn,
     assistant: WireMessage,
-) -> TurnCtx {
-    TurnCtx {
+) -> Result<TurnCtx> {
+    let mut text = rebase_prepared_attachment_paths(&turn.prepared_input);
+    let pending = handoff::pending_for(store, session)?;
+    if session.native_session_id.is_none() || pending.is_some() {
+        let (since, window) = pending.unwrap_or_default();
+        let context = handoff::context(
+            store,
+            session,
+            turn.user_message_id.as_deref(),
+            since.as_deref(),
+            window,
+        )?;
+        if !context.is_empty() {
+            text = format!("{context}\n\n{text}");
+        }
+    }
+
+    Ok(TurnCtx {
         host,
         turn_id: turn.id.clone(),
         durable: true,
@@ -7890,7 +7808,7 @@ fn turn_ctx_from_stored(
         plan_reset_pending: session.plan_reset_pending,
         reasoning_level: session.reasoning_level.clone(),
         project,
-        text: rebase_prepared_attachment_paths(&turn.prepared_input),
+        text,
         assistant,
         context_usage: session
             .context_usage_json
@@ -7904,7 +7822,7 @@ fn turn_ctx_from_stored(
         target_event_offset: 0,
         pending_target_events: Vec::new(),
         target_event_bindings: HashMap::new(),
-    }
+    })
 }
 
 fn rebase_prepared_attachment_paths(input: &str) -> String {
@@ -9728,6 +9646,23 @@ mod cap_tests {
             updated_at: 1,
         };
         store.create_chat_session(&adopted).unwrap();
+        for row in imported_rows(
+            &adopted.id,
+            "native-1",
+            vec![crate::local::native_chats::NativeMessage {
+                role: "assistant",
+                text: "Earlier answer".into(),
+                created_at: 1,
+            }],
+        )
+        .unwrap()
+        {
+            store.upsert_chat_message(&row).unwrap();
+        }
+        store
+            .set_chat_session_native_id(&adopted.id, Some("another-agent-native"))
+            .unwrap();
+        assert!(store.native_ids_outside(&[]).unwrap().contains("native-1"));
         // Adopting the same chat again returns the session that already owns
         // it — two sessions driving one native chat would split the history.
         let again = import_native_chat(&store, "proj_1", "claude-code", "native-1", None).unwrap();
@@ -9804,16 +9739,9 @@ mod cap_tests {
             !session.archived,
             "compacting is activity, which unarchives"
         );
-        assert!(with_turn_context(
-            session.native_session_id.as_deref(),
-            session.bootstrap_context.as_deref(),
-            None,
-            None,
-            None,
-            None,
-            "next".into(),
-        )
-        .contains("the summary"));
+        assert!(handoff::context(&store, &session, None, None, None)
+            .unwrap()
+            .contains("the summary"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -10862,6 +10790,34 @@ mod bridge_tests {
                         )));
                         assert!(context.contains("Parser API preserved; tests passed."));
                         assert!(!context.contains("Original plan."));
+                        let recovery = StoredChatTurn {
+                            id: "recovery".into(),
+                            session_id: session.id.clone(),
+                            user_message_id: Some(request.id.clone()),
+                            assistant_message_id: "recovered-answer".into(),
+                            client_turn_id: "recovery-client".into(),
+                            request_hash: "hash".into(),
+                            prepared_input: "Replay this request with its attachments.".into(),
+                            settings_json: "{}".into(),
+                            state: "failed".into(),
+                            delivery_state: "rejected".into(),
+                            attempt_count: 1,
+                            next_retry_at: None,
+                            error_kind: None,
+                            error_message: None,
+                            recovery_action: Some("retry".into()),
+                            recovered_by_turn_id: None,
+                            created_at: 1,
+                            updated_at: 1,
+                        };
+                        let ctx = turn_ctx_from_stored(
+                            host.clone(), &store, &back, TurnCtx::test_stub().project,
+                            &recovery, stored_to_wire(&answer),
+                        ).unwrap();
+                        assert_eq!(ctx.text.matches("<orx-handoff>").count(), 1);
+                        assert!(ctx.text.contains(&format!("You are the {source} agent")));
+                        assert!(!ctx.text.contains(&format!("You are the {target} agent")));
+                        assert!(ctx.text.ends_with(&recovery.prepared_input));
                         let (ids, _) = store
                             .native_sessions_for_deletion(&[session.id.clone()], &[target])
                             .unwrap();

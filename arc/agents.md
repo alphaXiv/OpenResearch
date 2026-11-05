@@ -71,6 +71,8 @@ requires a new chat.
 Recovery after a switch uses the selected agent's settings and starts a new
 turn, preserving the original failure and the harness that owns it. A native
 thread created before delivery does not count as having seen the request.
+The replayable request excludes agent-specific context; each launch rebuilds
+the handoff for the selected agent. An empty branch carries no discarded history.
 
 The handoff is rendered when the next turn starts, so worktree changes made
 while the chat was idle are visible. The byte budget prioritizes user requests
