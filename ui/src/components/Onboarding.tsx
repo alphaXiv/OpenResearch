@@ -744,7 +744,7 @@ function AlphaXivAccountCard({ user, avatarUrl, connectOnly, disabled, onSignedI
         </div>
       ) : (
         <Button size="large" className="h-16 w-full justify-center text-lg" disabled={disabled} onClick={() => openSignIn(connectOnly, card.current, onSignedIn)} aria-haspopup="dialog">
-          <LitSourceLogo source="alphaxiv" size={24} decorative />{m.account_sign_in_alphaxiv()}
+          <LitSourceLogo source="alphaxiv" size={24} decorative framed={false} />{m.account_sign_in_alphaxiv()}
         </Button>
       )}
     </div>
