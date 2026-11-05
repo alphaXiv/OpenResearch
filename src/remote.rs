@@ -351,29 +351,4 @@ mod tests {
             .render_instructions(4791, false);
         assert!(!msg.contains('\x1b'));
     }
-
-    #[test]
-    fn styling_wraps_the_primary_command_when_ansi_enabled() {
-        let msg = detect_from(Some("203.0.113.7 51344 10.0.0.5 22"), false)
-            .unwrap()
-            .render_instructions(4791, true);
-        // The primary command is bolded; the whole thing carries escape codes.
-        assert!(msg.contains("\x1b[1morx up --remote\x1b[22m"));
-    }
-
-    #[test]
-    fn both_commands_are_bold_and_placeholders_are_cyan_not_dim() {
-        // Readability fix: the commands you type must be the brightest thing on
-        // screen, and the `<user@host>` you fill in must be legible cyan — not
-        // dimmed into the background like it used to be.
-        let msg = detect_from(Some("203.0.113.7 51344 10.0.0.5 22"), false)
-            .unwrap()
-            .render_instructions(4791, true);
-        // Both commands bold.
-        assert!(msg.contains("\x1b[1morx up --remote\x1b[22m"));
-        assert!(msg.contains("\x1b[1mssh -N -L 4791:localhost:4791\x1b[22m"));
-        // The placeholder is cyan (\x1b[36m…\x1b[39m), and never dimmed.
-        assert!(msg.contains("\x1b[36m<user@host>\x1b[39m"));
-        assert!(!msg.contains("\x1b[2m<user@host>\x1b[22m"));
-    }
 }

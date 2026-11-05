@@ -1,0 +1,26 @@
+[package]
+name = "orx-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[features]
+test-hooks = []
+
+[dependencies]
+orx-host-proto = { path = "../orx-host-proto" }
+libc = "0.2"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+orx-host = { path = ".", features = ["test-hooks"] }
+orx-test-support = { path = "../../tests/support" }
+
+[build-dependencies]
+cc = "1"

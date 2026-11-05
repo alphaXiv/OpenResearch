@@ -2,7 +2,7 @@ use crate::error::{anyhow, Result};
 use crate::local::agent_skills::{self, SkillSet};
 
 // Bundled top-level overview, embedded from the repository root.
-const SKILL_MD: &str = include_str!("../../SKILL.md");
+pub(crate) const SKILL_MD: &str = include_str!("../../SKILL.md");
 
 /// Which bundled skill set this invocation serves.
 fn current_skill_set() -> SkillSet {
@@ -50,12 +50,4 @@ pub async fn run(args: crate::SkillArgs) -> Result<()> {
     capture_invocation("overview");
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn bundled_overview_avoids_openresearch_ui_navigation() {
-        crate::local::assert_agent_guidance_is_ui_agnostic("orx skill overview", super::SKILL_MD);
-    }
 }

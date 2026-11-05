@@ -100,6 +100,7 @@ async fn create(creds: &crate::config::Credentials, args: InstanceCreateArgs) ->
         creds,
         &CreateSandboxBody {
             organization_id: args.org_id.clone(),
+            rental_lease: None,
             target,
         },
     )

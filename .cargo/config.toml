@@ -1,0 +1,3 @@
+# Keeps the macOS floor independent of the build runner's SDK; matches LSMinimumSystemVersion in macos/Info.plist.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "11.0"

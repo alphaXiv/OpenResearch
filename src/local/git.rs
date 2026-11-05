@@ -157,21 +157,17 @@ fn long_paths() -> &'static [&'static str] {
     }
 }
 
-/// `git` resolved on, and run with, the user's shell PATH: a Finder-launched
-/// app's launchd PATH finds only `/usr/bin/git`, which needs the Xcode CLT.
+#[cfg(not(windows))]
 pub fn git_command() -> Command {
-    let mut command = match super::shell_env::find_on_path("git") {
-        Some(path) => Command::new(path),
-        None => Command::new("git"),
-    };
-    if let Some(paths) = super::shell_env::search_path() {
-        command.env("PATH", paths);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
+    crate::process::command("git")
+}
+
+/// `git`, without a console window.
+#[cfg(windows)]
+pub fn git_command() -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut command = crate::process::command("git");
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     command
 }
 
@@ -1495,13 +1491,20 @@ fn lost_worktree_head(repo: &Path, dir: &Path) -> Option<String> {
 pub fn remove_session_worktree(project: &crate::local::model::LocalProject, session_id: &str) {
     let repo_path = Path::new(&project.repo_path);
     let dir = existing_session_worktree_path(project, session_id);
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_session_worktree_at(repo_path, &dir);
+}
+
+fn remove_session_worktree_at(repo_path: &Path, dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
     // Once the dir is gone, `worktree remove` drops only this registration (unlike prune).
     if is_repository(repo_path) {
         let _ = git(
             Some(repo_path),
             &["worktree", "remove", "--force", &dir.to_string_lossy()],
         );
+    }
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::remove_dir(parent);
     }
 }
 
@@ -1872,7 +1875,7 @@ pub fn spawn_branch_publication(
     repo: &str,
 ) -> Result<()> {
     let executable = crate::paths::spawnable_exe()?;
-    let mut command = Command::new(executable);
+    let mut command = crate::process::command(executable);
     command
         .arg("publish-branch")
         .arg(repo_path)
@@ -1882,9 +1885,6 @@ pub fn spawn_branch_publication(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(paths) = super::shell_env::search_path() {
-        command.env("PATH", paths);
-    }
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
@@ -1940,6 +1940,24 @@ pub fn publication_sync_status(
         }
     }
     "synced"
+}
+
+/// Delete a local branch and return its last commit; `Ok(None)` when it or the repo is gone.
+/// Git refuses while any worktree has the branch checked out.
+pub fn delete_branch(repo_path: &Path, branch: &str) -> Result<Option<String>> {
+    if !repo_path.exists() {
+        return Ok(None);
+    }
+    let reference = format!("refs/heads/{branch}");
+    let sha = git(
+        Some(repo_path),
+        &["for-each-ref", "--format=%(objectname)", &reference],
+    )?;
+    if sha.is_empty() {
+        return Ok(None);
+    }
+    git(Some(repo_path), &["branch", "-D", branch])?;
+    Ok(Some(sha))
 }
 
 /// Create `new_branch` from `parent_branch`'s local tip.
@@ -2441,6 +2459,26 @@ pub fn file_bytes_at_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removing_worktrees_prunes_only_the_empty_project_parent() {
+        let repo = temp_repo();
+        let parent = repo.with_extension("worktrees");
+        let first = parent.join("first");
+        let second = parent.join("second");
+        ensure_worktree_from(&repo, first.clone(), "main", true).unwrap();
+        ensure_worktree_from(&repo, second.clone(), "main", true).unwrap();
+
+        remove_session_worktree_at(&repo, &first);
+        assert!(!first.exists());
+        assert!(second.is_dir());
+        assert!(parent.is_dir());
+        remove_session_worktree_at(&repo, &second);
+        assert!(!parent.exists());
+        assert!(repo.join(".git").is_dir());
+        remove_session_worktree_at(&repo, &second);
+        std::fs::remove_dir_all(repo).unwrap();
+    }
 
     #[test]
     fn github_git_uses_only_the_command_scoped_gh_credential_helper() {

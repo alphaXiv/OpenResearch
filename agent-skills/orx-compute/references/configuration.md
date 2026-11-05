@@ -10,6 +10,9 @@ orx compute show ssh --json
 orx compute configure ssh --default-host lab
 orx compute configure ssh --host lab --container research
 orx compute configure ssh --host lab --clear container
+orx compute configure ssh --host lab --remote-root /data/me/orx  # runs + source cache; default ~/.orx
+orx compute configure ssh --host lab --clear remote-root
+orx compute configure ssh --host lab --keep-remote-runs true   # keep every finished run dir on the host
 orx compute test ssh --host lab                     # tests saved container too
 orx compute test ssh --host lab --no-container      # explicitly tests host
 orx compute connect ssh --host lab                 # interactive login/MFA
@@ -17,6 +20,8 @@ orx compute configure slurm --host cluster --partition gpu --account lab --time-
 orx compute configure slurm --cpus-per-task 8 --mem 64G   # defaults; exp run --cpus/--mem override
 orx compute configure slurm --clear cpus-per-task --clear mem
 orx compute configure slurm --clear time-limit     # cluster chooses
+orx compute configure slurm --remote-root /scratch/me/orx   # shared FS; --clear remote-root for ~/.orx
+orx compute configure slurm --keep-remote-runs true          # keep every finished run dir on the cluster
 orx compute connect slurm --host cluster
 orx compute configure k8s --context research --namespace experiments
 orx compute configure ray --address http://127.0.0.1:8265
@@ -31,6 +36,8 @@ configuration summary, not proof of connectivity. `test` returns `ready` and
 exits nonzero when prerequisites fail. Its checks do not launch training jobs.
 Modal checks the local SDK and credential presence; it does not verify token
 validity with Modal.
+Vercel Sandbox likewise checks the local SDK and that `VERCEL_OIDC_TOKEN`, or
+all of `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`, are present.
 
 HF, Tinker and Modal credentials can come from
 `orx compute configure modal --credentials-file -` (stdin; likewise `hf` and

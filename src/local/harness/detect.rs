@@ -128,6 +128,8 @@ pub enum HarnessAuthState {
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     /// Reasoning/effort choices this *specific* model accepts, led by the
     /// `Default` sentinel. `None` means "this model has no list of its own" —
     /// the composer then falls back to the harness-wide
@@ -161,6 +163,10 @@ pub struct ModelInfo {
     /// Whether the model accepts image input, when the catalog says (OpenCode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_input: Option<bool>,
+    /// The versioned model an unversioned alias runs today (Claude's
+    /// `opus[1m]` → `claude-opus-5-5`), which model routing joins on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
 }
 
 impl ModelInfo {
@@ -169,12 +175,14 @@ impl ModelInfo {
     pub(super) fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            context_window: None,
             reasoning_levels: None,
             display_name: None,
             description: None,
             default_reasoning_level: None,
             service_tiers: None,
             image_input: None,
+            resolved_model: None,
         }
     }
 
@@ -254,6 +262,8 @@ pub struct HarnessInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub org: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
@@ -281,6 +291,7 @@ pub struct HarnessInfo {
     /// Whether a running turn accepts further user input, which is what lets
     /// the composer steer instead of parking the message until the turn ends.
     pub supports_steering: bool,
+    pub supports_compaction: bool,
     /// Set when a snapshot detection answered from file/discovery evidence
     /// and deferred the expensive probes — model catalog, live auth,
     /// capability checks — to a background full pass that replaces the
@@ -310,6 +321,7 @@ impl HarnessInfo {
             auth_observation: None,
             claude_ultracode: false,
             account: None,
+            account_name: None,
             org: None,
             plan: None,
             agent_ready: false,
@@ -321,6 +333,7 @@ impl HarnessInfo {
             logo: None,
             needs_config_repair: false,
             supports_steering: false,
+            supports_compaction: false,
             catalog_pending: false,
             models: Vec::new(),
             options: super::HarnessOptions::none(),
@@ -777,7 +790,7 @@ pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
     if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
         return BinProbe::Answered(Some(version));
     }
-    let mut cmd = tokio::process::Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("--version").stdin(std::process::Stdio::null());
     // An unparseable version downgrades a signed-in harness to `Unknown` —
     // which is why a synced `FORCE_COLOR` must not reach the version line.

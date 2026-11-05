@@ -404,7 +404,7 @@ fn is_archive(s: &str) -> bool {
             .all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'.')
 }
 
-fn alphaxiv_paper_url(id: &str) -> String {
+pub(crate) fn alphaxiv_paper_url(id: &str) -> String {
     format!("https://www.alphaxiv.org/abs/{}", versionless_id(id))
 }
 

@@ -1,38 +1,34 @@
-//! Local SSH launch — the SSH twin of `local/k8s.rs`: run the experiment as a
-//! detached process on one of your own boxes over ssh. `--host` names an
-//! `~/.ssh/config` host alias (there's no hardware scheduler on a plain
-//! server). The run row lives in the local store only; a detached
-//! `orx supervise` watches the remote process.
+//! SSH launch intents: the run executes as a detached process on one of your own boxes.
+//! `--host` names an `~/.ssh/config` host alias (there's no hardware scheduler on a plain
+//! server).
 
 use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
 use crate::jobs::{ssh, BackendDescriptor};
-use crate::store::{now_ms, Store, StoredRun};
+use crate::store::{now_ms, LaunchSpec, Store, StoredRun};
 
-/// CLI wrapper around `submit_local_ssh`: submit, then print the summary.
-pub async fn launch_local_ssh(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_ssh(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} SSH run submitted.");
-    println!(
-        "  host {}  ({})",
-        backend.namespace.as_deref().unwrap_or(""),
-        backend.job_id.as_deref().unwrap_or("")
-    );
-    println!("  run  {}", run.id);
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
-}
-
-/// Submit the local experiment's run as a detached process on an ssh host and
-/// detach a supervisor. Requires `--backend ssh` and `--host <host>` where
-/// the host is an `~/.ssh/config` alias.
-pub async fn submit_local_ssh(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    crate::compute::submit(args).await
+/// The saved container is resolved by the engine over its own connection to the host.
+pub fn launch_spec(args: &crate::ExpRunArgs, command: &str) -> Result<LaunchSpec> {
+    let settings = crate::config::ssh_settings()?;
+    let (host, options) = crate::jobs::ssh::resolve_options(args, &settings)?;
+    let launch = crate::engine::adapters::ssh::LaunchOptions {
+        run_sh: Some(format!(
+            "{} {}",
+            crate::compute::TENSORBOARD_LOGDIR_EXPORT,
+            crate::compute::staged_script(command)
+        )),
+        container_reference: options.container,
+        root: Some(crate::engine::runtime::engine_root(
+            options.remote_root.as_deref(),
+        )),
+        ..Default::default()
+    };
+    Ok(LaunchSpec {
+        kind: "ssh_job".into(),
+        target: Some(host),
+        options: serde_json::to_value(launch)?,
+    })
 }
 
 pub async fn submit_local_ssh_with_source(
@@ -56,7 +52,7 @@ pub async fn submit_local_ssh_with_source(
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    let target = launch.target.clone();
+    let target = launch.target.clone().for_run(&run_id);
     let container = launch
         .container
         .as_ref()
@@ -67,6 +63,7 @@ pub async fn submit_local_ssh_with_source(
         &source.path,
         &source.digest,
         container.as_ref(),
+        launch.remote_root.as_deref(),
     )
     .await?;
     let script = format!(
@@ -86,6 +83,7 @@ pub async fn submit_local_ssh_with_source(
         ssh_container: container.clone(),
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "ssh_job".to_string(),
         namespace: Some(target.dest.clone()),
         job_id: Some(remote_dir.clone()),
@@ -104,6 +102,8 @@ pub async fn submit_local_ssh_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: launch.remote_root.clone(),
+        unknown: Default::default(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if container.is_some() {
@@ -112,6 +112,7 @@ pub async fn submit_local_ssh_with_source(
     let submission = ssh::run_job(&ssh::SshJobSpec {
         target: target.clone(),
         run_id: run_id.clone(),
+        remote_root: launch.remote_root.clone(),
         script,
         env,
         container: container.clone(),

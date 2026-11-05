@@ -1,30 +1,12 @@
+import { useWorkspace } from "../workspace";
 import type { InfiniteData } from "@tanstack/react-query";
 import type { ChatSession, SidebarChatPage } from "../api";
 import { markLiveUpdate } from "./live";
-import {
-  refreshHarness,
-  refreshHarnesses,
-  getHarnessesQuery,
-  getUpdateStatusQuery,
-} from "./settings";
-import { dispatchChat } from "./chatStore";
-import { inputSummaryChanged } from "./chatState";
-import { useEffect } from "react";
-import {
-  emitEntity,
-  onDataDirMove,
-  onProjectActivityEvent,
-  onChatEvent,
-  onHarnessAuth,
-  onHarnessCatalog,
-  onUpdateStatus,
-  useOrxEventStream,
-} from "../events";
-import { queryClient, workspaceScope, isCurrentScope, deletedSessionIds } from "./client";
-import { listProjectsQuery, listRunsQuery, listExperimentsQuery } from "./projects";
-import { listChatSessionsQuery } from "./chat";
 
-import { artifactFamilies, liveFamilies, invalidateFamilies, removeSession } from "./invalidation";
+import { inputSummaryChanged } from "./chatState";
+import { useEffect, useMemo } from "react";
+
+import { artifactFamilies, liveFamilies } from "./invalidation";
 
 function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefined, next: T) {
   if (!rows) return undefined;
@@ -34,10 +16,48 @@ function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefin
 }
 
 export function QueryEvents() {
+  const { workspaceScope, isCurrentScope, queryClient, deletedSessionIds } = useWorkspace();
+  const { invalidateFamilies, removeSession } = useWorkspace().invalidation;
+  const {
+    useOrxEventStream,
+    emitEntity,
+    onProjectActivityEvent,
+    onDataDirMove,
+    onChatEvent,
+    onHarnessAuth,
+    onHarnessCatalog,
+    onUpdateStatus,
+  } = useWorkspace().events;
+  const {
+    listRunsQuery,
+    listExperimentsQuery,
+    listProjectsQuery,
+    listChatSessionsQuery,
+    refreshHarnesses,
+    refreshHarness,
+    getHarnessesQuery,
+    getUpdateStatusQuery,
+  } = useWorkspace().queries;
+  const { dispatchChat } = useWorkspace().chat;
+
   const scope = workspaceScope();
+  const sessionExperiments = useMemo(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return {
+      invalidate() {
+        timer ??= setTimeout(() => {
+          timer = undefined;
+          invalidateFamilies(["getSessionExperiments"], scope);
+        }, 200);
+      },
+      dispose() { clearTimeout(timer); timer = undefined; },
+    };
+  }, [scope[1]]);
+  useEffect(() => () => sessionExperiments.dispose(), [sessionExperiments]);
   useOrxEventStream({
     onRun(run) {
       if (!isCurrentScope(scope)) return;
+      sessionExperiments.invalidate();
       const old = queryClient.getQueryData(listRunsQuery(run.projectId).queryKey)?.find((row) => row.id === run.id);
       markLiveUpdate(queryClient, listRunsQuery(run.projectId).queryKey, run.id);
       queryClient.setQueryData(listRunsQuery(run.projectId).queryKey, (rows) => upsert(rows, run));
@@ -49,6 +69,7 @@ export function QueryEvents() {
     },
     onExperiment(experiment) {
       if (!isCurrentScope(scope)) return;
+      sessionExperiments.invalidate();
       markLiveUpdate(queryClient, listExperimentsQuery(experiment.projectId).queryKey, experiment.id);
       queryClient.setQueryData(listExperimentsQuery(experiment.projectId).queryKey, (rows) => upsert(rows, experiment));
       invalidateFamilies(["getProjectStarterPrompts"], scope, (query) => query.queryKey[3] === experiment.projectId);
@@ -68,6 +89,7 @@ export function QueryEvents() {
     onReconnect() {
       if (!isCurrentScope(scope)) return;
       invalidateFamilies(liveFamilies, scope);
+      invalidateFamilies(["getSessionExperiments"], scope);
       emitEntity.onReconnect();
     },
   });
@@ -92,6 +114,7 @@ export function QueryEvents() {
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
       if (inputSummaryChanged(event, promptStates)) refreshSidebar();
+      if (event.type === "branch" || event.type === "sessionDeleted" || event.type === "busy" && !event.busy) invalidateFamilies(["chatSearch"], scope);
       if (event.type === "session") markLiveUpdate(queryClient, listChatSessionsQuery(event.session.projectId).queryKey, event.session.id);
       else if (event.type === "busy" || event.type === "usage") markLiveUpdate(queryClient, [...scope, "listChatSessions"], event.sessionId);
       if (event.type === "message" || event.type === "queued" || event.type === "branch") {

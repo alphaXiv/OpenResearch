@@ -2,8 +2,10 @@
 set -euo pipefail
 # Only the uniquely named test containers are changed or removed.
 fixture=$(mktemp -d)
+export ORX_DATA_DIR="$fixture/data" XDG_CONFIG_HOME="$fixture/config" ORX_CACHE_DIR="$fixture/cache"
 prefix="orx-ssh-test-$$"
 cleanup() {
+  "${CARGO_TARGET_DIR:-target}/debug/orx" ssh-service stop >/dev/null 2>&1 || true
   docker rm -f "$prefix-host" "$prefix-inner" >/dev/null 2>&1 || true
   docker image rm "$prefix" >/dev/null 2>&1 || true
   rm -rf "$fixture"
@@ -12,25 +14,14 @@ trap cleanup EXIT
 ssh-keygen -q -t ed25519 -N '' -f "$fixture/key"
 cat > "$fixture/Dockerfile" <<'DOCKER'
 FROM docker:28-cli
-RUN apk add --no-cache openssh bash util-linux coreutils procps && ssh-keygen -A && mkdir -p /root/.ssh && chmod 700 /root/.ssh
+RUN apk add --no-cache openssh bash util-linux coreutils procps python3 && ssh-keygen -A && mkdir -p /root/.ssh && chmod 700 /root/.ssh
 COPY key.pub /root/.ssh/authorized_keys
 COPY ssh-dispatch /usr/local/bin/ssh-dispatch
 RUN chmod +x /usr/local/bin/ssh-dispatch && echo "ForceCommand /usr/local/bin/ssh-dispatch" >> /etc/ssh/sshd_config
 RUN chmod 600 /root/.ssh/authorized_keys
 ENTRYPOINT ["/usr/sbin/sshd", "-D", "-e"]
 DOCKER
-cat > "$fixture/ssh-dispatch" <<'DISPATCH'
-#!/bin/sh
-case "$SSH_ORIGINAL_COMMAND" in
-  *'date +%s > launch_time'*)
-    if [ -f /tmp/drop-launch-ack ]; then
-      rm /tmp/drop-launch-ack
-      sh -c "$SSH_ORIGINAL_COMMAND"
-      exit 255
-    fi ;;
-esac
-exec sh -c "$SSH_ORIGINAL_COMMAND"
-DISPATCH
+cp scripts/ssh-test-proxy.py "$fixture/ssh-dispatch"
 docker build -q -t "$prefix" "$fixture"
 docker run -d --name "$prefix-host" -p 127.0.0.1::22 -v /var/run/docker.sock:/var/run/docker.sock "$prefix"
 docker run -d --name "$prefix-inner" --user 1000:1000 --env CONDA_ENVS_PATH=/tmp/conda-envs --env "HOME=/tmp/orx home'quoted" --entrypoint bash condaforge/miniforge3 -c 'mkdir -p "$HOME"; exec sleep infinity'

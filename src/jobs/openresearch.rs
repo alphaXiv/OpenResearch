@@ -103,7 +103,7 @@ fn retained_failure_reason(
     })
 }
 
-fn is_not_found_error(message: &str) -> bool {
+pub(crate) fn is_not_found_error(message: &str) -> bool {
     message.contains("(404 ")
 }
 
@@ -171,7 +171,7 @@ pub async fn wait_online(
                     .unwrap_or_default()
             )));
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(crate::config::paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -184,7 +184,7 @@ pub async fn launched(target: &super::ssh::SshTarget, run_id: &str) -> Result<bo
         target,
         &format!(
             "d=\"$HOME/{dir}\"; \
-             if [ -e \"$d/pid\" ] || [ -e \"$d/exit_code\" ]; then echo STARTED; else echo FRESH; fi"
+             if [ -e \"$d/pid\" ] || [ -e \"$d/exit_code\" ] || [ -e \"$d/launch_started\" ]; then echo STARTED; else echo FRESH; fi"
         ),
         None,
     )
@@ -205,7 +205,7 @@ pub async fn teardown(creds: &Credentials, sandbox_id: &str) -> Result<()> {
     let mut last = None;
     for backoff_secs in [0u64, 2, 5, 10] {
         if backoff_secs > 0 {
-            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            tokio::time::sleep(crate::config::paced(Duration::from_secs(backoff_secs))).await;
         }
         match delete_sandbox(creds, sandbox_id).await {
             Ok(()) => return Ok(()),
@@ -242,6 +242,7 @@ mod tests {
     fn parse_flavor_sends_uppercase_gpu_id() {
         let body = crate::client::CreateSandboxBody {
             organization_id: "org".into(),
+            rental_lease: None,
             target: parse_flavor("rtx_3090", 100, None).unwrap(),
         };
         let body = serde_json::to_value(&body).unwrap();

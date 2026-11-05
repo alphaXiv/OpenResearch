@@ -44,6 +44,8 @@ AppMutex=Local\OpenResearchApp
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; Tells Explorer the .orx association below changed.
+ChangesAssociations=yes
 
 [Tasks]
 Name: desktopicon; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -55,6 +57,18 @@ Source: "{#SourceDir}\orx.exe"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{autoprograms}\OpenResearch"; Filename: "{app}\OpenResearch.exe"; AppUserModelID: "{#AppUserModelID}"
 Name: "{autodesktop}\OpenResearch"; Filename: "{app}\OpenResearch.exe"; AppUserModelID: "{#AppUserModelID}"; Tasks: desktopicon
+
+[Registry]
+; openresearch:// links (src/commands/app.rs) open the app; the launcher passes them to orx.exe.
+Root: HKCU; Subkey: "Software\Classes\openresearch"; ValueType: string; ValueName: ""; ValueData: "URL:OpenResearch"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\openresearch"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\openresearch\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"",0"
+Root: HKCU; Subkey: "Software\Classes\openresearch\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"" ""%1"""
+; Shared projects (src/local/share.rs) open in the app, which imports them.
+Root: HKCU; Subkey: "Software\Classes\.orx"; ValueType: string; ValueName: ""; ValueData: "OpenResearch.Project"; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKCU; Subkey: "Software\Classes\OpenResearch.Project"; ValueType: string; ValueName: ""; ValueData: "OpenResearch project"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\OpenResearch.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"",0"
+Root: HKCU; Subkey: "Software\Classes\OpenResearch.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"" ""%1"""
 
 [Run]
 Filename: "{app}\OpenResearch.exe"; Description: "{cm:LaunchProgram,OpenResearch}"; Flags: nowait postinstall skipifsilent

@@ -5,9 +5,8 @@
 #    the automatic path. IMPORTANT: GitHub suppresses workflow_run when the
 #    upstream run was authored by GITHUB_TOKEN (its anti-recursion rule), so
 #    release.yml must be dispatched by a PAT (see release-on-bump.yml) for this
-#    to fire on a real release. release.yml also runs on pull_request (a dry-run
-#    that publishes nothing), so we only proceed for a successful
-#    `workflow_dispatch` run and then confirm the tag's release actually exists.
+#    to fire on a real release. We only proceed for a successful dispatch and
+#    resolve the released tag from its source artifact.
 #  - workflow_dispatch: manually re-attach the DMG for a given tag — the recovery
 #    path, and how a release cut before this pipeline worked gets its DMG.
 #
@@ -21,7 +20,7 @@
 name: Attach macOS app to release
 
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers] Release has no PR trigger and `check` admits only dispatched runs
     workflows: ["Release"]
     types: [completed]
   workflow_dispatch:
@@ -32,7 +31,8 @@ on:
         type: string
 
 permissions:
-  contents: write # upload release assets
+  actions: read # resolve the upstream release source artifact
+  contents: read
 
 concurrency:
   group: release-macos-app
@@ -50,55 +50,105 @@ jobs:
     outputs:
       ok: ${{ steps.gate.outputs.ok }}
       tag: ${{ steps.gate.outputs.tag }}
+      source-sha: ${{ steps.gate.outputs.sha }}
+      release-run-id: ${{ steps.gate.outputs.release-run-id }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          persist-credentials: false
+          fetch-depth: 0
       - id: gate
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
-          # Manual dispatch names the tag; the automatic path derives it from the
-          # released commit's Cargo.toml.
+          # The upstream workflow revision can differ from its released source.
           if [ -n "$INPUT_TAG" ]; then
             tag="$INPUT_TAG"
           else
-            version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
-            tag="v${version}"
+            gh run download "$RELEASE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name release-source --dir "$RUNNER_TEMP/release-source"
+            tag=$(jq -er .tag "$RUNNER_TEMP/release-source/release-source.json")
+            expected_sha=$(jq -er .sha "$RUNNER_TEMP/release-source/release-source.json")
           fi
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::notice::No release $tag found (dry-run dispatch?) — nothing to attach."
+            echo "::notice::No release $tag found — nothing to attach."
             echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          git fetch origin "refs/tags/$tag:refs/tags/$tag"
+          sha=$(git rev-parse "refs/tags/$tag^{commit}")
+          git merge-base --is-ancestor "$sha" origin/main
+          if [ -n "${expected_sha:-}" ]; then test "$sha" = "$expected_sha"; fi
+          version=$(git show "$sha:Cargo.toml" | grep -m1 '^version = ' | sed -E 's/version = "(.*)"/\1/')
+          test "$tag" = "v$version"
+          if [ -z "$RELEASE_RUN_ID" ] && { git cat-file -e "$sha:scripts/build-host.mjs" 2>/dev/null || ! git cat-file -e "$sha:ui/dist/index.html" 2>/dev/null; }; then
+            RELEASE_RUN_ID=$(bash scripts/find-release-run.sh "$tag" "$sha")
+          fi
+          {
+            echo "ok=true"
+            echo "tag=$tag"
+            echo "sha=$sha"
+            echo "release-run-id=$RELEASE_RUN_ID"
+          } >> "$GITHUB_OUTPUT"
 
   macos-app:
     needs: check
     if: ${{ needs.check.outputs.ok == 'true' }}
-    runs-on: macos-14 # Apple Silicon runner
+    runs-on: macos-latest
     timeout-minutes: 45 # bound the 10x-billed runner (build + notarize + Finder styling)
     # The cert-using job. Secrets come from this environment; add required
     # reviewers to it (Settings → Environments) so the Developer ID certificate
     # is never used without a human approving the run — even if an unwanted change
     # reaches main. Restrict its deployment branches to main. See DISTRIBUTION.md.
     environment: release-signing
+    permissions:
+      actions: read # download the UI the Release run built
+      contents: write # upload release assets
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          persist-credentials: false
+          ref: ${{ needs.check.outputs.source-sha }}
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Remove checked-in UI
+        if: needs.check.outputs.release-run-id != ''
+        run: rm -rf ui/dist
+      - name: Download release UI
+        if: needs.check.outputs.release-run-id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ui
+          path: ui/dist
+          run-id: ${{ needs.check.outputs.release-run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Download release hosts
+        if: needs.check.outputs.release-run-id != '' && hashFiles('scripts/build-host.mjs') != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-host
+          path: target/host-binaries
+          run-id: ${{ needs.check.outputs.release-run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Take signing action from the workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+          path: signing-workflow
+          sparse-checkout: .github/actions/macos-signing
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
 
       - name: Add Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      - uses: ./.github/actions/macos-signing
+      - uses: ./signing-workflow/.github/actions/macos-signing
         with:
           cert-p12-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
           cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -107,6 +157,8 @@ jobs:
           notary-password: ${{ secrets.MACOS_NOTARY_PASSWORD }}
 
       - name: Build universal app
+        env:
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
         run: ORX_OFFICIAL_RELEASE_BUILD=1 ORX_APP_UNIVERSAL=1 bash scripts/build-macos-app.sh
 
       - name: Verify bundled production channel

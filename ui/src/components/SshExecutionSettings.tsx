@@ -1,11 +1,14 @@
+import { useWorkspace } from "../workspace";
 import { useId, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { saveSshDefault, saveSshHost, type SshHost, type SshSettings } from "../api";
+import { type SshHost, type SshSettings } from "../api";
 import { m } from "../paraglide/messages.js";
 import { OptionPicker } from "./ModelPicker";
 import { Input, showAlert } from "./ui";
 
 export function SshDefaultHost({ settings }: { settings: SshSettings }) {
+  const { saveSshDefault } = useWorkspace().api;
+
   const [saving, setSaving] = useState(false);
   return <label className="inline-flex max-w-full flex-wrap items-center gap-2 text-sm text-subtext">
     {m.ssh_default_host()}
@@ -33,6 +36,8 @@ export function SshExecutionSettings({ host, connecting, reference, onChange }: 
   reference: string | null;
   onChange: (reference: string | null) => void;
 }) {
+  const { saveSshHost } = useWorkspace().api;
+
   const id = useId();
   const save = useMutation({
     mutationFn: saveSshHost,
@@ -46,7 +51,7 @@ export function SshExecutionSettings({ host, connecting, reference, onChange }: 
   }
 
   return <details className="pb-3">
-    <summary className="w-fit cursor-pointer rounded-sm text-sm text-subtext focus-visible:outline-2 focus-visible:outline-text">{m.new_project_advanced()}</summary>
+    <summary className="w-fit cursor-pointer rounded-sm text-sm text-subtext focus-visible:outline-2 focus-visible:outline-focus">{m.new_project_advanced()}</summary>
     <div className="mt-3 grid max-w-xl gap-3">
       <label className="text-sm text-subtext">
         {m.ssh_run_in()}

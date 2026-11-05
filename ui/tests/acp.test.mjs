@@ -42,6 +42,7 @@ test("session labels and models survive removal of a saved harness", () => {
   const harness = sessionAcpHarness({ harness: "acp:stable-id", harnessName: "My agent", nativeConfiguration: { configOptions: [{ id: "m", name: "Model", category: "model", type: "select", currentValue: "native/model", options: [{ value: "native/model", name: "Native Model" }] }] } }, undefined);
   assert.equal(harness.name, "My agent");
   assert.equal(harness.agentReady, true);
+  assert.equal(harness.supportsCompaction, false);
   assert.deepEqual(harness.models.map((model) => model.displayName), ["Native Model"]);
   assert.equal(harness.options.permissionModes.length, 0);
 });

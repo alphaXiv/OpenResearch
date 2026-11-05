@@ -10,7 +10,7 @@
 name: Attach Windows app to release
 
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers] Release has no PR trigger and `check` admits only dispatched runs
     workflows: ["Release"]
     types: [completed]
   workflow_dispatch:
@@ -21,7 +21,8 @@ on:
         type: string
 
 permissions:
-  contents: write # upload release assets
+  actions: read # resolve the upstream release source artifact
+  contents: read
 
 concurrency:
   group: release-windows-app
@@ -34,29 +35,42 @@ jobs:
     outputs:
       ok: ${{ steps.gate.outputs.ok }}
       tag: ${{ steps.gate.outputs.tag }}
+      source-sha: ${{ steps.gate.outputs.sha }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          persist-credentials: false
+          fetch-depth: 0
       - id: gate
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
           if [ -n "$INPUT_TAG" ]; then
             tag="$INPUT_TAG"
           else
-            version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
-            tag="v${version}"
+            gh run download "$RELEASE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name release-source --dir "$RUNNER_TEMP/release-source"
+            tag=$(jq -er .tag "$RUNNER_TEMP/release-source/release-source.json")
+            expected_sha=$(jq -er .sha "$RUNNER_TEMP/release-source/release-source.json")
           fi
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::notice::No release $tag found (dry-run dispatch?) — nothing to attach."
+            echo "::notice::No release $tag found — nothing to attach."
             echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          git fetch origin "refs/tags/$tag:refs/tags/$tag"
+          sha=$(git rev-parse "refs/tags/$tag^{commit}")
+          git merge-base --is-ancestor "$sha" origin/main
+          if [ -n "${expected_sha:-}" ]; then test "$sha" = "$expected_sha"; fi
+          version=$(git show "$sha:Cargo.toml" | grep -m1 '^version = ' | sed -E 's/version = "(.*)"/\1/')
+          test "$tag" = "v$version"
+          {
+            echo "ok=true"
+            echo "tag=$tag"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
 
   windows-app:
     needs: check
@@ -74,13 +88,15 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          persist-credentials: false
+          ref: ${{ needs.check.outputs.source-sha }}
 
       - name: Take signing action from the workflow revision
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.workflow_sha }}
           path: signing-workflow
           sparse-checkout: .github/actions/windows-signing
@@ -105,7 +121,7 @@ jobs:
           $channel = & app-staging/orx.exe version --build-channel
           if ($channel -ne 'production') { throw "expected build channel 'production', got '$channel'" }
 
-      - uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+      - uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.WINDOWS_SIGNING_CLIENT_ID }}
           tenant-id: ${{ vars.WINDOWS_SIGNING_TENANT_ID }}

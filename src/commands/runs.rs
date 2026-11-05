@@ -37,7 +37,7 @@ pub async fn run(args: crate::RunsArgs) -> Result<()> {
         .map(|r| {
             vec![
                 r.id.clone(),
-                r.status.clone(),
+                r.display_status().into(),
                 listing
                     .titles
                     .get(&r.experiment_id)
@@ -64,6 +64,12 @@ pub async fn run(args: crate::RunsArgs) -> Result<()> {
         ],
         &rows,
     );
+
+    for run in &filtered {
+        if let Some(detail) = run.contact_detail() {
+            println!("{}  {detail}", run.id);
+        }
+    }
 
     if !failures.is_empty() {
         println!();

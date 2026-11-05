@@ -21,7 +21,7 @@ export type Action =
   // A `!` command just sent, shown running until the server's copy lands —
   // or, with `error`, the same card marked as never run.
   | { type: "localShell"; sessionId: string; id: string; command: string; error?: string }
-  | { type: "upsertMessage"; sessionId: string; message: ChatMessage }
+  | { type: "upsertMessage"; sessionId: string; message: ChatMessage; onlyIfMissing?: boolean }
   | {
     type: "optimisticUser";
     sessionId: string;
@@ -33,6 +33,8 @@ export type Action =
   | { type: "setQueued"; sessionId: string; items: QueuedMessage[] };
 
 export const LOCAL_PREFIX = "local-";
+/** A dashboard-side failure, never part of an agent turn. */
+export const LOCAL_ERROR_PART_ID = "local-error";
 /** Server-side `USER_SHELL_TOOL`: a composer `!` command on a user message. */
 export const SHELL_TOOL = "bash";
 
@@ -67,6 +69,7 @@ export function reducer(state: ChatState, action: Exclude<Action, { type: "busy"
       // not drag the branch pointer backwards — only a message we have not seen
       // extends the branch it arrived on.
       const known = list.some((m) => m.id === action.message.id);
+      if (known && action.onlyIfMissing) return state;
       const leaf = state.activeLeafBySession[action.sessionId] ?? null;
       const replacesOptimistic =
         action.message.role === "user" && leaf !== null && leaf.startsWith(LOCAL_PREFIX);
@@ -92,7 +95,7 @@ export function reducer(state: ChatState, action: Exclude<Action, { type: "busy"
         id: `${LOCAL_PREFIX}senderr-${Date.now()}`,
         role: "assistant",
         parts: [
-          { id: "p0", type: "tool", tool: "error", state: { status: "error", error: action.text } },
+          { id: LOCAL_ERROR_PART_ID, type: "tool", tool: "error", state: { status: "error", error: action.text } },
         ],
         createdAt: Date.now(),
         // Sit on the branch that is showing, not at the root of a new one.

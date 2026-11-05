@@ -85,6 +85,17 @@ pub fn cursor_home(store: NativeStore) -> PathBuf {
     }
 }
 
+pub fn cursor_skills_dir() -> PathBuf {
+    cursor_skills_dir_in(&home_dir(), user_env_path("CURSOR_CONFIG_DIR"))
+}
+
+fn cursor_skills_dir_in(home: &Path, config: Option<PathBuf>) -> PathBuf {
+    // XDG redirects Cursor state, but is not a native skill search location.
+    config
+        .unwrap_or_else(|| home.join(".cursor"))
+        .join("skills")
+}
+
 pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
     let isolated = opencode_db(NativeStore::Isolated);
     let legacy = opencode_db(NativeStore::Legacy);
@@ -182,6 +193,372 @@ pub(crate) fn opencode_relocation(
 
 pub(crate) fn opencode_has_session(db: &Path, native_id: &str) -> Result<bool> {
     opencode_database::has_session(db, native_id)
+}
+
+pub fn delete_opencode_sessions(
+    ids: &std::collections::BTreeSet<String>,
+    retained: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let isolated = opencode_db(NativeStore::Isolated);
+    let legacy = opencode_db(NativeStore::Legacy);
+    opencode_database::delete_sessions(&[isolated, legacy], ids, retained)
+}
+
+/// Removes Claude Code, Codex and Cursor history from orx's isolated homes only, never the user's own.
+pub fn delete_isolated_sessions(
+    ids: &std::collections::BTreeSet<String>,
+    surviving: &std::collections::HashSet<String>,
+) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    remove_isolated_sessions(&crate::store::data_dir().join("agents"), ids, surviving)
+}
+
+/// `surviving` holds every id other chats still record; their Codex sub-agents stay too.
+fn remove_isolated_sessions(
+    agents: &Path,
+    ids: &std::collections::BTreeSet<String>,
+    surviving: &std::collections::HashSet<String>,
+) -> Result<()> {
+    let mut deleting = ids
+        .iter()
+        .filter(|id| !surviving.contains(*id))
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let codex = agents.join("codex");
+    // Unreadable spawn edges leave sub-agents to the sweep, which skips Codex until they can be read.
+    if let (Ok(spawned), Ok(kept)) = (
+        codex_spawned_threads(&codex, &deleting),
+        codex_spawned_threads(&codex, surviving),
+    ) {
+        deleting = spawned
+            .into_iter()
+            .filter(|id| !kept.contains(id))
+            .collect();
+    }
+    let files = isolated_session_files(agents)?;
+    for id in &deleting {
+        for path in files.get(id).into_iter().flatten() {
+            remove_session_path(path)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum IsolatedHome {
+    Claude,
+    Codex,
+    Cursor,
+}
+
+const ISOLATED_HOMES: [IsolatedHome; 3] = [
+    IsolatedHome::Claude,
+    IsolatedHome::Codex,
+    IsolatedHome::Cursor,
+];
+
+#[derive(Clone, Copy)]
+enum SweepTarget {
+    Home(IsolatedHome),
+    OpenCode,
+}
+
+const SWEEP_ORDER: [SweepTarget; 4] = [
+    SweepTarget::Home(IsolatedHome::Claude),
+    SweepTarget::Home(IsolatedHome::Codex),
+    SweepTarget::Home(IsolatedHome::Cursor),
+    SweepTarget::OpenCode,
+];
+
+/// Rotates which target a sweep pass starts with, so one slow target cannot starve the others.
+static NEXT_SWEEP_TARGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Remove orx-launched sessions no chat records once they have settled; returns whether the budget ran out.
+pub(crate) fn sweep_isolated_sessions(
+    agents: &Path,
+    mut referenced: std::collections::HashSet<String>,
+    settle: std::time::Duration,
+    budget: std::time::Duration,
+) -> Result<bool> {
+    let deadline = std::time::Instant::now() + budget;
+    // Without the spawn edges a referenced thread's sub-agents would look orphaned.
+    let codex_readable = match codex_spawned_threads(&agents.join("codex"), &referenced) {
+        Ok(spawned) => {
+            referenced.extend(spawned);
+            true
+        }
+        Err(_) => false,
+    };
+    let first = NEXT_SWEEP_TARGET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut failure = None;
+    for step in 0..SWEEP_ORDER.len() {
+        // More work keeps the fast re-run; a failure is reported by a pass that finishes.
+        if std::time::Instant::now() >= deadline {
+            return Ok(true);
+        }
+        // Each target fails on its own, so an unhealthy one never holds the others back.
+        let swept = match SWEEP_ORDER[(first + step) % SWEEP_ORDER.len()] {
+            SweepTarget::Home(IsolatedHome::Codex) if !codex_readable => Ok(false),
+            SweepTarget::Home(home) => {
+                sweep_isolated_home(agents, home, &referenced, settle, deadline)
+            }
+            SweepTarget::OpenCode => sweep_opencode(agents, &referenced, settle).map(|()| false),
+        };
+        match swept {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    failure.map_or(Ok(false), Err)
+}
+
+fn sweep_isolated_home(
+    agents: &Path,
+    home: IsolatedHome,
+    referenced: &std::collections::HashSet<String>,
+    settle: std::time::Duration,
+    deadline: std::time::Instant,
+) -> Result<bool> {
+    for (id, paths) in home_session_files(agents, home)? {
+        if referenced.contains(&id)
+            || !paths.iter().all(|path| {
+                newest_modified(path).is_some_and(|at| at.elapsed().unwrap_or_default() >= settle)
+            })
+        {
+            continue;
+        }
+        for path in &paths {
+            // A path that cannot be removed is retried next pass without stalling the rest.
+            let _ = remove_session_path(path);
+        }
+        // Checked after a removal, so a home whose walk outlasts the budget still progresses.
+        if std::time::Instant::now() >= deadline {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn sweep_opencode(
+    agents: &Path,
+    referenced: &std::collections::HashSet<String>,
+    settle: std::time::Duration,
+) -> Result<()> {
+    let database = agents.join("opencode/opencode.db");
+    if same_home(&database, &opencode_db(NativeStore::Legacy)) {
+        return Ok(());
+    }
+    let orphans = opencode_database::stale_root_sessions(&database, settle)?
+        .into_iter()
+        .filter(|id| !referenced.contains(id))
+        .collect::<std::collections::BTreeSet<_>>();
+    if !orphans.is_empty() {
+        let retained = referenced.iter().cloned().collect();
+        let purged = opencode_database::delete_sessions(
+            std::slice::from_ref(&database),
+            &orphans,
+            &retained,
+        );
+        // A busy database is retried next pass.
+        if let Err(error) = purged {
+            if error
+                .downcast_ref::<opencode_database::DatabaseBusy>()
+                .is_none()
+            {
+                return Err(error);
+            }
+        }
+    }
+    opencode_database::compact(&database)
+}
+
+/// A directory's own mtime misses writes to files already inside it, so the newest one counts.
+fn newest_modified(path: &Path) -> Option<std::time::SystemTime> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    let mut newest = metadata.modified().ok()?;
+    if metadata.is_dir() {
+        for child in child_paths(path).ok()? {
+            newest = newest.max(newest_modified(&child)?);
+        }
+    }
+    Some(newest)
+}
+
+/// A user home pointed at orx's isolated one is the user's, so it is never purged.
+fn same_home(isolated: &Path, legacy: &Path) -> bool {
+    isolated == legacy
+        || matches!(
+            (crate::paths::canonicalize(isolated), crate::paths::canonicalize(legacy)),
+            (Ok(isolated), Ok(legacy)) if isolated == legacy
+        )
+}
+
+/// Session files in orx's isolated Claude Code, Codex and Cursor homes, by native id.
+fn isolated_session_files(
+    agents: &Path,
+) -> Result<std::collections::BTreeMap<String, Vec<PathBuf>>> {
+    let mut sessions = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
+    for home in ISOLATED_HOMES {
+        for (id, paths) in home_session_files(agents, home)? {
+            sessions.entry(id).or_default().extend(paths);
+        }
+    }
+    Ok(sessions)
+}
+
+fn home_session_files(
+    agents: &Path,
+    home: IsolatedHome,
+) -> Result<std::collections::BTreeMap<String, Vec<PathBuf>>> {
+    let mut sessions = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut add = |id: Option<&str>, path: PathBuf| {
+        // Hyphenated only: Claude, Codex and Cursor ids, and nothing else in those trees.
+        if let Some(id) = id.filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok()) {
+            sessions.entry(id.to_string()).or_default().push(path);
+        }
+    };
+    let name = |path: &Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    };
+    match home {
+        IsolatedHome::Claude => {
+            let claude = agents.join("claude");
+            if same_home(&claude, &claude_home(NativeStore::Legacy)) {
+                return Ok(sessions);
+            }
+            for project in child_dirs(&claude.join("projects"))? {
+                // `<id>.jsonl` is the transcript; a sibling `<id>/` holds its subagents and tool results.
+                for path in child_paths(&project)? {
+                    let name = name(&path);
+                    add(
+                        name.as_deref()
+                            .map(|name| name.strip_suffix(".jsonl").unwrap_or(name)),
+                        path,
+                    );
+                }
+            }
+            for tree in ["session-env", "file-history"] {
+                for path in child_paths(&claude.join(tree))? {
+                    add(name(&path).as_deref(), path);
+                }
+            }
+        }
+        IsolatedHome::Codex => {
+            let codex = agents.join("codex");
+            if same_home(&codex, &codex_home(NativeStore::Legacy)) {
+                return Ok(sessions);
+            }
+            for tree in ["sessions", "archived_sessions"] {
+                for path in tree_files(&codex.join(tree))? {
+                    // Rollouts are `rollout-<timestamp>-<thread id>.jsonl`.
+                    let stem = name(&path)
+                        .and_then(|name| name.strip_suffix(".jsonl").map(str::to_string));
+                    add(
+                        stem.as_deref()
+                            .and_then(|stem| stem.get(stem.len().saturating_sub(36)..)),
+                        path,
+                    );
+                }
+            }
+        }
+        IsolatedHome::Cursor => {
+            let cursor = agents.join("cursor");
+            if same_home(&cursor, &cursor_home(NativeStore::Legacy)) {
+                return Ok(sessions);
+            }
+            for workspace in child_dirs(&cursor.join("chats"))? {
+                for path in child_paths(&workspace)? {
+                    add(name(&path).as_deref(), path);
+                }
+            }
+            for path in child_paths(&cursor.join("acp-sessions"))? {
+                add(name(&path).as_deref(), path);
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+/// The given threads plus every sub-agent Codex spawned from them, transitively.
+fn codex_spawned_threads(
+    codex: &Path,
+    parents: &std::collections::HashSet<String>,
+) -> Result<std::collections::HashSet<String>> {
+    let database = codex.join("state_5.sqlite");
+    if !database.exists() {
+        return Ok(parents.clone());
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut query = connection.prepare(
+        "WITH RECURSIVE spawned(id) AS (
+            SELECT value FROM json_each(?1)
+            UNION SELECT child_thread_id FROM thread_spawn_edges JOIN spawned ON parent_thread_id = spawned.id
+         ) SELECT id FROM spawned",
+    )?;
+    let spawned = query
+        .query_map([serde_json::to_string(parents)?], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(spawned)
+}
+
+/// Entries that vanish while listing are skipped: a harness may be moving them.
+fn child_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    match std::fs::read_dir(root) {
+        Ok(entries) => Ok(entries.flatten().map(|entry| entry.path()).collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn child_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+    Ok(child_paths(root)?
+        .into_iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()))
+        .collect())
+}
+
+fn tree_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for path in child_paths(root)? {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.is_dir() {
+            files.extend(tree_files(&path)?);
+        } else if metadata.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
+/// Symlinks are removed, never followed.
+fn remove_session_path(path: &Path) -> Result<()> {
+    let result = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) => Err(error),
+    };
+    match result {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(anyhow!(
+            "Could not remove native chat history {}: {error}",
+            path.display()
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {
@@ -352,30 +729,70 @@ pub fn prepare_claude(store: NativeStore) -> Result<PathBuf> {
 pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
     let root = codex_home(store);
     let legacy = codex_home(NativeStore::Legacy);
-    if store == NativeStore::Legacy || root == legacy {
+    if store == NativeStore::Legacy || same_home(&root, &legacy) {
         std::fs::create_dir_all(&root)?;
         return Ok(root);
     }
-    let mut sources = vec![
-        legacy.join("auth.json"),
-        legacy.join("config.toml"),
-        legacy.join("AGENTS.md"),
-        legacy.join("plugins"),
-        legacy.join("skills"),
-        legacy.join("prompts"),
-        legacy.join("packages"),
-    ];
-    match std::fs::read_dir(&legacy) {
-        Ok(entries) => sources.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".config.toml"))
-        })),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    prepare_links(&root, &legacy, &sources)?;
+    prepare_codex_links(&root, &legacy)?;
     Ok(crate::paths::canonicalize(&root).unwrap_or(root))
+}
+
+fn prepare_codex_links(root: &Path, legacy: &Path) -> Result<()> {
+    std::fs::create_dir_all(root)?;
+    let isolated = crate::paths::canonicalize(root)?;
+    let mut sources = child_paths(legacy)?;
+    sources.extend(child_paths(root)?.into_iter().filter_map(|path| {
+        (path.extension()? == "orx-managed-link").then_some(legacy.join(path.file_stem()?))
+    }));
+    sources.retain(|path| {
+        let name = path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+
+        // CODEX_HOME also holds private transcripts, runtime files and desktop state.
+        let private = matches!(
+            name.as_str(),
+            "sessions"
+                | "archived_sessions"
+                | "log"
+                | "logs"
+                | "memories"
+                | "memories_v2"
+                | "shell_snapshots"
+                | "thread-writer-locks"
+                | "generated_images"
+                | "process_manager"
+                | "ipc"
+                | "worktrees"
+                | "automations"
+                | "cache"
+                | "tmp"
+                | ".tmp"
+                | "models_cache.json"
+                | "version.json"
+        ) || name.contains(".sqlite")
+            || name.starts_with("history.jsonl")
+            || name.starts_with("session_index.jsonl")
+            || name.starts_with("db-backup-")
+            || name.starts_with(".sandbox")
+            || name
+                .trim_start_matches('.')
+                .starts_with("codex-global-state")
+            || name.starts_with(".openresearch-")
+            || name.contains(".orx-");
+        let special = std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+            !metadata.is_file() && !metadata.is_dir() && !metadata.file_type().is_symlink()
+        });
+
+        !private
+            && !special
+            && !crate::paths::canonicalize(path).is_ok_and(|source| isolated.starts_with(source))
+    });
+    sources.sort_unstable();
+    sources.dedup();
+    prepare_links(root, legacy, &sources)
 }
 
 pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
@@ -390,7 +807,7 @@ pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
         &legacy,
         &[
             legacy.join("cli-config.json"),
-            legacy.join("skills"),
+            cursor_skills_dir(),
             legacy.join("skills-cursor"),
             legacy.join("plugins"),
         ],
@@ -426,19 +843,27 @@ fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<(
 }
 
 fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
-    let name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config");
-    let marker = destination.with_file_name(format!("{name}.orx-managed-link"));
+    let mut marker_name = destination.file_name().unwrap_or_default().to_os_string();
+    marker_name.push(".orx-managed-link");
+    let marker = destination.with_file_name(marker_name);
     let source_metadata = match std::fs::symlink_metadata(source) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if std::fs::symlink_metadata(destination)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                && std::fs::read_link(destination).is_ok_and(|target| target == source)
-            {
-                remove_link(destination)?;
+            if let Ok(metadata) = std::fs::symlink_metadata(destination) {
+                if metadata.file_type().is_symlink()
+                    && (marker.is_file()
+                        || std::fs::read_link(destination).is_ok_and(|target| target == source))
+                {
+                    remove_link(destination)?;
+                } else if metadata.is_file() && marker.is_file() {
+                    if std::fs::read_to_string(&marker).ok().as_deref()
+                        == file_hash(destination)?.as_deref()
+                    {
+                        std::fs::remove_file(destination)?;
+                    } else {
+                        preserve_conflict(destination)?;
+                    }
+                }
             }
             if marker.is_file() {
                 std::fs::remove_file(marker)?;
@@ -463,7 +888,10 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
                 write_marker(&marker, source)?;
                 return Ok(());
             }
-            if std::fs::read_to_string(&marker).ok().as_deref() == file_hash(source)?.as_deref() {
+            let previous = std::fs::read_to_string(&marker).ok();
+            if previous.as_deref() == file_hash(destination)?.as_deref() {
+                std::fs::remove_file(destination)?;
+            } else if previous.as_deref() == file_hash(source)?.as_deref() {
                 adopt_managed_file(destination, source)?;
             } else {
                 preserve_conflict(destination)?;
@@ -655,7 +1083,7 @@ pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Resu
 fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
 
-    let output = std::process::Command::new("cmd")
+    let output = crate::process::command("cmd")
         .arg("/d")
         .arg("/c")
         .raw_arg(format!(
@@ -678,10 +1106,262 @@ fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
     )))
 }
 
-/// Outside the unix-only `tests`: hard links exist everywhere.
 #[cfg(test)]
-mod hard_link_tests {
+mod link_tests {
     use super::*;
+
+    #[test]
+    fn codex_links_relative_configuration_assets_and_reconciles_changes() {
+        let root = std::env::temp_dir().join(format!("orx-codex-config-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("custom-codex-home");
+        let isolated = root.join("isolated");
+        prepare_codex_links(&isolated, &legacy).unwrap();
+        assert!(!legacy.exists());
+
+        std::fs::create_dir_all(legacy.join("catalogs")).unwrap();
+        for (name, contents) in [
+            ("config.toml", "model_catalog_json = 'provider-models.json'"),
+            ("provider-models.json", "{\"models\": []}"),
+            ("catalogs/extra.json", "nested catalog"),
+            ("hooks.json", "{}"),
+            ("requirements.toml", ""),
+            ("custom.config.toml", "model = 'custom'"),
+            (".custom-instructions.md", "instructions"),
+        ] {
+            std::fs::write(legacy.join(name), contents).unwrap();
+        }
+
+        prepare_codex_links(&isolated, &legacy).unwrap();
+
+        let config: toml::Value = std::fs::read_to_string(isolated.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let catalog = isolated.join(config["model_catalog_json"].as_str().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&catalog).unwrap(),
+            "{\"models\": []}"
+        );
+        assert!(same_file::is_same_file(&catalog, legacy.join("provider-models.json")).unwrap());
+        assert!(
+            same_file::is_same_file(isolated.join("catalogs"), legacy.join("catalogs")).unwrap()
+        );
+        for name in [
+            "hooks.json",
+            "requirements.toml",
+            "custom.config.toml",
+            ".custom-instructions.md",
+        ] {
+            assert!(same_file::is_same_file(isolated.join(name), legacy.join(name)).unwrap());
+        }
+
+        std::fs::write(legacy.join("catalogs/added.json"), "new nested file").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(isolated.join("catalogs/added.json")).unwrap(),
+            "new nested file"
+        );
+        std::fs::write(legacy.join("new-provider.json"), "another provider").unwrap();
+        std::fs::remove_file(legacy.join("provider-models.json")).unwrap();
+        std::fs::write(legacy.join("provider-models.json"), "replacement catalog").unwrap();
+        prepare_codex_links(&isolated, &legacy).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&catalog).unwrap(),
+            "replacement catalog"
+        );
+        assert_eq!(
+            std::fs::read_to_string(isolated.join("new-provider.json")).unwrap(),
+            "another provider"
+        );
+
+        std::fs::remove_file(legacy.join("provider-models.json")).unwrap();
+        prepare_codex_links(&isolated, &legacy).unwrap();
+        assert!(std::fs::symlink_metadata(catalog).is_err());
+        assert!(!isolated
+            .join("provider-models.json.orx-managed-link")
+            .exists());
+        assert!(!isolated.join(".openresearch-native-links.lock").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_keeps_native_and_isolated_runtime_state_separate() {
+        let root = std::env::temp_dir().join(format!("orx-codex-state-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("legacy");
+        let isolated = root.join("isolated");
+        let private = [
+            "sessions/2026/11/04/rollout.jsonl",
+            "archived_sessions/rollout.jsonl",
+            "history.jsonl",
+            "session_index.jsonl",
+            "session_index.jsonl.lock",
+            "state_5.sqlite",
+            "state_5.sqlite-wal",
+            "logs_2.sqlite-shm",
+            "memories/raw_memories.md",
+            "memories_v2/memory_summary.md",
+            "shell_snapshots/thread.sh",
+            "thread-writer-locks/thread.lock",
+            "log/codex-tui.log",
+            "generated_images/image.png",
+            "process_manager/chat_processes.json",
+            "ipc/socket",
+            "worktrees/project/code.rs",
+            "automations/task/automation.toml",
+            "cache/data",
+            ".tmp/lock",
+            "tmp/arg0/launcher",
+            "models_cache.json",
+            "version.json",
+            ".codex-global-state.json",
+            "..codex-global-state.json.tmp-123",
+            ".sandbox-secrets/credentials.json",
+        ];
+        for name in private {
+            for (home, contents) in [(&legacy, "native state"), (&isolated, "orx state")] {
+                let path = home.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, contents).unwrap();
+            }
+        }
+        std::fs::write(legacy.join("state_42.sqlite-wal"), "future database").unwrap();
+        std::fs::write(legacy.join("auth.json"), "sign-in").unwrap();
+        std::fs::write(legacy.join("catalog.json.orx-conflict-123"), "conflict").unwrap();
+        #[cfg(unix)]
+        let _socket = {
+            let alias = PathBuf::from("/tmp").join(format!("orx-socket-{}", uuid::Uuid::new_v4()));
+            create_symlink(&legacy, &alias).unwrap();
+            let socket =
+                std::os::unix::net::UnixListener::bind(alias.join("runtime.sock")).unwrap();
+            remove_link(&alias).unwrap();
+            socket
+        };
+
+        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy).unwrap();
+
+        for name in private {
+            assert_eq!(
+                std::fs::read_to_string(legacy.join(name)).unwrap(),
+                "native state"
+            );
+            assert_eq!(
+                std::fs::read_to_string(isolated.join(name)).unwrap(),
+                "orx state"
+            );
+        }
+        assert!(!isolated.join("state_42.sqlite-wal").exists());
+        assert!(!isolated.join("catalog.json.orx-conflict-123").exists());
+        assert!(!isolated.join("runtime.sock").exists());
+        assert!(
+            same_file::is_same_file(isolated.join("auth.json"), legacy.join("auth.json")).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_does_not_link_an_ancestor_of_its_isolated_home() {
+        let legacy =
+            std::env::temp_dir().join(format!("orx-codex-nested-{}", uuid::Uuid::new_v4()));
+        let isolated = legacy.join("orx/agents/codex");
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::write(legacy.join("config.toml"), "").unwrap();
+        create_symlink(&legacy.join("orx"), &legacy.join("alias")).unwrap();
+
+        prepare_codex_links(&isolated, &legacy).unwrap();
+
+        assert!(isolated.join("config.toml").exists());
+        assert!(!isolated.join("orx").exists());
+        assert!(!isolated.join("alias").exists());
+        std::fs::remove_dir_all(legacy).unwrap();
+    }
+
+    #[test]
+    fn managed_hard_links_follow_source_replacements_and_deletions() {
+        let root =
+            std::env::temp_dir().join(format!("orx-codex-hard-link-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("legacy");
+        let isolated = root.join("isolated");
+        let source = legacy.join("provider-models.json");
+        let destination = isolated.join("provider-models.json");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::write(&source, "original catalog").unwrap();
+        std::fs::hard_link(&source, &destination).unwrap();
+        write_marker(
+            &isolated.join("provider-models.json.orx-managed-link"),
+            &source,
+        )
+        .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        std::fs::write(&source, "replacement catalog").unwrap();
+
+        prepare_codex_links(&isolated, &legacy).unwrap();
+
+        assert!(same_file::is_same_file(&source, &destination).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "replacement catalog"
+        );
+        assert!(!child_paths(&isolated).unwrap().iter().any(|path| path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains(".orx-conflict-")));
+
+        remove_link(&destination).unwrap();
+        std::fs::hard_link(&source, &destination).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        prepare_codex_links(&isolated, &legacy).unwrap();
+        assert!(std::fs::symlink_metadata(&destination).is_err());
+
+        std::fs::write(&source, "native catalog").unwrap();
+        std::fs::hard_link(&source, &destination).unwrap();
+        write_marker(
+            &isolated.join("provider-models.json.orx-managed-link"),
+            &source,
+        )
+        .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        std::fs::write(&destination, "local edits").unwrap();
+        prepare_codex_links(&isolated, &legacy).unwrap();
+        assert!(!destination.exists());
+        let conflict = child_paths(&isolated)
+            .unwrap()
+            .into_iter()
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("provider-models.json.orx-conflict-")
+            })
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(conflict).unwrap(), "local edits");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cursor_roots_and_retired_managed_links() {
+        let root = std::env::temp_dir().join(format!("orx-cursor-skills-{}", uuid::Uuid::new_v4()));
+        let native = cursor_skills_dir_in(&root, None);
+        assert_eq!(native, root.join(".cursor/skills"));
+        assert_eq!(
+            cursor_skills_dir_in(&root, Some(root.join("custom"))),
+            root.join("custom/skills")
+        );
+        let old = root.join("xdg/cursor/skills");
+        let isolated = root.join("isolated");
+        std::fs::create_dir_all(&old).unwrap();
+        prepare_links(&isolated, &root, std::slice::from_ref(&old)).unwrap();
+        let link = isolated.join("skills");
+        assert!(same_file::is_same_file(&link, &old).unwrap());
+        reconcile_link(&native, &link).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(old.is_dir());
+        create_symlink(&old, &link).unwrap();
+        reconcile_link(&native, &link).unwrap();
+        assert!(same_file::is_same_file(&link, &old).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_hard_linked_destination_survives_an_edit_through_the_source() {
@@ -766,16 +1446,7 @@ mod hard_link_tests {
     #[cfg(windows)]
     #[test]
     fn untrusted_links_are_replaced_with_hard_links_and_copies() {
-        if std::env::var_os("ORX_TEST_REDIRECTION_GUARD").is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "local::native_store::hard_link_tests::untrusted_links_are_replaced_with_hard_links_and_copies",
-                ])
-                .env("ORX_TEST_REDIRECTION_GUARD", "1")
-                .status()
-                .unwrap();
-            assert!(status.success());
+        if !crate::config::in_test_child(&[]) {
             return;
         }
         let root = std::env::temp_dir().join(format!("orx-untrusted-{}", uuid::Uuid::new_v4()));
@@ -889,6 +1560,163 @@ mod tests {
             .unwrap();
         assert!(opencode_has_session(&db, "id").unwrap());
         assert!(!opencode_has_session(&db, "missing").unwrap());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn write_aged(path: &Path, age: std::time::Duration) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "private transcript").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - age)
+            .unwrap();
+    }
+
+    #[test]
+    fn isolated_history_is_purged_by_id_and_swept_only_when_unreferenced_and_settled() {
+        let root = std::env::temp_dir().join(format!("orx-native-sweep-{}", uuid::Uuid::new_v4()));
+        let agents = root.join("agents");
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let id = |n: u8| format!("00000000-0000-4000-8000-{n:012}");
+        let project = agents.join("claude/projects/-tmp-chat");
+        let rollout = |dir: &str, n: u8| {
+            agents.join(format!(
+                "codex/{dir}/rollout-2026-09-29T16-57-41-{}.jsonl",
+                id(n)
+            ))
+        };
+        let deleted = [
+            project.join(format!("{}.jsonl", id(1))),
+            project.join(id(1)).join("subagents/agent-a.jsonl"),
+            agents.join("claude/session-env").join(id(1)).join("env"),
+            agents
+                .join("cursor/chats/abc123")
+                .join(id(1))
+                .join("store.db"),
+        ];
+        let orphan = project.join(format!("{}.jsonl", id(2)));
+        let fresh = project.join(format!("{}.jsonl", id(3)));
+        let referenced_claude = project.join(format!("{}.jsonl", id(4)));
+        let orphan_rollout = rollout("sessions/2026/09/29", 5);
+        let referenced_rollout = rollout("archived_sessions", 6);
+        let spawned_rollout = rollout("sessions/2026/09/29", 7);
+        let not_a_session = project.join("notes.jsonl");
+        for path in deleted.iter().chain([
+            &orphan,
+            &referenced_claude,
+            &orphan_rollout,
+            &referenced_rollout,
+            &spawned_rollout,
+            &not_a_session,
+        ]) {
+            write_aged(path, 2 * day);
+        }
+        write_aged(&fresh, std::time::Duration::ZERO);
+        let active_chat = agents.join("cursor/chats/abc123").join(id(8));
+        write_aged(&active_chat.join("store.db"), std::time::Duration::ZERO);
+        std::fs::File::open(&active_chat)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - 2 * day)
+            .unwrap();
+        let (parent, child, kept_child) = (
+            rollout("sessions/2026/09/29", 9),
+            rollout("sessions/2026/09/29", 10),
+            rollout("sessions/2026/09/29", 11),
+        );
+        for path in [&parent, &child, &kept_child] {
+            write_aged(path, 2 * day);
+        }
+        let state = rusqlite::Connection::open(agents.join("codex/state_5.sqlite")).unwrap();
+        state
+            .execute_batch("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT, status TEXT);")
+            .unwrap();
+        for (parent, child) in [(6, 7), (9, 10), (9, 11)] {
+            state
+                .execute(
+                    "INSERT INTO thread_spawn_edges VALUES (?1, ?2, 'done')",
+                    [id(parent), id(child)],
+                )
+                .unwrap();
+        }
+        drop(state);
+
+        let none = std::collections::HashSet::new();
+        remove_isolated_sessions(&agents, &[id(1)].into(), &none).unwrap();
+        assert!(deleted.iter().all(|path| !path.exists()));
+        assert!(!project.join(id(1)).exists());
+        assert!(orphan.exists());
+        remove_isolated_sessions(&agents, &[id(9)].into(), &[id(11)].into()).unwrap();
+        assert!(
+            !parent.exists() && !child.exists(),
+            "sub-agents go with their parent"
+        );
+        assert!(kept_child.exists(), "a surviving chat still records it");
+
+        let referenced = || [id(4), id(6)].into_iter().collect();
+        assert!(
+            sweep_isolated_sessions(&agents, referenced(), day, std::time::Duration::ZERO).unwrap()
+        );
+        assert!(orphan.exists(), "an exhausted budget removes nothing");
+        assert!(!sweep_isolated_sessions(&agents, referenced(), day, day).unwrap());
+        assert!(!orphan.exists() && !orphan_rollout.exists());
+        for kept in [
+            &fresh,
+            &referenced_claude,
+            &referenced_rollout,
+            &spawned_rollout,
+            &not_a_session,
+            &active_chat,
+        ] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn opencode_sweep_purges_settled_unreferenced_roots_and_compacts() {
+        let root =
+            std::env::temp_dir().join(format!("orx-opencode-sweep-{}", uuid::Uuid::new_v4()));
+        let agents = root.join("agents");
+        let db = agents.join("opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let old = crate::store::now_ms() - 2 * 24 * 60 * 60 * 1000;
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, time_updated INTEGER);
+                 CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);
+                 CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);
+                 INSERT INTO session VALUES ('orphan', '/tmp', NULL, {old}), ('child', '/tmp', 'orphan', {old}),
+                   ('kept', '/tmp', NULL, {old}), ('fresh', '/tmp', NULL, {now});",
+                now = crate::store::now_ms()
+            ))
+            .unwrap();
+        for id in ["orphan", "child", "kept", "fresh"] {
+            connection
+                .execute(
+                    "INSERT INTO message VALUES (?1, ?1, ?2)",
+                    rusqlite::params![id, "x".repeat(64 * 1024)],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let before = std::fs::metadata(&db).unwrap().len();
+        let referenced = ["kept".to_string()].into_iter().collect();
+        sweep_isolated_sessions(&agents, referenced, day, day).unwrap();
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let mut query = connection
+            .prepare("SELECT id FROM session ORDER BY id")
+            .unwrap();
+        let remaining = query
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(remaining, ["fresh", "kept"]);
+        assert!(std::fs::metadata(&db).unwrap().len() < before);
         std::fs::remove_dir_all(root).ok();
     }
 }

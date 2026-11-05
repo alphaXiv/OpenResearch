@@ -38,6 +38,9 @@ pub struct Definition {
     pub executable: String,
     #[serde(default)]
     pub arguments: Vec<String>,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Definition {
@@ -120,6 +123,13 @@ pub fn presets() -> Vec<Preset> {
             "https://github.com/svkozak/pi-acp#install",
         ),
         (
+            "3d392186-692e-4b90-93b4-bb398f40007a",
+            "oh-my-pi",
+            "omp",
+            &["acp"][..],
+            "https://github.com/can1357/oh-my-pi#install",
+        ),
+        (
             "565e351e-62c7-488f-a58a-914d30cc5776",
             "Devin CLI",
             "devin",
@@ -133,8 +143,17 @@ pub fn presets() -> Vec<Preset> {
             &["agent", "stdio"][..],
             "https://github.com/xai-org/grok-build",
         ),
+        (
+            "c33b22bc-6d2e-44c6-a5d6-117dd6722f7f",
+            "fx",
+            "fx",
+            &["acp"][..],
+            "https://fx.sh/docs/using-fx/acp",
+        ),
     ]
     .into_iter()
+    // fx ships for macOS and Linux only, so Windows has no installer to offer.
+    .filter(|(_, _, executable, _, _)| !(cfg!(windows) && *executable == "fx"))
     .map(|(id, name, executable, arguments, setup_url)| Preset {
         needs_connection_adapter: matches!(executable, "pi-acp" | "zcode-acp-server"),
         launch: Definition {
@@ -145,6 +164,7 @@ pub fn presets() -> Vec<Preset> {
                 .iter()
                 .map(|argument| (*argument).into())
                 .collect(),
+            unknown: Default::default(),
         },
         setup_url,
     })
@@ -152,23 +172,29 @@ pub fn presets() -> Vec<Preset> {
 }
 
 pub fn registered_definitions() -> Vec<Definition> {
-    let mut definitions = definitions();
+    register_definitions(definitions())
+}
+
+fn register_definitions(mut definitions: Vec<Definition>) -> Vec<Definition> {
     for preset in presets() {
         let mut launch = preset.launch;
         if let Some(path) = executable_path(&launch.executable) {
             launch.executable = path.to_string_lossy().into_owned();
         }
-        if !definitions.iter().any(|saved| {
-            executable_path(&saved.executable)
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| saved.executable.clone())
-                == launch.executable
-                && saved.arguments == launch.arguments
-        }) {
+        if !definitions.iter().any(|saved| same_launch(saved, &launch)) {
             definitions.push(launch);
         }
     }
     definitions
+}
+
+pub fn same_launch(a: &Definition, b: &Definition) -> bool {
+    let executable = |definition: &Definition| {
+        executable_path(&definition.executable)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| definition.executable.clone())
+    };
+    executable(a) == executable(b) && a.arguments == b.arguments
 }
 
 pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
@@ -176,19 +202,18 @@ pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
     if path.is_absolute() {
         return path.is_file().then(|| path.to_path_buf());
     }
-    crate::local::shell_env::find_on_path(executable).or_else(|| {
-        let home = dirs::home_dir()?;
+    let own = dirs::home_dir().into_iter().flat_map(|home| {
         [
-            ".local/bin",
             ".grok/bin",
             ".devin/bin",
+            ".minimax-code/bin",
             ".zcode/runtime/bin",
         ]
-        .iter()
-        .find_map(|directory| {
-            crate::local::shell_env::find_in_dir(&home.join(directory), executable)
-        })
-    })
+        .map(|directory| home.join(directory))
+    });
+    crate::local::shell_env::installs(executable, own)
+        .into_iter()
+        .next()
 }
 
 pub fn save(definition: Definition, create: bool) -> Result<()> {
@@ -208,7 +233,11 @@ pub fn save(definition: Definition, create: bool) -> Result<()> {
         {
             found = true;
             if !create {
-                *saved = definition.clone();
+                let unknown = std::mem::take(&mut saved.unknown);
+                *saved = Definition {
+                    unknown,
+                    ..definition.clone()
+                };
             }
         } else if create {
             settings.acp_harnesses.push(definition);
@@ -238,7 +267,7 @@ pub async fn test_connection(definition: &Definition) -> Result<serde_json::Valu
     definition.validate()?;
     let executable = executable_path(&definition.executable)
         .unwrap_or_else(|| std::path::PathBuf::from(&definition.executable));
-    let mut command = tokio::process::Command::new(executable);
+    let mut command = crate::process::tokio_command(executable);
     command
         .args(&definition.arguments)
         .stdin(std::process::Stdio::piped())
@@ -323,6 +352,15 @@ pub async fn discover_models(definition: &Definition) -> Result<serde_json::Valu
     response.map_err(|_| crate::error::anyhow!("Loading the agent's models timed out"))?
 }
 
+pub(crate) fn alphaxiv_mcp_servers(
+) -> crate::error::Result<Vec<agent_client_protocol::schema::v1::McpServer>> {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    Ok(vec![McpServer::Stdio(
+        McpServerStdio::new("alphaxiv", crate::paths::spawnable_exe()?)
+            .args(vec!["alphaxiv-mcp".to_owned()]),
+    )])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +389,7 @@ for line in sys.stdin:
             name: "Catalog peer".into(),
             executable: if cfg!(windows) { "python" } else { "python3" }.into(),
             arguments: vec!["-u".into(), "-c".into(), peer.into()],
+            unknown: Default::default(),
         };
         let configuration = discover_models(&definition).await.unwrap();
         assert_eq!(
@@ -386,21 +425,62 @@ for line in sys.stdin:
                 )
             })
             .collect();
-        assert_eq!(
-            commands,
-            [
-                ("DeepSeek Harness", "dsh", vec!["--profile", "acp"]),
-                ("Kimi Code", "kimi", vec!["acp"]),
-                ("MiniMax Code", "mcode", vec!["acp"]),
-                ("ZCode", "zcode-acp-server", vec![]),
-                ("Pi", "pi-acp", vec![]),
-                ("Devin CLI", "devin", vec!["acp"]),
-                ("Grok Build", "grok", vec!["agent", "stdio"]),
-            ]
-        );
+        let mut expected = vec![
+            ("DeepSeek Harness", "dsh", vec!["--profile", "acp"]),
+            ("Kimi Code", "kimi", vec!["acp"]),
+            ("MiniMax Code", "mcode", vec!["acp"]),
+            ("ZCode", "zcode-acp-server", vec![]),
+            ("Pi", "pi-acp", vec![]),
+            ("oh-my-pi", "omp", vec!["acp"]),
+            ("Devin CLI", "devin", vec!["acp"]),
+            ("Grok Build", "grok", vec!["agent", "stdio"]),
+        ];
+        if !cfg!(windows) {
+            expected.push(("fx", "fx", vec!["acp"]));
+        }
+        assert_eq!(commands, expected);
         let file = std::env::current_exe().unwrap();
         assert_eq!(executable_path(file.to_str().unwrap()), Some(file));
         assert!(executable_path("missing-popular-agent-28e8c11").is_none());
+    }
+
+    #[test]
+    fn saved_launch_suppresses_preset_without_losing_customization() {
+        let preset = presets().remove(0).launch;
+        let mut saved = preset.clone();
+        saved.id = format!("acp:{}", uuid::Uuid::new_v4());
+        saved.name = "My DeepSeek".into();
+        if let Some(path) = executable_path(&saved.executable) {
+            saved.executable = path.to_string_lossy().into_owned();
+        }
+
+        let registered = register_definitions(vec![saved.clone()]);
+        let matched = registered
+            .iter()
+            .find(|item| same_launch(item, &preset))
+            .unwrap();
+        assert_eq!(matched, &saved);
+        assert!(!registered.iter().any(|item| item.id == preset.id));
+
+        saved.arguments.push("--other".into());
+        let refreshed = register_definitions(vec![saved.clone()]);
+        assert!(refreshed.contains(&saved));
+        assert_eq!(
+            refreshed
+                .iter()
+                .find(|item| same_launch(item, &preset))
+                .unwrap()
+                .id,
+            preset.id
+        );
+        assert_eq!(
+            register_definitions(vec![])
+                .iter()
+                .find(|item| same_launch(item, &preset))
+                .unwrap()
+                .id,
+            preset.id
+        );
     }
 
     #[tokio::test]
@@ -433,6 +513,7 @@ for line in sys.stdin:
                 "\"quoted\"".into(),
                 "$(echo untouched)".into(),
             ],
+            unknown: Default::default(),
         };
         let result = test_connection(&definition).await.unwrap();
         assert_eq!(result["status"], "connected");
@@ -471,6 +552,7 @@ for line in sys.stdin:
                 "\"quoted\"".into(),
                 "$(echo untouched)".into(),
             ],
+            unknown: Default::default(),
         };
         definition.validate().unwrap();
         let saved = serde_json::to_string(&definition).unwrap();
