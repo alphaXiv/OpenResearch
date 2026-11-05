@@ -882,9 +882,9 @@ pub enum OrxKind {
     Answer,
     /// A subscribed chat asks a question.
     Question,
-    /// A run the chat asked to be woken for ended.
+    /// A legacy run-result message retained for stored transcripts.
     Run,
-    /// orx lost sight of runs the chat waits on.
+    /// A legacy monitoring notice retained for stored transcripts.
     Monitoring,
 }
 

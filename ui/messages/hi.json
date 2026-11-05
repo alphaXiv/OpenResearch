@@ -1727,7 +1727,7 @@
   "run_abandon_unreachable": "मशीन तक पहुँचना संभव नहीं है।",
   "run_abandon_keep": "ट्रैक करना जारी रखें",
   "settings_run_engine_label": "नया प्रयोग इंजन",
-  "settings_run_engine_description": "नया रनर कनेक्शन टूटने और ऐप रीस्टार्ट होने पर भी रिमोट रन जारी रखता है। यह रद्द होने की पुष्टि करता है और SSH की कई स्थिरता समस्याएँ ठीक करता है।",
+  "settings_run_engine_description": "नया इंजन कनेक्शन टूटने और ऐप रीस्टार्ट होने पर भी रिमोट रन जारी रखता है। यह रद्द होने की पुष्टि करता है और SSH की कई स्थिरता समस्याएँ ठीक करता है।",
   "settings_run_engine_override": "ORX_RUN_ENGINE सर्वर की इस सेटिंग को नियंत्रित करता है।",
   "settings_run_engine_canary": "Canary बिल्ड हमेशा नए इंजन का उपयोग करते हैं।",
   "settings_run_engine_note": "अभी परीक्षण में है। नए रन पर लागू होता है।"

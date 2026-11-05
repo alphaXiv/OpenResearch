@@ -445,11 +445,8 @@ pub(crate) struct InteractiveConnection {
     _lock: std::fs::File,
 }
 
-/// Arguments for the short interactive login opened by Settings. `true` ends
-/// the visible session after authentication while ControlPersist keeps its
-/// master available to the batch-mode calls below — on Windows there is no
-/// master, so this only proves the host reachable and primes nothing.
-pub(crate) async fn interactive_args(
+/// Retires unusable Unix masters and holds their lock through the interactive login.
+pub(crate) async fn prepare_interactive_connection(
     target: &SshTarget,
     persist: Option<u64>,
     remote_command: Option<String>,
@@ -1359,23 +1356,29 @@ mod tests {
         prepare_control_dir().unwrap();
         let path = resolved_control_path(&target).await.unwrap();
         drop(UnixListener::bind(&path).unwrap());
-        interactive_args(&target, None, None).await.unwrap();
+        prepare_interactive_connection(&target, None, None)
+            .await
+            .unwrap();
         assert!(std::fs::symlink_metadata(&path).is_err());
         symlink(path.with_extension("missing"), &path).unwrap();
-        let args = interactive_args(&target, Some(120), None).await.unwrap();
+        let args = prepare_interactive_connection(&target, Some(120), None)
+            .await
+            .unwrap();
         assert!(std::fs::symlink_metadata(&path).is_err());
         assert_eq!(args.args[..2], ["-o", "ControlPersist=120"]);
         let socket = UnixListener::bind(&path).unwrap();
         assert!(tokio::time::timeout(
             Duration::from_millis(100),
-            interactive_args(&target, None, None)
+            prepare_interactive_connection(&target, None, None)
         )
         .await
         .is_err());
         assert!(path.exists());
         drop(socket);
         drop(args);
-        assert!(interactive_args(&target, None, None).await.is_ok());
+        assert!(prepare_interactive_connection(&target, None, None)
+            .await
+            .is_ok());
         let opts = ssh_opts(&target, true);
         for option in [
             "ServerAliveInterval=30",

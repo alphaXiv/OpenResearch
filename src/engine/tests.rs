@@ -825,37 +825,85 @@ async fn a_verified_cancel_receipt_keeps_its_exit_code() {
 
 #[tokio::test]
 async fn accepted_cancels_classify_nonzero_exits_after_restart() {
-    for (requested, code, signal, status) in [
-        (true, Some(137), None, "cancelled"),
-        (false, Some(137), None, "failed"),
-        (true, Some(0), None, "done"),
-        (true, None, Some(9), "cancelled"),
+    for handle in [
+        super::adapters::api::test_handle("ray_job", None, None, vec!["job".into()]),
+        Handle::Legacy {
+            descriptor: Box::new(
+                BackendDescriptor::parse(r#"{"kind":"ray_job","jobId":"job"}"#).unwrap(),
+            ),
+        },
     ] {
-        let mut f = Fixture::new();
-        f.running("run").await;
-        if requested {
-            assert!(f
-                .store()
-                .accept_run_cancel("run", Some("Dashboard stop"))
-                .unwrap()
-                .is_some());
+        for (requested, code, signal, status) in [
+            (true, Some(137), None, "cancelled"),
+            (false, Some(137), None, "failed"),
+            (true, Some(0), None, "done"),
+            (true, None, Some(9), "cancelled"),
+        ] {
+            let mut f = Fixture::new();
+            f.backend.then_launch(Ok(handle.clone()));
+            f.submit("run").await.unwrap();
+            f.engine
+                .observe("run", Observation::Running { started_at: None })
+                .unwrap();
+            if requested {
+                assert!(f
+                    .store()
+                    .accept_run_cancel("run", Some("Dashboard stop"))
+                    .unwrap()
+                    .is_some());
+            }
+            f.restart();
+            f.engine
+                .observe(
+                    "run",
+                    Observation::Exited {
+                        finished_at: Some(123),
+                        code,
+                        signal,
+                    },
+                )
+                .unwrap();
+
+            let row = f.store().get_run("run").unwrap().unwrap();
+            assert_eq!(row.status, status);
+            assert_eq!(row.exit_code, code.map(i64::from));
+            assert_eq!(row.ended_at, Some(123));
         }
-        f.restart();
+    }
+}
+
+#[tokio::test]
+async fn accepted_cancels_do_not_replace_wrapper_or_legacy_stop_proof() {
+    for legacy in [false, true] {
+        let f = Fixture::new();
+        if legacy {
+            f.legacy_run("run", r#"{"kind":"ssh_job","jobId":"/orx/run"}"#);
+        } else {
+            f.running("run").await;
+        }
+        f.store().accept_run_cancel("run", Some("stop")).unwrap();
+        f.engine
+            .observe("run", Observation::Lingering { pids: vec![42] })
+            .unwrap();
         f.engine
             .observe(
                 "run",
                 Observation::Exited {
-                    finished_at: Some(123),
-                    code,
-                    signal,
+                    finished_at: None,
+                    code: Some(137),
+                    signal: None,
                 },
             )
             .unwrap();
-
-        let row = f.store().get_run("run").unwrap().unwrap();
-        assert_eq!(row.status, status);
-        assert_eq!(row.exit_code, code.map(i64::from));
-        assert_eq!(row.ended_at, Some(123));
+        assert_eq!(f.status("run"), "failed");
+        let notices = f.deliver();
+        assert_eq!(notices.len(), 2);
+        assert!(notices
+            .iter()
+            .any(|notice| notice.body.contains("lingering processes [42]")));
+        assert!(notices
+            .iter()
+            .all(|notice| !notice.body.contains("Cancelled")));
     }
 }
 
@@ -1835,8 +1883,8 @@ async fn receipt_time_uses_the_source_clock_and_falls_back_to_observation_time()
     for (id, finished_at, expected) in [
         ("dated", Some(1234), 1234),
         ("old", None, now),
-        ("past", Some(-100), -100),
-        ("future", Some(now + 1000), now + 1000),
+        ("past", Some(-100), 1),
+        ("future", Some(now + 1000), now),
     ] {
         f.running(id).await;
         f.engine
@@ -1890,7 +1938,7 @@ async fn receipt_time_uses_the_source_clock_and_falls_back_to_observation_time()
         Some(2468)
     );
     f.running("rollback").await;
-    f.clock.jump_wall(-now);
+    f.clock.jump_wall(100 - now);
     f.engine
         .observe(
             "rollback",
@@ -1903,7 +1951,7 @@ async fn receipt_time_uses_the_source_clock_and_falls_back_to_observation_time()
         .unwrap();
     assert_eq!(
         f.store().get_run("rollback").unwrap().unwrap().ended_at,
-        Some(-100)
+        Some(1)
     );
 }
 
@@ -2118,4 +2166,79 @@ async fn emptied_survivors_without_proof_do_not_claim_a_verified_stop_in_the_fol
     f.restart();
     f.engine.observe("opaque", uncertain()).unwrap();
     assert!(f.deliver().is_empty());
+}
+
+#[tokio::test]
+async fn supervised_monitoring_outages_and_recoveries_are_delivered_once() {
+    let mut f = Fixture::new();
+    f.legacy_run("run", r#"{"kind":"ssh_job","jobId":"/orx/run"}"#);
+    f.engine.scan_legacy(false).unwrap();
+    assert!(f.deliver().is_empty());
+    for _ in 0..2 {
+        let mut run = f.store().get_run("run").unwrap().unwrap();
+        let mut descriptor = BackendDescriptor::parse(&run.backend_json).unwrap();
+        descriptor.monitoring_error = Some("Host unreachable".into());
+        run.backend_json = descriptor.to_json();
+        f.store().upsert_run(&run).unwrap();
+        f.engine.scan_legacy(false).unwrap();
+        f.engine.scan_legacy(false).unwrap();
+        let notices = f.deliver();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, ATTENTION);
+        assert!(notices[0].body.contains("orx can no longer monitor"));
+        f.restart();
+        f.engine.scan_legacy(false).unwrap();
+        assert!(f.deliver().is_empty());
+        descriptor.monitoring_error = None;
+        run.backend_json = descriptor.to_json();
+        f.store().upsert_run(&run).unwrap();
+        f.engine.scan_legacy(false).unwrap();
+        f.engine.scan_legacy(false).unwrap();
+        assert_eq!(f.kinds(), [RECOVERED]);
+        f.restart();
+        f.engine.scan_legacy(false).unwrap();
+        assert!(f.deliver().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn tombstone_finish_time_does_not_stage_terminal_effects_again() {
+    let f = Fixture::new();
+    f.running("run").await;
+    f.store()
+        .reserve_run_telemetry(
+            "run",
+            None,
+            Some(&(
+                "terminal".into(),
+                serde_json::json!({
+                    "events": [{"eventId": "terminal", "properties": {}}]
+                }),
+            )),
+        )
+        .unwrap();
+    f.engine.abandon("run").unwrap();
+    assert_eq!(f.store().pending_telemetry().unwrap().len(), 1);
+    f.store().acknowledge_pending_telemetry("terminal").unwrap();
+    let updated_at = f.store().get_run("run").unwrap().unwrap().updated_at;
+    let now = f.clock.wall_ms();
+    for (remaining, finished_at, expected) in [(2, now + 1000, now), (1, -100, 1), (0, 1234, 1234)]
+    {
+        f.engine
+            .observe(
+                "run",
+                Observation::CancelReceipt {
+                    finished_at: Some(finished_at),
+                    code: Some(137),
+                    remaining,
+                    note: None,
+                },
+            )
+            .unwrap();
+        let run = f.store().get_run("run").unwrap().unwrap();
+        assert_eq!(run.ended_at, Some(expected));
+        assert_eq!(run.exit_code, Some(137));
+        assert_eq!(run.updated_at, updated_at);
+        assert!(f.store().pending_telemetry().unwrap().is_empty());
+    }
 }

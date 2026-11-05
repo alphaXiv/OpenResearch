@@ -211,12 +211,13 @@ chat, or on its own with its own worktree, and the delegator's later
 `subscribe` or `wait` does not undo that. A side chat reports only when its
 agent `send`s. Agents answer questions through orx; approvals stay with the user.
 
-**Agents write to each other in the open.** Everything orx or another chat's
-agent writes into a chat (a task, a message, news) reaches its agent opening
-with `[orx]`, so the agent can tell it from the user. The transcript records
-it with its kind and sender and keeps what the sender wrote, refs included;
+**Agents write to each other in the open.** A task, message or piece of chat
+news that orx or another chat's agent writes into a chat reaches its agent
+opening with `[orx]`, so the agent can tell it from the user. The transcript
+records it with its kind and sender and keeps what the sender wrote, refs included;
 only the agent reads the refs expanded and the instructions around them. The
-dashboard shows it as the sender's message, and a finished run by its outcome.
+dashboard shows it as the sender's message. Run results and monitoring notices
+reach agents in hidden turns; the transcript records only the agent's reply.
 
 **Messages travel by reference.** Each user message reaches its agent tagged
 with a short ref from its id. A ref in a task or message, the user's included,

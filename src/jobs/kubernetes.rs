@@ -807,8 +807,9 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
         ],
         None,
     )
-    .await?;
-    let pods: Value = serde_json::from_str(&pods_raw)?;
+    .await
+    .unwrap_or_default();
+    let pods: Value = serde_json::from_str(&pods_raw).unwrap_or_default();
     if let Some(failed) = condition("Failed") {
         let reason = failed["reason"].as_str().unwrap_or("");
         let msg = failed["message"].as_str().unwrap_or("");

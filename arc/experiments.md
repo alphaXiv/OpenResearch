@@ -167,14 +167,13 @@ unreconciled until the user abandons it.
 
 ### Cancel and Abandon
 
-Cancelling records the intent and its reason on the run. For an active run, a
-nonzero exit or signal after an accepted cancel ends Cancelled, preserving the
-reported exit code. The engine delivers the stop whenever the run's machine is
-reachable, and the run's wrapper performs the stop, so verification never races
-its own exit: a container's cancel hook, TERM, a grace period, KILL, then fresh
-scans of every process carrying the
-run's tag. Completion of a run is its direct child's exit; processes it left
-behind are listed, raise one notice, and are stopped only on request.
+Cancelling records the intent and its reason on the run. For a run on a hosted
+service, a nonzero exit or signal after an accepted cancel ends Cancelled,
+preserving the reported exit code. The engine delivers the stop whenever the
+run's machine is reachable, and the run's wrapper performs the stop, so
+verification never races its own exit: a container's cancel hook, TERM, a
+grace period, KILL, then fresh scans of every process carrying the run's tag.
+Completion of a run is its direct child's exit; processes it left behind are listed, raise one notice, and are stopped only on request.
 
 | State | Meaning |
 | --- | --- |

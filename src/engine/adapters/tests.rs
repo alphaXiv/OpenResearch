@@ -967,6 +967,7 @@ async fn local_direct_child_completion_recovery_and_pages() {
             .unwrap()
             .unwrap()
             .finished_at
+            .map(|finished_at| finished_at.min(f.clock.wall_ms()))
     );
     assert!(started.elapsed() < Duration::from_secs(2));
 

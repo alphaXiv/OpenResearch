@@ -570,7 +570,8 @@ pub struct ReadyChatSubscription {
 
 const CHAT_SUBSCRIPTION_CLAIM_TTL_MS: i64 = 60 * 1000;
 
-/// Each subscription's latest turn and whether it is idle after draining its queue.
+/// Each subscription with its target's latest turn and whether the target is
+/// idle after it: done, and with nothing queued unless a stop held the queue.
 const LATEST_SUBSCRIBED_TURNS: &str = "subscribed AS (
     SELECT s.subscriber_session_id, s.target_session_id, s.paused, s.told_turn_id,
            s.told_prompt_id, s.claim_token, s.claimed_at, s.created_at,
@@ -1870,6 +1871,8 @@ impl Store {
         Ok((claimed == 1).then_some(token))
     }
 
+    /// Record `child` as a delegate of `parent`; recording it again, as a
+    /// retried start does, changes nothing.
     pub fn record_chat_delegate(
         &self,
         child: &str,

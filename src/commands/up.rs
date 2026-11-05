@@ -6538,7 +6538,13 @@ async fn ssh_run_socket(
     target: crate::jobs::ssh::SshTarget,
     command: String,
 ) {
-    let connection = match crate::jobs::ssh::interactive_args(&target, None, Some(command)).await {
+    let connection = match crate::jobs::ssh::prepare_interactive_connection(
+        &target,
+        None,
+        Some(command),
+    )
+    .await
+    {
         Ok(connection) => connection,
         Err(error) => {
             send_ws_error(&mut socket, error.to_string()).await;

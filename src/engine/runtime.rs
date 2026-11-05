@@ -975,7 +975,7 @@ impl Commands for Runtime {
             let target = SshTarget::alias(&host);
             #[cfg(unix)]
             if supervised && prompt.is_some() {
-                crate::jobs::ssh::interactive_args(&target, None, None).await?;
+                drop(crate::jobs::ssh::prepare_interactive_connection(&target, None, None).await?);
             }
             self.ssh(&Self::host_key(&host, slurm)?)?;
             let connections: Vec<_> = lock(&self.conns)
@@ -996,19 +996,20 @@ impl Commands for Runtime {
                     }
                 }
             }
-            if let Some((_, error)) = worst {
-                return Err(error);
-            }
             if let Err(error) = crate::jobs::ssh::service::reset_existing_backoff(&target).await {
                 eprintln!("Host {host}: could not reset supervisor SSH backoff: {error:#}");
             }
+            let connected = worst.map_or(Ok(()), |(_, error)| Err(error));
             #[cfg(windows)]
-            if supervised {
-                connect_supervised(prompt.as_ref(), |operation| {
+            let connected = if supervised {
+                connect_supervised(connected, prompt.as_ref(), |operation| {
                     crate::jobs::ssh::service::request(&target, operation)
                 })
-                .await?;
-            }
+                .await
+            } else {
+                connected
+            };
+            connected?;
         }
         crate::commands::up::compute_settings::check(
             backend,
@@ -1060,43 +1061,51 @@ impl Commands for Runtime {
 }
 
 #[cfg(any(windows, test))]
-async fn connect_supervised<F, Fut>(prompt: Option<&Prompt>, mut request: F) -> Result<()>
+async fn connect_supervised<F, Fut>(
+    connected: Result<()>,
+    prompt: Option<&Prompt>,
+    mut request: F,
+) -> Result<()>
 where
     F: FnMut(Value) -> Fut,
     Fut: std::future::Future<Output = Result<Value>>,
 {
-    if request(json!({"op": "status"})).await?["connected"] == true {
-        return Ok(());
-    }
-    let prompt = prompt.ok_or_else(|| {
-        anyhow!("SSH disconnected. Use Connect to authenticate; background login is disabled.")
-    })?;
-    let start = request(json!({"op": "connect_start"})).await?;
-    let attempt = start["attempt"]
-        .as_str()
-        .ok_or_else(|| anyhow!("SSH Connect returned no authentication attempt. Retry Connect."))?;
-    let result = async {
-        loop {
-            let status = request(json!({"op": "connect_status", "attempt": attempt})).await?;
-            if status["done"] == true {
-                if let Some(error) = status["error"].as_str() {
-                    bail!("{error}");
-                }
-                return Ok(());
-            }
-            if let Some(question) = status["prompt"].as_str() {
-                let answer = prompt(question.to_owned())
-                    .await?
-                    .ok_or_else(|| anyhow!("SSH authentication cancelled."))?;
-                request(json!({"op": "connect_answer", "attempt": attempt, "answer": answer}))
-                    .await?;
-            }
-            tokio::time::sleep(Duration::from_millis(150)).await;
+    let login = async {
+        if request(json!({"op": "status"})).await?["connected"] == true {
+            return Ok(());
         }
+        let prompt = prompt.ok_or_else(|| {
+            anyhow!("SSH disconnected. Use Connect to authenticate; background login is disabled.")
+        })?;
+        let start = request(json!({"op": "connect_start"})).await?;
+        let attempt = start["attempt"].as_str().ok_or_else(|| {
+            anyhow!("SSH Connect returned no authentication attempt. Retry Connect.")
+        })?;
+        let result = async {
+            loop {
+                let status = request(json!({"op": "connect_status", "attempt": attempt})).await?;
+                if status["done"] == true {
+                    if let Some(error) = status["error"].as_str() {
+                        bail!("{error}");
+                    }
+                    return Ok(());
+                }
+                if let Some(question) = status["prompt"].as_str() {
+                    let answer = prompt(question.to_owned())
+                        .await?
+                        .ok_or_else(|| anyhow!("SSH authentication cancelled."))?;
+                    request(json!({"op": "connect_answer", "attempt": attempt, "answer": answer}))
+                        .await?;
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        }
+        .await;
+        let _ = request(json!({"op": "connect_cancel", "attempt": attempt})).await;
+        result
     }
     .await;
-    let _ = request(json!({"op": "connect_cancel", "attempt": attempt})).await;
-    result
+    connected.and(login)
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -1123,7 +1132,7 @@ mod tests {
     async fn supervisor_connect_skips_a_live_service_and_relays_each_authentication_prompt() {
         use std::collections::VecDeque;
         let mut calls = Vec::new();
-        connect_supervised(None, |request| {
+        connect_supervised(Ok(()), None, |request| {
             calls.push(request);
             std::future::ready(Ok(json!({"connected": true})))
         })
@@ -1144,7 +1153,7 @@ mod tests {
             json!({}),
         ]);
         calls.clear();
-        connect_supervised(Some(&prompt), |request| {
+        connect_supervised(Ok(()), Some(&prompt), |request| {
             calls.push(request);
             std::future::ready(Ok(replies.pop_front().unwrap()))
         })
@@ -1173,6 +1182,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_connect_attempts_login_after_the_engine_fails() {
+        let prompt: Prompt = Arc::new(|_| Box::pin(async { Ok(Some("answer".into())) }));
+        let mut replies = std::collections::VecDeque::from([
+            json!({"connected": false}),
+            json!({"attempt": "login"}),
+            json!({"done": true}),
+            json!({}),
+        ]);
+        let mut calls = Vec::new();
+        let error =
+            connect_supervised(Err(anyhow!("Unsupported host")), Some(&prompt), |request| {
+                calls.push(request);
+                std::future::ready(Ok(replies.pop_front().unwrap()))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Unsupported host");
+        assert!(calls.iter().any(|call| call["op"] == "connect_start"));
+        assert!(replies.is_empty());
+    }
+
+    #[tokio::test]
     async fn supervisor_connect_cancels_the_attempt_after_errors_or_cancelled_prompts() {
         let prompt: Prompt = Arc::new(|_| Box::pin(async { Ok(None) }));
         for status in [
@@ -1187,7 +1218,7 @@ mod tests {
                 Ok(json!({})),
             ]);
             let mut calls = Vec::new();
-            assert!(connect_supervised(Some(&prompt), |request| {
+            assert!(connect_supervised(Ok(()), Some(&prompt), |request| {
                 calls.push(request);
                 std::future::ready(replies.pop_front().unwrap())
             })

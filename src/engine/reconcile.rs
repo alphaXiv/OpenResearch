@@ -273,6 +273,13 @@ impl Engine {
                 hook();
             }
         }
+        let hosted = match super::handle_of(&load(&self.store(), run_id)?.0) {
+            Some(Handle::Api { .. }) => true,
+            Some(Handle::Legacy { descriptor }) => {
+                super::adapters::api::provider(&descriptor.kind).is_ok()
+            }
+            _ => false,
+        };
         let now = self.clock.wall_ms();
         // Decided under the store lock that cancel registration also takes.
         self.commit(run_id, |phase, state| {
@@ -289,7 +296,8 @@ impl Engine {
                     finished_at,
                     code,
                     signal,
-                } if matches!(phase, Phase::Starting | Phase::Running)
+                } if hosted
+                    && matches!(phase, Phase::Starting | Phase::Running)
                     && state.cancel_accepted_at.is_some()
                     && (code.is_some_and(|code| code != 0) || signal.is_some()) =>
                 {
@@ -446,12 +454,14 @@ impl Engine {
                     store.set_result_markdown(run_id, reason)?;
                 }
             }
-            if moved && !recorded
-                || is_tombstone(old_phase, &state.contact) && change.finished_at.is_some()
-            {
-                let ended_at = phase
-                    .is_terminal()
-                    .then_some(change.finished_at.unwrap_or(now));
+            let ended_at = phase.is_terminal().then(|| {
+                change
+                    .finished_at
+                    .unwrap_or(now)
+                    .min(now)
+                    .max(run.created_at)
+            });
+            if moved && !recorded {
                 let started_at = change
                     .started_at
                     .filter(|_| phase == Phase::Running && super::is_engine_row(&run));
@@ -465,6 +475,11 @@ impl Engine {
                     ended_at,
                     change.exit_code,
                     started_at,
+                )?;
+            } else if is_tombstone(old_phase, &state.contact) && change.finished_at.is_some() {
+                tx.execute(
+                    "UPDATE runs SET ended_at = ?2, exit_code = COALESCE(?3, exit_code) WHERE id = ?1",
+                    rusqlite::params![run_id, ended_at, change.exit_code],
                 )?;
             }
 

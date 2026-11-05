@@ -108,7 +108,9 @@ async fn ssh_container_lifecycle() {
         "-i".into(),
         std::env::var("ORX_SSH_TEST_KEY").expect("fixture key"),
     ]);
-    let connection = ssh::interactive_args(&target, None, None).await.unwrap();
+    let connection = ssh::prepare_interactive_connection(&target, None, None)
+        .await
+        .unwrap();
     assert!(crate::process::tokio_command("ssh")
         .args(&connection.args)
         .status()

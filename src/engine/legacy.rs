@@ -5,7 +5,7 @@ use super::{handle_of, phase_of, Engine};
 use crate::error::Result;
 use crate::jobs::ssh::ContainerRun;
 use crate::jobs::BackendDescriptor;
-use crate::store::{Contact, SeenRow, StoredRun, TERMINAL};
+use crate::store::{Contact, SeenRow, StoredRun, ATTENTION, RECOVERED, TERMINAL};
 
 /// 0.2.x launched without wrapper or tags, so `CancelLegacy` only reaches the recorded group.
 const LEGACY_CANCEL_NOTE: &str = "Cancelled. This run was launched by orx 0.2.x, so only its \
@@ -133,6 +133,35 @@ impl Engine {
                 let body = store.terminal_notice_body(&run)?;
                 for chat in store.run_subscribers(id)? {
                     if store.insert_run_notice(id, &chat, TERMINAL, TERMINAL, &body, now)? {
+                        chats.push(chat);
+                    }
+                }
+            } else if !adopting {
+                let descriptor = BackendDescriptor::parse(&run.backend_json)?;
+                for chat in store.run_subscribers(id)? {
+                    let (kind, body) = if descriptor.monitoring_error.is_some() {
+                        let body = format!(
+                            "[orx] orx can no longer monitor these live runs:\n\
+                             - run `{id}` of experiment `{}` (still **{}**)\n\
+                             Run `orx exp status <expId>` for the reason and tell the user so they \
+                             can fix it. orx wakes you once it can see a run finish; until then \
+                             each run keeps its current status.",
+                            run.experiment_id, run.status
+                        );
+                        (ATTENTION, body)
+                    } else if store.settle_outage_notice(id, &chat)? {
+                        (
+                            RECOVERED,
+                            format!(
+                                "[orx] Run `{id}` is reachable again; status {}.",
+                                run.status
+                            ),
+                        )
+                    } else {
+                        continue;
+                    };
+                    let dedupe = store.outage_dedupe(id, &chat, kind)?;
+                    if store.insert_run_notice(id, &chat, kind, &dedupe, &body, now)? {
                         chats.push(chat);
                     }
                 }

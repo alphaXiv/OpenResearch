@@ -418,7 +418,7 @@ impl Actor {
         &mut self,
         prompt: Option<Prompt>,
         approve_route: bool,
-        _keep_master: bool,
+        #[cfg_attr(windows, allow(unused_variables))] keep_master: bool,
     ) -> Result<ssh::Session> {
         let auth = self.auth.clone();
         let _guard = auth.gate.lock().await;
@@ -492,7 +492,7 @@ impl Actor {
                         if authenticated && !askpass.auth_prompted() {
                             self.classify(HostClass::Key);
                         }
-                        if self.auth.state.borrow().class == Some(HostClass::Key) && !_keep_master {
+                        if self.auth.state.borrow().class == Some(HostClass::Key) && !keep_master {
                             ssh::stop_master(&self.config, &route).await?;
                         } else {
                             attach = true;
