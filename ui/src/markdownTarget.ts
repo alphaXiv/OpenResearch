@@ -132,6 +132,10 @@ export function nativeMarkdownPath(target: string): string | null {
 }
 
 export function chatImageTarget(src: string): (Pick<MarkdownTarget, "path" | "hash"> & { source: "absolute" | "artifact" | "checkout" }) | null {
+  if (/^file:/i.test(src)) {
+    const native = nativeMarkdownPath(src);
+    return native ? { path: native, hash: new URL(src).hash, source: "absolute" } : null;
+  }
   const windows = isWindowsDrivePath(src);
   if (!windows && isExternalMarkdownTarget(src)) return null;
   const resolved = resolveMarkdownTarget("", windows ? src.replaceAll("\\", "/") : src, true);
@@ -176,7 +180,7 @@ export function rehypeSafeUrls() {
           const value = String(node.properties[key] || "");
           // File destinations travel out of band, never as live browser protocols.
           if (key === "href" && (splitLineSuffix(value).line != null || nativeMarkdownPath(value))) node.properties["data-cited-href"] = value;
-          node.properties[key] = key === "src" && node.tagName === "img" && isWindowsDrivePath(value)
+          node.properties[key] = key === "src" && node.tagName === "img" && (isWindowsDrivePath(value) || nativeMarkdownPath(value))
             ? value : defaultUrlTransform(value);
         }
       }

@@ -25,6 +25,12 @@ test("network image references are distinguished from local and embedded files",
   for (const src of ["images/a.png", "/tmp/a.png", "C:/a.png", "data:image/png;base64,AA=="]) assert.equal(isNetworkImage(src), false);
 });
 
+test("file image URLs resolve only local files and preserve SVG fragments", () => {
+  assert.deepEqual(chatImageTarget("file:///C:/figures/chart%20one.svg#plot"), { path: "C:/figures/chart one.svg", hash: "#plot", source: "absolute" });
+  assert.deepEqual(chatImageTarget("file:///tmp/chart.png"), { path: "/tmp/chart.png", hash: "", source: "absolute" });
+  assert.equal(chatImageTarget("file://remote.example/share/chart.png"), null);
+});
+
 test("repository markdown resolves images relative to the document", () => {
   assert.deepEqual(resolveMarkdownTarget("", "dev/logo.png"), {
     path: "dev/logo.png",

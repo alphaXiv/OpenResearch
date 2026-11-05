@@ -43,6 +43,7 @@ import { useLatexCompile } from "../useLatexCompile";
 import { useOverleafSync } from "../useOverleafSync";
 import {
   documentAssetTarget,
+  chatImageTarget,
   isExternalMarkdownTarget,
   markdownTargetUrl,
   resolveMarkdownTarget,
@@ -285,28 +286,33 @@ export function FileViewer({
   );
   const resolveAssetSrc = useCallback(
     (src: string) => {
+      const absolute = chatImageTarget(src);
+      if (absolute?.source === "absolute" && (/^file:/i.test(src) || /^[a-z]:[\\/]/i.test(src))) {
+        return absoluteFileUrl(absolute.path) + absolute.hash;
+      }
       if (isExternalMarkdownTarget(src)) return src;
       const target = resolveMarkdownTarget(parentFolder, src, isAbsolute);
       if (!target) return null;
       return markdownTargetUrl(rawFileUrl(target.path), target);
     },
-    [isAbsolute, parentFolder, rawFileUrl],
+    [absoluteFileUrl, isAbsolute, parentFolder, rawFileUrl],
   );
   /** A Markdown image; an embedded HTML document's assets resolve from that document's folder. */
   const resolveImageCandidates = useCallback(
     (src: string): ImageCandidate[] => {
       const url = resolveAssetSrc(src);
       if (!url) return [];
-      const target = isExternalMarkdownTarget(src) ? null : resolveMarkdownTarget(parentFolder, src, isAbsolute);
+      const native = (/^file:/i.test(src) || /^[a-z]:[\\/]/i.test(src)) ? chatImageTarget(src) : null;
+      const target = native?.source === "absolute" ? native : isExternalMarkdownTarget(src) ? null : resolveMarkdownTarget(parentFolder, src, isAbsolute);
       return [{
         url,
         resolveAsset: (child) => {
-          const asset = target && documentAssetTarget(target.path, child, isAbsolute);
-          return asset ? rawFileUrl(asset.path) + asset.hash : null;
+          const asset = target && documentAssetTarget(target.path, child, Boolean(native) || isAbsolute);
+          return asset ? (native ? absoluteFileUrl(asset.path) : rawFileUrl(asset.path)) + asset.hash : null;
         },
       }];
     },
-    [isAbsolute, parentFolder, rawFileUrl, resolveAssetSrc],
+    [absoluteFileUrl, isAbsolute, parentFolder, rawFileUrl, resolveAssetSrc],
   );
   // Stable so Md's memo holds; callers pass a fresh `onOpenFile` each render.
   const onOpenFileRef = useRef(onOpenFile);
