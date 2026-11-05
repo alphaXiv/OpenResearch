@@ -1,6 +1,8 @@
 import { ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
-import { timeAgo, fmtNumber } from "../api";
+import { timeAgo, fmtNumber, type Run } from "../api";
+import { runDisplay } from "../runDisplay";
+import { statusLabel } from "./StatusBadge";
 import { getLocale } from "../paraglide/runtime.js";
 import { m } from "../paraglide/messages.js";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -69,13 +71,15 @@ function StatusShape({ status, cx, cy, r, color, background = "var(--base)" }: {
   return ring;
 }
 
-function StatusLabel({ status, word = true, size = 12 }: { status: HistoryStatus; word?: boolean; size?: number }) {
+function StatusLabel({ status, run, word = true, size = 12 }: { status: HistoryStatus; run: Run | null; word?: boolean; size?: number }) {
+  const display = run ? runDisplay(run) : null;
+  const label = display ? statusLabel(display.status, display.stopping) : STATUS_WORD[status]();
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-sm text-text">
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0" aria-hidden="true">
         <StatusShape status={status} cx={size / 2} cy={size / 2} r={size * 0.33} color={STATUS_TONE[status]} />
       </svg>
-      {word ? STATUS_WORD[status]() : <span className="sr-only">{STATUS_WORD[status]()}</span>}
+      {word ? label : <span className="sr-only">{label}</span>}
     </span>
   );
 }
@@ -138,7 +142,7 @@ export function Rail({ placed, height, path, selectedId }: {
       key={key}
       d={edge.d}
       fill="none"
-      stroke={edge.hot ? "var(--primary)" : INK}
+      stroke={edge.hot ? "var(--text)" : INK}
       strokeOpacity={edge.hot ? 1 : LINE_OPACITY}
       strokeWidth={edge.hot ? 2 : 1.5}
       strokeLinecap="round"
@@ -162,11 +166,11 @@ export function Rail({ placed, height, path, selectedId }: {
         const node = item.row.node;
         const selected = node.id === selectedId;
         const hot = path.has(node.id);
-        const color = hot ? "var(--primary)" : INK;
+        const color = hot ? "var(--text)" : INK;
         return (
           <g key={index} opacity={hot ? 1 : DOT_OPACITY}>
             {!node.parent && !node.missingParentId && <circle cx={cx} cy={item.y} r={7} fill="none" stroke={color} strokeWidth={1} opacity={0.7} />}
-            {selected && <circle cx={cx} cy={item.y} r={8.5} fill="var(--primary)" fillOpacity={0.18} />}
+            {selected && <circle cx={cx} cy={item.y} r={8.5} fill="var(--text)" fillOpacity={0.18} />}
             <StatusShape status={node.status} cx={cx} cy={item.y} r={selected ? 4.6 : 4} color={color} background={selected ? "var(--highlight)" : "var(--base)"} />
           </g>
         );
@@ -184,7 +188,7 @@ function LineageStep({ node, current, onSelect }: { node: HistoryNode; current?:
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onSelect(node.id, intent))}
       className={`flex min-w-0 items-center gap-2 rounded-sm px-1.5 py-1 text-start ${current ? "bg-highlight" : "hover:bg-hover-faint"}`}
     >
-      <StatusLabel status={node.status} word={false} size={11} />
+      <StatusLabel status={node.status} run={node.latestRun} word={false} size={11} />
       {node.code && <span className="w-7 shrink-0 font-mono text-xs text-subtext">{node.code}</span>}
       <span className={`min-w-0 flex-1 truncate text-sm text-text ${current ? "font-medium" : ""}`}>{node.label}</span>
       <When ms={node.createdAt} />
@@ -211,7 +215,7 @@ export function ExperimentLineage({ node, onSelect }: { node: HistoryNode; onSel
             className="flex min-w-0 items-center gap-1.5 px-1.5 py-1 text-start text-xs text-subtext hover:text-text"
             title={folded.map((step) => step.label).join(" → ")}
           >
-            <ChevronRight size={11} className={`shrink-0 ${showAllAncestors ? "rotate-90" : ""}`} />
+            <ChevronRight size={12} className={`shrink-0 ${showAllAncestors ? "rotate-90" : ""}`} />
             <span className="truncate">
               {showAllAncestors ? m.common_show_less() : m.history_earlier_steps({ count: fmtNumber(folded.length), steps: folded.map((step) => shortName(step, 18)).join(" → ") })}
             </span>

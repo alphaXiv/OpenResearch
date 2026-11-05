@@ -1,45 +1,94 @@
 import { QueryClient, type QueryFilters, type QueryKey, type DataTag } from "@tanstack/react-query";
 
-export const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { staleTime: 30_000, gcTime: 600_000, retry: false, networkMode: "always", refetchOnReconnect: true },
-    mutations: { retry: false, networkMode: "always" },
-  },
-});
+export function createWorkspaceClient(identity: string, basePath = "") {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 30_000,
+        // A hidden machine's screen stops observing, so this is how long switching back stays instant.
+        gcTime: 3_600_000,
+        retry: false,
+        networkMode: "always",
+        refetchOnReconnect: true,
+      },
+      mutations: { retry: false, networkMode: "always" },
+    },
+  });
+  const scope = ["workspace", identity] as const;
+  const lifetime = new AbortController();
+  const listeners = new Set<() => void>();
+  const deletedSessionIds = new Set<string>();
+  const workspaceScope = () => scope;
+  const workspaceKey = (family: string, ...args: readonly unknown[]) =>
+    [...scope, family, ...args] as const;
+  const isCurrentScope = (key: readonly unknown[]) =>
+    !lifetime.signal.aborted && key[1] === identity;
 
-export const deletedSessionIds = new Set<string>();
+  function url(path: string): string {
+    if (/^(https?:)?\/\//i.test(path)) {
+      const target = new URL(path, location.href);
+      if (target.origin !== location.origin) return path;
+      path = target.pathname + target.search + target.hash;
+    }
+    if (path.startsWith("/_orx/workspaces/")) {
+      if (basePath && path.startsWith(`${basePath}/`)) return path;
+      throw new Error("Resource belongs to another workspace");
+    }
+    return path.startsWith("/api/") || path.startsWith("/_orx/")
+      ? `${basePath}${path}`
+      : path;
+  }
 
-let identity: string | null = null;
-let generation = 0;
-const listeners = new Set<() => void>();
-export const getWorkspaceGeneration = () => generation;
-export const subscribeWorkspace = (listener: () => void) => {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
-};
-export const replaceWorkspace = () => { if (identity !== null) activateWorkspace(identity, true); };
-export const workspaceScope = () => ["workspace", generation] as const;
-export const workspaceKey = (family: string, ...args: readonly unknown[]) =>
-  [...workspaceScope(), family, ...args] as const;
+  function request(path: string, init: RequestInit = {}) {
+    lifetime.signal.throwIfAborted();
+    const signal = init.signal
+      ? AbortSignal.any([init.signal, lifetime.signal])
+      : lifetime.signal;
+    return fetch(url(path), { ...init, signal });
+  }
 
-export function activateWorkspace(next: string, replace = false) {
-  if (identity === next && !replace) return false;
-  const previous = workspaceScope();
-  identity = next;
-  generation++;
-  deletedSessionIds.clear();
-  void cancelAndRemove({ queryKey: previous });
-  listeners.forEach((listener) => listener());
-  return true;
+  function socketUrl(path: string) {
+    const target = new URL(url(path), location.href);
+    target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+    return target;
+  }
+
+  async function cancelAndRemove(filters: QueryFilters) {
+    await queryClient.cancelQueries(filters, { revert: false });
+    queryClient.removeQueries(filters);
+  }
+
+  function setScopedQueryData<T>(key: DataTag<QueryKey, T, unknown>, updater: T | undefined | ((previous: T | undefined) => T | undefined)) {
+    if (isCurrentScope(key)) return queryClient.setQueryData<T, typeof key, T>(key, updater);
+  }
+
+  function replaceWorkspace() {
+    lifetime.abort();
+    void cancelAndRemove({});
+    deletedSessionIds.clear();
+    listeners.forEach((listener) => listener());
+  }
+
+  const subscribeReplacement = (listener: () => void) => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+  };
+
+  return {
+    identity,
+    queryClient,
+    workspaceScope,
+    workspaceKey,
+    isCurrentScope,
+    deletedSessionIds,
+    url,
+    request,
+    socketUrl,
+    cancelAndRemove,
+    setScopedQueryData,
+    replaceWorkspace,
+    subscribeReplacement,
+  };
 }
 
-export const isCurrentScope = (scope: readonly unknown[]) => scope[1] === generation;
-
-export async function cancelAndRemove(filters: QueryFilters) {
-  await queryClient.cancelQueries(filters, { revert: false });
-  queryClient.removeQueries(filters);
-}
-
-export function setScopedQueryData<T>(key: DataTag<QueryKey, T, unknown>, updater: T | undefined | ((previous: T | undefined) => T | undefined)) {
-  if (isCurrentScope(key)) return queryClient.setQueryData<T, typeof key, T>(key, updater);
-}
+export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;

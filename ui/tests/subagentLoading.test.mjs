@@ -1,50 +1,30 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
+import { act, createElement } from "react";
+import { SubagentTab } from "../src/components/SubagentTab.tsx";
+import { render, serve, settle } from "./render.mjs";
 
-const file = ts.createSourceFile("SubagentTab.tsx", readFileSync(new URL("../src/components/SubagentTab.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-function evaluate(code, bindings) {
-  const js = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function(...Object.keys(bindings), js)(...Object.values(bindings));
-}
-
-test("a transcript that finishes loading after its messages attaches its growth observer", () => {
-  let effect, loading;
-  function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "loading") loading = node.initializer;
-    if (ts.isCallExpression(node) && node.expression.getText(file) === "useEffect" && node.getText(file).includes("new ResizeObserver")) effect = node;
-    ts.forEachChild(node, visit);
-  }
-  visit(file);
-  assert.ok(effect && loading);
-  const scrollRef = { current: null }, innerRef = { current: null };
-  const observed = [];
-  let resize, previousDependencies;
-  const bindings = {
-    scrollRef, innerRef, stickToBottom: { current: true },
-    ResizeObserver: class {
-      constructor(callback) { resize = callback; }
-      observe(element) { observed.push(element); }
-      disconnect() {}
-    },
-    useEffect: (setup, dependencies) => {
-      if (!previousDependencies || dependencies.some((value, i) => value !== previousDependencies[i])) setup();
-      previousDependencies = dependencies;
-    },
-  };
-  const render = (pending) => evaluate(`${effect.getText(file)};`, {
-    ...bindings,
-    loading: evaluate(`return ${loading.getText(file)};`, { messages: [], nativeTranscript: { isPending: pending } }),
+test("a transcript that finishes loading after its messages attaches its growth observer", async (t) => {
+  const observers = [];
+  t.mock.property(globalThis, "ResizeObserver", class {
+    constructor(callback) { this.callback = callback; this.observed = []; observers.push(this); }
+    observe(element) { this.observed.push(element); }
+    disconnect() {}
   });
-  render(true);
-  assert.deepEqual(observed, []);
-  const scroll = { scrollTop: 0, scrollHeight: 500 }, inner = {};
-  scrollRef.current = scroll;
-  innerRef.current = inner;
-  render(false);
-  assert.deepEqual(observed, [inner, scroll]);
-  scroll.scrollHeight = 1000;
-  resize();
+  let finishTranscript;
+  serve((path) => {
+    if (path === "/api/chat/sessions/s/messages") return { messages: [], queued: [], activeLeafId: null };
+    if (path.startsWith("/api/chat/sessions/s/subagent?")) return new Promise((resolve) => { finishTranscript = resolve; });
+  });
+  await render(createElement(SubagentTab, { projectId: "p", sessionId: "s", spawnPartId: "spawn", expansionState: new Map() }));
+  await settle();
+  assert.deepEqual(observers, []);
+
+  finishTranscript({ messages: [], state: { status: "completed" } });
+  await settle();
+  assert.equal(observers.length, 1);
+  const [scroll] = observers[0].observed.slice(-1);
+  Object.defineProperty(scroll, "scrollHeight", { value: 1000, configurable: true });
+  await act(() => observers[0].callback());
   assert.equal(scroll.scrollTop, 1000);
 });

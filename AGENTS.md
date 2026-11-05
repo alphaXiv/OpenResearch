@@ -1,24 +1,143 @@
-# Repository Guide
+# OpenResearch CLI
 
-## What this repository is
+`orx` turns the coding agents a researcher already has (Claude Code, Codex,
+OpenCode, Cursor, ACP agents) into research agents. One Rust binary is the
+CLI, the `orx up` dashboard server and the desktop app; `ui/` is the React
+dashboard it serves. Research state lives on the user's machine. The companion
+service openresearch.sh owns accounts, organizations, sandboxes and compute
+catalogs; when you change an API it serves, keep both sides compatible.
 
-`openresearch-cli` is the open-source Rust implementation of the `orx` command-line tool. It owns the local CLI, dashboard and API, SQLite store, coding-agent integrations, experiment orchestration, and execution backends.
+| Path | Owns |
+| --- | --- |
+| `src/commands/` | One module per `orx` command; `up` is the server and its API, `app` the window. |
+| `src/local/` | Projects and Git, chats (`chat/`), agent harnesses (`harness/`), skills, papers. |
+| `src/engine/`, `crates/orx-host*` | The run engine in `orx up` and the `orx-host` binary that runs jobs on hosts. |
+| `src/jobs/`, `src/compute.rs` | Backend clients, SSH config sharing, and the SSH service kept for 0.2.x runs. |
+| `src/store.rs` | The SQLite store and its schema. |
+| `src/client.rs`, `src/config.rs` | The openresearch.sh client, credentials, settings paths. |
+| `src/updates*` | Self-update for the CLI and the desktop apps. |
+| `ui/` | The dashboard: React, TanStack Router and Query, Paraglide messages. |
+| `agent-skills/`, `SKILL.md`, `SYSTEM_PROMPT.md` | What orx tells agents, compiled into the binary. |
+| `macos/`, `windows/`, `linux/`, `demo/`, `docs/` | Packaging, the onboarding demo, user guides. |
 
-`openresearch.sh` is the companion service. It owns the website and documentation, accounts and organizations, sandbox provisioning, and managed-compute catalogs. Research projects, experiments, runs, logs, and artifacts remain local to `orx`.
+## Rules that matter most
 
-When changing authentication, organization, sandbox, or managed-compute APIs, inspect the corresponding `openresearch.sh` implementation and keep both sides compatible. Do not edit the companion repository unless it is explicitly in scope.
+- **The user's machine owns their research.** Code, experiments, runs, logs and
+  chats never go to openresearch.sh unless the user publishes a project.
+  Anything new that leaves the machine is a
+  product decision: add it to the storage essay's list or don't ship it.
+- **Every shipped version stays out there.** Old apps stay open for days, a
+  remote host runs a different `orx` than the laptop, and openresearch.sh
+  serves every client in the wild. The store, settings, run descriptors and
+  wire protocols only grow: add fields, never rename or repurpose one.
+  Compatibility code is for shipped contracts; an unmerged change has no users.
+- **Loopback only.** `orx up` binds 127.0.0.1 without auth and checks the Host
+  and Origin of every request that changes state. Remote access goes over SSH.
+- **Agents are the user's own tools.** orx runs them in homes it prepares,
+  reusing the user's sign-in, and never edits their agent configuration.
+- **Nothing is lost silently.** When orx cannot finish a turn, a queued message
+  or a run, it records why and offers the way forward.
 
-## Development guidelines
+## A run in one breath
 
-- Rust code lives in `src/`; the dashboard lives in `ui/src/`. Keep local-only behavior local and use the production API client only for capabilities owned by `openresearch.sh`.
-- Run local app instances through `scripts/dev-slot.mjs` so development data, ports, and processes stay isolated.
-- `ui/dist` is committed and embedded in release builds. After UI changes, run `pnpm build` in `ui/` and include the regenerated assets.
-- Prefer canonical Tailwind utilities (`flex flex-col h-full min-h-0`) and project theme aliases (`bg-background`, `text-subtext`, `border-border`). Use arbitrary values only when no project utility exists, and preserve semantic marker classes when selectors or runtime behavior depend on them.
-- Before shipping, follow the checks in `.github/workflows/ci.yml`.
+A message reaches `orx up`, which starts or reuses the chat's agent in the
+chat's own worktree, with orx's playbook, skills and the `orx` CLI on its
+`PATH`. The agent commits and runs `orx exp run`: the dashboard archives the
+experiment's commit and submits it to a backend. A supervisor or the engine
+watches it and delivers results to the chat that asked. The page follows it
+through one event stream. See [the run engine setting](arc/experiments.md#choosing-the-run-engine).
 
-## CI and release gates
+## Architecture essays
 
-- GitHub protection for `main` must require the `fmt, clippy, test`, `version sanity`, and `linked issue` checks from GitHub Actions, including for administrators. Do not require a merge queue or require branches to be up to date. These settings are managed in GitHub, not by this file.
-- `linked issue` fails PRs from forks unless the description links an issue in this repository (e.g. `Closes #N`). PRs from branches in this repository are exempt, since only people with write access can push them. It runs on `pull_request_target`, so it must never check out or run PR code.
-- PR CI must test GitHub's simulated merge (`refs/pull/<number>/merge`), which `actions/checkout` selects by default for `pull_request` events, rather than checking out the PR head alone. Each run tests its merge candidate; subsequent changes to `main` do not automatically rerun open PRs.
-- CI also runs on `main`. Releases call the same CI workflow on the commit being packaged; publishing requires that run to succeed. Keep `./ci` in cargo-dist's `global-artifacts-jobs` when regenerating the release workflow; `allow-dirty` makes `dist generate` skip it, so follow the steps in `macos/DISTRIBUTION.md` ("CLI binaries").
+Each explains a core system's theory and invariants, not its files. Read the
+one for the area you touch, and fix any statement your change makes false.
+
+- [Where state lives](arc/storage.md): directories, the store, locks, egress.
+- [Chats and agents](arc/agents.md): harnesses, isolation, permissions, recovery.
+- [Experiments and compute](arc/experiments.md): snapshots, backends, the run engine.
+- [Remote machines](arc/remote.md): the persistent host, `orx-host` and SSH transport.
+- [The dashboard](arc/dashboard.md): the guard, live state, the React app.
+- [The desktop app and releases](arc/desktop.md): app mode, updates, shipping.
+
+## Running it
+
+`node dev.ts` runs one dev server per worktree, with its own ports, its data in
+`.dev/` and a build of that worktree's code; never point it at the user's
+installed data or running app. Without a terminal it starts the server if
+needed, prints the URLs once ready and exits, leaving the server running.
+
+```sh
+node dev.ts [desktop]          # start; `desktop` also opens the app window
+node dev.ts status --json      # URLs, readiness, attached terminals
+node dev.ts logs api -n 100    # api, web, app or build output
+node dev.ts restart            # rebuild Rust and restart the backend
+node dev.ts --state NAME       # load a saved state; also --onboarding, --copy
+node dev.ts save NAME | stop
+```
+
+Vite reloads UI edits; Rust edits need `restart`. If `status --json` shows
+attached clients, someone is using the server: don't stop it or load a state
+unless asked. Test UI changes in a browser at the web URL; `desktop` puts a
+window on the user's screen, so open it only to test the app.
+
+## Checks
+
+CI runs what the changed files need: `cargo fmt --all`,
+`cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`;
+in `ui/`, `pnpm typecheck`, `pnpm lint:i18n`, `pnpm lint:styles`, `pnpm test`;
+`node --test scripts/*.test.mjs`, `node --test 'src/**/*.test.mjs'` and
+`node --test --experimental-strip-types scripts/dev.test.ts`; `node e2e/run.ts`
+when `src/` or `ui/` change ([e2e/README.md](e2e/README.md)). Release builds
+embed `ui/dist`: run `pnpm build` in `ui/` before `cargo build --release`.
+
+Other scripts: `build-macos-app.sh` and `package-macos-app.sh` sign and
+notarize the app and DMG (`macos/DISTRIBUTION.md`), `build-linux-appimage.sh`
+builds the AppImage, `build-host.mjs` builds the `orx-host` binaries official
+builds embed through `ORX_EMBED_HOST_DIR`, `generate-*` draw brand assets and
+the demo's evidence, and `ci-*`, `canary-*`, `change-counts.mjs`,
+`release-source.sh`, `find-release-run.sh` and `release_notes.py` serve the
+workflows. Workflows pass `actionlint` and `zizmor --offline` (with
+`.github/zizmor.yml`), and every action is pinned to a commit.
+
+## Tests
+
+- Test through a module's interface or the running app. Never parse, regex or
+  evaluate source text (`createSourceFile`, `new Function`, YAML splitting); if
+  logic is buried in a component, render the component or move the logic out.
+- Fake only what orx doesn't own: agent CLIs, ssh, cloud APIs, openresearch.sh,
+  the network. Never replace an orx function with a reimplementation.
+- A test fails for a bug a user would notice and survives a rename. Pin a
+  string only when it is a contract: a CLI flag, a wire field, a stored value.
+- Shipped contracts get both directions: old data read by new code, and a newer
+  version's unknown fields kept by an old writer. Fixtures live in
+  `tests/contracts/`.
+- Tests are hermetic: under `cfg(test)` the data and config dirs are a
+  per-process temp root, and a test that needs other env runs in a child
+  (`config::in_test_child`). No wall-clock sleeps; long waits go through
+  `config::paced`. A tool missing in CI fails (`config::skip_without_tool`).
+- UI tests render real React in happy-dom through `ui/tests/register.mjs` and
+  `render.mjs`; `e2e/` drives the real `orx up` and dashboard with a fake agent.
+
+## Code
+
+- Fewer moving parts. Add a helper, field, type or abstraction only when it
+  removes real duplication or encodes an invariant; inline one-caller helpers;
+  derive values instead of storing copies; delete dead code on the way.
+- UI text goes through Paraglide, with each new key in every catalog in
+  `ui/messages/`. Style with theme tokens (`bg-background`, `text-subtext`),
+  never raw colors.
+- Default to no comment. Write one for a non-obvious why, an invariant the
+  local code can't show, or a trap: one line, timeless, impersonal. History
+  belongs in the commit. A comment about behavior that no longer exists is
+  false; delete it with the behavior.
+
+## Commits and pull requests
+
+- Title with a type, optionally scoped: `feat:`, `fix(ui):`, `chore:`, `ci:`.
+  After it, name the change in a few words, like
+  `feat(desktop): in-app remote machine switcher`; the description carries
+  the why.
+- Credit each model with `Assisted-by: claude-opus-5.5` (or `gpt-6.1-sol`,
+  one trailer per model). Never add `Co-authored-by` for a model.
+- Say why and what is surprising; the reviewer reads the diff, so don't list
+  hunks. Pull requests from forks must link an issue with `Closes #N`.

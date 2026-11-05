@@ -1,6 +1,4 @@
-//! Local HF Jobs launch — mirrors `commands/exp.rs::launch_hf` with the api
-//! calls deleted: the run row comes from and goes to the local store only.
-//! The detached `orx supervise` it spawns detects local runs itself.
+//! Hugging Face Jobs launch intents. The engine adds the job's tokens as secrets at launch.
 
 use std::collections::HashMap;
 
@@ -8,33 +6,52 @@ use crate::commands::exp::{default_hf_image, spawn_detached_supervise};
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
 use crate::jobs::{huggingface as hf, BackendDescriptor};
-use crate::store::{now_ms, Store, StoredRun};
+use crate::local::trackio;
+use crate::store::{now_ms, LaunchSpec, Store, StoredRun};
 
-/// CLI wrapper around `submit_local_hf`: submit, then print the summary.
-pub async fn launch_local_hf(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_hf(args).await?;
-    let backend = crate::jobs::BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} Hugging Face job submitted.");
-    println!("  run    {}", run.id);
-    println!(
-        "  job    {}/{} ({})",
-        backend.namespace.as_deref().unwrap_or(""),
-        backend.job_id.as_deref().unwrap_or(""),
-        backend.flavor.as_deref().unwrap_or("")
-    );
-    println!("  watch  {}", backend.url.as_deref().unwrap_or(""));
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
-}
-
-/// Submit the local experiment's run as a Hugging Face Job and detach a
-/// supervisor. `args.exp_id` must exist in `local_experiments`; requires
-/// `--backend hf` and `--flavor`. Shared by the CLI and the `orx up` API.
-pub async fn submit_local_hf(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    crate::compute::submit(args).await
+/// Requires `--flavor`; the namespace is the token's account.
+pub async fn launch_spec(
+    args: &crate::ExpRunArgs,
+    _source: &SourceSnapshot,
+    run_id: &str,
+    command: &str,
+) -> Result<LaunchSpec> {
+    let flavor = args.flavor.clone().ok_or_else(|| {
+        anyhow!(
+            "--backend hf requires --flavor: t4-small, a10g-small/large, l4x1, \
+             l40sx1, a100-large, h200, … (cpu-basic/cpu-upgrade for CPU). \
+             Priced per minute on your Hugging Face account."
+        )
+    })?;
+    // HF's own 30m default is a footgun.
+    let timeout_seconds = match &args.timeout {
+        Some(t) => hf::parse_timeout(t)?,
+        None => 4 * 3600,
+    };
+    let namespace = hf::whoami(&hf::resolve_token()?).await?;
+    let image = args
+        .image
+        .clone()
+        .unwrap_or_else(|| default_hf_image(&flavor));
+    let labels = super::run_labels(&args.exp_id, run_id)?;
+    let submission = hf::JobSubmission {
+        command: vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            crate::compute::snapshot_script("/orx-source/source.tar", command),
+        ],
+        docker_image: image,
+        flavor,
+        environment: HashMap::new(),
+        secrets: HashMap::new(),
+        timeout_seconds,
+        labels,
+    };
+    Ok(LaunchSpec {
+        kind: "hf_job".into(),
+        target: Some(namespace),
+        options: serde_json::to_value(submission)?,
+    })
 }
 
 pub async fn submit_local_hf_with_source(
@@ -83,6 +100,18 @@ pub async fn submit_local_hf_with_source(
     // Tokens travel as job secrets only — the command line stays tokenless.
     let mut secrets = HashMap::new();
     secrets.insert("HF_TOKEN".to_string(), token.clone());
+    // The run context and Trackio's variables, not every saved one; the URL may embed a write token.
+    let mut environment: HashMap<String, String> = crate::config::run_context_env(&run_id)
+        .into_iter()
+        .collect();
+    if let Some(space) = crate::config::synced_env_var(trackio::SPACE_ID) {
+        environment.insert(trackio::SPACE_ID.to_string(), space);
+    }
+    for key in [trackio::SERVER_URL, trackio::WRITE_TOKEN] {
+        if let Some(value) = crate::config::synced_env_var(key) {
+            secrets.insert(key.to_string(), value);
+        }
+    }
     let mut labels = HashMap::new();
     labels.insert("or_run".to_string(), run_id.clone());
     labels.insert("or_experiment".to_string(), exp.id.clone());
@@ -95,13 +124,14 @@ pub async fn submit_local_hf_with_source(
             command: vec!["bash".to_string(), "-c".to_string(), script],
             docker_image: image.clone(),
             flavor: flavor.clone(),
-            environment: HashMap::from([(crate::config::RUN_ID_ENV.to_string(), run_id.clone())]),
+            environment,
             secrets,
             timeout_seconds,
             labels,
         },
         &source.path,
         &source.digest,
+        None,
     )
     .await?;
 
@@ -115,7 +145,7 @@ pub async fn submit_local_hf_with_source(
         job_id: Some(job.id.clone()),
         flavor: Some(flavor.clone()),
         image: Some(image),
-        url: Some(hf::job_url(&namespace, &job.id)),
+        url: Some(format!("{}/jobs/{namespace}/{}", hf::endpoint(), job.id)),
         context: None,
         manifest: None,
         resources: None,
@@ -128,6 +158,8 @@ pub async fn submit_local_hf_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: None,
+        unknown: Default::default(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

@@ -1,14 +1,10 @@
+import { useWorkspace } from "../workspace";
+
 import { FolderOpen } from "lucide-react";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { isImmutableQuery } from "../queries/invalidation";
 import { useQuery } from "@tanstack/react-query";
-import { listChatSessionsQuery } from "../queries/chat";
-import {
-  workspaceKey,
-  queryClient,
-} from "../queries/client";
 
-import { getCodeTreeQuery, getSessionWorktreeQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 // The pinned Files home for the active chat session's private worktree — what
@@ -28,11 +24,7 @@ import { ltr } from "../i18n";
 // CodeTab's staleness handling.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  githubBranchUrl,
-  manageProjectFile,
-  type Project,
-} from "../api";
+import { githubBranchUrl, type Project } from "../api";
 
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
@@ -58,9 +50,12 @@ export function WorktreeTab({
   onToggledChange,
   onOpenFile,
   canRenameFile,
+  remote = false,
 }: {
   sessionId?: string;
   project: Project;
+  /** The dashboard is connected to a remote instance; OS actions would run there. */
+  remote?: boolean;
   /** Which segmented view is showing (lives on the tab def, so it survives the
    * unmount/remount when another end-pane tab fronts this one). */
   view: WorktreeView;
@@ -77,6 +72,12 @@ export function WorktreeTab({
   ) => void;
   canRenameFile: (path: string) => boolean;
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { listChatSessionsQuery, getSessionWorktreeQuery, getCodeTreeQuery } = useWorkspace().queries;
+  const { queryClient, workspaceKey } = useWorkspace();
+  const { manageProjectFile, revealFileInManager } = useWorkspace().api;
+
   const projectId = project.id;
   const sessions = useQuery(listChatSessionsQuery(projectId));
   const busy = sessions.data?.some((session) => session.id === sessionId && session.busy) ?? false;
@@ -139,6 +140,13 @@ export function WorktreeTab({
     const root = tree?.path ?? project.repoPath;
     copyFilePath(root, path);
   };
+  const reveal = async (path: string) => {
+    try {
+      await revealFileInManager(projectId, path, { sessionId });
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
 
   return (
     <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
@@ -195,7 +203,7 @@ export function WorktreeTab({
               description={m.files_empty_description()}
             />
           ) : (
-            <div className="file-tree py-1.5 px-0 text-sm">
+            <div data-keyboard-list className="file-tree py-1.5 px-0 text-sm">
               <TreeLevel
                 node={filesTree}
                 parentPath=""
@@ -221,6 +229,9 @@ export function WorktreeTab({
         <FileContextMenu
           target={contextMenu}
           onOpen={() => openFile(contextMenu.path, "keepOpen")}
+          onReveal={canManageFiles && !remote
+            ? () => void reveal(contextMenu.path)
+            : undefined}
           onRename={canManageFiles && canRenameFile(contextMenu.path)
             ? () => setRenamingPath(contextMenu.path)
             : undefined}
@@ -230,8 +241,17 @@ export function WorktreeTab({
           onCopyPath={() => copyPath(contextMenu.path)}
           onDelete={canManageFiles
             ? () => {
-              if (window.confirm(m.file_tree_delete_confirm({ path: ltr(contextMenu.path) })))
-                void manage(contextMenu.path, { action: "delete" });
+              showConfirmDialog({
+                title: m.chat_panel_delete(),
+                description: m.file_tree_delete_confirm({ path: ltr(contextMenu.path) }),
+                destructive: true,
+                confirmLabel: m.chat_panel_delete(),
+                onConfirm: async () => {
+                  await manageProjectFile(projectId, contextMenu.path, { action: "delete" }, { sessionId });
+                  load();
+                },
+                onCancel: "close",
+              });
             }
             : undefined}
           onClose={() => setContextMenu(null)}

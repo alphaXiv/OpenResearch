@@ -27,7 +27,7 @@ impl ManagedEnv {
     }
 
     async fn ready(&self, python: &Path) -> bool {
-        tokio::process::Command::new(python)
+        crate::process::tokio_command(python)
             .args(["-c", self.ready_check])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -63,7 +63,7 @@ impl ManagedEnv {
         if let Some(parent) = env_dir.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let status = tokio::process::Command::new(base)
+        let status = crate::process::tokio_command(base)
             .args(["-m", "venv"])
             .arg(&env_dir)
             .status()
@@ -79,7 +79,7 @@ impl ManagedEnv {
             "orx: installing {} for {} (one time)…",
             self.requirement, self.label
         );
-        let status = tokio::process::Command::new(&python)
+        let status = crate::process::tokio_command(&python)
             .args([
                 "-m",
                 "pip",
@@ -127,7 +127,7 @@ pub async fn base_python(min_python: (u32, u32), label: &str) -> Result<&'static
         "python3.11",
         "python3.10",
     ] {
-        let Some(version) = tokio::process::Command::new(candidate)
+        let Some(version) = crate::process::tokio_command(candidate)
             .args([
                 "-c",
                 "import sys, venv; print('%d.%d' % sys.version_info[:2])",
@@ -199,7 +199,7 @@ mod tests {
     #[cfg(not(windows))]
     async fn fake_env() -> Option<PathBuf> {
         let host = base_python((3, 0), "Test").await.ok()?;
-        let host = std::process::Command::new(host)
+        let host = crate::process::command(host)
             .args(["-c", "import sys; print(sys.executable)"])
             .output()
             .ok()?;
@@ -215,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_reuses_a_ready_env() {
         let Some(dir) = fake_env().await else {
-            eprintln!("skipped: no Python on PATH");
+            crate::config::skip_without_tool("no Python on PATH");
             return;
         };
         let python = test_env("pass", (3, 0))
@@ -231,7 +231,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_keeps_a_stale_env_when_no_python_is_new_enough() {
         let Some(dir) = fake_env().await else {
-            eprintln!("skipped: no Python on PATH");
+            crate::config::skip_without_tool("no Python on PATH");
             return;
         };
         let error = test_env("raise SystemExit(1)", (99, 0))

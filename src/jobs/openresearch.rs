@@ -103,7 +103,7 @@ fn retained_failure_reason(
     })
 }
 
-fn is_not_found_error(message: &str) -> bool {
+pub(crate) fn is_not_found_error(message: &str) -> bool {
     message.contains("(404 ")
 }
 
@@ -171,7 +171,7 @@ pub async fn wait_online(
                     .unwrap_or_default()
             )));
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(crate::config::paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -205,7 +205,7 @@ pub async fn teardown(creds: &Credentials, sandbox_id: &str) -> Result<()> {
     let mut last = None;
     for backoff_secs in [0u64, 2, 5, 10] {
         if backoff_secs > 0 {
-            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            tokio::time::sleep(crate::config::paced(Duration::from_secs(backoff_secs))).await;
         }
         match delete_sandbox(creds, sandbox_id).await {
             Ok(()) => return Ok(()),

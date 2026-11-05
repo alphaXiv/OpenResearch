@@ -17,6 +17,7 @@ use super::harness::{OneShot, OneShotQuality};
 use super::model::LocalProject;
 
 const PAPER_PDF: &str = "paper.pdf";
+const ALPHAXIV_PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LISTED_FILES: usize = 5000;
 const MAX_WALK_DEPTH: usize = 4;
 /// Paths shown to the model; shallow ones first so the layout reads at a glance.
@@ -48,8 +49,8 @@ pub struct StarterPrompt {
 /// What the empty chat has to offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Starter {
-    /// Nothing to read and no profile to tailor to, or the harness couldn't
-    /// answer: the UI shows its pre-written prompts.
+    /// No brief, no selected OpenCode model, or a failed blank-project request:
+    /// the UI shows its pre-written prompts.
     Blank,
     /// Written for this project (or, when blank, its researcher); `None` when
     /// the harness can't answer.
@@ -81,13 +82,21 @@ const ENTRYPOINT_PREFIXES: &[&str] = &[
 ];
 
 /// The chat harness that writes the prompts, and the model it runs on.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Agent {
     pub harness: String,
     pub model: Option<String>,
 }
 
 impl Agent {
+    fn missing_opencode_model(&self) -> bool {
+        self.harness == "opencode"
+            && self
+                .model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+    }
+
     /// The model as far as the harness's one-shot cares: dropped for a
     /// harness that ignores it.
     pub(crate) fn effective_model(&self) -> Option<&str> {
@@ -106,20 +115,22 @@ pub async fn prompts(project: &LocalProject, agent: &Agent, locale: &str) -> Sta
         let project = project.clone();
         move || {
             let files = list_files(Path::new(&project.repo_path));
-            if is_blank(project.paper_id.as_deref(), &files) {
-                blank_brief(&project.name, &crate::telemetry::load_profile())
-                    .map(|brief| (brief, Kind::Blank))
-            } else {
-                Some((brief(&project, &files), Kind::Project))
-            }
+            (!is_blank(project.paper_id.as_deref(), &files)).then(|| brief(&project, &files))
         }
     })
     .await;
+    let brief = match brief {
+        Ok(Some(brief)) => Ok(Some((brief, Kind::Project))),
+        Ok(None) => Ok(blank_brief(&project.name, &researcher_profile().await)
+            .map(|brief| (brief, Kind::Blank))),
+        Err(error) => Err(error),
+    };
     match brief {
         Ok(Some((brief, kind))) => {
             let prompts = generate(brief, kind, project.paper_id.as_deref(), agent, locale).await;
             match (kind, prompts) {
                 (Kind::Blank, None) => Starter::Blank,
+                (_, None) if agent.missing_opencode_model() => Starter::Blank,
                 (_, prompts) => Starter::Generated(prompts),
             }
         }
@@ -145,12 +156,18 @@ fn is_blank(paper_id: Option<&str>, files: &[String]) -> bool {
 /// form already knows: the name, and a paper id or an existing repository.
 /// The brief is built exactly as it will be once the project is created, so
 /// the cache entry is found by content the moment the empty chat opens.
-pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, locale: String) {
+pub fn prewarm(
+    name: String,
+    paper_id: Option<String>,
+    path: Option<String>,
+    locale: String,
+    selection: Option<Agent>,
+) {
     if paper_id.is_none() && path.is_none() {
         return;
     }
     tokio::spawn(async move {
-        let agent = resolve_agent().await?;
+        let agent = resolve_agent(selection).await?;
         let brief = tokio::task::spawn_blocking({
             let paper_id = paper_id.clone();
             move || match path {
@@ -208,6 +225,9 @@ async fn generate(
             return None;
         }
         _ => {}
+    }
+    if agent.missing_opencode_model() {
+        return None;
     }
     let prompts = generate_uncached(brief, kind, paper_id, agent, locale).await;
     let mut cache = lock_map(cache());
@@ -276,7 +296,10 @@ pub(crate) fn preferred_agent() -> Option<Agent> {
 }
 
 /// The user's preferred chat agent, else the first harness that is ready.
-pub(crate) async fn resolve_agent() -> Option<Agent> {
+pub(crate) async fn resolve_agent(selection: Option<Agent>) -> Option<Agent> {
+    if let Some(agent) = selection.filter(|agent| agent.harness == "opencode") {
+        return Some(agent);
+    }
     let preferred = tokio::task::spawn_blocking(preferred_agent)
         .await
         .ok()
@@ -298,9 +321,9 @@ pub(crate) async fn resolve_agent() -> Option<Agent> {
 /// Generate in the background for a just-created project, so the first open
 /// of its empty chat hits the cache. Fire-and-forget: any failure just leaves
 /// the on-demand path to run.
-pub fn warm(project: LocalProject, locale: String) {
+pub fn warm(project: LocalProject, locale: String, selection: Option<Agent>) {
     tokio::spawn(async move {
-        let agent = resolve_agent().await?;
+        let agent = resolve_agent(selection).await?;
         Some(prompts(&project, &agent, &locale).await)
     });
 }
@@ -465,7 +488,7 @@ fn brief_parts(
         push(&mut out, "Run command", command);
     }
     if let Some(paper_id) = paper_id {
-        push(&mut out, "Starting paper (arXiv id)", paper_id);
+        push(&mut out, "Starting paper (arXiv or alphaXiv id)", paper_id);
     }
     if files.iter().any(|f| f == PAPER_PDF) {
         push(
@@ -519,7 +542,27 @@ fn brief_parts(
     out
 }
 
-/// A blank project's brief: its name and the researcher's onboarding profile,
+/// The researcher's alphaXiv profile when they linked one that says something,
+/// else the profile saved from an earlier onboarding.
+async fn researcher_profile() -> crate::telemetry::ResearchProfile {
+    if crate::alphaxiv::signed_in() {
+        let fetched = tokio::time::timeout(
+            ALPHAXIV_PROFILE_TIMEOUT,
+            crate::alphaxiv::research_profile(),
+        )
+        .await;
+        if let Ok(Ok(profile)) = fetched {
+            if !profile.research_areas.is_empty() || profile.background.is_some() {
+                return profile;
+            }
+        }
+    }
+    tokio::task::spawn_blocking(crate::telemetry::load_profile)
+        .await
+        .unwrap_or_default()
+}
+
+/// A blank project's brief: its name and the researcher's profile,
 /// or `None` when the profile says nothing to tailor to.
 fn blank_brief(name: &str, profile: &crate::telemetry::ResearchProfile) -> Option<String> {
     let areas: Vec<&str> = profile
@@ -710,6 +753,66 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
+    #[tokio::test]
+    async fn missing_opencode_model_uses_static_prompts_without_caching_failure() {
+        let root = temp_root();
+        write(&root, "README.md", "A project with content");
+        let project = project(&root);
+        let key = fingerprint(&brief(&project, &list_files(&root)), "en");
+        for model in [None, Some("  ".to_string())] {
+            let agent = Agent {
+                harness: "opencode".into(),
+                model,
+            };
+            assert_eq!(prompts(&project, &agent, "en").await, Starter::Blank);
+            assert!(!lock_map(cache()).contains_key(&key));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn successful_starters_are_reused_across_models_and_missing_selection() {
+        let brief = uuid::Uuid::new_v4().to_string();
+        let key = fingerprint(&brief, "en");
+        let cached = vec![StarterPrompt {
+            title: "Explore".into(),
+            prompt: "Explore this project".into(),
+        }];
+        lock_map(cache()).insert(key.clone(), Cached::Prompts(cached.clone()));
+        for model in [Some("provider/a".into()), Some("provider/b".into()), None] {
+            let agent = Agent {
+                harness: "opencode".into(),
+                model,
+            };
+            assert_eq!(
+                generate(brief.clone(), Kind::Project, None, &agent, "en").await,
+                Some(cached.clone())
+            );
+        }
+        lock_map(cache()).remove(&key);
+    }
+
+    #[tokio::test]
+    async fn supplied_selection_keeps_custom_and_missing_models() {
+        for (harness, model) in [
+            ("opencode", Some("custom/private-model".into())),
+            ("opencode", None),
+        ] {
+            let agent = Agent {
+                harness: harness.into(),
+                model,
+            };
+            assert_eq!(
+                resolve_agent(Some(agent.clone())).await,
+                Some(agent.clone())
+            );
+            assert_eq!(
+                agent.missing_opencode_model(),
+                harness == "opencode" && agent.model.is_none()
+            );
+        }
+    }
+
     #[test]
     fn brief_reads_readme_manifests_entrypoints_and_tree() {
         let root = temp_root();
@@ -763,6 +866,7 @@ mod tests {
             papers: vec![ProfilePaper {
                 paper_id: "2401.12345".into(),
                 title: Some("Fold it".into()),
+                unknown: Default::default(),
             }],
         };
         assert_eq!(

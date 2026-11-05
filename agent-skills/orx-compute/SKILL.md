@@ -1,6 +1,6 @@
 ---
 name: orx-compute
-description: "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference."
+description: "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, vercel, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and result messages. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference."
 ---
 
 Each run uses an immutable snapshot of the experiment branch's recorded commit.
@@ -56,18 +56,30 @@ change the configured backend or authorize bypassing the launch contract.
 - **Commit before launching.** Every backend runs the recorded commit's
   immutable source snapshot. Uncommitted files are excluded; no backend needs a
   GitHub push.
-- `orx exp run` queues the run and returns immediately. Follow it with `orx
-  runs`, `orx logs`, `orx exp wait`, or `orx exp wake`.
+- `orx exp run` queues the run and returns immediately. End your turn once the
+  ready runs are launched; relevant results arrive as messages in this chat.
 - `--force` permits a deliberate concurrent run on the same experiment.
   Without it, `orx` rejects a launch while that node already has a run in
   flight.
-- Every run gets `ORX_RUN_ID`; use it as the run name in metric trackers.
-  Saved environment variables reach every backend except `hf`. If
-  `TRACKIO_SERVER_URL` is saved, log with
+- Every run gets `ORX_RUN_ID`, `ORX_EXPERIMENT`, `ORX_EXPERIMENT_TITLE`,
+  `ORX_PARENT_EXPERIMENT` (when it has a parent), `ORX_COMMIT` and
+  `TRACKIO_PROJECT`. Saved environment variables reach every backend except
+  `hf`, which gets only the `ORX_*` and Trackio ones. To track metrics, log
+  with Trackio; orx shows its charts beside the run:
   `trackio.init(project=os.environ.get("TRACKIO_PROJECT", <name>),
-  name=os.environ.get("ORX_RUN_ID"))`; the client reads the URL and
-  `TRACKIO_WRITE_TOKEN` itself. A localhost URL only works on the `local`
-  backend. Never print the token.
+  name=os.environ.get("ORX_RUN_ID"), group=os.environ.get("ORX_EXPERIMENT"),
+  config={"hypothesis": os.environ.get("ORX_EXPERIMENT_TITLE"), "parent":
+  os.environ.get("ORX_PARENT_EXPERIMENT"), "commit": os.environ.get("ORX_COMMIT"),
+  **hyperparameters})`. Keep that project and name, or orx cannot find the
+  run. The client reads `TRACKIO_SPACE_ID` or `TRACKIO_SERVER_URL` and its
+  token itself. With neither saved, only `local` runs show up in orx, and a
+  localhost URL only works on the `local` backend. Never print a token.
+- `orx metrics <runId> [<runId>…]` reads back what runs logged to Trackio,
+  wherever it went: per metric its first, last, min and max (with steps), the
+  mean over the last tenth, a sparkline, and sampled `step:value` points.
+  `--metric loss` filters, `--points 50` adds resolution, `--json` is
+  machine-readable. Read it while a run is live and after it ends, and pass the
+  parent experiment's run too to compare curves, not just final numbers.
 - `local`, `tinker`, `ssh` and `slurm` runs also get `TENSORBOARD_LOGDIR`, a
   per-run directory; pass it as the trainer's `logging_dir`/`log_dir`. `orx
   tensorboard <runId>` prints the command that opens it (not for SSH
@@ -90,6 +102,7 @@ this `SKILL.md`:
 | SSH (`ssh`) | [references/ssh.md](references/ssh.md) |
 | Slurm (`slurm`) | [references/slurm.md](references/slurm.md) |
 | Ray Jobs (`ray`) | [references/ray.md](references/ray.md) |
+| Vercel Sandbox (`vercel`) | [references/vercel.md](references/vercel.md) |
 | OpenResearch (`openresearch`) | [references/openresearch.md](references/openresearch.md) |
 | Tinker (`tinker`) | [references/tinker.md](references/tinker.md) |
 | This machine (`local`) | [references/local.md](references/local.md) |
@@ -104,39 +117,52 @@ For Slurm, `--cpus` and `--mem` request `#SBATCH --cpus-per-task` and
 partition default. Read
 `references/slurm.md` before choosing values.
 
-## Waiting on runs — `orx exp wait`
+## Run engine setting
 
-Block until a run changes state when you want to act as soon as it finishes:
+Stable and dev builds use detached supervisors by default;
+`ORX_RUN_ENGINE=1|0` on `orx up` overrides the saved opt-in. Canary builds
+always use the new engine being tested and ignore both the setting and
+environment override. Leave the user's setting alone unless asked. Existing
+runs keep their launch mode when the setting changes. In supervised mode, a
+detached `orx supervise` watches each run and streams logs; do not kill it.
+With the new engine, the OpenResearch server watches runs and catches up when
+reopened. Jobs keep running while the server is closed in both modes. The
+snapshot, command, result-message and wake contracts apply in both modes.
+Engine-specific contact states, Abandon and interim notify messages apply to
+engine-owned runs.
 
-```sh
-orx exp wait <expId>                    # wait for this experiment's latest run
-orx exp wait --project <projectId>      # return on the first project completion
-orx exp wait <expId> --interval 10 --timeout 3600
-```
+## Results arrive in the chat
 
-- Pass exactly one of `<expId>` or `--project`.
-- `--project` is the budget-loop primitive: it returns on the first completion,
-  not on starts or queued-to-running transitions. Reissue it once per loop tick.
-- A wait is a sleep-until-change signal, not the source of truth. After every
-  return, read `orx runs <projectId>` and reconcile all newly terminal runs.
-- When nothing is in flight, project wait returns `drained: no runs in flight`.
-- The default interval is 5 seconds and timeout is 1800 seconds. Timeout exits
-  non-zero and means nothing changed yet, not that the run failed.
-- Cancel only a run that is broken or no longer wanted; after a wait timeout,
-  wait again instead of cancelling.
-- Failed runs include a `reason:` line. Provider-capacity failures are often
-  retryable; failures after startup require reading the file located by `orx logs <runId>`.
-- A failed run is not a new node. Repair and relaunch the same experiment as
-  described by `orx-experiment-tree`.
+Launch ready runs with `orx exp run`, then end your turn. The launching chat is
+subscribed automatically. Results wait until the chat is idle and may combine
+several updates into one message. No waiting command or live agent session is
+needed to keep the runs monitored. Silence does not mean a run failed. A run
+can post an interim result with the new engine by appending a line to
+`$ORX_NOTIFY_FILE` (`>>`) when set; it arrives at most once per run per 10
+minutes, with later lines coalesced.
 
-### Going idle instead — `orx exp wake`
+When a result message arrives, read `orx runs <projectId>` and reconcile every
+newly terminal run, including runs that finished while you were analyzing an
+earlier result. Read the file located by `orx logs <runId>` and compare metrics
+before deciding whether to repair, refill a slot, promote a result, or stop.
+A failed run is not a new node: repair and relaunch the same experiment as
+specified by `orx-experiment-tree`.
 
-After launching, use `orx exp wake <expId>` when you want to end the turn and
-resume after that run succeeds or fails. Wake-up is opt-in, fires only for
-`done` or `failed`, and waits behind queued user messages. If orx cannot
-monitor a live Slurm run for over a minute, it tells you once per outage; the
-final wake-up comes once orx can see the run finish. Use either wait or wake
-for a run, not both.
+With the new engine, attention messages also arrive when monitoring or
+cancellation needs action. Supervised runs show monitoring errors in their
+status. Inspect `orx exp status <expId>` and tell the user what needs
+fixing. Cancel only a run that is broken or no longer wanted.
+
+With the new engine, **Cancellation pending** means the cancel has been
+accepted but has not reached the machine. It will be sent when the machine is
+reachable again or the launch is confirmed. **Cancelling…** means the machine
+is stopping the run. To stop tracking an unreachable run, use
+`orx exp abandon <runId>`; double-check that the actual compute is shut down.
+The cancel stays pending after Abandon.
+
+Use `orx exp wake <expId>` to subscribe this chat to a run launched elsewhere.
+`orx exp wait` remains available for humans; do not use it to keep an agent
+session waiting for results.
 
 ## Sizing compute
 

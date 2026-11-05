@@ -243,14 +243,13 @@ pub struct CreateProjectOptions {
 mod tests {
     use super::*;
     use std::fs::File;
-    use std::process::Command;
 
     fn root() -> PathBuf {
         std::env::temp_dir().join(format!("orx-local-project-{}", uuid::Uuid::new_v4()))
     }
 
     fn run_git(path: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let status = crate::process::command("git")
             .current_dir(path)
             .args(args)
             .status()
@@ -259,7 +258,7 @@ mod tests {
     }
 
     fn git_output(path: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .current_dir(path)
             .args(args)
             .output()

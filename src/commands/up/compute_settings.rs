@@ -163,6 +163,148 @@ pub(super) async fn set_hf_token(Json(req): Json<SetHfTokenReq>) -> ApiResult {
     Ok(Json(json!(hf_token_status().await)))
 }
 
+// --- vercel settings ----------------------------------------------------------
+
+use crate::jobs::vercel;
+
+/// Credentials set in orx's own process environment override anything saved here.
+fn vercel_process_env() -> bool {
+    [
+        vercel::OIDC_TOKEN,
+        vercel::TOKEN,
+        vercel::TEAM_ID,
+        vercel::PROJECT_ID,
+    ]
+    .iter()
+    .any(|key| matches!(vercel::credential(key), Some((_, "env"))))
+}
+
+/// The teams a token can use, the chosen team's projects, and which team was
+/// chosen: the requested one, else the saved one, else the account default.
+async fn vercel_scopes(token: &str, team_id: Option<String>) -> crate::error::Result<Value> {
+    let api = vercel::Api::new(token)?;
+    let teams = api.teams().await?;
+    if teams.is_empty() {
+        return Err(anyhow!(
+            "This token can't see any Vercel team. Create a token with access to a team."
+        ));
+    }
+    let known = |id: &String| teams.iter().any(|team| &team.id == id);
+    let saved = vercel::credential(vercel::TEAM_ID).map(|(id, _)| id);
+    let team_id = match team_id.filter(known).or(saved.filter(known)) {
+        Some(id) => id,
+        None => api
+            .default_team_id()
+            .await
+            .ok()
+            .flatten()
+            .filter(known)
+            .unwrap_or_else(|| teams[0].id.clone()),
+    };
+    let projects = api.projects(&team_id).await?;
+    Ok(json!({ "teams": teams, "teamId": team_id, "projects": projects }))
+}
+
+pub(super) async fn vercel_settings_json() -> Value {
+    let token = vercel::credential(vercel::TOKEN);
+    let scopes = match &token {
+        Some((token, _)) => Some(vercel_scopes(token, None).await),
+        None => None,
+    };
+    json!({
+        "configured": vercel::token_source().is_some(),
+        "processEnv": vercel_process_env(),
+        "oidc": vercel::credential(vercel::OIDC_TOKEN).is_some(),
+        "maskedToken": token.as_ref().map(|(token, _)| mask_token(token)),
+        "projectId": vercel::credential(vercel::PROJECT_ID).map(|(id, _)| id),
+        "scopes": scopes.as_ref().and_then(|scopes| scopes.as_ref().ok()),
+        "error": scopes.and_then(|scopes| scopes.err()).map(|error| error.to_string()),
+    })
+}
+
+pub(super) async fn vercel_settings() -> ApiResult {
+    Ok(Json(vercel_settings_json().await))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VercelScopesReq {
+    token: Option<String>,
+    team_id: Option<String>,
+}
+
+/// A token typed into Settings but not saved yet, or the saved one when absent.
+fn vercel_request_token(token: Option<String>) -> Result<String, ApiError> {
+    token
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .or_else(|| vercel::credential(vercel::TOKEN).map(|(token, _)| token))
+        .ok_or_else(|| bad_request("Enter a Vercel access token."))
+}
+
+pub(super) async fn vercel_scopes_route(Json(req): Json<VercelScopesReq>) -> ApiResult {
+    let token = vercel_request_token(req.token)?;
+    Ok(Json(
+        vercel_scopes(&token, req.team_id)
+            .await
+            .map_err(bad_request)?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetVercelReq {
+    token: Option<String>,
+    team_id: String,
+    /// An existing project, or absent with `new_project` to create one.
+    project_id: Option<String>,
+    new_project: Option<String>,
+}
+
+pub(super) async fn set_vercel(Json(req): Json<SetVercelReq>) -> ApiResult {
+    if vercel_process_env() {
+        return Err(bad_request(
+            "Vercel credentials are set in the process environment. Remove them there to set up \
+             Vercel here.",
+        ));
+    }
+    let token = vercel_request_token(req.token)?;
+    let api = vercel::Api::new(&token).map_err(bad_request)?;
+    let teams = api.teams().await.map_err(bad_request)?;
+    if !teams.iter().any(|team| team.id == req.team_id) {
+        return Err(bad_request("This token can't use that Vercel team."));
+    }
+    let project_id = match (req.project_id, req.new_project) {
+        (_, Some(name)) => {
+            api.create_project(&req.team_id, name.trim())
+                .await
+                .map_err(bad_request)?
+                .id
+        }
+        (Some(id), None) => {
+            let projects = api.projects(&req.team_id).await.map_err(bad_request)?;
+            if !projects.iter().any(|project| project.id == id) {
+                return Err(bad_request("That project isn't in the chosen Vercel team."));
+            }
+            id
+        }
+        (None, None) => return Err(bad_request("Choose a Vercel project.")),
+    };
+    let team_id = req.team_id;
+    tokio::task::spawn_blocking(move || {
+        crate::config::write_synced_env_vars(&[
+            (vercel::TOKEN, &token),
+            (vercel::TEAM_ID, &team_id),
+            (vercel::PROJECT_ID, &project_id),
+        ])?;
+        // An OIDC token wins over the access token and expires within hours.
+        crate::config::remove_synced_env_var(vercel::OIDC_TOKEN)
+    })
+    .await
+    .map_err(|e| anyhow!("env write task failed: {e}"))??;
+    Ok(Json(vercel_settings_json().await))
+}
+
 // --- modal settings -----------------------------------------------------------
 
 use crate::jobs::modal;
@@ -562,7 +704,7 @@ $path = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SOFTWARE\Micros
 if (!$path) { $path = $env:SystemRoot }
 [Environment]::ExpandEnvironmentVariables($path)
 "#;
-    let output = std::process::Command::new("powershell.exe")
+    let output = crate::process::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("ORX_SSH_CONFIG_USER", user)
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
@@ -587,6 +729,8 @@ pub(super) async fn ssh_settings() -> ApiResult {
                 .cloned()
                 .unwrap_or_default();
             host["container"] = json!(options.container);
+            host["remoteRoot"] = json!(options.remote_root);
+            host["keepRemoteRuns"] = json!(options.keep_remote_runs);
         }
         // Best-effort, like the preflight write: a store hiccup shouldn't take
         // out the host listing — hosts just render as never tested.
@@ -622,16 +766,31 @@ pub(super) async fn ssh_settings() -> ApiResult {
 pub(super) struct SaveSshSettingsReq {
     host: String,
     container: Option<String>,
+    /// Unlike `container`, `None` keeps the saved root (the UI never sends it); `Some("")` clears it.
+    remote_root: Option<String>,
+    /// `None` keeps the saved value.
+    keep_remote_runs: Option<bool>,
 }
 
 pub(super) async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> ApiResult {
     let host = req.host.trim().to_string();
     require_configured_ssh_host(&host).await?;
-    let options = crate::config::SshHostSettings {
-        container: req.container,
-    };
-    crate::jobs::ssh::validate_host_options(&options).map_err(bad_request)?;
     blocking_api(move || {
+        let saved = crate::config::ssh_settings()?
+            .hosts
+            .get(&host)
+            .cloned()
+            .unwrap_or_default();
+        let options = crate::config::SshHostSettings {
+            container: req.container,
+            remote_root: match req.remote_root {
+                Some(root) => Some(root.trim().to_string()).filter(|root| !root.is_empty()),
+                None => saved.remote_root,
+            },
+            keep_remote_runs: req.keep_remote_runs.unwrap_or(saved.keep_remote_runs),
+            ..Default::default()
+        };
+        crate::jobs::ssh::validate_host_options(&options).map_err(bad_request)?;
         crate::config::set_ssh_host(host, options)?;
         Ok(Json(json!({"ok": true})))
     })
@@ -746,14 +905,11 @@ pub(super) async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> Api
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    // A missing master is meaningful only on platforms that support multiplexing.
-    // Windows opens a new SSH connection for each command; reporting false here
-    // makes a successful preflight immediately look disconnected in the dashboard.
-    let running = if cfg!(unix) {
-        Some(crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host)).await?)
-    } else {
-        None
-    };
+    let running = super::api_v2::host_target(host, false).is_ok_and(|target| {
+        target.transport.is_some_and(|transport| {
+            transport.ssh.conn.state().borrow().status == crate::engine::transport::Status::Live
+        })
+    });
     Ok(Json(json!({ "running": running })))
 }
 
@@ -769,11 +925,10 @@ pub(super) async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult
     }
     let test = run_ssh_host_preflight(host.clone()).await;
     let container = if let Some(reference) = req.container {
-        let result = crate::jobs::ssh::resolve_container(
-            &crate::jobs::ssh::SshTarget::alias(&host),
-            &reference,
-        )
-        .await;
+        let result = match super::api_v2::host_target(&host, false) {
+            Ok(target) => crate::jobs::ssh::resolve_container(&target, &reference).await,
+            Err(error) => Err(error),
+        };
         Some(
             json!({"reference": reference, "ready": result.is_ok(), "error": result.err().map(|error| error.to_string())}),
         )
@@ -807,7 +962,15 @@ pub(super) async fn run_ssh_host_preflight(host: String) -> SshHostTest {
 }
 
 pub(super) async fn probe_ssh_host_preflight(host: String) -> SshHostTest {
-    let p = crate::jobs::ssh::preflight(&crate::jobs::ssh::SshTarget::alias(&host)).await;
+    let p = match super::api_v2::host_target(&host, false) {
+        Ok(target) => crate::jobs::ssh::preflight(&target).await,
+        Err(error) => crate::jobs::ssh::SshPreflight {
+            reachable: false,
+            tools_found: false,
+            missing_tools: Vec::new(),
+            error: Some(error.to_string()),
+        },
+    };
     SshHostTest {
         host,
         reachable: p.reachable,
@@ -848,6 +1011,8 @@ pub(super) fn slurm_settings_json() -> Value {
         "timeLimit": settings.time_limit,
         "cpusPerTask": settings.cpus_per_task,
         "mem": settings.mem,
+        "remoteRoot": settings.remote_root,
+        "keepRemoteRuns": settings.keep_remote_runs,
         "hosts": list_ssh_hosts(),
     })
 }
@@ -869,6 +1034,8 @@ pub(super) struct SetSlurmSettingsReq {
     /// Cores per job. `Some(0)` clears it (partition default).
     cpus_per_task: Option<u32>,
     mem: Option<String>,
+    remote_root: Option<String>,
+    keep_remote_runs: Option<bool>,
 }
 
 pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> ApiResult {
@@ -905,6 +1072,16 @@ pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> 
                 None => None,
             };
         }
+        if let Some(root) = req.remote_root {
+            let root = norm(root);
+            if let Some(root) = &root {
+                crate::jobs::ssh::validate_remote_root(root).map_err(bad_request)?;
+            }
+            settings.remote_root = root;
+        }
+        if let Some(keep) = req.keep_remote_runs {
+            settings.keep_remote_runs = keep;
+        }
         slurm::save_settings(&settings)?;
         Ok(Json(slurm_settings_json()))
     })
@@ -924,8 +1101,10 @@ pub(super) async fn slurm_preflight(Json(req): Json<SlurmPreflightReq>) -> ApiRe
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    let p = slurm::preflight(&host).await;
-    Ok(Json(slurm_preflight_value(&p)))
+    let target = super::api_v2::host_target(&host, true).map_err(bad_request)?;
+    Ok(Json(slurm_preflight_value(
+        &slurm::preflight(&target).await,
+    )))
 }
 
 pub(super) fn slurm_preflight_value(p: &slurm::SlurmPreflight) -> Value {
@@ -1019,94 +1198,82 @@ pub(super) async fn ray_preflight(Json(req): Json<RayPreflightReq>) -> ApiResult
     }
 }
 
-/// The saved Trackio server for run links; never the write token.
-pub(super) async fn trackio_settings() -> ApiResult {
-    Ok(Json(json!({
-        "serverUrl": crate::local::trackio::server_url(),
-        "project": crate::local::trackio::project(),
-    })))
+/// The project's Trackio dashboard and which runs have logged to it; never a token.
+pub(super) async fn trackio_project_runs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    let project = crate::local::trackio::project_for(&project.slug);
+    // A gateway error, not a 200 with no runs, so the dashboard keeps an open embed through a blip.
+    let mut runs = crate::local::trackio::project_runs(&state.trackio, project)
+        .await
+        .map_err(|error| ApiError(StatusCode::BAD_GATEWAY, error))?;
+    // An SSH workspace's browser cannot reach this host's loopback dashboard, so offer no embed.
+    if state.remote_instance_id.is_some()
+        && runs
+            .dashboard_url
+            .as_deref()
+            .is_some_and(crate::local::trackio::is_local_only)
+    {
+        runs.dashboard_url = None;
+    }
+    Ok(Json(json!(runs)))
 }
 
-/// Live check of the saved Trackio server and write token.
+/// Live check of the saved Trackio Space or server and its write access.
 pub(super) async fn trackio_preflight() -> ApiResult {
-    use crate::local::trackio;
-    let Some(base) = trackio::server_url() else {
-        return Err(bad_request(format!(
-            "Save an http(s) {} first.",
-            trackio::SERVER_URL
-        )));
-    };
-    let token = crate::config::synced_env_var(trackio::WRITE_TOKEN);
-    Ok(Json(json!(
-        trackio::preflight(&base, token.as_deref()).await
-    )))
+    let preflight = crate::local::trackio::check().await.map_err(bad_request)?;
+    Ok(Json(json!(preflight)))
 }
 
 // --- compute targets (unified settings list + default) --------------------------
 
-/// The whole payload for the Compute tab's collapsed list, in one round trip.
-/// CHEAP probes only — env vars and file reads, never a network call, kubectl,
-/// or the modal python import. `configured` means "worth trying", not
-/// "healthy"; deep health stays in each backend's own settings endpoint,
-/// fetched when a row is expanded.
 /// Whether a box would accept this machine. Three-valued on purpose: the check
 /// needs the api, so "we couldn't ask" is a different answer from "no" and the
-/// badge shouldn't have to pick one of the two. Each arm carries what the row
-/// needs to say — guessing a key path would send the user to a file that may
-/// not exist.
+/// badge shouldn't have to pick one of the two.
 #[derive(Clone, PartialEq)]
 pub(super) enum SshReadiness {
     Ready,
-    /// The `.pub` on this machine worth registering, if there is one.
-    NoUsableKey {
-        pub_path: Option<String>,
-    },
-    Unverified {
-        reason: String,
-    },
+    NoUsableKey,
+    Unverified { reason: String },
 }
 
 pub(super) async fn openresearch_ssh_readiness() -> SshReadiness {
-    use crate::local::ssh_identity::{preferred_local, tilde, KeyStatus};
+    use crate::local::ssh_identity::KeyStatus;
     let Ok(Some(creds)) = crate::config::load_credentials().await else {
         // Signed-out is reported by the row's own `or_logged_in`.
-        return SshReadiness::NoUsableKey { pub_path: None };
-    };
-    let named = |local: &[crate::local::ssh_identity::LocalKey]| SshReadiness::NoUsableKey {
-        pub_path: preferred_local(local)
-            .and_then(|k| k.path.as_deref())
-            .map(tilde),
+        return SshReadiness::NoUsableKey;
     };
     match crate::local::ssh_identity::check(&creds).await {
         KeyStatus::Matched => SshReadiness::Ready,
-        KeyStatus::NoLocalMatch { local, .. } | KeyStatus::NoneRegistered { local } => {
-            named(&local)
+        KeyStatus::NoLocalMatch { .. } | KeyStatus::NoneRegistered { .. } => {
+            SshReadiness::NoUsableKey
         }
         KeyStatus::Unknown { reason } => SshReadiness::Unverified { reason },
     }
 }
 
-/// The openresearch row's one-line status. Every branch that tells the user to
-/// run something names a path we actually found — never a guessed one.
 pub(super) fn openresearch_summary(logged_in: bool, ssh: &SshReadiness) -> String {
     if !logged_in {
         return "Not signed in — run orx login".to_string();
     }
     match ssh {
         SshReadiness::Ready => "Signed in — ephemeral boxes billed to your org".to_string(),
-        SshReadiness::NoUsableKey {
-            pub_path: Some(path),
-        } => format!("No usable SSH key — run orx ssh-key add {path}"),
-        SshReadiness::NoUsableKey { pub_path: None } => {
-            "No SSH key on this computer — run ssh-keygen -t ed25519, then orx ssh-key add"
-                .to_string()
-        }
+        SshReadiness::NoUsableKey => "Signed in — add this computer's SSH key".to_string(),
         SshReadiness::Unverified { reason } => {
             format!("Signed in — couldn't check your SSH key ({reason})")
         }
     }
 }
 
+/// The whole payload for the Compute tab's collapsed list, in one round trip.
+/// CHEAP probes only — env vars and file reads, never a network call, kubectl,
+/// or the modal python import. `configured` means "worth trying", not
+/// "healthy"; deep health stays in each backend's own settings endpoint,
+/// fetched when a row is expanded.
 pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let default = crate::config::compute_default();
     let (default_backend, default_flavor) = match &default {
@@ -1117,6 +1284,7 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let hf = crate::jobs::huggingface::resolve_token_with_source().ok();
     let tinker = crate::jobs::tinker::resolve_api_key_with_source().ok();
     let modal_source = crate::jobs::modal::token_source();
+    let vercel_source = crate::jobs::vercel::token_source();
     let k8s_settings = k8s::load_settings().ok().flatten();
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
@@ -1219,12 +1387,23 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
             },
         },
         {
+            "id": "vercel",
+            "configured": vercel_source.is_some(),
+            "fromEnvironmentTab": vercel_source == Some("syncedEnv"),
+            "summary": match vercel_source {
+                Some("env") => "VERCEL_* env vars",
+                Some("syncedEnv") => "Token from Environment tab",
+                _ => "No token",
+            },
+        },
+        {
             "id": "openresearch",
             // Signed in alone would be a green light on a backend that can't
             // connect — the box authorizes your *registered* keys, so one of
             // them has to be on this machine too.
             "configured": or_logged_in && ssh == SshReadiness::Ready,
             "unverified": or_logged_in && matches!(ssh, SshReadiness::Unverified { .. }),
+            "signedIn": or_logged_in,
             "summary": openresearch_summary(or_logged_in, &ssh),
         },
     ]);
@@ -1320,16 +1499,17 @@ pub(super) async fn openresearch_settings() -> ApiResult {
             "loggedIn": false,
             "apiUrl": null,
             "orgs": [],
+            "organizations": null,
             "sshKeyStatus": "unknown",
             "error": null,
         })));
     };
     let mut error: Option<String> = None;
     let orgs = match crate::client::list_orgs(&creds).await {
-        Ok(o) => o.orgs.into_iter().map(|o| o.name).collect::<Vec<_>>(),
+        Ok(o) => Some(o.orgs),
         Err(e) => {
             error = Some(e.to_string());
-            Vec::new()
+            None
         }
     };
     // "Registered" alone is a misleading green: a key registered from another
@@ -1359,14 +1539,76 @@ pub(super) async fn openresearch_settings() -> ApiResult {
             "unknown"
         }
     };
+    let ssh_key_to_add = match ssh_key_status {
+        "no_local_match" | "none_registered" => json!({
+            "path": crate::commands::ssh_key::DEFAULT_KEY,
+            "fingerprint": crate::commands::ssh_key::default_key_fingerprint().await,
+        }),
+        _ => Value::Null,
+    };
+    let org_names = orgs
+        .as_ref()
+        .map(|orgs| orgs.iter().map(|org| &org.name).collect::<Vec<_>>())
+        .unwrap_or_default();
     Ok(Json(json!({
         "loggedIn": true,
         "apiUrl": creds.api_url,
-        "orgs": orgs,
+        "orgs": org_names,
+        "organizations": orgs,
         "sshKeyStatus": ssh_key_status,
         "sshKeyPath": ssh_key_path,
+        "sshKeyToAdd": ssh_key_to_add,
         "error": error,
     })))
+}
+
+/// The compute settings' "Add SSH key": uploads the public half of
+/// `~/.ssh/id_ed25519`, creating the pair if missing.
+pub(super) async fn add_openresearch_ssh_key() -> ApiResult {
+    let creds = crate::config::load_credentials()
+        .await?
+        .ok_or_else(|| bad_request("Sign in to OpenResearch first."))?;
+    crate::commands::ssh_key::ensure_default_registered(&creds).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub(crate) async fn openresearch_account() -> ApiResult {
+    account_response(crate::config::load_credentials().await?).await
+}
+
+async fn account_response(creds: Option<crate::config::Credentials>) -> ApiResult {
+    let Some(creds) = creds else {
+        return Ok(Json(
+            json!({ "loggedIn": false, "apiUrl": null, "user": null }),
+        ));
+    };
+    match crate::client::current_user(&creds).await {
+        Ok(response) => Ok(Json(
+            json!({ "loggedIn": true, "apiUrl": creds.api_url, "user": response.user }),
+        )),
+        Err(error) if error.is::<crate::client::Unauthorized>() => Ok(Json(
+            json!({ "loggedIn": false, "apiUrl": null, "user": null }),
+        )),
+        Err(error) => {
+            let kind = if error.is::<crate::client::ApiTransportError>() {
+                "offline"
+            } else {
+                "server"
+            };
+            let status = error
+                .downcast_ref::<crate::client::ApiResponseError>()
+                .map(|e| e.0);
+            Ok(Json(
+                json!({ "failure": { "kind": kind, "apiUrl": creds.api_url, "status": status } }),
+            ))
+        }
+    }
+}
+
+pub(crate) async fn openresearch_logout() -> ApiResult {
+    crate::config::clear_credentials().await?;
+    crate::alphaxiv::sign_out().await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 fn cli_result(result: ApiResult) -> Result<Value> {
@@ -1387,6 +1629,7 @@ pub(crate) async fn show(backend: &str) -> Result<Value> {
         "ray" => ray_settings().await,
         "hf" => Ok(hf_settings().await),
         "modal" => modal_settings().await,
+        "vercel" => vercel_settings().await,
         "tinker" => tinker_settings().await,
         "k8s" => k8s_settings().await,
         "openresearch" => openresearch_settings().await,
@@ -1447,10 +1690,28 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
                     .await
                     .map_err(|ApiError(_, message)| anyhow!(message))?;
             }
-            if body.get("container").is_some() {
-                let req: SaveSshSettingsReq = serde_json::from_value(
-                    json!({"host": body["host"], "container": body["container"]}),
-                )?;
+            if ["container", "remoteRoot", "keepRemoteRuns"]
+                .iter()
+                .any(|key| body.get(*key).is_some())
+            {
+                // A change without --container keeps the host's saved container.
+                let container = match body.get("container") {
+                    Some(container) => container.clone(),
+                    None => {
+                        let host = body["host"].as_str().unwrap_or_default().trim();
+                        json!(crate::config::ssh_settings()?
+                            .hosts
+                            .get(host)
+                            .and_then(|saved| saved.container.clone()))
+                    }
+                };
+                let mut req = json!({"host": body["host"], "container": container});
+                for key in ["remoteRoot", "keepRemoteRuns"] {
+                    if let Some(value) = body.get(key) {
+                        req[key] = value.clone();
+                    }
+                }
+                let req: SaveSshSettingsReq = serde_json::from_value(req)?;
                 cli_result(save_ssh_settings(Json(req)).await)?;
             }
             if let Some(host) = body.get("defaultHost") {
@@ -1508,6 +1769,10 @@ pub(crate) async fn check(
             Ok(()) => json!({"ready": true}),
             Err(error) => json!({"ready": false, "error": error.to_string()}),
         },
+        "vercel" => match vercel::preflight().await {
+            Ok(()) => json!({"ready": true}),
+            Err(error) => json!({"ready": false, "error": error.to_string()}),
+        },
         _ => show(backend)
             .await
             .unwrap_or_else(|error| json!({"error": error.to_string()})),
@@ -1533,7 +1798,7 @@ pub(crate) async fn check(
                 && value["sshKeyStatus"] == "matched"
                 && value["error"].is_null()
         }
-        "modal" => value["ready"] == true,
+        "modal" | "vercel" => value["ready"] == true,
         _ => false,
     };
     value["ready"] = json!(ready);
@@ -1571,6 +1836,38 @@ mod tests {
 
     fn names(hosts: &[Value]) -> Vec<&str> {
         hosts.iter().map(|h| h["host"].as_str().unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn backend_settings_keep_fields_from_a_newer_orx() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let newer = json!({"kept": [1]});
+        let dir = crate::config::config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in ["k8s.json", "slurm.json", "ray.json"] {
+            std::fs::write(
+                dir.join(file),
+                json!({"fieldFromANewerOrx": newer}).to_string(),
+            )
+            .unwrap();
+        }
+        let empty = || json!({});
+        let _ = set_k8s_settings(Json(serde_json::from_value(empty()).unwrap()))
+            .await
+            .unwrap();
+        let _ = set_slurm_settings(Json(serde_json::from_value(empty()).unwrap()))
+            .await
+            .unwrap();
+        let _ = set_ray_settings(Json(serde_json::from_value(empty()).unwrap()))
+            .await
+            .unwrap();
+        for file in ["k8s.json", "slurm.json", "ray.json"] {
+            let saved: Value =
+                serde_json::from_slice(&std::fs::read(dir.join(file)).unwrap()).unwrap();
+            assert_eq!(saved["fieldFromANewerOrx"], newer, "{file}");
+        }
     }
 
     #[test]
@@ -1726,7 +2023,7 @@ Host b
         let user = std::env::var("USERNAME").unwrap();
         #[cfg(unix)]
         let user = String::from_utf8(
-            std::process::Command::new("id")
+            crate::process::command("id")
                 .arg("-un")
                 .output()
                 .unwrap()
@@ -1842,5 +2139,47 @@ Host b
         assert_eq!(hosts.len(), SSH_INCLUDE_MAX_DEPTH - 1);
         assert_eq!(hosts[0]["host"], "depth-0");
         assert_eq!(hosts.last().unwrap()["host"], "depth-14");
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn account_route_distinguishes_identity_rejection_and_outage() {
+        assert_eq!(account_response(None).await.unwrap().0["loggedIn"], false);
+        let upstream = Router::new().route("/users/me", get(|headers: HeaderMap| async move {
+            match headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()) {
+                Some("Bearer valid") => (StatusCode::OK, Json(json!({"user": {
+                    "id": "u", "email": "a@example.org", "firstName": "A", "lastName": null, "alphaxivUrl": null
+                }}))),
+                Some("Bearer error") => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))),
+                _ => (StatusCode::UNAUTHORIZED, Json(json!({}))),
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let creds = |token: &str| crate::config::Credentials {
+            api_url: api_url.clone(),
+            token: token.into(),
+        };
+        let linked = account_response(Some(creds("valid"))).await.unwrap().0;
+        assert_eq!(linked["user"]["email"], "a@example.org");
+        assert!(linked["user"]["alphaxivUrl"].is_null());
+        assert_eq!(
+            account_response(Some(creds("invalid"))).await.unwrap().0["loggedIn"],
+            false
+        );
+        let failure = account_response(Some(creds("error"))).await.unwrap().0;
+        assert_eq!(failure["failure"]["kind"], "server");
+        assert_eq!(failure["failure"]["status"], 500);
+        server.abort();
+        let _ = server.await;
+        assert_eq!(
+            account_response(Some(creds("valid"))).await.unwrap().0["failure"]["kind"],
+            "offline"
+        );
     }
 }

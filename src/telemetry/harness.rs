@@ -8,6 +8,9 @@ pub(super) struct InitialSnapshot {
     event_id: String,
     payload: Value,
     queued: bool,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    unknown: serde_json::Map<String, Value>,
 }
 
 fn state(id: &str, h: &Value) -> Value {
@@ -106,6 +109,7 @@ fn ensure_initial(settings: &mut Settings, install: &str, harnesses: &Value) {
         event_id: event_id.to_string(),
         payload,
         queued: false,
+        unknown: Default::default(),
     });
 }
 

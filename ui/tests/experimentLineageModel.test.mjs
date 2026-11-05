@@ -1,41 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { describe, test } from "node:test";
-import ts from "typescript";
 
-const require = createRequire(import.meta.url);
-const en = JSON.parse(readFileSync(new URL("../messages/en.json", import.meta.url), "utf8"));
-// English catalogue text with its placeholders filled, so assertions read as the UI does.
-const messages = {
-  m: new Proxy({}, {
-    get: (_, key) => (inputs = {}) => {
-      assert.ok(Object.hasOwn(en, key), `en.json has no message ${String(key)}`);
-      return en[key].replace(/\{(\w+)\}/g, (_, name) => String(inputs[name]));
-    },
-  }),
-};
-const runtime = { getLocale: () => "en" };
-
-function load(file, mocks) {
-  const source = readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
-  const code = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const exports = {};
-  new Function("require", "exports", code)((name) => mocks[name] ?? require(name), exports);
-  return exports;
-}
-
-const i18n = load("i18n.ts", { "./paraglide/runtime.js": runtime });
-const api = load("api.ts", {
-  "./queries/client": {},
-  "./queries/invalidation": {},
-  "./paraglide/messages.js": messages,
-  "./paraglide/runtime.js": runtime,
-  "./i18n": i18n,
-});
-const {
+import {
   buildHistoryNodes,
   describeAttemptChange,
   diffBaseOf,
@@ -48,11 +14,7 @@ const {
   layoutLineage,
   originOf,
   splitExperimentTitle,
-} = load("components/experimentLineageModel.ts", {
-  "../api": api,
-  "../i18n": i18n,
-  "../paraglide/messages.js": messages,
-});
+} from "../src/components/experimentLineageModel.ts";
 
 function experiment(id, createdAt, parentExperimentId = null, chatSessionId = "session-a", title = "Change " + id) {
   return {

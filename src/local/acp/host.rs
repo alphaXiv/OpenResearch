@@ -57,6 +57,7 @@ impl SessionIo {
 }
 
 pub struct Client {
+    alphaxiv_signed_in: bool,
     configuration_lock: tokio::sync::Mutex<()>,
     pub connection: ConnectionTo<Agent>,
     pub initialized: Value,
@@ -216,7 +217,12 @@ impl Client {
         Ok(())
     }
 
-    pub async fn restore(&self, native_id: &str, cwd: &Path) -> Result<Value> {
+    pub async fn restore(
+        &self,
+        native_id: &str,
+        cwd: &Path,
+        mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
+    ) -> Result<Value> {
         use agent_client_protocol::schema::v1::{LoadSessionRequest, ResumeSessionRequest};
         let capabilities = &self.initialized["agentCapabilities"];
         let method = if capabilities["sessionCapabilities"]["resume"].is_object() {
@@ -228,9 +234,13 @@ impl Client {
         };
         self.set_native_id(native_id);
         let params = if method == "session/resume" {
-            serde_json::to_value(ResumeSessionRequest::new(native_id.to_owned(), cwd))?
+            serde_json::to_value(
+                ResumeSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(mcp_servers),
+            )?
         } else {
-            serde_json::to_value(LoadSessionRequest::new(native_id.to_owned(), cwd))?
+            serde_json::to_value(
+                LoadSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(mcp_servers),
+            )?
         };
         self.request(method, params).await
     }
@@ -265,6 +275,16 @@ impl Client {
         method: &str,
         params: impl serde::Serialize + Send,
     ) -> Result<Value> {
+        self.request_with_timeout(method, params, std::time::Duration::from_secs(30))
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: impl serde::Serialize + Send,
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
         let request = self
             .connection
             .send_request(UntypedMessage::new(method, params)?)
@@ -272,7 +292,7 @@ impl Client {
         if method == "session/prompt" {
             return Ok(request.await?);
         }
-        match tokio::time::timeout(std::time::Duration::from_secs(30), request).await {
+        match tokio::time::timeout(timeout, request).await {
             Ok(response) => Ok(response?),
             Err(_) => {
                 self.shutdown().await;
@@ -381,9 +401,14 @@ impl Host {
             .or_default()
             .clone();
         let mut saved = slot.lock().await;
-        if let Some(client) = saved.as_ref().filter(|client| !*client.closed.borrow()) {
+        if let Some(client) = saved.as_ref().filter(|client| {
+            !*client.closed.borrow() && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+        }) {
             *client.idle_since.lock().unwrap() = None;
             return Ok(client.clone());
+        }
+        if let Some(client) = saved.take() {
+            client.shutdown().await;
         }
         let client = spawn(
             definition,
@@ -519,14 +544,14 @@ pub(super) async fn spawn(
     let mut command = if zcode {
         let node = super::executable_path("node")
             .ok_or_else(|| anyhow!("ZCode ACP requires Node.js on PATH"))?;
-        let mut command = tokio::process::Command::new(node);
+        let mut command = crate::process::tokio_command(node);
         command
             .args(["-e", include_str!("zcode-runtime.cjs")])
             .arg(executable)
             .arg("--orx-launch");
         command
     } else {
-        tokio::process::Command::new(executable)
+        crate::process::tokio_command(executable)
     };
     command
         .args(&definition.arguments)
@@ -724,6 +749,7 @@ pub(super) async fn spawn(
         tokio::time::timeout(std::time::Duration::from_secs(15), ready_receiver).await;
     match initialized {
         Ok(Ok(Ok((connection, initialized)))) => Ok(Arc::new(Client {
+            alphaxiv_signed_in: crate::alphaxiv::signed_in(),
             configuration_lock: tokio::sync::Mutex::new(()),
             connection,
             initialized,
@@ -760,6 +786,7 @@ mod tests {
                 .into(),
                 mode.into(),
             ],
+            unknown: Default::default(),
         }
     }
 
@@ -777,6 +804,34 @@ mod tests {
             .unwrap();
         client.set_native_id(response["sessionId"].as_str().unwrap());
         client
+    }
+
+    #[tokio::test]
+    async fn alphaxiv_server_reaches_new_loaded_and_resumed_sessions() {
+        use agent_client_protocol::schema::v1::NewSessionRequest;
+        for mode in ["alphaxiv-load", "alphaxiv-resume"] {
+            let host = Arc::new(Host::default());
+            let cwd = std::env::temp_dir();
+            let client = host.get(mode, &definition(mode), &cwd).await.unwrap();
+            let response = client
+                .request(
+                    "session/new",
+                    NewSessionRequest::new(&cwd)
+                        .mcp_servers(super::super::alphaxiv_mcp_servers().unwrap()),
+                )
+                .await
+                .unwrap();
+            let native_id = response["sessionId"].as_str().unwrap();
+            client
+                .restore(
+                    native_id,
+                    &cwd,
+                    super::super::alphaxiv_mcp_servers().unwrap(),
+                )
+                .await
+                .unwrap();
+            host.shutdown().await;
+        }
     }
 
     #[tokio::test]
@@ -805,9 +860,10 @@ mod tests {
             .await
             .unwrap();
         let error = client
-            .request(
+            .request_with_timeout(
                 "session/new",
                 json!({"cwd": std::env::temp_dir(), "mcpServers": []}),
+                std::time::Duration::from_secs(1),
             )
             .await
             .unwrap_err();

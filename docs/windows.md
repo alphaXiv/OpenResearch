@@ -39,8 +39,9 @@ The nanochat demo installs `uv`, and with it Python, on its first run.
 From [Releases](https://github.com/alphaXiv/OpenResearch/releases), download
 `OpenResearch-Setup.exe` and run it. It installs for your account only, with no
 administrator prompt, into `%LOCALAPPDATA%\Programs\OpenResearch`, adds
-OpenResearch to the Start menu, and installs the Microsoft Edge WebView2 Runtime
-if Windows lacks it. The dashboard opens in its own window; closing the window
+OpenResearch to the Start menu, makes `openresearch://` links (such as Open in
+OpenResearch on openresearch.sh) and shared `.orx` projects open it, and installs the Microsoft Edge WebView2
+Runtime if Windows lacks it. Older installs need the new installer for links and `.orx` files. The dashboard opens in its own window; closing the window
 quits OpenResearch, and starting it again while it runs brings the window back.
 Running the installer or uninstaller while OpenResearch is open asks you to
 close it first.
