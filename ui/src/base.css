@@ -14,26 +14,33 @@ body {
   background: var(--base);
   color: var(--text);
   font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   font-size: 1rem;
   line-height: 1.45;
   overflow: hidden;
 }
 
 ::selection {
-  background: var(--highlight);
+  color: var(--selection-text);
+  background: var(--selection-background);
 }
 
-.chat-thread-inner ::selection {
+::highlight(chat-search),
+::highlight(side-chat-search),
+::highlight(chat-search-results),
+::highlight(side-chat-search-results),
+::highlight(chat-search-prompt),
+::highlight(side-chat-search-prompt),
+::highlight(chat-annotations),
+::highlight(side-chat-annotations) {
   background: var(--chat-annotation-highlight);
 }
 
-::highlight(chat-annotations) {
-  background: var(--chat-annotation-highlight);
-}
-
-/* The editor stacks a transparent textarea over the highlighted code, so an
-   opaque selection would paint out the tokens underneath it. */
+/* The highlighted overlay draws the text; painting it here too doubles every glyph. */
 .file-view-editarea::selection {
+  color: transparent;
   background: var(--editor-selection);
 }
 
@@ -61,7 +68,7 @@ select {
 input:focus,
 textarea:focus,
 select:focus {
-  border-color: var(--text);
+  border-color: var(--focus-border);
 }
 
 input::placeholder,

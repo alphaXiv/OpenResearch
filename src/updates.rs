@@ -16,6 +16,7 @@
 //! dist-workspace.toml sets `install-path = "CARGO_HOME"`), so `orx update`
 //! refuses to touch the binary unless the receipt matches it.
 
+use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
@@ -28,6 +29,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Result};
 
+#[cfg(target_os = "linux")]
+pub mod linux_app;
 pub mod macos_app;
 #[cfg(windows)]
 pub(crate) mod windows;
@@ -39,11 +42,79 @@ pub const REPO_URL: &str = "https://github.com/alphaXiv/OpenResearch";
 /// in release asset names and the receipt path.
 pub const APP_NAME: &str = "openresearch-cli";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseChannel {
+    Stable,
+    Canary,
+}
+
+pub fn current_release_channel() -> ReleaseChannel {
+    if option_env!("ORX_DESKTOP_CANARY_TAG").is_some() {
+        ReleaseChannel::Canary
+    } else {
+        ReleaseChannel::Stable
+    }
+}
+
+pub(crate) fn current_build_id() -> &'static str {
+    option_env!("ORX_DESKTOP_CANARY_TAG").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+fn desktop_release_available(
+    current: &Version,
+    latest: &Version,
+    running: Option<&str>,
+    tag: &str,
+) -> bool {
+    match (running, tag.strip_prefix("canary-")) {
+        (Some(current_tag), Some(latest_id)) => {
+            let current_id = current_tag.strip_prefix("canary-").unwrap_or_default();
+            canary_id(latest_id) > canary_id(current_id)
+        }
+        (Some(_), None) => true,
+        (None, Some(latest_id)) => canary_id(latest_id).is_some(),
+        (None, None) => is_outdated(current, latest),
+    }
+}
+
+fn canary_id(id: &str) -> Option<(u32, u64)> {
+    let (date, sequence) = id.split_once('.')?;
+    if date.len() != 8 || !date.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if sequence.starts_with('0') {
+        return None;
+    }
+    Some((date.parse().ok()?, sequence.parse().ok()?))
+}
+
+fn valid_desktop_tag(channel: ReleaseChannel, tag: &str) -> bool {
+    match channel {
+        ReleaseChannel::Stable => tag
+            .strip_prefix('v')
+            .is_some_and(|version| Version::parse(version).is_ok()),
+        ReleaseChannel::Canary => tag.strip_prefix("canary-").and_then(canary_id).is_some(),
+    }
+}
+
 /// How long a cached update check stays fresh.
 const CHECK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Sent on requests to GitHub — some CDNs reject the default (empty) UA.
 const UA: &str = concat!("openresearch-cli/", env!("CARGO_PKG_VERSION"));
+
+/// Where this platform's desktop app downloads from.
+pub fn desktop_app_download_url() -> String {
+    let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", _) => "OpenResearch.dmg",
+        ("windows", _) => "OpenResearch-Setup.exe",
+        ("linux", "x86_64") => "OpenResearch-x86_64.AppImage",
+        ("linux", "aarch64") => "OpenResearch-aarch64.AppImage",
+        _ => return format!("{REPO_URL}/releases/latest"),
+    };
+    format!("{REPO_URL}/releases/latest/download/{asset}")
+}
 
 pub fn current_version() -> Version {
     // The crate version is always valid semver; a panic here is a build bug.
@@ -52,12 +123,32 @@ pub fn current_version() -> Version {
 
 fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| crate::net::remote_client().build().expect("http client"))
 }
 
 // ---------------------------------------------------------------------------
 // Latest-version discovery (dist-manifest.json)
 // ---------------------------------------------------------------------------
+
+/// Commit titles by conventional prefix, counted cumulatively up to a release's
+/// commit. Each release publishes its own totals, so what an update brings is
+/// its totals minus the running build's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Changes {
+    pub features: u32,
+    pub fixes: u32,
+    pub other: u32,
+}
+
+impl Changes {
+    fn since(self, base: Changes) -> Option<Changes> {
+        Some(Changes {
+            features: self.features.checked_sub(base.features)?,
+            fixes: self.fixes.checked_sub(base.fixes)?,
+            other: self.other.checked_sub(base.other)?,
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct LatestRelease {
@@ -65,6 +156,67 @@ pub struct LatestRelease {
     /// The git tag (e.g. `v0.1.15`), used to pin asset downloads to the same
     /// release the manifest described.
     pub tag: String,
+    pub compatible: bool,
+    #[cfg(windows)]
+    pub(crate) canary_asset: Option<ReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SingleAssetManifest {
+    pub version: String,
+    pub tag: String,
+    pub asset: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub ancestors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CanaryManifest {
+    version: String,
+    tag: String,
+    commit: String,
+    ancestors: Vec<String>,
+    assets: HashMap<String, ReleaseAsset>,
+    #[serde(default)]
+    changes: Option<Changes>,
+    #[serde(default)]
+    notes: Option<ManifestNotes>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ReleaseAsset {
+    pub(crate) asset: String,
+    pub(crate) sha256: String,
+}
+
+async fn fetch_canary_manifest(timeout: Duration) -> Result<Option<CanaryManifest>> {
+    let response = http()
+        .get(format!(
+            "{REPO_URL}/releases/download/canary/desktop-canary-v2.json"
+        ))
+        .header("user-agent", UA)
+        .timeout(timeout)
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let manifest: CanaryManifest = response.error_for_status()?.json().await?;
+    if !valid_desktop_tag(ReleaseChannel::Canary, &manifest.tag) {
+        return Err(anyhow!(
+            "The app update belongs to a different release channel."
+        ));
+    }
+    if manifest.ancestors.first() != Some(&manifest.commit)
+        || manifest
+            .ancestors
+            .iter()
+            .any(|sha| sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(anyhow!("The canary update has invalid source ancestry."));
+    }
+    Ok(Some(manifest))
 }
 
 #[derive(Deserialize)]
@@ -72,6 +224,8 @@ struct DistManifest {
     announcement_tag: String,
     #[serde(default)]
     releases: Vec<ManifestRelease>,
+    #[serde(default)]
+    orx_changes: Option<Changes>,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +247,9 @@ fn parse_manifest(body: &str) -> Result<LatestRelease> {
     Ok(LatestRelease {
         version,
         tag: manifest.announcement_tag,
+        compatible: true,
+        #[cfg(windows)]
+        canary_asset: None,
     })
 }
 
@@ -127,7 +284,7 @@ pub async fn fetch_latest(timeout: Duration) -> Result<LatestRelease> {
 
 /// Downloads a release asset pinned to `tag` and returns its bytes.
 pub async fn fetch_release_asset(tag: &str, asset: &str, timeout: Duration) -> Result<Vec<u8>> {
-    let url = format!("{}/releases/download/{}/{}", REPO_URL, tag, asset);
+    let url = release_asset_url(tag, asset);
     let res = http()
         .get(&url)
         .header("user-agent", UA)
@@ -146,6 +303,15 @@ pub async fn fetch_release_asset(tag: &str, asset: &str, timeout: Duration) -> R
         ));
     }
     Ok(res.bytes().await?.to_vec())
+}
+
+fn release_asset_url(tag: &str, asset: &str) -> String {
+    let release = if tag.starts_with("canary-") {
+        "canary"
+    } else {
+        tag
+    };
+    format!("{REPO_URL}/releases/download/{release}/{asset}")
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +399,10 @@ pub enum InstallChannel {
     },
     /// The executable inside `OpenResearch.app`; the path is the bundle root.
     AppBundle(PathBuf),
+    /// The executable inside the Linux AppImage; the path is the `.AppImage`
+    /// file, which orx replaces whole.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    AppImage(PathBuf),
     /// A Windows `orx.exe` extracted from the release zip; the path is its
     /// directory, where orx swaps the new `orx.exe` in.
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -251,6 +421,7 @@ impl InstallChannel {
         match self {
             InstallChannel::Installer { .. } => "installer",
             InstallChannel::AppBundle(_) => "app-bundle",
+            InstallChannel::AppImage(_) => "appimage",
             InstallChannel::Portable(_) => "portable",
             InstallChannel::Cargo => "cargo",
             InstallChannel::Homebrew => "homebrew",
@@ -266,8 +437,18 @@ impl InstallChannel {
             self,
             InstallChannel::Installer { .. }
                 | InstallChannel::AppBundle(_)
+                | InstallChannel::AppImage(_)
                 | InstallChannel::Portable(_)
         )
+    }
+
+    pub fn has_release_channels(&self) -> bool {
+        match self {
+            InstallChannel::AppBundle(_) | InstallChannel::AppImage(_) => true,
+            #[cfg(windows)]
+            InstallChannel::Portable(dir) => dir.join("OpenResearch.exe").is_file(),
+            _ => false,
+        }
     }
 }
 
@@ -282,13 +463,44 @@ fn app_bundle_root(exe: &Path) -> Option<PathBuf> {
     macos.parent()?.parent().map(Path::to_path_buf)
 }
 
-/// Classify `exe`. The bundle test comes first: the bundled binary has no
-/// receipt, so every later branch would misfile it. A malformed receipt is an
-/// error rather than "no receipt" for the reason [`load_receipt`] gives — the
-/// wrong answer here sends the user down the wrong update path.
+/// The `.AppImage` file `exe` runs from, given the AppImage runtime's `APPDIR`
+/// (where the image is mounted) and `APPIMAGE` (the file). Agents inherit both,
+/// so an `orx` outside the mount is some other install.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn appimage_file(
+    exe: &Path,
+    appdir: Option<&std::ffi::OsStr>,
+    appimage: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let appimage = appimage?;
+    crate::paths::in_appimage_mount(exe, appdir).then(|| PathBuf::from(appimage))
+}
+
+/// The `.AppImage` file this process runs from, if it is the AppImage's own orx.
+#[cfg(all(desktop_app, target_os = "linux"))]
+pub fn running_appimage() -> Option<PathBuf> {
+    appimage_file(
+        &current_exe().ok()?,
+        std::env::var_os("APPDIR").as_deref(),
+        std::env::var_os("APPIMAGE").as_deref(),
+    )
+}
+
+/// Classify `exe`. The app tests come first: an app's binary has no receipt,
+/// so every later branch would misfile it. A malformed receipt is an error
+/// rather than "no receipt" for the reason [`load_receipt`] gives — the wrong
+/// answer here sends the user down the wrong update path.
 pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
     if let Some(root) = app_bundle_root(exe) {
         return Ok(InstallChannel::AppBundle(root));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(file) = appimage_file(
+        exe,
+        std::env::var_os("APPDIR").as_deref(),
+        std::env::var_os("APPIMAGE").as_deref(),
+    ) {
+        return Ok(InstallChannel::AppImage(file));
     }
     let exe_str = exe.to_string_lossy();
     if exe_str.starts_with("/nix/store/") {
@@ -297,9 +509,17 @@ pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
     if exe_str.starts_with("/opt/homebrew/") || exe_str.contains("/Cellar/") {
         return Ok(InstallChannel::Homebrew);
     }
+    #[cfg(windows)]
+    if let Some(dir) = portable_dir(exe).filter(|dir| dir.join("OpenResearch.exe").is_file()) {
+        return Ok(InstallChannel::Portable(dir));
+    }
     if let Some(receipt) = load_receipt()? {
         let prefix = PathBuf::from(&receipt.install_prefix);
         let prefix = crate::paths::canonicalize(&prefix).unwrap_or(prefix);
+        #[cfg(windows)]
+        if let Some(dir) = portable_outside_prefix(exe, &prefix) {
+            return Ok(InstallChannel::Portable(dir));
+        }
         return Ok(InstallChannel::Installer { receipt, prefix });
     }
     if exe.parent().is_some_and(|dir| dir.ends_with(".cargo/bin")) {
@@ -322,6 +542,17 @@ fn portable_dir(exe: &Path) -> Option<PathBuf> {
     }
     let dir = exe.parent()?;
     (!package_manager_owns(dir)).then(|| dir.to_path_buf())
+}
+
+/// A zip-extracted or desktop-app `orx.exe` away from the CLI installer's prefix
+/// still updates itself when that installer's receipt exists too.
+// Un-gated so its test runs on CI's Linux runner; only Windows has a caller.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn portable_outside_prefix(exe: &Path, prefix: &Path) -> Option<PathBuf> {
+    if exe_matches_prefix(exe, prefix) {
+        return None;
+    }
+    portable_dir(exe)
 }
 
 /// Scoop, Chocolatey and winget each install under a directory named for them;
@@ -375,7 +606,7 @@ pub fn remove_retired_exes() {
     }
 }
 
-/// A relaunched `orx up` waits here for the process it replaces to release the
+/// A relaunched `orx up` or app waits here for the process it replaces to release the
 /// port, then sweeps the binary that process was running. Only Windows
 /// relaunches by spawning; everywhere else this is a no-op.
 pub fn await_replaced_parent() {
@@ -473,6 +704,15 @@ fn probe_writable(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// How an `orx update` run ended, for the attempt bookkeeping in `commands::update`.
+pub(crate) enum Outcome {
+    Done,
+    /// Another updater holds the lock.
+    Contended,
+    /// A running backend installs it on restart instead.
+    Deferred,
+}
+
 /// What `preflight` resolved this install to. The installer variant is checked
 /// here; the bundle's checks live in `macos_app::ensure_replaceable`, which runs
 /// after the version comparison so `--dry-run` needs no signed, writable app.
@@ -481,6 +721,9 @@ pub enum UpdateTarget {
     Installer(Receipt),
     /// The `.app` root to swap. macOS only; see the `macos_app` module.
     AppBundle(PathBuf),
+    /// The `.AppImage` file to replace. Linux only; see the `linux_app` module.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    AppImage(PathBuf),
     /// The directory holding a zip-extracted `orx.exe`. Only Windows reads it.
     #[cfg_attr(not(windows), allow(dead_code))]
     Portable(PathBuf),
@@ -494,6 +737,7 @@ pub fn preflight(force: bool) -> Result<UpdateTarget> {
     let channel = detect_channel(&exe)?;
     let (receipt, prefix) = match channel {
         InstallChannel::AppBundle(root) => return Ok(UpdateTarget::AppBundle(root)),
+        InstallChannel::AppImage(file) => return Ok(UpdateTarget::AppImage(file)),
         InstallChannel::Portable(dir) => {
             probe_writable(&dir).map_err(|e| {
                 anyhow!(
@@ -581,6 +825,8 @@ struct CheckCache {
     checked_at: u64,
     /// Latest version seen at that time.
     latest: String,
+    #[serde(default)]
+    latest_tag: String,
     /// Unix seconds of the last background update *attempt* (distinct from the
     /// version check above, which is only a fetch).
     #[serde(default)]
@@ -594,18 +840,232 @@ struct CheckCache {
     /// rather than in memory because the updater is a separate process.
     #[serde(default)]
     installed_version: String,
+    #[serde(default)]
+    installed_tag: String,
+    /// A release the updater held back because a backend was using this
+    /// install; that backend installs it when it restarts.
+    #[serde(default)]
+    deferred_version: String,
+    #[serde(default)]
+    deferred_tag: String,
+    #[serde(default)]
+    compatible_releases: HashMap<String, String>,
+    /// Totals by release tag, for the latest, installed, deferred and running releases.
+    #[serde(default)]
+    changes: HashMap<String, Changes>,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    unknown: serde_json::Map<String, serde_json::Value>,
+}
+
+fn compatible_with_current(cache: &CheckCache, tag: &str) -> bool {
+    release_compatibility(
+        cache,
+        tag,
+        option_env!("ORX_DESKTOP_CANARY_TAG"),
+        option_env!("ORX_DESKTOP_CANARY_SHA"),
+        &format!("v{}", current_version()),
+    )
+}
+
+fn release_compatibility(
+    cache: &CheckCache,
+    tag: &str,
+    running_canary: Option<&str>,
+    commit: Option<&str>,
+    running_stable_tag: &str,
+) -> bool {
+    let proof = cache.compatible_releases.get(tag).map(String::as_str);
+    match (running_canary, tag.starts_with("canary-")) {
+        (None, true) => proof == Some(running_stable_tag),
+        (Some(_), _) => commit.is_some_and(|sha| proof == Some(sha)),
+        (None, false) => true,
+    }
+}
+
+fn cache_checked_release(cache: &mut CheckCache, latest: &LatestRelease, identity: Option<&str>) {
+    cache.checked_at = now_unix();
+    cache.latest = latest.version.to_string();
+    cache.latest_tag = latest.tag.clone();
+    cache
+        .compatible_releases
+        .retain(|_, proof| Some(proof.as_str()) == identity);
+    if latest.compatible {
+        if let Some(identity) = identity {
+            cache
+                .compatible_releases
+                .insert(latest.tag.clone(), identity.to_string());
+        }
+    } else if latest.tag != cache.installed_tag && latest.tag != cache.deferred_tag {
+        cache.compatible_releases.remove(&latest.tag);
+    }
+}
+
+/// What a canary build holds beyond the latest stable release, newest first.
+#[derive(Debug, Serialize)]
+pub struct BuildNotes {
+    pub base: String,
+    pub commits: Vec<String>,
+}
+
+/// The canary manifest's list of commits between the latest stable release and
+/// the canary's own commit, newest first.
+#[derive(Debug, Deserialize)]
+struct ManifestNotes {
+    base: String,
+    commits: Vec<ManifestCommit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestCommit {
+    sha: String,
+    title: String,
+}
+
+/// The commit titles this canary build holds beyond stable, read from the
+/// canary manifest: the newest canary's list, cut back to this build's commit.
+/// `None` for any other build, or when the manifest's list doesn't reach this build's commit.
+pub async fn fetch_build_notes() -> Result<Option<BuildNotes>> {
+    let Some(head) = option_env!("ORX_DESKTOP_CANARY_SHA") else {
+        return Ok(None);
+    };
+    let Some(notes) = fetch_canary_manifest(Duration::from_secs(15))
+        .await?
+        .and_then(|manifest| manifest.notes)
+    else {
+        return Ok(None);
+    };
+    let Some(start) = notes.commits.iter().position(|commit| commit.sha == head) else {
+        return Ok(None);
+    };
+    Ok(Some(BuildNotes {
+        base: notes.base,
+        commits: notes
+            .commits
+            .into_iter()
+            .skip(start)
+            .map(|commit| commit.title)
+            .collect(),
+    }))
+}
+
+/// The totals a release published, if it did: canary builds only on the canary
+/// manifest's current build, stable ones in the release's own dist manifest.
+async fn fetch_changes(tag: &str, timeout: Duration) -> Result<Option<Changes>> {
+    if tag.starts_with("canary-") {
+        return Ok(fetch_canary_manifest(timeout)
+            .await?
+            .filter(|manifest| manifest.tag == tag)
+            .and_then(|manifest| manifest.changes));
+    }
+    let res = http()
+        .get(format!(
+            "{REPO_URL}/releases/download/{tag}/dist-manifest.json"
+        ))
+        .header("user-agent", UA)
+        .timeout(timeout)
+        .send()
+        .await?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let manifest: DistManifest = res.error_for_status()?.json().await?;
+    Ok(manifest.orx_changes)
+}
+
+/// Totals of the running build: stamped in at compile time for canary builds,
+/// which their release no longer publishes once a newer canary replaces it.
+fn current_changes(cache: &CheckCache) -> Option<Changes> {
+    match option_env!("ORX_DESKTOP_CANARY_CHANGES") {
+        Some(json) => serde_json::from_str(json).ok(),
+        None => cache
+            .changes
+            .get(&format!("v{}", current_version()))
+            .copied(),
+    }
+}
+
+/// Fill in the totals the cache is missing for the releases the dashboard
+/// compares. Best effort: a release without a published marker just has no summary.
+pub async fn refresh_changes() {
+    if opted_out() {
+        return;
+    }
+    let channel = crate::telemetry::update_channel();
+    let Some(cache) = read_cache() else {
+        return;
+    };
+    let mut tags = vec![
+        cache.latest_tag.clone(),
+        cache.installed_tag.clone(),
+        cache.deferred_tag.clone(),
+    ];
+    if option_env!("ORX_DESKTOP_CANARY_CHANGES").is_none() {
+        tags.push(format!("v{}", current_version()));
+    }
+    tags.retain(|tag| !tag.is_empty());
+    tags.sort();
+    tags.dedup();
+    let mut fetched = HashMap::new();
+    // Callers wait on this optional text, so a stalled request costs seconds, not minutes.
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        for tag in tags.iter().filter(|tag| !cache.changes.contains_key(*tag)) {
+            if let Ok(Some(changes)) = fetch_changes(tag, Duration::from_secs(5)).await {
+                fetched.insert(tag.clone(), changes);
+            }
+        }
+    })
+    .await;
+    if fetched.is_empty() {
+        return;
+    }
+    mutate_cache_for(channel, |cache| {
+        cache.changes.extend(fetched);
+        cache.changes.retain(|tag, _| tags.contains(tag));
+    });
+}
+
+pub(crate) fn record_checked_release(latest: &LatestRelease) {
+    record_checked_release_for(latest, crate::telemetry::update_channel());
+}
+
+fn record_checked_release_for(latest: &LatestRelease, channel: ReleaseChannel) {
+    let stable_tag = format!("v{}", current_version());
+    let identity = if option_env!("ORX_DESKTOP_CANARY_TAG").is_some() {
+        option_env!("ORX_DESKTOP_CANARY_SHA")
+    } else if latest.tag.starts_with("canary-") {
+        Some(stable_tag.as_str())
+    } else {
+        None
+    };
+    mutate_cache_for(channel, |cache| {
+        cache_checked_release(cache, latest, identity)
+    });
 }
 
 fn cache_path() -> PathBuf {
+    cache_path_for(crate::telemetry::update_channel())
+}
+
+fn cache_path_for(release_channel: ReleaseChannel) -> PathBuf {
     // Per channel. The macOS app and a script-installed CLI share a config dir
     // but track different release trains, so one file would have each install
     // reading the other's `latest` (suppressing a real update) and the other's
     // `installed_version` — which is a restart banner for a bundle that was
     // never touched, and the one symptom here that does not self-heal.
-    let channel = current_channel()
-        .map(InstallChannel::as_str)
-        .unwrap_or("unknown");
-    crate::config::config_dir().join(format!("update-check-{channel}.json"))
+    let install = current_channel().ok();
+    let desktop = install.is_some_and(InstallChannel::has_release_channels);
+    let channel = match install.map(InstallChannel::as_str) {
+        Some("portable") if desktop => "windows-app",
+        Some(channel) => channel,
+        None => "unknown",
+    };
+    let suffix = if desktop && release_channel == ReleaseChannel::Canary {
+        "-canary"
+    } else {
+        ""
+    };
+    crate::config::config_dir().join(format!("update-check-{channel}{suffix}.json"))
 }
 
 fn now_unix() -> u64 {
@@ -623,18 +1083,14 @@ fn legacy_cache_path() -> PathBuf {
 }
 
 fn read_cache() -> Option<CheckCache> {
-    let raw = std::fs::read_to_string(cache_path())
-        .or_else(|_| std::fs::read_to_string(legacy_cache_path()))
-        .ok()?;
-    serde_json::from_str(&raw).ok()
+    read_cache_from(&cache_path(), &legacy_cache_path())
 }
 
-/// Record the latest known release.
-pub fn write_check_cache(latest: &str) {
-    mutate_cache(|cache| {
-        cache.checked_at = now_unix();
-        cache.latest = latest.to_string();
-    });
+fn read_cache_from(path: &Path, legacy: &Path) -> Option<CheckCache> {
+    let raw = std::fs::read_to_string(path)
+        .or_else(|_| std::fs::read_to_string(legacy))
+        .ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 /// Record the outcome of an update attempt: success clears the backoff, failure
@@ -660,11 +1116,117 @@ pub fn record_contended() {
 
 /// Record a version as installed on disk. Also refreshes the check fields — an
 /// install is the freshest possible answer to "what is the latest release".
-pub fn record_installed(version: &str) {
+pub fn record_installed(version: &str, tag: &str) {
     mutate_cache(|cache| {
         cache.checked_at = now_unix();
         cache.latest = version.to_string();
+        cache.latest_tag = tag.to_string();
         cache.installed_version = version.to_string();
+        cache.installed_tag = tag.to_string();
+        cache.deferred_version.clear();
+        cache.deferred_tag.clear();
+    });
+}
+
+/// Held by an `orx update` for its whole run.
+pub fn updater_lock_path() -> PathBuf {
+    let channel = current_channel()
+        .map(InstallChannel::as_str)
+        .unwrap_or("unknown");
+    crate::config::config_dir().join(format!("update-{channel}.lock"))
+}
+
+/// Whether an `orx update` is still running, e.g. one `apply_now` stopped waiting for.
+pub fn updater_running() -> bool {
+    std::fs::File::open(updater_lock_path())
+        .is_ok_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+}
+
+/// Consecutive failed update attempts recorded so far.
+pub fn failure_count() -> u32 {
+    read_cache().map_or(0, |cache| cache.failures)
+}
+
+/// Record a release held back for a running backend to install on restart.
+pub fn record_deferred(version: &str, tag: &str) {
+    mutate_cache(|cache| {
+        cache.checked_at = now_unix();
+        cache.latest = version.to_string();
+        cache.latest_tag = tag.to_string();
+        cache.deferred_version = version.to_string();
+        cache.deferred_tag = tag.to_string();
+    });
+}
+
+/// Names the release a stage directory holds. Written before the stage's final
+/// rename, so the payload and its identity are published together.
+const STAGED_RELEASE: &str = "release";
+
+pub(crate) fn write_staged_release(stage: &Path, version: &Version, tag: &str) -> Result<()> {
+    let path = stage.join(STAGED_RELEASE);
+    std::fs::write(&path, format!("{version}\n{tag}"))
+        .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))
+}
+
+/// The release staged at `stage` for a restart to install, if this build may still
+/// move to it on the selected channel.
+pub(crate) fn staged_release(stage: &Path, current: &Version) -> Option<(Version, String)> {
+    staged_release_in(
+        stage,
+        &read_cache().unwrap_or_default(),
+        current,
+        crate::telemetry::update_channel(),
+    )
+}
+
+fn staged_release_in(
+    stage: &Path,
+    cache: &CheckCache,
+    current: &Version,
+    channel: ReleaseChannel,
+) -> Option<(Version, String)> {
+    let raw = std::fs::read_to_string(stage.join(STAGED_RELEASE)).ok()?;
+    let (version, tag) = raw.split_once('\n')?;
+    let version = Version::parse(version).ok()?;
+    (valid_desktop_tag(channel, tag)
+        && release_available(current, &version, tag)
+        && compatible_with_current(cache, tag))
+    .then(|| (version, tag.to_string()))
+}
+
+fn desktop_install_pending(
+    cache: &CheckCache,
+    current: &Version,
+    running: Option<&str>,
+    commit: Option<&str>,
+) -> bool {
+    Version::parse(&cache.installed_version).is_ok_and(|version| {
+        desktop_release_available(current, &version, running, &cache.installed_tag)
+            && release_compatibility(
+                cache,
+                &cache.installed_tag,
+                running,
+                commit,
+                &format!("v{current}"),
+            )
+    })
+}
+
+pub(crate) fn channel_change_blocked_by_installed() -> bool {
+    read_cache().is_some_and(|cache| {
+        desktop_install_pending(
+            &cache,
+            &current_version(),
+            option_env!("ORX_DESKTOP_CANARY_TAG"),
+            option_env!("ORX_DESKTOP_CANARY_SHA"),
+        )
+    })
+}
+
+pub(crate) fn clear_deferred_update() {
+    mutate_cache(|cache| {
+        cache.deferred_version.clear();
+        cache.deferred_tag.clear();
     });
 }
 
@@ -711,29 +1273,19 @@ fn spawn_background_update() {
 }
 
 /// The `orx update --background` invocation both spawn sites use.
-///
-/// The environment is the load-bearing part: in macOS app mode the user's real
-/// `XDG_CONFIG_HOME`/`ORX_DATA_DIR` live only in this process (`shell_env::set`
-/// deliberately avoids `env::set_var`), so a child left to inherit launchd's
-/// environment would take its lock and write its cache under a *different*
-/// config dir than the parent reads — losing the restart signal and the backoff,
-/// and failing to serialize against a terminal `orx update`.
 fn updater_command() -> Result<tokio::process::Command> {
-    let mut cmd = tokio::process::Command::new(std::env::current_exe()?);
+    let mut cmd = crate::process::tokio_command(crate::paths::spawnable_exe()?);
     cmd.args(["update", "--background"])
         .stdin(std::process::Stdio::null());
-    if let Some(path) = crate::local::shell_env::search_path() {
-        cmd.env("PATH", path);
-    }
-    crate::local::shell_env::export_to(|key, value| {
-        cmd.env(key, value);
-    });
     // Own process group, so a Ctrl-C — or an agent killing the group it spawned
     // `orx` in — can't land between the two renames that swap the binary.
     #[cfg(unix)]
     cmd.process_group(0);
     #[cfg(windows)]
-    cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    cmd.creation_flags(
+        windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
+            | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+    );
     Ok(cmd)
 }
 
@@ -741,20 +1293,32 @@ fn updater_command() -> Result<tokio::process::Command> {
 /// version check and the attempt bookkeeping are written by different code
 /// paths, so a whole-object write from either would erase the other's.
 ///
-/// Errors are swallowed — the cache only throttles a best-effort check. The
-/// rename is what makes the *file* safe to read concurrently (never torn, always
-/// the old or a complete new one); the read-modify-write around it is unlocked,
-/// so two processes racing can still lose one side's fields. Both writers
-/// re-run often enough that a lost update costs at most one cycle, which is
-/// cheaper than holding a lock on every `orx` invocation.
 fn mutate_cache(f: impl FnOnce(&mut CheckCache)) {
-    let mut cache = read_cache().unwrap_or_default();
-    f(&mut cache);
-    let path = cache_path();
+    mutate_cache_for(crate::telemetry::update_channel(), f);
+}
+
+fn mutate_cache_for(channel: ReleaseChannel, f: impl FnOnce(&mut CheckCache)) {
+    mutate_cache_at(&cache_path_for(channel), &legacy_cache_path(), f);
+}
+
+fn mutate_cache_at(path: &Path, legacy: &Path, f: impl FnOnce(&mut CheckCache)) {
     let Some(parent) = path.parent() else {
         return;
     };
     let _ = std::fs::create_dir_all(parent);
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))
+    else {
+        return;
+    };
+    if lock.lock().is_err() {
+        return;
+    }
+    let mut cache = read_cache_from(path, legacy).unwrap_or_default();
+    f(&mut cache);
     let Ok(body) = serde_json::to_string(&cache) else {
         return;
     };
@@ -763,17 +1327,17 @@ fn mutate_cache(f: impl FnOnce(&mut CheckCache)) {
         let _ = std::fs::remove_file(&tmp);
         return;
     }
-    if std::fs::rename(&tmp, &path).is_err() {
+    if std::fs::rename(&tmp, path).is_err() {
         // Rename failed (e.g. cross-device, racing cleanup); don't leak the temp.
         let _ = std::fs::remove_file(&tmp);
         return;
     }
     // Migrated: this channel now has its own file.
-    let _ = std::fs::remove_file(legacy_cache_path());
+    let _ = std::fs::remove_file(legacy);
 }
 
 // ---------------------------------------------------------------------------
-// Status, for long-lived processes (`orx up` and the macOS app)
+// Status, for long-lived processes (`orx up` and the desktop app)
 // ---------------------------------------------------------------------------
 
 /// How often a long-lived process re-checks. Short enough that a day-long
@@ -787,11 +1351,15 @@ pub const PERIODIC_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
     pub current: String,
-    /// Latest release this install can actually move to. `None` before the first
-    /// check.
+    /// Latest published release on the selected channel, if checked.
     pub latest: Option<String>,
+    pub latest_tag: Option<String>,
     /// How orx was installed — see [`InstallChannel::as_str`].
     pub channel: &'static str,
+    pub release_channel: ReleaseChannel,
+    pub release_channels_available: bool,
+    pub waiting_for_stable: bool,
+    pub waiting_for_canary: bool,
     /// Whether this install can update itself at all.
     pub self_updates: bool,
     /// Whether an update would be applied automatically — the setting *and* the
@@ -802,10 +1370,13 @@ pub struct UpdateStatus {
     /// actually the reason.
     pub env_disabled: bool,
     pub update_available: bool,
-    /// The version already on disk when it is newer than the running one: only a
-    /// restart of *this* process is missing. Named separately from `latest`
-    /// because a release can land between the install and the restart.
+    /// What the release a restart or update moves to adds over the running build.
+    pub changes: Option<Changes>,
+    /// The version a restart of *this* process moves to: already on disk, or held
+    /// back until this backend restarts. Named separately from `latest` because a
+    /// release can land between the install and the restart.
     pub installed_version: Option<String>,
+    pub installed_tag: Option<String>,
     pub restart_required: bool,
     /// Whether `POST /api/update/restart` is honored (see [`relaunch`]); pair
     /// with `restart_required`. Always true now that every platform relaunches;
@@ -816,29 +1387,238 @@ pub struct UpdateStatus {
     pub instance: &'static str,
 }
 
+/// Installed on disk or held back for this restart: either way a restart is what moves to it.
+fn restart_target<'a>(cache: &'a CheckCache, current: &Version) -> Option<(Version, &'a str)> {
+    [
+        (&cache.installed_version, &cache.installed_tag),
+        (&cache.deferred_version, &cache.deferred_tag),
+    ]
+    .into_iter()
+    .filter_map(|(version, tag)| Some((Version::parse(version).ok()?, tag.as_str())))
+    .find(|(version, tag)| {
+        release_available(current, version, tag) && compatible_with_current(cache, tag)
+    })
+}
+
 pub fn status() -> UpdateStatus {
     let current = current_version();
     let cache = read_cache();
     let channel = current_channel().ok();
     let latest = cache.as_ref().and_then(|c| Version::parse(&c.latest).ok());
-    let installed = cache
-        .as_ref()
-        .and_then(|c| Version::parse(&c.installed_version).ok())
-        .filter(|installed| is_outdated(&current, installed));
-    UpdateStatus {
-        update_available: latest
+    let restart_target = cache.as_ref().and_then(|c| restart_target(c, &current));
+    let desktop = channel.is_some_and(InstallChannel::has_release_channels);
+    let changes = cache.as_ref().and_then(|cache| {
+        let target = restart_target
             .as_ref()
-            .is_some_and(|latest| is_outdated(&current, latest)),
-        restart_required: installed.is_some(),
+            .map_or(cache.latest_tag.as_str(), |(_, tag)| *tag);
+        cache.changes.get(target)?.since(current_changes(cache)?)
+    });
+    UpdateStatus {
+        changes,
+        waiting_for_stable: desktop
+            && option_env!("ORX_DESKTOP_CANARY_TAG").is_some()
+            && crate::telemetry::update_channel() == ReleaseChannel::Stable
+            && !cache
+                .as_ref()
+                .is_some_and(|cache| compatible_with_current(cache, &cache.latest_tag)),
+        waiting_for_canary: desktop
+            && crate::telemetry::update_channel() == ReleaseChannel::Canary
+            && cache.as_ref().is_some_and(|cache| {
+                cache.latest_tag.starts_with("canary-")
+                    && Version::parse(&cache.latest).is_ok_and(|version| {
+                        release_available(&current, &version, &cache.latest_tag)
+                    })
+                    && !compatible_with_current(cache, &cache.latest_tag)
+            }),
+        update_available: latest.as_ref().is_some_and(|latest| {
+            cache
+                .as_ref()
+                .is_some_and(|cache| compatible_with_current(cache, &cache.latest_tag))
+                && release_available(
+                    &current,
+                    latest,
+                    cache.as_ref().map_or("", |c| &c.latest_tag),
+                )
+        }),
+        restart_required: restart_target.is_some(),
         can_restart: true,
         instance: instance_id(),
-        installed_version: installed.map(|v| v.to_string()),
-        latest: latest.map(|v| v.to_string()),
+        installed_tag: restart_target
+            .as_ref()
+            .and_then(|(_, tag)| (!tag.is_empty()).then(|| tag.to_string())),
+        installed_version: restart_target.map(|(version, tag)| {
+            if tag.starts_with("canary-") {
+                tag.to_string()
+            } else {
+                version.to_string()
+            }
+        }),
+        latest_tag: latest
+            .as_ref()
+            .and(cache.as_ref())
+            .and_then(|c| (!c.latest_tag.is_empty()).then(|| c.latest_tag.clone())),
+        latest: latest.map(|v| {
+            let tag = cache.as_ref().map_or("", |c| c.latest_tag.as_str());
+            if tag.starts_with("canary-") {
+                tag.to_string()
+            } else {
+                v.to_string()
+            }
+        }),
         channel: channel.map(InstallChannel::as_str).unwrap_or("unknown"),
+        release_channel: crate::telemetry::update_channel(),
+        release_channels_available: desktop,
         self_updates: channel.map(InstallChannel::self_updates).unwrap_or(false),
         auto_update: !opted_out() && crate::config::auto_update_enabled(),
         env_disabled: opted_out(),
-        current: current.to_string(),
+        current: if desktop {
+            current_build_id().to_string()
+        } else {
+            current.to_string()
+        },
+    }
+}
+
+/// Whether [`relaunch`] would start a replacement desktop build or newer CLI.
+pub async fn updated_exe_on_disk() -> bool {
+    // This process runs from the AppImage's mount, but the updater renames a new
+    // `.AppImage` over the file, so ask whether that file was replaced instead.
+    #[cfg(all(desktop_app, target_os = "linux"))]
+    if let Some(appimage) = running_appimage() {
+        return STARTUP_APPIMAGE
+            .get()
+            .copied()
+            .flatten()
+            .is_some_and(|start| file_identity(&appimage) != Some(start));
+    }
+    let Ok(exe) = crate::paths::spawnable_exe() else {
+        return false;
+    };
+    if current_channel().is_ok_and(|channel| channel.has_release_channels()) {
+        let Ok(out) = crate::process::tokio_command(exe)
+            .args(["--no-telemetry", "version", "--build-id"])
+            .output()
+            .await
+        else {
+            return false;
+        };
+        let on_disk = String::from_utf8_lossy(&out.stdout);
+        return out.status.success()
+            && !on_disk.trim().is_empty()
+            && on_disk.trim() != current_build_id();
+    }
+    let Ok(out) = crate::process::tokio_command(exe)
+        .arg("--version")
+        .output()
+        .await
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .strip_prefix("orx ")
+        .and_then(|v| Version::parse(v).ok())
+        .is_some_and(|on_disk| is_outdated(&current_version(), &on_disk))
+}
+
+#[cfg(all(desktop_app, target_os = "linux"))]
+static STARTUP_APPIMAGE: OnceLock<Option<(u64, u64)>> = OnceLock::new();
+
+/// Note which `.AppImage` file this process started from, before an update can replace it.
+pub fn note_startup_image() {
+    #[cfg(all(desktop_app, target_os = "linux"))]
+    STARTUP_APPIMAGE.get_or_init(|| running_appimage().as_deref().and_then(file_identity));
+}
+
+#[cfg(any(all(test, unix), all(desktop_app, target_os = "linux")))]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// Whether a held-back update is waiting for this process's restart, with no failed
+/// install of it backing off and no updater still installing it.
+pub fn deferred_update_due() -> bool {
+    let current = current_version();
+    read_cache().is_some_and(|cache| {
+        Version::parse(&cache.deferred_version).is_ok_and(|v| {
+            compatible_with_current(&cache, &cache.deferred_tag)
+                && release_available(&current, &v, &cache.deferred_tag)
+        }) && (cache.failures == 0 || attempt_due(Some(&cache)))
+    }) && !updater_running()
+}
+
+/// Beside what the updater replaces, so every config and data dir using this
+/// install agrees on it.
+fn backend_lock_path() -> Option<PathBuf> {
+    let target = match current_channel().ok()? {
+        InstallChannel::AppBundle(root) | InstallChannel::AppImage(root) => root.clone(),
+        _ => current_exe().ok()?,
+    };
+    Some(target.parent()?.join(BACKEND_LOCK))
+}
+
+const BACKEND_LOCK: &str = ".orx-backend.lock";
+
+/// Where the backends of the copy `target` replaces hold their lock, which with
+/// `--force` need not be the copy running the updater.
+fn target_lock_path(target: &UpdateTarget) -> Option<PathBuf> {
+    let dir = match target {
+        UpdateTarget::Installer(receipt) => {
+            let prefix = PathBuf::from(&receipt.install_prefix);
+            let bin = prefix.join("bin");
+            if bin.is_dir() {
+                bin
+            } else {
+                prefix
+            }
+        }
+        UpdateTarget::AppBundle(file) | UpdateTarget::AppImage(file) => file.parent()?.into(),
+        UpdateTarget::Portable(dir) => dir.clone(),
+    };
+    Some(dir.join(BACKEND_LOCK))
+}
+
+fn open_lock(path: Option<PathBuf>) -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path?)
+        .ok()
+}
+
+/// Held shared for an `orx up`'s lifetime. Swapping the binary under it would hand
+/// its agents a different `orx` than the backend running them, so updaters defer.
+pub struct BackendLock {
+    _file: std::fs::File,
+}
+
+impl BackendLock {
+    /// Waits out an install in progress, so a backend never starts under one.
+    /// `None` leaves this backend unprotected, as every backend before this lock was.
+    pub fn acquire() -> Option<Self> {
+        let file = open_lock(backend_lock_path())?;
+        file.lock_shared().ok()?;
+        Some(Self { _file: file })
+    }
+}
+
+/// An updater's exclusive hold on the install, kept until it finishes replacing it.
+pub struct InstallClaim {
+    _file: Option<std::fs::File>,
+}
+
+/// `None` while an `orx up` is using this install. A lock nobody could open protects nobody.
+pub fn claim_install(target: &UpdateTarget) -> Option<InstallClaim> {
+    let Some(file) = open_lock(target_lock_path(target)) else {
+        return Some(InstallClaim { _file: None });
+    };
+    match file.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        _ => Some(InstallClaim { _file: Some(file) }),
     }
 }
 
@@ -847,10 +1627,10 @@ fn instance_id() -> &'static str {
     ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-/// Environment the app-bundle relaunch hands to the new app: the port the old
-/// one served on, so the dashboard tab that asked for the restart reconnects to
-/// the same origin instead of timing out against a fresh ephemeral port.
-#[cfg(target_os = "macos")]
+/// Environment the app relaunch hands to the new app: the port the old one
+/// served on, so the new window keeps its origin (and localStorage) even when
+/// the old one had fallen back from the app's usual port.
+#[cfg(desktop_app)]
 pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 
 /// Relaunch this process into the copy on disk. Returns only on failure.
@@ -859,10 +1639,12 @@ pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 /// (plus `--no-browser`), so whatever started it (a shell, a supervisor, an SSH launcher's tunnel)
 /// sees an uninterrupted process. The macOS app cannot be exec'd — AppKit and
 /// LaunchServices track the launch, not the image — so it exits and leaves a
-/// detached shell to `open` the bundle once the old process is gone.
+/// detached shell to `open` the bundle once the old process is gone. The Linux
+/// AppImage execs the replaced `.AppImage` file.
 ///
-/// `port` is what the dashboard is served on; the relaunch keeps it, and skips
-/// opening a browser, because the tab that asked is reloading itself.
+/// `port` is what the dashboard is served on; the relaunch keeps it. A terminal
+/// `orx up` also skips opening a browser, because the tab that asked is reloading
+/// itself; the app opens a fresh window on the same origin.
 #[cfg(unix)]
 pub fn relaunch(port: u16) -> std::io::Error {
     // Same test as `main`: the bundle exe run from a terminal with arguments is
@@ -874,46 +1656,60 @@ pub fn relaunch(port: u16) -> std::io::Error {
             None => return std::io::Error::other("could not locate the app bundle to relaunch"),
         }
     }
-    // Only the bundle relaunch needs the port; exec keeps the original `--port`.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(desktop_app, target_os = "linux"))]
+    if crate::commands::app::launched_with_app_arg() {
+        // The update replaced the `.AppImage` file, not this mount of it, and its
+        // AppRun adds `app`, which the exec below's `--no-browser` would undo.
+        let mut app = match running_appimage() {
+            Some(appimage) => {
+                let mut app = crate::process::command(appimage);
+                // Or the new AppRun would save this image's GTK settings as the session's.
+                crate::local::shell_env::restore_host_gui_env(&mut app);
+                app
+            }
+            None => {
+                let Ok(exe) = crate::paths::spawnable_exe() else {
+                    return std::io::Error::other("could not resolve the running executable");
+                };
+                let mut app = crate::process::command(exe);
+                app.arg(crate::commands::app::APP_ARG);
+                app
+            }
+        };
+        return app.env(APP_RELAUNCH_PORT_ENV, port.to_string()).exec();
+    }
+    // Only the app relaunches need the port; exec keeps the original `--port`.
+    #[cfg(not(all(desktop_app, unix)))]
     let _ = port;
 
     // Not the canonical helper: the launch path is what the installer swapped
     // under, and canonicalizing a replaced binary would pin the old inode.
-    let Ok(exe) = std::env::current_exe() else {
+    let Ok(exe) = crate::paths::spawnable_exe() else {
         return std::io::Error::other("could not resolve the running executable");
     };
-    std::process::Command::new(relaunch_target(exe))
+    crate::process::command(exe)
         .args(relaunch_args(std::env::args_os().skip(1)))
         .exec()
 }
 
 /// Windows has no `exec`: spawn the new binary, which waits for this process to
-/// exit before it binds the port, then leave.
+/// exit before it binds the port, then leave. The desktop app comes back as the
+/// app, on the same port.
 #[cfg(windows)]
-pub fn relaunch(_port: u16) -> std::io::Error {
-    windows::relaunch(relaunch_args(std::env::args_os().skip(1)))
-}
-
-/// Linux reports a replaced binary as `<path> (deleted)`; the installer put the
-/// new file at `<path>`, which is what to exec.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn relaunch_target(exe: PathBuf) -> PathBuf {
-    exe.to_str()
-        .and_then(|exe| exe.strip_suffix(" (deleted)"))
-        .map(PathBuf::from)
-        .unwrap_or(exe)
+pub fn relaunch(port: u16) -> std::io::Error {
+    if crate::commands::app::launched_with_app_arg() {
+        return windows::relaunch(
+            vec![crate::commands::app::APP_ARG.into()],
+            &[(APP_RELAUNCH_PORT_ENV, port.to_string())],
+        );
+    }
+    windows::relaunch(relaunch_args(std::env::args_os().skip(1)), &[])
 }
 
 /// The original arguments plus `--no-browser`: the tab that asked for the
-/// restart reloads itself, so a second tab would only be clutter. No arguments
-/// means a double-clicked exe, which `main` turned into `orx up`; the flag is
-/// `up`'s, so that conversion is made explicit here.
+/// restart reloads itself, so a second tab would only be clutter.
 fn relaunch_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = args.collect();
-    if args.is_empty() {
-        args.push("up".into());
-    }
     if !args.iter().any(|arg| arg == "--no-browser") {
         args.push("--no-browser".into());
     }
@@ -922,7 +1718,7 @@ fn relaunch_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi
 
 #[cfg(target_os = "macos")]
 fn relaunch_app_bundle(root: &Path, port: u16) -> std::io::Error {
-    let spawned = std::process::Command::new("/bin/sh")
+    let spawned = crate::process::command("/bin/sh")
         .arg("-c")
         .arg(r#"while kill -0 "$1" 2>/dev/null; do sleep 0.1; done; exec open -n --env "$3" "$2""#)
         .arg("sh")
@@ -941,7 +1737,7 @@ fn relaunch_app_bundle(root: &Path, port: u16) -> std::io::Error {
     }
 }
 
-/// The newest version *this* install can move to.
+/// The newest release published for this install and selected channel.
 ///
 /// The channel decides which manifest answers, and getting this wrong is
 /// user-visible: the macOS app installs from `macos-app.json`, which is attached
@@ -949,14 +1745,128 @@ fn relaunch_app_bundle(root: &Path, port: u16) -> std::io::Error {
 /// behind the CLI's `dist-manifest.json`. Reporting the CLI's version to an app
 /// install would advertise — and endlessly re-attempt — a build that does not
 /// exist for it. `Ok(None)` means "nothing newer published for this channel".
-pub async fn fetch_latest_for_channel(timeout: Duration) -> Result<Option<Version>> {
-    if matches!(current_channel(), Ok(InstallChannel::AppBundle(_))) {
-        return Ok(macos_app::fetch_manifest(timeout)
+pub async fn fetch_latest_for_channel(timeout: Duration) -> Result<Option<LatestRelease>> {
+    #[cfg(windows)]
+    let mut canary_asset = None;
+    let candidate = match current_channel() {
+        Ok(InstallChannel::AppBundle(_)) => macos_app::fetch_manifest(timeout)
             .await?
-            .map(|manifest| Version::parse(&manifest.version))
-            .transpose()?);
+            .map(|m| (m.version, m.tag, m.ancestors)),
+        #[cfg(target_os = "linux")]
+        Ok(InstallChannel::AppImage(_)) => linux_app::fetch_manifest(timeout)
+            .await?
+            .map(|m| (m.version, m.tag, m.ancestors)),
+        #[cfg(windows)]
+        Ok(channel) if channel.has_release_channels() => {
+            if crate::telemetry::update_channel() == ReleaseChannel::Canary {
+                windows::fetch_manifest(timeout).await?.map(|m| {
+                    canary_asset = Some(ReleaseAsset {
+                        asset: m.asset,
+                        sha256: m.sha256,
+                    });
+                    (m.version, m.tag, m.ancestors)
+                })
+            } else {
+                let latest = fetch_latest(timeout).await?;
+                Some((latest.version.to_string(), latest.tag, Vec::new()))
+            }
+        }
+        _ => return Ok(Some(fetch_latest(timeout).await?)),
+    };
+    let Some((version, tag, ancestors)) = candidate else {
+        return Ok(None);
+    };
+    Ok(Some(LatestRelease {
+        version: Version::parse(&version)?,
+        compatible: release_is_compatible(&tag, &ancestors, timeout).await?,
+        tag,
+        #[cfg(windows)]
+        canary_asset,
+    }))
+}
+
+async fn release_is_compatible(tag: &str, ancestors: &[String], timeout: Duration) -> Result<bool> {
+    let running_canary = option_env!("ORX_DESKTOP_CANARY_TAG");
+    if !tag.starts_with("canary-") && running_canary.is_none() {
+        return Ok(true);
     }
-    Ok(Some(fetch_latest(timeout).await?.version))
+    if tag.starts_with("canary-") {
+        if running_canary.is_some() {
+            return Ok(option_env!("ORX_DESKTOP_CANARY_SHA")
+                .is_some_and(|sha| ancestors.iter().any(|ancestor| ancestor == sha)));
+        }
+        let stable_tag = format!("v{}", current_version());
+        let url = format!("{REPO_URL}/releases/download/{stable_tag}/desktop-ancestry.json");
+        let response = http()
+            .get(url)
+            .header("user-agent", UA)
+            .timeout(timeout)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        let stable_ancestors: Vec<String> = response.error_for_status()?.json().await?;
+        return Ok(canary_includes_stable(ancestors, &stable_ancestors));
+    }
+    let Some(sha) = option_env!("ORX_DESKTOP_CANARY_SHA") else {
+        return Ok(false);
+    };
+    let url = format!("{REPO_URL}/releases/download/{tag}/desktop-ancestry.json");
+    let response = http()
+        .get(url)
+        .header("user-agent", UA)
+        .timeout(timeout)
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    let ancestors: Vec<String> = response.error_for_status()?.json().await?;
+    Ok(ancestors.iter().any(|ancestor| ancestor == sha))
+}
+
+fn canary_includes_stable(canary_ancestors: &[String], stable_ancestors: &[String]) -> bool {
+    stable_ancestors
+        .first()
+        .is_some_and(|stable_commit| canary_ancestors.contains(stable_commit))
+}
+
+pub(crate) fn compatibility_wait_message(tag: &str) -> &'static str {
+    if tag.starts_with("canary-") {
+        "Canary will be available after it includes this build."
+    } else {
+        "Stable will be available after it includes this canary build."
+    }
+}
+
+/// Fetches a desktop app's release manifest. `Ok(None)` for a 404 — the expected
+/// state between a release being published and its app build being attached.
+/// That is "nothing to update to yet", never an error the user should see.
+async fn fetch_app_manifest<T: serde::de::DeserializeOwned>(
+    asset: &str,
+    timeout: Duration,
+) -> Result<Option<T>> {
+    let url = format!("{REPO_URL}/releases/latest/download/{asset}");
+    let res = http()
+        .get(&url)
+        .header("user-agent", UA)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Could not fetch {asset}: {e}"))?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let status = res.status();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "{asset} request failed ({} {})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("")
+        ));
+    }
+    Ok(Some(serde_json::from_str(&res.text().await?)?))
 }
 
 /// Apply an update right now, on request, ignoring the backoff — a person
@@ -991,6 +1901,7 @@ pub async fn apply_now() -> Result<()> {
             }
         ));
     }
+    refresh_changes().await;
     Ok(())
 }
 
@@ -1001,7 +1912,7 @@ pub async fn apply_now() -> Result<()> {
 const APPLY_NOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// One update pass for a process that outlives the invocation-time check in
-/// [`UpdateWarning::start`] — `orx up` and the macOS app can run for days, so
+/// [`UpdateWarning::start`] — `orx up` and the desktop app can run for days, so
 /// they poll instead.
 ///
 /// The check is refreshed even when auto-update is off, so the dashboard can
@@ -1013,9 +1924,17 @@ pub async fn periodic_update_pass() {
     if opted_out() {
         return;
     }
+    let selected = crate::telemetry::update_channel();
     if let Ok(Some(latest)) = fetch_latest_for_channel(Duration::from_secs(10)).await {
-        write_check_cache(&latest.to_string());
+        if selected != crate::telemetry::update_channel() {
+            return;
+        }
+        record_checked_release_for(&latest, selected);
     }
+    if selected != crate::telemetry::update_channel() {
+        return;
+    }
+    refresh_changes().await;
     if !auto_update_eligible() {
         return;
     }
@@ -1023,7 +1942,16 @@ pub async fn periodic_update_pass() {
     let outdated = cache
         .as_ref()
         .and_then(|c| Version::parse(&c.latest).ok())
-        .is_some_and(|latest| is_outdated(&current_version(), &latest));
+        .is_some_and(|latest| {
+            cache
+                .as_ref()
+                .is_some_and(|cache| compatible_with_current(cache, &cache.latest_tag))
+                && release_available(
+                    &current_version(),
+                    &latest,
+                    cache.as_ref().map_or("", |c| &c.latest_tag),
+                )
+        });
     if outdated && attempt_due(cache.as_ref()) {
         spawn_background_update();
     }
@@ -1103,6 +2031,14 @@ pub(crate) fn is_outdated(current: &Version, latest: &Version) -> bool {
     precedence(latest) > precedence(current)
 }
 
+pub(crate) fn release_available(current: &Version, latest: &Version, tag: &str) -> bool {
+    if current_channel().is_ok_and(|channel| channel.has_release_channels()) {
+        desktop_release_available(current, latest, option_env!("ORX_DESKTOP_CANARY_TAG"), tag)
+    } else {
+        is_outdated(current, latest)
+    }
+}
+
 /// Builds the outdated-version warning, or `None` when `current` is not behind.
 ///
 /// Because orx talks to a versioned backend, a stale client can hit removed or
@@ -1114,7 +2050,13 @@ pub(crate) fn is_outdated(current: &Version, latest: &Version) -> bool {
 /// downloading and the *next* invocation will be current. Installs orx doesn't
 /// own (cargo/Homebrew/Nix), and anyone who turned auto-update off, keep the
 /// manual instruction.
-fn warning_for(current: &Version, latest: &Version, orx: &str, automatic: bool) -> Option<String> {
+fn warning_for(
+    current: &Version,
+    latest: &Version,
+    orx: &str,
+    automatic: bool,
+    tag: Option<&str>,
+) -> Option<String> {
     if !is_outdated(current, latest) {
         return None;
     }
@@ -1123,10 +2065,32 @@ fn warning_for(current: &Version, latest: &Version, orx: &str, automatic: bool) 
     } else {
         format!("Run `{orx} update` to upgrade.")
     };
+    let notes = tag
+        .map(|tag| format!(" Release notes: {REPO_URL}/releases/tag/{tag}"))
+        .unwrap_or_default();
     Some(format!(
         "{WARNING_LABEL} orx {current} is outdated (latest {latest}). A newer release is \
-         available; upgrade to stay compatible with the API. {remedy}"
+         available; upgrade to stay compatible with the API. {remedy}{notes}"
     ))
+}
+
+/// For an agent whose `orx up` predates restarting itself into updates: it keeps
+/// serving the old code, which the version this CLI reports no longer describes.
+fn stale_up_warning() -> Option<String> {
+    let up_version = std::env::var(crate::local::chat::UP_VERSION_ENV)
+        .ok()
+        .and_then(|version| Version::parse(&version).ok());
+    (matches!(crate::local::chat::trusted_up_port(), Ok(Some(_)))
+        && up_version.is_none_or(|version| is_outdated(&version, &current_version())))
+    .then(|| {
+        format!(
+            "{WARNING_LABEL} this session's `orx up` is older than orx {} and still runs its \
+             old code, so runs it launches and sandboxes it builds miss this version's fixes. \
+             Ask the user to restart `orx up` (or click Restart in the dashboard's update \
+             banner) once no chats are running.",
+            current_version()
+        )
+    })
 }
 
 /// The outdated-version warning, modeled on the gh CLI / update-notifier
@@ -1156,7 +2120,14 @@ impl UpdateWarning {
     /// refresh of the cached "latest" for next time. Printing here — rather than
     /// after the command — is what guarantees the warning shows even when the
     /// command exits the process itself.
-    pub fn start() -> UpdateWarning {
+    pub fn start(may_update: bool) -> UpdateWarning {
+        if let Some(message) = stale_up_warning() {
+            let _ = write!(
+                std::io::stderr(),
+                "{}",
+                render(&message, stderr_supports_ansi())
+            );
+        }
         if opted_out() {
             return UpdateWarning { refresh: None };
         }
@@ -1166,14 +2137,29 @@ impl UpdateWarning {
         let cached_latest = cache.as_ref().and_then(|c| Version::parse(&c.latest).ok());
         // Resolved once: it reads settings.json and canonicalizes the exe, and
         // both the message and the spawn decision below depend on it.
-        let automatic = cached_latest
-            .as_ref()
-            .is_some_and(|latest| is_outdated(&current, latest))
-            && auto_update_eligible();
+        let available = cached_latest.as_ref().is_some_and(|latest| {
+            cache.as_ref().is_some_and(|cache| {
+                compatible_with_current(cache, &cache.latest_tag)
+                    && release_available(&current, latest, &cache.latest_tag)
+            })
+        });
+        let automatic = available && auto_update_eligible();
 
         if let Some(message) = cached_latest
             .as_ref()
-            .and_then(|latest| warning_for(&current, latest, crate::invocation::orx(), automatic))
+            .filter(|_| available)
+            .and_then(|latest| {
+                warning_for(
+                    &current,
+                    latest,
+                    crate::invocation::orx(),
+                    automatic,
+                    cache
+                        .as_ref()
+                        .map(|c| c.latest_tag.as_str())
+                        .filter(|tag| !tag.is_empty()),
+                )
+            })
         {
             // Infallible: a closed/broken stderr (e.g. `2>&-`, or a reader that
             // already exited) must not panic the process before the command even
@@ -1185,7 +2171,7 @@ impl UpdateWarning {
             );
         }
 
-        if automatic && attempt_due(cache.as_ref()) {
+        if may_update && automatic && attempt_due(cache.as_ref()) {
             spawn_background_update();
         }
 
@@ -1200,22 +2186,31 @@ impl UpdateWarning {
             return UpdateWarning { refresh: None };
         }
 
-        let prev_latest = cache.map(|c| c.latest);
+        let prev_latest = cache.map(|c| (c.latest, c.latest_tag));
+        let selected = crate::telemetry::update_channel();
         let handle = tokio::spawn(async move {
             let latest = fetch_latest_for_channel(Duration::from_secs(3))
                 .await
                 .ok()
-                .flatten()
-                .map(|v| v.to_string());
+                .flatten();
+            if selected != crate::telemetry::update_channel() {
+                return;
+            }
+            if let Some(latest) = latest {
+                record_checked_release_for(&latest, selected);
+                return;
+            }
             // On fetch failure, refresh checked_at with the old answer so errors
             // don't cause a retry on every invocation. Only fabricate `current`
             // as a last resort (no cache, no previous answer): a one-off failed
             // fetch then suppresses the warning until the TTL lapses, which is
             // the price of not re-fetching on every offline invocation.
-            let value = latest
-                .or(prev_latest)
-                .unwrap_or_else(|| current.to_string());
-            write_check_cache(&value);
+            let value = prev_latest.unwrap_or_else(|| (current.to_string(), String::new()));
+            mutate_cache_for(selected, |cache| {
+                cache.checked_at = now_unix();
+                cache.latest = value.0;
+                cache.latest_tag = value.1;
+            });
         });
 
         UpdateWarning {
@@ -1252,15 +2247,62 @@ impl UpdateWarning {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_root, attempt_backoff, attempt_due, bold, detect_channel, exe_matches_prefix,
-        now_unix, package_manager_owns, parse_manifest, portable_dir, precedence, relaunch_args,
-        relaunch_target, render, retired_path, warning_for, CheckCache, InstallChannel,
-        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, current_version,
+        detect_channel, exe_matches_prefix, now_unix, package_manager_owns, parse_manifest,
+        portable_dir, portable_outside_prefix, precedence, relaunch_args, release_asset_url,
+        render, restart_target, retired_path, staged_release_in, target_lock_path, warning_for,
+        write_staged_release, BackendLock, Changes, CheckCache, DistManifest, InstallChannel,
+        ReleaseChannel, UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
     use std::path::Path;
     use std::path::PathBuf;
+
+    #[test]
+    fn changes_are_the_difference_of_cumulative_totals() {
+        let total = |features, fixes, other| Changes {
+            features,
+            fixes,
+            other,
+        };
+        assert_eq!(
+            total(12, 30, 9).since(total(10, 30, 4)),
+            Some(total(2, 0, 5))
+        );
+        assert_eq!(total(12, 30, 9).since(total(13, 30, 4)), None);
+    }
+
+    #[test]
+    fn dist_manifest_publishes_changes_only_when_marked() {
+        let marked =
+            r#"{"announcement_tag":"v1.0.0","orx_changes":{"features":3,"fixes":2,"other":1}}"#;
+        let manifest: DistManifest = serde_json::from_str(marked).unwrap();
+        assert_eq!(
+            manifest.orx_changes,
+            Some(Changes {
+                features: 3,
+                fixes: 2,
+                other: 1
+            })
+        );
+        let manifest: DistManifest =
+            serde_json::from_str(r#"{"announcement_tag":"v0.1.0"}"#).unwrap();
+        assert_eq!(manifest.orx_changes, None);
+    }
+
+    #[test]
+    fn canary_assets_live_in_the_shared_canary_release() {
+        let base = "https://github.com/alphaXiv/OpenResearch/releases/download";
+        assert_eq!(
+            release_asset_url("canary-20261027.3", "canary-20261027.3--OpenResearch.dmg"),
+            format!("{base}/canary/canary-20261027.3--OpenResearch.dmg")
+        );
+        assert_eq!(
+            release_asset_url("v0.2.22", "OpenResearch.dmg"),
+            format!("{base}/v0.2.22/OpenResearch.dmg")
+        );
+    }
 
     #[test]
     fn render_sets_off_the_warning_in_its_own_block() {
@@ -1307,6 +2349,192 @@ mod tests {
         assert!(precedence(&v("0.2.0")) > precedence(&v("0.1.29")));
     }
 
+    #[test]
+    fn desktop_channels_switch_in_both_directions_and_order_canaries() {
+        let current = Version::parse("0.2.21").unwrap();
+        let older_stable = Version::parse("0.2.20").unwrap();
+        let available =
+            |running, tag| super::desktop_release_available(&current, &older_stable, running, tag);
+        assert!(available(None, "canary-20261026.1"));
+        assert!(available(Some("canary-20261026.2"), "v0.2.20"));
+        assert!(available(Some("canary-20261026.2"), "canary-20261026.10"));
+        assert!(available(Some("canary-20261026.10"), "canary-20261027.1"));
+        assert!(!available(Some("canary-20261026.10"), "canary-20261026.2"));
+        assert!(!available(Some("canary-20261026.10"), "canary-20261026.10"));
+        assert!(!available(None, "canary-bogus"));
+        assert!(!available(None, "v0.2.20"));
+    }
+
+    #[test]
+    fn stable_switch_requires_proof_for_the_running_canary_and_target_release() {
+        let mut cache = CheckCache::default();
+        let allowed = |cache: &CheckCache, tag, sha| {
+            super::release_compatibility(cache, tag, Some("canary-20261026.1"), sha, "v0.2.21")
+        };
+        assert!(!allowed(&cache, "v0.2.21", Some("a")));
+        cache
+            .compatible_releases
+            .insert("v0.2.21".into(), "a".into());
+        assert!(allowed(&cache, "v0.2.21", Some("a")));
+        assert!(!allowed(&cache, "v0.2.22", Some("a")));
+        assert!(!allowed(&cache, "v0.2.21", Some("b")));
+        assert!(!allowed(&cache, "v0.2.21", None));
+        assert!(!allowed(&cache, "canary-20261027.1", Some("b")));
+        cache
+            .compatible_releases
+            .insert("canary-20261027.1".into(), "b".into());
+        assert!(allowed(&cache, "canary-20261027.1", Some("b")));
+    }
+
+    #[test]
+    fn canary_switch_requires_the_current_stable_commit_in_its_ancestry() {
+        let stable = vec!["stable".into(), "older".into()];
+        assert!(!super::canary_includes_stable(&["older".into()], &stable));
+        assert!(super::canary_includes_stable(
+            &["stable".into(), "older".into()],
+            &stable
+        ));
+        assert!(super::canary_includes_stable(
+            &["newer".into(), "stable".into()],
+            &stable
+        ));
+        assert!(!super::canary_includes_stable(&["stable".into()], &[]));
+
+        let mut cache = CheckCache::default();
+        let allowed = |cache: &CheckCache, tag, stable| {
+            super::release_compatibility(cache, tag, None, None, stable)
+        };
+        assert!(!allowed(&cache, "canary-20261027.1", "v0.2.21"));
+        cache
+            .compatible_releases
+            .insert("canary-20261027.1".into(), "v0.2.21".into());
+        assert!(allowed(&cache, "canary-20261027.1", "v0.2.21"));
+        assert!(!allowed(&cache, "canary-20261027.2", "v0.2.21"));
+        assert!(!allowed(&cache, "canary-20261027.1", "v0.2.22"));
+    }
+
+    #[test]
+    fn changing_channels_is_blocked_only_for_an_installed_pending_update() {
+        let current = Version::parse("0.2.21").unwrap();
+        let mut cache = CheckCache {
+            deferred_version: "0.2.21".into(),
+            deferred_tag: "canary-20261027.1".into(),
+            ..Default::default()
+        };
+        assert!(!super::desktop_install_pending(
+            &cache, &current, None, None
+        ));
+        cache.installed_version = "0.2.21".into();
+        cache.installed_tag = "canary-20261027.1".into();
+        cache
+            .compatible_releases
+            .insert(cache.installed_tag.clone(), "v0.2.21".into());
+        assert!(super::desktop_install_pending(&cache, &current, None, None));
+        assert!(!super::desktop_install_pending(
+            &cache,
+            &current,
+            Some("canary-20261027.1"),
+            Some("running")
+        ));
+        cache.installed_tag = "v0.2.21".into();
+        cache
+            .compatible_releases
+            .insert(cache.installed_tag.clone(), "previous".into());
+        assert!(!super::desktop_install_pending(
+            &cache,
+            &current,
+            Some("canary-20261027.1"),
+            Some("running")
+        ));
+        cache
+            .compatible_releases
+            .insert(cache.installed_tag.clone(), "running".into());
+        assert!(super::desktop_install_pending(
+            &cache,
+            &current,
+            Some("canary-20261027.1"),
+            Some("running")
+        ));
+    }
+
+    #[test]
+    fn checking_a_new_release_preserves_proof_for_an_inflight_or_pending_update() {
+        let version = Version::parse("0.2.21").unwrap();
+        for (first, second, identity) in [
+            ("canary-20261027.1", "canary-20261027.2", "v0.2.21"),
+            ("v0.2.22", "v0.2.23", "running-canary-sha"),
+        ] {
+            for pending in ["installing", "installed", "deferred"] {
+                let mut cache = CheckCache::default();
+                let release = |tag: &str| super::LatestRelease {
+                    version: version.clone(),
+                    tag: tag.into(),
+                    compatible: true,
+                    #[cfg(windows)]
+                    canary_asset: None,
+                };
+                super::cache_checked_release(&mut cache, &release(first), Some(identity));
+                if pending == "installed" {
+                    cache.installed_tag = first.into();
+                } else if pending == "deferred" {
+                    cache.deferred_tag = first.into();
+                }
+                super::cache_checked_release(&mut cache, &release(second), Some(identity));
+                assert_eq!(
+                    cache.compatible_releases.get(first).map(String::as_str),
+                    Some(identity)
+                );
+                assert_eq!(
+                    cache.compatible_releases.get(second).map(String::as_str),
+                    Some(identity)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_cache_writes_preserve_each_channel() {
+        let dir = std::env::temp_dir().join(format!("orx-update-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stable = dir.join("stable.json");
+        let canary = dir.join("canary.json");
+        let legacy = dir.join("legacy.json");
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let path = if index % 2 == 0 { &stable } else { &canary };
+                let legacy = &legacy;
+                scope.spawn(move || {
+                    for _ in 0..25 {
+                        super::mutate_cache_at(path, legacy, |cache| cache.failures += 1);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            super::read_cache_from(&stable, &legacy).unwrap().failures,
+            100
+        );
+        assert_eq!(
+            super::read_cache_from(&canary, &legacy).unwrap().failures,
+            100
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn canary_manifest_describes_all_desktop_assets() {
+        let manifest: super::CanaryManifest = serde_json::from_str(
+            r#"{"version":"0.2.21","tag":"canary-20261027.2","commit":"abc","ancestors":["abc"],"assets":{"macos":{"asset":"OpenResearch.dmg","sha256":"1"},"windows":{"asset":"OpenResearch-Canary-orx.exe","sha256":"2"},"linux-x86_64":{"asset":"OpenResearch-x86_64.AppImage","sha256":"3"}}}"#,
+        ).unwrap();
+        assert_eq!(manifest.tag, "canary-20261027.2");
+        assert_eq!(manifest.assets["macos"].asset, "OpenResearch.dmg");
+        assert_eq!(manifest.assets["windows"].sha256, "2");
+        assert_eq!(
+            manifest.assets["linux-x86_64"].asset,
+            "OpenResearch-x86_64.AppImage"
+        );
+    }
+
     // Every outdated case shows the same message; assert its stable markers
     // without pinning the exact copy.
     fn assert_warns(msg: &str) {
@@ -1319,13 +2547,13 @@ mod tests {
     fn no_warning_when_current_or_ahead() {
         let v = |s: &str| Version::parse(s).unwrap();
         // Exactly current.
-        assert!(warning_for(&v("0.1.29"), &v("0.1.29"), "orx", false).is_none());
+        assert!(warning_for(&v("0.1.29"), &v("0.1.29"), "orx", false, None).is_none());
         // Local build ahead of the latest release.
-        assert!(warning_for(&v("0.2.0"), &v("0.1.29"), "orx", false).is_none());
+        assert!(warning_for(&v("0.2.0"), &v("0.1.29"), "orx", false, None).is_none());
         // Build metadata is ignored by semver ordering, so it's not "outdated".
-        assert!(warning_for(&v("0.1.29"), &v("0.1.29+build.5"), "orx", false).is_none());
+        assert!(warning_for(&v("0.1.29"), &v("0.1.29+build.5"), "orx", false, None).is_none());
         // Running ahead of the latest stable on a local pre-release: not outdated.
-        assert!(warning_for(&v("0.3.0-dev.1"), &v("0.2.0"), "orx", false).is_none());
+        assert!(warning_for(&v("0.3.0-dev.1"), &v("0.2.0"), "orx", false, None).is_none());
     }
 
     #[test]
@@ -1345,7 +2573,7 @@ mod tests {
             ("0.1.29", "0.2.0-rc.1"), // behind the next minor's pre-release
         ] {
             assert_warns(
-                &warning_for(&v(cur), &v(latest), "orx", false).unwrap_or_else(|| {
+                &warning_for(&v(cur), &v(latest), "orx", false, None).unwrap_or_else(|| {
                     panic!("expected a warning for {cur} -> {latest}");
                 }),
             );
@@ -1357,12 +2585,30 @@ mod tests {
         let v = |s: &str| Version::parse(s).unwrap();
         // Auto-updating installs are told what is happening, not what to run:
         // the command would be busywork for something already underway.
-        let auto = warning_for(&v("0.1.28"), &v("0.1.29"), "orx", true).unwrap();
+        let auto = warning_for(&v("0.1.28"), &v("0.1.29"), "orx", true, None).unwrap();
         assert!(auto.contains("outdated"), "{auto}");
         assert!(auto.contains("in the background"), "{auto}");
         assert!(!auto.contains("Run `orx update`"), "{auto}");
         // The manual form is unchanged for the channels orx doesn't own.
-        assert_warns(&warning_for(&v("0.1.28"), &v("0.1.29"), "orx", false).unwrap());
+        assert_warns(&warning_for(&v("0.1.28"), &v("0.1.29"), "orx", false, None).unwrap());
+
+        let notes = warning_for(
+            &v("0.1.28"),
+            &v("0.1.29"),
+            "orx",
+            false,
+            Some("releases/v0.1.29"),
+        )
+        .unwrap();
+        assert!(notes.contains("/releases/tag/releases/v0.1.29"), "{notes}");
+    }
+
+    #[test]
+    fn old_update_cache_without_tags_still_loads() {
+        let cache: CheckCache =
+            serde_json::from_str(r#"{"checked_at":1,"latest":"0.2.13"}"#).unwrap();
+        assert!(cache.latest_tag.is_empty());
+        assert!(cache.installed_tag.is_empty());
     }
 
     #[test]
@@ -1374,6 +2620,146 @@ mod tests {
         // shift.
         assert_eq!(attempt_backoff(20), ATTEMPT_BACKOFF_MAX);
         assert_eq!(attempt_backoff(u32::MAX), ATTEMPT_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn a_deferred_update_is_a_restart_target() {
+        let v = |s: &str| Version::parse(s).unwrap();
+        let mut cache = CheckCache {
+            deferred_version: "0.2.17".into(),
+            deferred_tag: "v0.2.17".into(),
+            ..Default::default()
+        };
+        if let Some(sha) = option_env!("ORX_DESKTOP_CANARY_SHA") {
+            for tag in ["v0.2.17", "v0.2.18", "v0.2.19"] {
+                cache.compatible_releases.insert(tag.into(), sha.into());
+            }
+        }
+        assert_eq!(
+            restart_target(&cache, &v("0.2.16")),
+            Some((v("0.2.17"), "v0.2.17"))
+        );
+        // An installed version is what restart will run, even if another is deferred.
+        cache.installed_version = "0.2.18".into();
+        cache.installed_tag = "v0.2.18".into();
+        cache.deferred_version = "0.2.19".into();
+        cache.deferred_tag = "v0.2.19".into();
+        assert_eq!(restart_target(&cache, &v("0.2.16")).unwrap().0, v("0.2.18"));
+        assert_eq!(restart_target(&cache, &v("0.2.18")).unwrap().0, v("0.2.19"));
+    }
+
+    #[test]
+    fn a_stage_names_its_own_release_and_needs_a_proof_for_this_build() {
+        let v = |s: &str| Version::parse(s).unwrap();
+        let stage = std::env::temp_dir().join(format!("orx-stage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&stage).unwrap();
+        let proof = option_env!("ORX_DESKTOP_CANARY_SHA")
+            .map_or_else(|| format!("v{}", current_version()), str::to_string);
+        // The cache still names an earlier stage, as after a restage killed before
+        // `record_deferred`.
+        let mut cache = CheckCache {
+            deferred_version: "0.2.17".into(),
+            deferred_tag: "v0.2.17".into(),
+            ..Default::default()
+        };
+        for tag in ["v0.2.17", "v0.2.18"] {
+            cache.compatible_releases.insert(tag.into(), proof.clone());
+        }
+
+        let stable =
+            |current: &str| staged_release_in(&stage, &cache, &v(current), ReleaseChannel::Stable);
+        assert_eq!(stable("0.2.16"), None);
+        // A restage killed after removing the old stage leaves none: the download path runs.
+        assert_eq!(
+            staged_release_in(
+                &stage.join("gone"),
+                &cache,
+                &v("0.2.16"),
+                ReleaseChannel::Stable
+            ),
+            None
+        );
+
+        write_staged_release(&stage, &v("0.2.18"), "v0.2.18").unwrap();
+        assert_eq!(stable("0.2.16"), Some((v("0.2.18"), "v0.2.18".into())));
+        assert_eq!(stable("0.2.18"), None);
+        // A stable stage left behind by a switch to the canary channel.
+        assert_eq!(
+            staged_release_in(&stage, &cache, &v("0.2.16"), ReleaseChannel::Canary),
+            None
+        );
+
+        // A canary staged by another build, e.g. before a newer stable was installed
+        // by hand, is not this build's to install.
+        write_staged_release(&stage, &v("0.2.19"), "canary-20261027.1").unwrap();
+        cache
+            .compatible_releases
+            .insert("canary-20261027.1".into(), "v0.0.0-another-build".into());
+        let canary = |cache: &CheckCache| {
+            staged_release_in(&stage, cache, &v("0.2.16"), ReleaseChannel::Canary)
+        };
+        assert_eq!(canary(&cache), None);
+        cache
+            .compatible_releases
+            .insert("canary-20261027.1".into(), proof);
+        assert_eq!(
+            canary(&cache),
+            Some((v("0.2.19"), "canary-20261027.1".into()))
+        );
+        assert_eq!(
+            staged_release_in(&stage, &cache, &v("0.2.16"), ReleaseChannel::Stable),
+            None
+        );
+
+        std::fs::remove_dir_all(&stage).unwrap();
+    }
+
+    #[test]
+    fn an_updater_defers_only_while_a_backend_holds_its_lock() {
+        let exe = std::env::current_exe().unwrap();
+        let target = UpdateTarget::Portable(exe.parent().unwrap().to_path_buf());
+        let lock = BackendLock::acquire().expect("backend lock beside the test binary");
+        assert!(claim_install(&target).is_none());
+        drop(lock);
+        let claim = claim_install(&target).expect("no backend running");
+        // The claim excludes backends until the install finishes.
+        assert!(claim_install(&target).is_none());
+        drop(claim);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renaming_a_new_file_over_an_image_changes_its_identity() {
+        use super::file_identity;
+        let dir = std::env::temp_dir().join(format!("orx-image-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("OpenResearch.AppImage");
+        std::fs::write(&image, "old").unwrap();
+        let start = file_identity(&image);
+        std::fs::write(dir.join("new"), "new").unwrap();
+        std::fs::rename(dir.join("new"), &image).unwrap();
+        assert!(start.is_some() && file_identity(&image) != start);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_installer_update_locks_beside_the_receipts_binary() {
+        let prefix = std::env::temp_dir().join(format!("orx-lock-{}", uuid::Uuid::new_v4()));
+        let target = UpdateTarget::Installer(super::Receipt {
+            install_prefix: prefix.to_string_lossy().into_owned(),
+            version: "0.2.15".into(),
+            modify_path: false,
+        });
+        assert_eq!(
+            target_lock_path(&target),
+            Some(prefix.join(".orx-backend.lock"))
+        );
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        assert_eq!(
+            target_lock_path(&target),
+            Some(prefix.join("bin").join(".orx-backend.lock"))
+        );
+        std::fs::remove_dir_all(&prefix).unwrap();
     }
 
     #[test]
@@ -1422,6 +2808,18 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_desktop_is_distinct_from_a_portable_cli() {
+        let dir = std::env::temp_dir().join(format!("orx-desktop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let channel = InstallChannel::Portable(dir.clone());
+        assert!(!channel.has_release_channels());
+        std::fs::write(dir.join("OpenResearch.exe"), []).unwrap();
+        assert!(channel.has_release_channels());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn a_bundle_root_is_the_directory_above_contents() {
         assert_eq!(
@@ -1433,18 +2831,6 @@ mod tests {
         // Anything not laid out as a bundle executable.
         assert_eq!(app_bundle_root(Path::new("/usr/local/bin/orx")), None);
         assert_eq!(app_bundle_root(Path::new("/a/Contents/orx")), None);
-    }
-
-    #[test]
-    fn relaunch_target_strips_the_deleted_marker() {
-        assert_eq!(
-            relaunch_target(PathBuf::from("/x/orx (deleted)")),
-            PathBuf::from("/x/orx")
-        );
-        assert_eq!(
-            relaunch_target(PathBuf::from("/x/orx")),
-            PathBuf::from("/x/orx")
-        );
     }
 
     #[test]
@@ -1471,6 +2857,63 @@ mod tests {
         );
         assert_eq!(portable_dir(Path::new("Downloads/orx-0.2.exe")), None);
         assert_eq!(portable_dir(Path::new("Downloads/ORX.EXE")), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn only_the_orx_inside_the_mount_is_the_appimage() {
+        use super::appimage_file;
+        use std::ffi::OsStr;
+        let (appdir, appimage) = (
+            Some(OsStr::new("/tmp/.mount_OpenReAbc")),
+            Some(OsStr::new("/home/me/Applications/OpenResearch.AppImage")),
+        );
+        assert_eq!(
+            appimage_file(
+                Path::new("/tmp/.mount_OpenReAbc/usr/bin/orx"),
+                appdir,
+                appimage
+            ),
+            Some(PathBuf::from("/home/me/Applications/OpenResearch.AppImage"))
+        );
+        // An agent inherits APPDIR, but runs some other orx.
+        assert_eq!(
+            appimage_file(Path::new("/home/me/.cargo/bin/orx"), appdir, appimage),
+            None
+        );
+        assert_eq!(
+            appimage_file(
+                Path::new("/tmp/.mount_OpenReAbc/usr/bin/orx"),
+                None,
+                appimage
+            ),
+            None
+        );
+        for appdir in ["", "/"] {
+            assert_eq!(
+                appimage_file(
+                    Path::new("/home/me/.cargo/bin/orx"),
+                    Some(OsStr::new(appdir)),
+                    appimage
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn the_desktop_apps_orx_updates_itself_beside_a_cli_install() {
+        // Forward slashes, so the parent splits the same way off Windows.
+        let prefix = Path::new("C:/Users/me/.cargo");
+        let app = Path::new("C:/Users/me/AppData/Local/Programs/OpenResearch/orx.exe");
+        assert_eq!(
+            portable_outside_prefix(app, prefix),
+            Some(PathBuf::from(
+                "C:/Users/me/AppData/Local/Programs/OpenResearch"
+            ))
+        );
+        let cli = Path::new("C:/Users/me/.cargo/bin/orx.exe");
+        assert_eq!(portable_outside_prefix(cli, prefix), None);
     }
 
     #[test]
@@ -1507,8 +2950,6 @@ mod tests {
     #[test]
     fn relaunch_args_add_no_browser_once() {
         let args = |list: &[&str]| relaunch_args(list.iter().map(OsString::from));
-        // A double-clicked exe has no arguments; `main` ran it as `up`.
-        assert_eq!(args(&[]), ["up", "--no-browser"]);
         assert_eq!(
             args(&["up", "--port", "1"]),
             ["up", "--port", "1", "--no-browser"]

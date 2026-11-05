@@ -72,6 +72,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             chat_session_id: None,
+            archived: false,
         }
     }
 
@@ -91,6 +92,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         }
     }

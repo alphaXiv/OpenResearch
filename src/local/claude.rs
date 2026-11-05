@@ -34,18 +34,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::error::{anyhow, Result};
+use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
 use crate::local::harness::claude::{
-    claude_permission_mode, find_claude, uses_permission_bridge, write_mcp_config,
-    write_plan_settings,
+    claude_permission_mode, find_claude, uses_permission_bridge, write_mcp_config, write_settings,
+    CLAUDE_ENTRYPOINT,
 };
 use crate::local::harness::{HarnessAuthState, PermissionMode};
 use crate::local::native_store::NativeStore;
@@ -55,21 +56,23 @@ use crate::local::native_store::NativeStore;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const STALE_AFTER: Duration = Duration::from_secs(90 * 60);
-const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleStopReason {
     IdleExpired,
+    IdleLimit,
     Stale,
+    Exited,
 }
 
 impl LifecycleStopReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::IdleExpired => "idle-expired",
+            Self::IdleLimit => "idle-limit",
             Self::Stale => "stale",
+            Self::Exited => "exited",
         }
     }
 }
@@ -87,14 +90,19 @@ impl TurnSlot {
         }
     }
 
-    fn stop_reason(&self, started_at: Instant, now: Instant) -> Option<LifecycleStopReason> {
+    fn stop_reason(
+        &self,
+        started_at: Instant,
+        now: Instant,
+        idle_timeout: Duration,
+    ) -> Option<LifecycleStopReason> {
         if self.sender.is_some() {
             return None;
         }
         if now.duration_since(started_at) >= STALE_AFTER {
             return Some(LifecycleStopReason::Stale);
         }
-        if now.duration_since(self.idle_since) >= IDLE_TIMEOUT {
+        if now.duration_since(self.idle_since) >= idle_timeout {
             return Some(LifecycleStopReason::IdleExpired);
         }
         None
@@ -119,7 +127,7 @@ impl TurnSlot {
 }
 
 /// What the resident child was spawned with. Any field that can only be applied
-/// at launch (permission mode, effort, the mcp-gate bridge) forces a respawn
+/// at launch (permission mode, effort, the `orx mcp` bridge) forces a respawn
 /// when it changes; `model` is the exception — it retunes live via `set_model`,
 /// so it is updated in place on a successful control request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,9 +136,8 @@ pub struct SpawnConfig {
     pub effort: Option<String>,
     pub model: Option<String>,
     pub native_store: NativeStore,
-    /// Whether the mcp-gate permission bridge was actually wired at spawn (plan
-    /// mode + a bound `orx up` port + a successful config write). A plan turn
-    /// that wanted the bridge but got `false` respawns next turn to try again.
+    pub alphaxiv_signed_in: bool,
+    /// Whether the child has its input bridge; failed setup is retried on the next turn.
     pub bridge_active: bool,
 }
 
@@ -204,7 +211,7 @@ pub fn classify_line(line: &str) -> ClaudeLine {
             ClaudeLine::ControlResponse { request_id, result }
         }
         // A control_request FROM the child (e.g. a permission prompt) rides the
-        // mcp-gate bridge over HTTP, not this stream — we never answer it here.
+        // `orx mcp` bridge over HTTP, not this stream — we never answer it here.
         Some("control_request") | None => ClaudeLine::Junk,
         // Everything else is a stream-json output object: assistant/user/system/
         // result. The turn loop discriminates on `type`.
@@ -214,6 +221,7 @@ pub fn classify_line(line: &str) -> ClaudeLine {
 
 /// A live connection to one session's resident `claude` child.
 pub struct ClaudeClient {
+    chat: Weak<crate::local::chat::ChatHost>,
     session_id: String,
     child: Mutex<Child>,
     #[cfg(unix)]
@@ -290,6 +298,97 @@ impl ClaudeClient {
         }
     }
 
+    /// Run Claude's own `/compact` on the resident child and wait for the turn
+    /// it opens to finish. The child keeps its session id — the point of using
+    /// the native command rather than reseeding a new session.
+    pub(crate) async fn compact(
+        self: &Arc<Self>,
+        mut rx: mpsc::UnboundedReceiver<TurnEvent>,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.send_user_message("/compact").await?;
+        let settle = async {
+            let mut saw_user_echo = false;
+            let mut saw_compacting = false;
+            let mut compact_outcome: Option<Result<(), String>> = None;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    TurnEvent::Line(line) => {
+                        let system = line.get("type").and_then(Value::as_str) == Some("system");
+                        let subtype = line.get("subtype").and_then(Value::as_str);
+                        // Native /compact emits status events instead of a user-message echo.
+                        if system
+                            && subtype == Some("status")
+                            && line.get("status").and_then(Value::as_str) == Some("compacting")
+                        {
+                            saw_compacting = true;
+                        }
+                        if !saw_compacting
+                            && !crate::local::harness::claude::belongs_to_current_turn(
+                                &line,
+                                "/compact",
+                                &mut saw_user_echo,
+                            )
+                        {
+                            continue;
+                        }
+                        if system && subtype == Some("status") {
+                            match line.get("compact_result").and_then(Value::as_str) {
+                                Some("success") => compact_outcome = Some(Ok(())),
+                                Some("failed") => {
+                                    compact_outcome = Some(Err(line
+                                        .get("compact_error")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("compaction failed")
+                                        .to_string()))
+                                }
+                                _ => {}
+                            }
+                        } else if system && subtype == Some("compact_boundary") {
+                            compact_outcome.get_or_insert(Ok(()));
+                        }
+                        if line.get("type").and_then(Value::as_str) != Some("result") {
+                            continue;
+                        }
+                        // Fail closed, and let `is_error` win over the subtype
+                        // as the turn path does: a shape we don't recognize
+                        // must not read as a compaction that happened.
+                        let subtype = line.get("subtype").and_then(Value::as_str);
+                        let failed = line
+                            .get("is_error")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(subtype != Some("success"));
+                        return if failed {
+                            Err(anyhow!(
+                                "claude /compact failed: {}",
+                                subtype.unwrap_or("no result status")
+                            ))
+                        } else {
+                            // Local commands can return result.success even when compact_result failed.
+                            compact_outcome
+                                .unwrap_or_else(|| {
+                                    if saw_user_echo {
+                                        Ok(())
+                                    } else {
+                                        Err("Claude did not confirm compaction".to_string())
+                                    }
+                                })
+                                .map_err(|error| anyhow!("claude /compact failed: {error}"))
+                        };
+                    }
+                    TurnEvent::Closed => return Err(anyhow!("claude closed during /compact")),
+                }
+            }
+            Err(anyhow!("claude stopped reporting during /compact"))
+        };
+        tokio::time::timeout(timeout, settle).await.map_err(|_| {
+            anyhow!(
+                "claude did not finish /compact within {}s",
+                timeout.as_secs()
+            )
+        })?
+    }
+
     /// Retune the resident child's model in place via `set_model`. On success,
     /// record the new model in `config` so the reuse decision stays truthful.
     async fn set_model(&self, model: &str) -> Result<()> {
@@ -333,8 +432,11 @@ impl ClaudeClient {
         }
     }
 
-    fn stop_reason(&self, now: Instant) -> Option<LifecycleStopReason> {
-        self.turn.lock().unwrap().stop_reason(self.started_at, now)
+    fn stop_reason(&self, now: Instant, idle_timeout: Duration) -> Option<LifecycleStopReason> {
+        self.turn
+            .lock()
+            .unwrap()
+            .stop_reason(self.started_at, now, idle_timeout)
     }
 
     fn age_and_idle(&self, now: Instant) -> (Duration, Option<Duration>) {
@@ -375,6 +477,23 @@ impl Drop for TurnRoute {
     }
 }
 
+fn reported_permission_mode(event: &Value) -> Option<PermissionMode> {
+    if event.get("type").and_then(Value::as_str) != Some("system") {
+        return None;
+    }
+    match event.get("subtype").and_then(Value::as_str) {
+        Some("init" | "status") => match event.get("permissionMode").and_then(Value::as_str)? {
+            "default" | "manual" => Some(PermissionMode::Ask),
+            "auto" => Some(PermissionMode::Auto),
+            "acceptEdits" => Some(PermissionMode::AcceptEdits),
+            "plan" => Some(PermissionMode::Plan),
+            "bypassPermissions" => Some(PermissionMode::Bypass),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Reader task: pump child stdout, route each line. On EOF every pending control
 /// request fails and the live turn (if any) gets [`TurnEvent::Closed`].
 async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdout) {
@@ -387,11 +506,44 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                 }
             }
             ClaudeLine::Event(value) => {
+                if let Some(mode) = reported_permission_mode(&value) {
+                    let previous = {
+                        let mut config = client.config.lock().unwrap();
+                        let previous = config.permission_mode.unwrap_or(PermissionMode::Auto);
+                        config.permission_mode = Some(mode);
+                        previous
+                    };
+                    if previous != mode && !client.terminated.load(Ordering::Acquire) {
+                        if let Some(chat) = client.chat.upgrade() {
+                            if let Err(error) = chat
+                                .sync_claude_permission_mode(&client.session_id, previous, mode)
+                                .await
+                            {
+                                eprintln!(
+                                    "orx up: could not synchronize Claude permission mode: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
                 // Route to the live turn; dropped if none is listening (a
-                // between-turns line, or an aborted turn's tail).
+                // between-turns line, or an aborted turn's tail) once its tool identities are recorded.
                 let turn = client.turn.lock().unwrap();
                 if let Some(tx) = turn.sender.as_ref() {
                     let _ = tx.send(TurnEvent::Line(value));
+                } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
+                    drop(turn);
+                    if let Some(message) = value.get("message").cloned() {
+                        let session_id = client.session_id.clone();
+                        // Off the reader so a busy store never stalls Claude's stdout.
+                        tokio::task::spawn_blocking(move || {
+                            crate::local::chat::record_native_invocations(
+                                "claude-code",
+                                &session_id,
+                                &message,
+                            )
+                        });
+                    }
                 }
             }
             ClaudeLine::Junk => {}
@@ -459,7 +611,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     let bin = find_claude().ok_or_else(|| {
         anyhow!("claude not found on PATH — install Claude Code and run `claude` once to sign in")
     })?;
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
         "--print",
         "--input-format",
@@ -498,55 +650,65 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         cmd.args(["--resume", native_id]);
     }
 
-    // Plan-mode extras, iff the child was spawned in Plan. `bridge_active` on the
-    // config records what we ACHIEVED, not what we wanted: forced false here, set
-    // true only on a successful bridge write. A failed write thus leaves it false
-    // — the next plan turn's wanted-true mismatch respawns to retry, degrading to
-    // today's no-bridge plan gating, never worse.
     let mut config = spec.config.clone();
-    config.bridge_active = false;
-    if spec.config.permission_mode == Some(PermissionMode::Plan) {
-        match write_plan_settings(&spec.repo) {
-            Ok(path) => {
-                cmd.arg("--settings").arg(path);
-            }
-            Err(e) => {
-                eprintln!(
-                    "orx up: plan-mode settings not written, orx inspection will be gated: {e}"
-                );
-            }
-        }
-    }
-    if uses_permission_bridge(spec.config.permission_mode) {
-        // The gate token is minted HERE and ONLY here — once per child, riding
-        // the mcp-gate bridge for the child's whole life. Re-minting mid-child
-        // (e.g. per turn) would strand a live bridge: `request_permission`
-        // equality-checks the token with no expiry (chat/mod.rs), so a fresh
-        // token invalidates the resident bridge child's held requests.
-        if let Some(port) = spec.chat.up_port() {
+    let settings = write_settings(
+        &spec.repo,
+        spec.config.permission_mode == Some(PermissionMode::Plan),
+    )?;
+    cmd.arg("--settings").arg(settings);
+    // The gate token is minted only here, once per child: `request_permission`
+    // checks it without expiry, so re-minting would strand the bridge's held requests.
+    let gate = if uses_permission_bridge(spec.config.permission_mode) {
+        spec.chat.up_port().map(|port| {
             let token = spec.chat.mint_gate_token(
                 &spec.session_id,
                 spec.config.permission_mode == Some(PermissionMode::Plan),
                 spec.config.permission_mode == Some(PermissionMode::Bypass),
             );
-            match write_mcp_config(&spec.repo, port, &spec.session_id, &token) {
-                Ok(path) => {
-                    cmd.arg("--mcp-config").arg(path);
-                    cmd.args(["--permission-prompt-tool", "mcp__orx__approve"]);
-                    // Give a held approval an hour before the CLI abandons the
-                    // tool call; orx denies at 55 min, safely inside it.
-                    cmd.env("MCP_TOOL_TIMEOUT", "3600000");
-                    config.bridge_active = true;
-                }
-                Err(e) => {
-                    eprintln!(
-                        "orx up: mcp bridge not configured, gray-area tools will be denied: {e}"
-                    );
-                }
-            }
+            (port, token)
+        })
+    } else {
+        None
+    };
+    // Record successful bridge setup so reconciliation retries failures next turn.
+    config.bridge_active = false;
+    let gate_config = gate.as_ref().map(|(port, token)| (*port, token.as_str()));
+    match write_mcp_config(&spec.repo, &spec.session_id, gate_config) {
+        Ok(path) => {
+            cmd.arg("--mcp-config").arg(path);
+            config.bridge_active = gate.is_some();
         }
+        Err(e) => eprintln!(
+            "orx up: MCP config not written, alphaXiv tools are unavailable and gray-area tools will be denied: {e}"
+        ),
+    }
+    // A held approval gets an hour before the CLI abandons the tool call; orx denies at 55 min.
+    cmd.env(
+        "MCP_TOOL_TIMEOUT",
+        if config.bridge_active {
+            "3600000"
+        } else {
+            "300000"
+        },
+    );
+    if config.bridge_active {
+        cmd.args(["--permission-prompt-tool", "mcp__orx__approve"]);
+        // Sub-agents go through orx's `delegate`, which can reach any model
+        // and wakes this chat with the answer.
+        cmd.args(["--disallowedTools", "Agent,Task,Workflow"]);
+        cmd.args(["--allowedTools", "mcp__orx"]);
     }
     crate::local::chat::prepare_env(&mut cmd);
+    cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
+    let delegated = crate::store::Store::open()
+        .and_then(|store| store.delegation(&spec.session_id))
+        .is_ok_and(|delegation| delegation.parent.is_some());
+    if let Some(ttl) = delegated
+        .then(crate::local::chat::delegation::delegate_prompt_cache_ttl)
+        .flatten()
+    {
+        cmd.env("CLAUDE_CODE_PROMPT_CACHE_TTL", ttl);
+    }
     let native_store = spec.config.native_store;
     let config_home = tokio::task::spawn_blocking(move || {
         crate::local::native_store::prepare_claude(native_store)
@@ -591,6 +753,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
 
     let started_at = Instant::now();
     let client = Arc::new(ClaudeClient {
+        chat: Arc::downgrade(&spec.chat),
         session_id: spec.session_id.clone(),
         child: Mutex::new(child),
         #[cfg(unix)]
@@ -628,6 +791,7 @@ pub fn child_action(current: &SpawnConfig, wanted: &SpawnConfig) -> ChildAction 
     if current.permission_mode != wanted.permission_mode
         || current.effort != wanted.effort
         || current.bridge_active != wanted.bridge_active
+        || current.alphaxiv_signed_in != wanted.alphaxiv_signed_in
         || current.native_store != wanted.native_store
     {
         return ChildAction::Respawn;
@@ -661,11 +825,16 @@ pub struct ClaudeHost {
     forgotten_sessions: Mutex<HashSet<String>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthSnapshot {
     pub state: HarnessAuthState,
     pub generation: u64,
     pub runtime_rejected: bool,
+    pub method: Option<&'static str>,
+    pub provider: Option<String>,
+    pub credential_conflict: bool,
+    pub auth_check_failed: bool,
+    sequence: u64,
     last_recovered_generation: Option<u64>,
 }
 
@@ -685,6 +854,11 @@ impl ClaudeHost {
                 state: HarnessAuthState::Unknown,
                 generation: 0,
                 runtime_rejected: false,
+                method: None,
+                provider: None,
+                credential_conflict: false,
+                auth_check_failed: false,
+                sequence: 0,
                 last_recovered_generation: None,
             }),
             auth_recovery_lock: Mutex::new(()),
@@ -715,12 +889,56 @@ impl ClaudeHost {
     }
 
     async fn reap_expired(&self) {
-        self.reap_expired_at(Instant::now()).await;
+        self.reap_expired_at(Instant::now(), IdlePolicy::current())
+            .await;
     }
 
-    async fn reap_expired_at(&self, now: Instant) {
-        let sessions = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
-        for session_id in sessions {
+    async fn reap_expired_at(&self, now: Instant, policy: IdlePolicy) {
+        let clients = self
+            .inner
+            .lock()
+            .await
+            .iter()
+            .map(|(session_id, client)| (session_id.clone(), client.clone()))
+            .collect::<Vec<_>>();
+        let mut doomed = Vec::new();
+        let mut idle = Vec::new();
+        for (session_id, client) in clients {
+            if client.terminated.load(Ordering::Acquire) {
+                continue;
+            }
+            let exited = !matches!(client.child.lock().await.try_wait(), Ok(None));
+            let turn = client.turn.lock().unwrap();
+            if turn.sender.is_some() {
+                continue;
+            }
+            let idle_since = turn.idle_since;
+            // An exited child may leave descendants in its group; release it, never keep it warm.
+            let reason = if exited {
+                Some(LifecycleStopReason::Exited)
+            } else {
+                turn.stop_reason(client.started_at, now, policy.idle_timeout)
+            };
+            drop(turn);
+            match reason {
+                Some(reason) => doomed.push((session_id, client, idle_since, reason)),
+                None => idle.push((session_id, client, idle_since)),
+            }
+        }
+        let idle_for = idle
+            .iter()
+            .map(|(_, _, idle_since)| now.duration_since(*idle_since))
+            .collect::<Vec<_>>();
+        for index in policy.over_limit(&idle_for) {
+            let (session_id, client, idle_since) = idle[index].clone();
+            doomed.push((
+                session_id,
+                client,
+                idle_since,
+                LifecycleStopReason::IdleLimit,
+            ));
+        }
+        for (session_id, client, idle_since, reason) in doomed {
             let session_lock = {
                 let mut locks = self.spawn_locks.lock().await;
                 locks
@@ -731,22 +949,27 @@ impl ClaudeHost {
             let _spawning = session_lock.lock().await;
             let expired = {
                 let mut clients = self.inner.lock().await;
-                let Some(client) = clients.get(&session_id) else {
+                // A turn may have run since the snapshot; only an untouched idle child goes.
+                let untouched = clients
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &client))
+                    && {
+                        let turn = client.turn.lock().unwrap();
+                        turn.sender.is_none() && turn.idle_since == idle_since
+                    };
+                if !untouched {
                     continue;
-                };
-                let Some(reason) = client.stop_reason(now) else {
-                    continue;
-                };
-                clients.remove(&session_id).map(|client| (client, reason))
+                }
+                clients.remove(&session_id)
             };
-            if let Some((client, reason)) = expired {
+            if let Some(client) = expired {
                 stop_client_at(client, reason.as_str(), now).await;
             }
         }
     }
 
     pub fn auth_snapshot(&self) -> AuthSnapshot {
-        *self.auth.read().unwrap()
+        self.auth.read().unwrap().clone()
     }
 
     pub fn claim_auth_announcement(&self, generation: u64) -> bool {
@@ -765,24 +988,50 @@ impl ClaudeHost {
         false
     }
 
-    /// Adopt a read-only detection result if no runtime transition happened
-    /// since that probe began. Inconclusive probes never rotate credentials or
-    /// replace a previously conclusive state.
-    pub fn observe_auth_state(&self, state: HarnessAuthState, expected_generation: u64) -> bool {
+    /// Publish one live status result; worker generation is not probe order.
+    pub fn observe_auth_probe(&self, probe: &crate::local::harness::claude::AuthProbe) -> bool {
         let mut auth = self.auth.write().unwrap();
-        if auth.generation != expected_generation
-            || auth.runtime_rejected
-            || auth.state == state
-            || (state == HarnessAuthState::Unknown && auth.state != HarnessAuthState::Unknown)
-        {
+        if probe.sequence <= auth.sequence || auth.runtime_rejected {
             return false;
         }
-        auth.state = state;
-        if state != HarnessAuthState::Unknown {
-            auth.generation += 1;
-            auth.last_recovered_generation = None;
+        auth.sequence = probe.sequence;
+        let before = auth.clone();
+        if probe.failed_check {
+            auth.auth_check_failed = true;
+            if auth.state == HarnessAuthState::Unknown {
+                auth.method = probe.method;
+                auth.provider = probe.provider.clone();
+            }
+        } else {
+            let rotate = auth.state != probe.state
+                || (auth.state == HarnessAuthState::Ready
+                    && probe.state == HarnessAuthState::Ready
+                    && (auth.method != probe.method || auth.provider != probe.provider));
+            auth.state = probe.state;
+            auth.method = probe.method;
+            auth.provider = probe.provider.clone();
+            auth.credential_conflict = probe.credential_conflict;
+            auth.auth_check_failed = false;
+            if rotate {
+                auth.generation += 1;
+                auth.last_recovered_generation = None;
+            }
         }
-        true
+        auth.state != before.state
+            || auth.method != before.method
+            || auth.provider != before.provider
+            || auth.credential_conflict != before.credential_conflict
+            || auth.auth_check_failed != before.auth_check_failed
+            || auth.generation != before.generation
+    }
+
+    fn auth_barrier(auth: &mut AuthSnapshot) {
+        auth.sequence = crate::local::harness::claude::auth_barrier_sequence();
+    }
+
+    pub fn reserve_auth_check(&self) {
+        let mut auth = self.auth.write().unwrap();
+        Self::auth_barrier(&mut auth);
     }
 
     /// Explicit UI re-check after the user changed credentials. This clears a
@@ -795,6 +1044,8 @@ impl ClaudeHost {
         }
         auth.runtime_rejected = false;
         auth.state = HarnessAuthState::Unknown;
+        Self::auth_barrier(&mut auth);
+        auth.auth_check_failed = false;
         auth.generation += 1;
         auth.last_recovered_generation = None;
         true
@@ -809,6 +1060,8 @@ impl ClaudeHost {
             return false;
         }
         auth.state = HarnessAuthState::Unknown;
+        Self::auth_barrier(&mut auth);
+        auth.auth_check_failed = false;
         auth.generation += 1;
         auth.last_recovered_generation = None;
         true
@@ -835,14 +1088,22 @@ impl ClaudeHost {
         if current.state == HarnessAuthState::NeedsLogin {
             return current.state;
         }
-        let state = crate::local::harness::claude::current_auth_state().await;
+        let probe = crate::local::harness::claude::current_auth_state().await;
         let mut auth = self.auth.write().unwrap();
-        if auth.generation != current.generation || auth.runtime_rejected {
+        if auth.generation != current.generation
+            || auth.runtime_rejected
+            || probe.sequence <= auth.sequence
+        {
             return auth.state;
         }
         auth.last_recovered_generation = Some(failed_generation);
+        Self::auth_barrier(&mut auth);
         auth.generation += 1;
-        auth.state = state;
+        auth.state = probe.state;
+        auth.method = probe.method;
+        auth.provider = probe.provider;
+        auth.credential_conflict = probe.credential_conflict;
+        auth.auth_check_failed = probe.failed_check;
         auth.runtime_rejected = false;
         auth.state
     }
@@ -864,6 +1125,8 @@ impl ClaudeHost {
         }
         auth.state = HarnessAuthState::NeedsLogin;
         auth.runtime_rejected = true;
+        Self::auth_barrier(&mut auth);
+        auth.auth_check_failed = false;
         auth.generation += 1;
         auth.last_recovered_generation = Some(failed_generation);
         auth.state
@@ -875,8 +1138,8 @@ impl ClaudeHost {
         if current.state != HarnessAuthState::Unknown || current.runtime_rejected {
             return current;
         }
-        let state = crate::local::harness::claude::current_auth_state().await;
-        self.observe_auth_state(state, current.generation);
+        let probe = crate::local::harness::claude::current_auth_state().await;
+        self.observe_auth_probe(&probe);
         self.auth_snapshot()
     }
 
@@ -913,7 +1176,11 @@ impl ClaudeHost {
         match auth.state {
             HarnessAuthState::NeedsLogin => {
                 return Err(anyhow!(
-                    "Claude Code sign-in required — run `claude auth login`, then try again"
+                    "{}",
+                    crate::local::harness::claude::auth_recovery_note(
+                        auth.method,
+                        auth.provider.as_deref(),
+                    )
                 ));
             }
             HarnessAuthState::Unsupported => {
@@ -933,7 +1200,9 @@ impl ClaudeHost {
             {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "exited").await;
-            } else if let Some(reason) = live.stop_reason(Instant::now()) {
+            } else if let Some(reason) =
+                live.stop_reason(Instant::now(), IdlePolicy::current().idle_timeout)
+            {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, reason.as_str()).await;
             } else if live.auth_generation() != auth.generation {
@@ -1041,6 +1310,30 @@ impl ClaudeHost {
         }
     }
 
+    /// Resume or reuse the session's child before invoking its native compaction.
+    pub(crate) async fn compact_session(
+        self: &Arc<Self>,
+        spec: SpawnSpec,
+        timeout: Duration,
+    ) -> Result<()> {
+        let session_id = spec.session_id.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let result = tokio::time::timeout(timeout, async {
+            let route = self.acquire_turn(spec, tx).await?;
+            route.client().compact(rx, timeout).await
+        })
+        .await
+        .map_err(|_| anyhow!("Claude Code compaction exceeded {}s", timeout.as_secs()))
+        .and_then(|result| result);
+        if let Err(error) = result {
+            // The child is still mid-`/compact`; its trailing `result` would
+            // otherwise land in whatever turn registers next.
+            self.kill_session(&session_id).await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Permanently remove one deleted session's child and reconciliation state.
     pub async fn forget_session(&self, session_id: &str) {
         let session_lock = {
@@ -1080,6 +1373,8 @@ impl ClaudeHost {
 mod tests {
     use super::*;
 
+    const IDLE_TIMEOUT: Duration = IdlePolicy::DEFAULT.idle_timeout;
+
     #[cfg(unix)]
     async fn test_client(
         session_id: &str,
@@ -1087,7 +1382,7 @@ mod tests {
         idle_since: Instant,
         shell: &str,
     ) -> Arc<ClaudeClient> {
-        let mut command = Command::new("sh");
+        let mut command = crate::process::tokio_command("sh");
         command
             .args(["-c", shell])
             .stdin(Stdio::piped())
@@ -1098,6 +1393,7 @@ mod tests {
         let process_group_id = child.id().unwrap();
         let stdin = child.stdin.take().unwrap();
         Arc::new(ClaudeClient {
+            chat: Weak::new(),
             session_id: session_id.to_string(),
             child: Mutex::new(child),
             process_group_id,
@@ -1138,8 +1434,190 @@ mod tests {
             effort: effort.map(str::to_string),
             model: model.map(str::to_string),
             native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
             bridge_active: bridge,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_waits_for_its_echo_before_accepting_a_result() {
+        for failed in [false, true] {
+            let now = Instant::now();
+            let client = test_client("compact", now, now, "sleep 600").await;
+            let (tx, rx) = mpsc::unbounded_channel();
+            for line in [
+                json!({"type": "result", "subtype": "success"}),
+                json!({"type": "user", "message": {"content": "previous message"}}),
+                json!({"type": "result", "subtype": "error_during_execution", "is_error": true}),
+                json!({"type": "user", "message": {"content": "/compact"}}),
+                json!({"type": "result", "subtype": "success", "is_error": failed}),
+            ] {
+                tx.send(TurnEvent::Line(line)).unwrap();
+            }
+            let result = client.compact(rx, Duration::from_secs(1)).await;
+            terminate_client(&client).await;
+            assert_eq!(result.is_err(), failed);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_uses_native_status_outcome_without_a_user_echo() {
+        for outcome in ["success", "failed"] {
+            let now = Instant::now();
+            let client = test_client("compact", now, now, "sleep 600").await;
+            let (tx, rx) = mpsc::unbounded_channel();
+            for line in [
+                json!({"type": "system", "subtype": "compact_boundary"}),
+                json!({"type": "result", "subtype": "success", "is_error": false}),
+                json!({"type": "system", "subtype": "status", "status": "compacting"}),
+                json!({"type": "system", "subtype": "status", "status": null,
+                    "compact_result": outcome, "compact_error": "Not enough messages to compact."}),
+                json!({"type": "system", "subtype": "init"}),
+                json!({"type": "result", "subtype": "success", "is_error": false, "local_command": "compact"}),
+            ] {
+                tx.send(TurnEvent::Line(line)).unwrap();
+            }
+            let result = client.compact(rx, Duration::from_secs(1)).await;
+            terminate_client(&client).await;
+            if outcome == "failed" {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "claude /compact failed: Not enough messages to compact."
+                );
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_requires_confirmation_after_its_live_status() {
+        for boundary in [false, true] {
+            let now = Instant::now();
+            let client = test_client("compact", now, now, "sleep 600").await;
+            let (tx, rx) = mpsc::unbounded_channel();
+            tx.send(TurnEvent::Line(
+                json!({"type": "system", "subtype": "status", "status": "compacting"}),
+            ))
+            .unwrap();
+            if boundary {
+                tx.send(TurnEvent::Line(
+                    json!({"type": "system", "subtype": "compact_boundary"}),
+                ))
+                .unwrap();
+            }
+            tx.send(TurnEvent::Line(
+                json!({"type": "result", "subtype": "success", "is_error": false}),
+            ))
+            .unwrap();
+            let result = client.compact(rx, Duration::from_secs(1)).await;
+            terminate_client(&client).await;
+            assert_eq!(result.is_ok(), boundary);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_does_not_succeed_from_replayed_results_without_its_echo() {
+        let now = Instant::now();
+        let client = test_client("compact", now, now, "sleep 600").await;
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(TurnEvent::Line(
+            json!({"type": "result", "subtype": "success"}),
+        ))
+        .unwrap();
+        let result = client.compact(rx, Duration::from_millis(10)).await;
+        terminate_client(&client).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("did not finish /compact"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_reports_a_closed_child_after_its_echo() {
+        let now = Instant::now();
+        let client = test_client("compact", now, now, "sleep 600").await;
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(TurnEvent::Line(
+            json!({"type": "user", "message": {"content": [{"type": "text", "text": "/compact"}]}}),
+        ))
+        .unwrap();
+        tx.send(TurnEvent::Closed).unwrap();
+        let result = client.compact(rx, Duration::from_secs(1)).await;
+        terminate_client(&client).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "claude closed during /compact"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_timeout_reaps_the_acquired_worker_and_releases_its_route() {
+        let now = Instant::now();
+        let host = Arc::new(ClaudeHost::new());
+        host.auth.write().unwrap().state = HarnessAuthState::Ready;
+        let client = test_client("compact", now, now, "sleep 600").await;
+        install_test_client(&host, client.clone()).await;
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ));
+        let result = host
+            .compact_session(
+                SpawnSpec {
+                    chat,
+                    session_id: "compact".into(),
+                    repo: PathBuf::new(),
+                    playbook: PathBuf::new(),
+                    resume: Some("saved-native-id".into()),
+                    config: client.config(),
+                },
+                Duration::from_millis(10),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(client.terminated.load(Ordering::Acquire));
+        assert!(!host.inner.lock().await.contains_key("compact"));
+        assert!(client.turn.lock().unwrap().sender.is_none());
+    }
+
+    #[test]
+    fn native_permission_status_reports_fallback_and_ignores_unrelated_events() {
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"status","permissionMode":"default"})
+            ),
+            Some(PermissionMode::Ask)
+        );
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"init","permissionMode":"auto"})
+            ),
+            Some(PermissionMode::Auto)
+        );
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"status","status":"compacting"})
+            ),
+            None
+        );
+        assert_eq!(
+            reported_permission_mode(&json!({"type":"assistant","permissionMode":"default"})),
+            None
+        );
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"status","permissionMode":"unknown"})
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1264,22 +1742,31 @@ mod tests {
     }
 
     #[test]
+    fn alphaxiv_sign_in_changes_respawn_the_resident_child() {
+        let signed_out = cfg(Some(PermissionMode::Ask), None, None, true);
+        let mut signed_in = signed_out.clone();
+        signed_in.alphaxiv_signed_in = true;
+        assert_eq!(child_action(&signed_out, &signed_in), ChildAction::Respawn);
+        assert_eq!(child_action(&signed_in, &signed_out), ChildAction::Respawn);
+    }
+
+    #[test]
     fn lifecycle_reaps_idle_and_stale_workers_at_the_boundaries() {
         let now = Instant::now();
         let recent_start = now - Duration::from_secs(20 * 60);
         let mut slot = TurnSlot::new(now - IDLE_TIMEOUT + Duration::from_secs(1));
 
-        assert_eq!(slot.stop_reason(recent_start, now), None);
+        assert_eq!(slot.stop_reason(recent_start, now, IDLE_TIMEOUT), None);
 
         slot.idle_since = now - IDLE_TIMEOUT;
         assert_eq!(
-            slot.stop_reason(recent_start, now),
+            slot.stop_reason(recent_start, now, IDLE_TIMEOUT),
             Some(LifecycleStopReason::IdleExpired)
         );
 
         slot.idle_since = now;
         assert_eq!(
-            slot.stop_reason(now - STALE_AFTER, now),
+            slot.stop_reason(now - STALE_AFTER, now, IDLE_TIMEOUT),
             Some(LifecycleStopReason::Stale)
         );
     }
@@ -1292,13 +1779,13 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         slot.register(tx.clone());
 
-        assert_eq!(slot.stop_reason(started_at, now), None);
+        assert_eq!(slot.stop_reason(started_at, now, IDLE_TIMEOUT), None);
 
         let released_at = now + Duration::from_secs(5);
         assert!(slot.release(&tx, released_at));
         assert_eq!(slot.idle_since, released_at);
         assert_eq!(
-            slot.stop_reason(started_at, released_at),
+            slot.stop_reason(started_at, released_at, IDLE_TIMEOUT),
             Some(LifecycleStopReason::Stale)
         );
     }
@@ -1332,12 +1819,15 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let route = client.register_turn(tx, host.reaper_notify.clone());
 
-        host.reap_expired_at(now).await;
+        host.reap_expired_at(now, IdlePolicy::DEFAULT).await;
         assert!(host.inner.lock().await.contains_key("active-stale"));
 
         drop(route);
-        host.reap_expired_at(Instant::now() + Duration::from_secs(60))
-            .await;
+        host.reap_expired_at(
+            Instant::now() + Duration::from_secs(60),
+            IdlePolicy::DEFAULT,
+        )
+        .await;
         assert!(!host.inner.lock().await.contains_key("active-stale"));
         assert!(client.terminated.load(Ordering::Acquire));
     }
@@ -1358,7 +1848,7 @@ mod tests {
         install_test_client(&host, idle.clone()).await;
         install_test_client(&host, stale.clone()).await;
 
-        host.reap_expired_at(now).await;
+        host.reap_expired_at(now, IdlePolicy::DEFAULT).await;
 
         let clients = host.inner.lock().await;
         assert!(!clients.contains_key("idle"));
@@ -1366,6 +1856,53 @@ mod tests {
         drop(clients);
         assert!(idle.terminated.load(Ordering::Acquire));
         assert!(stale.terminated.load(Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reaper_keeps_only_the_most_recent_idle_worker_on_low_memory() {
+        let now = Instant::now();
+        let host = ClaudeHost::new();
+        let recent = test_client("recent", now, now - Duration::from_secs(40), "sleep 600").await;
+        let older = test_client("older", now, now - Duration::from_secs(60), "sleep 600").await;
+        let active = test_client("active", now, now - Duration::from_secs(90), "sleep 600").await;
+        install_test_client(&host, recent.clone()).await;
+        install_test_client(&host, older.clone()).await;
+        install_test_client(&host, active.clone()).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let _route = active.register_turn(tx, host.reaper_notify.clone());
+
+        host.reap_expired_at(now, IdlePolicy::LOW_MEMORY).await;
+
+        let clients = host.inner.lock().await;
+        assert!(clients.contains_key("recent"));
+        assert!(clients.contains_key("active"));
+        assert!(!clients.contains_key("older"));
+        drop(clients);
+        assert!(older.terminated.load(Ordering::Acquire));
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exited_worker_is_released_instead_of_kept_warm() {
+        let now = Instant::now();
+        let host = ClaudeHost::new();
+        let warm = test_client("warm", now, now - Duration::from_secs(60), "sleep 600").await;
+        let exited = test_client("exited", now, now - Duration::from_secs(40), "exit 0").await;
+        exited.child.lock().await.wait().await.unwrap();
+        install_test_client(&host, warm.clone()).await;
+        install_test_client(&host, exited.clone()).await;
+
+        host.reap_expired_at(now, IdlePolicy::LOW_MEMORY).await;
+
+        let clients = host.inner.lock().await;
+        assert!(clients.contains_key("warm"));
+        assert!(!clients.contains_key("exited"));
+        drop(clients);
+        assert!(!warm.terminated.load(Ordering::Acquire));
+        assert!(exited.terminated.load(Ordering::Acquire));
+        host.shutdown().await;
     }
 
     #[cfg(unix)]
@@ -1388,7 +1925,7 @@ mod tests {
             let host = host.clone();
             tokio::spawn(async move {
                 let _ = started_tx.send(());
-                host.reap_expired_at(now).await;
+                host.reap_expired_at(now, IdlePolicy::DEFAULT).await;
             })
         };
         started_rx.await.unwrap();
@@ -1524,16 +2061,84 @@ mod tests {
     }
 
     #[test]
-    fn auth_generation_changes_only_on_transitions() {
+    fn auth_observations_order_without_recycling_on_transient_failure() {
         let host = ClaudeHost::new();
         assert_eq!(host.auth_snapshot().generation, 0);
-        assert!(host.observe_auth_state(HarnessAuthState::NeedsLogin, 0));
+        let first = crate::local::harness::claude::parse_auth_status(
+            Some(1),
+            br#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#,
+            crate::local::harness::claude::auth_barrier_sequence(),
+        );
+        assert!(host.observe_auth_probe(&first));
         assert_eq!(host.auth_snapshot().generation, 1);
-        assert!(!host.observe_auth_state(HarnessAuthState::NeedsLogin, 1));
+        assert!(!host.observe_auth_probe(&first));
         assert_eq!(host.auth_snapshot().generation, 1);
-        assert!(!host.observe_auth_state(HarnessAuthState::Unknown, 1));
-        assert_eq!(host.auth_snapshot().generation, 1);
-        assert!(host.observe_auth_state(HarnessAuthState::Ready, 1));
+        let ready = crate::local::harness::claude::parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"third_party","apiProvider":"bedrock"}"#,
+            crate::local::harness::claude::auth_barrier_sequence(),
+        );
+        assert!(host.observe_auth_probe(&ready));
         assert_eq!(host.auth_snapshot().generation, 2);
+        let unknown = crate::local::harness::claude::parse_auth_status(
+            Some(2),
+            b"not json",
+            crate::local::harness::claude::auth_barrier_sequence(),
+        );
+        assert!(host.observe_auth_probe(&unknown));
+        assert_eq!(host.auth_snapshot().state, HarnessAuthState::Ready);
+        assert!(host.auth_snapshot().auth_check_failed);
+        assert_eq!(host.auth_snapshot().generation, 2);
+        host.reserve_auth_check();
+        assert_eq!(host.auth_snapshot().generation, 2);
+        assert!(!host.observe_auth_probe(&unknown));
+    }
+
+    #[test]
+    fn newer_provider_wins_in_both_completion_orders() {
+        for newer_first in [false, true] {
+            let host = ClaudeHost::new();
+            let older = crate::local::harness::claude::parse_auth_status(
+                Some(0),
+                br#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#,
+                crate::local::harness::claude::auth_barrier_sequence(),
+            );
+            let newer = crate::local::harness::claude::parse_auth_status(
+                Some(0),
+                br#"{"loggedIn":true,"authMethod":"third_party","apiProvider":"bedrock"}"#,
+                crate::local::harness::claude::auth_barrier_sequence(),
+            );
+            if newer_first {
+                assert!(host.observe_auth_probe(&newer));
+                assert!(!host.observe_auth_probe(&older));
+                assert_eq!(host.auth_snapshot().generation, 1);
+            } else {
+                assert!(host.observe_auth_probe(&older));
+                assert!(host.observe_auth_probe(&newer));
+                assert_eq!(host.auth_snapshot().generation, 2);
+            }
+            let snapshot = host.auth_snapshot();
+            assert_eq!(snapshot.method, Some("thirdParty"));
+            assert_eq!(snapshot.provider.as_deref(), Some("bedrock"));
+            assert!(!host.observe_auth_probe(&newer));
+        }
+    }
+
+    #[test]
+    fn ready_credential_route_change_recycles_workers() {
+        let host = ClaudeHost::new();
+        for status in [
+            br#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#.as_slice(),
+            br#"{"loggedIn":true,"authMethod":"api-key","apiProvider":"firstParty"}"#.as_slice(),
+            br#"{"loggedIn":true,"authMethod":"api-key"}"#.as_slice(),
+        ] {
+            let probe = crate::local::harness::claude::parse_auth_status(
+                Some(0),
+                status,
+                crate::local::harness::claude::auth_barrier_sequence(),
+            );
+            assert!(host.observe_auth_probe(&probe));
+        }
+        assert_eq!(host.auth_snapshot().generation, 3);
     }
 }

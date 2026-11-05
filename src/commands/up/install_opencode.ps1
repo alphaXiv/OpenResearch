@@ -1,27 +1,60 @@
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell's progress bar slows Invoke-WebRequest to a crawl.
+$ProgressPreference = 'SilentlyContinue'
+# Windows PowerShell 5.1 can default to TLS 1.0, which GitHub and npm refuse.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 # ponytail: baseline supports all x64 CPUs; select AVX2 builds if performance requires it.
 $asset = switch ($arch) {
     'X64' { 'x64-baseline' }
     'Arm64' { 'arm64' }
-    default { throw "Unsupported architecture: $arch" }
+    default { throw "OpenCode has no Windows build for $arch processors." }
 }
 $temp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
 $destination = Join-Path $env:USERPROFILE '.opencode\bin'
 $installed = Join-Path $destination 'opencode.exe'
+$release = "https://github.com/anomalyco/opencode/releases/latest/download/opencode-windows-$asset.zip"
 New-Item -ItemType Directory -Path $temp -Force | Out-Null
 try {
     Write-Output 'Downloading OpenCode...'
     $archive = Join-Path $temp 'opencode.zip'
-    curl.exe -fL --retry 2 --connect-timeout 15 --max-time 300 "https://github.com/anomalyco/opencode/releases/latest/download/opencode-windows-$asset.zip" -o $archive
-    # Keep curl's own exit code so distinct network faults stay apart; the
-    # throws below surface as exit 1 with their message.
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "OpenCode download failed (curl exit $LASTEXITCODE)." -ErrorAction Continue
-        exit $LASTEXITCODE
+    $binary = $null
+    # Unlike curl.exe, Invoke-WebRequest uses the system proxy and tolerates
+    # revocation servers a filtered network cannot reach.
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $release -OutFile $archive -TimeoutSec 30
+        Expand-Archive -Path $archive -DestinationPath $temp -Force
+        $binary = Join-Path $temp 'opencode.exe'
+    } catch {
+        Write-Output "GitHub download failed: $($_.Exception.Message)"
     }
-    Expand-Archive -Path $archive -DestinationPath $temp
-    $binary = Join-Path $temp 'opencode.exe'
+    # The same build is published to npm, which networks that block GitHub's downloads often allow.
+    if (-not $binary) {
+        try {
+            $package = Invoke-RestMethod -UseBasicParsing -Uri "https://registry.npmjs.org/opencode-windows-$asset/latest" -TimeoutSec 30
+            $tarball = Join-Path $temp 'opencode.tgz'
+            Invoke-WebRequest -UseBasicParsing -Uri $package.dist.tarball -OutFile $tarball -TimeoutSec 30
+            $expected = -join ([Convert]::FromBase64String(($package.dist.integrity -replace '^sha512-', '')) | ForEach-Object { $_.ToString('x2') })
+            if ((Get-FileHash -LiteralPath $tarball -Algorithm SHA512).Hash -ne $expected) { throw 'npm package checksum mismatch.' }
+            & (Join-Path $env:SystemRoot 'System32\tar.exe') -xzf $tarball -C $temp
+            if ($LASTEXITCODE -ne 0) { throw "tar exited with $LASTEXITCODE." }
+            $binary = Join-Path $temp 'package\bin\opencode.exe'
+        } catch {
+            Write-Output "npm download failed: $($_.Exception.Message)"
+        }
+    }
+    if (-not $binary) {
+        curl.exe -fL --retry 2 --connect-timeout 15 --max-time 300 $release -o $archive
+        # Keep curl's own exit code so distinct network faults stay apart; the
+        # throws below surface as exit 1 with their message.
+        if ($LASTEXITCODE -ne 0) {
+            # Straight to stderr: an error record raised here prints this whole script as its source.
+            [Console]::Error.WriteLine("OpenCode download failed (curl exit $LASTEXITCODE).")
+            exit $LASTEXITCODE
+        }
+        Expand-Archive -Path $archive -DestinationPath $temp -Force
+        $binary = Join-Path $temp 'opencode.exe'
+    }
     & $binary --version
     if ($LASTEXITCODE -ne 0) { throw 'OpenCode failed to run after extraction.' }
     New-Item -ItemType Directory -Path $destination -Force | Out-Null

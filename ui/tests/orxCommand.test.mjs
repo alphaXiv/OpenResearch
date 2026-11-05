@@ -6,6 +6,7 @@ import {
   orxArgv,
   orxArgvFromTokens,
   parseOrxLit,
+  recordedDiscoveryQueries,
   shellWords,
   shellWrapperBody,
   unwrapShellBody,
@@ -151,6 +152,33 @@ test("paper discovery commands expose their strategy and query", () => {
     strategy: "biorxiv",
     query: "single-cell atlas",
   });
+  assert.deepEqual(parseOrxLit('orx discover pubmed "sepsis biomarkers" --prioritize recency'), {
+    kind: "discover",
+    source: "pubmed",
+    strategy: "pubmed",
+    query: "sepsis biomarkers",
+  });
+});
+
+test("discovery labels omit shell expansions but preserve literal queries", () => {
+  for (const query of ['"$q"', '"${query}"', '"papers about $topic"', '"$(cat query.txt)"', '"`cat query.txt`"']) {
+    assert.equal(parseOrxLit(`orx discover embedding ${query}`)?.query, undefined);
+  }
+  assert.equal(parseOrxLit("orx discover embedding '$q'")?.query, "$q");
+  assert.equal(parseOrxLit(String.raw`orx discover embedding "\$q"`)?.query, "$q");
+  assert.equal(parseOrxLit('orx discover embedding "models under $10"')?.query, undefined);
+  assert.equal(parseOrxLit(['orx', 'discover', 'embedding', '$q'])?.query, "$q");
+  assert.equal(parseOrxLit('orx discover embedding "protein folding"')?.query, "protein folding");
+});
+
+test("batch discovery queries are confirmed by recorded output", () => {
+  const command = 'for q in "AI agents" "world models"; do echo "=== $q"; orx discover embedding "$q" --limit 10; done';
+  assert.deepEqual(recordedDiscoveryQueries(command, '=== AI agents\nresults\n=== world models\nresults\n=== openalex', 'embedding'), ['AI agents', 'world models']);
+  assert.deepEqual(recordedDiscoveryQueries(command, '=== AI agents\nresults', 'embedding'), ['AI agents']);
+  assert.deepEqual(recordedDiscoveryQueries(command, '', 'embedding'), []);
+  assert.deepEqual(recordedDiscoveryQueries(command, '=== AI agents', 'keyword'), []);
+  assert.deepEqual(recordedDiscoveryQueries(command.replace('"AI agents" "world models"', '"$topics"'), '=== $topics', 'embedding'), []);
+  assert.deepEqual(recordedDiscoveryQueries(command.replace('"world models"', '"$topic"'), '=== AI agents\n=== expanded topic', 'embedding'), ['AI agents']);
 });
 
 test("paper parsing remains intact", () => {
@@ -159,4 +187,11 @@ test("paper parsing remains intact", () => {
     source: "biorxiv",
     id: "10.1101/2024.01.01.123456v2",
   });
+});
+
+test("paper ids route PMIDs, pmid: prefixes, and PubMed URLs to PubMed", () => {
+  for (const id of ["38308006", "PMID:38308006", "https://pubmed.ncbi.nlm.nih.gov/38308006/"]) {
+    assert.deepEqual(parseOrxLit(`orx paper "${id}"`), { kind: "paper", source: "pubmed", id });
+  }
+  assert.equal(parseOrxLit("orx paper 2410.12345")?.source, "alphaxiv");
 });

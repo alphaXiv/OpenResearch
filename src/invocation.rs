@@ -16,7 +16,7 @@ pub fn orx() -> &'static str {
         if resolves_on_path("orx") {
             return "orx".to_string();
         }
-        match std::env::current_exe() {
+        match crate::paths::spawnable_exe() {
             // Not canonicalized: invoked through the bundle's `orx` alias, that
             // alias is the friendlier thing to echo back.
             Ok(exe) => quote_for_shell(&exe.to_string_lossy()),

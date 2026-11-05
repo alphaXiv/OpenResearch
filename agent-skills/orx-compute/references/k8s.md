@@ -27,7 +27,7 @@ spec:
       containers:
         - name: run
           image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
-          command: ["bash", "-c", "$ORX_SCRIPT"]
+          command: ["bash", "-c", "eval \"$ORX_SCRIPT\""]
           resources:
             requests: { nvidia.com/gpu: "4", cpu: "32", memory: "128Gi" }
             limits: { nvidia.com/gpu: "4" }
@@ -39,7 +39,8 @@ The submit-time contract is:
   primary `orx-primary: "true"`. Parallel and Indexed Jobs are rejected because
   the immutable archive is staged into one pod.
 - A container in the primary Job must execute `$ORX_SCRIPT`, normally with
-  `command: ["bash", "-c", "$ORX_SCRIPT"]`.
+  `command: ["bash", "-c", "eval \"$ORX_SCRIPT\""]`. A bare `"$ORX_SCRIPT"`
+  argument is rejected: bash would only word-split it, not run the script.
 - Every resource needs `metadata.name`; do not use `generateName` or set a
   foreign namespace. Include `{{ORX_RUN}}` in names to prevent rerun collisions.
 - `orx` injects run labels and the `orx-env` Secret into primary containers. It
@@ -48,5 +49,5 @@ The submit-time contract is:
 - Auxiliary resources may accompany the Job and are deleted on cancellation.
   They must reference the `orx-env` Secret themselves when needed.
 - The run log follows the primary Job's sole pod.
-- A detached `orx supervise` process watches the Job through `kubectl`; do not
-  kill it.
+
+See [run monitoring](../SKILL.md#run-engine-setting).

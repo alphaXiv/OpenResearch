@@ -1,0 +1,106 @@
+# Configure compute
+
+Settings and custom instructions belong to this machine, across all projects.
+Configuration changes affect future launches, not existing runs. Only change the
+backend when requested; saving credentials does not select a new default.
+
+```sh
+orx compute status --json
+orx compute show ssh --json
+orx compute configure ssh --default-host lab
+orx compute configure ssh --host lab --container research
+orx compute configure ssh --host lab --clear container
+orx compute configure ssh --host lab --remote-root /data/me/orx  # runs + source cache; default ~/.orx
+orx compute configure ssh --host lab --clear remote-root
+orx compute configure ssh --host lab --keep-remote-runs true   # keep every finished run dir on the host
+orx compute test ssh --host lab                     # tests saved container too
+orx compute test ssh --host lab --no-container      # explicitly tests host
+orx compute connect ssh --host lab                 # interactive login/MFA
+orx compute configure slurm --host cluster --partition gpu --account lab --time-limit 24h
+orx compute configure slurm --cpus-per-task 8 --mem 64G   # defaults; exp run --cpus/--mem override
+orx compute configure slurm --clear cpus-per-task --clear mem
+orx compute configure slurm --clear time-limit     # cluster chooses
+orx compute configure slurm --remote-root /scratch/me/orx   # shared FS; --clear remote-root for ~/.orx
+orx compute configure slurm --keep-remote-runs true          # keep every finished run dir on the cluster
+orx compute connect slurm --host cluster
+orx compute configure k8s --context research --namespace experiments
+orx compute configure ray --address http://127.0.0.1:8265
+orx compute default set slurm --flavor h100:1
+orx compute default clear
+orx compute catalog --gpu H100_SXM --count 1 --json
+```
+
+Use `--help` on each command for flags. Supplied fields change; omitted fields
+stay unchanged. `--clear <field>` explicitly removes a setting. `status` is a
+configuration summary, not proof of connectivity. `test` returns `ready` and
+exits nonzero when prerequisites fail. Its checks do not launch training jobs.
+Modal checks the local SDK and credential presence; it does not verify token
+validity with Modal.
+Vercel Sandbox likewise checks the local SDK and that `VERCEL_OIDC_TOKEN`, or
+all of `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`, are present.
+
+HF, Tinker and Modal credentials can come from
+`orx compute configure modal --credentials-file -` (stdin; likewise `hf` and
+`tinker`), or a private JSON file. Shapes: HF `{"token":"…"}`,
+Tinker `{"key":"…"}`, Modal `{"tokenId":"…","tokenSecret":"…"}`. Never put
+credentials in command arguments, custom instructions, or committed files.
+`orx compute connect hf` uses `hf auth login`; `orx compute connect modal` and
+`orx compute connect tinker` prompt without echoing credentials.
+`orx compute connect openresearch` reuses login and SSH-key registration.
+Interactive login requires a terminal and does not support JSON.
+`orx compute configure modal --clear credentials` (likewise hf and tinker) removes
+ORX-saved credentials; process environment and provider-owned credential stores
+can still take precedence.
+
+To change SSH aliases, read `orx compute ssh-config show --json` and retain its
+exact content in a private file. Write the modified config using
+`orx compute ssh-config set --file <new-file> --previous-file <original-file>`.
+A stale original is rejected; reread and reconcile instead of overwriting
+someone else's edit.
+
+## Maintain the custom recipe
+
+For most users, leave `CUSTOM.md` empty. Use standard `orx compute` settings and
+committed project scripts first. Add instructions only for a verified,
+consistently repeated bespoke compute workflow that neither can express and
+that truly requires extra steps from the agent. Do not record ordinary settings
+or one-off fixes.
+
+```sh
+orx compute instructions show --json
+orx compute instructions set --file - --expected-revision <revision>
+```
+
+There is one canonical `<ORX config directory>/compute/CUSTOM.md`; it is not a
+copy in each session's generated skills. `set --file -` reads stdin. Use the
+revision from the last read; a conflict means reread and reconcile. The CLI
+write lock serializes `set` calls; the revision rejects changes saved since
+`show` and before the check. Agents and users should update through `set`.
+`orx compute instructions path` locates or initializes the file for inspection.
+Direct editor saves do not use the lock and can race with `set`; close or reload
+an editor before a CLI update rather than editing concurrently.
+Skill refreshes, upgrades, and session cleanup do not own or delete this file.
+
+Keep a short section for each backend/host: verified environment activation,
+data paths, relevant constraints, and documentation links. Example:
+
+```markdown
+## SSH: lab
+- Use the saved `research` container.
+- Source `/opt/conda/etc/profile.d/conda.sh`; activate `research`.
+- Dataset: `/datasets/project-a` (read-only).
+- Keep setup in committed `scripts/run.sh`.
+```
+
+Read current settings and the recipe each time; an earlier session prompt can
+be stale. Markdown is guidance, never an automatically executed setup script.
+Preserve the fixed run command and launch through `orx exp run`.
+
+## Slurm connection loss
+
+A disconnected monitor does not prove the scheduler stopped the job. Reconnect
+with `orx compute connect slurm --host <alias>`, then inspect the existing run
+with `orx exp status <expId> --scheduler` (omit `--scheduler` for offline status).
+Do not resubmit merely because logs stopped.
+Status includes the requested timeout and available scheduler accounting data.
+Absent accounting is unknown; a scheduler `TIMEOUT` is evidence of termination.

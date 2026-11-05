@@ -19,8 +19,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::process::Command;
 
+use super::managed_env::ManagedEnv;
 use crate::error::{anyhow, Result};
 
 /// Bundled Python launcher. Subcommands (argv[1]):
@@ -45,7 +45,11 @@ def submit():
     modal = _modal()
     spec = json.load(sys.stdin)
     app = modal.App.lookup(spec.get("app", "openresearch"), create_if_missing=True)
-    image = modal.Image.from_registry(spec["image"])
+    # Registry images rarely ship uv; append it to PATH so an image's own uv still wins.
+    image = modal.Image.from_registry(spec["image"]).dockerfile_commands(
+        "COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /uvx /opt/orx-uv/",
+        "ENV PATH=$PATH:/opt/orx-uv",
+    )
     kwargs = {
         "app": app,
         "image": image,
@@ -85,13 +89,14 @@ def status(sid):
         out = {"stage": "COMPLETED"}
     else:
         out = {"stage": "ERROR", "message": "exited with code %d" % code}
+    out["exitCode"] = code
     print(json.dumps(out))
 
 def logs(sid):
     modal = _modal()
     sb = modal.Sandbox.from_id(sid)
     # StreamReader replays from the start on each (re)connect, which matches
-    # supervise's skip/dedup contract (same as HF's SSE and `kubectl logs -f`).
+    # supervise's skip/dedup contract (same as HF's SSE).
     for line in sb.stdout:
         if not line.endswith("\n"):
             line += "\n"
@@ -116,21 +121,15 @@ else:
     sys.exit(2)
 "#;
 
-/// Directory of the orx-managed Modal environment (a venv with `modal` in it),
-/// under orx's config dir alongside `k8s.json`.
-fn managed_env_dir() -> PathBuf {
-    crate::config::config_dir().join("envs").join("modal")
-}
-
-/// The interpreter inside the managed env (may not exist until `ensure_env`).
-fn managed_python() -> PathBuf {
-    let dir = managed_env_dir();
-    if cfg!(windows) {
-        dir.join("Scripts").join("python.exe")
-    } else {
-        dir.join("bin").join("python")
-    }
-}
+/// `Sandbox.create(tags=...)` arrived in modal 1.4.3, which requires Python 3.10.
+const MODAL_ENV: ManagedEnv = ManagedEnv {
+    name: "modal",
+    label: "Modal",
+    min_python: (3, 10),
+    requirement: "modal>=1.4.3",
+    ready_check:
+        "import inspect, modal; assert 'tags' in inspect.signature(modal.Sandbox.create).parameters",
+};
 
 /// The Python interpreter the launcher runs with — resolved with NO side
 /// effects, so it's safe to call from the detached supervisor:
@@ -143,43 +142,11 @@ fn python_bin() -> String {
             return p;
         }
     }
-    let managed = managed_python();
+    let managed = MODAL_ENV.python();
     if managed.exists() {
         return managed.to_string_lossy().into_owned();
     }
     "python3".to_string()
-}
-
-/// Does `py -c "import modal"` succeed?
-async fn imports_modal(py: &str) -> bool {
-    Command::new(py)
-        .args(["-c", "import modal"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// First interpreter on PATH that can build a venv (to bootstrap the managed env).
-async fn base_python() -> Option<String> {
-    for c in ["python3", "python"] {
-        let ok = Command::new(c)
-            .args(["-c", "import venv"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(c.to_string());
-        }
-    }
-    None
 }
 
 /// Ensure a usable Modal interpreter exists, provisioning the orx-managed venv
@@ -192,64 +159,13 @@ pub async fn ensure_env() -> Result<()> {
     if std::env::var("ORX_MODAL_PYTHON").is_ok_and(|p| !p.trim().is_empty()) {
         return Ok(()); // explicit override — trust it, don't provision
     }
-    let managed = managed_python();
-    let managed_str = managed.to_string_lossy().into_owned();
-    if managed.exists() && imports_modal(&managed_str).await {
-        return Ok(()); // already provisioned and healthy
-    }
-    let base = base_python().await.ok_or_else(|| {
+    MODAL_ENV.ensure().await.map_err(|e| {
         anyhow!(
-            "No Python 3 found to build the Modal environment. Install Python 3 (it ships with \
-             `venv`), or set ORX_MODAL_PYTHON to an interpreter that already has `modal`."
+            "{}. Or set ORX_MODAL_PYTHON to an interpreter with {}.",
+            e.to_string().trim_end_matches('.'),
+            MODAL_ENV.requirement
         )
     })?;
-    let dir = managed_env_dir();
-    if !managed.exists() {
-        eprintln!(
-            "orx: provisioning the Modal environment at {} (one-time, ~30–60s)…",
-            dir.display()
-        );
-        if let Some(parent) = dir.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let ok = Command::new(&base)
-            .arg("-m")
-            .arg("venv")
-            .arg(&dir)
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
-            return Err(anyhow!(
-                "Could not create a virtualenv at {} with {}.",
-                dir.display(),
-                base
-            ));
-        }
-    }
-    eprintln!("orx: installing the `modal` SDK…");
-    let ok = Command::new(&managed_str)
-        .args([
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--disable-pip-version-check",
-            "modal",
-        ])
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok || !imports_modal(&managed_str).await {
-        return Err(anyhow!(
-            "Built the Modal environment but `import modal` still fails. Remove {} and relaunch, \
-             or set ORX_MODAL_PYTHON to a working interpreter.",
-            dir.display()
-        ));
-    }
-    eprintln!("orx: Modal environment ready.");
     Ok(())
 }
 
@@ -308,7 +224,7 @@ fn launcher_error(what: &str, code: Option<i32>, stderr: &str) -> crate::error::
 
 /// Run the launcher and capture its output (submit / status / cancel).
 async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>> {
-    let mut cmd = Command::new(python_bin());
+    let mut cmd = crate::process::tokio_command(python_bin());
     cmd.arg("-c")
         .arg(LAUNCHER)
         .args(args)
@@ -395,6 +311,7 @@ pub fn default_image(gpu: bool) -> String {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ModalJobSpec {
     /// `bash -c` payload (the shared snapshot-and-run script).
     pub script: String,
@@ -403,6 +320,7 @@ pub struct ModalJobSpec {
     pub cpu: Option<f64>,
     pub memory: Option<u64>,
     /// Passed to the sandbox as an ephemeral Secret (tokens, synced env).
+    #[serde(default)]
     pub env: HashMap<String, String>,
     pub timeout_seconds: u64,
     /// Modal app name to group sandboxes under.
@@ -452,6 +370,7 @@ pub async fn run_job(spec: &ModalJobSpec) -> Result<String> {
 pub struct JobState {
     pub stage: String,
     pub message: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 pub async fn inspect_job(sandbox_id: &str) -> Result<JobState> {
@@ -465,6 +384,10 @@ pub async fn inspect_job(sandbox_id: &str) -> Result<JobState> {
             .unwrap_or("RUNNING")
             .to_string(),
         message: v.get("message").and_then(Value::as_str).map(str::to_string),
+        exit_code: v
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .and_then(|code| code.try_into().ok()),
     })
 }
 
@@ -475,19 +398,19 @@ pub async fn cancel_job(sandbox_id: &str) -> Result<()> {
 
 /// One pass over the sandbox's log stream, invoking `sink` per line past `skip`.
 ///
-/// Same replay/dedup contract as `hf::stream_logs` and `k8s::stream_logs`: the
-/// launcher replays the whole stdout from the start on each connect, so the
-/// caller passes how many lines it has consumed and gets the new total back.
+/// Same replay/dedup contract as `hf::stream_logs`: the launcher replays the
+/// whole stdout from the start on each connect, so the caller passes how many
+/// lines it has consumed and gets the new total back.
 /// Ends when the launcher exits (sandbox finished) or after `idle` silence.
 pub async fn stream_logs(
     sandbox_id: &str,
     skip: u64,
-    idle: Duration,
+    idle: Option<Duration>,
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-    let mut child = Command::new(python_bin())
+    let mut child = crate::process::tokio_command(python_bin())
         .arg("-c")
         .arg(LAUNCHER)
         .args(["logs", sandbox_id])
@@ -496,6 +419,7 @@ pub async fn stream_logs(
         .env(super::PYTHONUNBUFFERED, "1")
         .envs(modal_auth_env())
         .stdin(Stdio::null())
+        .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::null()) // startup noise; state comes from inspect
         .spawn()
@@ -505,10 +429,25 @@ pub async fn stream_logs(
     let mut lines = BufReader::new(stdout).lines();
     let mut seen = 0u64;
     loop {
-        match tokio::time::timeout(idle, lines.next_line()).await {
-            Err(_) => break,       // idle — let the caller re-check state
-            Ok(Err(_)) => break,   // read error
-            Ok(Ok(None)) => break, // launcher exited
+        let next = match idle {
+            Some(idle) => tokio::time::timeout(idle, lines.next_line()).await,
+            None => Ok(lines.next_line().await),
+        };
+        match next {
+            Err(_) => break, // idle — let the caller re-check state
+            Ok(Err(e)) => {
+                return Err(anyhow!(
+                    "Could not read the Modal log launcher output: {}",
+                    e
+                ))
+            }
+            Ok(Ok(None)) => {
+                let status = child.wait().await?;
+                if !status.success() {
+                    return Err(anyhow!("the Modal log launcher exited with {}", status));
+                }
+                break;
+            }
             Ok(Ok(Some(line))) => {
                 seen += 1;
                 if seen > skip {
@@ -541,7 +480,7 @@ pub async fn preflight() -> Result<()> {
              ORX_MODAL_PYTHON to an interpreter that has it.",
             python_bin(),
             s.error.as_deref().unwrap_or("import modal failed"),
-            managed_env_dir().display()
+            MODAL_ENV.dir().display()
         ));
     }
     if !s.token_configured {
@@ -651,7 +590,7 @@ pub async fn detect() -> ModalStatus {
         token_configured,
         error,
     };
-    let probe = Command::new(python_bin())
+    let probe = crate::process::tokio_command(python_bin())
         .arg("-c")
         .arg("import modal")
         .stdin(Stdio::null())
@@ -681,6 +620,37 @@ pub async fn detect() -> ModalStatus {
 #[cfg(test)]
 mod credential_tests {
     use super::*;
+    use std::io::Write as _;
+
+    #[tokio::test]
+    async fn status_keeps_the_sandbox_exit_code() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-modal-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (code, stage) in [("None", "RUNNING"), ("0", "COMPLETED"), ("7", "ERROR")] {
+            std::fs::write(dir.join("modal.py"), format!(
+                "class Sandbox:\n    @staticmethod\n    def from_id(sid): return Sandbox()\n    def poll(self): return {code}\n"
+            )).unwrap();
+            let output = crate::process::command(python)
+                .args(["-B", "-c", LAUNCHER, "status", "sandbox"])
+                .env("PYTHONPATH", &dir)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let state: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(state["stage"], stage);
+            assert_eq!(state["exitCode"].as_i64(), code.parse::<i64>().ok());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn selects_active_or_explicit_profile_and_rejects_ambiguity() {
@@ -699,5 +669,104 @@ mod credential_tests {
         let ambiguous: toml::Table = "[one]\n[other]".parse().unwrap();
         assert!(token_profile(&ambiguous, None).is_err());
         assert!(token_profile(&toml::Table::new(), None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ready_check_requires_sandbox_tags() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            eprintln!(
+                "skipped: no Python {}.{}+ on PATH",
+                MODAL_ENV.min_python.0, MODAL_ENV.min_python.1
+            );
+            return;
+        };
+        for (params, ready) in [
+            ("*args, app=None", false),
+            ("*args, app=None, tags=None", true),
+        ] {
+            let dir = std::env::temp_dir().join(format!("orx-modal-env-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(dir.join("modal")).unwrap();
+            std::fs::write(
+                dir.join("modal").join("__init__.py"),
+                format!("class Sandbox:\n    @classmethod\n    def create(cls, {params}):\n        pass\n"),
+            )
+            .unwrap();
+            let status = crate::process::command(python)
+                .args(["-c", MODAL_ENV.ready_check])
+                .env("PYTHONPATH", &dir)
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(status.success(), ready, "create({params})");
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_puts_uv_on_the_sandbox_path() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            eprintln!(
+                "skipped: no Python {}.{}+ on PATH",
+                MODAL_ENV.min_python.0, MODAL_ENV.min_python.1
+            );
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-modal-uv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("modal")).unwrap();
+        std::fs::write(
+            dir.join("modal").join("__init__.py"),
+            r#"import sys
+class App:
+    @staticmethod
+    def lookup(name, create_if_missing): return name
+class Image:
+    @staticmethod
+    def from_registry(tag): return Image()
+    def dockerfile_commands(self, *cmds):
+        sys.stderr.write("\n".join(cmds)); Image.with_uv = Image(); return Image.with_uv
+class Sandbox:
+    object_id = "sb-1"
+    @classmethod
+    def create(cls, *args, **kwargs):
+        assert kwargs["image"] is Image.with_uv, "sandbox did not get the uv image"
+        return cls()
+"#,
+        )
+        .unwrap();
+        let mut child = crate::process::command(python)
+            .args(["-c", LAUNCHER, "submit"])
+            .env("PYTHONPATH", &dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"image": "python:3.12", "script": "true"}"#)
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line.starts_with("COPY --from=ghcr.io/astral-sh/uv:")
+                    && line.ends_with(" /uv /uvx /opt/orx-uv/")),
+            "{stderr}"
+        );
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line == "ENV PATH=$PATH:/opt/orx-uv"),
+            "{stderr}"
+        );
     }
 }

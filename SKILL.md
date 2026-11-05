@@ -24,8 +24,8 @@ expands on the why; these are the non-negotiables.
    a run establishes its baseline or tests its hypothesis — that includes the
    root — and freezing is permanent: a disappointing result is still a result.
    Until then it is **provisional**: seeding it, fixing its deps, and making it
-   run all happen on its own branch (`orx-experiment-tree`). To try an idea,
-   branch a **child** and edit the child.
+   run all happen on its own branch (`orx-experiment-tree`). To test a new
+   hypothesis, branch a **child** and edit the child.
 2. **The run command *and* the environment are a fixed contract — identical on
    every node.** A child inherits its parent's run command verbatim; leave it
    alone. Do **not** give nodes different start commands, and do **not** vary
@@ -79,27 +79,33 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx project view <projectId>` | Show a local project's details and experiment tree. **Experiment ids come from here.** |
 | `orx runs <projectId> [--experiment <id>]` | List runs as a table, newest first. **Run ids come from here.** |
 
-### Run evidence (run-scoped) — module `orx-evidence`
+### Run evidence (run-scoped) — module `orx-logs`
 | Command | What it does |
 |---|---|
-| `orx logs <runId> [--head] [--bytes <n>] [--range <s>:<e>]` | Read a run's terminal log. |
+| `orx logs <runId>` | Show the local log path, size, and short preview; inspect the file for full evidence. |
 
 ### Create and run experiments (write) — modules `orx-create`, `orx-compute`, `orx-git`
 | Command | What it does |
 |---|---|
 | `orx up` | Open the local dashboard to import or create a local project. |
 | `orx project edit <localProjectId> [--name "<n>"] [--run-command "<cmd>"]` | Edit a local project's name or fixed run command. |
+| `orx project share <localProjectId> [--out <file> \| --publish] [--chat <chatId>... \| --no-chats] [--no-logs] [--no-artifacts]` | Only when the user asks: save the project's code, experiment tree, finished runs, logs, artifacts and chats as a `.orx` file to send to a collaborator. `--chat` narrows it to the named chats. `--publish` (only when the user asks for a link) uploads it to openresearch.sh and prints a link anyone can open; publishing again updates the same link. |
+| `orx project unpublish <localProjectId>` | Delete the project's published link and its file. |
+| `orx project import <file.orx \| link> [--path <dir>]` | Open a shared `.orx` file or an `openresearch.sh/p/...` link as a new local project with its tree, runs and chosen chats. |
 | `orx create-experiment <localProjectId> --title "<t>" [...]` | Add a local experiment node; prints its Git branch. |
+| `orx compute status` / `show <backend>` / `test <backend>` | Inspect machine-wide compute configuration and readiness. |
+| `orx compute configure <backend> --help` / `default set <backend>` / `connect <backend>` | Configure compute or authenticate; load `orx-compute`. |
+| `orx compute instructions show --json` | Read the machine-wide custom recipe and its revision before configuring or launching. |
 | `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
 | `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
 | `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |
+| `orx exp move/archive/unarchive/delete <localExpId>` | Re-parent, hide, restore, or permanently delete experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
-| `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.
 
-### Literature & papers — alphaXiv / OpenAlex / bioRxiv (no login required) — module `orx-lit-review`
+### Literature & papers — alphaXiv / OpenAlex / bioRxiv / PubMed (no login required) — module `orx-lit-review`
 Use before any web search for academic/research queries (paper, author, blog, model release).
 | Command | What it does |
 |---|---|
@@ -107,7 +113,8 @@ Use before any web search for academic/research queries (paper, author, blog, mo
 | `orx discover embedding "<query>"` | Call the alphaXiv semantic retrieval primitive. The main agent ranks candidates and decides focused follow-ups; see `orx-lit-review`. |
 | `orx discover openalex "<query>"` | Search the cross-disciplinary OpenAlex scholarly graph. |
 | `orx discover biorxiv "<query>"` | Search bioRxiv preprints through OpenAlex's bioRxiv index. |
-| `orx paper <id\|url> [--source ...] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv metadata+abstract. Source auto-detected from the id. |
+| `orx discover pubmed "<query>"` | Search PubMed biomedical literature through NCBI E-utilities. |
+| `orx paper <id\|url> [--source <source>] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv/PubMed metadata+abstract. Source auto-detected from the id. |
 
 ### Skills & templates — module `orx-customize`
 | Command | What it does |
@@ -119,6 +126,7 @@ Use before any web search for academic/research queries (paper, author, blog, mo
 | Command | What it does |
 |---|---|
 | `orx skill [name[/resource]]` | Print this overview, one bundled module, or a lazily loaded module resource such as `compute/hf`. |
+| `orx feedback --kind <bug\|feature_request\|frustration> --summary <summary> --details <details>` | Report a meaningful OpenResearch bug, feature request, or user frustration to its maintainers. See the `orx-feedback` module. |
 
 ## Modules
 
@@ -130,12 +138,14 @@ list, with one-line descriptions, is printed at the end of `orx skill` output):
 - **orx-compute** — launch and monitor runs; after resolving the backend, read its bundled reference.
 - **orx-instances** — create persistent standalone machines for manual work.
 - **orx-git** — read, edit, and diff a node's code with plain git.
-- **orx-agent-delegation** — delegate independent work to helper sessions safely.
-- **orx-evidence** — capture and inspect experiment results through run logs.
+- **orx-agent-delegation** — delegate to other models and chats with orx's MCP tools.
+- **orx-logs** — retrieve persisted run output for progress, debugging, or measurements.
+- **orx-results** — interpret, compare, and summarize measured experiment outcomes.
 - **orx-reports** — write durable research outputs into the project's artifacts directory.
 - **orx-figures** — publication-quality figures in matplotlib or TikZ. Load it **before** writing any plotting code, then read the one reference for that figure type.
 - **orx-customize** — add reusable skills and LaTeX templates across projects.
 - **orx-paper** — draft a paper or preprint as LaTeX that renders and compiles to PDF.
+- **orx-feedback** — report meaningful OpenResearch bugs, feature requests, and user frustration without leaking research details.
 - **orx-lit-review** — main-agent cross-corpus retrieval, source-selective follow-up policy, and paper content; the preferred starting point for academic/research queries.
 
 ## Typical workflow
@@ -147,7 +157,7 @@ orx projects                     # find the project id
 orx project view <projectId>     # see the tree, pick an experiment id
 orx skill experiment-tree        # the model + the auto-research loop
 orx runs <projectId>             # find a run id
-orx logs <runId>                 # read its output
+orx logs <runId>                 # locate its log, then inspect the file
 ```
 
 To actually **drive** a project toward a goal — edit each node's code on its Git

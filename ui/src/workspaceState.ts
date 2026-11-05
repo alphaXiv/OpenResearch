@@ -1,10 +1,11 @@
 export type Pane =
   | { kind: "home"; view: "experiments" | "files" | "artifacts" | "terminal" }
-  | { kind: "experiment"; experimentId: string; view: "overview" | "terminal"; runId?: string }
+  | { kind: "experiment"; experimentId: string; view: "overview" | "terminal" | "trackio"; runId?: string }
   | { kind: "file"; path: string; source?: "repo" | "artifacts" | "abs"; sessionId?: string; ref?: string; line?: number; branchLabel?: string }
   | { kind: "code"; experimentId: string; branch: string; view: "files" | "changes" }
   | { kind: "plan"; sessionId: string; promptId: string }
-  | { kind: "subagent"; sessionId: string; spawnPartId: string };
+  | { kind: "subagent"; sessionId: string; spawnPartId: string }
+  | { kind: "side"; sessionId: string | null };
 
 export interface TaskWorkspace {
   tabs: Pane[];
@@ -36,10 +37,11 @@ export interface GlobalWorkspace {
   lastLocation: string | null;
   railOpen: boolean;
   panelWidth: number;
+  railWidth?: number;
   experimentsView: "tree" | "table";
 }
 
-export const settingsTabs = ["settings", "harnesses", "projects", "compute", "instances", "environment", "git", "storage"] as const;
+export const settingsTabs = ["settings", "harnesses", "projects", "compute", "openresearch", "instances", "environment", "storage"] as const;
 export type SettingsSection = typeof settingsTabs[number];
 export const isSettingsSection = (value: unknown): value is SettingsSection =>
   settingsTabs.some((tab) => tab === value);
@@ -58,7 +60,7 @@ export function parsePane(value: unknown): Pane | undefined {
         return { kind: "home", view: value.view };
       break;
     case "experiment":
-      if (only("kind", "experimentId", "view", "runId") && nonempty(value.experimentId) && (value.view === "overview" || value.view === "terminal") && optionalString(value.runId))
+      if (only("kind", "experimentId", "view", "runId") && nonempty(value.experimentId) && (value.view === "overview" || value.view === "terminal" || value.view === "trackio") && optionalString(value.runId))
         return { kind: "experiment", experimentId: value.experimentId, view: value.view, ...(nonempty(value.runId) ? { runId: value.runId } : {}) };
       break;
     case "file":
@@ -78,6 +80,9 @@ export function parsePane(value: unknown): Pane | undefined {
       break;
     case "subagent":
       if (only("kind", "sessionId", "spawnPartId") && nonempty(value.sessionId) && nonempty(value.spawnPartId)) return { kind: "subagent", sessionId: value.sessionId, spawnPartId: value.spawnPartId };
+      break;
+    case "side":
+      if (only("kind", "sessionId") && (value.sessionId === null || nonempty(value.sessionId))) return { kind: "side", sessionId: value.sessionId };
   }
 }
 

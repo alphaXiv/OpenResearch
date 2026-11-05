@@ -62,8 +62,8 @@ is a transformation of the evidence:
 
 ## Template
 
-`figs/loss_curve.py`, reading a tidy CSV exported from `orx logs`
-(`variant,seed,step,value`):
+`figs/loss_curve.py`, reading a tidy CSV (`variant,seed,step,value`)
+extracted from the log file located by `orx logs`:
 
 ```python
 """Validation loss over training. Regenerate: python figs/loss_curve.py"""

@@ -1,8 +1,6 @@
-//! Local Modal launch — the Modal twin of `local/hf.rs` and `local/k8s.rs`: the
-//! run row comes from and goes to the local store only, and the detached
-//! `orx supervise` watches the sandbox via the Modal Python launcher. Auth is
-//! Modal's own (MODAL_TOKEN_ID/SECRET or `~/.modal.toml`); the sandbox runs on
-//! the user's Modal account and scales to zero when the run ends.
+//! Modal Sandbox launch intents. Auth is Modal's own (MODAL_TOKEN_ID/SECRET or
+//! `~/.modal.toml`); the sandbox runs on the user's Modal account and scales to zero when the
+//! run ends.
 
 use std::collections::HashMap;
 
@@ -10,35 +8,53 @@ use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
 use crate::jobs::{huggingface as hf, modal, BackendDescriptor};
-use crate::store::{now_ms, Store, StoredRun};
+use crate::store::{now_ms, LaunchSpec, Store, StoredRun};
 
 /// Modal app all orx sandboxes are grouped under (visible in the Modal dashboard).
 const MODAL_APP: &str = "openresearch";
 
-/// CLI wrapper around `submit_local_modal`: submit, then print the summary.
-pub async fn launch_local_modal(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_modal(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} Modal sandbox submitted.");
-    println!(
-        "  sandbox {} ({})",
-        backend.job_id.as_deref().unwrap_or(""),
-        backend.flavor.as_deref().unwrap_or("")
-    );
-    println!("  run     {}", run.id);
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
-}
-
-/// Submit the local experiment's run as a Modal Sandbox and detach a
-/// supervisor. Requires `--backend modal` and `--flavor <name>` where the name
-/// is a Modal GPU (t4, l4, a10g, a100, a100-80gb, l40s, h100, h200, …) or
-/// `cpu` / `cpu-large` for CPU-only.
-pub async fn submit_local_modal(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    crate::compute::submit(args).await
+/// Requires `--flavor <name>`: a Modal GPU (t4, l4, a10g, a100, a100-80gb, l40s, h100, h200,
+/// …) or `cpu` / `cpu-large` for CPU-only.
+pub fn launch_spec(
+    args: &crate::ExpRunArgs,
+    source: &SourceSnapshot,
+    run_id: &str,
+    command: &str,
+) -> Result<LaunchSpec> {
+    let flavor = args.flavor.clone().ok_or_else(|| {
+        anyhow!(
+            "--backend modal requires --flavor: a Modal GPU (t4, l4, a10g, a100, \
+             a100-80gb, l40s, h100, h200, or e.g. h100:2 for a count) — or cpu / cpu-large \
+             for CPU-only. Priced per second on your Modal account."
+        )
+    })?;
+    let resources = modal::resolve_flavor(&flavor);
+    // Same default as the HF/k8s paths — no-timeout jobs are a footgun.
+    let timeout_seconds = match &args.timeout {
+        Some(t) => hf::parse_timeout(t)?,
+        None => 4 * 3600,
+    };
+    let image = args
+        .image
+        .clone()
+        .unwrap_or_else(|| modal::default_image(resources.gpu.is_some()));
+    let spec = modal::ModalJobSpec {
+        script: crate::compute::gated_script("/tmp/orx-source.tar", command),
+        image,
+        gpu: resources.gpu,
+        cpu: resources.cpu,
+        memory: resources.memory,
+        env: HashMap::new(),
+        timeout_seconds,
+        app: MODAL_APP.to_string(),
+        tags: super::run_labels(&args.exp_id, run_id)?,
+        source_archive: Some(source.path.clone()),
+    };
+    Ok(LaunchSpec {
+        kind: "modal_job".into(),
+        target: None,
+        options: serde_json::to_value(spec)?,
+    })
 }
 
 pub async fn submit_local_modal_with_source(
@@ -86,7 +102,7 @@ pub async fn submit_local_modal_with_source(
     // The sandbox's env: everything the user synced (API keys), plus the tokens
     // the run script and common tooling expect. Rides an ephemeral Modal
     // Secret, never the plain env arg.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let mut env = crate::config::run_env(&run_id);
     if let Ok(hf_token) = hf::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
@@ -110,6 +126,10 @@ pub async fn submit_local_modal_with_source(
     .await?;
 
     let mut descriptor = BackendDescriptor {
+        ssh_container: None,
+        monitoring_error: None,
+        cancellation_accepted: false,
+        rental_lease: None,
         kind: "modal_job".to_string(),
         namespace: Some(MODAL_APP.to_string()),
         job_id: Some(sandbox_id.clone()),
@@ -123,9 +143,13 @@ pub async fn submit_local_modal_with_source(
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        cpus_per_task: None,
+        mem: None,
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: None,
+        unknown: Default::default(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
@@ -148,6 +172,7 @@ pub async fn submit_local_modal_with_source(
         cancel_requested: store
             .get_run(&run_id)?
             .is_some_and(|run| run.cancel_requested),
+        cancel_reason: None,
         chat_session_id: args.launching_chat_session(),
     };
     store.upsert_run(&run)?;

@@ -1,31 +1,69 @@
-import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
-import { markLiveUpdate } from "../queries/live";
-import { removeSession as removeCachedSession } from "../queries/invalidation";
+import { useMachines } from "../machineSelection";
+import { downloadFile } from "../download";
 import {
-  isCurrentScope,
-  setScopedQueryData,
-  deletedSessionIds,
-  queryClient,
-} from "../queries/client";
-import { LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { useChatState } from "../queries/chatStore";
+  createContext,
+  useContext,
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
+
+import { Dialog } from "@base-ui/react/dialog";
+import { EscapeScope } from "./EscapeScope";
+import { commandRegion, subscribeCommandRegion } from "../keyboardRegion";
+import { ChatSearch } from "./ChatSearch";
+import { chatSearchRanges } from "../chatSearch";
+import { ComposerProjectPicker } from "./ComposerProjectPicker";
+import { LibraryPicker } from "./LibraryPicker";
+import { ProjectInfoCard } from "./ProjectInfoCard";
+import { SessionHoverCard } from "./SessionHoverCard";
+import { AgentMessageCard } from "./AgentMessageCard";
+import { DelegateCard } from "./DelegateCard";
+import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
+import { taskLocation } from "../workspaceState";
+import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
+import { markLiveUpdate } from "../queries/live";
+
+import { nativeOptions, sessionAcpHarness } from "../acp";
+import { deriveComposerSelection, resolveHarnessDefaultModel } from "../modelSelection";
+
+import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
+
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
+import { CancelledError, useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 
 import {
-  getHarnessesQuery,
-  getSshHostsQuery,
-  listRemoteSessionsQuery,
-  getSkillsQuery,
-} from "../queries/settings";
-import { listChatSessionsQuery, getChatMessagesQuery } from "../queries/chat";
-import { getProjectStarterPromptsQuery } from "../queries/projects";
+  fileMentionContext,
+  insertFileMention,
+  insertMentionToken,
+  matchFileMentions,
+  mentionCandidates,
+  paperToken,
+} from "../fileMentions";
 import { m } from "../paraglide/messages.js";
+import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
+import { appHotkeys } from "../hotkeys";
+import { copyToClipboard } from "../clipboard";
+import { readClipboardImage } from "../clipboardImage";
 import { autoDir, ltr } from "../i18n";
+import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
-import { getThemePreference } from "../theme";
 import {
   ArrowDown,
+  ArrowRightLeft,
   ArrowUpRight,
+  Bell,
   Blocks,
   BookOpen,
   Check,
@@ -35,99 +73,92 @@ import {
   Clock,
   CornerDownLeft,
   Copy,
+  Link,
   FileText,
   FlaskConical,
-  FolderOpen,
+  FolderPlus,
   Globe,
   Gauge,
   HelpCircle,
+  Goal,
+  LibraryBig,
   Lightbulb,
   MessageSquareQuote,
+  MessagesSquare,
   MoreHorizontal,
-  PanelLeft,
   Paperclip,
   Pencil,
   Plus,
   Search,
   SlidersHorizontal,
   SquareTerminal,
-  Terminal,
-  ToggleRight,
   TriangleAlert,
+  Trash2,
   Users,
+  WifiOff,
   X,
 } from "lucide-react";
-import { createPortal } from "react-dom";
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type MouseEvent as ReactMouseEvent,
-} from "react";
+
 import { BrandMark } from "./Wordmark";
 import {
-  cancelQueuedMessage,
-  chatAttachmentUrl,
-  createChatSession,
-  deleteChatSession,
+  type SidebarChatCursor,
   DEMO_FIGURE_SESSION_ID,
   DEMO_LITERATURE_SESSION_ID,
-  captureUiEvent,
   DEMO_EXPERIMENT_LABELS,
   DEMO_PROJECT_ID,
   DEMO_RUN_EXPERIMENT_PROMPT,
   DEMO_SEEDED_LEAF_IDS,
-  forkChatTurn,
   fmtNumber,
-  createRemoteSession,
-  interruptChat,
+  harnessModelLabel,
   reasoningFor,
-  recoverChatTurn,
   reconcileReasoning,
   reconcileServiceTier,
-  renameChatSession,
-  retryQueuedMessage,
-  respondChat,
-  selectChatBranch,
-  runShellCommand,
   fmtDuration,
-  sendChatMessage,
-  setChatSessionArchived,
-  setChatSessionPermissionMode,
-  setChatSessionPlanMode,
+  RejectedResponseError,
+  modelLabel,
   type FirstActionSurface,
   type ChatImageAttachment,
   type ChatMessage,
+  type AlphaXivFolder,
   type ChatPart,
-  type ChatPrompt,
+  type OrxSource,
+  type Autonomy,
   type ChatSession,
-  type ChatTextAnnotation,
+  type CitedMessage,
+  type ChatSearchHit,
   type Harness,
+  type Project,
   type PromptAnswer,
   type RuntimeInfo,
+  type NativeChat,
   type SkillInfo,
   type StarterPrompt,
 } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
-  splitTurnParts,
+  groupResponseMessages,
+  isParentUpdate,
+  parentUpdateText,
+  splitResponseParts,
   isUsageLimitPart,
   isModelAccessLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
+  splitResponseTurn,
   partIsVisible,
-  pendingQuestionId,
+  questionReplies,
+  type QuestionReplies,
+  hasPendingInput,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
+  lastResponseText,
+  responseText,
+  transcriptFileName,
+  transcriptMarkdown,
 } from "../chatRendering";
-import { onChatEvent } from "../events";
+
 import {
   queuedRetryLabel,
   recoveryAction as parseRecoveryAction,
@@ -135,26 +166,45 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
+  attachmentToken,
+  citedAttachments,
+  composerStashContent,
+  mergeFailedComposer,
+  EMPTY_COMPOSER_STASH,
+  nextAttachmentId,
+  type ComposerAnnotation,
+  type ComposerAttachment,
+  type ComposerStash,
+} from "../composerStash";
+import {
   containsShellGlob,
   orxArgsMatch,
   orxArgv,
+  recordedDiscoveryQueries,
   shellWords,
   shellWrapperBody,
   unwrapShellBody,
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
-import { Md } from "./Md";
+import { ChatImageScope, Md } from "./Md";
+import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
+import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
-import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
+import { useComposerFocus } from "./useComposerFocus";
+import { ExperimentRunBanner } from "./ExperimentRunBanner";
+import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
-import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
-import { SshConfigDialog } from "./SshConfigDialog";
-import { RemoteIcon } from "./RemoteIcon";
-import { RemoteStatus } from "./RemoteStatus";
+import { MentionMenu, type MentionMatch } from "./MentionMenu";
+import { useDebouncedValue } from "./NewProjectForm";
+import { MessageWithChips } from "./SkillChips";
+import { ComposerEditor, type ChipSource, type ComposerEditorHandle } from "./ComposerEditor";
+import { WorkspaceConnection } from "./WorkspaceConnection";
+import { SidebarToggle } from "./Header";
+import { AccountChip } from "./AccountChip";
 import {
   defaultSelection,
-  HARNESS_LABELS,
+  harnessLabel,
   ModelPicker,
   usePopover,
   type ModelSelection,
@@ -162,14 +212,21 @@ import {
 import { ContextMeter } from "./ContextMeter";
 import { renderNote } from "./agentNote";
 import {
+  canonicalSkillName,
+  commandMatchesQuery,
   commandsForHarness,
   effectiveCommandPlanMode,
   insertSlashCommand,
-  parsePlanCommand,
+  isComposerCommand,
+  parseComposerCommand,
   removeSlashCommand,
+  resolveComposerCommand,
   slashCommandContext,
+  takesArgument,
+  type ComposerCommandName,
   type SlashCommandContext,
-} from "../planCommand";
+} from "../composerCommands";
+import { ResumeDialog } from "./ResumeDialog";
 import { bashCommand, withoutBashPrefix } from "../bashCommand";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -184,8 +241,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, Input, MenuItem, showAlert, Spinner } from "./ui";
-import { useDialogFocus } from "./useDialogFocus";
+import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Textarea, Tooltip } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -195,11 +251,7 @@ const TOOL_TARGET_INSPECTION_LIMIT = 1_024;
 const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
 const SELECTION_ACTION_GAP_PX = 8;
 const CHAT_ANNOTATION_HIGHLIGHT_NAME = "chat-annotations";
-
-interface ComposerAnnotation extends ChatTextAnnotation {
-  id: string;
-  range?: Range;
-}
+const SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME = "side-chat-annotations";
 
 interface SelectionAction {
   text: string;
@@ -559,25 +611,25 @@ function useTranscriptSelection(
   return { action, add, dismiss };
 }
 
-function useAnnotationHighlights(annotations: ComposerAnnotation[]) {
+function useAnnotationHighlights(annotations: ComposerAnnotation[], name: string) {
   useLayoutEffect(() => {
     if (!("highlights" in CSS) || typeof Highlight === "undefined") return;
     const ranges = annotations.flatMap((annotation) =>
       annotation.range ? [annotation.range] : [],
     );
     if (ranges.length === 0) {
-      CSS.highlights.delete(CHAT_ANNOTATION_HIGHLIGHT_NAME);
+      CSS.highlights.delete(name);
       return;
     }
 
     const highlight = new Highlight(...ranges);
-    CSS.highlights.set(CHAT_ANNOTATION_HIGHLIGHT_NAME, highlight);
+    CSS.highlights.set(name, highlight);
     return () => {
-      if (CSS.highlights.get(CHAT_ANNOTATION_HIGHLIGHT_NAME) === highlight) {
-        CSS.highlights.delete(CHAT_ANNOTATION_HIGHLIGHT_NAME);
+      if (CSS.highlights.get(name) === highlight) {
+        CSS.highlights.delete(name);
       }
     };
-  }, [annotations]);
+  }, [annotations, name]);
 }
 
 function AnnotationPreview({ annotation }: { annotation: ComposerAnnotation }) {
@@ -608,16 +660,17 @@ function AnnotationEntries({
         <AnnotationPreview annotation={annotation} />
       </div>
       {onRemove && (
-        <IconButton
-          type="button"
-          size="small"
-          data-annotation-remove
-          title={m.chat_panel_remove_annotation()}
-          aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
-          onClick={() => onRemove(annotation.id)}
-        >
-          <X size={13} />
-        </IconButton>
+        <Tooltip interactive content={m.chat_panel_remove_annotation()}>
+          <IconButton
+            type="button"
+            size="small"
+            data-annotation-remove
+            aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
+            onClick={() => onRemove(annotation.id)}
+          >
+            <X size={14} />
+          </IconButton>
+        </Tooltip>
       )}
     </div>
   ));
@@ -696,7 +749,7 @@ function AnnotationsPopover({
             aria-label={m.chat_panel_clear_annotations()}
             onClick={onClear}
           >
-            <X size={13} />
+            <X size={14} />
           </button>
         )}
       </div>
@@ -712,6 +765,7 @@ function AnnotationsPopover({
           <AnnotationEntries annotations={annotations} onRemove={onRemove ? removeAnnotation : undefined} />
         </div>
       )}
+      <EscapeScope enabled={popover.open} onEscape={() => { popover.setOpen(false); triggerRef.current?.focus(); }} />
     </div>
   );
 }
@@ -719,14 +773,6 @@ function AnnotationsPopover({
 function ComposerAnnotations(props: Omit<React.ComponentProps<typeof AnnotationsPopover>, "variant">) {
   return <AnnotationsPopover {...props} variant="composer" />;
 }
-
-const PROMPT_COLLAPSED_CLASS_NAME = [
-  "prompt-collapsed text-muted text-base font-[375] my-3.5 mx-0 [&_summary]:flex",
-  "[&_summary]:items-center [&_summary]:gap-2 [&_summary]:cursor-pointer",
-  "[&_summary]:list-none [&_summary]:select-none [&_summary::-webkit-details-marker]:hidden",
-  "[&_summary::after]:content-['›'] [&_summary::after]:text-muted",
-  "[&_summary::after]:transition-transform [&_summary::after]:duration-80 [&_summary::after]:ease-standard [&[open]_summary::after]:rotate-90",
-].join(" ");
 
 const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
   "prompt-collapsed-body mt-1.5 ps-3 border-s-2 border-s-border",
@@ -736,16 +782,11 @@ const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
 const PLAN_RESOLVED_CLASS_NAME = [
   "prompt-collapsed plan-resolved text-subtext my-3.5 mx-0",
   "[&_summary]:flex [&_summary]:items-center [&_summary]:gap-2 [&_summary]:w-fit [&_summary]:max-w-full",
-  "[&_summary]:py-[3px] [&_summary]:px-1 [&_summary]:cursor-pointer [&_summary]:rounded-sm",
+  "[&_summary]:py-1 [&_summary]:px-1 [&_summary]:cursor-pointer [&_summary]:rounded-sm",
   "[&_summary]:list-none [&_summary]:select-none [&_summary:hover]:bg-surface",
   "[&_summary::-webkit-details-marker]:hidden",
   "[&_summary_.plan-chevron]:transition-transform [&_summary_.plan-chevron]:duration-120",
   "[&_summary_.plan-chevron]:ease-standard [&[open]_summary_.plan-chevron]:rotate-90",
-].join(" ");
-
-const PROMPT_HEAD_CLASS_NAME = [
-  "prompt-head text-sm font-medium text-text",
-  "[&_code]:font-mono [&_code]:text-sm [&_code]:text-text",
 ].join(" ");
 
 const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
@@ -754,6 +795,8 @@ const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 const NO_MESSAGES: ChatMessage[] = [];
 const EMPTY_SESSIONS: ChatSession[] = [];
+type DelegateRow = { session: ChatSession; status: DelegateStatus };
+const EMPTY_DELEGATES: DelegateRow[] = [];
 const EMPTY_RECOVERY_OVERRIDES = {};
 
 // --- rendering ---------------------------------------------------------------
@@ -783,11 +826,14 @@ interface ToolActivity {
   kind: ToolActivityKind;
   label: string;
   progressLabel?: string;
+  /** What an approval card asks to do, when the kind's verb alone says too little. */
+  approvalLabel?: string;
   searchPattern?: string;
   filePath?: string;
   fileRef?: string;
   labelTarget?: string;
   litCall?: NonNullable<ReturnType<typeof parseOrxLit>>;
+  queries?: string[];
   runIds?: string[];
   experimentIds?: string[];
   /** Chat sessions `orx agent spawn` created in this tool call. */
@@ -1439,6 +1485,11 @@ function computeToolActivity(part: ChatPart): ToolActivity {
   const resourceExperimentIds = normalizedTargetIds(inputStringArray(normalizedInput, "experimentTargetIds"));
   const filePath = inputString(normalizedInput, "filePath", "file_path", "notebookPath", "notebook_path", "path");
   const description = inputString(normalizedInput, "description");
+  if (part.state?.title === "subagent") return { kind: "agent", label: description ?? m.activity_ran_subagent() };
+  const alphaxivTool = [tool, part.state?.title]
+    .map((name) => name?.match(ALPHAXIV_TOOL)?.[1])
+    .find((name) => name != null);
+  if (alphaxivTool) return alphaxivActivity(alphaxivTool.toLowerCase(), normalizedInput);
   const toolSegments = tool.toLowerCase().split(/(?::|\.|__)+/);
   const baseTool = toolSegments.at(-1) ?? tool.toLowerCase();
   if (baseTool === "run" && toolSegments.includes("web")) {
@@ -1464,9 +1515,13 @@ function computeToolActivity(part: ChatPart): ToolActivity {
     ["run_command", "bash"],
     ["agent", "task"],
     ["collabagenttoolcall", "subagent"],
+    // orx's own compaction marker reads as the agents' automatic one.
+    ["compacted", "contextcompaction"],
+    ["imported", "importedchat"],
     ["subagentactivity", "subagent"],
   ]).get(baseTool) ?? baseTool;
   switch (normalizedTool) {
+    case "shell":
     case "bash": {
       if (!rawCommand && !commandArgv?.length) return { kind: "command", label: m.chat_panel_ran_a_command() };
       const command = meaningfulCommand(rawCommand ?? commandArgv?.join(" ") ?? "");
@@ -1488,20 +1543,28 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return argv !== null && argv[0] !== "discover" && argv[0] !== "paper";
       });
       if (litCall && !hasNonLiteratureOrx) {
+        const queries = litCall.kind === "discover" && !litCall.query
+          ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
+          : [];
         const discoveryLabel = litCall.kind === "discover"
           ? {
             keyword: m.activity_searched_alphaxiv_full_text(),
             embedding: m.activity_searched_alphaxiv_semantically(),
             openalex: m.activity_searched_openalex(),
             biorxiv: m.activity_searched_biorxiv(),
+            pubmed: m.activity_searched_pubmed(),
           }[litCall.strategy]
           : null;
         const label = litCall.kind === "discover"
           ? litCall.query
             ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: litCall.query })
-            : discoveryLabel ?? m.activity_searched_literature()
+            : queries.length === 1
+              ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: queries[0] })
+              : queries.length > 1
+                ? m.activity_for_queries({ activity: discoveryLabel ?? m.activity_searched_literature(), count: fmtNumber(queries.length) })
+                : discoveryLabel ?? m.activity_searched_literature()
           : litCall.id ? m.activity_read_target({ target: ltr(litCall.id) }) : m.activity_read_paper();
-        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall };
+        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall, queries };
       }
 
       if (commandInvokesOrx(command, "agent\\s+spawn")) {
@@ -1537,7 +1600,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return { kind: "project", label: m.chat_panel_waited_for_an_experiment_run(), litCall: litCall ?? undefined };
       }
       if (commandInvokesOrx(command, "exp\\s+cancel")) {
-        return { kind: "project", label: m.chat_panel_cancelled_an_experiment_run(), litCall: litCall ?? undefined };
+        return { kind: "project", label: m.chat_panel_requested_an_experiment_stop(), litCall: litCall ?? undefined };
       }
       const readsProject = commandInvokesOrx(command, "project\\s+view");
       if (readsProject && readsExperimentStatus && readsExperimentNotes) {
@@ -1752,13 +1815,20 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       // liveness is the shimmer, and the current step lives in its tab.
       return { kind: "agent", label: description ?? m.activity_ran_subagent() };
     case "subagent":
-      return { kind: "agent", label: subagentLine(normalizedInput) };
+      return { kind: "agent", label: isParentUpdate(part) ? m.activity_sent_update_to_parent() : description ?? subagentLine(normalizedInput) };
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
+    case "importedchat":
+      return { kind: "project", label: m.activity_imported_chat() };
     case "contextcompaction":
       return {
         kind: "command",
-        label: m.activity_compacted_context(),
+        label: part.state?.status === "error"
+          ? m.activity_compacting_failed()
+          // A row left running (the host died mid-compaction) is not a success.
+          : part.state?.status === "running"
+            ? m.activity_compacting_context()
+            : m.activity_compacted_context(),
         progressLabel: m.activity_compacting_context(),
       };
     default: {
@@ -1766,6 +1836,178 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return { kind: "command", label: detail ? `${tool}: ${detail}` : tool };
     }
   }
+}
+
+/** The tool of an alphaXiv MCP call: Claude names it `mcp__alphaxiv__x`, Codex
+ * `alphaxiv:x` (`orx_alphaxiv:x` when the user configured their own `alphaxiv`),
+ * OpenCode `orx_alphaxiv_x`; ACP agents put such a name, or `Tool: alphaxiv/x`,
+ * in the title. Anchored so commands and URLs never match. */
+const ALPHAXIV_TOOL = /^(?:tool: )?(?:mcp__)?(?:orx_)?alphaxiv(?:__|[:/_])([a-z0-9_]+)$/i;
+
+function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolActivity {
+  const row = (kind: ToolActivityKind, label: string, paper?: string, approvalLabel?: string): ToolActivity => ({
+    kind,
+    label,
+    approvalLabel,
+    // Paper arguments may be full titles, which have no page to link.
+    litCall: { kind: "paper", source: "alphaxiv", id: paper && !/\s/.test(paper) ? paper : undefined },
+  });
+  const readPaper = (paper: string | null) =>
+    paper ? m.activity_read_target({ target: ltr(paper) }) : m.activity_read_paper();
+  const forQuery = (activity: string, query: string | null) =>
+    query ? m.activity_for_query({ activity, query }) : activity;
+
+  switch (tool) {
+    case "list_library":
+      return row("read", m.activity_alphaxiv_read_library());
+    case "list_annotated_papers":
+      return row("read", m.activity_alphaxiv_listed_annotated_papers());
+    case "get_paper_notes": {
+      const paper = inputString(input, "paper_id_or_url");
+      const label = paper
+        ? m.activity_alphaxiv_read_notes_on({ paper: ltr(paper) })
+        : m.activity_alphaxiv_read_notes_on_a_paper();
+      return row("read", label, paper ?? undefined);
+    }
+    case "save_papers_to_folder": {
+      const papers = exactInputStringArray(input, "paper_ids_or_urls") ?? [];
+      const only = papers.length === 1 ? papers[0] : undefined;
+      const label = only
+        ? m.activity_alphaxiv_saved_paper({ paper: ltr(only) })
+        : m.activity_alphaxiv_saved_papers({ count: fmtNumber(papers.length) });
+      return row("edit", label, only, alphaxivApprovalLabel(tool, input));
+    }
+    case "create_folder": {
+      const name = inputString(input, "name");
+      return row(
+        "edit",
+        name ? m.activity_alphaxiv_created_folder({ name }) : m.activity_alphaxiv_created_a_folder(),
+        undefined,
+        alphaxivApprovalLabel(tool, input),
+      );
+    }
+    case "answer_pdf_queries": {
+      const paper = inputString(input, "paper");
+      const queries = typeof input.queries === "string" ? [input.queries] : exactInputStringArray(input, "queries") ?? [];
+      const label = queries.length > 1
+        ? m.activity_for_queries({ activity: readPaper(paper), count: fmtNumber(queries.length) })
+        : forQuery(readPaper(paper), queries[0] ?? null);
+      return row("read", label, paper ?? undefined);
+    }
+    case "get_paper_content": {
+      const paper = inputString(input, "url");
+      return row("read", readPaper(paper), paper ?? undefined);
+    }
+    case "read_files_from_github_repository": {
+      const repository = inputString(input, "githubUrl")
+        ?.replace(/^https?:\/\/(?:www\.)?github\.com\//i, "")
+        .replace(/(?:\.git)?\/*$/, "");
+      const path = inputString(input, "path")?.replace(/^\/+/, "");
+      const target = repository && path ? `${repository}/${path}` : repository;
+      return row("read", target ? m.activity_read_target({ target: ltr(target) }) : m.activity_alphaxiv_read_github_repository());
+    }
+    case "discover_papers": {
+      const keywords = exactInputStringArray(input, "keywords") ?? [];
+      const query = inputString(input, "question") ?? (keywords.join(", ") || null);
+      return row("search", forQuery(m.activity_searched_alphaxiv(), query));
+    }
+    case "find_researchers":
+      return row("search", forQuery(m.activity_alphaxiv_searched_researchers(), inputString(input, "topic", "query")));
+    case "get_researcher":
+    case "resolve_researchers": {
+      const count = Array.isArray(input.people)
+        ? input.people.length
+        : exactInputStringArray(input, "researchers")?.length ?? 0;
+      const only = count === 1
+        ? arrayInputString(input, "people", "name") ?? exactInputStringArray(input, "researchers")?.[0]
+        : null;
+      const label = only
+        ? m.activity_alphaxiv_looked_up_researcher({ name: only })
+        : count > 1
+          ? m.activity_alphaxiv_looked_up_researchers({ count: fmtNumber(count) })
+          : m.activity_alphaxiv_looked_up_some_researchers();
+      return row("search", label);
+    }
+    case "get_researcher_papers": {
+      const researchers = exactInputStringArray(input, "researchers") ?? [];
+      const label = researchers.length === 1
+        ? m.activity_alphaxiv_listed_papers_by({ name: researchers[0] })
+        : researchers.length > 1
+          ? m.activity_alphaxiv_listed_papers_by_researchers({ count: fmtNumber(researchers.length) })
+          : m.activity_alphaxiv_listed_researcher_papers();
+      return row("search", label);
+    }
+    case "get_hot_feed":
+      return row("read", m.activity_alphaxiv_checked_trending_papers());
+    default:
+      return row("command", m.activity_used_alphaxiv());
+  }
+}
+
+/** What an alphaXiv write asks to do, naming its folders once `folders` has them. */
+function alphaxivApprovalLabel(
+  tool: string,
+  input: Record<string, unknown>,
+  folders?: AlphaXivFolder[],
+): string | undefined {
+  const folderName = (key: string) => {
+    const id = inputString(input, key);
+    return id ? folders?.find((folder) => folder.id === id)?.name : undefined;
+  };
+
+  switch (tool) {
+    case "save_papers_to_folder": {
+      const papers = exactInputStringArray(input, "paper_ids_or_urls") ?? [];
+      const folder = folderName("folder_id");
+      if (papers.length === 1) {
+        return folder ? m.activity_alphaxiv_save_a_paper_to({ folder }) : m.activity_alphaxiv_save_a_paper();
+      }
+      const count = fmtNumber(papers.length);
+      return folder ? m.activity_alphaxiv_save_papers_to({ count, folder }) : m.activity_alphaxiv_save_papers({ count });
+    }
+    case "create_folder": {
+      const name = inputString(input, "name");
+      const parent = folderName("parent_folder_id");
+      if (!name) return m.activity_alphaxiv_create_a_folder();
+      return parent ? m.activity_alphaxiv_create_folder_in({ name, parent }) : m.activity_alphaxiv_create_folder({ name });
+    }
+  }
+}
+
+/** The body of an alphaXiv write's approval card: what it writes, with each paper linked by title. */
+function AlphaXivApproval({ tool, input }: { tool: string; input: Record<string, unknown> }) {
+  const { useAlphaXivFolders } = useMachines().owner.queries;
+  const { resolvePaperQuery } = useWorkspace().queries;
+  const folders = useAlphaXivFolders().data;
+  const papers = tool === "save_papers_to_folder" ? exactInputStringArray(input, "paper_ids_or_urls") ?? [] : [];
+  const resolved = useQueries({ queries: papers.map((paper) => resolvePaperQuery(paper)) });
+
+  return (
+    <>
+      <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere" dir="auto">
+        {alphaxivApprovalLabel(tool, input, folders)}
+      </div>
+      {papers.length > 0 && (
+        <ul className="m-0 max-h-40 list-none overflow-auto rounded-md border border-border-variant bg-surface px-3 py-1.5">
+          {papers.map((paper, index) => {
+            const title = resolved[index]?.data?.title?.trim();
+            return (
+              <li key={paper} className="flex h-6 items-center gap-2 text-sm text-text">
+                <LitSourceLogo source="alphaxiv" size={14} className="shrink-0" />
+                <span className="flex min-w-0 items-center">
+                  <span className="min-w-0 truncate" dir="auto" title={title}>
+                    <a className="tool-target" href={paperUrl("alphaxiv", paper)} target="_blank" rel="noopener noreferrer">{title || ltr(paper)}</a>
+                  </span>
+                  <ArrowUpRight className="ms-1 shrink-0 opacity-50" size={14} aria-hidden="true" />
+                </span>
+                {title && <span className="shrink-0 text-xs text-subtext">{ltr(paper)}</span>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
+  );
 }
 
 /** Readable one-liner for a Codex sub-agent spawn/activity row, from the
@@ -1938,7 +2180,7 @@ function ToolActivityLabel({
         rel="noopener noreferrer"
       >
         {activity.label}
-        <ArrowUpRight className="inline ms-1 opacity-50" size={13} aria-hidden="true" />
+        <ArrowUpRight className="inline ms-1 opacity-50" size={14} aria-hidden="true" />
       </a>
     );
   }
@@ -2099,6 +2341,7 @@ function permissionActivityLabel(tool: string | undefined, input: Record<string,
     tool,
     state: { status: "running", input },
   });
+  if (activity.approvalLabel) return activity.approvalLabel;
   return {
     skill: m.activity_load(),
     read: m.activity_read(),
@@ -2194,7 +2437,7 @@ interface SquashedToolPart {
 }
 
 function squashableToolPartKey(part: ChatPart, activity: ToolActivity): string | null {
-  if (part.state?.status !== "completed") return null;
+  if (isSubagentPart(part) || part.state?.status !== "completed") return null;
   return JSON.stringify([
     activity.kind,
     activity.label,
@@ -2204,6 +2447,7 @@ function squashableToolPartKey(part: ChatPart, activity: ToolActivity): string |
     activity.runIds ?? null,
     activity.experimentIds ?? null,
     activity.spawnedSessionIds ?? null,
+    activity.queries ?? null,
   ]);
 }
 
@@ -2230,9 +2474,11 @@ function TurnStatusRow({
   recovering,
   onRecover,
   usageLimited = false,
+  temporaryApiError = false,
 }: {
   part: ChatPart;
   usageLimited?: boolean;
+  temporaryApiError?: boolean;
   busy: boolean;
   recovering: boolean;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
@@ -2254,7 +2500,7 @@ function TurnStatusRow({
   if (part.id === "turn-retry") {
     const label = retryStatusLabel(input ?? {}, now);
     return (
-      <div className="turn-retry-row flex items-center gap-2 py-1 px-1 text-sm text-subtext">
+      <div className="turn-retry-row mt-4 flex items-center gap-2 py-1 px-1 text-sm text-subtext">
         <Spinner />
         <span>{label}</span>
       </div>
@@ -2264,13 +2510,14 @@ function TurnStatusRow({
   const turnId = input?.turnId;
   const label = isModelAccessLimitPart(part)
     ? m.chat_model_unavailable()
-    : usageLimited ? m.chat_session_limit_reached() : m.chat_turn_incomplete();
-  const Icon = usageLimited ? Gauge : TriangleAlert;
+    : usageLimited ? m.chat_session_limit_reached()
+    : temporaryApiError ? m.chat_panel_temporary_api_error() : m.chat_turn_incomplete();
+  const Icon = temporaryApiError ? WifiOff : usageLimited ? Gauge : TriangleAlert;
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
-    <details className="turn-usage-limit group/limit text-base text-subtext">
-      <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
-        <Icon size={18} className="shrink-0 text-accent-red" aria-hidden="true" />
+    <Disclosure id={`${part.id}:${turnId ?? ""}`} className="turn-usage-limit group/limit mt-4 text-base text-subtext">
+      <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+        <Icon size={18} className={temporaryApiError ? "shrink-0 text-subtext" : "shrink-0 text-accent-red"} aria-hidden="true" />
         <span>{label}</span>
         <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
       </summary>
@@ -2288,7 +2535,7 @@ function TurnStatusRow({
           {recovering ? m.chat_starting() : action === "retry" ? m.app_retry() : m.chat_continue()}
         </Button>
       )}
-    </details>
+    </Disclosure>
   );
 }
 
@@ -2296,6 +2543,9 @@ function TurnStatusRow({
  * raw command/output, because that detail is useful for diagnosis. */
 function ToolRow({
   part,
+  expansionState,
+  revealNonce,
+  revealPartId,
   activity,
   repeatCount = 1,
   onOpenFile,
@@ -2306,6 +2556,9 @@ function ToolRow({
   experimentName,
 }: {
   part: ChatPart;
+  expansionState?: Map<string, boolean>;
+  revealNonce?: number;
+  revealPartId?: string;
   activity: ToolActivity;
   repeatCount?: number;
   onOpenFile?: OpenTranscriptFile;
@@ -2315,12 +2568,28 @@ function ToolRow({
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
   const state = part.state;
   const failed = state?.status === "error";
   const errorMessage = cleanToolError(state?.error || state?.output || "");
   const hasDetail = failed && Boolean(errorMessage);
-  const [detailOpen, setDetailOpen] = useState(false);
-  const detailId = `tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  const key = `error:${part.id}`;
+  const [detailOpen, setDetailOpen] = useState(() => expansionState?.get(key) ?? false);
+  useLayoutEffect(() => {
+    if (revealNonce === undefined || !hasDetail || part.id !== revealPartId) return;
+    expansionState?.set(key, true);
+    setDetailOpen(true);
+  }, [revealNonce, revealPartId, hasDetail, expansionState, key, part.id]);
+  const detailId = elementId(`tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`);
+  if (part.id === LOCAL_ERROR_PART_ID) {
+    return (
+      <div className="local-error mt-4 flex items-start gap-2 text-base text-subtext">
+        <TriangleAlert size={18} className="mt-0.5 shrink-0 text-accent-red" aria-hidden="true" />
+        <span className="wrap-anywhere">{errorMessage}</span>
+      </div>
+    );
+  }
   if (part.tool === "error") {
     return <TurnStatusRow part={part} busy={false} recovering={false} usageLimited={isUsageLimitPart(part)} />;
   }
@@ -2329,7 +2598,7 @@ function ToolRow({
       {failed && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {failed ? (
         <span className="flex h-6 shrink-0 items-center text-accent-red">
-          <CircleX size={16} strokeWidth={1.75} className="tool-kind-icon" aria-hidden="true" />
+          <CircleX size={16} strokeWidth={1.5} className="tool-kind-icon" aria-hidden="true" />
         </span>
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted" />
@@ -2354,12 +2623,12 @@ function ToolRow({
   );
 
   if (!hasDetail) {
-    return <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1">{line}</div>;
+    return <div data-part-id={part.id} className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">{line}</div>;
   }
 
   return (
-    <div className="tool-row tool-row-error flex flex-col min-w-0">
-      <div className="flex items-start gap-2 w-fit max-w-full py-[3px] px-1 min-w-0 rounded-sm">
+    <div data-part-id={part.id} className="tool-row tool-row-error flex flex-col min-w-0">
+      <div className="flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm">
         {line}
         <button
           type="button"
@@ -2367,7 +2636,7 @@ function ToolRow({
           aria-expanded={detailOpen}
           aria-controls={detailId}
           aria-label={detailOpen ? m.a11y_hide_error_details({ activity: activity.label }) : m.a11y_show_error_details({ activity: activity.label })}
-          onClick={() => setDetailOpen((current) => !current)}
+          onClick={() => { expansionState?.set(key, !detailOpen); setDetailOpen(!detailOpen); }}
         >
           <ChevronRight size={16} className={`text-accent-red transition-transform duration-120 ease-standard ${detailOpen ? "rotate-90" : ""}`} />
         </button>
@@ -2387,7 +2656,12 @@ function ToolRow({
  * aggregate description and a collapsible list of semantic rows. */
 function ToolGroup({
   parts,
+  expansionState,
+  revealNonce,
+  revealPartId,
   pendingTail,
+  streaming = false,
+  onOpenSubagent,
   onOpenFile,
   onOpenRun,
   onOpenSpawnedSession,
@@ -2396,7 +2670,12 @@ function ToolGroup({
   experimentName,
 }: {
   parts: ChatPart[];
+  expansionState?: Map<string, boolean>;
+  revealNonce?: number;
+  revealPartId?: string;
   pendingTail?: boolean;
+  streaming?: boolean;
+  onOpenSubagent?: OpenSubagent;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
   onOpenSpawnedSession?: (sessionId: string) => void;
@@ -2404,15 +2683,26 @@ function ToolGroup({
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
-  const [open, setOpen] = useState(false);
-  const [hasOpened, setHasOpened] = useState(false);
+  const key = `tool:${parts[0].id}`;
+  const [open, setOpen] = useState(() => expansionState?.get(key) ?? false);
+  const [hasOpened, setHasOpened] = useState(open);
+  const holdsRevealedPart = revealPartId !== undefined && findPartById(parts, revealPartId) !== null;
+  useLayoutEffect(() => {
+    if (revealNonce === undefined || !holdsRevealedPart) return;
+    expansionState?.set(key, true);
+    setOpen(true);
+    setHasOpened(true);
+  }, [revealNonce, holdsRevealedPart, expansionState, key]);
   const toggle = () => {
     setHasOpened(true);
-    setOpen((value) => !value);
+    expansionState?.set(key, !open);
+    setOpen(!open);
   };
   const displayParts = squashToolParts(parts);
   const activities = displayParts.map(({ activity }) => activity);
-  const tail = pendingTail ? displayParts.at(-1) : undefined;
+  const tail = pendingTail ? displayParts.at(-1) : streaming
+    ? [...displayParts].reverse().find(({ part }) => isSubagentPart(part) && part.state?.status === "running")
+    : undefined;
   const tailPart = tail?.part;
   const tailActivity = tail?.activity;
   const rawPending = tailPart?.state?.status !== "error"
@@ -2430,10 +2720,21 @@ function ToolGroup({
     ? pendingActivity.label
     : m.chat_panel_used_tools();
   if (parts.length === 1) {
+    if (isSubagentPart(parts[0])) {
+      return (
+        <div className="tool-group my-3.5 mx-0">
+          <SubagentBlock
+            part={parts[0]}
+            pendingTail={pendingTail || (streaming && parts[0].state?.status === "running")}
+            onOpenSubagent={onOpenSubagent}
+          />
+        </div>
+      );
+    }
     if (pendingActivity) {
       return (
         <div className="tool-group my-3.5 mx-0">
-          <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1 text-base leading-6 text-subtext">
+          <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1 text-base leading-6 text-subtext">
             <ToolActivityIcon activity={pendingActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
             <span
               className={`${shimmering ? "tool-running-shimmer" : ""} min-w-0 line-clamp-2 break-words`}
@@ -2471,7 +2772,7 @@ function ToolGroup({
 
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-[3px] px-1 text-base leading-6 text-subtext text-start">
+      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-subtext text-start">
         <ToolActivityIcon activity={iconActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
         {pendingActivity ? (
           <span
@@ -2515,10 +2816,20 @@ function ToolGroup({
       >
         <div className="tool-group-disclosure-inner">
           <div className="tool-group-rows flex flex-col gap-px mt-0.5 me-0 mb-1 ms-6">
-            {hasOpened && displayParts.map(({ part, count, activity }) => (
+            {hasOpened && displayParts.map(({ part, count, activity }) => isSubagentPart(part) ? (
+              <SubagentBlock
+                key={part.id}
+                part={part}
+                pendingTail={(streaming && part.state?.status === "running") || (pendingTail && part.id === tailPart?.id)}
+                onOpenSubagent={onOpenSubagent}
+              />
+            ) : (
               <ToolRow
                 key={part.id}
                 part={part}
+                expansionState={expansionState}
+                revealNonce={revealNonce}
+                revealPartId={revealPartId}
                 repeatCount={count}
                 activity={activity}
                 onOpenFile={onOpenFile}
@@ -2543,22 +2854,40 @@ function ToolGroup({
  * chosen answer — all inline at the card's chronological position. */
 function PromptCard({
   part,
+  questionText = part.prompt?.question,
+  answerInTranscript = false,
   onRespond,
   onOpenFile,
   onOpenPlan,
 }: {
   part: ChatPart;
-  onRespond?: (answer: PromptAnswer) => void;
+  questionText?: string;
+  answerInTranscript?: boolean;
+  onRespond?: (answer: PromptAnswer) => Promise<boolean>;
   onOpenFile?: OpenTranscriptFile;
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
 }) {
-  const p = part.prompt as ChatPrompt;
+  const { id: elementId } = useContext(WorkspaceDomContext);
+  const p = part.prompt;
   const [picked, setPicked] = useState<string[]>([]);
+  const [answerText, setAnswerText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  if (!p) return null;
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
-  const done = !onRespond;
+  const done = !onRespond || submitting;
 
-  const respond = (answer: Omit<PromptAnswer, "promptId">) =>
-    onRespond?.({ promptId: part.id, ...answer });
+  const respond = async (answer: Omit<PromptAnswer, "promptId">) => {
+    if (!onRespond || submitting) return;
+    setSubmitting(true);
+    try {
+      if (await onRespond({ promptId: part.id, ...answer })) {
+        setAnswerText("");
+        setPicked([]);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   // Resolved rendering, keyed off `resolved` alone (`done` also covers
   // read-only hosts, where an *unresolved* card must stay visible).
@@ -2574,54 +2903,51 @@ function PromptCard({
             : { label: m.chat_panel_plan_resolved(), icon: FileText, iconClass: "text-muted" };
       const OutcomeIcon = outcome.icon;
       return (
-        <details className={PLAN_RESOLVED_CLASS_NAME}>
+        <Disclosure id={part.id} className={PLAN_RESOLVED_CLASS_NAME}>
           <summary>
-            <span className="plan-resolved-label text-base font-[375] wrap-anywhere">
+            <span className="plan-resolved-label text-base font-normal wrap-anywhere">
               {p.synthesized ? m.chat_plan() : m.chat_proposed_plan()}
             </span>
-            <OutcomeIcon size={17} strokeWidth={1.8} className={`shrink-0 ${outcome.iconClass}`} />
-            <span className="plan-resolved-label prompt-outcome text-base font-[375] wrap-anywhere">{outcome.label}</span>
+            <OutcomeIcon size={16} strokeWidth={1.5} className={`shrink-0 ${outcome.iconClass}`} />
+            <span className="plan-resolved-label prompt-outcome text-base font-normal wrap-anywhere">{outcome.label}</span>
             <ChevronRight size={12} className="plan-chevron shrink-0 text-muted" />
           </summary>
           <div className={`${PROMPT_COLLAPSED_BODY_CLASS_NAME} ms-6`}>
             <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
             {p.note && <div className="prompt-collapsed-note mt-1.5 italic">{p.note}</div>}
           </div>
-        </details>
+        </Disclosure>
       );
     }
-    // question — one line: header/question + what was chosen (or the typed
-    // custom answer). No echo at all (stale-resolved): neutral "Resolved",
-    // matching the plan row.
-    const chosen = (p.answers ?? []).join(", ") || p.note || "";
+    const chosen = [(p.answers ?? []).join(", "), p.note].filter(Boolean).join("\n\n");
+    if (p.approved === false && !chosen) {
+      return (
+        <Disclosure id={part.id} className="group/question py-1 text-base text-subtext">
+          <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+            <span>{m.chat_question()} — {m.chat_question_skipped()}</span>
+            <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/question:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+          </summary>
+          <div className="mt-1 leading-normal text-subtext whitespace-pre-line wrap-anywhere">{questionText}</div>
+        </Disclosure>
+      );
+    }
     const annotations: ComposerAnnotation[] = (p.annotations ?? []).map((annotation, index) => ({
       id: `${part.id}-annotation-${index}`,
       text: annotation.text,
     }));
+    if (!chosen) return annotations.length > 0 ? <AnnotationsPopover annotations={annotations} variant="sent" /> : null;
     return (
-      <div className="flex flex-col items-end gap-1.5">
-        {annotations.length > 0 && <AnnotationsPopover annotations={annotations} variant="sent" />}
-        <details className={PROMPT_COLLAPSED_CLASS_NAME}>
-          <summary>
-            <span className="prompt-collapsed-title font-[375] wrap-anywhere">{p.header || p.question || m.chat_question()}</span>
-            <span className={`prompt-outcome font-[375] text-subtext wrap-anywhere [&.approved]:text-accent-green [&.chosen]:text-accent-green [&.approved::before]:content-['✓_'] [&.chosen::before]:content-['✓_'] [&.revised]:text-accent-amber [&.rejected]:text-accent-amber ${chosen ? "chosen" : ""}`}>{chosen || m.chat_resolved()}</span>
-          </summary>
-          <div className={PROMPT_COLLAPSED_BODY_CLASS_NAME}>
-            {/* The summary title already shows the question when there's no header. */}
-            {p.header && p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
-            {(p.options ?? []).length > 0 && (
-              <ul className="prompt-collapsed-options mt-1.5 mx-0 mb-0 ps-4.5 [&_.sel]:text-text [&_.sel]:font-medium">
-                {(p.options ?? []).map((o) => (
-                  <li key={o.label} className={p.answers?.includes(o.label) ? "sel" : ""}>
-                    {o.label}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {/* A note-only answer is already the summary outcome — don't echo it twice. */}
-            {p.note && p.note !== chosen && <div className="prompt-collapsed-note mt-1.5 italic">{p.note}</div>}
+      <div className="flex flex-col gap-3 py-1">
+        {questionText && <div className="text-base text-text leading-normal whitespace-pre-line wrap-anywhere">{questionText}</div>}
+        {!answerInTranscript && (p.answeredBy ? (
+          <AgentMessageCard part={{ id: part.id, type: "text", text: chosen, orx: { kind: "message", from: p.answeredBy } }} onOpenFile={onOpenFile} />
+        ) : (
+          <div className="ms-auto max-w-[88%] rounded-2xl bg-panel px-4 py-3 text-base text-text whitespace-pre-wrap wrap-anywhere">
+            {questionText && <div className="mb-1 truncate text-subtext">{questionText}</div>}
+            {chosen}
           </div>
-        </details>
+        ))}
+        {annotations.length > 0 && <AnnotationsPopover annotations={annotations} variant="sent" />}
       </div>
     );
   }
@@ -2634,11 +2960,11 @@ function PromptCard({
     // harness-agnostic permission-mode wire ids).
     const docked = !!onOpenPlan;
     return (
-      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
+      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-accent-blue-border rounded-lg bg-accent-blue-subtle flex flex-col gap-2 [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
         <div className="prompt-head text-base font-semibold text-text">
           {p.synthesized ? m.chat_plan_ready() : m.chat_proposed_plan()}
         </div>
-        <div className={`prompt-plan text-base leading-[1.6] text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--surface))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
+        <div className={`prompt-plan text-base leading-relaxed text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--accent-blue-subtle))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
           <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
         </div>
         {docked && (
@@ -2680,28 +3006,40 @@ function PromptCard({
     const reason =
       (typeof p.toolInput?.reason === "string" && p.toolInput.reason) || "";
     const description = inputString(toolInput, "description") || "";
-    const explanation = reason || description || permissionActivityLabel(p.tool, toolInput);
-    const headingId = `permission-heading-${part.id}`;
+    const explanation = p.header || reason || description || (summary ? "" : permissionActivityLabel(p.tool, toolInput));
+    const headingId = elementId(`permission-heading-${part.id}`);
+    const alphaxivTool = p.tool?.match(ALPHAXIV_TOOL)?.[1]?.toLowerCase();
+    const alphaxivWrite = alphaxivTool === "save_papers_to_folder" || alphaxivTool === "create_folder" ? alphaxivTool : null;
     return (
       <div
-        className={`prompt-card permission my-3 w-full max-w-2xl overflow-hidden rounded-md border border-border bg-background shadow-hairline [&.readonly]:opacity-60 ${done ? "readonly" : ""}`}
+        className={`prompt-card permission my-3 w-full max-w-2xl overflow-hidden rounded-lg border border-border bg-background [&.readonly]:opacity-60 ${done ? "readonly" : ""}`}
         role="group"
         aria-labelledby={headingId}
       >
         <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-0">
           <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-accent-amber-subtle text-accent-amber">
-            <TriangleAlert size={15} strokeWidth={1.8} aria-hidden="true" />
+            <TriangleAlert size={16} strokeWidth={1.5} aria-hidden="true" />
           </span>
           <span id={headingId} className="text-base font-semibold text-text">{m.chat_panel_approval_required()}</span>
         </div>
         <div className="flex flex-col gap-3 px-3.5 py-3">
-          <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere">{explanation}</div>
-          {summary && (
+          {alphaxivWrite
+            ? <AlphaXivApproval tool={alphaxivWrite} input={toolInput} />
+            : explanation && <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere">{explanation}</div>}
+          {summary && !alphaxivWrite && (
             <code className="prompt-command block max-h-36 overflow-auto whitespace-pre-wrap wrap-anywhere rounded-md border border-border-variant bg-surface px-3 py-2 font-mono text-sm leading-relaxed text-text">
               {summary}
             </code>
           )}
-          {!done && (
+          {!done && p.nativeChoices?.length ? (
+            <div className="prompt-actions flex flex-wrap items-center justify-end gap-2 pt-0.5">
+              {p.nativeChoices.map((choice) => (
+                <Button key={choice.id} size="small" onClick={() => respond({ answers: [choice.id], approve: choice.kind.startsWith("allow") })}>
+                  {choice.label}
+                </Button>
+              ))}
+            </div>
+          ) : !done && (
             // No resumeMode: the harness picks the right one for an approval.
             // Claude resumes under `bypassPermissions` (the only mode that grants a
             // blocked tool — acceptEdits would re-deny Bash); inline harnesses
@@ -2728,46 +3066,74 @@ function PromptCard({
     );
   }
 
-  // question
-  const toggle = (label: string) =>
-    setPicked((cur) =>
-      p.multiSelect
-        ? cur.includes(label)
-          ? cur.filter((l) => l !== label)
-          : [...cur, label]
-        : [label],
-    );
+  const toggle = (label: string) => {
+    setAnswerText("");
+    setPicked((cur) => p.multiSelect
+      ? cur.includes(label) ? cur.filter((item) => item !== label) : [...cur, label]
+      : [label]);
+  };
+  const submit = () => {
+    if (!done && (answerText.trim() || picked.length > 0)) {
+      void respond({ answers: picked, note: answerText.trim() || undefined });
+    }
+  };
+  const skip = () => void respond({ approve: false });
   return (
-    <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 question ${done ? "readonly" : ""}`}>
-      {p.header && <div className={PROMPT_HEAD_CLASS_NAME}>{p.header}</div>}
-      {p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
-      <div className="prompt-options flex flex-col gap-1.5">
-        {(p.options ?? []).map((o) => {
-          const sel = picked.includes(o.label);
-          return (
-            <button
-              key={o.label}
-              className={`prompt-option flex flex-col items-start gap-0.5 w-full py-2 px-[11px] text-start border border-border rounded-sm bg-background text-text cursor-pointer transition-[border-color,background] duration-80 ease-standard [&:hover:not(:disabled)]:border-border-strong [&:hover:not(:disabled)]:bg-surface [&.sel]:border-primary [&.sel]:bg-primary-subtle [&:disabled]:cursor-default ${sel ? "sel" : ""}`}
-              disabled={done}
-              onClick={() => (done ? undefined : p.multiSelect ? toggle(o.label) : respond({ answers: [o.label] }))}
-            >
-              <span className="prompt-option-label block text-sm font-medium">{o.label}</span>
-              {o.description && <span className="prompt-option-desc block text-sm font-normal leading-[1.45] text-subtext">{o.description}</span>}
-            </button>
-          );
-        })}
+    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={elementId(`question-${part.id}`)}>
+      <div className="flex items-center gap-2 text-subtext">
+        <HelpCircle size={18} aria-hidden="true" />
+        <span className="flex-1 text-sm">{p.header || m.chat_question()}</span>
+        {onRespond && <IconButton aria-label={m.chat_question_skip()} disabled={done} onClick={skip}><X size={16} /></IconButton>}
       </div>
-      {p.multiSelect && !done && (
-        <div className={PROMPT_ACTIONS_CLASS_NAME}>
-          <Button
-            size="small"
-            variant="primary"
-            disabled={picked.length === 0}
-            onClick={() => respond({ answers: picked })}
-          >
-            {m.chat_panel_submit()}
-          </Button>
+      <div id={elementId(`question-${part.id}`)} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
+      {(p.options?.length ?? 0) > 0 && (
+        <div className="prompt-options flex flex-col">
+          {p.options?.map((option, index) => {
+            const selected = picked.includes(option.label);
+            return (
+              <button
+                type="button"
+                key={option.label}
+                aria-pressed={selected}
+                className={`prompt-option flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-start text-text cursor-pointer transition-colors duration-120 ease-standard enabled:hover:bg-highlight focus-visible:bg-highlight focus-visible:outline-2 focus-visible:outline-focus disabled:cursor-default ${selected ? "bg-panel" : ""}`}
+                disabled={done}
+                onClick={() => toggle(option.label)}
+              >
+                <span className={`flex size-6 shrink-0 items-center justify-center rounded-md border text-sm ${selected ? "border-text bg-surface text-text" : "border-border bg-background text-subtext"}`}>{selected ? <Check size={14} /> : index + 1}</span>
+                <span className="min-w-0 text-base">
+                  <span>{option.label}</span>
+                  {option.description && <span className="ms-2 text-sm text-subtext">{option.description}</span>}
+                </span>
+              </button>
+            );
+          })}
         </div>
+      )}
+      {onRespond && (
+        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+          <div className="flex min-w-0 basis-48 grow items-start gap-2">
+            <Pencil size={18} className="mt-2 shrink-0 text-subtext" aria-hidden="true" />
+            <Textarea
+              variant="inline"
+              aria-label={m.chat_question_your_answer()}
+              placeholder={m.chat_question_custom_response()}
+              value={answerText}
+              onChange={(event) => { setAnswerText(event.target.value); setPicked([]); }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+              disabled={done}
+              rows={1}
+            />
+          </div>
+          <div className="ms-auto flex items-center gap-2">
+            <Button type="button" disabled={done} onClick={skip}>{m.chat_question_skip()}</Button>
+            <Button type="submit" variant="primary" disabled={done || (!answerText.trim() && picked.length === 0)}>{m.chat_panel_send()}</Button>
+          </div>
+        </form>
       )}
     </div>
   );
@@ -2791,7 +3157,7 @@ function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | 
  * memo stops those from touching the rows at all. */
 /** Resolve an `image` (attachment) part into what the transcript renders: a
  * source URL, whether it's a PDF (file chip vs inline image), and a name. */
-function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: string } {
+function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isPdf: boolean; name: string } {
   const raw = p.text ?? "";
   const src = raw.startsWith("data:") ? raw : chatAttachmentUrl(raw);
   // Server file names embed the original after a `__` marker; optimistic parts
@@ -2820,6 +3186,7 @@ function ForkControls({
   pagerDisabled,
   onEdit,
   editDisabled,
+  citeRef,
 }: {
   text: string;
   createdAt: number;
@@ -2831,18 +3198,12 @@ function ForkControls({
   pagerDisabled: boolean;
   onEdit: () => void;
   editDisabled: boolean;
+  /** The ref Copy link puts on the clipboard, once the message is saved. */
+  citeRef?: string;
 }) {
   const many = count > 1;
   const sentAt = new Date(createdAt);
-  const copy = async () => {
-    try {
-      if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
-      await navigator.clipboard.writeText(text);
-      showAlert(m.common_copied(), "success");
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    }
-  };
+  const copy = () => copyToClipboard(text);
   return (
     <div
       className={`fork-controls flex items-center gap-0.5 transition-opacity duration-80 ease-standard ${
@@ -2851,25 +3212,27 @@ function ForkControls({
     >
       {many && (
         <>
-          <IconButton size="small"
-            title={m.chat_panel_previous_version()}
-            aria-label={m.chat_panel_previous_version()}
-            disabled={pagerDisabled || !prevId}
-            onClick={() => prevId && onSelect(prevId)}
-          >
-            <ChevronLeft size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_panel_previous_version()}>
+            <IconButton size="small"
+              aria-label={m.chat_panel_previous_version()}
+              disabled={pagerDisabled || !prevId}
+              onClick={() => prevId && onSelect(prevId)}
+            >
+              <ChevronLeft size={14} />
+            </IconButton>
+          </Tooltip>
           <span className="fork-count text-xs text-subtext tabular-nums select-none">
             {index + 1}/{count}
           </span>
-          <IconButton size="small"
-            title={m.chat_panel_next_version()}
-            aria-label={m.chat_panel_next_version()}
-            disabled={pagerDisabled || !nextId}
-            onClick={() => nextId && onSelect(nextId)}
-          >
-            <ChevronRight size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_panel_next_version()}>
+            <IconButton size="small"
+              aria-label={m.chat_panel_next_version()}
+              disabled={pagerDisabled || !nextId}
+              onClick={() => nextId && onSelect(nextId)}
+            >
+              <ChevronRight size={14} />
+            </IconButton>
+          </Tooltip>
         </>
       )}
       <div className="flex items-center gap-0.5 opacity-0 group-hover/turn:opacity-100 group-focus-within/turn:opacity-100 transition-opacity duration-80 ease-standard">
@@ -2877,23 +3240,33 @@ function ForkControls({
           {sentAt.toLocaleTimeString(getLocale(), { hour: "numeric", minute: "2-digit" })}
         </time>
         <IconButton size="small" aria-label={m.md_copy()} disabled={!text} onClick={copy}>
-          <Copy size={13} />
+          <Copy size={14} />
         </IconButton>
+        {citeRef && (
+          <Tooltip interactive content={m.chat_copy_message_link()}>
+            <IconButton size="small" aria-label={m.chat_copy_message_link()} onClick={() => void copyToClipboard(citeRef)}>
+              <Link size={14} />
+            </IconButton>
+          </Tooltip>
+        )}
       </div>
-      <IconButton size="small"
-        title={m.chat_panel_edit_and_re_send()}
-        aria-label={m.chat_panel_edit_and_re_send()}
-        disabled={editDisabled}
-        onClick={onEdit}
-      >
-        <Pencil size={13} />
-      </IconButton>
+      <Tooltip interactive content={m.chat_panel_edit_and_re_send()}>
+        <IconButton size="small"
+          aria-label={m.chat_panel_edit_and_re_send()}
+          disabled={editDisabled}
+          onClick={onEdit}
+        >
+          <Pencil size={14} />
+        </IconButton>
+      </Tooltip>
     </div>
   );
 }
 
-const Message = memo(function Message({
+export const Message = memo(function Message({
   message,
+  responseMessages,
+  replies,
   activePermissionId,
   pendingTailToolId,
   onOpenFile,
@@ -2918,8 +3291,13 @@ const Message = memo(function Message({
   branchDisabled,
   onFork,
   onSelectFork,
+  expansionState,
+  revealNonce,
+  revealPartId,
 }: {
   message: ChatMessage;
+  responseMessages?: ChatMessage[];
+  replies?: QuestionReplies;
   activePermissionId: string | null;
   pendingTailToolId?: string | null;
   onOpenFile?: OpenTranscriptFile;
@@ -2928,7 +3306,7 @@ const Message = memo(function Message({
   runExperimentName?: (runId: string) => string;
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
-  onRespond?: (answer: PromptAnswer) => void;
+  onRespond?: (answer: PromptAnswer) => Promise<boolean>;
   /** Open a plan's full markdown in the right pane (plan cards/strip). */
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
   /** Open a sub-agent's transcript in the right pane (spawn-row "view"). */
@@ -2950,25 +3328,59 @@ const Message = memo(function Message({
   branchDisabled: boolean;
   onFork: (messageId: string, text: string) => void;
   onSelectFork: (leafId: string) => void;
+  expansionState?: Map<string, boolean>;
+  revealNonce?: number;
+  /** Only the tool group and error detail holding this part open on reveal. */
+  revealPartId?: string;
 }) {
+  const { chatAttachmentUrl } = useWorkspace().api;
   useLocale();
   // Editing re-asks as a new fork rather than rewriting history, so the original
   // stays reachable through the pager.
   const [editDraft, setEditDraft] = useState<string | null>(null);
   const shell = shellExchangePart(message);
   if (shell) return <ShellExchangeCard part={shell} />;
+  const providerSwitch = message.parts.find((part) => part.tool === "provider_switch");
+  if (providerSwitch) {
+    const input = providerSwitch.state?.input ?? {};
+    const harness = inputString(input, "harness") ?? "";
+    const name = inputString(input, "name") ?? harness;
+    const model = inputString(input, "model");
+    return (
+      <div role="status" data-provider-switch className="flex items-center gap-2 py-2 text-sm text-subtext">
+        <ArrowRightLeft size={16} className="shrink-0" aria-hidden="true" />
+        <span className="min-w-0 wrap-anywhere">{m.chat_switched_agent({ agent: name, model: model ? modelLabel(model) : m.model_picker_default_model() })}</span>
+      </div>
+    );
+  }
   if (message.role === "user") {
-    const text = message.parts
+    const sent = message.parts.filter((part): part is ChatPart & { orx: OrxSource } => Boolean(part.orx));
+    if (sent.length > 0) {
+      return (
+        <div className="msg-agent-group flex flex-col items-start gap-2">
+          {sent.map((part) => (
+            <AgentMessageCard
+              key={part.id}
+              part={part}
+              runExperimentName={runExperimentName}
+              onOpenFile={onOpenFile}
+              onOpenRun={onOpenRun}
+            />
+          ))}
+        </div>
+      );
+    }
+    const text = replies?.textById.get(message.id) ?? message.parts
       .filter((p) => p.type === "text")
       .map((p) => p.text ?? "")
       .join("\n");
     // Known `/command` tokens render as the chips the composer showed, where
     // they were typed. Unknown commands (or skills removed since) stay plain text.
-    const isCommand = (name: string) => !!skills?.some((s) => s.name === name);
+    const isCommand = (name: string) => !!skills?.some((s) => s.name === canonicalSkillName(name));
     // Optimistic parts carry a data URL; server parts carry a file name.
     const attachments = message.parts
       .filter((p) => p.type === "image" && p.text)
-      .map(attachmentPartView);
+      .map((part) => attachmentPartView(part, chatAttachmentUrl));
     const images = attachments.filter((a) => !a.isPdf);
     const files = attachments.filter((a) => a.isPdf);
     const annotations: ComposerAnnotation[] = message.parts
@@ -2988,26 +3400,32 @@ const Message = memo(function Message({
       };
       return (
         <div className="msg-user-group ms-auto self-end flex w-full max-w-[88%] flex-col items-end gap-1.5">
-          <div className="msg-user-edit w-full bg-surface rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
+          <div className="msg-user-edit w-full flex flex-col rounded-lg border border-border bg-background shadow-control-subtle focus-within:border-focus-border">
             <textarea
               dir="auto"
-              className="w-full bg-transparent text-base text-text resize-none outline-none field-sizing-content min-h-16"
+              {...{ writingsuggestions: "false" }}
+              className="w-full border-0 rounded-none bg-transparent pt-2.5 px-3 pb-1 text-base text-text resize-none outline-none field-sizing-content min-h-16 max-h-60"
               aria-label={m.chat_panel_edit_message()}
               value={editDraft}
               autoFocus
               onChange={(e) => setEditDraft(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
+                  e.stopPropagation();
+                  return;
+                }
                 if (e.key === "Escape") {
+                  e.stopPropagation();
                   e.preventDefault();
                   setEditDraft(null);
-                } else if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                } else if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   submit();
                 }
               }}
             />
-            <div className={`${PROMPT_ACTIONS_CLASS_NAME} justify-end`}>
-              <Button size="small" onClick={() => setEditDraft(null)}>
+            <div className={`${PROMPT_ACTIONS_CLASS_NAME} justify-end pt-1.5 px-2 pb-2`}>
+              <Button size="small" variant="ghost" onClick={() => setEditDraft(null)}>
                 {m.chat_panel_cancel()}
               </Button>
               <Button
@@ -3028,7 +3446,8 @@ const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div dir="auto" className="msg-user max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
+        <div dir="auto" className="msg-user max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border">
+          {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
@@ -3042,8 +3461,8 @@ const Message = memo(function Message({
           {files.length > 0 && (
             <div className="msg-files flex flex-wrap gap-1.5 mt-2">
               {files.map((a, i) => (
-                <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-text [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
-                  <FileText size={15} />
+                <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-border-hover-strong [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
+                  <FileText size={16} />
                   <span>{a.name}</span>
                 </a>
               ))}
@@ -3062,17 +3481,27 @@ const Message = memo(function Message({
             pagerDisabled={branchDisabled}
             onEdit={() => setEditDraft(text)}
             editDisabled={forkDisabled}
+            citeRef={messageRef(message.id)}
           />
         )}
       </div>
     );
   }
-  const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
-  const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
-  const regularParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
+  const responses = responseMessages ?? [message];
+  const localErrors = responses.filter((turn) => turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
+  const responseTurns = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`)).map(splitResponseTurn);
+  const turns = responseTurns.map((turn) => turn.message);
+  const response = splitResponseParts(turns, predictTextTail, replies);
+  const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
+  const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
+  const answerRef = messageRef(response.answerMessageId ?? message.id);
   return (
-    <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
-      <AssistantTurn message={message} parts={regularParts} options={{
+    <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
+      {turns.length > 0 && <AssistantTurn messages={turns} response={response} options={{
+        replies,
+        expansionState,
+        revealNonce,
+        revealPartId,
         activePermissionId,
         pendingTailToolId,
         onOpenFile,
@@ -3085,37 +3514,80 @@ const Message = memo(function Message({
         onOpenPlan,
         onOpenSubagent,
         predictTextTail,
-      }} />
-      {turnStatus && (
+      }} />}
+      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
         <TurnStatusRow
+          key={turn.id}
           part={turnStatus}
           usageLimited={Boolean(usageLimit)}
+          temporaryApiError={temporaryApiError}
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
         />
+      ))}
+      {localErrors.map((turn) => (
+        <div key={turn.id} role="alert" className="mt-4 whitespace-pre-wrap text-base text-accent-red">
+          {cleanToolError(turn.parts[0]?.state?.error ?? "")}
+        </div>
+      ))}
+      {copyText && (
+        <div className="mt-2 flex justify-end opacity-0 transition-opacity duration-80 ease-standard group-hover/turn:opacity-100 group-focus-within/turn:opacity-100">
+          <Tooltip interactive content={m.chat_copy_response()}>
+            <IconButton
+              size="small"
+              aria-label={m.chat_copy_response()}
+              onClick={() => void copyToClipboard(copyText)}
+            >
+              <Copy size={14} />
+            </IconButton>
+          </Tooltip>
+          {answerRef && (
+            <Tooltip interactive content={m.chat_copy_message_link()}>
+              <IconButton
+                size="small"
+                aria-label={m.chat_copy_message_link()}
+                onClick={() => void copyToClipboard(answerRef)}
+              >
+                <Link size={14} />
+              </IconButton>
+            </Tooltip>
+          )}
+        </div>
       )}
     </div>
   );
 });
 
-function AssistantTurn({ message, parts, options }: {
-  message: ChatMessage;
-  parts: ChatPart[];
+function AssistantTurn({ messages, response, options }: {
+  messages: ChatMessage[];
+  response: ReturnType<typeof splitResponseParts>;
   options: Parameters<typeof renderParts>[1];
 }) {
   const streaming = options.predictTextTail ?? false;
-  const { work, answer } = splitTurnParts(parts, streaming);
-  const [expanded, setExpanded] = useState(false);
+  const { work, answer, answerMessageId } = response;
+  const message = messages[messages.length - 1];
+  const answerOptions = { ...options, predictTextTail: streaming && answerMessageId === message.id };
+  const key = messages[0].id;
+  const [expanded, setExpanded] = useState(() => options.expansionState?.get(key) ?? false);
+  const [hasOpened, setHasOpened] = useState(expanded);
+  useLayoutEffect(() => {
+    if (options.revealNonce === undefined) return;
+    options.expansionState?.set(key, true);
+    setHasOpened(true);
+    setExpanded(true);
+  }, [options.revealNonce, options.expansionState, key]);
   const [, tick] = useState(0);
   useEffect(() => {
     if (!streaming || message.completedAt != null || work.length === 0) return;
     const timer = window.setInterval(() => tick((value) => value + 1), 1000);
     return () => window.clearInterval(timer);
   }, [streaming, message.completedAt, work.length]);
-  if (work.length === 0) return <>{renderParts(answer, options)}</>;
-  const end = message.completedAt ?? (streaming ? Date.now() : null);
-  const elapsed = end === null ? null : end - message.createdAt;
+  if (work.length === 0) return <>{renderParts(answer, answerOptions)}</>;
+  const elapsed = messages.reduce<number | null>((total, turn) => {
+    const end = turn.completedAt ?? (streaming && turn.id === message.id ? Date.now() : null);
+    return end === null ? total : (total ?? 0) + Math.max(0, end - turn.createdAt);
+  }, null);
   const duration = elapsed === null ? null : elapsed < 60_000 || elapsed >= 3_600_000
     ? fmtDuration(elapsed)
     : m.chat_work_duration({ minutes: fmtNumber(Math.floor(elapsed / 60_000)), seconds: fmtNumber(Math.floor(elapsed / 1000) % 60) });
@@ -3124,21 +3596,25 @@ function AssistantTurn({ message, parts, options }: {
       <div className="turn-work mb-4">
         <button
           type="button"
-          className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-primary"
+          className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-focus"
           aria-expanded={expanded}
           data-work-toggle
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => { setHasOpened(true); options.expansionState?.set(key, !expanded); setExpanded(!expanded); }}
         >
           <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
           <ChevronRight size={16} className={`shrink-0 text-muted transition-transform duration-200 ease-standard motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
         </button>
         <div className={`tool-group-disclosure ${expanded ? "open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
           <div className="tool-group-disclosure-inner">
-            <div className="turn-work-content pt-4">{renderParts(work, { ...options, predictTextTail: false, pendingTailToolId: null })}</div>
+            <div className="turn-work-content flex flex-col gap-4 pt-4">
+              {hasOpened && work.map((turn) => (
+                <div key={turn.id}>{renderParts(turn.parts, { ...options, predictTextTail: false, pendingTailToolId: turn.id === message.id ? options.pendingTailToolId : null })}</div>
+              ))}
+            </div>
           </div>
         </div>
       </div>
-      <div className="turn-answer">{renderParts(answer, options)}</div>
+      <div className="turn-answer">{renderParts(answer, answerOptions)}</div>
     </>
   );
 }
@@ -3164,12 +3640,12 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
       : null;
   return (
     <div className="msg-shell ms-auto self-end flex w-full max-w-[88%] flex-col items-stretch gap-1.5">
-      <div dir="ltr" className="max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base">
+      <div dir="ltr" className="max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base">
         <div className="flex items-start gap-2 font-mono text-sm text-text whitespace-pre-wrap wrap-anywhere">
           <span className="sr-only">{m.chat_panel_bash()} </span>
           <SquareTerminal
             size={16}
-            strokeWidth={1.6}
+            strokeWidth={1.5}
             className={`mt-0.5 shrink-0 ${failed ? "text-accent-red" : "text-muted"}`}
             aria-hidden="true"
           />
@@ -3190,13 +3666,15 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
 
 /** Shared assistant-parts renderer, reused for a message body and (recursively)
  * for a sub-agent's nested transcript. Coalesces consecutive tool parts into one
- * collapsed group (Claude-desktop style); text / prompt parts break a run and
- * render inline, while reasoning parts are never rendered. A sub-agent spawn
- * part (tool `subagent`) also breaks the run and renders as its own nested
- * block. */
+ * collapsed group, including clickable sub-agent rows. Text and prompts break
+ * a run and render inline; reasoning parts are never rendered. */
 function renderParts(
   parts: ChatPart[],
   opts: {
+    replies?: QuestionReplies;
+    expansionState?: Map<string, boolean>;
+    revealNonce?: number;
+    revealPartId?: string;
     activePermissionId?: string | null;
     pendingTailToolId?: string | null;
     onOpenFile?: OpenTranscriptFile;
@@ -3205,13 +3683,17 @@ function renderParts(
     runExperimentName?: (runId: string) => string;
     onOpenExperiment?: OpenTranscriptTarget;
     experimentName?: (experimentId: string) => string;
-    onRespond?: (answer: PromptAnswer) => void;
+    onRespond?: (answer: PromptAnswer) => Promise<boolean>;
     onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
     onOpenSubagent?: OpenSubagent;
     predictTextTail?: boolean;
   },
 ): React.ReactNode[] {
   const {
+    replies,
+    expansionState,
+    revealNonce,
+    revealPartId,
     activePermissionId,
     pendingTailToolId,
     onOpenFile,
@@ -3238,7 +3720,12 @@ function renderParts(
       <ToolGroup
         key={`tg-${toolRun[0].id}`}
         parts={toolRun}
+        expansionState={expansionState}
+        revealNonce={revealNonce}
+        revealPartId={revealPartId}
         pendingTail={toolRun.some((part) => part.id === pendingTailToolId)}
+        streaming={predictTextTail}
+        onOpenSubagent={onOpenSubagent}
         onOpenFile={onOpenFile}
         onOpenRun={onOpenRun}
         onOpenSpawnedSession={onOpenSpawnedSession}
@@ -3256,28 +3743,9 @@ function renderParts(
     // resolved permission card. Without this, each invisible part splits
     // consecutive tools into single-row groups.
     if (!partIsVisible(part, activePermissionId)) continue;
-    // A sub-agent spawn part streams its own transcript in `children` — render
-    // it as a standalone nested block, not folded into a tool run. Codex tags
-    // its rows `subagent`; Claude's `Task`/`Agent` and OpenCode's `task` are
-    // spawn tools by name (a prose-only agent may have zero children yet still
-    // carry a final report); anything else with children streamed into it is a
-    // spawn too.
-    if (
-      part.type === "tool" &&
-      (isSpawnTool(part.tool) || (part.children?.length ?? 0) > 0)
-    ) {
+    if (part.type === "tool" && part.tool === "api_error") {
       flushTools();
-      rendered.push(
-        <SubagentBlock
-          key={part.id}
-          part={part}
-          // A spawn row runs in parallel with whatever streams after it, so its
-          // shimmer follows its own status while the turn is live — the shared
-          // tail-tool id only ever points at one row and would freeze the rest.
-          pendingTail={(predictTextTail && part.state?.status === "running") || part.id === pendingTailToolId}
-          onOpenSubagent={onOpenSubagent}
-        />,
-      );
+      rendered.push(<TurnStatusRow key={part.id} part={part} busy={false} recovering={false} temporaryApiError />);
       continue;
     }
     if (part.type === "tool") {
@@ -3291,31 +3759,48 @@ function renderParts(
       rendered.push(
         <Md
           key={part.id}
+          partId={part.id}
           text={part.text!}
           onOpenFile={onOpenFile}
           onOpenRun={onOpenRun}
           predict={predictTextTail && part.id === visibleTail?.id}
         />,
       );
-    else if (part.type === "steer")
-      // A message the user sent into this turn while it ran — the same bubble a
-      // user message gets, sitting where the agent received it.
-      rendered.push(
+    else if (part.type === "steer") {
+      const { orx } = part;
+      rendered.push(orx ? (
+        <div key={part.id} className="my-2">
+          <AgentMessageCard
+            part={{ ...part, orx }}
+            runExperimentName={runExperimentName}
+            onOpenFile={onOpenFile}
+            onOpenRun={onOpenRun}
+          />
+        </div>
+      ) : (
+        // A message the user sent into this turn while it ran — the same bubble a
+        // user message gets, sitting where the agent received it.
         <div
           key={part.id}
           dir="auto"
           role="note"
           aria-label={m.chat_panel_you_mid_task()}
-          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere"
+          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere"
         >
-          {part.text}
-        </div>,
-      );
+          {replies?.questionById.has(part.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(part.id)}</div>}
+          {replies?.textById.get(part.id) ?? part.text}
+        </div>
+      ));
+    }
+    else if (part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved)
+      continue;
     else if (part.type === "prompt" && part.prompt)
       rendered.push(
         <PromptCard
           key={part.id}
           part={part}
+          questionText={replies?.questionById.get(part.id)}
+          answerInTranscript={replies?.prompts.has(part.id)}
           onRespond={onRespond}
           onOpenFile={onOpenFile}
           onOpenPlan={onOpenPlan}
@@ -3338,13 +3823,17 @@ function isSpawnTool(tool: string | undefined): boolean {
   return name === "subagent" || name === "task" || name === "agent";
 }
 
+function isSubagentPart(part: ChatPart): boolean {
+  return part.type === "tool" && (isParentUpdate(part) || isSpawnTool(part.tool) || part.state?.title === "subagent" || (part.children?.length ?? 0) > 0);
+}
+
 /** The spawn tool result that stands in for a prose-less sub-agent transcript
  * (a sync Claude agent's final report is delivered as the tool output). The
  * async-launch acknowledgement is internal metadata, not a report — newly
  * stored parts omit it, and the prefix guard covers older transcripts. */
 function spawnFinalReport(part: ChatPart): string {
   const output = part.state?.status === "completed" ? (part.state?.output ?? "") : "";
-  return output.startsWith("Async agent launched") ? "" : output;
+  return output.startsWith("Async agent launched") || output.startsWith("The subagent is working in the background") ? "" : output;
 }
 
 /** Find a part by id anywhere in a parts tree (depth-first). Used by the
@@ -3363,6 +3852,10 @@ export function findPartById(parts: ChatPart[], id: string): ChatPart | null {
  * `renderParts`, so nested sub-agents are themselves click-to-open rows. */
 export function SubagentTranscript({
   spawn,
+  expansionState,
+  searchQuery,
+  searchNonce,
+  searchPartId,
   onOpenFile,
   onOpenRun,
   runExperimentName,
@@ -3371,6 +3864,10 @@ export function SubagentTranscript({
   onOpenSubagent,
 }: {
   spawn: ChatPart;
+  expansionState?: Map<string, boolean>;
+  searchQuery?: string;
+  searchNonce?: number;
+  searchPartId?: string;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
   runExperimentName?: (runId: string) => string;
@@ -3378,6 +3875,7 @@ export function SubagentTranscript({
   experimentName?: (experimentId: string) => string;
   onOpenSubagent?: OpenSubagent;
 }) {
+  if (isParentUpdate(spawn)) return <AgentUpdateRow part={spawn} />;
   const parts = spawn.children ?? [];
   const running = spawn.state?.status === "running";
   const errored = spawn.state?.status === "error";
@@ -3387,6 +3885,9 @@ export function SubagentTranscript({
   // Gate the empty state on what actually renders, not the raw part count — a
   // stored transcript of nothing but invisible parts must still read as empty.
   const rendered = renderParts(parts, {
+    expansionState,
+    revealNonce: searchQuery ? searchNonce : undefined,
+    revealPartId: searchPartId,
     onOpenFile,
     onOpenRun,
     runExperimentName,
@@ -3404,7 +3905,7 @@ export function SubagentTranscript({
   const hasProseChild = parts.some((p) => p.type === "text" && !!p.text);
   const finalReport = hasProseChild ? "" : spawnFinalReport(spawn);
   return (
-    <div className="msg-assistant text-base leading-[1.62] text-text min-w-0">
+    <div className="msg-assistant text-base leading-relaxed text-text min-w-0">
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errorMessage && (
         <div className={TOOL_OUTPUT_CLASS_NAME}>
@@ -3412,22 +3913,41 @@ export function SubagentTranscript({
         </div>
       )}
       {rendered.length === 0 && !finalReport && !errorMessage ? (
-        <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{running ? m.chat_working() : m.chat_no_activity()}</div>
+        <div className="subagent-empty py-1 px-1 text-sm text-muted">{running ? m.chat_working() : m.chat_no_activity()}</div>
       ) : (
         <>
           {rendered}
-          {finalReport && <Md text={finalReport} onOpenFile={onOpenFile} onOpenRun={onOpenRun} />}
+          {finalReport && <Md text={finalReport} partId={spawn.id} onOpenFile={onOpenFile} onOpenRun={onOpenRun} />}
         </>
       )}
     </div>
   );
 }
 
-/** A Codex/Claude/OpenCode sub-agent spawn row: a one-liner (icon + label)
- * whether the agent is running (shimmer) or done. Click-to-open — the
- * transcript shows in a right-side panel tab, never inline — when there is
- * anything to open (streamed children, a final report, or an error); a pure
- * interaction marker renders as an inert status line instead. */
+const DisclosureState = createContext<Map<string, boolean> | undefined>(undefined);
+
+/** A `<details>` whose open state outlives its virtualized row. */
+function Disclosure({ id, ...props }: React.ComponentProps<"details"> & { id: string }) {
+  const state = useContext(DisclosureState);
+  const [open] = useState(() => state?.get(`details:${id}`) ?? false);
+  return <details {...props} open={open} onToggle={(event) => state?.set(`details:${id}`, event.currentTarget.open)} />;
+}
+
+function AgentUpdateRow({ part }: { part: ChatPart }) {
+  const text = parentUpdateText(part);
+  const label = <><ToolActivityIcon activity={{ kind: "agent", label: m.activity_sent_update_to_parent() }} className="text-muted" /><span className={`${TOOL_LINE_CLASS_NAME} text-subtext`}>{m.activity_sent_update_to_parent()}</span></>;
+  if (!text) return <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">{label}</div>;
+  return (
+    <Disclosure id={part.id} className="min-w-0 [&[open]_.update-chevron]:rotate-90">
+      <summary className="tool-row flex cursor-pointer list-none items-center gap-2 min-w-0 py-1 px-1 rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+        {label}<ChevronRight size={12} className="update-chevron text-muted" aria-hidden="true" />
+      </summary>
+      <div className="ps-7 py-2 text-sm"><Md text={text} /></div>
+    </Disclosure>
+  );
+}
+
+/** Agent events open their transcript even before its first content arrives. */
 function SubagentBlock({
   part,
   pendingTail,
@@ -3443,16 +3963,13 @@ function SubagentBlock({
     ? activityInProgress(toolActivity(part))
     : toolActivity(part);
   const shimmering = useDelayedToolShimmer(Boolean(pendingTail && !errored));
-  // Openable when there is anything to show in the tab: streamed children, a
-  // final report standing in for them, or an error. Only a pure interaction
-  // marker (codex's "reported back" rows) is inert.
-  const inert = (part.children?.length ?? 0) === 0 && !errored && !spawnFinalReport(part);
+  if (isParentUpdate(part)) return <AgentUpdateRow part={part} />;
   const line = (
     <>
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errored ? (
         <span className="flex h-6 shrink-0 items-center text-accent-red">
-          <CircleX size={16} strokeWidth={1.75} className="subagent-icon" aria-hidden="true" />
+          <CircleX size={16} strokeWidth={1.5} className="subagent-icon" aria-hidden="true" />
         </span>
       ) : (
         <ToolActivityIcon activity={activity} className={`subagent-icon ${shimmering ? "tool-running-shimmer-icon" : "text-muted"}`} />
@@ -3462,19 +3979,10 @@ function SubagentBlock({
       <span className={`${TOOL_LINE_CLASS_NAME} ${shimmering ? "tool-running-shimmer" : errored ? "text-accent-red" : "text-subtext"}`}>{activity.label}</span>
     </>
   );
-  // Only a row that actually owns a transcript is click-to-open. Codex's
-  // interaction markers (and a spawn row before any activity arrived) have no
-  // children — offering a transcript there opens an empty pane.
-  if (inert) {
-    return (
-      <div className="subagent-row flex items-start gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-base text-start rounded-sm">
-        {line}
-      </div>
-    );
-  }
   return (
     <button
-      className="subagent-row flex items-start gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
+      className="subagent-row flex items-start gap-2 w-full py-1 px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
+      data-part-id={part.id}
       title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenSubagent?.(part.id, activity.label, intent),
@@ -3626,6 +4134,16 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
   return announcement;
 }
 
+const TRANSCRIPT_ROW_SIZES_LIMIT = 5_000;
+
+export type FocusedMessage = { sessionId: string; messageId: string; nonce: number; query?: string; partId?: string; spawnPartId?: string };
+
+// Transcripts remount per chat and side chats per tab switch; a request is handled once, not once per mount.
+let handledFocusNonce: number | undefined;
+let openedSearchNonce: number | undefined;
+/** The opened request whose plan or subagent tab may replace the side pane that searched for it. */
+let handedOffSearchNonce: number | undefined;
+
 const Transcript = memo(function Transcript({
   messages,
   scrollRef,
@@ -3649,6 +4167,16 @@ const Transcript = memo(function Transcript({
   recoveringTurnId,
   onRecover,
   skills,
+  delegates,
+  onOpenDelegate,
+  focusedMessageId,
+  focusedPartId,
+  focusNonce,
+  searchQuery,
+  programmaticScroll,
+  highlightName,
+  assistantLabel,
+  onLeaveFeed,
 }: {
   /** The branch on screen, oldest first. */
   messages: ChatMessage[];
@@ -3669,107 +4197,347 @@ const Transcript = memo(function Transcript({
   runExperimentName?: (runId: string) => string;
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
-  onRespond?: (answer: PromptAnswer) => void;
+  onRespond?: (answer: PromptAnswer) => Promise<boolean>;
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
   onOpenSubagent?: OpenSubagent;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
   skills?: SkillInfo[];
+  /** Chats this one delegated to, oldest first. */
+  delegates: DelegateRow[];
+  onOpenDelegate?: (sessionId: string) => void;
+  focusedMessageId?: string | null;
+  focusedPartId?: string;
+  focusNonce?: number;
+  searchQuery?: string;
+  /** Where the virtualizer last scrolled, so the bottom pin follows only other scrolls. */
+  programmaticScroll: React.RefObject<number | null>;
+  highlightName: string;
+  /** Names each assistant article, as the Markdown export does. */
+  assistantLabel: string;
+  /** Ctrl+End and Ctrl+Home leave the feed, forward or back. */
+  onLeaveFeed: (forward: boolean) => void;
 }) {
+  const { transcriptRowSizes, transcriptDisclosures: disclosures } = useWorkspace();
   useLocale();
+  const replies = useMemo(() => questionReplies(messages), [messages]);
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
+  const responseGroups = useRef<ChatMessage[][]>([]);
   const visibleMessages = useMemo(
-    () => messages.filter((message) => messageHasVisibleContent(message, activePermissionId)),
+    () => {
+      responseGroups.current = groupResponseMessages(messages, responseGroups.current);
+      return responseGroups.current.filter((group) =>
+        group.some((message) => messageHasVisibleContent(message, activePermissionId)));
+    },
     [messages, activePermissionId],
   );
+  // Each delegate sits under the turn that started it: the last row begun before it was.
+  const delegatesByRow = useMemo(() => {
+    const rows = new Map<number, DelegateRow[]>();
+    for (const delegate of delegates) {
+      const { session } = delegate;
+      let index = -1;
+      visibleMessages.forEach((group, row) => {
+        if (group[0].createdAt <= session.createdAt) index = row;
+      });
+      if (index >= 0) rows.set(index, [...(rows.get(index) ?? []), delegate]);
+    }
+    return rows;
+  }, [visibleMessages, delegates]);
   // forkPositions indexes only non-local ids, so a local bearer would page as 0/1.
   const positions = useMemo(() => {
     const bearers = visibleMessages.filter(
-      (m) => m.role === "user" && !m.id.startsWith(LOCAL_PREFIX),
+      (group) => group[0].role === "user" && !group[0].id.startsWith(LOCAL_PREFIX),
     );
-    return forkPositions(allMessages, messages, bearers, (id) => id.startsWith(LOCAL_PREFIX));
+    return forkPositions(allMessages, messages, bearers.map((group) => group[0]), (id) => id.startsWith(LOCAL_PREFIX));
   }, [messages, visibleMessages, allMessages]);
-  // ponytail: interacted rows stay mounted for this visit; lift row state if retention becomes costly.
-  const retainedRows = useRef(new Set<string>());
-  const [fullHistory, setFullHistory] = useState(false);
-  const getItemKey = useCallback((index: number) => visibleMessages[index].id, [visibleMessages]);
+  const draftRows = useRef(new Set<string>());
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(() => new Set());
+  const [focusedRow, setFocusedRow] = useState<string | null>(null);
+  const [jumping, setJumping] = useState(false);
+  const feedRef = useRef<HTMLDivElement>(null);
+  const rowIndexes = useMemo(() => new Map(visibleMessages.flatMap((group, index) => group.map((message) => [message.id, index] as const))), [visibleMessages]);
+  const targetIndex = focusedMessageId ? rowIndexes.get(focusedMessageId) : undefined;
+  const getItemKey = useCallback((index: number) => visibleMessages[index][0].id, [visibleMessages]);
   const rangeExtractor = useCallback((range: VirtualRange) => {
-    if (fullHistory) return visibleMessages.map((_, index) => index);
     const indexes = new Set(defaultRangeExtractor(range));
-    visibleMessages.forEach((message, index) => {
-      if (retainedRows.current.has(message.id)) indexes.add(index);
-    });
+    for (const id of [...selectedRows, ...(focusedRow ? [focusedRow] : [])]) {
+      const index = rowIndexes.get(id);
+      if (index !== undefined) indexes.add(index);
+    }
+    for (const id of draftRows.current) {
+      const row = scrollRef.current?.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
+      const index = rowIndexes.get(id);
+      if (index !== undefined && row?.querySelector("input, textarea, [contenteditable=true]")) indexes.add(index);
+      else draftRows.current.delete(id);
+    }
+    if (jumping && targetIndex !== undefined) indexes.add(targetIndex);
     return [...indexes].sort((a, b) => a - b);
-  }, [visibleMessages, fullHistory]);
+  }, [rowIndexes, focusedRow, selectedRows, jumping, targetIndex, scrollRef]);
+  // The virtualizer re-estimates every unmeasured row whenever a message streams; groups keep their identity until they change.
+  const estimates = useRef(new WeakMap<ChatMessage[], number>());
+  const estimateSize = useCallback((index: number) => {
+    const group = visibleMessages[index];
+    const cached = estimates.current.get(group);
+    if (cached !== undefined) return cached;
+    const user = group[0].role === "user";
+    const response = user ? null : splitResponseParts(group, false);
+    const parts = response?.answer ?? group[0].parts;
+    const text = parts.filter((part) => part.type === "text" || part.type === "steer").map((part) => part.text ?? "").join("\n");
+    const width = scrollRef.current?.firstElementChild?.clientWidth ?? 760;
+    const columns = Math.max(20, Math.floor((width - 32) / 8));
+    const lines = text.split("\n").reduce((total, line) => total + Math.max(1, Math.ceil(line.length / columns)), 0);
+
+    const size = (user ? 56 : response?.work.length ? 72 : 32) + lines * 26;
+    estimates.current.set(group, size);
+    return size;
+  }, [visibleMessages, scrollRef]);
+  // Seed via the measurement cache, not estimateSize, so remembered rows count as measured for anchoring.
+  const [initialMeasurementsCache] = useState(() => visibleMessages.flatMap((group, index) => {
+    const remembered = transcriptRowSizes.get(group[0].id);
+    if (!remembered || remembered.width !== scrollRef.current?.offsetWidth) return [];
+    const { size } = remembered;
+    return [{ key: group[0].id, index, start: 0, end: size, size, lane: 0 }];
+  }));
+  // Offscreen rows keep their old height through a resize, so each height carries its measuring width.
+  const measuredWidths = useRef(new Map<string, number>());
   const virtualizer = useVirtualizer({
-    count: visibleMessages.length,
     useFlushSync: false,
+    count: visibleMessages.length,
     getScrollElement: () => scrollRef.current,
     getItemKey,
-    estimateSize: () => 400,
-    overscan: 1,
+    estimateSize,
+    directDomUpdates: true,
+    directDomUpdatesMode: "position",
+    scrollMargin: Number.parseFloat(scrollRef.current?.firstElementChild ? getComputedStyle(scrollRef.current.firstElementChild).paddingTop : "0") || 0,
+    initialMeasurementsCache,
+    measureElement: (element, entry, instance) => {
+      const id = element.getAttribute("data-message-id");
+      // Entry-less calls may return the cached size unmeasured; width is read live since scrollRect lags row observers.
+      if (id && (entry || !instance.itemSizeCache.has(id))) measuredWidths.current.set(id, instance.scrollElement?.offsetWidth ?? 0);
+      return measureVirtualElement(element, entry, instance);
+    },
+    overscan: 4,
     initialRect: { width: scrollRef.current?.clientWidth ?? 0, height: scrollRef.current?.clientHeight ?? 0 },
-    initialOffset: () => Math.max(0, visibleMessages.length * 400 - (scrollRef.current?.clientHeight ?? 0)),
+    initialOffset: () => {
+      const remembered = new Map(initialMeasurementsCache.map((item) => [item.key, item.size]));
+      const estimated = visibleMessages.reduce((total, group, index) => total + (remembered.get(group[0].id) ?? estimateSize(index)), 0);
+      return Math.max(0, estimated - (scrollRef.current?.clientHeight ?? 0));
+    },
     anchorTo: stickToBottom.current ? "end" : "start",
     followOnAppend: true,
     scrollEndThreshold: 60,
     rangeExtractor,
+    scrollToFn: (offset, options, instance) => {
+      // virtual-core passes size corrections with the last scroll event's offset; apply them to the live scrollTop so a scroll since isn't undone.
+      const target = options.adjustments === undefined ? offset : (instance.scrollElement?.scrollTop ?? offset) + options.adjustments;
+      programmaticScroll.current = target;
+      elementScroll(target, { behavior: options.behavior }, instance);
+    },
   });
+  const setFeed = useCallback((node: HTMLDivElement | null) => { feedRef.current = node; virtualizer.containerRef(node); }, [virtualizer]);
   useLayoutEffect(() => {
-    const scroll = () => virtualizer.scrollToEnd();
+    const scroll = () => virtualizer.scrollToOffset(scrollRef.current?.scrollHeight ?? 0);
     scrollToEndRef.current = scroll;
     onPinToBottom();
     return () => { scrollToEndRef.current = null; };
-  }, [virtualizer, scrollToEndRef, onPinToBottom]);
+  }, [virtualizer, scrollToEndRef, onPinToBottom, scrollRef]);
+  useLayoutEffect(() => () => {
+    for (const [key, size] of virtualizer.itemSizeCache) {
+      const id = String(key);
+      const width = measuredWidths.current.get(id) ?? transcriptRowSizes.get(id)?.width;
+      transcriptRowSizes.delete(id);
+      if (width !== undefined) transcriptRowSizes.set(id, { size, width });
+    }
+    for (const id of transcriptRowSizes.keys()) {
+      if (transcriptRowSizes.size <= TRANSCRIPT_ROW_SIZES_LIMIT) break;
+      transcriptRowSizes.delete(id);
+    }
+  }, [virtualizer, transcriptRowSizes]);
   useEffect(() => {
     const retainSelection = () => {
       const selection = window.getSelection();
-      if (!selection || selection.isCollapsed || !selection.rangeCount) return;
-      const range = selection.getRangeAt(0);
-      for (const row of scrollRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []) {
-        if (range.intersectsNode(row) && row.dataset.messageId) retainedRows.current.add(row.dataset.messageId);
+      const next = new Set<string>();
+      if (selection && !selection.isCollapsed && selection.rangeCount) {
+        const range = selection.getRangeAt(0);
+        for (const row of scrollRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []) {
+          if (range.intersectsNode(row) && row.dataset.messageId) next.add(row.dataset.messageId);
+        }
       }
+      setSelectedRows((current) => current.size === next.size && [...next].every((id) => current.has(id)) ? current : next);
     };
     document.addEventListener("selectionchange", retainSelection);
     return () => document.removeEventListener("selectionchange", retainSelection);
   }, [scrollRef]);
-  const activeMessage = visibleMessages.at(-1);
+  const [markedRowId, setMarkedRowId] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const feed = feedRef.current;
+    if (!scroll || !feed || targetIndex === undefined || focusNonce === undefined || handledFocusNonce === focusNonce) return;
+    handledFocusNonce = focusNonce;
+    const rowId = virtualizer.options.getItemKey(targetIndex);
+    const selector = `[data-message-id="${CSS.escape(String(rowId))}"]`;
+    const current = feed.querySelector<HTMLElement>(selector);
+    const requestedPart = focusedPartId ? current?.querySelector(`[data-part-id="${CSS.escape(focusedPartId)}"]`) : null;
+    if (!current || focusedPartId && (!requestedPart || requestedPart.closest("[inert], [aria-hidden=true]")) || Math.abs(current.getBoundingClientRect().top - scroll.getBoundingClientRect().top) > scroll.clientHeight * 2) feed.style.visibility = "hidden";
+    stickToBottom.current = false;
+    virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
+    setMarkedRowId(String(rowId));
+    setJumping(true);
+    let frame = 0, stable = 0, attempts = 0;
+    let observer: ResizeObserver | undefined;
+    let stopped = false;
+    const finish = () => { feed.style.visibility = ""; setJumping(false); };
+    const cancel = () => { stopped = true; cancelAnimationFrame(frame); observer?.disconnect(); finish(); };
+    const step = () => {
+      if (stopped) return;
+      const row = feed.querySelector<HTMLElement>(selector);
+      if (!row) { if (attempts++ < 12) frame = requestAnimationFrame(step); else finish(); return; }
+      virtualizer.resizeItem(targetIndex, row.getBoundingClientRect().height);
+      const anchor = () => {
+        const part = focusedPartId ? row.querySelector<HTMLElement>(`[data-part-id="${CSS.escape(focusedPartId)}"]`) : null;
+        const range = searchQuery ? chatSearchRanges(part ?? row, searchQuery)[0] : undefined;
+        return range?.getBoundingClientRect() ?? part?.getBoundingClientRect() ?? row.getBoundingClientRect();
+      };
+      const desired = Math.min(160, scroll.clientHeight / 3);
+      const offset = Math.max(0, Math.min(scroll.scrollHeight - scroll.clientHeight, scroll.scrollTop + anchor().top - scroll.getBoundingClientRect().top - desired));
+      const delta = offset - scroll.scrollTop;
+      if (Math.abs(delta) > 0.5) { stable = 0; virtualizer.scrollToOffset(offset); }
+      else stable++;
+      if (stable < 2 && attempts++ < 12) { frame = requestAnimationFrame(step); return; }
+      finish();
+      if (!document.activeElement?.closest("[role=search]")) row.focus({ preventScroll: true });
+      const anchoredAt = anchor().top - scroll.getBoundingClientRect().top;
+      observer = new ResizeObserver(() => {
+        const delta = anchor().top - scroll.getBoundingClientRect().top - anchoredAt;
+        if (!stopped && !stickToBottom.current && Math.abs(delta) > 0.5) virtualizer.scrollToOffset(scroll.scrollTop + delta);
+      });
+      observer.observe(row);
+    };
+    frame = requestAnimationFrame(step);
+    scroll.addEventListener("wheel", cancel, { passive: true });
+    scroll.addEventListener("touchstart", cancel, { passive: true });
+    scroll.addEventListener("pointerdown", cancel);
+    scroll.addEventListener("keydown", cancel);
+    return () => {
+      cancel();
+      scroll.removeEventListener("wheel", cancel);
+      scroll.removeEventListener("touchstart", cancel);
+      scroll.removeEventListener("pointerdown", cancel);
+      scroll.removeEventListener("keydown", cancel);
+    };
+  }, [focusedMessageId, focusedPartId, focusNonce, targetIndex, searchQuery, scrollRef, virtualizer, stickToBottom]);
+  const virtualItems = virtualizer.getVirtualItems();
+  useLayoutEffect(() => {
+    if (!("highlights" in CSS) || typeof Highlight === "undefined") return;
+    const row = focusedMessageId ? feedRef.current?.querySelector<HTMLElement>("[data-search-target=true]") : null;
+    if (!row || !searchQuery) { CSS.highlights.delete(highlightName); return; }
+    const part = focusedPartId ? row.querySelector<HTMLElement>(`[data-part-id="${CSS.escape(focusedPartId)}"]`) : null;
+    const highlight = new Highlight(...chatSearchRanges(part ?? row, searchQuery));
+    CSS.highlights.set(highlightName, highlight);
+    return () => { if (CSS.highlights.get(highlightName) === highlight) CSS.highlights.delete(highlightName); };
+  }, [focusedMessageId, focusedPartId, searchQuery, highlightName, virtualItems]);
+  useEffect(() => {
+    if (!markedRowId) return;
+    const timer = window.setTimeout(() => setMarkedRowId(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [markedRowId]);
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const row = focusedRow ? scroll?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focusedRow)}"]`) : null;
+    if (!scroll || !row || row.contains(document.activeElement)) return;
+    row.focus({ preventScroll: true });
+    const viewport = scroll.getBoundingClientRect();
+    const bounds = row.getBoundingClientRect();
+    if (bounds.top >= viewport.top && bounds.bottom <= viewport.bottom) return;
+    virtualizer.scrollToIndex(Number(row.dataset.index), { align: bounds.height > viewport.height ? "start" : "auto" });
+  }, [focusedRow, scrollRef, virtualizer]);
+  const activeMessage = messages.at(-1);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
+  const userLabel = m.chat_export_you();
+  const headingPrefix = useId();
   return (
     <>
       <span className="sr-only" role="status" aria-live="polite">
         <span key={transcriptAnnouncement.sequence}>{transcriptAnnouncement.text}</span>
       </span>
-      <button type="button" className="sr-only focus:not-sr-only" aria-pressed={fullHistory} onClick={() => setFullHistory((value) => !value)}>
-        {m.chat_show_full_conversation()}
-      </button>
-      <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
-      {virtualizer.getVirtualItems().map((item) => {
-        const m = visibleMessages[item.index];
-        const turnStatus = m.parts.find(isTurnStatusPart);
-        const turnId = turnStatus?.state?.input?.turnId;
+      {/* The WAI-ARIA feed pattern: assistive technology moves focus between articles, and the virtualizer mounts around it. */}
+      <div
+        role="feed"
+        aria-label={m.chat_messages_feed()}
+        aria-busy={jumping}
+        className="relative"
+        ref={setFeed}
+        onKeyDown={(event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLElement) || target.isContentEditable || target.matches("input, textarea, select")) return;
+          if (event.altKey || event.metaKey || event.shiftKey) return;
+          if (event.ctrlKey && (event.key === "Home" || event.key === "End")) {
+            event.preventDefault();
+            onLeaveFeed(event.key === "End");
+            return;
+          }
+          const step = event.ctrlKey ? 0 : event.key === "PageDown" ? 1 : event.key === "PageUp" ? -1 : 0;
+          const article = target.closest<HTMLElement>("[role=article]");
+          const next = step && article ? visibleMessages[Number(article.dataset.index) + step] : undefined;
+          if (!next) return;
+          event.preventDefault();
+          setFocusedRow(next[0].id);
+        }}
+      >
+      {virtualItems.map((item) => {
+        const group = visibleMessages[item.index];
+        const m = group[group.length - 1];
+        const rowId = group[0].id;
+        const headingId = `${headingPrefix}${rowId}`;
+        let expansionState = disclosures.get(rowId);
+        if (!expansionState) { expansionState = new Map(); disclosures.set(rowId, expansionState); }
+        const isTarget = group.some((message) => message.id === focusedMessageId);
+        const answerText = isTarget && searchQuery ? splitResponseParts(group, false).answer.map((part) => part.text ?? "").join("\n").toLowerCase() : "";
+        const revealWork = isTarget && (jumping || handledFocusNonce !== focusNonce) && ((focusedPartId && splitResponseParts(group, false).work.some((turn) => findPartById(turn.parts, focusedPartId)))
+          || searchQuery && !searchQuery.toLowerCase().split(/\s+/u).every((term) => answerText.includes(term)));
+
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
-        const recoveryDisabled = turnStatus ? busy || recoveringTurnId !== null : false;
+        const recoveryDisabled = busy || recoveringTurnId !== null;
         return (
           <div
-            key={m.id}
+            key={rowId}
+            role="article"
+            tabIndex={0}
+            aria-labelledby={headingId}
+            aria-posinset={item.index + 1}
+            aria-setsize={visibleMessages.length}
             data-index={item.index}
-            data-message-id={m.id}
+            data-message-id={rowId}
+            data-search-target={isTarget || undefined}
             ref={virtualizer.measureElement}
-            className="absolute left-0 w-full pb-4"
-            style={{ top: item.start }}
+            className={`absolute left-0 w-full pb-4 isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
             onClickCapture={(event) => {
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
               stickToBottom.current = false;
               virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
             }}
-            onPointerDownCapture={() => retainedRows.current.add(m.id)}
-            onFocusCapture={() => retainedRows.current.add(m.id)}
+            onInputCapture={() => draftRows.current.add(rowId)}
+            // Screen readers can move focus through every row as they read, so focus holds a row only while it lasts.
+            onFocusCapture={() => setFocusedRow(rowId)}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow((current) => current === rowId ? null : current);
+            }}
           >
+          {/* NVDA leaves article names unspoken by default, so a hidden heading names the author. A reply nests under its prompt. */}
+          {group[0].role === "user"
+            ? <h5 id={headingId} className="sr-only select-none">{userLabel}</h5>
+            : <h6 id={headingId} className="sr-only select-none">{assistantLabel}</h6>}
+          <DisclosureState value={expansionState}>
           <Message
             message={m}
+            expansionState={expansionState}
+            revealNonce={revealWork ? focusNonce : undefined}
+            revealPartId={focusedPartId}
+            responseMessages={group}
+            replies={replies}
             forkCount={positions.get(m.id)?.count}
             forkIndex={positions.get(m.id)?.index}
             forkPrevId={positions.get(m.id)?.prevId}
@@ -3790,11 +4558,19 @@ const Transcript = memo(function Transcript({
             onOpenPlan={onOpenPlan}
             onOpenSubagent={onOpenSubagent}
             busy={recoveryDisabled}
-            recoveringTurnId={turnId === recoveringTurnId ? recoveringTurnId : null}
+            recoveringTurnId={recoveringTurnId}
             onRecover={onRecover}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
+          </DisclosureState>
+          {onOpenDelegate && delegatesByRow.has(item.index) && (
+            <div className="mt-3 flex flex-col gap-2">
+              {delegatesByRow.get(item.index)?.map(({ session, status }) => (
+                <DelegateCard key={session.id} session={session} status={status} onOpen={onOpenDelegate} />
+              ))}
+            </div>
+          )}
           </div>
         );
       })}
@@ -3813,8 +4589,8 @@ const matchesFilter = (filter: SessionFilter, archived: boolean) =>
 
 /** Menu label + rail section heading per filter — "Recents" for the default view. */
 const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () => string }[] = [
-  { id: "active", label: m.chat_panel_active, railLabel: m.chat_recents },
   { id: "archived", label: m.chat_panel_archived, railLabel: m.chat_panel_archived },
+  { id: "active", label: m.chat_panel_active, railLabel: m.chat_recents },
   { id: "all", label: m.chat_panel_all, railLabel: m.chat_all_sessions },
 ];
 
@@ -3822,26 +4598,41 @@ const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () =
 function SessionFilterMenu({
   value,
   onChange,
+  grouping,
+  onGroupingChange,
 }: {
   value: SessionFilter;
   onChange: (next: SessionFilter) => void;
+  grouping: "projects" | "list";
+  onGroupingChange: (next: "projects" | "list") => void;
 }) {
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="rail-filter relative inline-flex" ref={ref}>
-      <IconButton size="small"
-        className="rail-filter-btn"
-        active={value !== "active"}
-        title={m.chat_panel_filter_sessions()}
-        aria-label={m.chat_panel_filter_sessions()}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <SlidersHorizontal size={13} />
-      </IconButton>
+      <Tooltip interactive content={m.chat_panel_filter_sessions()}>
+        <IconButton size="small"
+          className="rail-filter-btn text-subtext"
+          active={value !== "active"}
+          aria-label={m.chat_panel_filter_sessions()}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <SlidersHorizontal size={16} className="text-subtext" />
+        </IconButton>
+      </Tooltip>
       {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-40 p-1 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
+          <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_group_by()}</div>
+          {(["projects", "list"] as const).map((mode) => (
+            <MenuItem size="compact" className="text-sm" key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
+              <span>{mode === "projects" ? m.projects_home_projects() : m.sidebar_one_list()}</span>
+              {grouping === mode && <Check size={14} />}
+            </MenuItem>
+          ))}
+          <div className="my-1 border-t border-border" />
+          <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_filter()}</div>
           {SESSION_FILTERS.map((f) => (
             <MenuItem
+              size="compact" className="text-sm"
               key={f.id}
 
               onClick={() => {
@@ -3850,11 +4641,12 @@ function SessionFilterMenu({
               }}
             >
               <span>{f.label()}</span>
-              {value === f.id && <Check size={13} />}
+              {value === f.id && <Check size={14} />}
             </MenuItem>
           ))}
         </div>
       )}
+      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
     </div>
   );
 }
@@ -3912,18 +4704,25 @@ function SessionRow({
   unread,
   busy,
   waiting,
+  experimentRunning,
   revealTitle,
   onOpen,
   onRename,
   onSetArchived,
   onDelete,
+  onOpenExperiment,
+  modelName,
+  projectName,
+  harnessLogo,
+  cardWarmUntil,
 }: {
   session: ChatSession;
   active: boolean;
   unread: boolean;
   busy: boolean;
-  /** Turn held on an unanswered card: steady dot, not the working pulse. */
+  /** An actionable question or held approval needs the user's attention. */
   waiting: boolean;
+  experimentRunning: boolean;
   /** Nonce set while this row's freshly auto-generated title should play its
    * reveal; it doubles as the remount key so a second retitle replays it.
    * Undefined the rest of the time (static title). */
@@ -3932,15 +4731,69 @@ function SessionRow({
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
   onDelete: () => void;
+  onOpenExperiment: (projectId: string, experimentId: string) => void;
+  modelName: string | null;
+  projectName?: string;
+  harnessLogo?: string;
+  cardWarmUntil: React.RefObject<number>;
 }) {
   const { open, setOpen, ref } = usePopover();
-  const title = session.title?.trim() || "Untitled";
+  const title = session.title?.trim() || m.chat_untitled();
+  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const cardId = useId();
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const openTimer = useRef<number | undefined>(undefined);
+  const closeTimer = useRef<number | undefined>(undefined);
+  const pointerInside = useRef(false);
+  const dismissed = useRef(false);
+
+  function closeCard() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    setAnchor(null);
+  }
+  function showCard() {
+    if (!editing && !open && !dismissed.current) setAnchor(ref.current?.getBoundingClientRect() ?? null);
+  }
+  function scheduleClose() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => {
+      const focused = document.activeElement;
+      if (!pointerInside.current && focused !== ref.current && !cardRef.current?.contains(focused)) setAnchor(null);
+    }, 150);
+  }
+  useEffect(() => () => {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+  }, []);
+  useEffect(() => {
+    if (!anchor) return;
+    const update = (event: Event) => {
+      if (event.target instanceof Node && cardRef.current?.contains(event.target)) return;
+      const row = ref.current;
+      const bounds = row?.getBoundingClientRect();
+      const scrollContainer = row?.closest(".rail-body")?.getBoundingClientRect();
+      if (!bounds || (scrollContainer && (bounds.bottom <= scrollContainer.top || bounds.top >= scrollContainer.bottom))) {
+        if (cardRef.current?.contains(document.activeElement)) row?.focus();
+        setAnchor(null);
+      } else setAnchor(bounds);
+    };
+    window.addEventListener("resize", update);
+    document.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      document.removeEventListener("scroll", update, true);
+    };
+  }, [anchor, ref]);
 
   function startEditing() {
+    closeCard();
     setDraft(session.title?.trim() || "");
     setEditing(true);
   }
@@ -3965,11 +4818,36 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] px-2.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      data-sidebar-keyboard-row
+      aria-label={sessionDescription}
+      aria-describedby={anchor ? cardId : undefined}
+      onMouseEnter={() => {
+        pointerInside.current = true;
+        dismissed.current = false;
+        window.clearTimeout(closeTimer.current);
+        if (!editing && !open) {
+          if (Date.now() < cardWarmUntil.current) showCard();
+          else openTimer.current = window.setTimeout(showCard, 350);
+        }
+      }}
+      onMouseLeave={(event) => {
+        if (anchor) cardWarmUntil.current = Date.now() + 500;
+        pointerInside.current = false;
+        dismissed.current = false;
+        if (event.relatedTarget instanceof Element && event.relatedTarget.closest(".session-row")) closeCard();
+        else scheduleClose();
+      }}
+      onFocus={(event) => {
+        if (event.target === event.currentTarget && !editing && !open) {
+          showCard();
+        }
+      }}
+      onBlur={(event) => {
+        if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
+        scheduleClose();
+      }}
+      className={`session-row relative flex items-center gap-2 w-full h-8.5 text-start ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
         editing ? "editing" : ""
-        }`}
-      title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}${
-        session.parentSessionId ? m.chat_spawned_by_agent() : ""
         }`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
@@ -3977,15 +4855,19 @@ function SessionRow({
         // With the menu open, a body click just dismisses it — switching
         // sessions underneath an open menu would leave it orphaned.
         if (open) setOpen(false);
-        else onOpen();
+        else { closeCard(); onOpen(); }
       }}
       onKeyDown={(e) => {
         // Only keys aimed at the row itself: the kebab, menu items, and the
         // rename input are descendants, and preventDefault here would cancel
         // their activation.
         if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
+        if (e.key === "Tab" && !e.shiftKey && anchor && cardRef.current) {
           e.preventDefault();
+          cardRef.current.focus();
+        } else if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          closeCard();
           // Mirror the click branch: dismiss an open menu instead of
           // navigating underneath it.
           if (open) setOpen(false);
@@ -3993,9 +4875,6 @@ function SessionRow({
         }
       }}
     >
-      {session.parentSessionId && !editing && (
-        <Users className="text-muted shrink-0" size={12} aria-hidden />
-      )}
       {editing ? (
         <input
           ref={inputRef}
@@ -4011,6 +4890,7 @@ function SessionRow({
               e.preventDefault();
               commit();
             } else if (e.key === "Escape") {
+              e.stopPropagation();
               e.preventDefault();
               setEditing(false);
             }
@@ -4025,24 +4905,53 @@ function SessionRow({
           />
         </span>
       )}
+      {experimentRunning && !editing && (
+        <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
+          <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
+        </Tooltip>
+      )}
+      {waiting && !editing && (
+        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-accent-amber">
+          <HelpCircle size={14} aria-hidden="true" />
+        </Tooltip>
+      )}
       <span className="session-dot">
-        {busy ? (
-          <span className={`busy-dot ${waiting ? "waiting" : ""}`} />
+        {busy && !waiting ? (
+          <span className="busy-dot" />
         ) : (
-          unread && <span className="unread-dot" />
+          unread && !waiting && <span className="unread-dot" />
         )}
       </span>
-      <button
-        className="session-menu-btn"
-        title={m.chat_panel_session_options()}
-        aria-label={m.chat_panel_session_options()}
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-      >
-        <MoreHorizontal size={14} />
-      </button>
+      <Tooltip interactive content={m.chat_panel_session_options()} className="session-menu-btn">
+        <button
+          className="flex w-full h-full items-center justify-center"
+          aria-label={m.chat_panel_session_options()}
+          onClick={(e) => {
+            e.stopPropagation();
+            closeCard();
+            setOpen((v) => !v);
+          }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </Tooltip>
+      {anchor && !open && !editing && (
+        <SessionHoverCard
+          session={session}
+          modelName={modelName}
+          projectName={projectName}
+          harnessLogo={harnessLogo}
+          anchor={anchor}
+          cardId={cardId}
+          cardRef={cardRef}
+          container={ref.current?.closest(".mobile-rail-dialog") ?? document.body}
+          onEnter={() => { pointerInside.current = true; window.clearTimeout(closeTimer.current); }}
+          onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
+          onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
+          onReturnToRow={() => ref.current?.focus()}
+          onContinue={() => { closeCard(); ref.current?.querySelector<HTMLButtonElement>(".session-menu-btn button")?.focus(); }}
+        />
+      )}
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
           <MenuItem
@@ -4074,6 +4983,8 @@ function SessionRow({
           </MenuItem>
         </div>
       )}
+      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
+      <EscapeScope enabled={!!anchor && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); closeCard(); }} />
     </div>
   );
 }
@@ -4082,7 +4993,7 @@ function SessionRow({
 
 // The four starter prompts progress starting point → gap → baseline → experiment.
 const STARTER_ICONS = [BookOpen, Search, SquareTerminal, FlaskConical];
-// A blank project has nothing for a model to read, so its prompts are pre-written.
+// Shown for a blank project when prompts tailored to its researcher aren't available.
 const blankStarterPrompts = (): StarterPrompt[] => [
   { title: m.chat_panel_starter_blank_1_title(), prompt: m.chat_panel_starter_blank_1_prompt() },
   { title: m.chat_panel_starter_blank_2_title(), prompt: m.chat_panel_starter_blank_2_prompt() },
@@ -4094,162 +5005,75 @@ const STARTER_TONES = [
   { box: "border-accent-blue/45", icon: "text-accent-blue" },
   { box: "border-accent-green/45", icon: "text-accent-green" },
   { box: "border-accent-amber/45", icon: "text-accent-amber" },
-  { box: "border-primary/45", icon: "text-primary" },
+  { box: "border-accent-purple/45", icon: "text-accent-purple" },
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
-function RemoteHostDialog({
-  onClose,
-  onConfigureSsh,
-}: {
-  onClose: () => void;
-  onConfigureSsh: () => void;
-}) {
-  const createRemoteSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createRemoteSession>) => createRemoteSession(...args) });
-
-  const hostsQuery = useQuery(getSshHostsQuery());
-  const sessionsQuery = useQuery(listRemoteSessionsQuery());
-  const hosts = hostsQuery.data ?? null;
-  const sessions = sessionsQuery.data ?? [];
-  const [query, setQuery] = useState("");
-  const loadError = !hosts ? hostsQuery.error?.message ?? sessionsQuery.error?.message ?? null : null;
-  const [openingHost, setOpeningHost] = useState<string | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  useDialogFocus(dialogRef, onClose);
-
-  async function openRemote(host: string) {
-    const remoteWindow = window.open("/remote-launch", "_blank");
-    if (!remoteWindow) {
-      showAlert(m.remote_popup_blocked(), "error");
-      return;
-    }
-    setOpeningHost(host);
-    try {
-      const session = await createRemoteSessionMutation.mutateAsync([host, {
-        theme: getThemePreference(),
-        locale: getLocale(),
-      }]);
-      remoteWindow.location.replace(session.gatewayUrl);
-      onClose();
-    } catch (error) {
-      remoteWindow.close();
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setOpeningHost(null);
-    }
-  }
-
-  const filteredHosts = hosts?.filter((host) =>
-    host.host.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
-  );
-  const sessionByHost = new Map(sessions.map((session) => [session.host, session]));
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-200 flex items-center justify-center bg-modal-backdrop p-5"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="relative flex h-[min(42rem,calc(100vh-2.5rem))] w-160 max-w-full flex-col overflow-hidden rounded-xl border border-border bg-background shadow-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="remote-host-dialog-title"
-        tabIndex={-1}
-      >
-        <IconButton className="absolute end-3.5 top-3.5" aria-label={m.remote_dialog_close()} onClick={onClose}>
-          <X size={16} />
-        </IconButton>
-        <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
-          <h2 id="remote-host-dialog-title" className="m-0 text-xl font-medium">{m.remote_dialog_title()}</h2>
-          <p className="mt-2 mb-0 text-sm leading-normal text-subtext">{m.remote_dialog_description()}</p>
-          <Input
-            data-initial-focus
-            className="mt-4"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={m.remote_search_hosts()}
-            aria-label={m.remote_search_hosts()}
-          />
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto border-t border-border-variant p-2">
-          {loadError ? (
-            <p className="m-3 text-sm text-accent-red">{loadError}</p>
-          ) : hosts === null ? (
-            <div className="flex items-center gap-2 p-3 text-sm text-subtext"><Spinner /> {m.settings_page_reading_ssh_config()}</div>
-          ) : filteredHosts?.length === 0 ? (
-            <p className="m-3 text-sm text-subtext">{m.remote_no_matching_hosts()}</p>
-          ) : (
-            filteredHosts?.map((host) => {
-              const session = sessionByHost.get(host.host);
-              return (
-                <Button
-                  key={host.host}
-                  variant="ghost"
-                  className="w-full justify-start text-base font-normal"
-                  disabled={openingHost === host.host}
-                  onClick={() => void openRemote(host.host)}
-                >
-                  <span className="min-w-0 flex-1 truncate text-start">{host.host}</span>
-                  {openingHost === host.host ? (
-                    <Spinner />
-                  ) : session ? (
-                    <span className="text-sm text-subtext">{m.remote_open()}</span>
-                  ) : null}
-                </Button>
-              );
-            })
-          )}
-        </div>
-        <div className="shrink-0 border-t border-border-variant p-2">
-          <Button variant="ghost" className="w-full justify-start text-base font-normal" onClick={onConfigureSsh}>
-            <SlidersHorizontal size={15} />
-            {m.ssh_configure_hosts()}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 export function ChatPanel({
   projectId,
   projectName,
+  contentLoading = false,
+  contentError = null,
+  onRetryContent,
   railHeader,
+  railWidth,
+  onResizeRail,
   railOpen,
+  mobileRail = false,
+  onCloseMobileRail,
+  contentInert = false,
   onShowRail,
+  onNewProject,
   mainView,
   onSelectMainView,
   onOpenFile,
   onOpenRun,
   runExperimentName,
+  chatInfo,
+  onOpenMessage,
+  onOpenSearchHit,
+  onClearSearch,
+  focusedMessage,
   onOpenExperiment,
   experimentName,
   onOpenPlan,
   onOpenSubagent,
   runtime,
-  onOpenDemoWelcome,
   composerFocusNonce = 0,
-  demoRunningRunId = null,
   activeSessionId,
   onActiveSessionChange,
+  onStartHarnessDraft,
   preferredAgent,
   onPreferredAgentChange,
+  preferredAutonomy,
+  onPreferredAutonomyChange,
+  embedded = false,
+  sideParentSessionId,
+  onOpenSideChat,
+  onOpenDelegate,
+  onRunSetup,
   children,
 }: {
   projectId: string;
   projectName: string;
-  /** Back-to-projects + project name block rendered at the top of the rail. */
+  contentLoading?: boolean;
+  contentError?: string | null;
+  onRetryContent?: () => void;
+  /** Brand and project creation controls at the top of the rail. */
   railHeader?: React.ReactNode;
+  railWidth?: number;
+  onResizeRail?: (event: React.PointerEvent) => void;
   /** Whether the agents rail is showing (collapsed via its own header icon). */
   railOpen: boolean;
+  mobileRail?: boolean;
+  onCloseMobileRail?: () => void;
+  contentInert?: boolean;
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
+  onNewProject?: () => void;
+  /** Run a harness setup command (`path` is its setup route) in the right panel's terminal tab. */
+  onRunSetup?: (command: string, path: string) => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
   mainView: "chat" | "skills" | SettingsTab;
   onSelectMainView: (view: "chat" | "skills" | SettingsTab) => void;
@@ -4269,6 +5093,14 @@ export function ChatPanel({
   onOpenRun?: OpenTranscriptTarget;
   /** Resolve a run to the experiment name shown on tool activity links. */
   runExperimentName?: (runId: string) => string;
+  /** A chat in this project, or undefined for one elsewhere. */
+  chatInfo?: ChatLinks["chat"];
+  /** Open the chat a message an agent cited lives in, at that message. */
+  onOpenMessage?: (cited: string) => void;
+  /** A message to scroll to and mark once its chat is on screen. */
+  focusedMessage?: FocusedMessage | null;
+  onOpenSearchHit: (hit: ChatSearchHit, query: string) => void;
+  onClearSearch: () => void;
   /** Open an experiment overview, where its notes are displayed. */
   onOpenExperiment?: OpenTranscriptTarget;
   /** Resolve an experiment id to the name shown on tool activity links. */
@@ -4289,29 +5121,158 @@ export function ChatPanel({
     intent: TabOpenIntent,
   ) => void;
   runtime: RuntimeInfo;
-  /** Reopen the demo welcome modal from the chat header. */
-  onOpenDemoWelcome?: () => void;
-  /** Increments when the demo welcome hands focus to the composer. */
+  /** Requests composer focus on change; a nonzero value also focuses on mount. */
   composerFocusNonce?: number;
   /** Demo run currently executing, for the monitor-it hint above the composer. */
-  demoRunningRunId?: string | null;
   activeSessionId: string | null;
-  onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean }) => void;
+  onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
+  onStartHarnessDraft?: () => void;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
+  preferredAutonomy: Autonomy;
+  onPreferredAutonomyChange: (autonomy: Autonomy) => void;
+  /** A second instance hosting a side chat in the right pane: no rail, and
+   * global shortcuts act on it only while focus is inside it. */
+  embedded?: boolean;
+  sideParentSessionId?: string;
+  /** Branch a side chat off `parentSessionId`; a question, if given, is its first message. */
+  onOpenSideChat?: (parentSessionId: string, question: string) => void;
+  /** Open a chat this one delegated to. */
+  onOpenDelegate?: (sessionId: string) => void;
   /** Middle-pane content when a settings section is active. */
   children?: React.ReactNode;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+
+  const {
+    setChatSessionPermissionMode,
+    setChatSessionPlanMode,
+    setChatSessionAutonomy,
+    setChatSessionAgent,
+    setChatSessionGoal,
+    importNativeChat,
+    openSideChat,
+    createChatSession,
+    setChatSessionArchived,
+    releaseDelegate,
+    renameChatSession,
+    deleteChatSession,
+    setChatConfiguration,
+    compactChatSession,
+    captureUiEvent,
+    sendChatMessage,
+    getChatSubmission,
+    runShellCommand,
+    interruptChat,
+    recoverChatTurn,
+    forkChatTurn,
+    selectChatBranch,
+    cancelQueuedMessage,
+    retryQueuedMessage,
+    respondChat,
+    getChatSession,
+  } = useWorkspace().api;
+  const {
+    listProjectsQuery,
+    listProjectActivityQuery,
+    listChatSessionsQuery,
+    readSidebarChatPage,
+    listChatActiveRunsQuery,
+    getHarnessesQuery,
+    getSkillsQuery,
+    getHarnessSetupCommandsQuery,
+    getCodeTreeQuery,
+    listNativeChatsQuery,
+    getChatMessagesQuery,
+    getProjectStarterPromptsQuery,
+    citedMessageQuery,
+  } = useWorkspace().queries;
+  // The alphaXiv account and library belong to the machine the app runs on.
+  const owner = useMachines().owner;
+  const { workspaceKey, setScopedQueryData, queryClient, isCurrentScope, deletedSessionIds } = useWorkspace();
+  const { useChatState } = useWorkspace().chat;
+  const { composerStashes, mountedComposers, composerSeed, forgetComposerSeed } = useWorkspace().composers;
+  const { onChatEvent } = useWorkspace().events;
+  const { removeSession: removeCachedSession } = useWorkspace().invalidation;
+
   const setChatSessionPermissionModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPermissionMode>) => setChatSessionPermissionMode(...args) });
   const setChatSessionPlanModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPlanMode>) => setChatSessionPlanMode(...args) });
+  const setChatSessionAutonomyMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAutonomy>) => setChatSessionAutonomy(...args) });
+  const setChatSessionAgentMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAgent>) => queueSessionMutation(() => setChatSessionAgent(...args)) });
+  const setChatSessionGoalMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionGoal>) => setChatSessionGoal(...args) });
+  const importNativeChatMutation = useMutation({ mutationFn: (args: Parameters<typeof importNativeChat>) => importNativeChat(...args) });
+  const openSideChatMutation = useMutation({ mutationFn: openSideChat });
   const createChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createChatSession>) => createChatSession(...args) });
   const setChatSessionArchivedMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionArchived>) => setChatSessionArchived(...args) });
+  const releaseDelegateMutation = useMutation({ mutationFn: releaseDelegate });
   const renameChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof renameChatSession>) => renameChatSession(...args) });
   const deleteChatSessionMutation = useMutation({ mutationFn: deleteChatSession });
 
+  const navigate = useNavigate();
+  const { data: sidebarProjects = [] } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
+  const { data: projectActivity = [] } = useQuery({ ...listProjectActivityQuery(), enabled: !embedded });
+  const [sidebarGrouping, setSidebarGrouping] = useState<"projects" | "list">(() => {
+    try { return localStorage.getItem("sidebar-grouping") === "list" ? "list" : "projects"; }
+    catch { return "projects"; }
+  });
+  const machineSuffix = runtime.kind === "ssh" ? `:${encodeURIComponent(runtime.session.host)}` : "";
+  const pinnedProjectsKey = `sidebar-pinned-projects${machineSuffix}`;
+  const collapsedProjectsKey = `sidebar-collapsed-projects${machineSuffix}`;
+  const [pinnedProjects, setPinnedProjects] = useState<string[]>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(pinnedProjectsKey) ?? "[]");
+      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+    } catch { return []; }
+  });
+  const [collapsedProjects, setCollapsedProjects] = useState<string[]>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(collapsedProjectsKey) ?? "[]");
+      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+    } catch { return []; }
+  });
+  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
+  const [sidebarExpandedAll, setSidebarExpandedAll] = useState(false);
+  const railBodyRef = useRef<HTMLDivElement>(null);
+  const cardWarmUntil = useRef(0);
+  const [railHeight, setRailHeight] = useState(0);
+  const [focusedSidebarRow, setFocusedSidebarRow] = useState<string | null>(null);
+  const [chatLimits, setChatLimits] = useState<Record<string, number>>({});
+  const sidebarExpanded = sidebarExpandedAll || Object.keys(chatLimits).length > 0;
+  const setRailBody = useCallback((body: HTMLDivElement | null) => {
+    railBodyRef.current = body;
+    if (!body || embedded) return;
+    const resize = () => setRailHeight(body.clientHeight);
+    const observer = new ResizeObserver(resize);
+    observer.observe(body);
+    resize();
+    return () => { observer.disconnect(); railBodyRef.current = null; };
+  }, [embedded]);
+  const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
+  const sortedProjects = [...sidebarProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
+  const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
+  let shownProjects = sortedProjects.slice(0, candidateLimit);
+  const currentProject = sidebarProjects.find((project) => project.id === projectId);
+  if (currentProject && !shownProjects.some((project) => project.id === projectId)) {
+    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), currentProject];
+  }
+  const projectSessionsQueries = useQueries({
+    queries: (sidebarGrouping === "projects" ? shownProjects : []).map((project) => ({
+      ...listChatSessionsQuery(project.id),
+      enabled: !embedded,
+    })),
+  });
+  const flatSessions = useInfiniteQuery({
+    queryKey: workspaceKey("listSidebarChatSessions", sessionFilter),
+    queryFn: ({ pageParam, signal }: { pageParam: SidebarChatCursor | null; signal: AbortSignal }) => readSidebarChatPage(sessionFilter, pageParam, signal),
+    initialPageParam: null,
+    getNextPageParam: (page): SidebarChatCursor | undefined => page.next ?? undefined,
+    enabled: !embedded && sidebarGrouping === "list",
+  });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
-  const { data: sessions = EMPTY_SESSIONS } = useQuery(sessionsOptions);
+  const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
   const setSessions = useCallback((value: React.SetStateAction<ChatSession[]>) => {
     setScopedQueryData(sessionsOptions.queryKey, (current) => {
       if (!current) return undefined;
@@ -4325,31 +5286,115 @@ export function ChatPanel({
       return next;
     });
   }, [sessionsOptions]);
-  const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
-  const [sshConfigOpen, setSshConfigOpen] = useState(false);
   const activeId = activeSessionId;
+  // Session rows keep their identity across unrelated updates, so the memoized
+  // transcript only re-renders when one of its delegates or their status changes.
+  const delegatesRef = useRef<DelegateRow[]>(EMPTY_DELEGATES);
+  const chatLinks = useMemo<ChatLinks | null>(
+    () => (chatInfo && onOpenDelegate && onOpenMessage ? { chat: chatInfo, onOpenChat: onOpenDelegate, onOpenMessage } : null),
+    [chatInfo, onOpenDelegate, onOpenMessage],
+  );
+  const delegates = useMemo(() => {
+    const next = activeId
+      ? delegatesOf(sessions, activeId).map((session) => ({ session, status: delegateStatus(session, sessions) }))
+      : EMPTY_DELEGATES;
+    const previous = delegatesRef.current;
+    const changed = next.length !== previous.length
+      || next.some((row, index) => row.session !== previous[index].session || row.status !== previous[index].status);
+    if (changed) delegatesRef.current = next;
+    return delegatesRef.current;
+  }, [sessions, activeId]);
   const onActiveSessionChangeRef = useRef(onActiveSessionChange);
   onActiveSessionChangeRef.current = onActiveSessionChange;
   const projectVisitRef = useRef({ projectId });
   if (projectVisitRef.current.projectId !== projectId) projectVisitRef.current = { projectId };
   const [unreadSessionIds, setUnreadSessionIds] = useState<ReadonlySet<string>>(new Set());
-  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [draft, setDraft] = useState("");
   const [demoHintDismissed, setDemoHintDismissed] = useState(false);
-  const [demoRunHintDismissed, setDemoRunHintDismissed] = useState(false);
   const [annotations, setAnnotations] = useState<ComposerAnnotation[]>([]);
-  const annotationId = useRef(0);
+  const [unconfirmedSend, setUnconfirmedSend] = useState<string | null>(null);
   const composerScopeRef = useRef({ projectId, activeId, mainView });
+  const composerMountedRef = useRef(false);
+  useLayoutEffect(() => {
+    composerMountedRef.current = true;
+    return () => { composerMountedRef.current = false; };
+  }, []);
   if (composerScopeRef.current.projectId !== projectId
     || composerScopeRef.current.activeId !== activeId
     || composerScopeRef.current.mainView !== mainView) {
     composerScopeRef.current = { projectId, activeId, mainView };
   }
+  const [goalScope, setGoalScope] = useState<typeof composerScopeRef.current | null>(null);
+  const goalArmed = goalScope === composerScopeRef.current;
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
-  const [attachments, setAttachments] = useState<
-    { dataUrl: string; mediaType: string; name?: string; size: number }[]
-  >([]);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const cited = citedAttachments(draft, attachments);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [imageRefusedFor, setImageRefusedFor] = useState<string | null>(null);
+  // Unsent composer content belongs to the scope it was typed in — stash on
+  // the way out, restore on return, so a draft can't bleed into another chat.
+  const stashScope = `${sessionsOptions.queryKey[1]}:`;
+  const stashKey = stashScope + (embedded
+    ? activeId ? `side:${activeId}` : `${projectId}:side:${sideParentSessionId ?? "new"}`
+    : activeId ?? `${projectId}:new`);
+  const pendingClientTurn = useRef<ComposerStash["pendingClientTurn"]>(null);
+  const pendingScope = useRef<string | null>(null);
+  const composerLiveRef = useRef(EMPTY_COMPOSER_STASH);
+  composerLiveRef.current = { draft, attachments, annotations, unconfirmedSend, pendingClientTurn: pendingClientTurn.current };
+  // On offer until the user has sent anything in the demo: a send either adds
+  // a session or moves a recorded session's leaf off its seeded message. The
+  // nudge anchors to the first scope that had it — seeding it in every scope
+  // would read as the draft bleeding across chats. A new project's seeded
+  // prompt (an openresearch:// reproduce link) is offered the same way until it has a chat.
+  const seededPrompt = !embedded && sessionsLoaded && sessions.length === 0 ? composerSeed(projectId) : null;
+  const composerPrefillOffer =
+    projectId === DEMO_PROJECT_ID && !embedded &&
+      sessions.length > 0 &&
+      sessions.every((session) => session.sideParentSessionId || DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
+      ? DEMO_RUN_EXPERIMENT_PROMPT
+      : seededPrompt;
+  // Per project, so a seeded project's anchor can't block the demo's.
+  const prefillScopesRef = useRef(new Map<string, string>());
+  const canAnchorPrefill = activeId !== null || seededPrompt !== null;
+  if (composerPrefillOffer !== null && !prefillScopesRef.current.has(projectId) && canAnchorPrefill) {
+    prefillScopesRef.current.set(projectId, stashKey);
+  }
+  useEffect(() => {
+    if (sessions.length > 0) forgetComposerSeed(projectId);
+  }, [projectId, sessions.length]);
+  const composerPrefill = stashKey === prefillScopesRef.current.get(projectId) ? composerPrefillOffer : null;
+  // Layout effect: the restore must land before paint or the outgoing chat's
+  // draft flashes for a frame inside the incoming one.
+  useLayoutEffect(() => {
+    const restored = composerStashes.get(stashKey) ?? EMPTY_COMPOSER_STASH;
+    // StrictMode double-invokes: the cleanup must see the restored value, not
+    // the pre-restore render's.
+    composerLiveRef.current = restored;
+    pendingClientTurn.current = restored.pendingClientTurn;
+    pendingScope.current = stashKey;
+    setDraft(restored.draft);
+    setAttachments(restored.attachments);
+    setAnnotations(restored.annotations);
+    setUnconfirmedSend(restored.unconfirmedSend);
+    setImageRefusedFor(null);
+    const restoreFailed = (failed: ComposerStash) => {
+      composerLiveRef.current = mergeFailedComposer(composerLiveRef.current, failed);
+      pendingClientTurn.current = composerLiveRef.current.pendingClientTurn;
+      setDraft((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, draft: current }, failed).draft);
+      setAttachments((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, attachments: current }, failed).attachments);
+      setAnnotations((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, annotations: current }, failed).annotations);
+      if (failed.unconfirmedSend !== null) setUnconfirmedSend((current) => current ?? failed.unconfirmedSend);
+    };
+    mountedComposers.set(stashKey, restoreFailed);
+    return () => {
+      if (mountedComposers.get(stashKey) === restoreFailed) mountedComposers.delete(stashKey);
+      if (!isCurrentScope(sessionsOptions.queryKey) || (activeId && deletedSessionIds.has(activeId))
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
+      if (stashed) composerStashes.set(stashKey, stashed);
+      else composerStashes.delete(stashKey);
+    };
+  }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const settingsMutationTail = useRef<Promise<void>>(Promise.resolve());
   const settingsMutationSeq = useRef(0);
@@ -4358,6 +5403,7 @@ export function ChatPanel({
   const planModeOverrideRef = useRef<boolean | null>(null);
   const queuedPlanOverrideSeen = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { data: activeRuns = [] } = useQuery(listChatActiveRunsQuery());
   const [state, dispatch, historyQuery] = useChatState(projectId, mainView === "chat" ? activeId : null);
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const [selection, setSelection] = useState<ModelSelection | null>(preferredAgent);
@@ -4368,6 +5414,8 @@ export function ChatPanel({
   // active session changes. Distinct from `selection`, which is the sticky
   // global preference that seeds *new* sessions.
   const [sessionOverride, setSessionOverride] = useState<Partial<ModelSelection>>({});
+  const [sideDraftAutonomy, setSideDraftAutonomy] = useState<Autonomy | null>(null);
+  useEffect(() => setSideDraftAutonomy(null), [sideParentSessionId]);
   const [recoveryOverrides, setRecoveryOverrides] = useState<
     Partial<ModelSelection> & { planMode?: boolean }
   >(EMPTY_RECOVERY_OVERRIDES);
@@ -4376,7 +5424,6 @@ export function ChatPanel({
   const activeLeafRef = useRef<string | null>(null);
   const [retryingQueuedId, setRetryingQueuedId] = useState<string | null>(null);
   const preparingSend = useRef(false);
-  const pendingClientTurn = useRef<{ signature: string; id: string } | null>(null);
   // Sessions whose title was just replaced by a harness-generated one, mapped
   // to a nonce that bumps per reveal so a second retitle remounts the spans and
   // replays the animation instead of sitting on a finished one.
@@ -4391,26 +5438,64 @@ export function ChatPanel({
   // Render-fresh mirror of `sessions` for callbacks memoized on projectId
   // alone (syncSessionList snapshots it before fetching).
   const threadRef = useRef<HTMLDivElement>(null);
+  const [findRequest, setFindRequest] = useState<number | null>(null);
+  const [branchReturn, setBranchReturn] = useState<{ sessionId: string; leafId: string } | null>(null);
+  const searchRegion = useSyncExternalStore(subscribeCommandRegion, commandRegion);
+  const openFind = useCallback(() => setFindRequest(Date.now()), []);
+  const closeFind = useCallback(() => {
+    const anchor = threadRef.current?.querySelector<HTMLElement>("[data-search-target=true]");
+    const top = anchor?.getBoundingClientRect().top;
+    setFindRequest(null);
+    setBranchReturn(null);
+    requestAnimationFrame(() => {
+      const scroll = threadRef.current;
+      if (scroll && anchor?.isConnected && top !== undefined) scroll.scrollTop += anchor.getBoundingClientRect().top - top;
+      const pane = threadRef.current?.closest(".chat-pane");
+      const target = pane?.querySelector<HTMLElement>("[data-search-target=true][data-part-id]") ?? pane?.querySelector<HTMLElement>("[data-search-target=true]");
+      target?.focus({ preventScroll: true });
+    });
+  }, []);
+  const findOpen = findRequest !== null;
+  const unmounting = useRef(false);
+  useLayoutEffect(() => {
+    unmounting.current = false;
+    return () => { unmounting.current = true; };
+  }, []);
+  // A hit can open in the other chat pane, which highlights it until this box closes or unmounts,
+  // unless this pane gave way to the plan or subagent tab that still shows the hit.
+  useLayoutEffect(() => {
+    if (findOpen) return () => { if (!unmounting.current || handedOffSearchNonce !== openedSearchNonce) onClearSearch(); };
+  }, [findOpen, onClearSearch]);
   const threadInnerRef = useRef<HTMLDivElement>(null);
   const scrollToEndRef = useRef<(() => void) | null>(null);
   const stickToBottom = useRef(true);
+  const programmaticScroll = useRef<number | null>(null);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
-  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<ComposerEditorHandle>(null);
+  useEffect(() => {
+    const focused = document.activeElement;
+    if (setChatSessionAgentMutation.isPending
+      && (focused === document.body || (focused instanceof HTMLButtonElement && focused.disabled))) {
+      composerRef.current?.focus();
+    }
+  }, [setChatSessionAgentMutation.isPending]);
+  const connection = useRemoteConnection();
+  const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
-    annotationId.current += 1;
     setAnnotations((current) => [
       ...current,
-      { id: `annotation-${annotationId.current}`, ...selection },
+      { id: `annotation-${crypto.randomUUID()}`, ...selection },
     ]);
     composerRef.current?.focus();
   }, []);
   const transcriptSelection = useTranscriptSelection(threadInnerRef, addTranscriptSelection);
-  useAnnotationHighlights(annotations);
+  useAnnotationHighlights(annotations, embedded ? SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME : CHAT_ANNOTATION_HIGHLIGHT_NAME);
 
   useEffect(() => {
-    setAnnotations([]);
+    resumeCancelRef.current?.();
     transcriptSelection.dismiss();
+    return () => resumeCancelRef.current?.();
   }, [activeId, projectId, transcriptSelection.dismiss]);
 
   // Slash-skills: menu state is derived from the draft — open while the token
@@ -4418,62 +5503,57 @@ export function ChatPanel({
   // matches, wherever in the message it was typed.
 
   const [skillIdx, setSkillIdx] = useState(0);
+  const [mentionIdx, setMentionIdx] = useState(0);
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
+  const [modelPickerRequest, setModelPickerRequest] = useState(0);
   const [composerCursor, setComposerCursor] = useState(0);
-  // IME guard: mid-composition text can transiently look like a full command.
-  const composingRef = useRef(false);
 
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
-    if (!slashContext) return;
-    if (skill.source === "command" && skill.name === "plan") {
-      activatePlanCommand(draft, slashContext);
+    if (!slashContext || skill.disabled) return;
+    if (
+      skill.source === "command" && isComposerCommand(skill.name)
+    ) {
+      activateComposerCommand(skill.name, draft, slashContext);
       return;
     }
     // The command replaces the `/query` token in place, so the chip lands where
     // it was typed and the rest of the message stays untouched.
-    const marginSpaces = skillMarginSpaces(skill.name, composerRef.current);
-    const next = insertSlashCommand(draft, slashContext, skill.name, marginSpaces);
-    setDraft(next.text);
-    window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
-      setComposerCursor(next.cursor);
-    });
+    const next = insertSlashCommand(draft, slashContext, skill.name.replace(/@u$/, "^").replace(/@p$/, "~"));
+    composerRef.current?.setText(next.text, next.cursor);
   }
 
-  /** Backspace just behind a chip deletes the whole command, the way the chip
-   * it paints reads — a single object, not eight characters. */
-  function deleteCommandBehindCaret(textarea: HTMLTextAreaElement): boolean {
-    if (typingCommand) return false;
-    const cursor = textarea.selectionStart;
-    if (composingRef.current || cursor !== textarea.selectionEnd) return false;
-    const tokenEnd = draft.slice(0, cursor).replace(/[ \t]+$/, "").length;
-    const context = slashCommandContext(draft, tokenEnd);
-    if (!context || context.end !== tokenEnd) return false;
-    if (!knownCommand(context.query)) return false;
-    if (cursor > tokenEnd && cursor - tokenEnd !== skillMarginSpaces(context.query, textarea)) return false;
-    const next = removeSlashCommand(draft, { ...context, end: cursor });
-    setDraft(next.text);
-    setComposerCursor(next.cursor);
-    window.requestAnimationFrame(() =>
-      textarea.setSelectionRange(next.cursor, next.cursor),
-    );
-    return true;
+  function pickMention(match: MentionMatch) {
+    if (!mentionContext) return;
+    const next = match.kind === "file"
+      ? insertFileMention(draft, mentionContext, match)
+      : insertMentionToken(draft, mentionContext, match.kind === "paper" ? paperToken(match.paper) : match.id);
+    composerRef.current?.setText(next.text, next.cursor);
   }
 
   /** Queue files (upload button, clipboard paste, or drag-drop) as composer
-   * attachments — images and PDFs, which the harness reads off disk by path. */
-  function addFiles(files: File[]) {
+   * attachments — images and PDFs, which the harness reads off disk by path —
+   * cited in the draft at the caret. */
+  function addFiles(
+    files: File[],
+    target?: { scope: typeof composerScopeRef.current; stashKey: string },
+  ) {
     // Per-file and total caps keep the base64-inflated (~33%) request body
     // under the backend's 64 MB limit — a single 30 MB file or a batch summing
     // to 40 MB both stay clear once encoded.
     const MAX_BYTES = 30 * 1024 * 1024;
     const TOTAL_BYTES = 40 * 1024 * 1024;
     setAttachError(null);
-    let total = attachments.reduce((n, a) => n + a.size, 0);
+    setImageRefusedFor(null);
+    let total = cited.attachments.reduce((n, a) => n + a.size, 0);
+    const scope = target?.scope ?? composerScopeRef.current;
+    const attachmentStashKey = target?.stashKey ?? stashKey;
     for (const file of files) {
       if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
+      if (noImageInputError && file.type.startsWith("image/")) {
+        setImageRefusedFor(selectedModel?.id ?? null);
+        continue;
+      }
       if (file.size > MAX_BYTES) {
         setAttachError(m.chat_attachment_too_large({ name: ltr(file.name) }));
         continue;
@@ -4485,18 +5565,36 @@ export function ChatPanel({
       total += file.size;
       const reader = new FileReader();
       reader.onload = () => {
-        const dataUrl = reader.result as string;
-        setAttachments((cur) => [
-          ...cur,
-          { dataUrl, mediaType: file.type, name: file.name, size: file.size },
-        ]);
+        if (!isCurrentScope(sessionsOptions.queryKey)) return;
+        const attachment = {
+          id: nextAttachmentId(),
+          dataUrl: reader.result as string,
+          mediaType: file.type,
+          name: file.name,
+          size: file.size,
+        };
+        // The decode is async — if the composer moved on, the file belongs to
+        // the scope it was pasted into, not whatever chat is now showing.
+        if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId && composerScopeRef.current.mainView === scope.mainView) {
+          setAttachments((cur) => [...cur, attachment]);
+          composerRef.current?.insertToken(attachmentToken(attachment));
+          return;
+        }
+        const stash = composerStashes.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
+        composerStashes.set(attachmentStashKey, {
+          ...stash,
+          draft: [stash.draft, attachmentToken(attachment)].filter(Boolean).join(" "),
+          attachments: [...stash.attachments, attachment],
+        });
       };
       reader.readAsDataURL(file);
     }
   }
 
-  function onComposerPaste(e: React.ClipboardEvent) {
-    const files = Array.from(e.clipboardData.items)
+  function onComposerPaste(e: ClipboardEvent) {
+    const data = e.clipboardData;
+    if (!data) return;
+    const files = Array.from(data.items)
       .filter(
         (item) =>
           item.kind === "file" &&
@@ -4504,43 +5602,84 @@ export function ChatPanel({
       )
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
-    if (files.length > 0) {
+    const usable = files.filter((file) => file.size > 0);
+    if (usable.length > 0) {
       e.preventDefault();
-      addFiles(files);
+      addFiles(usable);
+      return;
     }
+    const types = Array.from(data.types);
+    const hasImageType =
+      types.some((type) => type.startsWith("image/")) ||
+      files.some((file) => file.type.startsWith("image/"));
+    const mayContainImage = hasImageType || types.length === 0 || types.includes("Files");
+    const hasText =
+      types.some((type) => type.startsWith("text/")) ||
+      Boolean(data.getData("text/plain"));
+    if (!mayContainImage || (hasText && !hasImageType)) {
+      return;
+    }
+    if (!navigator.clipboard?.read) {
+      return;
+    }
+    e.preventDefault();
+    const scope = composerScopeRef.current;
+    const attachmentStashKey = stashKey;
+    void (async () => {
+      const file = await readClipboardImage();
+      if (file) {
+        addFiles([file], { scope, stashKey: attachmentStashKey });
+      }
+    })();
   }
 
-  // The open session, if any (its harness is locked; its model/mode/reasoning
-  // are what the composer should reflect and edit).
   const openSession = sessions.find((s) => s.id === activeId);
+  const assistantLabel = openSession ? harnessLabel(openSession.harness, openSession.harnessName) : m.chat_the_agent();
 
   // The selection the composer displays and edits:
   //  * with a session open — that session's stored settings, with any unsent
   //    picker tweaks layered on. The harness is the session's, not the global.
   //  * with no session — the sticky global preference (seeds a new session).
   const savedSelection = selection ?? defaultSelection(harnesses);
+  const retryOptions = (pendingScope.current === stashKey
+    ? pendingClientTurn.current
+    : composerStashes.get(stashKey)?.pendingClientTurn)?.options;
   const rawSelection: ModelSelection | null = openSession
     ? {
       harness: openSession.harness,
-      model: sessionOverride.model ?? openSession.model,
-      serviceTier:
-        sessionOverride.serviceTier !== undefined
-          ? sessionOverride.serviceTier
-          : openSession.serviceTier,
-      permissionMode: sessionOverride.permissionMode ?? openSession.permissionMode,
-      reasoningLevel: sessionOverride.reasoningLevel ?? openSession.reasoningLevel,
+      model: sessionOverride.model !== undefined ? sessionOverride.model
+        : retryOptions?.model !== undefined ? retryOptions.model : openSession.model,
+      serviceTier: sessionOverride.serviceTier !== undefined ? sessionOverride.serviceTier
+        : retryOptions?.serviceTier !== undefined ? retryOptions.serviceTier : openSession.serviceTier,
+      permissionMode: sessionOverride.permissionMode ?? (retryOptions?.permissionMode !== undefined
+        ? retryOptions.permissionMode : openSession.permissionMode),
+      reasoningLevel: sessionOverride.reasoningLevel ?? (retryOptions?.reasoningLevel !== undefined
+        ? retryOptions.reasoningLevel : openSession.reasoningLevel),
     }
     : savedSelection
       ? { ...savedSelection, ...sessionOverride }
       : null;
-  const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness));
-  const activeHarness = rawSelection
+  const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness, projectId));
+  const catalogHarness = rawSelection
     ? harnesses.find((h) => h.id === rawSelection.harness)
     : undefined;
+  const activeHarness = sessionAcpHarness(openSession, catalogHarness);
+  const acpOptions = nativeOptions(openSession?.nativeConfiguration, { model: m.model_picker_model(), mode: m.model_picker_mode() });
+  const acpModel = acpOptions.find((option) => option.category === "model");
+  const acpMode = acpOptions.find((option) => option.category === "mode" && option.choices.some((choice) => choice.id === "plan"));
   const opts = activeHarness?.options;
+  const planActivation = acpMode ? "command" : opts?.planActivation;
+  const { data: setupCommands } = useQuery({ ...getHarnessSetupCommandsQuery(), enabled: !!onRunSetup });
+  const setupPath = (command: string) => {
+    if (!activeHarness) return undefined;
+    const setup = setupCommands?.[activeHarness.id];
+    // The setup route refuses a Claude login its auth state rules out.
+    if (activeHarness.id === "claude-code" && command === setup?.login && !activeHarness.loginEligible) return undefined;
+    return harnessSetupPath(activeHarness, setup, command);
+  };
   const commands = useMemo(
-    () => commandsForHarness(skills, opts?.planActivation),
-    [skills, opts?.planActivation],
+    () => commandsForHarness(skills, planActivation, activeHarness?.supportsCompaction),
+    [skills, planActivation, activeHarness?.supportsCompaction],
   );
   // `!` at the start of the draft is a shell command, not a message (Claude
   // Code's bash mode); the slash menu stays shut over paths like `!ls /tmp`.
@@ -4551,11 +5690,7 @@ export function ChatPanel({
   const completions =
     slashToken === null
       ? []
-      : commands.filter(
-          (command) =>
-            command.name.startsWith(slashToken) ||
-            (command.plugin && `${command.plugin}:${command.name}`.toLowerCase().startsWith(slashToken)),
-        );
+      : commands.filter((command) => commandMatchesQuery(command, slashToken));
   const typingCommand =
     !bashMode &&
     slashToken !== null &&
@@ -4564,34 +5699,73 @@ export function ChatPanel({
   const skillMatches =
     typingCommand && !skillMenuDismissed ? completions : [];
   const skillMenuOpen = skillMatches.length > 0;
-  const activeSkillIdx = Math.min(skillIdx, Math.max(0, skillMatches.length - 1));
+  const selectableSkillIndices = skillMatches.flatMap((skill, index) => skill.disabled ? [] : [index]);
+  const activeSkillIdx = selectableSkillIndices.includes(skillIdx) ? skillIdx : selectableSkillIndices[0] ?? -1;
   useEffect(() => setSkillIdx(0), [slashToken]);
-  // Reconcile the reasoning level against the *currently selected model* here
-  // rather than only in the picker's `pick`. Two paths reach the composer with
-  // a level nobody chose for this model: a session row stored by an older build
-  // (which always wrote an explicit effort), and a stale saved preference.
-  // Reconciling at the point the composer derives its state covers both, so the
-  // displayed value and the value `send` transmits can never be one the model
-  // rejects.
-  // A saved model the harness no longer lists (a provider whose key was
-  // rejected, a retired id) falls back to the harness's first model.
-  const composerModel =
-    rawSelection &&
-      activeHarness &&
-      activeHarness.models.length > 0 &&
-      !activeHarness.models.some((model) => model.id === rawSelection.model)
-      ? activeHarness.models[0].id
-      : (rawSelection?.model ?? null);
-  const composerSelection: ModelSelection | null = rawSelection && {
-    ...rawSelection,
-    model: composerModel,
-    serviceTier: reconcileServiceTier(activeHarness, composerModel, rawSelection.serviceTier),
-    reasoningLevel: reconcileReasoning(activeHarness, composerModel, rawSelection.reasoningLevel),
-  };
+  // `@path` mentions list the checkout the agent works in; the text is sent as typed.
+  const mentionContext = bashMode ? null : fileMentionContext(draft, composerCursor);
+  const mentionQuery = mentionContext?.end === composerCursor ? mentionContext.query : null;
+  const mentionTree = useQuery({
+    ...getCodeTreeQuery(projectId, activeId ? { sessionId: activeId } : {}),
+    // Also loaded for `@path` tokens already in the draft, which chip only when the path exists.
+    enabled: mentionQuery !== null || /(^|\s)@\S/.test(draft),
+  });
+  const mentionEntries = mentionTree.data?.entries;
+  const mentionPool = useMemo(() => mentionCandidates(mentionEntries ?? []), [mentionEntries]);
+  const libraryUserId = owner.queries.useOpenResearchAccount().data?.user?.id;
+  // A `/` in the query browses the checkout, so papers and chats sit that out.
+  const searchesBeyondFiles = mentionQuery !== null && !mentionQuery.includes("/");
+  const paperSearch = useDebouncedValue(mentionQuery ?? "", 200);
+  const mentionPapers = useQuery({
+    queryKey: owner.workspaceKey("mentionPapers", libraryUserId, paperSearch),
+    queryFn: ({ signal }) => owner.api.getAlphaXivPapers(null, null, paperSearch || undefined, signal),
+    enabled: Boolean(libraryUserId) && searchesBeyondFiles,
+    staleTime: 60_000,
+    retry: false,
+  }, owner.queryClient);
+  const mentionMatches = useMemo((): MentionMatch[] => {
+    if (mentionQuery === null || skillMenuDismissed) return [];
+    const files = matchFileMentions(mentionPool, mentionQuery).map((match) => ({ kind: "file" as const, ...match }));
+    if (!searchesBeyondFiles) return files;
+
+    const needle = mentionQuery.toLowerCase();
+    const papers = (mentionPapers.data?.papers ?? [])
+      .slice(0, 3)
+      .map((paper) => ({ kind: "paper" as const, paper }));
+    const chats = sessions
+      .filter((session) => session.id !== activeId && !session.archived)
+      .map((session) => ({
+        kind: "chat" as const,
+        id: session.id,
+        title: chatInfo?.(session.id)?.title ?? session.title ?? m.chat_untitled(),
+        harness: session.harness,
+      }))
+      .filter((chat) => chat.title.toLowerCase().includes(needle))
+      .slice(0, 3);
+    // Room for every section above the fold.
+    return [...files.slice(0, papers.length + chats.length > 0 ? 4 : undefined), ...papers, ...chats];
+  }, [mentionPool, mentionQuery, skillMenuDismissed, searchesBeyondFiles, mentionPapers.data, sessions, activeId, chatInfo]);
+  const mentionMenuOpen = mentionMatches.length > 0;
+  const mentionPaths = useMemo(() => new Set(mentionPool.map((candidate) => candidate.path)), [mentionPool]);
+  const activeMentionIdx = Math.min(mentionIdx, Math.max(0, mentionMatches.length - 1));
+  useEffect(() => setMentionIdx(0), [mentionQuery]);
+  // Reconcile the selected model's settings, including stale saved preferences,
+  // without replacing custom model IDs that are absent from the catalog.
+  const composerSelection = deriveComposerSelection(acpModel && rawSelection ? { ...rawSelection, model: acpModel.currentValue } : rawSelection, activeHarness);
   // Reasoning choices follow the *selected model*, not just the harness — an
   // OpenCode model with no `variants` hides the picker entirely, and Codex's
   // top tiers appear only on the models that accept them.
   const reasoning = reasoningFor(activeHarness, composerSelection?.model);
+  const selectedModel = activeHarness?.models.find((model) => model.id === composerSelection?.model);
+  // OpenCode reports a text-only model's image Read as both success and error, so refuse up front.
+  const noImageInputError = selectedModel?.imageInput === false
+    ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
+    : null;
+  const imageInputBlocked =
+    !!noImageInputError && cited.attachments.some((a) => a.mediaType.startsWith("image/"));
+  const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
+  const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
+  useEffect(() => setImageRefusedFor(null), [selectedModel?.id]);
 
   // Editing the pickers: every change updates the sticky global preference —
   // the config a "New session" composer opens with is whatever the user chose
@@ -4605,7 +5779,36 @@ export function ChatPanel({
   // let a change on one axis pin a reconciled value on another — picking a
   // permission mode would write a reasoning level the user never chose, and the
   // next send would persist it over their real setting.
+  const invalidatePendingRetry = () => {
+    if (pendingClientTurn.current) pendingClientTurn.current.invalidated = true;
+    pendingClientTurn.current = null;
+    composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
+  };
   const selectModel = (next: Partial<ModelSelection>) => {
+    if (openSession && composerSelection && next.harness && next.harness !== openSession.harness) {
+      const agent = { ...composerSelection, ...next };
+      const scope = stashKey;
+      invalidatePendingRetry();
+      setSettingsError(null);
+      setSelection(agent);
+      void onPreferredAgentChange(agent).catch(() => {});
+      void setChatSessionAgentMutation.mutateAsync([openSession.id, agent])
+        .then((session) => {
+          setSessions((current) => current.map((row) => row.id === session.id ? session : row));
+          if (pendingScope.current !== scope) return;
+          setSessionOverride({});
+          setRecoveryOverrides({});
+        })
+        .catch((error: unknown) => {
+          if (pendingScope.current === scope) setSettingsError(error instanceof Error ? error.message : m.chat_switch_agent_failed());
+        });
+      return;
+    }
+    if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
+      if (next.model !== acpModel.currentValue) invalidatePendingRetry();
+      void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
+      return;
+    }
     if (!composerSelection) return;
     const merged = { ...composerSelection, ...next };
     const changed: Partial<ModelSelection> = {};
@@ -4625,6 +5828,7 @@ export function ChatPanel({
       next.reasoningLevel !== composerSelection.reasoningLevel
     )
       changed.reasoningLevel = next.reasoningLevel;
+    if (Object.keys(changed).length) invalidatePendingRetry();
     setRecoveryOverrides((current) => ({ ...current, ...changed }));
     setSelection(merged);
     void onPreferredAgentChange(merged).catch(() => {});
@@ -4634,6 +5838,20 @@ export function ChatPanel({
       setSessionOverride({});
     }
   };
+  function startHarness(harness: Harness) {
+    const model = resolveHarnessDefaultModel(harness);
+    const next: ModelSelection = {
+      harness: harness.id,
+      model,
+      serviceTier: reconcileServiceTier(harness.catalogPending ? undefined : harness, model, null),
+      permissionMode: harness.options?.defaultPermissionMode ?? null,
+      reasoningLevel: reconcileReasoning(harness.catalogPending ? undefined : harness, model, null),
+    };
+    setSelection(next);
+    void onPreferredAgentChange(next).catch(() => {});
+    if (onStartHarnessDraft) onStartHarnessDraft();
+    else onActiveSessionChangeRef.current(null, { projectId });
+  }
   const queueSessionMutation = useCallback(<T,>(mutation: () => Promise<T>): Promise<T> => {
     const result = settingsMutationTail.current.catch(() => {}).then(() => {
       if (!isCurrentScope(sessionsOptions.queryKey)) throw new DOMException("Workspace changed", "AbortError");
@@ -4649,6 +5867,7 @@ export function ChatPanel({
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
     if (id === "plan" && activeHarness?.id === "claude-code") {
+      if (composerSelection?.permissionMode !== id) invalidatePendingRetry();
       setRecoveryOverrides((current) => ({ ...current, permissionMode: id }));
       setSessionOverride((current) => ({ ...current, permissionMode: id }));
     } else {
@@ -4687,10 +5906,39 @@ export function ChatPanel({
       });
   };
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
-  const planActive = composerSelection?.harness === "claude-code"
+  const setAutonomy = (autonomy: Autonomy) => {
+    if (autonomy !== (openSession?.autonomy ?? preferredAutonomy)) invalidatePendingRetry();
+    if (!openSession) {
+      if (sideParentSessionId) setSideDraftAutonomy(autonomy);
+      else onPreferredAutonomyChange(autonomy);
+      return;
+    }
+    const sessionId = openSession.id;
+    const previous = openSession.autonomy;
+    const mutation = ++settingsMutationSeq.current;
+    const replace = (session: ChatSession) =>
+      setSessions((current) => current.map((row) => (row.id === session.id ? session : row)));
+    replace({ ...openSession, autonomy });
+    setSettingsError(null);
+    void queueSessionMutation(() => setChatSessionAutonomyMutation.mutateAsync([sessionId, autonomy]))
+      .then((session) => {
+        replace(session);
+        onPreferredAutonomyChange(session.autonomy);
+      })
+      .catch(() => {
+        setSessions((current) =>
+          current.map((row) =>
+            row.id === sessionId && row.autonomy === autonomy ? { ...row, autonomy: previous } : row,
+          ),
+        );
+        if (settingsMutationSeq.current === mutation) setSettingsError(m.chat_update_autonomy_failed());
+      });
+  };
+  const sessionGoal = openSession?.goal?.trim() || "";
+  const planActive = acpMode ? acpMode.currentValue === "plan" : composerSelection?.harness === "claude-code"
     ? composerSelection.permissionMode === "plan"
-    : opts?.planActivation === "command"
-      ? planModeOverride ?? openSession?.planMode ?? false
+    : planActivation === "command"
+      ? planModeOverride ?? retryOptions?.planMode ?? openSession?.planMode ?? false
       : false;
   useEffect(() => {
     if (planModeOverride === null || openSession?.planMode !== planModeOverride) return;
@@ -4699,6 +5947,13 @@ export function ChatPanel({
   }, [openSession?.planMode, planModeOverride]);
 
   async function setIndependentPlanMode(planMode: boolean) {
+    if (planMode !== planActive) invalidatePendingRetry();
+    if (acpMode && openSession) {
+      const next = planMode ? "plan" : acpMode.choices.find((choice) => choice.id !== "plan")?.id;
+      if (!next) throw new Error(m.chat_toggle_plan_failed());
+      await queueSessionMutation(() => setChatConfiguration(openSession.id, acpMode.id, next));
+      return;
+    }
     setRecoveryOverrides((current) => ({ ...current, planMode }));
     planModeOverrideRef.current = planMode;
     setPlanModeOverride(planMode);
@@ -4743,7 +5998,7 @@ export function ChatPanel({
     try {
       if (composerSelection?.harness === "claude-code") {
         setPermissionMode(nextPlanMode ? "plan" : "auto");
-      } else if (opts?.planActivation === "command") {
+      } else if (planActivation === "command") {
         await setIndependentPlanMode(nextPlanMode);
       } else {
         throw new Error(m.chat_selected_harness_unavailable());
@@ -4753,16 +6008,170 @@ export function ChatPanel({
     }
   }
 
-  function activatePlanCommand(text: string, context: SlashCommandContext) {
+  /** Returns whether the command took focus for itself (a picker or dialog). */
+  function runComposerCommand(name: ComposerCommandName, argument = ""): boolean {
+    switch (name) {
+      case "plan":
+        void togglePlanMode();
+        return false;
+      case "new":
+        // In a side chat, a new chat is another side chat off the same parent.
+        if (embedded) {
+          const parent = openSession?.sideParentSessionId ?? sideParentSessionId;
+          if (parent) onOpenSideChat?.(parent, "");
+        } else startNewTask();
+        return false;
+      case "resume":
+        showCustomDialog({
+          component: ResumeDialog,
+          props: {
+            activeSessionId: activeId,
+            cancelRef: resumeCancelRef,
+            onResume: (session) => {
+              setSessionFilter("all");
+              onActiveSessionChange(session.id, { projectId: session.projectId });
+            },
+            onImport: (chat) => { void importChat(chat); },
+          },
+          onConfirm: () => {},
+          onCancel: "close",
+        });
+        return true;
+      case "model":
+        setModelPickerRequest((request) => request + 1);
+        return true;
+      case "compact":
+        void compactSession();
+        return false;
+      case "goal":
+        setGoalScope(composerScopeRef.current);
+        return false;
+      case "side":
+        openSide(argument);
+        return false;
+      case "copy": {
+        const tail = messages.at(-1);
+        const streamingTail = busy && tail?.role === "assistant" && !tail.completedAt;
+        const text = lastResponseText(streamingTail ? messages.slice(0, -1) : messages);
+        if (text) void copyToClipboard(text);
+        else showAlert(m.chat_nothing_to_copy(), "info");
+        return false;
+      }
+      case "export": {
+        const title = openSession?.title?.trim() || m.chat_untitled();
+        const markdown = openSession
+          ? transcriptMarkdown(title, messages, {
+            user: m.chat_export_you(),
+            assistant: assistantLabel,
+          })
+          : null;
+        if (markdown) downloadFile(transcriptFileName(title), new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
+        else showAlert(m.chat_nothing_to_export(), "info");
+        return false;
+      }
+    }
+  }
+
+  function openSide(question: string) {
+    if (embedded) showAlert(m.side_chat_nested(), "info");
+    else if (!openSession || !onOpenSideChat) showAlert(m.side_chat_needs_a_chat(), "info");
+    else onOpenSideChat(openSession.id, question);
+  }
+
+  /** Adopt a chat from an agent's own CLI into this project, then open it. */
+  async function importChat(chat: NativeChat) {
+    setSettingsError(null);
+    const visit = projectVisitRef.current;
+    try {
+      const session = await importNativeChatMutation.mutateAsync([projectId, chat]);
+      // The adopted chat is no longer one of the agent's unclaimed ones.
+      void queryClient.invalidateQueries({ queryKey: listNativeChatsQuery().queryKey });
+      if (projectVisitRef.current !== visit) return;
+      setSessions((current) => [session, ...current.filter((row) => row.id !== session.id)]);
+      setSessionFilter("all");
+      onActiveSessionChange(session.id, { projectId: session.projectId });
+    } catch (err) {
+      if (projectVisitRef.current !== visit) return;
+      setSettingsError(m.chat_import_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+    }
+  }
+
+  /** `/goal <text>` sets, `/goal clear` clears, and a bare `/goal` reports what
+   * the agent is currently working toward. */
+  async function setGoal(argument: string) {
+    const wanted = argument.trim();
+    if (!wanted) {
+      const goal = openSession?.goal?.trim();
+      showAlert(goal ? m.chat_goal_current({ goal: autoDir(goal) }) : m.chat_goal_none(), "info");
+      return;
+    }
+    const sourceScope = composerScopeRef.current;
+    const inSourceScope = () => composerScopeRef.current.activeId === sourceScope.activeId;
+    setSettingsError(null);
+    let sessionId = activeId;
+    // Declaring the goal before the first message is the natural moment for it,
+    // so an empty composer gets a session rather than losing the goal.
+    if (!sessionId) {
+      if (!activeHarness?.agentReady || !composerSelection) {
+        setSettingsError(m.chat_selected_harness_unavailable());
+        return;
+      }
+      try {
+        sessionId = (await openNewSession(
+          composerSelection,
+          effectiveCommandPlanMode(planActivation, undefined, planModeOverrideRef.current),
+        )).id;
+      } catch (err) {
+        setSettingsError(m.chat_goal_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+        return;
+      }
+    }
+    const clearing = /^(clear|none|off)$/i.test(wanted);
+    try {
+      const session = await queueSessionMutation(() =>
+        setChatSessionGoalMutation.mutateAsync([sessionId, clearing ? null : wanted]),
+      );
+      setSessions((current) => current.map((candidate) => (candidate.id === session.id ? session : candidate)));
+      showAlert(clearing ? m.chat_goal_cleared() : m.chat_goal_set(), "success");
+    } catch (err) {
+      if (!inSourceScope()) return;
+      setSettingsError(m.chat_goal_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+    }
+  }
+
+  /** Compaction runs in the backend; its progress is the transcript row it
+   * publishes over SSE, so only a failure needs a toast. */
+  async function compactSession() {
+    if (!activeHarness?.supportsCompaction) return;
+    const sessionId = activeId;
+    if (!sessionId) {
+      showAlert(m.chat_nothing_to_compact(), "info");
+      return;
+    }
+    if (busy) {
+      setSettingsError(m.chat_compact_busy());
+      return;
+    }
+    setSettingsError(null);
+    // Compacting unarchives the session, so the archived filter would hide it.
+    if (sessionFilter === "archived") setSessionFilter("active");
+    const sourceScope = composerScopeRef.current;
+    try {
+      // SSE may deliver the final result before this initial progress response.
+      const { message } = await compactChatSession(sessionId);
+      dispatch({ type: "upsertMessage", sessionId, message, onlyIfMissing: true });
+    } catch (err) {
+      if (composerScopeRef.current.activeId !== sourceScope.activeId) return;
+      setSettingsError(m.chat_compact_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+    }
+  }
+
+  function activateComposerCommand(name: ComposerCommandName, text: string, context: SlashCommandContext) {
     const next = removeSlashCommand(text, context);
     setDraft(next.text);
     setSkillMenuDismissed(true);
-    void togglePlanMode();
-    window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
-      setComposerCursor(next.cursor);
-    });
+    if (runComposerCommand(name)) return;
+    composerRef.current?.setText(next.text, next.cursor);
   }
 
   // Reconcile deletions and title animations after missed session events.
@@ -4810,10 +6219,7 @@ export function ChatPanel({
         )
         : new Set(),
     );
-    setDraft("");
     setDemoHintDismissed(false);
-    setDemoRunHintDismissed(false);
-    setAttachments([]);
     setTitleReveals(new Map());
     seenTitles.current = new Map();
     void syncSessionList();
@@ -4822,12 +6228,6 @@ export function ChatPanel({
       if (projectVisitRef.current === visit) projectVisitRef.current = { projectId };
     };
   }, [projectId, syncSessionList]);
-
-  // Load message history when a session becomes active.
-  useEffect(() => {
-    setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-    pendingClientTurn.current = null;
-  }, [activeId]);
 
   useEffect(() => {
     return onChatEvent((ev) => {
@@ -4870,6 +6270,9 @@ export function ChatPanel({
 
   useEffect(() => onChatEvent((event) => {
     if (event.type === "reconnected") void syncSessionList(true);
+    if (event.type === "runsChanged" || event.type === "reconnected") {
+      void queryClient.invalidateQueries({ queryKey: listChatActiveRunsQuery().queryKey });
+    }
   }), [syncSessionList]);
 
   // Every fork stays loaded; only the branch on screen drives the transcript,
@@ -4928,37 +6331,27 @@ export function ChatPanel({
       setPlanModeOverride(null);
     }
   }, [queued]);
-  // A session whose transcript hasn't been seeded yet: its key is absent from
-  // messagesBySession (vs. present-but-empty for a genuinely empty session).
-  // Switching to an existing session leaves this true for the getChatMessages
-  // fetch, so we show a spinner instead of flashing the empty state. A brand-new
-  // session created via the composer never lands here — its optimisticUser seed
-  // populates the key synchronously in the same handler.
-  const historyLoading = !!activeId && !(activeId in state.messagesBySession) && historyQuery.isPending;
-  // A busy turn blocked on an unanswered HELD card (nativeId — a bridge or
-  // inline mid-turn request) is waiting on the user, not the model. Drives
-  // the status line and the rail dot (the composer button is keyed on
-  // `pendingQuestion` instead — what send() can actually service). End-turn
-  // cards (no nativeId) never coexist with a busy turn of their own, so
-  // keying on nativeId avoids false positives from stale cards. (Sessions
-  // whose transcripts aren't loaded fall back to plain busy.) Memoized so the
-  // messages × parts scan stays off the per-keystroke render path.
+  const historyLoading = !!activeId && historyQuery.isPending;
   const waitingSessions = useMemo(() => {
     const waiting = new Set<string>();
-    for (const id of state.busySessions) {
-      if (
-        (state.messagesBySession[id] ?? []).some((m) =>
-          m.parts.some(
-            (p) => p.type === "prompt" && p.prompt && !p.prompt.resolved && p.prompt.nativeId,
-          ),
-        )
-      )
-        waiting.add(id);
+    for (const [id, messages] of Object.entries(state.messagesBySession)) {
+      const busy = state.busySessions.has(id);
+      if (hasPendingInput(activePath(messages, state.activeLeafBySession[id]), busy)) waiting.add(id);
     }
     return waiting;
-  }, [state.busySessions, state.messagesBySession]);
-  const awaitingInput = activeId ? waitingSessions.has(activeId) : false;
+  }, [state.busySessions, state.messagesBySession, state.activeLeafBySession]);
+  // Async questions can await an answer while the agent continues working.
+  const awaitingInput = busy && messages.some((message) => message.parts.some(
+    (part) => part.type === "prompt" && part.prompt && !part.prompt.resolved && part.prompt.nativeId,
+  ));
+  const pendingQuestions = useMemo(() => messages.flatMap((message) => message.parts.filter((part) =>
+    part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
+  )), [messages, busy]);
   const activeSession = openSession;
+  // Once the user writes in a delegate, whether it still reports to its parent is theirs to decide.
+  const steeringDelegate = Boolean(activeSession?.delegate?.notifies) && (draft.trim() !== ""
+    || messages.some((message) => message.parts.some((part) =>
+      (part.type === "steer" || (message.role === "user" && part.type === "text")) && Boolean(part.text) && !part.orx)));
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
@@ -4980,18 +6373,44 @@ export function ChatPanel({
     return null;
   }, [messages]);
 
-  // Native questions own the composer only while their turn is still running.
-  const pendingQuestion = useMemo(
-    () => activeId ? pendingQuestionId(messages, activeSession?.harness, state.busySessions.has(activeId)) : null,
-    [messages, activeSession?.harness, activeId, state.busySessions],
-  );
-  // A pending question card owns typed text, so `!` is just an answer there.
-  const bashActive = bashMode && !pendingQuestion;
+  const knownCommand = (name: string) => {
+    if (bashMode) return false;
+    const resolved = resolveComposerCommand(name);
+    const command = commands.find((candidate) => candidate.name === canonicalSkillName(resolved ?? name));
+    if (!command || command.source !== "command") return !!command;
+    // Chip a command only where it would run: plan composes with a prompt, the
+    // rest are whole-message commands and are otherwise ordinary prose.
+    if (resolved && takesArgument(resolved)) {
+      return resolved === "plan" || draft.trim().toLowerCase().startsWith(`/${name}`);
+    }
+    return draft.trim().toLowerCase() === `/${name}`;
+  };
 
-  // A pending question card owns the composer's text as a plain answer — no
-  // command in it is ever expanded, so none of it is chipped either.
-  const knownCommand = (name: string) =>
-    !pendingQuestion && !bashMode && commands.some((command) => command.name === name);
+  const draftRefs = useMemo(
+    () => [...new Set(Array.from(draft.matchAll(CITED_ID), ([cited]) => cited).filter((cited) => cited.startsWith("msg_")))],
+    [draft],
+  );
+  const combineCited = useCallback(
+    (results: { data?: CitedMessage }[]) => new Map(results.flatMap((result, i) => (result.data ? [[draftRefs[i], result.data] as const] : []))),
+    [draftRefs],
+  );
+  const citedInDraft = useQueries({ queries: draftRefs.map(citedMessageQuery), combine: combineCited });
+
+  const chipSource = useMemo<ChipSource>(() => ({
+    isCommand: knownCommand,
+    message: (ref) => citedInDraft.get(ref),
+    chat: (id) => chatInfo?.(id),
+    skill: (name) => commands.find((command) => command.name === canonicalSkillName(name) && command.source !== "command"),
+    isPath: (path) => !bashMode && mentionPaths.has(path),
+    attachment: (id) => attachments.find((attachment) => attachment.id === id),
+    // `knownCommand` reads the draft, commands and bash mode.
+  }), [draft, commands, bashMode, mentionPaths, attachments, citedInDraft, chatInfo]);
+
+  /** Sent messages keep any command token as prose — it was never intercepted. */
+  const transcriptSkills = useMemo(
+    () => commands.filter((command) => command.source !== "command"),
+    [commands],
+  );
   // A submitted plan revision, until its replacement card arrives: hides the
   // outgoing card's strip so it never sits there looking actionable while
   // the model rewrites the plan (the transcript's Working… spinner is the
@@ -5010,16 +6429,15 @@ export function ChatPanel({
 
   const pendingPermission = useMemo(() => firstPendingPermission(messages), [messages]);
   // Enter hands the message to the running turn. Attachments still park (only
-  // a full turn builds their on-disk preamble), and a pending card owns typed
-  // text — there the card is the affordance, not a steer.
+  // a full turn builds their on-disk preamble). Held prompts must be answered first.
   const steering =
     busy &&
     !!activeHarness?.supportsSteering &&
     !!activeHarness?.agentReady &&
     !pendingPlan &&
-    !pendingQuestion &&
+    !awaitingInput &&
     !pendingPermission &&
-    attachments.length === 0 &&
+    cited.attachments.length === 0 &&
     annotations.length === 0;
 
   // Plan opens are stamped with the session like file opens are. Memoized
@@ -5059,8 +6477,13 @@ export function ChatPanel({
   );
 
   // Drop any unsent composer tweak when switching sessions, so it never bleeds
-  // from one session's pickers onto another's.
+  // from one session's pickers onto another's. A hidden machine's effects rerun
+  // when it is shown again, so only a real session change resets them.
+  const overridesSession = useRef<string | null | undefined>(undefined);
   useEffect(() => {
+    if (overridesSession.current === activeId) return;
+    overridesSession.current = activeId;
+    setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
     settingsMutationSeq.current += 1;
     planMutationSeq.current += 1;
     const queuedMode = (activeId ? state.queuedBySession[activeId] ?? [] : []).reduce<
@@ -5081,7 +6504,7 @@ export function ChatPanel({
   const starterHarness = composerSelection?.harness ?? null;
   const starterModel = composerSelection?.model ?? null;
   const historyError = !historyQuery.data ? historyQuery.error : null;
-  const starterVisible = mainView === "chat" && !threadMounted && !historyLoading && !historyError;
+  const starterVisible = mainView === "chat" && !embedded && !threadMounted && !contentLoading && !contentError && !historyLoading && !historyError;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale()),
     enabled: starterVisible && starterHarness !== null,
@@ -5095,55 +6518,44 @@ export function ChatPanel({
   const telemetrySurface: FirstActionSurface =
     projectId === DEMO_PROJECT_ID ? "demo" : "project";
   const applyStarterPrompt = (prompt: string) => {
-    setDraft(prompt);
     setSkillMenuDismissed(false);
-    window.requestAnimationFrame(() => {
-      const el = composerRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(prompt.length, prompt.length);
-      setComposerCursor(prompt.length);
-    });
+    composerRef.current?.setText(prompt, prompt.length);
   };
-  // On offer until the user has sent anything in the demo: a send either adds
-  // a session or moves a recorded session's leaf off its seeded message.
-  const composerPrefill =
-    projectId === DEMO_PROJECT_ID &&
-      sessions.length > 0 &&
-      sessions.every((session) => DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
-      ? DEMO_RUN_EXPERIMENT_PROMPT
-      : null;
   // Seeds without taking focus; focus may still belong to the welcome dialog.
+  // Declared after the stash-restore effect so `current` below is the scope's
+  // just-restored draft.
   useEffect(() => {
     if (!composerPrefill) return;
     setDraft((current) => current || composerPrefill);
     setSkillMenuDismissed(false);
     setComposerCursor(composerPrefill.length);
   }, [composerPrefill]);
-  useEffect(() => {
-    if (composerFocusNonce === 0) return;
-    // The welcome dialog restores its previous focus on unmount; run after that.
-    const frame = window.requestAnimationFrame(() => {
-      const el = composerRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(el.value.length, el.value.length);
-      el.scrollIntoView({ block: "nearest" });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [composerFocusNonce]);
+  const requestNewChatFocus = useComposerFocus(
+    composerRef,
+    composerFocusNonce,
+    mainView === "chat" && !contentLoading && !contentError && !historyLoading,
+    projectId,
+    activeId,
+  );
   const demoHintId = useId();
+  const unconfirmedSendId = useId();
   const demoHintVisible =
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    stickToBottom.current = atBottom;
+    // Wheels, keys, focus moves and screen readers scroll unannounced; only the virtualizer's own scrolls are recorded.
+    const programmatic = programmaticScroll.current !== null && Math.abs(el.scrollTop - programmaticScroll.current) <= 1;
+    programmaticScroll.current = null;
+    if (!programmatic) stickToBottom.current = atBottom;
     setTranscriptAtBottom(atBottom);
   }, []);
   const pinTranscriptToBottom = useCallback(() => {
     stickToBottom.current = true;
     setTranscriptAtBottom(true);
     scrollToEndRef.current?.();
+  }, []);
+  const leaveTranscriptFeed = useCallback((forward: boolean) => {
+    (forward ? composerRef.current : threadRef.current)?.focus();
   }, []);
   useEffect(() => {
     const el = threadRef.current;
@@ -5166,57 +6578,115 @@ export function ChatPanel({
   }, [pinTranscriptToBottom]);
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
-  async function send({ queue = false }: { queue?: boolean } = {}) {
-    captureUiEvent({
-      name: "first_action",
-      surface: telemetrySurface,
-      action: "typed_prompt",
-    });
-    if (preparingSend.current) return;
+  async function send({ queue = false, starter }: { queue?: boolean; starter?: string } = {}) {
+    if (setChatSessionAgentMutation.isPending) return;
     // Slash tokens stay in the wire form: the server resolves every selected
     // skill and supplies this exact message as their shared request context.
-    const originalText = draft.trim();
-    const planCommand = !pendingQuestion
-      ? parsePlanCommand(originalText, opts?.planActivation)
+    const originalText = (starter ?? draft).trim();
+    const composerCommand = starter === undefined
+      ? parseComposerCommand(originalText, planActivation)
       : null;
-    const planRequested = !!planCommand;
+    const goalCommand = composerCommand?.name === "goal";
+    if (goalCommand && !composerCommand.prompt) {
+      setDraft("");
+      setSkillMenuDismissed(false);
+      setGoalScope(composerScopeRef.current);
+      return;
+    }
+    if ((goalCommand || goalArmed)
+      && /^(clear|none|off)$/i.test(goalCommand ? composerCommand.prompt : originalText)) {
+      setDraft("");
+      setGoalScope(null);
+      await setGoal("clear");
+      return;
+    }
+    if (composerCommand && composerCommand.name !== "plan" && !goalCommand) {
+      setDraft(takesArgument(composerCommand.name) ? "" : composerCommand.prompt);
+      setSkillMenuDismissed(false);
+      runComposerCommand(composerCommand.name, composerCommand.prompt);
+      return;
+    }
+    if (imageInputBlocked) return;
+    if (starter === undefined) {
+      captureUiEvent({
+        name: "first_action",
+        surface: telemetrySurface,
+        action: "typed_prompt",
+      });
+    }
+    if (preparingSend.current) return;
+    const planRequested = composerCommand?.name === "plan";
+    const goalRequested = (goalCommand || goalArmed);
     const toggledPlanMode = !planActive;
     const independentPlanMode = effectiveCommandPlanMode(
-      opts?.planActivation,
+      acpMode ? undefined : planActivation,
       planRequested ? toggledPlanMode : undefined,
       planModeOverrideRef.current,
     );
     const planPermissionMode = planRequested && activeHarness?.id === "claude-code"
       ? toggledPlanMode ? "plan" : "auto"
       : undefined;
-    const text = planCommand ? planCommand.prompt : originalText;
-    const pending = attachments;
+    // Attachments travel in the order the text cites them.
+    const sending = citedAttachments(composerCommand ? composerCommand.prompt : originalText, attachments);
+    const text = sending.text;
+    const pending = sending.attachments;
+    const attachmentsAtSend = attachments;
     const pendingAnnotations = annotations;
     const wireAnnotations = pendingAnnotations.map((annotation) => ({
       text: annotation.text,
     }));
+    const turnSignature = JSON.stringify({
+      text,
+      goal: goalRequested ? text : undefined,
+      plan: planRequested,
+      images: pending.map((attachment) => ({
+        mediaType: attachment.mediaType,
+        name: attachment.name,
+        dataUrl: attachment.dataUrl,
+      })),
+      annotations: wireAnnotations,
+    });
+    const retry = pendingClientTurn.current?.signature === turnSignature ? pendingClientTurn.current : null;
     const sourceProjectId = projectId;
     const sourceView = mainView;
     let sourceSessionId = activeId;
+    let sourceStashKey = stashKey;
     const inSourceScope = () => {
       const current = composerScopeRef.current;
-      return isCurrentScope(sessionsOptions.queryKey) && current.projectId === sourceProjectId
+      return composerMountedRef.current && isCurrentScope(sessionsOptions.queryKey) && current.projectId === sourceProjectId
         && current.activeId === sourceSessionId
         && current.mainView === sourceView;
     };
-    const restoreComposer = () => {
-      if (!inSourceScope()) return;
-      setDraft((current) => current || originalText);
-      setAttachments((current) => (current.length ? current : pending));
-      setAnnotations((current) => (current.length ? current : pendingAnnotations));
+    let failedTurn: ComposerStash["pendingClientTurn"] = null;
+    const restoreComposer = (unconfirmedSend: string | null = null) => {
+      if (!isCurrentScope(sessionsOptions.queryKey)
+        || (sourceSessionId && deletedSessionIds.has(sourceSessionId))
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      const restore = mountedComposers.get(sourceStashKey);
+      const failed = {
+        draft: goalArmed && !goalCommand && (!restore || !inSourceScope()) ? `/goal ${starter ?? draft}` : starter ?? draft,
+        attachments: pending,
+        annotations: pendingAnnotations.map(({ range: _range, ...annotation }) => annotation),
+        unconfirmedSend,
+        pendingClientTurn: unconfirmedSend === null || failedTurn?.invalidated ? null : failedTurn,
+      };
+      if (restore) {
+        restore(failed);
+        if (goalRequested && inSourceScope()) setGoalScope(composerScopeRef.current);
+      } else {
+        const merged = mergeFailedComposer(composerStashes.get(sourceStashKey) ?? EMPTY_COMPOSER_STASH, failed);
+        const stashed = composerStashContent(merged, null);
+        if (stashed) composerStashes.set(sourceStashKey, stashed);
+      }
     };
     if (planRequested && !text && pending.length === 0 && pendingAnnotations.length === 0) {
+      composerLiveRef.current = { ...composerLiveRef.current, draft: "" };
       setDraft("");
       setSkillMenuDismissed(false);
       try {
         if (activeHarness?.id === "claude-code") {
           setPermissionMode(toggledPlanMode ? "plan" : "auto");
-        } else if (opts?.planActivation === "command") {
+        } else if (planActivation === "command") {
           await setIndependentPlanMode(toggledPlanMode);
         } else {
           throw new Error(m.chat_selected_harness_unavailable());
@@ -5227,16 +6697,24 @@ export function ChatPanel({
       }
       return;
     }
+    if (planRequested && acpMode && !retry) {
+      try {
+        await setIndependentPlanMode(toggledPlanMode);
+      } catch {
+        if (inSourceScope()) setSettingsError(m.chat_toggle_plan_failed());
+        return;
+      }
+    }
     const effective = composerSelection
       ? {
         ...composerSelection,
         ...(planPermissionMode ? { permissionMode: planPermissionMode } : {}),
       }
       : null;
-    if (planPermissionMode) setPermissionMode(planPermissionMode);
+    if (planPermissionMode && !retry) setPermissionMode(planPermissionMode);
     let planCommandMutation: number | null = null;
     const previousPlanModeOverride = planModeOverrideRef.current;
-    if (planRequested && opts?.planActivation === "command") {
+    if (planRequested && !acpMode && planActivation === "command" && !retry) {
       planCommandMutation = ++planMutationSeq.current;
       planModeOverrideRef.current = toggledPlanMode;
       setPlanModeOverride(toggledPlanMode);
@@ -5247,48 +6725,54 @@ export function ChatPanel({
       planModeOverrideRef.current = previousPlanModeOverride;
       setPlanModeOverride(previousPlanModeOverride);
     };
-    if (!text && pending.length === 0 && pendingAnnotations.length === 0) return;
-    // A pending question card owns plain typed text as a custom answer
-    // (Claude-desktop behavior). This also works while the turn is HELD on
-    // the card — where a new message would be rejected as busy and silently
-    // dropped. A failed answer restores the draft so the text isn't lost.
-    // (Nothing is chipped or expanded while a card is pending — a `/command`
-    // in the answer serializes into the note text exactly as it reads.)
-    if ((text || pendingAnnotations.length > 0) && pendingQuestion && pending.length === 0) {
-      setDraft("");
-      setAnnotations([]);
-      void respond({
-        promptId: pendingQuestion,
-        answers: [],
-        note: text || undefined,
-        annotations: wireAnnotations,
-      }).then((ok) => {
-        if (!ok) restoreComposer();
-      });
-      return;
-    }
-    const turnSignature = JSON.stringify({
-      text,
-      images: pending.map((attachment) => ({
-        mediaType: attachment.mediaType,
-        name: attachment.name,
-        dataUrl: attachment.dataUrl,
-      })),
-      annotations: wireAnnotations,
-      settings: effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          planMode: independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
+    if ((!text && pending.length === 0 && pendingAnnotations.length === 0) || (goalRequested && !text)) return;
+    const persistMessageGoal = async (sessionId: string) => {
+      if (!goalRequested) return;
+      const session = await setChatSessionGoalMutation.mutateAsync([sessionId, text]);
+      setSessions((current) => current.map((candidate) => candidate.id === session.id ? session : candidate));
+    };
+    const clientTurnId = retry?.id ?? `ct_${crypto.randomUUID()}`;
+    const mode = retry ? retry.mode : busy && steering && !queue && !planRequested && !goalRequested ? "steer" : null;
+    const turnOpts = retry?.options ?? (effective ? {
+      model: effective.model,
+      serviceTier: effective.serviceTier,
+      permissionMode: effective.permissionMode,
+      // A persisted plan toggle must reach the running turn's settings check.
+      planMode: busy && planActivation === "command" ? (independentPlanMode ?? openSession?.planMode) : independentPlanMode,
+      reasoningLevel: effective.reasoningLevel,
+    } : {});
+    pendingClientTurn.current = { signature: turnSignature, id: clientTurnId, mode, options: turnOpts };
+    failedTurn = pendingClientTurn.current;
+    const finishSentMessage = () => {
+      if (inSourceScope()) {
+        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+        if (retry) {
+          setUnconfirmedSend(null);
+          composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
         }
-        : null,
-    });
-    const clientTurnId = pendingClientTurn.current?.signature === turnSignature
-      ? pendingClientTurn.current.id
-      : `ct_${crypto.randomUUID()}`;
-    pendingClientTurn.current = { signature: turnSignature, id: clientTurnId };
+        if (goalRequested) setGoalScope(null);
+      }
+      if (pendingClientTurn.current?.id === clientTurnId) {
+        pendingClientTurn.current = null;
+        if (inSourceScope() && composerLiveRef.current.pendingClientTurn?.id === clientTurnId) {
+          composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
+        }
+      }
+    };
+    const clearComposer = () => {
+      const live = composerLiveRef.current;
+      composerLiveRef.current = {
+        ...live,
+        draft: live.draft === draft ? "" : live.draft,
+        attachments: live.attachments === attachmentsAtSend ? [] : live.attachments,
+        annotations: live.annotations === pendingAnnotations ? [] : live.annotations,
+      };
+      setDraft((current) => current === draft ? "" : current);
+      setAttachments((current) => current === attachmentsAtSend ? [] : current);
+      setAnnotations((current) => current === pendingAnnotations ? [] : current);
+      setAttachError(null);
+      setImageRefusedFor(null);
+    };
     if (busy) {
       // A turn is already running. Steering hands the message to it now, and
       // the delivered text comes back inline on the assistant message. Parking
@@ -5300,54 +6784,50 @@ export function ChatPanel({
         return;
       }
       const sid = activeId;
-      setDraft("");
-      setAttachments([]);
-      setAnnotations([]);
-      setAttachError(null);
-      // Always send the composer's settings, steer or not: a permission or
-      // plan change persists itself before this message, so the server's
-      // comparison against the *running* turn is the only thing that catches
-      // it — and a mismatch parks the message, which also persists the change.
-      const turnOpts = effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          // The composer's plan state, not just an unpersisted toggle: a
-          // toggle that already persisted would otherwise reach the server
-          // as "no change" and steer into a turn still running without it.
-          planMode:
-            opts?.planActivation === "command"
-              ? (independentPlanMode ?? openSession?.planMode)
-              : independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
-        }
-        : {};
+      clearComposer();
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
         dataBase64: a.dataUrl.slice(a.dataUrl.indexOf(",") + 1),
         name: a.name,
       }));
+      let submitted = false;
       try {
-        const sendBusy = () =>
-          sendChatMessage(
+        const sendBusy = async () => {
+          await persistMessageGoal(sid);
+          submitted = true;
+          return sendChatMessage(
             sid,
             text,
             turnOpts,
             images.length ? images : undefined,
             wireAnnotations,
             clientTurnId,
-            steering && !queue && !planRequested ? "steer" : undefined,
+            mode ?? undefined,
           );
+        };
         const response = await queueSessionMutation(sendBusy);
         if (response.turn?.existing) await reseedSession(sid);
-        if (inSourceScope()) setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-        if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
-      } catch {
-        // Never reached the turn — restore the composer so a retry is one keypress.
+        finishSentMessage();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+        if (unconfirmed) {
+          const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+          if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+            || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+          if (accepted) {
+            finishSentMessage();
+            await reseedSession(sid).catch(() => {});
+            return;
+          }
+        }
         clearFailedPlanCommand();
-        restoreComposer();
+        restoreComposer(unconfirmed ? msg : null);
+        if (isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(sid)
+          && (!sideParentSessionId || !deletedSessionIds.has(sideParentSessionId)) && !unconfirmed) {
+          dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
+        }
       }
       return;
     }
@@ -5362,39 +6842,48 @@ export function ChatPanel({
       return;
     }
     let sid = activeId;
+    let submitted = false;
     try {
+      // Clear before the first await — once the scope can move, a stash
+      // cleanup must never see the sent text still in the composer. Failure
+      // paths below restore it via restoreComposer().
+      clearComposer();
       preparingSend.current = true;
       try {
         if (!sid) {
           const session = await openNewSession(effective, independentPlanMode);
           sid = session.id;
           sourceSessionId = session.id;
+          sourceStashKey = `${stashScope}${embedded ? `side:${session.id}` : session.id}`;
         }
         if (!isCurrentScope(sessionsOptions.queryKey)) return;
-        const history = getChatMessagesQuery(sid);
-        // Join pending repair even when it has published an intermediate snapshot.
-        await queryClient.fetchQuery({
+        const historySid = sid;
+        const history = getChatMessagesQuery(historySid);
+        // Join pending repair even when it has published an intermediate snapshot. A live invalidation
+        // (e.g. SSE reconnect) can cancel the joined read; retrying joins its replacement or reads the cache.
+        const awaitHistory = (): Promise<unknown> => queryClient.fetchQuery({
           ...history,
           ...(queryClient.getQueryState(history.queryKey)?.fetchStatus === "fetching" ? { staleTime: 0 } : {}),
+        }).catch((cause: unknown) => {
+          if (cause instanceof CancelledError && isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(historySid)) return awaitHistory();
+          throw cause;
         });
+        await awaitHistory();
       } finally {
         preparingSend.current = false;
       }
-      if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      if (inSourceScope()) {
-        setDraft((current) => current === draft ? "" : current);
-        setAttachments((current) => current === pending ? [] : current);
-        setAnnotations((current) => current === pendingAnnotations ? [] : current);
-        setAttachError(null);
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      if (!(retry && mode === "steer")) {
+        dispatch({
+          type: "optimisticUser",
+          sessionId: sid,
+          text: text || m.chat_asked_about_selection(),
+          attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
+          annotations: pendingAnnotations,
+        });
+        dispatch({ type: "busy", sessionId: sid, busy: true });
       }
-      dispatch({
-        type: "optimisticUser",
-        sessionId: sid,
-        text: text || m.chat_asked_about_selection(),
-        attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
-        annotations: pendingAnnotations,
-      });
-      dispatch({ type: "busy", sessionId: sid, busy: true });
       if (inSourceScope()) pinTranscriptToBottom();
       // The session being sent to is never archived after this turn (new ones
       // start active; existing ones are unarchived server-side by activity) —
@@ -5403,15 +6892,6 @@ export function ChatPanel({
       // `effective.harness` is always the target session's harness (locked once
       // it exists), so these overrides are always valid — the backend persists
       // them as the session's sticky settings. Clear the unsent tweak now.
-      const turnOpts = effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          planMode: independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
-        }
-        : {};
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
@@ -5420,49 +6900,51 @@ export function ChatPanel({
       }));
       const targetSessionId = sid;
       if (!targetSessionId) throw new Error(m.chat_session_not_created());
-      const sendTurn = () =>
-        sendChatMessage(
+      const sendTurn = async () => {
+        await persistMessageGoal(targetSessionId);
+        submitted = true;
+        return sendChatMessage(
           targetSessionId,
           text,
           turnOpts,
           images.length ? images : undefined,
           wireAnnotations,
           clientTurnId,
+          mode ?? undefined,
         );
+      };
       const response = await queueSessionMutation(sendTurn);
       if (response.turn?.existing) await reseedSession(targetSessionId);
-      if (inSourceScope()) setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-      if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
+      finishSentMessage();
     } catch (err) {
       if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      // The message never reached a turn — put it back in the composer so a
-      // retry is one keypress, whichever branch below applies.
-      restoreComposer();
-      clearFailedPlanCommand();
-      if (!sid) return; // session creation failed; no transcript to annotate
+      if (!sid) {
+        restoreComposer();
+        clearFailedPlanCommand();
+        const msg = err instanceof Error ? err.message : String(err);
+        showAlert(m.chat_message_not_sent({ error: ltr(msg) }), "error");
+        return;
+      }
       const msg = err instanceof Error ? err.message : String(err);
-      // A *network* failure does not prove no turn started — the backend
-      // claims the turn (and emits busy) before its response, so a lost
-      // response can reject on a live, streaming turn; ask the server before
-      // declaring failure. An explicit busy rejection is different: the slot
-      // belongs to someone else's turn (run watcher, second tab) and ours was
-      // never accepted — always surface that.
-      if (!/session is busy/i.test(msg)) {
-        const busyNow = await queryClient.fetchQuery({ ...listChatSessionsQuery(projectId), staleTime: 0 })
-          .then((list) => !!list.find((s) => s.id === sid)?.busy)
-          .catch(() => false);
-        if (busyNow) {
-          // The turn is real and streaming — undo the restore, nothing failed.
-          if (inSourceScope()) {
-            setDraft((cur) => (cur === text ? "" : cur));
-            setAttachments((cur) => (cur === pending ? [] : cur));
-            setAnnotations((cur) => (cur === pendingAnnotations ? [] : cur));
-          }
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)) return;
+      const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+      if (unconfirmed) {
+        const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+        if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+          || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+        if (accepted) {
+          finishSentMessage();
+          await reseedSession(sid).catch(() => {});
           return;
         }
       }
-      dispatch({ type: "busy", sessionId: sid, busy: false });
-      dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
+      restoreComposer(unconfirmed ? msg : null);
+      clearFailedPlanCommand();
+      if (submitted) await reseedSession(sid).catch(() => {});
+      else dispatch({ type: "busy", sessionId: sid, busy: false });
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      if (!unconfirmed) dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
     }
   }
 
@@ -5470,18 +6952,24 @@ export function ChatPanel({
   async function openNewSession(selection: ModelSelection, planMode: boolean | undefined) {
     const scope = composerScopeRef.current;
     const visit = projectVisitRef.current;
-    const session = await createChatSessionMutation.mutateAsync([projectId, selection.harness, {
-      model: selection.model,
-      serviceTier: selection.serviceTier,
-      permissionMode: selection.permissionMode,
-      planMode,
-      reasoningLevel: selection.reasoningLevel,
-    }]);
-    if (projectVisitRef.current === visit) {
+    let session = sideParentSessionId
+      ? await openSideChatMutation.mutateAsync(sideParentSessionId)
+      : await createChatSessionMutation.mutateAsync([projectId, selection.harness, {
+        model: selection.model,
+        serviceTier: selection.serviceTier,
+        permissionMode: selection.permissionMode,
+        planMode,
+        reasoningLevel: selection.reasoningLevel,
+        autonomy: preferredAutonomy,
+      }]);
+    if (sideParentSessionId && sideDraftAutonomy !== null && session.autonomy !== sideDraftAutonomy) {
+      session = await setChatSessionAutonomyMutation.mutateAsync([session.id, sideDraftAutonomy]);
+    }
+    if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit) {
       setSessions((cur) => [session, ...cur.filter((row) => row.id !== session.id)]);
       if (!queryClient.getQueryData(sessionsOptions.queryKey)) void syncSessionList(true);
     }
-    if (projectVisitRef.current === visit && composerScopeRef.current === scope) {
+    if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit && composerScopeRef.current === scope) {
       onActiveSessionChangeRef.current(session.id, { replace: true });
       composerScopeRef.current = { ...scope, activeId: session.id };
     }
@@ -5490,17 +6978,13 @@ export function ChatPanel({
 
   function exitBashMode() {
     const next = withoutBashPrefix(draft);
-    setDraft(next);
-    window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.length, next.length);
-      setComposerCursor(next.length);
-    });
+    composerRef.current?.setText(next, next.length);
   }
 
   /** Enter in bash mode: run the command where the agent works and show the
    * exchange on the branch. A new chat gets its session first, as send() does. */
   async function runShell() {
+    if (setChatSessionAgentMutation.isPending) return;
     const command = shellCommand;
     if (!command) return;
     setSettingsError(null);
@@ -5532,7 +7016,7 @@ export function ChatPanel({
       }
       try {
         const planMode = effectiveCommandPlanMode(
-          opts?.planActivation,
+          planActivation,
           undefined,
           planModeOverrideRef.current,
         );
@@ -5638,6 +7122,54 @@ export function ChatPanel({
     [activeId, busy, queueSessionMutation],
   );
 
+  const forkedForNonce = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (!focusedMessage || focusedMessage.sessionId !== activeId || busy) return;
+    if (forkedForNonce.current === focusedMessage.nonce) return;
+    const { messageId } = focusedMessage;
+    if (messages.some((message) => message.id === messageId)) {
+      forkedForNonce.current = focusedMessage.nonce;
+      return;
+    }
+    if (!allMessages.some((message) => message.id === messageId)) return;
+    forkedForNonce.current = focusedMessage.nonce;
+    const previous = activeLeafRef.current;
+    if (focusedMessage.query && previous) {
+      setBranchReturn((current) => current?.sessionId === activeId ? current : { sessionId: activeId, leafId: previous });
+    }
+    selectBranch(messageId);
+  }, [focusedMessage, activeId, busy, messages, allMessages, selectBranch]);
+  const restoreSearchBranch = useCallback(() => {
+    if (!branchReturn || branchReturn.sessionId !== activeId) return;
+    selectBranch(branchReturn.leafId);
+    setBranchReturn(null);
+  }, [branchReturn, activeId, selectBranch]);
+  const searchedPart = useMemo(() => {
+    if (focusedMessage?.sessionId !== activeId || !focusedMessage?.partId) return;
+    const message = allMessages.find((message) => message.id === focusedMessage.messageId);
+    return message && findPartById(message.parts, focusedMessage.partId);
+  }, [focusedMessage, activeId, allMessages]);
+  useEffect(() => {
+    if (contentLoading || historyLoading || !focusedMessage?.query || focusedMessage.sessionId !== activeId || openedSearchNonce === focusedMessage.nonce) return;
+    const message = messages.find((message) => message.id === focusedMessage.messageId);
+    if (!message) return;
+    openedSearchNonce = focusedMessage.nonce;
+    const part = focusedMessage.partId ? findPartById(message.parts, focusedMessage.partId) : undefined;
+    handedOffSearchNonce = (focusedMessage.spawnPartId ? openSubagent : part?.prompt?.kind === "plan" && openPlan) ? focusedMessage.nonce : undefined;
+    if (focusedMessage.spawnPartId) openSubagent?.(focusedMessage.spawnPartId, undefined, "preview");
+    else if (part?.prompt?.kind === "plan") openPlan?.(part.prompt.plan ?? "", part.id, "preview");
+  }, [contentLoading, historyLoading, focusedMessage, activeId, messages, openSubagent, openPlan]);
+  useLayoutEffect(() => {
+    if (!focusedMessage?.query || !focusedMessage.partId || focusedMessage.sessionId !== activeId) return;
+    const root = threadRef.current?.closest(".chat-pane")?.querySelector<HTMLElement>(`.chat-prompt-questions [data-part-id="${CSS.escape(focusedMessage.partId)}"]`);
+    if (!root || !("highlights" in CSS) || typeof Highlight === "undefined") return;
+    const name = embedded ? "side-chat-search-prompt" : "chat-search-prompt";
+    const highlight = new Highlight(...chatSearchRanges(root, focusedMessage.query));
+    CSS.highlights.set(name, highlight);
+    root.scrollIntoView({ block: "nearest" });
+    return () => { if (CSS.highlights.get(name) === highlight) CSS.highlights.delete(name); };
+  }, [focusedMessage, activeId, pendingQuestions, embedded]);
+
   // Durable cancellation wins before the chip disappears. If persistence
   // fails, leave it visible so a restart cannot surprise the user by sending it.
   function cancelQueued(itemId: string) {
@@ -5666,38 +7198,27 @@ export function ChatPanel({
     }
   }
 
-  // Escape stops the streaming turn and drops focus back into the composer,
-  // mirroring the Claude Code desktop app. Harness-agnostic — `stop()` →
-  // `interruptChat` interrupts whichever harness (Claude, Codex, OpenCode, …)
-  // is running the active session. Only armed while chat is visible.
-  //
-  // An overlay that should swallow Escape (rather than let it stop the turn)
-  // must own the key ahead of this document-level bubble listener, by one of
-  // two means already in use — a new overlay has to pick one or it will
-  // interrupt the turn on Escape:
-  //   - the slash menu preventDefaults in the composer's onKeyDown (bubble),
-  //     so the `defaultPrevented` guard below defers to it;
-  //   - the composer pickers (usePopover) stopPropagation in the capture phase,
-  //     so their Escape never reaches this listener at all.
-  useEffect(() => {
-    if (!busy || mainView !== "chat") return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key !== "Escape" || e.defaultPrevented) return;
-      e.preventDefault();
-      stop();
-      composerRef.current?.focus();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [busy, activeId, mainView]);
+  useHotkey("Escape", () => {
+    if (commandRegion() !== (embedded ? "right" : "left")) return;
+    stop();
+    composerRef.current?.focus();
+  }, { enabled: busy && mainView === "chat", preventDefault: true, stopPropagation: false, conflictBehavior: "allow" });
 
   /** Drop every trace of a session — the local row, the open-thread selection,
    * and the cached transcript. Used on delete (ours or another dashboard's). */
   function forgetSession(sessionId: string) {
     removeCachedSession(sessionId);
+    composerStashes.delete(`${stashScope}${sessionId}`);
+    composerStashes.delete(`${stashScope}side:${sessionId}`);
+    if (prefillScopesRef.current.get(projectId) === `${stashScope}${sessionId}`) prefillScopesRef.current.delete(projectId);
     if (composerScopeRef.current.projectId === projectId
       && composerScopeRef.current.activeId === sessionId
       && composerScopeRef.current.mainView === "chat") {
+      // The session is gone — its composer dies with it. Cleared in the same
+      // batch as the navigation so the stash cleanup can't resurrect the key.
+      setDraft("");
+      setAttachments([]);
+      setAnnotations([]);
       onActiveSessionChangeRef.current(null, { replace: true });
     }
     setUnreadSessionIds((current) => {
@@ -5709,16 +7230,31 @@ export function ChatPanel({
     seenTitles.current.delete(sessionId);
   }
 
+  function updateSidebarSession(session: ChatSession, changes: Partial<ChatSession>) {
+    const options = listChatSessionsQuery(session.projectId);
+    markLiveUpdate(queryClient, options.queryKey, session.id);
+    setScopedQueryData(options.queryKey, (current) =>
+      current?.map((row) => row.id === session.id ? { ...row, ...changes } : row),
+    );
+  }
+
   function setArchived(session: ChatSession, archived: boolean) {
     // Optimistic; the server also broadcasts the row over chat.session. On
     // failure restore the pre-request snapshot (not the request's negation,
     // which could undo a concurrent authoritative update).
     const prev = session.archived;
-    setSessions((cur) => cur.map((s) => (s.id === session.id ? { ...s, archived } : s)));
+    updateSidebarSession(session, { archived });
     void setChatSessionArchivedMutation.mutateAsync([session.id, archived]).catch(() => {
-      setSessions((cur) =>
-        cur.map((s) => (s.id === session.id ? { ...s, archived: prev } : s)),
-      );
+      updateSidebarSession(session, { archived: prev });
+    });
+  }
+
+  function stopNotifyingParent(session: ChatSession) {
+    const prev = session.delegate;
+    updateSidebarSession(session, { delegate: null });
+    void releaseDelegateMutation.mutateAsync(session.id).catch((error) => {
+      updateSidebarSession(session, { delegate: prev });
+      showAlert(error instanceof Error ? error.message : String(error), "error");
     });
   }
 
@@ -5727,22 +7263,25 @@ export function ChatPanel({
     // On failure restore the pre-request title (not the draft) so a concurrent
     // authoritative update isn't undone.
     const prev = session.title;
-    setSessions((cur) => cur.map((s) => (s.id === session.id ? { ...s, title } : s)));
+    updateSidebarSession(session, { title });
     void renameChatSessionMutation.mutateAsync([session.id, title]).catch(() => {
-      setSessions((cur) => cur.map((s) => (s.id === session.id ? { ...s, title: prev } : s)));
+      updateSidebarSession(session, { title: prev });
     });
   }
 
-  async function removeSession(session: ChatSession) {
+  function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
-    if (!window.confirm(m.chat_delete_session_confirm({ title: autoDir(title) }))) return;
-    try {
-      await deleteChatSessionMutation.mutateAsync(session.id);
-    } catch (err) {
-      showAlert(m.chat_delete_session_failed({ title: autoDir(title), error: ltr(err instanceof Error ? err.message : String(err)) }), "error");
-      return;
-    }
-    forgetSession(session.id);
+    showConfirmDialog({
+      title: m.chat_panel_delete(),
+      description: m.chat_delete_session_confirm({ title: autoDir(title) }),
+      confirmLabel: m.chat_panel_delete(),
+      destructive: true,
+      onCancel: "close",
+      onConfirm: async () => {
+        await deleteChatSessionMutation.mutateAsync(session.id);
+        forgetSession(session.id);
+      },
+    });
   }
 
   /** Deliver a card answer; resolves `false` when delivery failed (so a
@@ -5756,7 +7295,10 @@ export function ChatPanel({
       dispatch({ type: "busy", sessionId: sid, busy: true });
       return queueSessionMutation(() => respondChat(sid, answer))
         .then(() => true)
-        .catch(() => false)
+        .catch((error: unknown) => {
+          showAlert(error instanceof Error ? error.message : String(error), "error");
+          return false;
+        })
         .finally(() => {
           if (!isCurrentScope(sessionsOptions.queryKey)) return;
           // Reconcile with the store: if this tab's copy of the card was stale
@@ -5774,179 +7316,390 @@ export function ChatPanel({
     [activeId, projectId, queueSessionMutation, sessionsOptions],
   );
 
-  const visibleSessions = sessions.filter((s) => matchesFilter(sessionFilter, s.archived));
-  const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
-  const newTaskShortcut = isApple ? "⌘ ⇧ ↵" : "Ctrl + Shift + ↵";
-  const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
-  const startNewTask = useCallback(() => {
+  const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
+  const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
+  const queueChord = formatForDisplay("Mod+Enter");
+  const startProjectTask = useCallback(() => {
     setSessionFilter("active");
+    requestNewChatFocus(projectId);
     onActiveSessionChange(null);
-  }, [onActiveSessionChange]);
+  }, [onActiveSessionChange, projectId]);
+  const startNewTask = useCallback(async () => {
+    try {
+      const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
+      const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
+        !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
+      setSessionFilter("active");
+      const targetProject = latest?.projectId ?? projectId;
+      requestNewChatFocus(targetProject);
+      onActiveSessionChange(null, { projectId: targetProject });
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [projectId, onActiveSessionChange]);
 
-  /** Follow a spawn card and reveal its session in the rail. */
   const openSpawnedSession = useCallback(
-    (sessionId: string) => {
-      setSessionFilter("all");
-      onActiveSessionChange(sessionId);
+    async (sessionId: string) => {
+      const visit = projectVisitRef.current;
+      const scope = composerScopeRef.current;
+      try {
+        const session = await getChatSession(sessionId);
+        if (projectVisitRef.current !== visit || composerScopeRef.current !== scope) return;
+        setSessionFilter("all");
+        onActiveSessionChange(sessionId, { projectId: session.projectId });
+      } catch (error) {
+        if (projectVisitRef.current !== visit || composerScopeRef.current !== scope) return;
+        showAlert(error instanceof Error ? error.message : String(error), "error");
+      }
     },
     [onActiveSessionChange],
   );
 
+  const newTask = () => {
+    if (commandRegion() === "right" && document.querySelector(".right-pane [data-side-chat]")) return;
+    startNewTask();
+  };
+  useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
+  useHotkey(appHotkeys["chat.find"], openFind, { enabled: mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right"), requireReset: true, ignoreInputs: false, capture: true, conflictBehavior: "allow" });
+  useHotkey("Mod+Shift+Enter", newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
+
+  const sessionWaiting = (session: ChatSession) => state.messagesBySession[session.id]
+    ? waitingSessions.has(session.id) : session.awaitingInput === true;
+  const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
+  const sidebarRows: SidebarRow[] = [];
+  if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {
+    const query = projectSessionsQueries[index];
+    const projectSessions = project.id === projectId ? sessions : query.data ?? EMPTY_SESSIONS;
+    const matching = projectSessions
+      .filter((session) => !session.sideParentSessionId && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const chatLimit = chatLimits[project.id] ?? 6;
+    let visible = matching.slice(0, chatLimit);
+    const selected = matching.find((session) => session.id === activeId);
+    if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
+    const collapsed = collapsedProjects.includes(project.id);
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
+    if (collapsed) return;
+    visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
+    if (matching.length > 6) sidebarRows.push({ kind: "more", project });
+    if (!visible.length && (sidebarGrouping === "projects" || query.isPending || query.error)) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => { void query.refetch(); } });
+  });
+  if (sidebarGrouping === "list") {
+    const flat = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? [];
+    const selected = sessions.find((session) => session.id === activeId);
+    if (selected && !flat.some((session) => session.id === selected.id)) flat.push(selected);
+    flat.filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).forEach((session) => {
+      const project = sidebarProjects.find((project) => project.id === session.projectId);
+      if (project) sidebarRows.push({ kind: "chat", project, session });
+    });
+    const project = currentProject ?? sidebarProjects[0];
+    if (project && (!sidebarRows.length || flatSessions.isFetchingNextPage || flatSessions.isError)) {
+      sidebarRows.push({ kind: "status", project, pending: flatSessions.isPending || flatSessions.isFetchingNextPage, error: flatSessions.isError,
+        retry: () => { void (flatSessions.isFetchNextPageError ? flatSessions.fetchNextPage() : flatSessions.refetch()); } });
+    }
+  }
+  const sidebarScrollable = sidebarGrouping === "list" || sidebarExpanded;
+  const initialRows = fitSidebarRows(sidebarRows, railHeight, activeId);
+  const hasHiddenProjects = initialRows.length < sidebarRows.length || shownProjects.length < sortedProjects.length;
+  const defaultRows = sidebarGrouping === "projects" && hasHiddenProjects
+    ? fitSidebarRows(sidebarRows, Math.max(0, railHeight - 38), activeId) : initialRows;
+  const showProjectMore = sidebarGrouping === "projects" && !sidebarExpanded && hasHiddenProjects;
+  const defaultRowsHeight = defaultRows.reduce((height, row) => height + sidebarRowHeight(row), 0);
+  const sidebarRowKey = (row: SidebarRow) => row.kind === "chat" ? row.session.id : `${row.kind}:${row.project.id}`;
+  const sidebarVirtualizer = useVirtualizer({
+    useFlushSync: false,
+    count: sidebarRows.length,
+    getScrollElement: () => railBodyRef.current,
+    getItemKey: (index) => sidebarRowKey(sidebarRows[index]),
+    estimateSize: (index) => sidebarRowHeight(sidebarRows[index]),
+    overscan: 5,
+    rangeExtractor: (range) => {
+      const indexes = defaultRangeExtractor(range);
+      const focused = sidebarRows.findIndex((row) => sidebarRowKey(row) === focusedSidebarRow);
+      return focused < 0 || indexes.includes(focused) ? indexes : [...indexes, focused].sort((a, b) => a - b);
+    },
+    enabled: sidebarScrollable && railOpen && !embedded,
+  });
+
+  const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
+  const pendingSidebarFocus = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (pendingSidebarFocus.current === null) return;
+    const row = railBodyRef.current?.querySelector<HTMLElement>(`[data-index="${pendingSidebarFocus.current}"] [data-sidebar-keyboard-row]`);
+    if (row) {
+      pendingSidebarFocus.current = null;
+      row.focus();
+    }
+  });
+  const lastVisibleIndex = sidebarVirtualItems.at(-1)?.index ?? -1;
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.repeat ||
-        event.key !== "Enter" ||
-        (!event.metaKey && !event.ctrlKey) ||
-        event.altKey ||
-        !event.shiftKey
-      )
-        return;
-      event.preventDefault();
-      startNewTask();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [startNewTask]);
+    if (sidebarGrouping === "list" && railOpen && !embedded && lastVisibleIndex >= sidebarRows.length - 6
+      && flatSessions.hasNextPage && !flatSessions.isFetching && !flatSessions.isError) {
+      void flatSessions.fetchNextPage();
+    }
+  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:pt-0 [&_.rail-body]:pb-1 [&_.rail-body]:px-2 border border-border rounded-lg overflow-visible shadow-elevated">
+    <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
+      {!mobileRail && <div
+        className="rail-resizer absolute -end-1 top-0 bottom-0 w-1.5 z-30 cursor-col-resize [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover"
+        onPointerDown={onResizeRail}
+      />}
       {railHeader}
-      <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
+      <nav data-keyboard-list onKeyDown={navigateKeyboardList} className="rail-nav flex flex-col gap-0.5 p-2 shrink-0 [&_[data-tip]::after]:left-[calc(100%_+_6px)] [&_[data-tip]::after]:top-1/2 [&_[data-tip]::after]:translate-x-0 [&_[data-tip]::after]:-translate-y-1/2">
         <button
-          className="rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
+          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface"
           data-onboarding="new-session"
+          data-keyboard-item
           data-tip={newTaskShortcut}
-          aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
+          aria-label={m.chat_panel_new_chat()}
+          aria-keyshortcuts="Meta+N Control+N Meta+Shift+Enter Control+Shift+Enter"
           onClick={startNewTask}
         >
-          <Plus size={15} />
+          <Plus size={16} />
           {m.chat_panel_new_chat()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          data-keyboard-item
+          className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          aria-current={mainView === "skills" ? "page" : undefined}
           onClick={() => onSelectMainView("skills")}
         >
-          <Blocks size={15} />
+          <Blocks size={16} />
           {m.chat_panel_customize()}
         </button>
-        {SETTINGS_NAV.map((item) => (
-          <button
-            key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
-            data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-            onClick={() => onSelectMainView(item.id)}
-          >
-            {item.icon}
-            {item.label()}
-          </button>
-        ))}
+        {SETTINGS_NAV.map((item) => {
+          const active = mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView);
+          const shortcut = item.id === "settings" ? appHotkeys["settings.open"].hotkey : item.id === "compute" ? appHotkeys["compute.open"].hotkey : null;
+          return (
+            <button
+              key={item.id}
+              data-keyboard-item
+              className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${active ? "active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
+              data-tip={shortcut ? formatForDisplay(shortcut) : undefined}
+              aria-label={item.label()}
+              aria-keyshortcuts={item.id === "settings" ? "Meta+, Control+," : item.id === "compute" ? "Meta+Alt+C Control+Alt+C" : undefined}
+              onClick={() => onSelectMainView(item.id)}
+            >
+              {item.icon}
+              {item.label()}
+            </button>
+          );
+        })}
       </nav>
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-0 ps-4.5">
+      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-3.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
-          {SESSION_FILTERS.find((f) => f.id === sessionFilter)?.railLabel() ?? m.chat_recents()}
+          {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
         </div>
-        <div className="rail-section-actions flex items-center gap-0.5">
-          <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} />
-        </div>
-      </div>
-      <div className="rail-body">
-        {visibleSessions.map((s) => (
-          <SessionRow
-            key={s.id}
-            session={s}
-            active={s.id === activeId && mainView === "chat"}
-            unread={unreadSessionIds.has(s.id)}
-            busy={state.busySessions.has(s.id)}
-            waiting={waitingSessions.has(s.id)}
-            revealTitle={titleReveals.get(s.id)}
-            onOpen={() => {
-              onActiveSessionChange(s.id);
-              if (projectId === DEMO_PROJECT_ID) {
-                markDemoSessionRead(s.id);
-                const experiment = DEMO_EXPERIMENT_LABELS[s.id];
-                if (experiment) {
-                  captureUiEvent({
-                    name: "demo_experiment_started",
-                    kind: "curated",
-                    experiment,
-                  });
-                  captureUiEvent({
-                    name: "first_action",
-                    surface: "demo",
-                    action: "open_experiment",
-                  });
-                }
-              }
-            }}
-            onRename={(title) => rename(s, title)}
-            onSetArchived={(archived) => setArchived(s, archived)}
-            onDelete={() => void removeSession(s)}
-          />
-        ))}
-        {visibleSessions.length === 0 && (
-          <div className="rail-empty py-1.5 px-2.5 text-sm text-muted">
-            {sessionFilter === "archived"
-              ? m.chat_no_archived_sessions()
-              : sessions.length > 0
-                ? m.chat_no_active_sessions()
-                : m.chat_no_sessions_yet()}
-          </div>
-        )}
-      </div>
-      {runtime.kind === "ssh" ? (
-        <RemoteStatus runtime={runtime} />
-      ) : (
-        <div className="relative shrink-0 border-t border-border">
-          <div className="flex items-center gap-1.5 py-2 ps-1 pe-2.5">
-            <IconButton size="small" aria-label={m.remote_dialog_title()} aria-haspopup="dialog" onClick={() => setRemoteDialogOpen(true)}>
-              <RemoteIcon size={14} className="shrink-0" />
+        <div className="rail-section-actions flex items-center gap-1">
+          {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
+              <FolderPlus size={16} className="text-subtext" />
             </IconButton>
-            <span className="flex min-w-0 flex-col gap-1 text-start text-text">
-              <span className="truncate text-sm leading-tight">{m.projects_local()}</span>
-              <span className="truncate text-xs leading-tight text-subtext">OpenResearch {ltr(runtime.version)}</span>
-            </span>
-          </div>
+          </Tooltip>}
+          <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
+            setSidebarGrouping(grouping);
+            try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
+            setSidebarExpandedAll(false);
+            setChatLimits({});
+            if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
+          }} />
         </div>
-      )}
-      {remoteDialogOpen && (
-        <RemoteHostDialog
-          onClose={() => setRemoteDialogOpen(false)}
-          onConfigureSsh={() => {
-            setRemoteDialogOpen(false);
-            setSshConfigOpen(true);
-          }}
-        />
-      )}
-      {sshConfigOpen && (
-        <SshConfigDialog
-          onClose={() => {
-            setSshConfigOpen(false);
-            setRemoteDialogOpen(true);
-          }}
-        />
-      )}
+      </div>
+      <div className="relative flex-1 min-h-0">
+      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}
+        onKeyDown={(event) => {
+          if (event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+          const target = event.target;
+          if (!(target instanceof HTMLElement) || (target !== event.currentTarget && !target.hasAttribute("data-sidebar-keyboard-row"))) return;
+          const rows = sidebarScrollable ? sidebarRows : defaultRows;
+          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "chat" ? [index] : []);
+          if (indexes.length === 0) return;
+          const rowIndex = Number(target.closest("[data-index]")?.getAttribute("data-index") ?? -1);
+          const position = indexes.indexOf(rowIndex);
+          let next: number;
+          if (event.key === "ArrowDown") next = position < 0 ? 0 : Math.min(position + 1, indexes.length - 1);
+          else if (event.key === "ArrowUp") next = position < 0 ? indexes.length - 1 : Math.max(position - 1, 0);
+          else if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = indexes.length - 1;
+          else if (target instanceof HTMLButtonElement && event.key === "ArrowRight" && target.getAttribute("aria-expanded") === "false") {
+            event.preventDefault();
+            target.click();
+            return;
+          } else if (target instanceof HTMLButtonElement && event.key === "ArrowLeft" && target.getAttribute("aria-expanded") === "true") {
+            event.preventDefault();
+            target.click();
+            return;
+          } else return;
+          event.preventDefault();
+          const index = indexes[next];
+          if (index === rowIndex) return;
+          pendingSidebarFocus.current = index;
+          setFocusedSidebarRow(sidebarRowKey(rows[index]));
+          if (sidebarScrollable) sidebarVirtualizer.scrollToIndex(index, { align: "auto" });
+        }}>
+        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) }}>
+          {(sidebarScrollable
+            ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
+            : defaultRows.map((row, index) => ({ row, top: 0, index }))
+          ).map(({ row, top, index }) => {
+            const project = row.project;
+            const s = row.kind === "chat" ? row.session : null;
+            const sessionHarness = s ? sessionAcpHarness(s, harnesses.find((h) => h.id === s.harness)) : undefined;
+            const sessionModel = sessionHarness?.models.find((model) => model.id === s?.model);
+            return (
+              <div
+                key={sidebarRowKey(row)}
+                data-index={index}
+                onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}
+                onBlurCapture={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget) && !(event.relatedTarget instanceof Element && event.relatedTarget.closest(`[data-session-hover-card="${sidebarRowKey(row)}"]`))) setFocusedSidebarRow(null);
+                }}
+                className={sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"}
+                style={{ height: sidebarRowHeight(row), top: sidebarScrollable ? top : undefined }}
+              >
+                {row.kind === "project" ? (
+                  <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
+                    <ProjectInfoCard
+                      project={project}
+                      chatCount={projectActivity.find((activity) => activity.projectId === project.id)?.totalAgents}
+                      collapsed={row.collapsed}
+                      busy={row.busy}
+                      onToggleCollapsed={() => {
+                        const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
+                        setCollapsedProjects(next);
+                        try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
+                      }}
+                      pinned={pinnedProjects.includes(project.id)}
+                      onPin={() => {
+                        const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
+                        setPinnedProjects(next);
+                        try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
+                      }}
+                      onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
+                      onNewChat={() => {
+                        if (project.id === projectId) startProjectTask();
+                        else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
+                      }}
+                    />
+                  </div>
+                ) : s ? (
+                  <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
+                    <SessionRow
+                      key={s.id}
+                      session={s}
+                      cardWarmUntil={cardWarmUntil}
+                      projectName={sidebarGrouping === "list" ? project.name : undefined}
+                      harnessLogo={sessionHarness?.logo}
+                      modelName={sessionModel ? harnessModelLabel(sessionModel) : s.model}
+                      active={s.id === activeId && mainView === "chat"}
+                      unread={unreadSessionIds.has(s.id)}
+                      busy={sessionBusy(project, s)}
+                      waiting={sessionWaiting(s)}
+                      experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
+                      revealTitle={titleReveals.get(s.id)}
+                      onOpenExperiment={(targetProjectId, experimentId) => {
+                        void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
+                      }}
+                      onOpen={() => {
+                        onActiveSessionChange(s.id, { projectId: project.id });
+                        if (project.id === DEMO_PROJECT_ID) {
+                          markDemoSessionRead(s.id);
+                          const experiment = DEMO_EXPERIMENT_LABELS[s.id];
+                          if (experiment) {
+                            captureUiEvent({
+                              name: "demo_experiment_started",
+                              kind: "curated",
+                              experiment,
+                            });
+                            captureUiEvent({
+                              name: "first_action",
+                              surface: "demo",
+                              action: "open_experiment",
+                            });
+                          }
+                        }
+                      }}
+                      onRename={(title) => rename(s, title)}
+                      onSetArchived={(archived) => setArchived(s, archived)}
+                      onDelete={() => void removeSession(s)}
+                    />
+                  </div>
+                ) : row.kind === "more" ? (
+                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={project.id in chatLimits} onClick={() => {
+                    setChatLimits((current) => {
+                      const next = { ...current };
+                      if (project.id in next) delete next[project.id];
+                      else next[project.id] = Infinity;
+                      return next;
+                    });
+                  }}>
+                    {project.id in chatLimits ? m.common_show_less() : m.common_show_more()}
+                  </Button>
+                ) : row.kind === "status" && (
+                  <div className={`flex h-full items-center px-2.5 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
+                    {row.error ? <Button size="small" onClick={row.retry}>{m.app_retry()}</Button>
+                      : row.pending ? <Spinner />
+                        : sessionFilter === "archived" ? m.chat_no_archived_sessions() : m.chat_no_sessions_yet()}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {(showProjectMore || sidebarExpandedAll) && (
+            <div className="absolute start-0 flex h-9.5 w-full items-center pt-1" style={{ top: sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight }}>
+              <Button variant="ghost" size="small" className="text-subtext" aria-expanded={sidebarExpandedAll} onClick={() => {
+                if (sidebarExpandedAll) {
+                  setChatLimits({});
+                  setFocusedSidebarRow(null);
+                  if (railBodyRef.current) {
+                    railBodyRef.current.scrollTop = 0;
+                    railBodyRef.current.focus();
+                  }
+                }
+                setSidebarExpandedAll(!sidebarExpandedAll);
+              }}>{sidebarExpandedAll ? m.common_show_less() : m.common_show_more()}</Button>
+            </div>
+          )}
+        </div>
+      </div>
+      {sidebarScrollable && <>
+        {(sidebarVirtualizer.scrollOffset ?? 0) > 0 && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-5 h-3 bg-linear-to-b from-background to-transparent" />}
+        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
+      </>}
+      </div>
+      <div className="flex shrink-0 items-center gap-1 border-t border-border px-1 py-1"><AccountChip onDetails={() => onSelectMainView("openresearch")} /><WorkspaceConnection runtime={runtime} /></div>
     </aside>
   );
 
-  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
-  const railReopen = !railOpen && (
-    <IconButton
-      title={m.chat_panel_show_sidebar()}
-      aria-label={m.chat_panel_show_sidebar()}
-      onClick={onShowRail}
-    >
-      <PanelLeft size={20} />
-    </IconButton>
+  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-titlebar relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
+  const displayedRail = mobileRail ? (
+    <Dialog.Root open={railOpen} onOpenChange={(open) => { if (!open) onCloseMobileRail?.(); }}>
+      <Dialog.Portal container={portalContainer}>
+        <Dialog.Backdrop className="fixed inset-0 z-70 bg-modal-backdrop" />
+        <Dialog.Popup aria-modal="true" aria-label={m.chat_panel_show_sidebar()} className="mobile-rail-dialog fixed inset-y-0 start-0 z-80 outline-none">{rail}</Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+  ) : railOpen ? rail : null;
+  // Sits exactly where the open sidebar's toggle does; in the macOS app it only holds the titlebar toggle's place.
+  const railReopen = (!railOpen || mobileRail) && !embedded && (
+    <SidebarToggle open={false} onClick={onShowRail} className="ms-2.5 max-md:ms-1 mac-titlebar:invisible mac-titlebar:ms-titlebar-inset" />
   );
 
   if (mainView !== "chat") {
     return (
       <>
-        {railOpen && rail}
-        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {!railOpen && <div className="flex h-12 shrink-0 items-center">{railReopen}</div>}
-          <div className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">{children}</div>
+        {displayedRail}
+        {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
+        <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
+          {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
+          <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
+            {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
+              : contentLoading ? <LoadingRow className="p-6"><Spinner />{m.chat_panel_loading_conversation()}</LoadingRow> : children}
+          </div>
         </section>
       </>
     );
@@ -5954,106 +7707,145 @@ export function ChatPanel({
 
   return (
     <>
-      {railOpen && rail}
-      <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 mt-5">
+      {displayedRail}
+      {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
+      <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane relative flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] items-center"}>
+        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2.625rem_minmax(0,1fr)_2.625rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
           {railReopen}
           <div className={headerClass}>
-          <PaperTitle variant="header"
-            title={activeSession ? activeSession.title?.trim() || m.chat_untitled() : m.chat_new_session()}
-          >
-            {activeSession ? (
-              <TitleReveal
-                key={activeTitleReveal ?? "static"}
-                title={activeSession.title?.trim() || m.chat_untitled()}
-                animate={activeTitleReveal !== undefined}
-              />
-            ) : (
-              m.chat_new_session()
-            )}
-          </PaperTitle>
-          {onOpenDemoWelcome && (
-            <IconButton
-              data-tip={m.chat_panel_about_this_demo()}
-              aria-label={m.chat_panel_about_this_demo()}
-              onClick={onOpenDemoWelcome}
-            >
-              <HelpCircle size={15} />
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {activeSession && <>
+              {activeSession.title?.trim() ? (
+                <PaperTitle variant="header" className="flex-initial" title={activeSession.title.trim()}>
+                  <TitleReveal
+                    key={activeTitleReveal ?? "static"}
+                    title={activeSession.title.trim()}
+                    animate={activeTitleReveal !== undefined}
+                  />
+                </PaperTitle>
+              ) : busy ? <Spinner /> : null}
+              <span className="min-w-0 truncate rounded-md border border-border bg-surface px-2.5 py-0.5 text-sm font-normal text-subtext" title={projectName}>
+                {projectName}
+              </span>
+            </>}
+          </div>
+          {embedded && activeSession && (
+            <IconButton aria-label={m.side_chat_delete()} data-tip={m.side_chat_delete()} onClick={() => void removeSession(activeSession)}>
+              <Trash2 size={16} />
             </IconButton>
           )}
+          <IconButton aria-label={m.chat_search_title()} data-tip={findRequest === null ? m.chat_search_title() : undefined} aria-expanded={findRequest !== null} aria-keyshortcuts="Control+f Meta+f" onClick={openFind}><Search size={16} /></IconButton>
           </div>
         </div>
 
-        {historyError ? (
+        {findRequest !== null && <div className="relative z-30 shrink-0 px-4">
+          <ChatSearch key={sessionsOptions.queryKey[1]} projectId={projectId} sessionId={activeId} projects={sidebarProjects} assistantLabel={assistantLabel} focusRequest={findRequest} embedded={embedded}
+            onOpen={onOpenSearchHit} onClose={closeFind} branchReturn={branchReturn?.sessionId === activeId && !busy ? restoreSearchBranch : undefined}
+            pendingMessageId={busy && focusedMessage?.sessionId === activeId && !messages.some((message) => message.id === focusedMessage.messageId) ? focusedMessage.messageId : undefined} />
+        </div>}
+        {contentError ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-subtext" role="alert">
+            <p>{contentError}</p><Button onClick={onRetryContent}>{m.app_retry()}</Button>
+          </div>
+        ) : historyError ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-subtext" role="alert">
             <p>{historyError.message}</p>
             <Button onClick={() => void historyQuery.refetch()}>{m.app_retry()}</Button>
           </div>
-        ) : historyLoading ? (
-          <div className="chat-loading flex-1 flex items-center justify-center gap-3 text-subtext text-xl p-5 [&_.spinner]:w-5.5 [&_.spinner]:h-5.5 [&_.spinner]:border-[3px]" aria-live="polite" aria-busy="true">
-            <Spinner />
-            <span>{m.chat_panel_loading_conversation()}</span>
+        ) : contentLoading || historyLoading ? (
+          <div className="chat-loading flex-1 min-h-0 overflow-hidden [scrollbar-gutter:stable_both-edges]" role="status" aria-label={m.chat_panel_loading_conversation()} aria-busy="true">
+            <div aria-hidden="true" className="mx-auto flex h-full w-full max-w-readable flex-col gap-6 px-4 pb-8 pt-4 motion-safe:animate-pulse">
+              <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
+              <div className="flex shrink-0 flex-col gap-3">
+                {["w-5/6", "w-full", "w-11/12", "w-2/3", "w-full", "w-3/4", "w-1/2"].map((width, index) => (
+                  <div key={index} className={`h-3 rounded-xs bg-panel ${width}`} />
+                ))}
+              </div>
+              <div className="ms-auto h-10 w-2/5 shrink-0 rounded-lg bg-panel" />
+              <div className="flex shrink-0 flex-col gap-3">
+                {["w-full", "w-11/12", "w-3/4", "w-5/6", "w-1/2", "w-full", "w-5/6", "w-11/12", "w-2/3", "w-3/4", "w-1/3"].map((width, index) => (
+                  <div key={index} className={`h-3 rounded-xs bg-panel ${width}`} />
+                ))}
+              </div>
+              <div className="ms-auto h-16 w-1/2 shrink-0 rounded-lg bg-panel" />
+            </div>
+          </div>
+        ) : !threadMounted && (activeSession?.sideParentSessionId || sideParentSessionId) ? (
+          <div className="chat-empty flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-subtext">
+            <MessagesSquare size={22} />
+            <p className="m-0 text-balance">{m.side_chat_empty()}</p>
           </div>
         ) : !threadMounted ? (
-          <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
+          <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-tight [&_h2]:text-text">
             <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
               <BrandMark />
             </div>
             <h2>{m.chat_panel_what_should_we_research()}</h2>
-            <div className="chat-empty-project inline-flex items-center gap-[7px] mt-3 py-1.5 px-3 border border-border rounded-full text-subtext bg-surface text-lg font-medium">
-              <FolderOpen size={19} />
-              <span>{projectName}</span>
-            </div>
             {starterLoading && (
-              <div
-                className={STARTER_GRID_CLASS}
-                role="status"
-                aria-live="polite"
-                aria-label={m.chat_panel_starter_generating()}
-                aria-busy="true"
-              >
-                {STARTER_ICONS.map((Icon, index) => (
-                  <div
-                    key={index}
-                    className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
-                  >
-                    <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
-                      <Icon size={17} />
-                      <span className="h-3.5 w-2/5 rounded bg-surface-bright" />
-                    </span>
-                    <span className="h-3 w-4/5 rounded bg-surface" />
-                  </div>
-                ))}
-              </div>
+              <>
+                <div className={STARTER_GRID_CLASS} aria-hidden="true">
+                  {STARTER_ICONS.map((Icon, index) => (
+                    <div
+                      key={index}
+                      className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
+                    >
+                      <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
+                        <Icon size={16} />
+                        <span className="h-3.5 w-2/5 rounded-xs bg-panel" />
+                      </span>
+                      <span className="h-3 w-4/5 rounded-xs bg-panel" />
+                    </div>
+                  ))}
+                </div>
+                <LoadingRow className="mt-3" role="status">
+                  <Spinner />
+                  <span>{m.chat_panel_starter_generating()}</span>
+                </LoadingRow>
+              </>
             )}
             {starterPrompts && starterPrompts.length > 0 && (
-              <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()}>
+              <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()} inert={connection !== null}>
                 {starterPrompts.map((item, index) => {
                   const Icon = STARTER_ICONS[index];
                   const tone = STARTER_TONES[index];
+                  const pickStarter = (edit: boolean) => {
+                    captureUiEvent({ name: "project_starter_clicked", slot: index + 1 });
+                    captureUiEvent({
+                      name: "first_action",
+                      surface: telemetrySurface,
+                      action: "starter_click",
+                    });
+                    // Don't auto-send past an unavailable agent or a non-empty composer.
+                    const composerEmpty = !draft.trim() && annotations.length === 0;
+                    if (edit || !activeHarness?.agentReady || !composerEmpty) applyStarterPrompt(item.prompt);
+                    else void send({ starter: item.prompt });
+                  };
                   return (
-                    <button
-                      key={index}
-                      type="button"
-                      className={`flex min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background px-5 py-4 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
-                      onClick={() => {
-                        captureUiEvent({ name: "project_starter_clicked", slot: index + 1 });
-                        captureUiEvent({
-                          name: "first_action",
-                          surface: telemetrySurface,
-                          action: "starter_click",
-                        });
-                        applyStarterPrompt(item.prompt);
-                      }}
-                    >
-                      <span className="flex items-center gap-2.5 text-base font-medium text-text">
-                        <Icon size={17} className={tone.icon} />
-                        {item.title}
-                      </span>
-                      <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
-                    </button>
+                    <div key={index} className="relative min-w-0">
+                      <button
+                        type="button"
+                        className={`flex h-full min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background py-4 ps-5 pe-11 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
+                        onClick={() => pickStarter(false)}
+                      >
+                        <span className="flex items-center gap-2.5 text-base font-medium text-text">
+                          <Icon size={16} className={tone.icon} />
+                          {item.title}
+                        </span>
+                        <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
+                      </button>
+                      <Tooltip interactive content={m.chat_panel_starter_edit({ title: item.title })} className="absolute end-2.5 top-2.5">
+                        <IconButton
+                          size="small"
+                          className="[&:hover:not(:disabled)]:bg-surface-bright"
+                          aria-label={m.chat_panel_starter_edit({ title: item.title })}
+                          onClick={() => pickStarter(true)}
+                        >
+                          <Pencil size={14} />
+                        </IconButton>
+                      </Tooltip>
+                    </div>
                   );
                 })}
               </div>
@@ -6061,7 +7853,7 @@ export function ChatPanel({
           </div>
         ) : (
           <div
-            className="chat-thread flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]"
+            className="chat-thread flex-1 min-h-0 overflow-y-auto [overflow-anchor:none] [scrollbar-gutter:stable_both-edges]"
             ref={threadRef}
             tabIndex={0}
             role="region"
@@ -6072,31 +7864,45 @@ export function ChatPanel({
             }}
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
-              <Transcript
-                key={activeId}
-                scrollRef={threadRef}
-                scrollToEndRef={scrollToEndRef}
-                stickToBottom={stickToBottom}
-                onPinToBottom={pinTranscriptToBottom}
-                messages={messages}
-                allMessages={allMessages}
-                canFork={canFork}
-                onFork={forkTurn}
-                onSelectFork={selectBranch}
-                busy={busy}
-                onOpenFile={openFileInSession}
-                onOpenRun={onOpenRun}
-                onOpenSpawnedSession={openSpawnedSession}
-                runExperimentName={runExperimentName}
-                onOpenExperiment={onOpenExperiment}
-                experimentName={experimentName}
-                onRespond={respond}
-                onOpenPlan={openPlan}
-                onOpenSubagent={openSubagent}
-                recoveringTurnId={recoveringTurnId}
-                onRecover={recoverFailedTurn}
-                skills={commands}
-              />
+              <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <ChatLinksContext value={chatLinks}>
+                <Transcript
+                  key={`${sessionsOptions.queryKey[1]}:${activeId}`}
+                  scrollRef={threadRef}
+                  scrollToEndRef={scrollToEndRef}
+                  stickToBottom={stickToBottom}
+                  onPinToBottom={pinTranscriptToBottom}
+                  messages={messages}
+                  allMessages={allMessages}
+                  canFork={canFork}
+                  onFork={forkTurn}
+                  onSelectFork={selectBranch}
+                  busy={busy}
+                  onOpenFile={openFileInSession}
+                  onOpenRun={onOpenRun}
+                  onOpenSpawnedSession={openSpawnedSession}
+                  runExperimentName={runExperimentName}
+                  onOpenExperiment={onOpenExperiment}
+                  experimentName={experimentName}
+                  onRespond={respond}
+                  onOpenPlan={openPlan}
+                  onOpenSubagent={openSubagent}
+                  recoveringTurnId={recoveringTurnId}
+                  onRecover={recoverFailedTurn}
+                  skills={transcriptSkills}
+                  delegates={delegates}
+                  onOpenDelegate={onOpenDelegate}
+                  focusedMessageId={focusedMessage?.sessionId === activeId ? focusedMessage.messageId : null}
+                  focusedPartId={focusedMessage?.spawnPartId ?? focusedMessage?.partId}
+                  focusNonce={focusedMessage?.nonce}
+                  searchQuery={!focusedMessage?.spawnPartId && searchedPart?.prompt?.kind !== "plan" ? focusedMessage?.query : undefined}
+                  programmaticScroll={programmaticScroll}
+                  highlightName={embedded ? "side-chat-search" : "chat-search"}
+                  assistantLabel={assistantLabel}
+                  onLeaveFeed={leaveTranscriptFeed}
+                />
+                </ChatLinksContext>
+              </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
@@ -6127,24 +7933,37 @@ export function ChatPanel({
           </Button>
         )}
 
+        {pendingQuestions.length > 0 && (
+          <div inert={contentLoading || Boolean(contentError) || historyLoading || connection !== null} className="chat-prompt-questions mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
+            {pendingQuestions.map((part) => <div key={`${activeId}-${part.id}`} data-part-id={part.id} data-search-target={focusedMessage?.partId === part.id || undefined} tabIndex={-1}><PromptCard part={part} onRespond={respond} /></div>)}
+          </div>
+        )}
+
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div className="composer px-3 pb-5 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto">
           {threadMounted && (
-            <IconButton
-              className={`absolute bottom-full left-1/2 z-5 mb-6 h-9 w-9 -translate-x-1/2 rounded-full border border-border bg-background shadow-control transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "opacity-0" : "opacity-100"}`}
-              title={m.chat_scroll_to_bottom()}
-              aria-label={m.chat_scroll_to_bottom()}
-              inert={transcriptAtBottom}
-              onClick={scrollToTranscriptBottom}
-            >
-              {busy && !awaitingInput ? (
-                <MoreHorizontal size={18} className="tool-running-shimmer-icon" />
-              ) : (
-                <ArrowDown size={16} />
-              )}
-            </IconButton>
+            <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
+              <IconButton
+                className="h-9 w-9 rounded-full border border-border bg-background shadow-control"
+                aria-label={m.chat_scroll_to_bottom()}
+                inert={transcriptAtBottom}
+                onClick={scrollToTranscriptBottom}
+              >
+                {busy && !awaitingInput ? (
+                  <MoreHorizontal size={18} className="tool-running-shimmer-icon" />
+                ) : (
+                  <ArrowDown size={16} />
+                )}
+              </IconButton>
+            </Tooltip>
           )}
+          <ExperimentRunBanner
+            key={activeId}
+            runs={activeRuns.filter((item) => item.sessionId === activeId)}
+            onOpenRun={onOpenRun}
+            onOpenExperiment={onOpenExperiment}
+          />
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
@@ -6156,9 +7975,7 @@ export function ChatPanel({
           {pendingPlan && !(revisingPlan && pendingPlan.promptId === revisingPlan.promptId) && (
             <PlanStrip
               synthesized={pendingPlan.synthesized}
-              agentLabel={
-                activeSession ? HARNESS_LABELS[activeSession.harness] : m.chat_the_agent()
-              }
+              agentLabel={assistantLabel}
               showResumeModes={activeSession?.harness === "claude-code"}
               onView={(intent) => openPlan?.(pendingPlan.plan, pendingPlan.promptId, intent)}
               onApprove={(resumeMode) =>
@@ -6188,8 +8005,8 @@ export function ChatPanel({
                   title={q.error ? `${q.text}\n\n${q.error}` : q.text}
                 >
                   {q.dispatchState === "blocked"
-                    ? <TriangleAlert size={13} className="shrink-0 text-accent-amber" />
-                    : <Clock size={13} className="shrink-0 text-muted" />}
+                    ? <TriangleAlert size={14} className="shrink-0 text-accent-amber" />
+                    : <Clock size={14} className="shrink-0 text-muted" />}
                   <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-text">
                     {q.text}
                   </span>
@@ -6206,7 +8023,7 @@ export function ChatPanel({
                         onClick={() => void retryQueued(q.id)}
                         aria-label={m.a11y_retry_queued_message({ text: q.text })}
                         disabled={retryingQueuedId !== null}
-                        className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-sm text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-text"
+                        className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-sm text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-border-hover-strong"
                       >
                         {retryingQueuedId === q.id ? m.retrying() : m.app_retry()}
                       </button>
@@ -6231,7 +8048,7 @@ export function ChatPanel({
                       onClick={() => cancelQueued(q.id)}
                       className="shrink-0 inline-flex items-center justify-center w-4 h-4 p-0 border-0 rounded-full text-muted cursor-pointer [&:hover]:bg-text [&:hover]:text-background"
                     >
-                      <X size={11} />
+                      <X size={12} />
                     </button>
                   )}
                 </div>
@@ -6244,311 +8061,373 @@ export function ChatPanel({
               role="note"
               className={`composer-demo-hint ${COMPOSER_HINT_CLASS}`}
             >
-              <FlaskConical size={16} className="shrink-0 text-primary" />
-              <span className="flex-1" dir="auto">{m.chat_panel_demo_hint_body()}</span>
-              <IconButton
-                size="small"
-                aria-label={m.chat_panel_dismiss_demo_hint()}
-                title={m.chat_panel_dismiss_demo_hint()}
-                onClick={() => {
-                  setDemoHintDismissed(true);
-                  composerRef.current?.focus();
-                }}
-              >
-                <X size={14} />
-              </IconButton>
-            </div>
-          )}
-          {demoRunningRunId && !demoRunHintDismissed && onOpenRun && (
-            <div
-              role="note"
-              className={`composer-demo-run-hint ${COMPOSER_HINT_CLASS}`}
-            >
-              <FlaskConical size={16} className="shrink-0 text-primary" />
-              <span className="flex flex-1 flex-wrap items-center gap-x-1.5 gap-y-1" dir="auto">
-                <span>{m.chat_panel_demo_run_hint_before()}</span>
-                <Button size="small" onClick={() => onOpenRun(demoRunningRunId, "keepOpen")}>
-                  <Terminal size={14} />
-                  {m.experiments_table_logs()}
-                </Button>
-                <span>{m.chat_panel_demo_run_hint_after()}</span>
+              <span className="flex-1" dir="auto">
+                <FlaskConical size={16} className="inline-block align-text-bottom me-2 text-subtext" />
+                {m.chat_panel_demo_hint_body()}
               </span>
-              <IconButton
-                size="small"
-                aria-label={m.chat_panel_dismiss_demo_hint()}
-                title={m.chat_panel_dismiss_demo_hint()}
-                onClick={() => {
-                  setDemoRunHintDismissed(true);
-                  composerRef.current?.focus();
-                }}
-              >
-                <X size={14} />
-              </IconButton>
+              <Tooltip interactive content={m.chat_panel_dismiss_demo_hint()}>
+                <IconButton
+                  size="small"
+                  aria-label={m.chat_panel_dismiss_demo_hint()}
+                  onClick={() => {
+                    setDemoHintDismissed(true);
+                    composerRef.current?.focus();
+                  }}
+                >
+                  <X size={14} />
+                </IconButton>
+              </Tooltip>
             </div>
           )}
-          <span className="sr-only" role="status" aria-live="polite">
-            {demoRunningRunId
-              ? `${m.chat_panel_demo_run_hint_before()} ${m.experiments_table_logs()} ${m.chat_panel_demo_run_hint_after()}`
-              : ""}
-          </span>
-          <div className={`composer-box relative flex flex-col border ${bashActive ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-elevated`} data-onboarding="composer">
-            {activeHarness && !activeHarness.agentReady && (
-              <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
-                <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
-                {activeHarness.agentNote ? renderNote(activeHarness.agentNote) : m.chat_recheck_setup()}
-              </div>
-            )}
-            {skillMenuOpen && (
-              <SkillMenu
-                skills={skillMatches}
-                activeIndex={activeSkillIdx}
-                onPick={pickSkill}
-                onHover={setSkillIdx}
-              />
-            )}
-            {annotations.length > 0 && (
-              <ComposerAnnotations
-                annotations={annotations}
-                onClear={() => {
-                  setAnnotations([]);
-                  window.requestAnimationFrame(() => composerRef.current?.focus());
-                }}
-                onRemove={(id) => {
-                  const remaining = annotations.filter((annotation) => annotation.id !== id);
-                  setAnnotations(remaining);
-                  if (remaining.length === 0) {
-                    window.requestAnimationFrame(() => composerRef.current?.focus());
-                  }
-                }}
-              />
-            )}
-            {attachments.length > 0 && (
-              <div className="composer-attachments flex flex-wrap gap-1.5 pt-2 px-3 pb-0">
-                {attachments.map((a, i) => {
-                  const remove = () =>
-                    setAttachments((cur) => cur.filter((_, j) => j !== i));
-                  return a.mediaType === "application/pdf" ? (
-                    <div key={i} className="attachment-file [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background relative inline-flex items-center gap-2 max-w-55 py-2 px-2.5 border border-border rounded-sm text-text bg-surface [&_svg]:shrink-0 [&_svg]:text-muted" title={a.name}>
-                      <FileText size={22} />
-                      <span className="attachment-file-name overflow-hidden text-ellipsis whitespace-nowrap text-sm">{a.name ?? "document.pdf"}</span>
-                      <button title={m.chat_panel_remove_file()} aria-label={m.chat_panel_remove_file()} onClick={remove}>
-                        <X size={11} />
-                      </button>
-                    </div>
+          {!embedded && !activeId && onNewProject && (
+            <ComposerProjectPicker
+              projects={sidebarProjects}
+              activity={projectActivity}
+              projectId={projectId}
+              projectName={projectName}
+              onNewProject={onNewProject}
+              onSelect={(id) => {
+                if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
+              }}
+            />
+          )}
+          <RemoteConnectionStrip />
+          <div inert={connection !== null} className={`composer-frame flex flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+              {unconfirmedSend !== null && (
+                <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
+                  <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
+                  <button type="button" className="underline cursor-pointer" onClick={() => {
+                    composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
+                    setUnconfirmedSend(null);
+                    composerRef.current?.focus();
+                  }}>
+                    {m.chat_panel_dismiss_demo_hint()}
+                  </button>
+                </div>
+              )}
+              {activeHarness && !activeHarness.agentReady && (
+                <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
+                  {activeHarness.catalogPending ? (
+                    <span>{activeHarness.name} — {m.onboarding_checking()}</span>
                   ) : (
-                    <div key={i} className="attachment-thumb relative [&_img]:w-13 [&_img]:h-13 [&_img]:object-cover [&_img]:border [&_img]:border-border [&_img]:rounded-sm [&_img]:block [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background">
-                      <img src={a.dataUrl} alt={m.chat_pasted_image()} />
-                      <button title={m.chat_panel_remove_image()} aria-label={m.chat_panel_remove_image()} onClick={remove}>
-                        <X size={11} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {attachError && (
-              <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
-                {attachError}
-              </div>
-            )}
-            {settingsError && (
-              <div className="composer-settings-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
-                {settingsError}
-              </div>
-            )}
-            <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashActive ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
-              <textarea
-                dir="auto"
-                ref={composerRef}
-                aria-describedby={demoHintVisible ? demoHintId : undefined}
-                // Native prose stays visible; the aligned mirror paints only skill tokens.
-                className="relative z-1 bg-transparent"
-                value={draft}
-                placeholder={
-                  // A pending question card owns typed text (see send()); say so.
-                  // While a steerable turn runs, Enter goes to that turn, so name
-                  // the gesture and its queue chord — the send button is a Stop
-                  // button for the whole busy stretch.
-                  // Otherwise follow `composerSelection` so the name tracks the
-                  // picker for a new session and the open session once one exists.
-                  pendingQuestion
-                    ? m.chat_type_custom_answer()
-                    : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(HARNESS_LABELS[activeHarness.id]), shortcut: ltr(queueChord) })
+                    <>
+                      <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
+                      {activeHarness.agentNote
+                        ? renderNote(activeHarness.agentNote, onRunSetup && {
+                          canRun: (command) => setupPath(command) !== undefined,
+                          onRun: (command) => {
+                            const path = setupPath(command);
+                            if (path) onRunSetup(command, path);
+                          },
+                        })
+                        : m.chat_recheck_setup()}
+                    </>
+                  )}
+                </div>
+              )}
+              {skillMenuOpen && (
+                <SkillMenu
+                  skills={skillMatches}
+                  activeIndex={activeSkillIdx}
+                  onPick={pickSkill}
+                  onHover={setSkillIdx}
+                />
+              )}
+              {mentionMenuOpen && (
+                <MentionMenu
+                  matches={mentionMatches}
+                  activeIndex={activeMentionIdx}
+                  onPick={pickMention}
+                  onHover={setMentionIdx}
+                />
+              )}
+              {annotations.length > 0 && (
+                <ComposerAnnotations
+                  annotations={annotations}
+                  onClear={() => {
+                    setAnnotations([]);
+                    window.requestAnimationFrame(() => composerRef.current?.focus());
+                  }}
+                  onRemove={(id) => {
+                    const remaining = annotations.filter((annotation) => annotation.id !== id);
+                    setAnnotations(remaining);
+                    if (remaining.length === 0) {
+                      window.requestAnimationFrame(() => composerRef.current?.focus());
+                    }
+                  }}
+                />
+              )}
+              {(imageInputError ?? attachError) && (
+                <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
+                  {imageInputError ?? attachError}
+                </div>
+              )}
+              {settingsError && (
+                <div className="composer-settings-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
+                  {settingsError}
+                </div>
+              )}
+              <div className="composer-input flex min-w-0 items-end">
+                <ComposerEditor
+                  ref={composerRef}
+                  value={draft}
+                  describedBy={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
+                  placeholder={
+                    steering && activeHarness
+                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
                       : composerSelection
                         ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
-                          : m.chat_harness_unavailable({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
+                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
                         : m.chat_ask_agent_placeholder()
-                }
-                rows={2}
-                onPaste={onComposerPaste}
-                onDragOver={(e) => {
-                  if (e.dataTransfer.types.includes("Files")) e.preventDefault();
-                }}
-                onDrop={(e) => {
-                  if (e.dataTransfer.files.length === 0) return;
-                  e.preventDefault();
-                  addFiles(Array.from(e.dataTransfer.files));
-                }}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  const cursor = e.target.selectionStart;
-                  setComposerCursor(cursor);
-                  // `/plan` is the one command the composer consumes rather than
-                  // sends: it toggles the mode the moment the space lands. Not
-                  // while a question card is pending (its answer is a note, never
-                  // a command) and not mid-IME-composition, where the text can
-                  // transiently look complete.
-                  const completedCommand =
-                    cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && bashCommand(v) === null
-                      ? slashCommandContext(v, cursor - 1)
-                      : null;
-                  if (completedCommand?.query === "plan" && opts?.planActivation) {
-                    activatePlanCommand(v, completedCommand);
-                    return;
                   }
-                  setDraft(v);
-                  setSkillMenuDismissed(false);
-                }}
-                onSelect={(e) => setComposerCursor(e.currentTarget.selectionStart)}
-                onCompositionStart={() => {
-                  composingRef.current = true;
-                }}
-                onCompositionEnd={() => {
-                  composingRef.current = false;
-                }}
-                onKeyDown={(e) => {
-                  if (skillMenuOpen) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      const delta = e.key === "ArrowDown" ? 1 : -1;
-                      setSkillIdx(
-                        (activeSkillIdx + delta + skillMatches.length) % skillMatches.length,
-                      );
+                  plain={bashMode}
+                  chipSource={chipSource}
+                  projectId={projectId}
+                  draftKey={stashKey}
+                  resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
+                  onFiles={addFiles}
+                  onPaste={onComposerPaste}
+                  onChange={(v, cursor, typed) => {
+                    setComposerCursor(cursor);
+                    if (v === draft) return;
+                    // Composer commands run rather than send: each fires the moment
+                    // its space lands, but not mid-IME-composition, where the text
+                    // can transiently look complete.
+                    const completedCommand =
+                      typed && cursor > 0 && /\s/.test(v[cursor - 1]) && bashCommand(v) === null
+                        ? slashCommandContext(v, cursor - 1)
+                        : null;
+                    const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
+                    const restOfDraft = completedCommand
+                      ? (v.slice(0, completedCommand.start) + v.slice(completedCommand.end)).trim()
+                      : "";
+                    if (
+                      completedCommand && completedName
+                      && (completedName === "plan" || completedName === "goal" || (!takesArgument(completedName) && !restOfDraft))
+                      && commands.some((command) => command.name === completedName)
+                    ) {
+                      activateComposerCommand(completedName, v, completedCommand);
                       return;
                     }
-                    if (e.key === "Tab" || e.key === "Enter") {
-                      e.preventDefault();
-                      pickSkill(skillMatches[activeSkillIdx]);
-                      return;
+                    setDraft(v);
+                    setSkillMenuDismissed(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (skillMenuOpen) {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        const delta = e.key === "ArrowDown" ? 1 : -1;
+                        if (activeSkillIdx >= 0) {
+                          const index = selectableSkillIndices.indexOf(activeSkillIdx);
+                          setSkillIdx(selectableSkillIndices[(index + delta + selectableSkillIndices.length) % selectableSkillIndices.length]);
+                        }
+                        return;
+                      }
+                      if ((e.key === "Tab" || e.key === "Enter") && activeSkillIdx >= 0) {
+                        e.preventDefault();
+                        pickSkill(skillMatches[activeSkillIdx]);
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setSkillMenuDismissed(true);
+                        return;
+                      }
                     }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setSkillMenuDismissed(true);
-                      return;
+                    if (mentionMenuOpen) {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        const delta = e.key === "ArrowDown" ? 1 : -1;
+                        setMentionIdx(
+                          (activeMentionIdx + delta + mentionMatches.length) % mentionMatches.length,
+                        );
+                        return;
+                      }
+                      // A bare trailing `@` still sends on Enter; `@` is common in prose.
+                      if (
+                        e.key === "Tab"
+                        || (mentionQuery !== "" && matchesKeyboardEvent(e, "Enter"))
+                      ) {
+                        e.preventDefault();
+                        pickMention(mentionMatches[activeMentionIdx]);
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setSkillMenuDismissed(true);
+                        return;
+                      }
                     }
-                  }
-                  // Backspace just behind a chip deletes the whole command.
-                  // (Escape deliberately doesn't touch it — that's the
-                  // stop-the-turn gesture, see the document listener above.)
-                  if (e.key === "Backspace" && deleteCommandBehindCaret(e.currentTarget)) {
-                    e.preventDefault();
-                    return;
-                  }
-                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                    e.preventDefault();
-                    if (bashActive) {
-                      void runShell();
-                      return;
-                    }
-                    void send({ queue: e.metaKey || e.ctrlKey });
-                  }
-                }}
-              />
-              {/* After the textarea: its ref must be attached before the mirror
-              * measures it. */}
-              <ComposerSkillChips
-                text={draft}
-                editingTokenEnd={slashContext?.end}
-                isCommand={knownCommand}
-                skills={commands}
-                projectId={projectId}
-                textareaRef={composerRef}
-              />
+                  }}
+                  onSubmit={(e) => {
+                    if (bashMode) void runShell();
+                    else void send({ queue: matchesKeyboardEvent(e, "Mod+Enter") });
+                  }}
+                />
+                <div className="flex shrink-0 items-center gap-1 p-1.5">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      addFiles(Array.from(e.target.files ?? []));
+                      e.target.value = ""; // let the same file be re-picked
+                    }}
+                  />
+                  <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                    <IconButton
+                      type="button"
+                      className="composer-attach"
+                      aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Paperclip size={16} />
+                    </IconButton>
+                  </Tooltip>
+                  {busy ? (
+                    <Tooltip interactive content={m.chat_panel_stop()}>
+                      <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
+                        <X size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip interactive content={bashMode ? m.chat_panel_run() : m.chat_panel_send()}>
+                      <IconButton
+                        className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
+                        variant="primary"
+                        aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
+                        onClick={() => void (bashMode ? runShell() : send())}
+                        disabled={
+                          bashMode
+                            ? setChatSessionAgentMutation.isPending || !shellCommand || (!activeId && !activeHarness?.agentReady)
+                            : setChatSessionAgentMutation.isPending || !activeHarness?.agentReady ||
+                            (!draft.trim() && annotations.length === 0)
+                        }
+                      >
+                        <CornerDownLeft size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
             </div>
-            <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
+            <div className="composer-actions flex min-w-0 items-center gap-1 px-1.5 py-1">
               <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
-                <IconButton
-                  type="button"
-                  className="composer-bare"
-                  title={m.chat_panel_data_sources()}
-                  aria-label={m.chat_panel_data_sources()}
-                  aria-haspopup="dialog"
-                  aria-expanded={dataSources.open}
-                  onClick={() => dataSources.setOpen((open) => !open)}
-                >
-                  <ToggleRight size={16} />
-                </IconButton>
+                <Tooltip interactive content={m.chat_panel_data_sources()}>
+                  <IconButton
+                    type="button"
+                    size="small"
+                    className={`composer-bare ${BAR_BUTTON}`}
+                    aria-label={m.chat_panel_data_sources()}
+                    aria-haspopup="dialog"
+                    aria-expanded={dataSources.open}
+                    onClick={() => dataSources.setOpen((open) => !open)}
+                  >
+                    <LibraryBig size={16} />
+                  </IconButton>
+                </Tooltip>
                 {dataSources.open && (
-                  <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-md border border-border bg-background p-2 shadow-dropdown">
+                  <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-lg border border-border bg-background p-2 shadow-dropdown">
                     <span className="px-1 text-sm font-medium text-muted">{m.chat_panel_data_sources()}</span>
                     <LitSourcesList />
                   </div>
                 )}
               </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
-                multiple
-                hidden
-                onChange={(e) => {
-                  addFiles(Array.from(e.target.files ?? []));
-                  e.target.value = ""; // let the same file be re-picked
-                }}
+              <LibraryPicker
+                className={`composer-bare ${BAR_BUTTON}`}
+                onAdd={(papers) => window.requestAnimationFrame(() => {
+                  composerRef.current?.focus();
+                  composerRef.current?.insertToken(papers.map(paperToken).join(" "));
+                })}
               />
-              <IconButton
-                type="button"
-                className="composer-attach"
-                title={m.chat_panel_attach_a_pdf_or_image()}
-                aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip size={16} />
-              </IconButton>
-              {planActive && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  active
-                  className="group"
-                  title={m.chat_panel_exit_plan_mode()}
-                  aria-label={m.chat_panel_exit_plan_mode()}
-                  onClick={() => void exitPlanMode()}
-                >
-                  <span className="relative size-4" aria-hidden="true">
-                    <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
-                  </span>
-                  <span>{m.chat_panel_plan()}</span>
-                </Button>
+              {steeringDelegate && activeSession && (
+                <Tooltip interactive content={m.chat_notify_parent()}>
+                  <IconButton
+                    type="button"
+                    size="small"
+                    className={BAR_BUTTON}
+                    aria-label={m.chat_notify_parent()}
+                    aria-pressed
+                    active
+                    onClick={() => stopNotifyingParent(activeSession)}
+                  >
+                    <Bell size={16} />
+                  </IconButton>
+                </Tooltip>
               )}
-              {bashActive && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  active
-                  className="group"
-                  title={m.chat_panel_exit_bash_mode()}
-                  aria-label={m.chat_panel_exit_bash_mode()}
-                  onClick={exitBashMode}
-                >
-                  <span className="relative size-4" aria-hidden="true">
-                    <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
-                  </span>
-                  <span>{m.chat_panel_bash()}</span>
-                </Button>
+              {(sessionGoal || goalArmed) && (
+                <Tooltip interactive content={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}>
+                  <Button
+                    type="button"
+                    size="small"
+                    variant="purple"
+                    active
+                    className="group max-w-60"
+                    aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                    onClick={() => {
+                      setGoalScope(null);
+                      if (sessionGoal) void setGoal("clear");
+                    }}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span className="truncate">{m.chat_panel_goal()}</span>
+                  </Button>
+                </Tooltip>
+              )}
+              {planActive && (
+                <Tooltip interactive content={m.chat_panel_exit_plan_mode()}>
+                  <Button
+                    type="button"
+                    size="small"
+                    variant="amber"
+                    active
+                    className="group"
+                    aria-label={m.chat_panel_exit_plan_mode()}
+                    onClick={() => void exitPlanMode()}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span>{m.chat_panel_plan()}</span>
+                  </Button>
+                </Tooltip>
+              )}
+              {bashMode && (
+                <Tooltip interactive content={m.chat_panel_exit_bash_mode()}>
+                  <Button
+                    type="button"
+                    size="small"
+                    variant="ghost"
+                    active
+                    className={`group ${BAR_BUTTON}`}
+                    aria-label={m.chat_panel_exit_bash_mode()}
+                    onClick={exitBashMode}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span>{m.chat_panel_bash()}</span>
+                  </Button>
+                </Tooltip>
               )}
               <div className="min-w-0 flex-1" />
-              {/* The model picker reflects the open session (harness locked once it
-                exists); the global default only applies before the first
-                message. */}
-              <div className="flex min-w-0 items-center">
+              <div className="flex min-w-0 items-center gap-0.5">
                 <ModelPicker
+                  sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
                   value={composerSelection}
                   onSelect={selectModel}
+                  onStartHarness={startHarness}
                   onOpenSettings={() => onSelectMainView("harnesses")}
                   permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
@@ -6556,43 +8435,31 @@ export function ChatPanel({
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
-                  lockHarness={!!openSession}
+                  autonomy={openSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy}
+                  onSelectAutonomy={setAutonomy}
+                  disabled={setChatSessionAgentMutation.isPending}
+                  lockHarness={busy || setChatSessionAgentMutation.isPending || (!openSession && !!sideParentSessionId)}
+                  openRequest={modelPickerRequest}
+                  nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
+                  onSelectNativeOption={(optionId, value) => {
+                    if (!openSession) return;
+                    void setChatConfiguration(openSession.id, optionId, value).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
+                  }}
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>
-              {busy && !pendingQuestion ? (
-                // Stop whenever the turn is busy and typed text has nowhere to
-                // go — actively streaming, or held on a plan/permission card
-                // (their cards are the affordance; send() can't service them).
-                // Send stays only when it actually works: idle, or a held
-                // QUESTION card that owns typed text.
-                <IconButton className="send-btn" variant="stop" title={m.chat_panel_stop()} aria-label={m.chat_panel_stop()} onClick={stop}>
-                  <X size={16} />
-                </IconButton>
-              ) : (
-                <IconButton
-                  className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
-                  variant="primary"
-                  title={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
-                  aria-label={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
-                  onClick={() => void (bashActive ? runShell() : send())}
-                  disabled={
-                    bashActive
-                      ? !shellCommand || (!activeId && !activeHarness?.agentReady)
-                      : !activeHarness?.agentReady ||
-                      (!draft.trim() && attachments.length === 0 && annotations.length === 0)
-                  }
-                >
-                  <CornerDownLeft size={16} />
-                </IconButton>
-              )}
             </div>
           </div>
         </div>
       </section>
+      <EscapeScope enabled={dataSources.open} onEscape={() => dataSources.setOpen(false)} />
+      <EscapeScope enabled={skillMenuOpen || mentionMenuOpen} onEscape={() => setSkillMenuDismissed(true)} />
     </>
   );
 }
+
+/** Bar controls sit on the surface tint, where the default surface hover vanishes. */
+const BAR_BUTTON = "[&:hover:not(:disabled)]:bg-hover-muted [&.active]:bg-hover-muted";
 
 const COMPOSER_HINT_CLASS =
   "flex items-center gap-2.5 mb-2.5 py-2 ps-3.5 pe-2 rounded-lg border border-border bg-surface text-text text-sm leading-normal";

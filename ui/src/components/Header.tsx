@@ -1,111 +1,138 @@
+import { useContext, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
+import { Popover } from "@base-ui/react/popover";
+import { formatForDisplay } from "@tanstack/react-hotkeys";
+import { PanelLeft } from "lucide-react";
+
+import { appHotkeys } from "../hotkeys";
+import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import {
-  ArrowLeft,
-  ChevronDown,
-  FolderGit2,
-  FolderPlus,
-  History,
-  PanelLeft,
-} from "lucide-react";
-import { useEffect, useRef } from "react";
-import { usePopover } from "./ModelPicker";
-import { IconButton, MenuItem } from "./ui";
+import { useRuntime } from "../RemoteRuntime";
+import { setQueryDevtoolsOpen, useQueryDevtoolsOpen } from "./QueryDevtools";
+import { BuildNotes, describeChanges, releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
+import { BrandMark } from "./Wordmark";
+import { Badge, Button, IconButton, Switch, Tooltip } from "./ui";
 
-const PROJECT_MENU_LABEL_CLASS_NAME = [
-  "project-menu-label inline-flex items-center gap-2 min-w-0 overflow-hidden",
-  "text-ellipsis whitespace-nowrap",
-].join(" ");
+/** The same box whether the sidebar is open or closed, so the toggle never moves under the pointer. */
+export function SidebarToggle({ open, onClick, className }: { open: boolean; onClick: () => void; className?: string }) {
+  const label = open ? m.header_hide_sidebar() : m.chat_panel_show_sidebar();
+  return (
+    <Tooltip interactive content={`${label} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} className={`sidebar-toggle rounded-md ${className ?? ""}`}>
+      <IconButton aria-label={label} aria-expanded={open} onClick={onClick}>
+        <PanelLeft size={18} />
+      </IconButton>
+    </Tooltip>
+  );
+}
 
-/** Top row of the agents rail: back to the projects page + the current
- *  project's name. Settings sections live in the rail nav below. */
-export function RailHeader({
-  projectName,
-  onHome,
-  onNewProject,
-  onRepository,
-  onCollapse,
-}: {
-  projectName: string;
-  onHome: () => void;
-  onNewProject: () => void;
-  onRepository: () => void;
-  /** Hide the rail (a matching reopen button lives in the chat header). */
-  onCollapse?: () => void;
-}) {
-  const { open, setOpen, ref } = usePopover();
-  const projectButtonRef = useRef<HTMLButtonElement>(null);
+export function RailHeader({ onCollapse }: { onCollapse?: () => void }) {
+  return (
+    <div className="rail-brand mac-titlebar-spacer flex h-12 shrink-0 items-center gap-1.5 ps-2.5 pe-2 max-md:ps-1 mac-titlebar:h-titlebar mac-titlebar:ps-[calc(var(--spacing-titlebar-toggle)+2.375rem)]">
+      {/* The macOS app keeps one toggle beside the traffic lights for both states. */}
+      {onCollapse && <SidebarToggle open onClick={onCollapse} className="mac-titlebar:hidden" />}
+      <Brand />
+    </div>
+  );
+}
 
-  useEffect(() => {
-    if (!open) return;
-    const restoreFocus = (event: KeyboardEvent) => {
-      if (event.key === "Escape") projectButtonRef.current?.focus();
-    };
-    document.addEventListener("keydown", restoreFocus, true);
-    return () => document.removeEventListener("keydown", restoreFocus, true);
-  }, [open]);
+/** The logo and name, marked when this isn't a stable release; hovering shows the version and its update state. */
+function Brand() {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { applyUpdate } = useWorkspace().api;
+  const { showFormDialog } = useWorkspace().dialogs;
+
+  const runtime = useRuntime();
+  const { status, apply } = useUpdateStatus(runtime.kind === "local");
+  const restart = useRestartApp(status);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canary = status?.current.startsWith("canary-") ?? false;
+  const dev = !canary && runtime.buildChannel === "development";
+  const badge = canary ? m.settings_update_channel_canary() : dev ? m.header_dev_badge() : null;
+
+  const check = () => {
+    setChecking(true);
+    setError(null);
+    applyUpdate()
+      .then(apply, (e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setChecking(false));
+  };
+  const busy = checking || restart.restarting;
+  const action = !status ? null
+    : status.restartRequired && status.canRestart ? { label: restart.restarting ? m.update_banner_restarting() : m.update_banner_restart(), run: restart.restart }
+      : status.selfUpdates ? { label: checking ? m.chat_working() : status.updateAvailable ? m.settings_update_now() : m.settings_check_now(), run: check }
+        : null;
+  const currentTag = status && !canary && !dev ? `v${status.current}` : null;
+  const changes = status && (status.updateAvailable || status.restartRequired) ? describeChanges(status.changes) : null;
+  const shownError = restart.error ? m.update_banner_restart_failed({ error: restart.error }) : error;
 
   return (
-    <div className="rail-brand px-3 py-1.5 border-b border-border shrink-0">
-      <div className="project-switcher relative min-w-0" ref={ref}>
-        <div className="flex h-7 items-center justify-between gap-1 px-0.5">
-          <IconButton size="small" className="project-back text-text" aria-label={m.header_all_projects()} onClick={onHome}>
-            <ArrowLeft size={18} />
-          </IconButton>
-          <span className="brand-project-label flex-1 text-xs font-medium tracking-wide uppercase text-subtext">{m.header_project()}</span>
-          {onCollapse && (
-            <IconButton
-              size="small"
-              data-tip={m.header_hide_sidebar()}
-              data-tip-align="end"
-              aria-label={m.header_hide_sidebar()}
-              onClick={onCollapse}
-            >
-              <PanelLeft size={18} />
-            </IconButton>
-          )}
-        </div>
-        <button
-          ref={projectButtonRef}
-          className={`brand group flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-start text-text hover:bg-surface focus-visible:outline-2 focus-visible:outline-text ${open ? "open bg-surface" : ""}`}
-          onClick={() => setOpen((value) => !value)}
-          aria-expanded={open}
+    <DirectionProvider direction={document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+      <Popover.Root>
+        <Popover.Trigger
+          openOnHover
+          delay={300}
+          closeDelay={150}
+          type="button"
+          aria-label={badge ? `OpenResearch ${badge}` : "OpenResearch"}
+          className="flex min-w-0 items-center gap-1.5 rounded-sm text-sm font-medium text-text outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
         >
-          <span className="brand-project min-w-0 flex-1 truncate text-xl font-semibold">{projectName}</span>
-          <ChevronDown className={`project-chevron shrink-0 text-muted transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${open ? "rotate-180 opacity-100" : "opacity-0"}`} size={14} />
-        </button>
-        {open && (
-          <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down project-menu w-52.5 z-70">
-            <MenuItem
-              onClick={() => {
-                setOpen(false);
-                onRepository();
-              }}
-            >
-              <span className={PROJECT_MENU_LABEL_CLASS_NAME}>
-                <FolderGit2 size={14} />{m.header_configure_repository()}
-              </span>
-            </MenuItem>
-            <MenuItem
-              onClick={() => {
-                setOpen(false);
-                onHome();
-              }}
-            >
-              <span className={PROJECT_MENU_LABEL_CLASS_NAME}><History size={14} />{m.header_all_projects()}</span>
-            </MenuItem>
-            <MenuItem
-              onClick={() => {
-                projectButtonRef.current?.focus();
-                setOpen(false);
-                onNewProject();
-              }}
-            >
-              <span className={PROJECT_MENU_LABEL_CLASS_NAME}><FolderPlus size={14} />{m.header_create_a_new_project()}</span>
-            </MenuItem>
-          </div>
-        )}
-      </div>
+          <span className="size-4.5 shrink-0"><BrandMark fill={dev ? "var(--accent-orange)" : undefined} /></span>
+          {/* The name wraps onto a clipped second line when it can't fit whole, leaving the logo and badge. */}
+          <span className="flex h-5 min-w-0 flex-row-reverse flex-wrap content-start items-center justify-end overflow-hidden">
+            {badge ? <Badge size="small" className="shrink-0">{badge}</Badge> : <span />}
+            <span className={`whitespace-nowrap ${badge ? "me-1.5" : ""}`}>OpenResearch</span>
+          </span>
+        </Popover.Trigger>
+        <Popover.Portal container={portalContainer}>
+          <Popover.Positioner side="bottom" align="start" sideOffset={6} collisionPadding={8} className="z-50">
+            <Popover.Popup aria-label="OpenResearch" className="w-max min-w-56 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-background p-3 text-sm text-text shadow-menu outline-none">
+              <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2">
+                <dt className="text-subtext">{m.settings_page_version()}</dt>
+                <dd className="m-0 flex items-center justify-between gap-3">
+                  <span className="truncate">{ltr(status?.current ?? runtime.version)}</span>
+                  {canary
+                    ? <button type="button" className="shrink-0 cursor-pointer text-subtext underline" onClick={() => showFormDialog(m.update_notes_title(), () => <BuildNotes />)}>{m.update_notes_open()}</button>
+                    : currentTag && <ReleaseNotesLink tag={currentTag} />}
+                </dd>
+                {status && <>
+                  <dt className="text-subtext">{m.settings_page_latest()}</dt>
+                  <dd className="m-0 flex items-center justify-between gap-3">
+                    <span className="truncate">{ltr(status.latest ?? "—")}</span>
+                    {status.updateAvailable && status.latestTag && <ReleaseNotesLink tag={status.latestTag} />}
+                    {action && <Button size="small" disabled={busy} onClick={action.run}>{action.label}</Button>}
+                  </dd>
+                </>}
+              </dl>
+              {changes && <p className="mt-2 mb-0 text-subtext">{changes}</p>}
+              {shownError && <p role="alert" className="mt-2 mb-0 text-accent-red">{shownError}</p>}
+              {import.meta.env.DEV && <DevtoolsSwitch />}
+            </Popover.Popup>
+          </Popover.Positioner>
+        </Popover.Portal>
+      </Popover.Root>
+    </DirectionProvider>
+  );
+}
 
+function ReleaseNotesLink({ tag }: { tag: string }) {
+  return (
+    <a href={releaseNotesUrl(tag)} target="_blank" rel="noreferrer" className="shrink-0 text-subtext underline">
+      {m.settings_release_notes()}
+    </a>
+  );
+}
+
+function DevtoolsSwitch() {
+  const open = useQueryDevtoolsOpen();
+  const label = m.header_query_devtools();
+  return (
+    <div className="mt-3 flex items-center justify-between gap-3 border-t border-border pt-3">
+      <span className="text-subtext">{label}</span>
+      <Switch checked={open} aria-label={label} onClick={() => setQueryDevtoolsOpen(!open)} />
     </div>
   );
 }

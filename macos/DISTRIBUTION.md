@@ -24,12 +24,41 @@ gh workflow run release-macos-app.yml -f tag=v0.1.99
 ```
 
 The manual path checks out `inputs.tag` and runs the signing scripts under the
-`release-signing` environment, so the **required reviewer approving the run is
-the real gate on the certificate** — verify the tag points at trusted code (the
-`main`-only deployment-branch restriction covers the workflow file, not the
-checked-out tag).
+`release-signing` environment. Verify the tag points at trusted code: the
+deployment-branch restriction covers the workflow file, not the checked-out
+tag. The macOS and Linux app builds use the same UI as the CLI:
+the matching Release run's `release-ui` artifact, or the committed bundle for
+older releases. A Release run for an older source revision also uses its
+committed bundle. The artifact must still be available for manual re-attachments.
 
 ## The app updater's contract
+
+The desktop app offers stable and canary update channels. A push to `main` runs
+`.github/workflows/release-canary.yml`: alongside CI, it builds the macOS app,
+Windows installer and Linux AppImages; once CI succeeds, it publishes versioned
+assets and `desktop-canary-v2.json` on the `canary` prerelease. The manifest
+records the build identity, source commit, and ancestry. A running build always
+finishes; only the newest pending push waits behind it, so intermediate commits
+get no canary. An older rerun cannot replace the canary pointer, and
+publication retries retain already-published assets. The latest build and six
+other recent builds are retained.
+
+The first build after this change also publishes a compatibility release and
+`desktop-canary.json` for already-installed clients that download from a
+version-specific release. That release and pointer remain available so those
+clients can update to the shared-release format.
+
+Stable releases continue to start with a reviewed version bump on `main`. Their
+`desktop-ancestry.json` contains the release commit's ancestry. A canary can
+switch back to stable only when that file contains its own source commit; until
+then, the chosen stable channel waits for a compatible release. Older stable
+releases without this file cannot establish compatibility. Switching from stable
+to canary likewise waits until the canary includes the stable release's commit.
+
+Automatic macOS and Windows canaries use the same `release-signing` environment,
+credentials, and Windows Azure identity as stable releases. The environment
+currently permits protected branches and has no required reviewers; adding an
+approval gate will also pause automatic canary builds.
 
 Installed apps update themselves from `macos-app.json`, uploaded to the release
 by the same step that uploads the DMG:
@@ -64,15 +93,40 @@ signature check — not the digest — is what makes an unattended swap safe, so
 **changing the signing identity breaks self-update for every installed app**:
 update `EXPECTED_TEAM_ID` and ship that release before retiring the old cert.
 
+## CLI binaries
+
+The `install.sh` archives for macOS are signed with the same Developer ID and
+notarized by `.github/workflows/sign-macos-cli.yml`, which dist runs between its
+local and global builds. It re-uploads each darwin archive under the same
+artifact name with a rewritten `.sha256` and per-target manifest checksum, so the
+installers and `sha256.sum` built afterwards match the signed archives. It uses
+the same `release-signing` environment as the DMG. Unlike the DMG, it ignores
+`MACOS_SIGNING_ENABLED`: every published release needs those secrets. PRs do not
+run release builds or signing; publication starts after a version bump merges.
+
+dist does not generate this job's `needs: build-local-artifacts`, so
+`dist-workspace.toml` sets `allow-dirty = ["ci"]`, which makes `dist generate`
+skip `release.yml` entirely: dist config changes no longer reach CI on their own.
+To regenerate, remove `allow-dirty`, run the pinned `dist generate`, then restore
+the shared UI build, the `build-host` job and its `needs` edges, the host artifact
+download and `ORX_EMBED_HOST_DIR` on embedding build steps, custom signing
+dependencies, release-only dispatch guard, immutable source SHA propagation,
+the full-history checkout and
+`desktop-ancestry.json` generation, and required publication checks before
+restoring `allow-dirty`.
+Release recovery requires an explicit version tag; set `source-sha` to the original
+merged bump commit if `main` has advanced. Desktop attachment jobs resolve that
+published tag rather than rebuilding the current tip of `main`.
+
 ## Configure signing (CI)
 
 Needs an Apple Developer Program account with a **Developer ID Application**
 certificate (see Apple's [notarizing docs](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)).
 From it you produce the six values below.
 
-1. Create the **`release-signing` environment** (Settings → Environments): add
-   **required reviewers** and set **Deployment branches → `main`**. Add these as
-   **environment** secrets (not repo-wide):
+1. Configure the **`release-signing` environment** (Settings → Environments)
+   for protected branches. Automatic canaries require it to have no required
+   reviewers. Add these as **environment** secrets (not repo-wide):
 
    | Secret | Value |
    | --- | --- |
@@ -97,14 +151,12 @@ Also enable **Require a pull request** + **Require review from Code Owners** on
 `main` (see `.github/CODEOWNERS`) so the signing scripts can't change unreviewed.
 Never commit the `.p12`.
 
-`package-macos-app.sh` signs with `macos/entitlements.plist`, which grants the
-Apple-events entitlement the Dock-click tab focus needs. Without it that path is
-denied in signed builds only — unsigned local bundles never exercise the check —
-and the first Dock click prompts once for Automation access.
-
 ## Build / sign locally
 
+Use Node 22 and the pnpm version pinned in `ui/package.json` for the UI build.
+
 ```bash
+pnpm -C ui install --frozen-lockfile && pnpm -C ui build
 rustup target add aarch64-apple-darwin x86_64-apple-darwin   # once, for universal
 ORX_APP_UNIVERSAL=1 bash scripts/build-macos-app.sh
 xcrun notarytool store-credentials orx-notary \
@@ -143,20 +195,32 @@ installer drop locations — the "works in my terminal, broken in the app" bug.
 (`$SHELL -ilc`, interactive because `.zshrc` is where these exports live) once at
 startup and installs the result via `local::shell_env`, which harness lookup,
 harness children, and directory resolution consult instead of the process
-environment. It is best-effort and capped at 5s; every outcome is logged. To see
-it, run the bundled binary from a terminal:
+environment. It is best-effort: startup waits up to 5s, and a later answer
+(within 60s) still supplies PATH but not the directories below. Every outcome is
+logged. To see it, run the bundled binary from a terminal:
 
 ```bash
 /Applications/OpenResearch.app/Contents/MacOS/OpenResearch
 ```
+
+## Desktop page zoom
+
+The macOS View menu offers Zoom In (`Cmd =`), Zoom Out (`Cmd -`), and Actual Size
+(`Cmd 0`). Zoom ranges from 50% to 200% in 10-point steps. The app remembers your last
+zoom level in your local user preferences and restores it on launch (100% by
+default). A brief zoom popover shows the percentage, zoom buttons, and Reset.
+The titlebar preserves space for the native window controls.
+Windows and Linux use `Ctrl =` (or `Ctrl +`), `Ctrl -`, and `Ctrl 0` with the
+same range and window-local behavior.
 
 ## Coexisting with a CLI install
 
 The app and a `curl`-installed `orx` share one data dir and one config dir, so
 both must be safe to have at once:
 
-- **Ports** — the app binds an ephemeral loopback port rather than `orx up`'s
-  4791.
+- **Ports** — the app binds loopback port 4792 rather than `orx up`'s 4791,
+  falling back to an ephemeral port when 4792 is taken. Keeping it fixed keeps
+  the window's origin, and so its localStorage, stable across launches.
 - **Store** — SQLite in WAL with a 5s busy timeout; concurrent readers/writers
   are expected. Run supervisors hold a per-run exclusive lock, so a second
   server recovering the same active run exits instead of double-driving it.
@@ -172,7 +236,8 @@ both must be safe to have at once:
   `launched_as_app_bundle`.
 
 - **Directories** — `ORX_DATA_DIR`, `XDG_DATA_HOME`, and `XDG_CONFIG_HOME` are
-  imported by the same startup probe (`local::shell_env::IMPORTED`), so a rc
+  imported by the same startup probe when it answers within the startup wait
+  (`local::shell_env::IMPORTED`), so a rc
   file that redirects the store moves the app with it. Otherwise the app would
   read the default database while the CLI read the user's, and the lock above
   would guard a file neither shares.

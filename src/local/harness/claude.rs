@@ -12,7 +12,7 @@
 //! `--permission-mode` from the session's setting (`auto`/`bypassPermissions` — see
 //! `options`). AskUserQuestion / ExitPlanMode surface as interactive cards: the
 //! turn ends on them and the user's answer resumes the session — except in plan
-//! mode, where the mcp-gate bridge holds both open mid-turn and the answer
+//! mode, where the `orx mcp` bridge holds both open mid-turn and the answer
 //! continues the same turn.
 //!
 //! Detection: `claude auth status --json` is the readiness source of truth.
@@ -27,7 +27,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 use super::detect::{
     bin_version, nonempty_str, parse_version, read_json, HarnessAuthState, HarnessInfo, ModelInfo,
@@ -36,8 +35,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited,
-    ORX_MAX_ATTEMPTS,
+    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure,
+    TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -47,22 +46,9 @@ use crate::local::chat::{
 use crate::local::claude::{SpawnConfig, SpawnSpec, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
-use crate::local::shell_env::find_on_path;
+use crate::local::shell_env::installs;
 
-/// FALLBACK model list, used only when the `list_models` control request fails
-/// (a CLI too old to answer it, or a spawn/timeout failure). The primary source
-/// is [`claude_list_models`]: the same catalog the CLI's own `/model` menu
-/// renders, with per-model `supportedEffortLevels`.
-const CLAUDE_MODELS: [&str; 4] = [
-    "claude-fable-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-haiku-4-5",
-];
-
-/// FALLBACK effort tiers, paired with `CLAUDE_MODELS` above — the base five
-/// every supported CLI accepts. The primary source is per-model
-/// `supportedEffortLevels` from `list_models`.
+/// Harness-wide effort choices when no model-specific catalog is available.
 const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// `ultracode` — the session mode that selects `xhigh` effort plus standing
@@ -70,7 +56,7 @@ const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"
 /// keyword) or Codex's `ultra`. The CLI models it as a *mode*, not an effort
 /// level: `list_models` never includes it in `supportedEffortLevels`, even on
 /// versions whose `--effort` accepts it — which is why support is detected by
-/// [`claude_accepts_ultracode`] rather than read from the catalog.
+/// [`probe_auth_and_ultracode`] rather than read from the catalog.
 const CLAUDE_ULTRACODE: &str = "ultracode";
 
 /// Includes Anthropic's multi-process refresh-token and sleep/wake fixes.
@@ -81,17 +67,67 @@ const AUTH_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Not `claude update` — that runs the very binary that is failing.
 const CLAUDE_REINSTALL: &str = "Reinstall it from claude.com/download";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AuthProbe {
-    state: HarnessAuthState,
-    method: Option<&'static str>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthProbe {
+    pub state: HarnessAuthState,
+    pub method: Option<&'static str>,
+    pub provider: Option<String>,
+    subscription_type: Option<String>,
+    pub sequence: u64,
+    pub failed_check: bool,
+    reported_method_present: bool,
     /// The CLI answered with a saved login that an environment credential
     /// overrides — proven, not inferred from an `Unknown` a timeout also
     /// produces. No login or update command can repair it.
-    credential_conflict: bool,
+    pub credential_conflict: bool,
 }
 
-fn parse_auth_status(success: bool, stdout: &[u8]) -> AuthProbe {
+fn next_auth_sequence() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+pub(crate) fn auth_barrier_sequence() -> u64 {
+    next_auth_sequence()
+}
+
+impl AuthProbe {
+    fn unknown(sequence: u64) -> Self {
+        Self {
+            state: HarnessAuthState::Unknown,
+            method: None,
+            provider: None,
+            subscription_type: None,
+            sequence,
+            failed_check: true,
+            reported_method_present: false,
+            credential_conflict: false,
+        }
+    }
+}
+
+pub(crate) fn login_eligible(probe: &AuthProbe) -> bool {
+    login_eligible_state(
+        probe.state,
+        probe.method,
+        probe.provider.as_deref(),
+        probe.credential_conflict,
+    )
+}
+
+pub(crate) fn login_eligible_state(
+    state: HarnessAuthState,
+    method: Option<&str>,
+    provider: Option<&str>,
+    conflict: bool,
+) -> bool {
+    state == HarnessAuthState::NeedsLogin
+        && !conflict
+        && method != Some("thirdParty")
+        && (provider == Some("firstParty") || (provider.is_none() && method == Some("oauth")))
+}
+
+pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence: u64) -> AuthProbe {
     let value = serde_json::from_slice::<Value>(stdout).ok();
     let logged_in = value
         .as_ref()
@@ -100,146 +136,201 @@ fn parse_auth_status(success: bool, stdout: &[u8]) -> AuthProbe {
     let reported_method = value
         .as_ref()
         .and_then(|value| value.get("authMethod"))
-        .and_then(Value::as_str)
-        .map(|method| method.to_ascii_lowercase());
-    let method = reported_method.as_deref().and_then(|method| {
-        if method.contains("api") || method.contains("token") {
-            Some("apiKey")
-        } else if method.contains("oauth") || method.contains("claude") {
-            Some("oauth")
-        } else {
-            None
-        }
+        .and_then(Value::as_str);
+    let method = reported_method.and_then(|method| match method.to_ascii_lowercase().as_str() {
+        "oauth" | "claude.ai" => Some("oauth"),
+        "api-key" | "api_key" | "apikey" => Some("apiKey"),
+        "third_party" | "third-party" => Some("thirdParty"),
+        _ => None,
     });
-    let state = match (success, logged_in) {
-        (true, Some(true)) => HarnessAuthState::Ready,
-        (_, Some(false)) => HarnessAuthState::NeedsLogin,
+    let state = match (exit_code, logged_in) {
+        (Some(0), Some(true)) => HarnessAuthState::Ready,
+        (Some(0 | 1), Some(false)) => HarnessAuthState::NeedsLogin,
         _ => HarnessAuthState::Unknown,
     };
     AuthProbe {
         state,
         method,
+        provider: value
+            .as_ref()
+            .and_then(|value| value.get("apiProvider"))
+            .and_then(Value::as_str)
+            .filter(|provider| {
+                !provider.is_empty()
+                    && provider.len() <= 64
+                    && provider
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            })
+            .map(str::to_string),
+        subscription_type: value
+            .as_ref()
+            .and_then(|value| nonempty_str(value, "subscriptionType")),
+        sequence,
+        failed_check: state == HarnessAuthState::Unknown,
+        reported_method_present: reported_method.is_some(),
         credential_conflict: false,
     }
 }
 
-async fn probe_auth(bin: &Path) -> AuthProbe {
-    let mut cmd = Command::new(bin);
+async fn probe_auth(bin: &Path, sequence: u64) -> AuthProbe {
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.args(["auth", "status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     prepare_env(&mut cmd);
-    match tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output()).await {
-        Ok(Ok(out)) => parse_auth_status(out.status.success(), &out.stdout),
+    match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
+        Some(Ok(out)) => parse_auth_status(out.status.code(), &out.stdout, sequence),
         // A timeout or a spawn failure: no evidence of anything, least of all a
         // credential conflict.
-        _ => AuthProbe {
-            state: HarnessAuthState::Unknown,
-            method: None,
-            credential_conflict: false,
-        },
+        _ => AuthProbe::unknown(sequence),
     }
 }
 
-async fn effective_auth_probe(bin: &Path) -> AuthProbe {
-    let mut probe = probe_auth(bin).await;
-    // Headless Claude gives ANTHROPIC_* credentials precedence over a saved
-    // subscription login. If status still reports OAuth in that environment,
-    // it has only verified leftover OAuth metadata, not the credential the
-    // worker will actually send.
-    if has_api_credential() && probe.method != Some("apiKey") {
-        // Only a login the CLI reports as working proves the credential is
-        // overriding it. A signed-out or unanswered probe proves nothing and
-        // must not cost the user their sign-in button.
-        probe.credential_conflict = probe.state == HarnessAuthState::Ready;
+/// The environment-credential overlay both auth paths share. Headless Claude
+/// gives ANTHROPIC_* credentials precedence over a saved subscription login.
+/// If status still reports OAuth in that environment, it has only verified
+/// leftover OAuth metadata, not the credential the worker will actually send.
+fn apply_env_credential_override(mut probe: AuthProbe) -> AuthProbe {
+    if has_api_credential()
+        && probe.state == HarnessAuthState::Ready
+        && probe.method == Some("oauth")
+        && probe
+            .provider
+            .as_deref()
+            .is_none_or(|provider| provider == "firstParty")
+    {
+        probe.credential_conflict = true;
         probe.state = HarnessAuthState::Unknown;
-        probe.method = None;
-    } else if probe.state == HarnessAuthState::Ready && probe.method.is_none() {
-        probe.method = Some("oauth");
+        probe.failed_check = false;
     }
     probe
 }
 
+async fn effective_auth_probe(bin: &Path, sequence: u64) -> AuthProbe {
+    apply_env_credential_override(probe_auth(bin, sequence).await)
+}
+
+fn has_oauth_credentials() -> bool {
+    let path = native_store::claude_home(NativeStore::Legacy).join(".credentials.json");
+    read_json(path).is_some_and(|creds| creds.get("claudeAiOauth").is_some())
+}
+
 fn gate_oauth_version(mut probe: AuthProbe, version: Option<&str>) -> AuthProbe {
-    if probe.state == HarnessAuthState::Ready && probe.method == Some("oauth") {
+    let direct_route = probe
+        .provider
+        .as_deref()
+        .is_none_or(|provider| provider == "firstParty");
+    if probe.state == HarnessAuthState::Ready
+        && direct_route
+        && (probe.method == Some("oauth")
+            || (!probe.reported_method_present && probe.method.is_none()))
+    {
         probe.state = match version.and_then(parse_version) {
             Some(version) if version >= MIN_CLAUDE_VERSION => HarnessAuthState::Ready,
             Some(_) => HarnessAuthState::Unsupported,
             None => HarnessAuthState::Unknown,
         };
+        probe.failed_check = probe.state == HarnessAuthState::Unknown;
     }
     probe
 }
 
 /// Polled on a timer by the auth monitor, so it must not re-probe every
 /// candidate: `find_claude` already returns the executable detection selected.
-pub(crate) async fn current_auth_state() -> HarnessAuthState {
+pub(crate) async fn current_auth_state() -> AuthProbe {
+    let sequence = next_auth_sequence();
     match find_claude() {
         Some(bin) => {
             let version = bin_version(&bin).await;
-            gate_oauth_version(effective_auth_probe(&bin).await, version.as_deref()).state
+            gate_oauth_version(
+                effective_auth_probe(&bin, sequence).await,
+                version.as_deref(),
+            )
         }
-        None => HarnessAuthState::Unknown,
+        None => AuthProbe::unknown(sequence),
     }
 }
 
-pub(crate) fn auth_recovery_note() -> &'static str {
-    if has_api_credential() {
+pub(crate) fn auth_recovery_note(method: Option<&str>, provider: Option<&str>) -> &'static str {
+    if external_provider(method, provider) {
+        "Check the configured Claude Code provider and run `claude auth status`, then re-check this harness."
+    } else if has_api_credential() {
         "Claude Code rejected the configured `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Replace or unset it, then re-check this harness."
-    } else {
+    } else if method == Some("oauth") || provider == Some("firstParty") {
         "Sign in with `claude auth login`, then re-check this harness."
+    } else {
+        "Check Claude Code authentication with `claude auth status`, then re-check this harness."
     }
 }
 
-/// Ask the installed CLI's own argument parser whether it accepts
-/// `--effort ultracode`. `--version` still runs the parser, which prints
-/// `Warning: Unknown --effort value …` for a value it doesn't know and exits
-/// without touching the network (~0.2s); absence of the warning is acceptance.
+pub(crate) fn external_provider(method: Option<&str>, provider: Option<&str>) -> bool {
+    method == Some("thirdParty") || provider.is_some_and(|provider| provider != "firstParty")
+}
+
+/// One child answering both detection questions: `--effort ultracode`
+/// exercises the argument parser while `auth status` answers readiness — on
+/// Windows each spawn of the ~200MB binary costs seconds, so folding them
+/// halves the probe count. A CLI too old for `ultracode` prints the warning
+/// and exits before the subcommand runs; that case is detected by the
+/// missing JSON and the auth probe is retried without the flag.
 ///
-/// The parser is the only truthful surface. Every enumeration the CLI offers
-/// lies about this value: `--help` lists five tiers on versions that accept
-/// six; the warning's own "Valid values:" list omits `ultracode` on versions
-/// that accept it; and `list_models` never advertises it (see
-/// [`CLAUDE_ULTRACODE`]). Probing the parser replaces a hard-coded version
-/// gate — the boundary (2.1.202 rejects / 2.1.203 accepts, bisected across
-/// every published version in between) is now discovered per install instead
-/// of pinned.
+/// The parser is the only truthful surface for `ultracode` support. Every
+/// enumeration the CLI offers lies about this value: `--help` lists five
+/// tiers on versions that accept six; the warning's own "Valid values:"
+/// list omits `ultracode` on versions that accept it; and `list_models`
+/// never advertises it (see [`CLAUDE_ULTRACODE`]). Probing the parser
+/// replaces a hard-coded version gate — the boundary (2.1.202 rejects /
+/// 2.1.203 accepts, bisected across every published version in between) is
+/// now discovered per install instead of pinned.
 ///
 /// Any failure reports unsupported: a missing choice is a smaller harm than a
 /// choice that silently runs at the default effort.
-async fn claude_accepts_ultracode(bin: &Path) -> bool {
-    let mut cmd = Command::new(bin);
-    cmd.args(["--effort", CLAUDE_ULTRACODE, "--version"])
-        .stdin(Stdio::null());
+async fn probe_auth_and_ultracode(bin: &Path, sequence: u64) -> (AuthProbe, bool) {
+    let mut cmd = crate::process::tokio_command(bin);
+    cmd.args(["--effort", CLAUDE_ULTRACODE, "auth", "status", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     prepare_env(&mut cmd);
-    let fut = cmd.output();
-    match tokio::time::timeout(Duration::from_secs(10), fut).await {
-        Ok(Ok(out)) => {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            out.status.success() && !text.contains("Unknown --effort value")
-        }
-        _ => false,
+    let out = match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
+        Some(Ok(out)) => out,
+        _ => return (AuthProbe::unknown(sequence), false),
+    };
+    let warned = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .contains("Unknown --effort value");
+    let ultracode = out.status.success() && !warned;
+    let mut probe = parse_auth_status(out.status.code(), &out.stdout, sequence);
+    if warned && probe.state == HarnessAuthState::Unknown {
+        // The parser rejected `--effort` and never reached `auth status`.
+        probe = probe_auth(bin, sequence).await;
     }
+    (apply_env_credential_override(probe), ultracode)
 }
 
-/// Query the CLI's own model catalog — the `list_models` control request over
-/// `--print` stream-json, the same data its `/model` menu renders: every model
-/// with its `supportedEffortLevels`. This is the Claude analogue of codex's
-/// `model/list` and opencode's `models --verbose`; a curated table here shipped
-/// effort tiers on Haiku, which the catalog says supports none.
+/// The `list_models` transport — a control request over `--print`
+/// stream-json, the same data its `/model` menu renders. This is the Claude
+/// analogue of codex's `model/list` and opencode's `models --verbose`; a
+/// curated table here shipped effort tiers on Haiku, which the catalog says
+/// supports none.
 ///
 /// One shot: spawn, write the control request, read until its
 /// `control_response` (skipping stream noise), kill the child. Any failure —
 /// spawn, timeout, a CLI too old for the subtype — returns `None` and the
-/// caller falls back to the static table.
-async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo>> {
-    let fut = async {
-        let mut cmd = Command::new(bin);
+/// caller reports an unavailable catalog. The raw `response` payload comes
+/// back unparsed: the ultracode probe decides the parse, and detection runs
+/// both children concurrently.
+async fn claude_models_response(bin: PathBuf) -> Option<Value> {
+    // Acquire the spawn lane before the deadline — queue time must not spend
+    // the child's execution budget.
+    let permit = super::detect::detect_spawn_permit().await;
+    let fut = async move {
+        let mut cmd = crate::process::tokio_command(&bin);
         cmd.args([
             "--print",
             "--input-format",
@@ -249,13 +340,11 @@ async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo
             "--verbose",
         ]);
         prepare_env(&mut cmd);
-        let mut child = cmd
-            .stdin(Stdio::piped())
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .ok()?;
+            .kill_on_drop(true);
+        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
 
@@ -280,10 +369,8 @@ async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo
             if resp.get("request_id").and_then(Value::as_str) != Some("orx_list_models") {
                 continue;
             }
-            // An `error` subtype has no inner response — `?` falls through to
-            // the static fallback.
-            let models = parse_claude_model_list(resp.get("response")?, ultracode);
-            return (!models.is_empty()).then_some(models);
+            // An `error` subtype has no inner response.
+            return resp.get("response").cloned();
         }
         None
     };
@@ -291,6 +378,57 @@ async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo
         .await
         .ok()
         .flatten()
+}
+
+pub(crate) async fn external_model_catalog(bin: PathBuf, ultracode: bool) -> Vec<ModelInfo> {
+    super::detect::timed_probe("claude-code", "models", claude_models_response(bin))
+        .await
+        .map(|response| parse_claude_model_list(&response, ultracode))
+        .unwrap_or_default()
+}
+
+/// The Full pass's probes on one binary. Auth and the ultracode parser check
+/// share a single child (`probe_auth_and_ultracode`). The `list_models`
+/// catalog child is only useful to a signed-in CLI, so it launches
+/// speculatively only where file/env evidence says a login exists — a
+/// signed-out install would just abort it after burning seconds of CPU the
+/// other harnesses' probes need. When the live auth verdict surprises the
+/// evidence (e.g. a login in an OS credential store), the catalog child is
+/// launched late instead.
+async fn claude_spec_probes(bin: PathBuf, sequence: u64) -> (AuthProbe, bool, Option<Value>) {
+    let login_evidence = has_oauth_credentials() || has_api_credential();
+    let models = login_evidence.then(|| {
+        super::detect::spawn_timed_probe(
+            "claude-code",
+            "models",
+            claude_models_response(bin.clone()),
+        )
+    });
+    let (auth, ultracode) = super::detect::timed_probe(
+        "claude-code",
+        "auth+ultracode",
+        probe_auth_and_ultracode(&bin, sequence),
+    )
+    .await;
+    // External provider model enumeration can stall; the CLI default remains usable.
+    let external = external_provider(auth.method, auth.provider.as_deref());
+    let models = match models {
+        Some(task) if auth.state == HarnessAuthState::Ready && !external => {
+            task.await.ok().flatten()
+        }
+        Some(task) => {
+            task.abort();
+            // Await teardown so the aborted probe's timing row lands in the
+            // fill's sink before the pass can drain it.
+            let _ = task.await;
+            None
+        }
+        None if auth.state == HarnessAuthState::Ready && !external => {
+            super::detect::timed_probe("claude-code", "models", claude_models_response(bin)).await
+        }
+        None => None,
+    };
+    (auth, ultracode, models)
 }
 
 /// `list_models` response → per-model `ModelInfo`. Split from the transport
@@ -303,7 +441,7 @@ async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo
 /// * A model without `supportedEffortLevels` (Haiku) gets an empty list, which
 ///   hides the reasoning picker — same absent-vs-empty contract as opencode.
 /// * `ultracode` is appended where the CLI accepts it (see
-///   [`claude_accepts_ultracode`]) and the model reaches `xhigh`, since the
+///   [`probe_auth_and_ultracode`]) and the model reaches `xhigh`, since the
 ///   mode is documented as `xhigh` + dynamic workflows.
 fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
     let Some(models) = result.get("models").and_then(Value::as_array) else {
@@ -339,6 +477,11 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
             let mut info = ModelInfo::new(value)
                 .with_reasoning(&efforts)
                 .with_label(name, blurb);
+            info.resolved_model = m
+                .get("resolvedModel")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            info.context_window = m.get("contextWindow").and_then(Value::as_u64);
             // Claude reports no default *tier* because its unset default isn't
             // one: with adaptive thinking, the CLI scales effort per request.
             // Name the sentinel row for what actually runs — preselecting a
@@ -355,17 +498,10 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
         .collect()
 }
 
-/// The FALLBACK effort ids (see `CLAUDE_EFFORT_LEVELS`), plus `ultracode` when
-/// the parser probe accepted it.
-fn claude_effort_ids(ultracode: bool) -> Vec<&'static str> {
-    let mut ids: Vec<&'static str> = CLAUDE_EFFORT_LEVELS.to_vec();
-    if ultracode {
-        ids.push(CLAUDE_ULTRACODE);
-    }
-    ids
-}
-
 pub struct ClaudeCode;
+
+/// Override inherited launch metadata so children identify OpenResearch.
+pub(crate) const CLAUDE_ENTRYPOINT: &str = "openresearch";
 
 /// Either credential Claude Code accepts. `ANTHROPIC_AUTH_TOKEN` is the one a
 /// custom `ANTHROPIC_BASE_URL` gateway uses, so detecting only the api key
@@ -378,6 +514,26 @@ fn has_api_credential() -> bool {
         .any(|key| super::detect::api_key(key).is_some())
 }
 
+/// Turn Claude's private billing enum into a stable user-facing label. Unknown
+/// values are deliberately hidden: exposing a new server-side enum verbatim is
+/// both confusing and makes the dashboard depend on an undocumented contract.
+fn billing_label(
+    subscription: Option<&str>,
+    tier: Option<&str>,
+    value: Option<&str>,
+) -> Option<String> {
+    match (subscription, tier, value) {
+        (Some("max") | None, Some("default_claude_max_5x"), _) => Some("Max 5x".into()),
+        (Some("max") | None, Some("default_claude_max_20x"), _) => Some("Max 20x".into()),
+        (Some("max"), _, _) => Some("Max".into()),
+        (Some("pro"), _, _) => Some("Pro".into()),
+        (_, _, Some("stripe_subscription" | "stripe_subscription_contracted")) => {
+            Some("Subscription".to_string())
+        }
+        _ => None,
+    }
+}
+
 /// One headless request on a throwaway `claude -p` child, mirroring how
 /// Claude Code titles its own conversations with a cheap background model.
 /// Deliberately *not* the session's resident child — a request there would
@@ -385,15 +541,14 @@ fn has_api_credential() -> bool {
 /// the throwaway request unrecorded.
 ///
 /// `--model haiku`/`sonnet` are CLI model aliases of the kind we already pass
-/// through from the catalog; a CLI too old to know them exits non-zero, which
-/// lands on `None`. Every other failure (spawn, timeout, garbage output)
-/// degrades the same silent way.
-async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
+/// through from the catalog; a CLI too old to know them exits non-zero, and
+/// the error carries what it printed.
+async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     let model = match request.quality {
         OneShotQuality::Cheap => "haiku",
         OneShotQuality::Standard => "sonnet",
     };
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.args([
         "-p",
         request.prompt,
@@ -419,15 +574,16 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
-    .stderr(Stdio::null())
+    .stderr(Stdio::piped())
     .kill_on_drop(true)
     // Hermetic: run outside any repo so the child doesn't ingest the server
     // cwd's CLAUDE.md / settings into a request that carries its own context.
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
+    cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
     cmd.env(
         "CLAUDE_CONFIG_DIR",
-        native_store::prepare_claude(NativeStore::Isolated).ok()?,
+        native_store::prepare_claude(NativeStore::Isolated)?,
     );
     cmd.env(
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
@@ -439,25 +595,21 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     let fut = cmd.output();
     let out = tokio::time::timeout(request.timeout, fut)
         .await
-        .ok()?
-        .ok()?;
+        .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
     if !out.status.success() {
-        return None;
+        // `-p` prints request failures (bad model, signed out) on stdout; stderr is diagnostics.
+        return Err(super::one_shot_exit_error(
+            out.status,
+            &[&out.stdout, &out.stderr],
+        ));
     }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `claude` on PATH, then the common install drop locations, in preference order.
+/// Every `claude` install, in preference order.
 fn claude_candidates() -> Vec<PathBuf> {
-    let drops = dirs::home_dir().into_iter().flat_map(|home| {
-        [
-            home.join(".claude").join("local"),
-            home.join(".local").join("bin"),
-        ]
-        .into_iter()
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "claude"))
-    });
-    find_on_path("claude").into_iter().chain(drops).collect()
+    let own = dirs::home_dir().map(|home| home.join(".claude").join("local"));
+    installs("claude", own)
 }
 
 /// The executable detection selected, else `claude` on PATH / the drop
@@ -475,62 +627,102 @@ pub(super) async fn find_claude_working() -> Option<(PathBuf, super::detect::Bin
         .await
 }
 
-#[async_trait]
-impl Harness for ClaudeCode {
-    fn id(&self) -> &'static str {
-        "claude-code"
-    }
-
-    fn name(&self) -> &'static str {
-        "Claude Code"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    /// The resident child holds stdin open, so a second stream-json user
-    /// message reaches the turn already running.
-    fn supports_steering(&self) -> bool {
-        true
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl ClaudeCode {
+    /// `snapshot` skips the catalog probes (`ultracode`, `list_models`) and
+    /// leaves models empty until the background full pass
+    /// replaces it. It also skips the `--version` spawn — install is decided
+    /// by discovery alone — and answers auth from files/env first, falling
+    /// back to `auth status` only where a login could live in a credential
+    /// store the filesystem cannot see (macOS Keychain, Windows).
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some((bin, probe)) = find_claude_working().await {
-            info.record_bin(&bin, probe);
+        // The Full pass overlaps the catalog/auth children with the
+        // `--version` sweep — each spawn costs seconds, so sequencing them
+        // made the fill their sum.
+        let mut spec_probes = None;
+        if snapshot {
+            super::detect::record_selected(
+                &mut info,
+                true,
+                "claude-code",
+                find_claude,
+                find_claude_working(),
+            )
+            .await;
+        } else {
+            let sequence = next_auth_sequence();
+            let (selected, probes) = super::detect::select_and_speculate(
+                "claude-code",
+                claude_candidates(),
+                Some(MIN_CLAUDE_VERSION),
+                |bin| claude_spec_probes(bin, sequence),
+            )
+            .await;
+            if let Some((bin, probe)) = selected {
+                info.record_bin(&bin, probe);
+            }
+            spec_probes = probes;
         }
+        let (spec_auth, ultracode, spec_models) = spec_probes
+            .map(|(auth, ultracode, models)| (Some(auth), ultracode, models))
+            .unwrap_or((None, false, None));
+        info.claude_ultracode = ultracode;
         // The CLI owns OAuth and Keychain refresh. Its live status decides
         // whether this harness can run; a broken binary would only fail it too.
         if info.installed && !info.install_broken {
             let bin = info.bin_path.as_deref().map(Path::new);
-            let probe = match bin {
-                Some(bin) => {
-                    gate_oauth_version(effective_auth_probe(bin).await, info.version.as_deref())
-                }
-                None => AuthProbe {
-                    state: HarnessAuthState::Unknown,
-                    method: None,
-                    credential_conflict: false,
-                },
+            let probe = match (bin, snapshot) {
+                (Some(_), false) => gate_oauth_version(
+                    spec_auth.unwrap_or_else(|| AuthProbe::unknown(next_auth_sequence())),
+                    info.version.as_deref(),
+                ),
+                (Some(_), true) => AuthProbe::unknown(0),
+                (None, _) => AuthProbe::unknown(0),
             };
             info.auth_state = probe.state;
             info.auth_method = probe.method;
+            info.auth_provider = probe.provider.clone();
+            info.auth_observation = (!snapshot).then_some(probe.clone());
+            info.login_eligible = login_eligible(&probe);
+            info.auth_check_failed = probe.failed_check;
             info.needs_config_repair = probe.credential_conflict;
             if info.auth_state == HarnessAuthState::Ready {
                 info.authenticated = true;
                 if probe.method == Some("oauth") {
+                    let credential_tier = if cfg!(target_os = "macos") {
+                        None
+                    } else {
+                        read_json(
+                            native_store::claude_home(NativeStore::Legacy)
+                                .join(".credentials.json"),
+                        )
+                        .and_then(|credentials| {
+                            credentials
+                                .get("claudeAiOauth")
+                                .and_then(|oauth| nonempty_str(oauth, "rateLimitTier"))
+                        })
+                    };
+                    info.plan = billing_label(
+                        probe.subscription_type.as_deref(),
+                        credential_tier.as_deref(),
+                        None,
+                    );
                     if let Some(acct) = dirs::home_dir()
                         .and_then(|h| read_json(h.join(".claude.json")))
                         .and_then(|cfg| cfg.get("oauthAccount").cloned())
                     {
                         info.account = nonempty_str(&acct, "emailAddress");
+                        info.account_name = nonempty_str(&acct, "displayName")
+                            .or_else(|| nonempty_str(&acct, "fullName"));
                         info.org = nonempty_str(&acct, "organizationName");
-                        info.plan = match nonempty_str(&acct, "billingType").as_deref() {
-                            Some("stripe_subscription") => Some("Subscription".to_string()),
-                            Some(other) => Some(other.to_string()),
-                            None => None,
-                        };
+                        info.plan = billing_label(
+                            probe.subscription_type.as_deref(),
+                            credential_tier.as_deref().or_else(|| {
+                                acct.get("organizationRateLimitTier")
+                                    .and_then(Value::as_str)
+                            }),
+                            nonempty_str(&acct, "billingType").as_deref(),
+                        );
                     }
                 }
             }
@@ -540,26 +732,20 @@ impl Harness for ClaudeCode {
         if info.agent_ready {
             // The resident child is only spawnable once the CLI is ready.
             info.supports_steering = true;
-            // Ask the installed CLI for its own catalog: `list_models` for the
-            // models and their per-model effort tiers, and the parser probe for
-            // `ultracode` (a session mode the catalog never advertises — see
-            // `claude_accepts_ultracode`). The static table only covers a CLI
-            // too old to answer.
-            let bin = info.bin_path.as_deref().map(Path::new);
-            let (ultracode, models) = match bin {
-                Some(bin) => {
-                    let ultracode = claude_accepts_ultracode(bin).await;
-                    (ultracode, claude_list_models(bin, ultracode).await)
-                }
-                None => (false, None),
-            };
-            info = info.with_models(models.unwrap_or_else(|| {
-                let ids = claude_effort_ids(ultracode);
-                CLAUDE_MODELS
-                    .iter()
-                    .map(|id| ModelInfo::new(*id).with_reasoning(&ids))
-                    .collect()
-            }));
+            // The speculated `list_models` response is parsed here, where the
+            // ultracode verdict has landed.
+            let models = spec_models.and_then(|resp| {
+                let parsed = parse_claude_model_list(&resp, ultracode);
+                (!parsed.is_empty()).then_some(parsed)
+            });
+            if models.is_none() && !snapshot {
+                info.agent_note = Some(if external_provider(info.auth_method, info.auth_provider.as_deref()) {
+                    "Loading Claude Code models; the CLI default model is available now."
+                } else {
+                    "Could not load Claude Code models. Re-check this harness or update Claude Code; the CLI default model is still available."
+                }.to_string());
+            }
+            info = info.with_models(models.unwrap_or_default());
         } else if info.install_broken {
             info.agent_note = Some(info.broken_note(CLAUDE_REINSTALL));
         } else if info.auth_state == HarnessAuthState::Unsupported {
@@ -576,7 +762,7 @@ impl Harness for ClaudeCode {
                     "Claude Code could not verify the effective `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Fix or unset it, then re-check this harness.".to_string(),
                 HarnessAuthState::Unknown =>
                     "Open a terminal and run `claude auth status`, then re-check this harness.".to_string(),
-                _ => auth_recovery_note().to_string(),
+                _ => auth_recovery_note(info.auth_method, info.auth_provider.as_deref()).to_string(),
             });
         } else {
             info.agent_note = Some(
@@ -586,6 +772,85 @@ impl Harness for ClaudeCode {
         }
         Some(info)
     }
+}
+
+/// Compaction re-reads the whole conversation, so it needs more room than a
+/// control request but far less than a turn.
+const CLAUDE_COMPACT_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[async_trait]
+impl Harness for ClaudeCode {
+    fn id(&self) -> &'static str {
+        "claude-code"
+    }
+
+    fn name(&self) -> &'static str {
+        "Claude Code"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        let Some(native_id) = ctx.native_session_id.clone() else {
+            return Ok(CompactOutcome::Fallback);
+        };
+        let lookup_id = native_id.clone();
+        let native_session =
+            tokio::task::spawn_blocking(move || native_store::claude_session(&lookup_id))
+                .await
+                .map_err(|error| anyhow!("Claude session lookup failed: {error}"))??
+                .ok_or_else(|| {
+                    anyhow!("Claude Code's saved conversation is unavailable for compaction")
+                })?;
+        let project = ctx.project.clone();
+        let session_id = ctx.session_id.clone();
+        let skills_dir = self.session_skills_dir();
+        let (repo, playbook) =
+            tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
+                .await
+                .map_err(|error| anyhow!("playbook task failed: {error}"))??;
+        let spec = SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo,
+            playbook,
+            resume: Some(native_id),
+            config: SpawnConfig {
+                permission_mode: ctx.permission_mode,
+                effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
+                model: ctx.model.clone(),
+                native_store: native_session.store,
+                alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+                bridge_active: uses_permission_bridge(ctx.permission_mode)
+                    && ctx.host.up_port().is_some(),
+            },
+        };
+        ctx.host
+            .claude
+            .compact_session(spec, CLAUDE_COMPACT_TIMEOUT)
+            .await?;
+        Ok(CompactOutcome::Native)
+    }
+
+    /// The resident child holds stdin open, so a second stream-json user
+    /// message reaches the turn already running.
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
+    }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         run_turn(ctx)
@@ -594,8 +859,9 @@ impl Harness for ClaudeCode {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
-        claude_one_shot(&find_claude()?, request).await
+    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        let bin = find_claude().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        claude_one_shot(&bin, request).await
     }
 
     fn one_shot_honours_model(&self) -> bool {
@@ -714,25 +980,12 @@ impl Harness for ClaudeCode {
                         plan_mode: None,
                     })
                 }
-                // Mid-turn question (a bridge-held AskUserQuestion): the held
-                // tool call is denied with the user's answer as the message —
-                // the model reads the answer from the denial and continues the
-                // same turn. (Allowing the tool instead would run it headless,
-                // which returns no answer — the model would guess and move on
-                // rather than block; that's the bug this arm exists to avoid.)
                 ("question", _) => {
-                    let (text, _) = synthesize_resume("question", answer);
-                    if text.trim().is_empty() {
-                        return Err(anyhow!("select an option (or add a note) to answer"));
-                    }
+                    let input = question_answer_input(prompt, answer)?;
                     ctx.host.settle_permission(
                         native_id,
-                        crate::local::chat::PermissionDecision::Deny {
-                            message: format!(
-                                "The user answered: {text}. Treat this as their answer and \
-                                 continue — do not ask this question again. (Only the first \
-                                 question of the call was shown; ask any others separately.)"
-                            ),
+                        crate::local::chat::PermissionDecision::Allow {
+                            updated_input: Some(input),
                         },
                     )?;
                     Ok(ResumeAction::Handled { plan_mode: None })
@@ -773,13 +1026,10 @@ impl Harness for ClaudeCode {
         Some(native_store::claude_home(NativeStore::Legacy))
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        self.config_home()
+            .map(|home| vec![home.join("skills")])
+            .unwrap_or_default()
     }
 
     fn skill_shim(&self) -> Option<&'static str> {
@@ -855,33 +1105,29 @@ pub(crate) fn claude_permission_mode(mode: Option<PermissionMode>) -> &'static s
 
 pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
     matches!(
-        mode,
-        Some(PermissionMode::Ask | PermissionMode::AcceptEdits | PermissionMode::Plan)
+        mode.unwrap_or(PermissionMode::Auto),
+        PermissionMode::Ask
+            | PermissionMode::AcceptEdits
+            | PermissionMode::Plan
+            | PermissionMode::Auto
+            | PermissionMode::Bypass
     )
 }
 
-/// Path (relative to the worktree) of the plan-mode settings file we write and
+/// Path (relative to the worktree) of the native-hook settings file we write and
 /// pass via `--settings`. Lives under the same agent dir as the playbook, which
 /// is already git-excluded.
 const PLAN_SETTINGS_REL: &str = ".openresearch/agent/claude-plan-settings.json";
 
-/// Path (relative to the worktree) of the plan-mode MCP config wiring the
-/// `orx mcp-gate` permission bridge. Same git-excluded agent dir.
-const MCP_CONFIG_REL: &str = ".openresearch/agent/claude-mcp.json";
+/// Directory (relative to the worktree) of the MCP configs wiring the
+/// `orx mcp` bridge, one per chat: chats sharing a worktree spawn at once,
+/// and each config names its own chat. Same git-excluded agent dir.
+const MCP_CONFIG_DIR_REL: &str = ".openresearch/agent";
 
-/// Write the plan-mode `--settings` file into `repo` and return its path. The
-/// file registers `PreToolUse` hooks running `orx plan-gate` (this same
-/// binary): on `Bash` it allows read-only inspection through plan mode's gate,
-/// and on `ExitPlanMode` it forces an `ask` — headless plan mode otherwise
-/// SELF-approves the call ("User has approved exiting plan mode", nobody
-/// asked; verified on claude 2.1.197) and starts editing. The `ask` routes
-/// plan approval to the permission bridge card. See `plan_gate`.
-///
-/// The hook command is this executable's absolute path, so it resolves without
-/// depending on `orx` being on Claude's `PATH`.
-pub(crate) fn write_plan_settings(repo: &std::path::Path) -> Result<PathBuf> {
-    let orx = std::env::current_exe()
-        .map_err(|e| anyhow!("cannot resolve orx binary path for plan-mode hook: {e}"))?;
+// Attribution updates input without granting permission; plan decisions stay separate.
+pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathBuf> {
+    let orx = crate::paths::spawnable_exe()
+        .map_err(|e| anyhow!("cannot resolve orx binary path for native hooks: {e}"))?;
     let hook = serde_json::json!([{
         "type": "command",
         "command": format!(
@@ -889,14 +1135,33 @@ pub(crate) fn write_plan_settings(repo: &std::path::Path) -> Result<PathBuf> {
             crate::jobs::ssh::sh_quote(&orx.to_string_lossy())
         ),
     }]);
-    let settings = serde_json::json!({
-        "hooks": {
-            "PreToolUse": [
-                { "matcher": "Bash", "hooks": hook },
-                { "matcher": "ExitPlanMode", "hooks": hook },
-            ],
+    let mut hooks = vec![
+        serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":format!("{} invocation-gate", crate::jobs::ssh::sh_quote(&orx.to_string_lossy()))}]}),
+    ];
+    if plan {
+        hooks.push(serde_json::json!({"matcher":"Bash","hooks":hook}));
+        hooks.push(serde_json::json!({"matcher":"ExitPlanMode","hooks":hook}));
+    }
+    let allow: Vec<_> = crate::commands::alphaxiv_mcp::RESEARCH_TOOLS
+        .iter()
+        .chain(crate::commands::alphaxiv_mcp::LIBRARY_READ_TOOLS)
+        .map(|name| format!("mcp__alphaxiv__{name}"))
+        .collect();
+    let ask: Vec<_> = crate::commands::alphaxiv_mcp::WRITE_TOOLS
+        .iter()
+        .map(|name| format!("mcp__alphaxiv__{name}"))
+        .collect();
+    let mut settings =
+        serde_json::json!({"hooks":{"PreToolUse":hooks}, "permissions":{"allow":allow, "ask":ask}});
+    // Dev data lives under the checkout (dev.ts), so Claude would load its
+    // CLAUDE.md, which also suppresses a test repo's own AGENTS.md.
+    if cfg!(debug_assertions) {
+        if let Ok(checkout) = crate::paths::canonicalize(env!("CARGO_MANIFEST_DIR")) {
+            let checkout = checkout.to_string_lossy();
+            settings["claudeMdExcludes"] =
+                serde_json::json!([format!("{checkout}/*"), format!("{checkout}/.claude/**")]);
         }
-    });
+    }
     let path = repo.join(PLAN_SETTINGS_REL);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -907,34 +1172,41 @@ pub(crate) fn write_plan_settings(repo: &std::path::Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Write the per-spawn `--mcp-config` file pointing Claude at `orx mcp-gate`
-/// (this same binary) and return its path. The bridge's env block carries the
-/// `orx up` port, the session id, and a fresh per-child token minted at spawn —
-/// everything the resident bridge needs to relay permission requests back to
-/// the running server for the child's whole life.
+/// Write the chat's `--mcp-config` file and return its path: alphaXiv always,
+/// and with `gate` the `orx mcp` bridge (this same binary), whose env
+/// block carries the `orx up` port, the session id, and a fresh per-child
+/// token minted at spawn — everything the resident bridge needs to relay
+/// requests back to the running server for the child's whole life.
 pub(crate) fn write_mcp_config(
     repo: &std::path::Path,
-    up_port: u16,
     session_id: &str,
-    token: &str,
+    gate: Option<(u16, &str)>,
 ) -> Result<PathBuf> {
-    let orx = std::env::current_exe()
+    let orx = crate::paths::spawnable_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
-    let config = serde_json::json!({
-        "mcpServers": {
-            "orx": {
-                "type": "stdio",
-                "command": orx.to_string_lossy(),
-                "args": ["mcp-gate"],
-                "env": {
-                    "ORX_UP_PORT": up_port.to_string(),
-                    "ORX_SESSION_ID": session_id,
-                    "ORX_GATE_TOKEN": token,
-                },
+    let orx = orx.to_string_lossy();
+    let mut config = serde_json::json!({"mcpServers": {
+        "alphaxiv": {"type":"stdio", "command":orx, "args":["alphaxiv-mcp"]}
+    }});
+    if let Some((up_port, token)) = gate {
+        config["mcpServers"]["orx"] = serde_json::json!({
+            "type": "stdio",
+            "command": orx,
+            "args": ["mcp"],
+            // Orchestration tools are few and needed unprompted, so they
+            // skip tool search.
+            "alwaysLoad": true,
+            "env": {
+                "ORX_UP_PORT": up_port.to_string(),
+                "ORX_SESSION_ID": session_id,
+                "ORX_GATE_TOKEN": token,
+                "ORX_AGENT_TOKEN": crate::local::chat::delegation::agent_token(session_id),
             },
-        }
-    });
-    let path = repo.join(MCP_CONFIG_REL);
+        });
+    }
+    let path = repo
+        .join(MCP_CONFIG_DIR_REL)
+        .join(format!("claude-mcp-{session_id}.json"));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
@@ -965,9 +1237,7 @@ fn claude_effort(level: Option<&str>) -> Option<&str> {
 /// resume strategy: a prompt ends the turn and the answer becomes a *new user
 /// message* that continues via `--resume`. `ChatHost` validates `resume_mode`
 /// against Claude's advertised choices before this helper parses it; an absent
-/// id falls through to the per-kind default. The question arm is
-/// also reused as a plain text builder by the bridge's mid-turn question
-/// resume (the denial message that carries the answer).
+/// id falls through to the per-kind default.
 pub(crate) fn synthesize_resume(
     kind: &str,
     req: &PromptAnswer,
@@ -1007,6 +1277,7 @@ pub(crate) fn synthesize_resume(
             let text = "The user approved that action. Continue.".to_string();
             (text, chosen.or(Some(PermissionMode::Bypass)))
         }
+        "question" if !req.approve => (SKIPPED_QUESTION_MESSAGE.to_string(), None),
         // question (or anything else): feed the selection back as the user's reply.
         _ => (req.contextualized_answer(req.plain_answer_text()), None),
     }
@@ -1045,9 +1316,34 @@ fn plan_prompt(name: &str, input: Option<&Value>) -> Option<WirePrompt> {
     })
 }
 
+pub(crate) const SKIPPED_QUESTION_MESSAGE: &str =
+    "The user skipped this question. Do not retry it or treat it as answered.";
+
+fn question_answer_input(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    let mut input = prompt
+        .tool_input
+        .clone()
+        .ok_or_else(|| anyhow!("question input is missing"))?;
+    if !answer.approve {
+        // The batch continues; an entirely skipped call is denied by the host.
+        input["answers"] = serde_json::json!({});
+        return Ok(input);
+    }
+    let text = answer.contextualized_answer(answer.plain_answer_text());
+    if text.trim().is_empty() {
+        return Err(anyhow!("select an option (or add a note) to answer"));
+    }
+    let question = prompt
+        .question
+        .as_deref()
+        .ok_or_else(|| anyhow!("question text is missing"))?;
+    input["answers"] = serde_json::json!({ question: text });
+    Ok(input)
+}
+
 /// AskUserQuestion → a `question` prompt. Claude's schema is
 /// `{questions: [{question, header, options: [{label, description}], multiSelect}]}`;
-/// we surface the first question (the composer answers one at a time). Also
+/// The bridge presents each question separately and collects the whole batch. Also
 /// used by the plan-mode bridge (`ChatHost::request_permission`, via the
 /// harness re-export) to build the held mid-turn question card.
 pub(crate) fn question_prompt(name: &str, input: Option<&Value>) -> Option<WirePrompt> {
@@ -1143,7 +1439,7 @@ fn replays_user_message(event: &Value, text: &str) -> bool {
 /// including a stale `result` that would end the turn instantly. The echo
 /// itself is consumed (returns `false`); everything after it belongs to the
 /// turn.
-fn belongs_to_current_turn(event: &Value, text: &str, saw_user_echo: &mut bool) -> bool {
+pub(crate) fn belongs_to_current_turn(event: &Value, text: &str, saw_user_echo: &mut bool) -> bool {
     if *saw_user_echo {
         return true;
     }
@@ -1164,7 +1460,7 @@ fn observe_turn_boundary(event: &Value, text: &str, saw_user_echo: &mut bool) ->
 /// the fixture tests.
 #[derive(Default)]
 struct TurnState {
-    /// Whether this child was spawned with the mcp-gate bridge active. With the
+    /// Whether this child was spawned with the `orx mcp` bridge active. With the
     /// bridge on, ExitPlanMode / AskUserQuestion come from the bridge (held,
     /// mid-turn-answerable), so their `tool_use` renders nothing.
     bridge_active: bool,
@@ -1202,19 +1498,24 @@ struct TurnState {
     /// per message id (subagent events namespaced by `parent_tool_use_id`) —
     /// see the `assistant` arm for why this offset exists.
     assistant_blocks_seen: HashMap<String, usize>,
-    /// Background (`local_agent`) tasks spawned this turn that haven't reached
-    /// their terminal `task_notification` yet, task_id → spawning tool_use_id.
+    /// Background sub-agents (and, in a spawned helper, background shell
+    /// commands) started this turn that haven't reached their terminal
+    /// `task_notification` yet, keyed by task_id.
     /// A `result` while entries remain is a segment boundary, not the end of
     /// the turn — the CLI auto-resumes with the task's report once it
     /// finishes, and ending the turn there would silently drop that whole
-    /// continuation. The tool_use_id side keeps the spawn part `running` (the
+    /// continuation. The tool_use_id keeps the spawning part `running` (the
     /// async launch acknowledgement would otherwise complete it at launch and
-    /// kill every running indicator while the agent works).
-    pending_tasks: HashMap<String, Option<String>>,
+    /// kill every running indicator while the task works).
+    pending_tasks: HashMap<String, PendingTask>,
     /// Whether any background task ran this turn (stays true after completion)
     /// — gates the post-result grace wait for the auto-resume segment, which
     /// can trail the result even when every task already finished.
     saw_background_task: bool,
+}
+
+struct PendingTask {
+    tool_use_id: Option<String>,
 }
 
 /// The spawning `Task` tool_use id for a sub-agent event (`parent_tool_use_id`),
@@ -1284,6 +1585,7 @@ fn apply_subagent_blocks(
                         prompt: None,
                         phase: None,
                         children: Vec::new(),
+                        orx: None,
                     },
                 );
             }
@@ -1319,6 +1621,10 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             let inner = event.get("event").unwrap_or(&Value::Null);
             match inner.get("type").and_then(Value::as_str) {
                 Some("message_start") => {
+                    // An interrupt kills the child before `assistant`; the model is known here.
+                    if let Some(message) = inner.get("message") {
+                        record_message(ctx, message);
+                    }
                     // Sub-agent streams have their own message ids; namespace the
                     // stream mid per parent so a concurrent sub-agent's deltas
                     // don't collide with the main stream's.
@@ -1407,18 +1713,16 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     state.native_session_id = Some(sid.to_string());
                 }
             }
-            // Track background sub-agents so the `result` arm knows a turn
-            // isn't over while one still runs (see `pending_tasks`).
             Some("task_started") => {
                 if event.get("task_type").and_then(Value::as_str) == Some("local_agent") {
                     if let Some(id) = event.get("task_id").and_then(Value::as_str) {
-                        // No tool_use_id → no spawn-part association; the
-                        // task still gates the turn's end.
-                        let tool_id = event
+                        let tool_use_id = event
                             .get("tool_use_id")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        state.pending_tasks.insert(id.to_string(), tool_id);
+                        state
+                            .pending_tasks
+                            .insert(id.to_string(), PendingTask { tool_use_id });
                         state.saw_background_task = true;
                     }
                 }
@@ -1427,15 +1731,15 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             // — the async-launch tool_result deliberately left it `running`.
             Some("task_notification") => {
                 if let Some(id) = event.get("task_id").and_then(Value::as_str) {
-                    let tool_id = state.pending_tasks.remove(id).flatten();
-                    if let Some(part) = tool_id
-                        .as_deref()
-                        .and_then(|tid| find_part_mut(&mut ctx.assistant.parts, tid))
+                    let task = state.pending_tasks.remove(id);
+                    if let Some(part) = task
+                        .and_then(|task| task.tool_use_id)
+                        .and_then(|tid| find_part_mut(&mut ctx.assistant.parts, &tid))
                     {
                         if let Some(part_state) = part.state.as_mut() {
                             if part_state.status == "running" {
-                                let ok = event.get("status").and_then(Value::as_str)
-                                    == Some("completed");
+                                let status = event.get("status").and_then(Value::as_str);
+                                let ok = status == Some("completed");
                                 part_state.status = if ok { "completed" } else { "error" }.into();
                                 if !ok {
                                     // Give the failure a real message — the
@@ -1457,6 +1761,12 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             _ => {}
         },
         Some("assistant") => {
+            if let Some(message) = event.get("message") {
+                ctx.record_native_invocations(message);
+            }
+            if let Some(message) = event.get("message") {
+                record_message(ctx, message);
+            }
             if event
                 .get("error")
                 .or_else(|| event.pointer("/message/error"))
@@ -1596,6 +1906,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                                 prompt: None,
                                 phase: None,
                                 children: Vec::new(),
+                                orx: None,
                             });
                         }
                     }
@@ -1659,7 +1970,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     && state
                         .pending_tasks
                         .values()
-                        .any(|tid| tid.as_deref() == Some(part_id.as_str()));
+                        .any(|task| task.tool_use_id.as_deref() == Some(part_id.as_str()));
                 if launch_ack {
                     continue;
                 }
@@ -1676,6 +1987,14 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             }
         }
         Some("result") => {
+            if let Some(scope) = event.get("session_id").and_then(Value::as_str) {
+                let samples = claude_result_usage_samples(event);
+                ctx.record_native_aggregate(
+                    &format!("claude-{}:", ctx.attempt_count_for_usage()),
+                    scope,
+                    &samples,
+                );
+            }
             state.saw_result = true;
             // Resume mints a fresh session id per turn — track the latest.
             if let Some(sid) = event.get("session_id").and_then(Value::as_str) {
@@ -1707,14 +2026,31 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                         .and_then(Value::as_str)
                         .unwrap_or(subtype)
                         .to_string();
-                    ctx.push_error(format!("claude: {detail}"));
+                    if is_transient_api_error(event, &detail) {
+                        let detail = detail.trim();
+                        ctx.assistant.parts.retain(|part| {
+                            part.kind != "text"
+                                || part
+                                    .text
+                                    .as_deref()
+                                    .is_none_or(|text| text.trim() != detail)
+                        });
+                        let mut part = WirePart::tool(
+                            format!("api-error-{}", ctx.assistant.parts.len()),
+                            "api_error",
+                            "error",
+                            Some(detail.to_string()),
+                        );
+                        if let Some(state) = part.state.as_mut() {
+                            state.title = Some("Temporary API error".into());
+                        }
+                        ctx.assistant.parts.push(part);
+                    } else {
+                        ctx.push_error(format!("claude: {detail}"));
+                    }
                 }
             }
             state.had_activity |= report_result_usage(ctx, event).is_some_and(|used| used > 0);
-            // A result while background sub-agents still run is only a segment
-            // boundary: the model ended ITS reply, but the CLI auto-resumes
-            // with the agents' reports when they finish. Keep listening — the
-            // continuation's own result (no tasks pending) ends the turn.
             if !state.pending_tasks.is_empty() {
                 return false;
             }
@@ -1728,11 +2064,93 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
     false
 }
 
+fn is_transient_api_error(event: &Value, detail: &str) -> bool {
+    let api_failure = event.get("terminal_reason").and_then(Value::as_str) == Some("api_error")
+        || detail.trim_start().starts_with("API Error:");
+    let detail = detail.to_ascii_lowercase();
+    api_failure
+        && [
+            "connection to the api was lost",
+            "connection dropped",
+            "enotfound",
+            "eai_again",
+            "econnreset",
+            "etimedout",
+            "socket hang up",
+        ]
+        .iter()
+        .any(|marker| detail.contains(marker))
+}
+
 fn mark_stream_final(ctx: &mut TurnCtx, state: &TurnState) {
     if let Some(mid) = state.stream_mid.as_deref() {
         let prefix = format!("{mid}-");
         ctx.mark_final_text(|part| part.id.starts_with(&prefix));
     }
+}
+
+/// One native message's model and usage snapshot, recorded even when only one is reported.
+fn record_message(ctx: &TurnCtx, message: &Value) {
+    let (Some(id), model, usage) = (
+        message.get("id").and_then(Value::as_str),
+        message.get("model").and_then(Value::as_str),
+        message.get("usage"),
+    ) else {
+        return;
+    };
+    if model.is_none() && usage.is_none() {
+        return;
+    }
+    let field = |key| {
+        usage
+            .and_then(|usage| usage.get(key))
+            .and_then(Value::as_u64)
+    };
+    ctx.record_native_usage(
+        &format!("claude-{}:{id}", ctx.attempt_count_for_usage()),
+        model,
+        None,
+        crate::store::TokenUsage {
+            input_tokens: field("input_tokens")
+                .and_then(|input| input.checked_add(field("cache_read_input_tokens")?))
+                .and_then(|input| input.checked_add(field("cache_creation_input_tokens")?)),
+            // Assistant output is a partial subtotal; terminal modelUsage includes reasoning.
+            output_tokens: field("output_tokens"),
+            cache_read_tokens: field("cache_read_input_tokens"),
+            cache_write_tokens: field("cache_creation_input_tokens"),
+            reasoning_tokens: None,
+        },
+    );
+}
+
+fn claude_result_usage_samples(
+    event: &Value,
+) -> Vec<(String, Option<String>, crate::store::TokenUsage)> {
+    event
+        .get("modelUsage")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|models| models.iter())
+        .map(|(model, usage)| {
+            let field = |name| usage.get(name).and_then(Value::as_u64);
+            (
+                model.clone(),
+                usage
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                crate::store::TokenUsage {
+                    input_tokens: field("inputTokens")
+                        .and_then(|input| input.checked_add(field("cacheReadInputTokens")?))
+                        .and_then(|input| input.checked_add(field("cacheCreationInputTokens")?)),
+                    output_tokens: field("outputTokens"),
+                    cache_read_tokens: field("cacheReadInputTokens"),
+                    cache_write_tokens: field("cacheCreationInputTokens"),
+                    reasoning_tokens: field("thinkingTokens"),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Sum the four token buckets of a Claude `usage` object into the context-window
@@ -1816,11 +2234,8 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
         native_store,
-        // The turn WANTS the bridge iff it's plan mode under a bound `orx up`
-        // port; whether the bridge was actually achieved is recorded on the
-        // spawned child's config (a failed write leaves it false and the next
-        // plan turn respawns). Keeping the wanted value here means a plan turn
-        // reconciles against a child that already has the bridge and reuses it.
+        alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+        // A failed bridge setup must respawn next turn rather than reuse a child without input.
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
     }
 }
@@ -1875,6 +2290,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
     let client = route.client();
     let auth_generation = client.auth_generation();
     let bridge_active = client.config().bridge_active;
+    ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
     ctx.persist_delivery(DeliveryState::Unknown)?;
     if let Err(e) = client.send_user_message(&ctx.text).await {
         ctx.host.claude.kill_session(&ctx.session_id).await;
@@ -1903,19 +2319,25 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         let waited = match queued.take() {
             Some(event) => Waited::Event(Ok(Some(event))),
             None => {
+                let flush_due = ctx.flush_due();
                 let steering = &mut ctx.steering;
                 tokio::select! {
                     event = tokio::time::timeout_at(deadline, rx.recv()) => Waited::Event(event),
                     steer = super::next_steer(steering) => Waited::Steer(steer),
+                    _ = flush_due => Waited::Flush,
                 }
             }
         };
         let event = match waited {
+            Waited::Flush => {
+                let _ = ctx.flush();
+                continue;
+            }
             Waited::Steer(steer) => {
                 // A failed write means the child is gone and this turn is about
                 // to error out — park the text so it survives into the next one.
                 match client.send_user_message(&steer.text).await {
-                    Ok(()) => ctx.record_steer(&steer.display),
+                    Ok(()) => ctx.record_steer(&steer, true),
                     Err(_) => {
                         if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                             ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -1997,10 +2419,11 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                     // report as a fresh segment: init + messages + another
                     // result). Give that continuation a short window to show up
                     // before ending the turn; a quiet window means the report
-                    // was already delivered in this segment.
-                    if !state.saw_background_task {
+                    // was already delivered in this segment. A failed turn has nothing to resume.
+                    if !state.saw_background_task || state.turn_errored {
                         break;
                     }
+                    let _ = ctx.flush();
                     match tokio::time::timeout(BACKGROUND_RESUME_GRACE, rx.recv()).await {
                         Ok(Some(event)) => queued = Some(event),
                         _ => break,
@@ -2058,7 +2481,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // unresolved: they can never be answered again, and once this turn makes the
     // session busy one could capture the composer's typed-text routing. End-turn
     // cards are deliberately left alone — they resume via --resume.
-    let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true).await;
+    let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true);
 
     let native_session = match ctx.native_session_id.clone() {
         Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session(&id))
@@ -2075,7 +2498,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .clone()
         .filter(|_| native_session.is_some());
     if ctx.native_session_id.is_some() && resume.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code")? {
             ctx.text = format!("{recovery}\n\n{}", ctx.text);
         }
     }
@@ -2145,7 +2568,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 
         let detail = match auth {
             HarnessAuthState::NeedsLogin => {
-                "Claude Code sign-in required. Run `claude auth login`, then retry this message."
+                "Claude Code authentication needs attention. Check `claude auth status`, then retry this message."
             }
             HarnessAuthState::Unknown => {
                 "Claude Code authentication could not be verified. Run `claude auth status`, then re-check the harness."
@@ -2199,7 +2622,7 @@ mod tests {
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {
         let repo = std::env::temp_dir().join(format!("orx-mcp-test-{}", uuid::Uuid::new_v4()));
-        let path = write_mcp_config(&repo, 4791, "session", "gate").unwrap();
+        let path = write_mcp_config(&repo, "session", Some((4791, "gate"))).unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let env = config["mcpServers"]["orx"]["env"].as_object().unwrap();
@@ -2256,6 +2679,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[test]
+    fn billing_labels_hide_private_enums() {
+        let probe = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"pro"}"#,
+            1,
+        );
+        assert_eq!(probe.subscription_type.as_deref(), Some("pro"));
+        assert_eq!(
+            billing_label(None, None, Some("stripe_subscription")),
+            Some("Subscription".to_string())
+        );
+        assert_eq!(
+            billing_label(None, None, Some("stripe_subscription_contracted")),
+            Some("Subscription".to_string())
+        );
+        assert_eq!(
+            billing_label(Some("pro"), None, None).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            billing_label(Some("max"), Some("default_claude_max_5x"), None).as_deref(),
+            Some("Max 5x")
+        );
+        assert_eq!(
+            billing_label(Some("max"), Some("default_claude_max_20x"), None).as_deref(),
+            Some("Max 20x")
+        );
+        assert_eq!(
+            billing_label(Some("pro"), Some("default_claude_max_20x"), None).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            billing_label(None, None, Some("future_internal_value")),
+            None
+        );
+        assert_eq!(billing_label(None, None, None), None);
+    }
+
     /// A `list_models` response in the live 2.1.212 shape (fields we don't
     /// read trimmed). Covers the four things the parser decides: the `default`
     /// entry is skipped, `value` (the alias the CLI's own picker submits) is
@@ -2267,7 +2729,7 @@ mod tests {
             "models": [
                 {
                     "value": "default",
-                    "resolvedModel": "claude-opus-4-8[1m]",
+                    "resolvedModel": "claude-fable-5",
                     "displayName": "Default (recommended)",
                     "supportsEffort": true,
                     "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
@@ -2312,6 +2774,10 @@ mod tests {
             "Adaptive"
         );
         assert_eq!(with[0].default_reasoning_level, None);
+        assert_eq!(
+            with[1].resolved_model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
         // No description → the plain displayName stands.
         assert_eq!(with[1].display_name.as_deref(), Some("Haiku"));
         assert_eq!(with[1].description, None);
@@ -2343,19 +2809,6 @@ mod tests {
         assert!(parse_claude_model_list(&serde_json::json!({ "models": "nope" }), true).is_empty());
     }
 
-    /// The fallback tiers gain `ultracode` only when the parser probe said so.
-    #[test]
-    fn fallback_effort_ids_follow_the_probe() {
-        assert_eq!(
-            claude_effort_ids(false),
-            ["low", "medium", "high", "xhigh", "max"]
-        );
-        assert_eq!(
-            claude_effort_ids(true),
-            ["low", "medium", "high", "xhigh", "max", "ultracode"]
-        );
-    }
-
     /// Only the sentinel is withheld; everything else forwards. The composer
     /// offers only catalog-reported tiers (plus a probe-verified `ultracode`),
     /// and Claude merely warns-and-defaults on a value it doesn't know, so an
@@ -2373,11 +2826,10 @@ mod tests {
         assert_eq!(claude_effort(None), None);
     }
 
-    /// Every id the composer can offer must survive the mapper — catalog
-    /// tiers and the probe-gated fallback alike.
+    /// Every harness-wide effort id the composer can offer reaches the CLI.
     #[test]
     fn advertised_effort_ids_all_map_back() {
-        for id in claude_effort_ids(true) {
+        for id in CLAUDE_EFFORT_LEVELS.into_iter().chain([CLAUDE_ULTRACODE]) {
             assert_eq!(claude_effort(Some(id)), Some(id), "{id} was dropped");
         }
     }
@@ -2426,7 +2878,32 @@ mod tests {
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
             annotations: Vec::new(),
+            from: None,
         }
+    }
+
+    #[test]
+    fn question_answers_preserve_native_input_and_return_structured_values() {
+        let input = serde_json::json!({"questions":[{"question":"Which colors?","header":"Colors","multiSelect":true,"options":[{"label":"Red","description":"First"},{"label":"Green","description":"Second"}]}]});
+        let mut prompt = question_prompt("AskUserQuestion", Some(&input)).unwrap();
+        prompt.tool_input = Some(input.clone());
+        let returned =
+            question_answer_input(&prompt, &answer(true, None, &["Red", "Green"], None)).unwrap();
+        assert_eq!(returned["questions"], input["questions"]);
+        assert_eq!(
+            returned["answers"],
+            serde_json::json!({"Which colors?":"Red, Green"})
+        );
+        let custom =
+            question_answer_input(&prompt, &answer(true, None, &[], Some("Blue"))).unwrap();
+        assert_eq!(
+            custom["answers"],
+            serde_json::json!({"Which colors?":"Blue"})
+        );
+        assert!(question_answer_input(&prompt, &answer(true, None, &[], None)).is_err());
+        let skipped = question_answer_input(&prompt, &answer(false, None, &[], None)).unwrap();
+        assert_eq!(skipped["questions"], input["questions"]);
+        assert_eq!(skipped["answers"], serde_json::json!({}));
     }
 
     #[test]
@@ -2451,8 +2928,9 @@ mod tests {
         assert!(uses_permission_bridge(Some(PermissionMode::Ask)));
         assert!(uses_permission_bridge(Some(PermissionMode::AcceptEdits)));
         assert!(uses_permission_bridge(Some(PermissionMode::Plan)));
-        assert!(!uses_permission_bridge(Some(PermissionMode::Auto)));
-        assert!(!uses_permission_bridge(Some(PermissionMode::Bypass)));
+        assert!(uses_permission_bridge(Some(PermissionMode::Auto)));
+        assert!(uses_permission_bridge(None));
+        assert!(uses_permission_bridge(Some(PermissionMode::Bypass)));
     }
 
     #[test]
@@ -2505,6 +2983,16 @@ mod tests {
     }
 
     #[test]
+    fn skipped_question_resumes_without_an_answer_or_mode_change() {
+        let (text, mode) = synthesize_resume("question", &answer(false, None, &[], None));
+        assert_eq!(
+            text,
+            "The user skipped this question. Do not retry it or treat it as answered."
+        );
+        assert_eq!(mode, None);
+    }
+
+    #[test]
     fn question_keeps_selected_chat_excerpts_as_quoted_context() {
         let mut response = answer(true, None, &[], Some("Explain this"));
         response.annotations = vec![crate::local::chat::TextAnnotation {
@@ -2525,6 +3013,36 @@ mod tests {
         // this into an error that keeps the card actionable.
         let (text, _) = synthesize_resume("question", &answer(true, None, &[], None));
         assert!(text.trim().is_empty());
+    }
+
+    #[test]
+    fn native_model_usage_preserves_child_models_and_inclusive_totals() {
+        let events: Vec<Value> =
+            serde_json::from_str(include_str!("fixtures/claude-model-usage.json")).unwrap();
+        let samples = claude_result_usage_samples(&events[0]);
+        assert_eq!(samples.len(), 2);
+        let parent = samples
+            .iter()
+            .find(|(model, _, _)| model == "claude-opus-5-5")
+            .unwrap();
+        assert_eq!(parent.2.input_tokens, Some(290410));
+        assert_eq!(parent.2.output_tokens, Some(392));
+        assert_eq!(parent.2.reasoning_tokens, Some(198));
+        let child = samples
+            .iter()
+            .find(|(model, _, _)| model == "claude-haiku-4-5-20251001")
+            .unwrap();
+        assert_eq!(child.2.total(), Some(101006));
+        let resumed = claude_result_usage_samples(&events[1]);
+        assert_eq!(
+            resumed
+                .iter()
+                .find(|(model, _, _)| model == "claude-opus-5-5")
+                .unwrap()
+                .2
+                .output_tokens,
+            Some(484)
+        );
     }
 
     /// Fold a hand-written stream-json transcript through `apply_event` against a
@@ -2632,6 +3150,67 @@ mod tests {
             err.state.as_ref().unwrap().error.as_deref(),
             Some("claude: boom")
         );
+    }
+
+    #[test]
+    fn transient_api_result_replaces_duplicate_text_with_retryable_status() {
+        for detail in [
+            "API Error: Connection to the API was lost (ENOTFOUND). This is usually temporary — try again.",
+            "API Error: Connection dropped (ECONNRESET)",
+            "API Error: Connection dropped",
+            "API Error: EAI_AGAIN",
+            "API Error: ETIMEDOUT",
+            "API Error: socket hang up",
+        ] {
+            let assistant = serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "id": "msg_api",
+                    "content": [{"type": "text", "text": "Earlier useful output"}, {"type": "text", "text": detail}]
+                }
+            });
+            let result = serde_json::json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "terminal_reason": "api_error",
+                "session_id": "sess-retry",
+                "result": detail
+            });
+            let mut ctx = TurnCtx::test_stub();
+            let mut state = TurnState::default();
+            assert!(!apply_event(&mut ctx, &mut state, &assistant));
+            assert!(apply_event(&mut ctx, &mut state, &result));
+            assert!(state.saw_result && state.turn_errored && !state.auth_failed);
+            assert_eq!(state.native_session_id.as_deref(), Some("sess-retry"));
+            assert_eq!(ctx.assistant.parts.len(), 2);
+            assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("Earlier useful output"));
+            let part = &ctx.assistant.parts[1];
+            assert_eq!(part.tool.as_deref(), Some("api_error"));
+            assert_eq!(part.state.as_ref().unwrap().error.as_deref(), Some(detail));
+        }
+    }
+
+    #[test]
+    fn transient_api_classification_keeps_other_failures_generic() {
+        for detail in [
+            "API Error: Invalid API key",
+            "API Error: Invalid model",
+            "Bash failed: ENOTFOUND",
+        ] {
+            let event = serde_json::json!({"type": "result", "is_error": true, "result": detail});
+            let mut ctx = TurnCtx::test_stub();
+            assert!(apply_event(&mut ctx, &mut TurnState::default(), &event));
+            assert_eq!(ctx.assistant.parts[0].tool.as_deref(), Some("error"));
+        }
+        assert!(is_transient_api_error(
+            &serde_json::json!({"terminal_reason": "api_error"}),
+            "ECONNRESET"
+        ));
+        assert!(!is_transient_api_error(
+            &serde_json::json!({"terminal_reason": "api_error"}),
+            "Not logged in"
+        ));
     }
 
     #[test]
@@ -3179,6 +3758,30 @@ mod tests {
         );
     }
 
+    /// Claude Code 2.1.284's stream for a background Bash: the model replies
+    /// with progress, the CLI emits a result, then resumes once the command ends.
+    const BACKGROUND_BASH_STREAM: &[&str] = &[
+        r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"toolu_b","name":"Bash","input":{"command":"sleep 8; echo FINISHED-42","run_in_background":true}}]}}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_b","task_type":"local_bash","is_backgrounded":true}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"Command running in background with ID: b1."}]}}"#,
+        r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"The command is running in the background."}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"The command is running in the background."}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_b","status":"completed"}"#,
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+        r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"FINISHED-42"}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"FINISHED-42"}"#,
+    ];
+
+    #[test]
+    fn ordinary_chat_ends_at_reply_over_background_shell() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        let end = BACKGROUND_BASH_STREAM.iter().position(|line| {
+            apply_event(&mut ctx, &mut state, &serde_json::from_str(line).unwrap())
+        });
+        assert_eq!(end, Some(4));
+    }
+
     #[test]
     fn result_falls_back_to_last_iteration_when_no_assistant_usage() {
         let mut ctx = TurnCtx::test_stub();
@@ -3221,74 +3824,53 @@ mod tests {
 
     #[test]
     fn auth_status_requires_live_logged_in_result() {
-        assert_eq!(
-            parse_auth_status(true, br#"{"loggedIn":true,"authMethod":"claude.ai"}"#),
-            AuthProbe {
-                state: HarnessAuthState::Ready,
-                method: Some("oauth"),
-                credential_conflict: false,
-            }
+        let bedrock = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"third_party","apiProvider":"bedrock"}"#,
+            1,
         );
+        assert_eq!(bedrock.state, HarnessAuthState::Ready);
+        assert_eq!(bedrock.method, Some("thirdParty"));
+        assert_eq!(bedrock.provider.as_deref(), Some("bedrock"));
         assert_eq!(
-            parse_auth_status(true, br#"{"loggedIn":true,"authMethod":"api-key"}"#),
-            AuthProbe {
-                state: HarnessAuthState::Ready,
-                method: Some("apiKey"),
-                credential_conflict: false,
-            }
-        );
-        // Claude intentionally exits 1 for this valid signed-out response.
-        assert_eq!(
-            parse_auth_status(false, br#"{"loggedIn":false,"authMethod":"none"}"#),
-            AuthProbe {
-                state: HarnessAuthState::NeedsLogin,
-                method: None,
-                credential_conflict: false,
-            }
-        );
-        assert_eq!(
-            parse_auth_status(true, b"not json"),
-            AuthProbe {
-                state: HarnessAuthState::Unknown,
-                method: None,
-                credential_conflict: false,
-            }
-        );
-        assert_eq!(
-            gate_oauth_version(
-                AuthProbe {
-                    state: HarnessAuthState::Ready,
-                    method: Some("oauth"),
-                    credential_conflict: false,
-                },
-                None,
-            )
-            .state,
-            HarnessAuthState::Unknown
-        );
-        assert_eq!(
-            gate_oauth_version(
-                AuthProbe {
-                    state: HarnessAuthState::Ready,
-                    method: Some("apiKey"),
-                    credential_conflict: false,
-                },
-                Some("2.0.0"),
-            )
-            .state,
+            gate_oauth_version(bedrock, Some("2.0.0")).state,
             HarnessAuthState::Ready
         );
-        // The version gate must carry a proven conflict through untouched.
-        assert!(
-            gate_oauth_version(
-                AuthProbe {
-                    state: HarnessAuthState::Unknown,
-                    method: None,
-                    credential_conflict: true,
-                },
-                Some("2.0.0"),
-            )
-            .credential_conflict
+
+        let key = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"api-key","apiProvider":"bedrock"}"#,
+            2,
+        );
+        assert_eq!(key.method, Some("apiKey"));
+        assert_eq!(key.provider.as_deref(), Some("bedrock"));
+
+        let signed_out = parse_auth_status(
+            Some(1),
+            br#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#,
+            3,
+        );
+        assert_eq!(signed_out.state, HarnessAuthState::NeedsLogin);
+        assert!(login_eligible(&signed_out));
+        assert_eq!(
+            parse_auth_status(Some(1), br#"{"loggedIn":true}"#, 4).state,
+            HarnessAuthState::Unknown
+        );
+        assert!(parse_auth_status(Some(0), b"not json", 5).failed_check);
+
+        let oauth = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#,
+            6,
+        );
+        assert_eq!(
+            gate_oauth_version(oauth, None).state,
+            HarnessAuthState::Unknown
+        );
+        let legacy = parse_auth_status(Some(0), br#"{"loggedIn":true}"#, 7);
+        assert_eq!(
+            gate_oauth_version(legacy, Some("2.0.0")).state,
+            HarnessAuthState::Unsupported
         );
     }
 

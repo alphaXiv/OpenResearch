@@ -39,7 +39,7 @@ pub struct Org {
 /// enum because serde's tagged enums can't key on a bool discriminator, and an
 /// untagged enum would not apply the container's `camelCase` rename to variant
 /// fields. The unused payload is simply `None`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Disk {
     pub sizable: bool,
@@ -48,7 +48,7 @@ pub struct Disk {
 }
 
 /// A single GPU offer from the compute catalog (`GET /compute/catalog`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuOffer {
     pub provider: String,
@@ -71,7 +71,7 @@ pub struct ListCatalog {
 
 /// A single CPU-only offer from the CPU catalog (`GET /compute/catalog/cpu`).
 /// Sibling to [`GpuOffer`]; CPU instances live in their own RunPod-only catalog.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CpuOffer {
     pub provider: String,
@@ -90,6 +90,21 @@ pub struct CpuOffer {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListCpuCatalog {
     pub offers: Vec<CpuOffer>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentUser {
+    pub id: String,
+    pub email: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub alphaxiv_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CurrentUserResponse {
+    pub user: CurrentUser,
 }
 
 // Thin envelope DTOs for the list endpoints.
@@ -137,6 +152,27 @@ pub enum SandboxTarget {
 pub struct CreateSandboxBody {
     pub organization_id: String,
     pub target: SandboxTarget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rental_lease: Option<CreateRentalLease>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRentalLease {
+    pub version: u8,
+    pub max_active_seconds: u64,
+}
+#[derive(Clone, Deserialize)]
+pub struct RentalLeaseCapability {
+    pub version: u8,
+    pub token: String,
+}
+impl std::fmt::Debug for RentalLeaseCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RentalLeaseCapability")
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A sandbox as returned by `POST /sandboxes`. Mirrors the API's `zSandbox`;
@@ -172,6 +208,8 @@ pub struct Sandbox {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SandboxEnvelope {
     pub sandbox: Sandbox,
+    #[serde(default, rename = "rentalLease")]
+    pub rental_lease: Option<RentalLeaseCapability>,
 }
 
 /// `GET /sandboxes` — each row is a `Sandbox` (the extra `connections` the
@@ -208,10 +246,78 @@ pub struct SshKeyEnvelope {
 // Core request helper — preserves TS error semantics exactly.
 // ---------------------------------------------------------------------------
 
-fn http() -> &'static Client {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(Client::new)
+/// Render a transport failure with its full `source()` chain.
+///
+/// `main` prints an error's `Display`, not its `{:#}` alternate form, so an
+/// `anyhow` context layer alone would hide the cause. `reqwest`'s own
+/// `Display` is just `error sending request for url (...)`; the actionable
+/// part — `invalid peer certificate: UnknownIssuer`, a DNS failure, a refused
+/// connection — only appears in the chain. Flatten it into the message so the
+/// user sees it without a debug build.
+pub(crate) fn transport_error(base: &str, err: reqwest::Error) -> crate::error::Error {
+    let mut detail = err.to_string();
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&err);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !detail.contains(&text) {
+            detail.push_str(": ");
+            detail.push_str(&text);
+        }
+        source = std::error::Error::source(cause);
+    }
+    anyhow!("Could not reach alphaXiv at {}: {}", base, detail)
 }
+
+pub(crate) fn http() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| crate::net::remote_client().build().expect("http client"))
+}
+
+#[derive(Debug)]
+pub struct Unauthorized;
+
+impl std::fmt::Display for Unauthorized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Unauthorized — your token is invalid or revoked. Run `orx login` again.")
+    }
+}
+
+impl std::error::Error for Unauthorized {}
+
+#[derive(Debug)]
+pub struct ApiTransportError(pub String);
+
+impl std::fmt::Display for ApiTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ApiTransportError {}
+
+#[derive(Debug)]
+pub struct ApiResponseError(pub u16, pub String);
+
+impl std::fmt::Display for ApiResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for ApiResponseError {}
+
+/// OpenResearch answered 503 to an alphaXiv sign-in: it couldn't fetch
+/// alphaXiv's signing keys, so a retry in a moment may pass.
+#[derive(Debug)]
+pub struct AlphaXivUnavailable;
+
+impl std::fmt::Display for AlphaXivUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OpenResearch couldn't reach alphaXiv. Try again in a moment.")
+    }
+}
+
+impl std::error::Error for AlphaXivUnavailable {}
 
 /// Sends a request and returns the response after applying the shared error
 /// semantics (network failure, 401, other non-2xx). Body decoding is left to
@@ -234,19 +340,17 @@ async fn send_request(
     let res = match req.send().await {
         Ok(res) => res,
         Err(err) => {
-            return Err(anyhow!(
+            return Err(ApiTransportError(format!(
                 "Could not reach the API at {}: {}",
-                creds.api_url,
-                err
-            ));
+                creds.api_url, err
+            ))
+            .into());
         }
     };
 
     let status = res.status();
     if status.as_u16() == 401 {
-        return Err(anyhow!(
-            "Unauthorized — your token is invalid or revoked. Run `orx login` again."
-        ));
+        return Err(Unauthorized.into());
     }
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -256,13 +360,17 @@ async fn send_request(
         } else {
             format!(": {}", detail)
         };
-        return Err(anyhow!(
-            "Request to {} failed ({} {}){}",
-            path,
+        return Err(ApiResponseError(
             status.as_u16(),
-            reason,
-            suffix
-        ));
+            format!(
+                "Request to {} failed ({} {}){}",
+                path,
+                status.as_u16(),
+                reason,
+                suffix
+            ),
+        )
+        .into());
     }
 
     Ok(res)
@@ -291,6 +399,32 @@ async fn request_no_content(
     Ok(())
 }
 
+/// `POST /feedback`. Accepted without a login; a token only attributes it.
+pub async fn submit_feedback(creds: Option<&Credentials>, body: &impl Serialize) -> Result<()> {
+    let base = creds.map_or_else(crate::config::default_api_url, |c| c.api_url.clone());
+    let mut req = http()
+        .post(format!("{base}/feedback"))
+        .timeout(std::time::Duration::from_secs(10))
+        .json(body);
+    if let Some(creds) = creds {
+        req = req.bearer_auth(&creds.token);
+    }
+    let res = req.send().await?;
+    let status = res.status();
+    if !status.is_success() {
+        // The body names the rejected field so the agent can fix it and retry.
+        let detail: String = res
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(1000)
+            .collect();
+        return Err(anyhow!("Feedback rejected ({status}): {detail}"));
+    }
+    Ok(())
+}
+
 async fn api_get<T: DeserializeOwned>(creds: &Credentials, path: &str) -> Result<T> {
     request(creds, Method::GET, path, None).await
 }
@@ -302,6 +436,99 @@ async fn api_post<T: DeserializeOwned>(creds: &Credentials, path: &str, body: Va
 // ---------------------------------------------------------------------------
 // Endpoint fns (one per TS export, same path/method/shape)
 // ---------------------------------------------------------------------------
+
+/// How long the sign-in and account calls wait on OpenResearch, so a hung API
+/// can't hold the sign-in page open.
+const ACCOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub async fn current_user(creds: &Credentials) -> Result<CurrentUserResponse> {
+    tokio::time::timeout(ACCOUNT_TIMEOUT, api_get(creds, "/users/me"))
+        .await
+        .map_err(|_| {
+            ApiTransportError(format!(
+                "Could not reach the API at {}: timed out",
+                creds.api_url
+            ))
+        })?
+}
+
+/// Posts an alphaXiv id_token issued to the desktop app to `path`, as the
+/// account behind `token` if any, and maps the refusals both routes share.
+async fn post_alphaxiv_id_token(
+    api_url: &str,
+    path: &str,
+    token: Option<&str>,
+    id_token: &str,
+) -> Result<reqwest::Response> {
+    let mut request = http()
+        .post(format!("{api_url}{path}"))
+        .json(&serde_json::json!({ "idToken": id_token }))
+        .timeout(ACCOUNT_TIMEOUT);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| ApiTransportError(format!("Could not reach the API at {api_url}: {err}")))?;
+    match response.status().as_u16() {
+        401 => {
+            let body = response.json::<Value>().await.unwrap_or_default();
+            if body["error"] == "invalid_token" {
+                Err(anyhow!(
+                    "OpenResearch couldn't verify the alphaXiv sign-in. Try again."
+                ))
+            } else {
+                Err(Unauthorized.into())
+            }
+        }
+        404 => Err(anyhow!(
+            "The OpenResearch server at {api_url} is too old for alphaXiv sign-in."
+        )),
+        503 => Err(AlphaXivUnavailable.into()),
+        _ => Ok(response),
+    }
+}
+
+/// A personal access token for the account behind an alphaXiv id_token issued
+/// to the desktop app — `POST /auth/alphaxiv/desktop`.
+pub async fn alphaxiv_desktop_token(api_url: &str, id_token: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Issued {
+        token: String,
+    }
+
+    let response =
+        post_alphaxiv_id_token(api_url, "/auth/alphaxiv/desktop", None, id_token).await?;
+    match response.status().as_u16() {
+        200 => Ok(response.json::<Issued>().await?.token),
+        409 => Err(anyhow!(
+            "An OpenResearch account already uses this email. Sign in at openresearch.sh and connect alphaXiv there, then try again."
+        )),
+        status => Err(anyhow!(
+            "Request to /auth/alphaxiv/desktop failed ({status})."
+        )),
+    }
+}
+
+/// Links the alphaXiv account behind an id_token issued to the desktop app to
+/// the signed-in account — `POST /auth/alphaxiv/link`.
+pub async fn link_alphaxiv(creds: &Credentials, id_token: &str) -> Result<()> {
+    let response = post_alphaxiv_id_token(
+        &creds.api_url,
+        "/auth/alphaxiv/link",
+        Some(&creds.token),
+        id_token,
+    )
+    .await?;
+    match response.status().as_u16() {
+        200..=299 => Ok(()),
+        409 => Err(anyhow!(
+            "This alphaXiv account or your OpenResearch account is already linked to another account."
+        )),
+        status => Err(anyhow!("Request to /auth/alphaxiv/link failed ({status}).")),
+    }
+}
 
 pub async fn list_orgs(creds: &Credentials) -> Result<ListOrgs> {
     api_get(creds, "/orgs").await
@@ -369,6 +596,273 @@ pub async fn create_ssh_key(
 }
 
 // ---------------------------------------------------------------------------
+// Published projects: the one place research leaves for openresearch.sh, and
+// only the `.orx` file the user chose to publish.
+// ---------------------------------------------------------------------------
+
+/// Largest `.orx` file openresearch.sh accepts or serves.
+const MAX_PUBLISHED_PROJECT_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// A link the signed-in user published (`zSharedProject`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedProject {
+    pub id: String,
+    pub slug: String,
+    pub url: String,
+    /// The local project id the link was published from.
+    pub source_project_id: String,
+    pub name: String,
+    pub byte_size: u64,
+    pub published_at: String,
+}
+
+/// What anyone with a link sees (`zPublicSharedProject`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicProject {
+    pub slug: String,
+    pub url: String,
+    pub name: String,
+    pub byte_size: u64,
+    pub publisher: Option<String>,
+}
+
+/// A `/shared-projects` request that surfaces the service's own message, which it writes for people.
+async fn shared_projects_request(
+    creds: &Credentials,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<reqwest::Response> {
+    let mut request = http()
+        .request(method, format!("{}{path}", creds.api_url))
+        .bearer_auth(&creds.token);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| anyhow!("Could not reach the API at {}: {err}", creds.api_url))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let message = response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|body| body["error"]["message"].as_str().map(str::to_owned));
+    Err(match (status.as_u16(), message) {
+        (401, _) => Unauthorized.into(),
+        (404, None) => anyhow!("{} can't publish projects yet.", creds.api_url),
+        (_, Some(message)) => anyhow!("{message}"),
+        _ => anyhow!("Request to {path} failed ({status})."),
+    })
+}
+
+/// Uploads `file`, the `.orx` written with `manifest`, as the link for
+/// `source_project_id`: `POST /shared-projects`, a PUT to the presigned URL,
+/// then `POST /shared-projects/{id}/publish`. Publishing again replaces the file behind the same link.
+pub async fn publish_project(
+    creds: &Credentials,
+    source_project_id: &str,
+    manifest: &crate::local::share::Manifest,
+    file: &std::path::Path,
+) -> Result<PublishedProject> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Reserved {
+        shared_project_id: String,
+        upload_id: String,
+        upload: Upload,
+    }
+    #[derive(Deserialize)]
+    struct Upload {
+        url: String,
+        headers: HashMap<String, String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Published {
+        shared_project: PublishedProject,
+    }
+
+    let digest_path = file.to_path_buf();
+    let (sha256, byte_size) =
+        tokio::task::spawn_blocking(move || crate::compute::digest_file(&digest_path))
+            .await
+            .map_err(|error| anyhow!("hashing the project failed: {error}"))??;
+    if byte_size > MAX_PUBLISHED_PROJECT_BYTES {
+        return Err(anyhow!(
+            "This project is {} as a .orx file; published projects can be at most {}. Leave out logs or artifacts and try again.",
+            crate::store::human_bytes(byte_size),
+            crate::store::human_bytes(MAX_PUBLISHED_PROJECT_BYTES)
+        ));
+    }
+    let reserved: Reserved = shared_projects_request(
+        creds,
+        Method::POST,
+        "/shared-projects",
+        Some(serde_json::json!({
+            "sourceProjectId": source_project_id,
+            // The service keeps names to 200 characters.
+            "name": manifest.project.name.trim().chars().take(200).collect::<String>(),
+            "summary": {
+                "experiments": manifest.experiments.len(),
+                "runs": manifest.runs.len(),
+                "chats": manifest.chats.len(),
+            },
+            "byteSize": byte_size,
+            "sha256": sha256,
+        })),
+    )
+    .await?
+    .json()
+    .await?;
+    let body = tokio::fs::File::open(file).await?;
+    // The presigned URL signs the length, and R2 refuses chunked uploads.
+    let mut put = http()
+        .put(&reserved.upload.url)
+        .header(reqwest::header::CONTENT_LENGTH, byte_size)
+        .body(reqwest::Body::wrap_stream(
+            tokio_util::io::ReaderStream::new(body),
+        ));
+    for (header, value) in &reserved.upload.headers {
+        put = put.header(header, value);
+    }
+    let response = put
+        .send()
+        .await
+        .map_err(|err| anyhow!("Uploading the project failed: {err}"))?;
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "Uploading the project failed ({}).",
+            response.status()
+        ));
+    }
+    let published: Published = shared_projects_request(
+        creds,
+        Method::POST,
+        &format!("/shared-projects/{}/publish", reserved.shared_project_id),
+        Some(serde_json::json!({ "uploadId": reserved.upload_id })),
+    )
+    .await?
+    .json()
+    .await?;
+    Ok(published.shared_project)
+}
+
+/// The signed-in user's link for a local project — `GET /shared-projects`.
+pub async fn find_published_project(
+    creds: &Credentials,
+    project_id: &str,
+) -> Result<Option<PublishedProject>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct List {
+        shared_projects: Vec<PublishedProject>,
+    }
+    let list: List = shared_projects_request(creds, Method::GET, "/shared-projects", None)
+        .await?
+        .json()
+        .await?;
+    Ok(list
+        .shared_projects
+        .into_iter()
+        .find(|link| link.source_project_id == project_id))
+}
+
+/// Unpublish: the link stops working and its file is deleted — `DELETE /shared-projects/{id}`.
+pub async fn delete_published_project(creds: &Credentials, id: &str) -> Result<()> {
+    shared_projects_request(
+        creds,
+        Method::DELETE,
+        &format!("/shared-projects/{id}"),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The slug of an openresearch.sh project link, or the slug itself.
+pub fn published_project_slug(link: &str) -> Option<&str> {
+    let link = link.trim();
+    let link = link[..link.find(['?', '#']).unwrap_or(link.len())].trim_end_matches('/');
+    let slug = link.rsplit_once("/p/").map_or(link, |(_, slug)| slug);
+    (slug.len() == 12 && slug.bytes().all(|b| b.is_ascii_alphanumeric())).then_some(slug)
+}
+
+/// A public link request's response, or why the link doesn't open.
+async fn public_project_response(api_url: &str, path: &str) -> Result<reqwest::Response> {
+    let response = http()
+        .get(format!("{api_url}{path}"))
+        .send()
+        .await
+        .map_err(|err| anyhow!("Could not reach the API at {api_url}: {err}"))?;
+    match response.status().as_u16() {
+        200 => Ok(response),
+        404 => Err(anyhow!(
+            "This project link doesn't work; its publisher may have unpublished it."
+        )),
+        status => Err(anyhow!("Opening the project link failed ({status}).")),
+    }
+}
+
+/// A link's public details; no sign-in — `GET /shared-projects/by-slug/{slug}`.
+pub async fn get_public_project(api_url: &str, slug: &str) -> Result<PublicProject> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Found {
+        shared_project: PublicProject,
+    }
+    let found: Found =
+        public_project_response(api_url, &format!("/shared-projects/by-slug/{slug}"))
+            .await?
+            .json()
+            .await?;
+    Ok(found.shared_project)
+}
+
+/// Saves a link's `.orx` file to `out`; no sign-in — `GET /shared-projects/by-slug/{slug}/file`.
+pub async fn download_public_project(
+    api_url: &str,
+    slug: &str,
+    out: &std::path::Path,
+) -> Result<()> {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    // A whole-request timeout would cut off a large file; a stall is what to give up on.
+    const STALL: std::time::Duration = std::time::Duration::from_secs(60);
+    let response = tokio::time::timeout(
+        STALL,
+        public_project_response(api_url, &format!("/shared-projects/by-slug/{slug}/file")),
+    )
+    .await
+    .map_err(|_| anyhow!("Downloading the project stalled."))??;
+    let mut file = tokio::fs::File::create(out).await?;
+    let mut received = 0u64;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = tokio::time::timeout(STALL, stream.next())
+        .await
+        .map_err(|_| anyhow!("Downloading the project stalled."))?
+    {
+        let chunk = chunk.map_err(|err| anyhow!("Downloading the project failed: {err}"))?;
+        received += chunk.len() as u64;
+        if received > MAX_PUBLISHED_PROJECT_BYTES {
+            return Err(anyhow!(
+                "The project file is larger than {}.",
+                crate::store::human_bytes(MAX_PUBLISHED_PROJECT_BYTES)
+            ));
+        }
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // alphaXiv literature endpoints (public — no auth, different hosts).
 //
 // These do NOT go through `send_request`/`Credentials`: they hit alphaXiv's
@@ -379,6 +873,67 @@ pub async fn create_ssh_key(
 
 /// Sent on external requests — some CDNs reject the default (empty) UA.
 const ALPHAXIV_UA: &str = concat!("openresearch-cli/", env!("CARGO_PKG_VERSION"));
+
+/// Longest `Retry-After` worth waiting out in-process; a longer one fails fast with the wait.
+const MAX_RETRY_WAIT_SECS: u64 = 5;
+
+/// How long to wait before retrying a throttled request: the host's `Retry-After`,
+/// else a growing backoff, plus jitter so concurrent `orx` processes don't retry in lockstep.
+fn retry_delay(retry_after: Option<u64>, attempt: u64) -> std::time::Duration {
+    let secs = retry_after.unwrap_or(attempt);
+    let jitter_ms = u64::try_from(uuid::Uuid::new_v4().as_u128() % 500).unwrap_or(0);
+    std::time::Duration::from_millis(secs * 1000 + jitter_ms)
+}
+
+/// `Retry-After` as seconds from now: either delta-seconds or an HTTP-date (RFC 9110).
+fn retry_after_secs(value: &str) -> Option<u64> {
+    let value = value.trim();
+    value.parse().ok().or_else(|| {
+        let at = httpdate::parse_http_date(value).ok()?;
+        Some(
+            at.duration_since(std::time::SystemTime::now())
+                .map_or(0, |d| d.as_secs()),
+        )
+    })
+}
+
+/// Send a keyless literature GET, retrying 429s: parallel agent calls routinely
+/// burst past these hosts' per-IP limits. Other statuses are left to the caller.
+async fn public_get(
+    request: impl Fn() -> reqwest::RequestBuilder,
+    service: &str,
+    unreachable: impl Fn(reqwest::Error) -> crate::error::Error,
+) -> Result<reqwest::Response> {
+    const ATTEMPTS: u64 = 3;
+    let mut attempt = 1;
+    loop {
+        let res = request()
+            .header("user-agent", ALPHAXIV_UA)
+            .send()
+            .await
+            .map_err(&unreachable)?;
+        if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(res);
+        }
+        let retry_after = res
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(retry_after_secs);
+        drop(res);
+        if attempt == ATTEMPTS || retry_after.is_some_and(|secs| secs > MAX_RETRY_WAIT_SECS) {
+            let wait = match retry_after {
+                Some(secs) if secs > 0 => format!("retry in {secs}s"),
+                _ => "wait a minute before retrying".to_string(),
+            };
+            return Err(anyhow!(
+                "{service} is rate-limiting requests (429 Too Many Requests); {wait}"
+            ));
+        }
+        tokio::time::sleep(retry_delay(retry_after, attempt)).await;
+        attempt += 1;
+    }
+}
 
 /// One alphaXiv full-text or discovery search hit. Serialize is derived so the
 /// CLI can emit endpoint results verbatim.
@@ -449,12 +1004,12 @@ async fn discover_papers(
 ) -> Result<Vec<PaperHit>> {
     let base = crate::config::alphaxiv_api_url();
     let url = paper_discovery_url(&base, strategy, query, options)?;
-    let res = http()
-        .get(url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(url.clone()),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -483,10 +1038,11 @@ pub async fn discover_papers_by_embedding(
 }
 
 /// `2401.12345v2` → `2401.12345`; alphaXiv lookups want the versionless id.
+/// Like alphaXiv, a `v` after a dash is part of the name: `2610.deepseek-v4` stays.
 pub(crate) fn versionless_id(paper_id: &str) -> &str {
     paper_id
         .rfind('v')
-        .filter(|&i| i > 0 && !paper_id[i + 1..].is_empty())
+        .filter(|&i| i > 0 && paper_id.as_bytes()[i - 1] != b'-' && !paper_id[i + 1..].is_empty())
         .filter(|&i| paper_id[i + 1..].chars().all(|c| c.is_ascii_digit()))
         .map_or(paper_id, |i| &paper_id[..i])
 }
@@ -510,12 +1066,12 @@ pub async fn search_papers_fast(query: &str) -> Result<Vec<FastPaperHit>> {
         base,
         urlencoding::encode(query)
     );
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -540,19 +1096,20 @@ pub struct ResolvedPaper {
     pub repo_stars: Option<i64>,
 }
 
-/// Resolve an arXiv id to title + linked GitHub repo. `/papers/v3/{id}` scrapes
+/// Resolve an arXiv or alphaXiv paper id to title + linked GitHub repo. `/papers/v3/{id}` scrapes
 /// arXiv on a miss, so brand-new papers resolve too (their repo links may lag).
-/// The implementations lookup is best-effort — a failure there just means no repo.
+/// A missing or unparseable implementations answer just means no repo; a rate limit or
+/// unreachable host fails the resolve rather than silently starting a blank project.
 pub async fn resolve_paper(paper_id: &str) -> Result<ResolvedPaper> {
     let id = versionless_id(paper_id);
     let base = crate::config::alphaxiv_api_url();
     let url = format!("{}/papers/v3/{}", base, urlencoding::encode(id));
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         return Err(anyhow!(
@@ -603,17 +1160,17 @@ pub async fn resolve_paper(paper_id: &str) -> Result<ResolvedPaper> {
         base,
         urlencoding::encode(&group_id)
     );
-    let impls = match http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-    {
-        Ok(res) if res.status().is_success() => match res.json::<Implementations>().await {
-            Ok(body) => body,
-            Err(_) => return Ok(resolved),
-        },
-        _ => return Ok(resolved),
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
+    if !res.status().is_success() {
+        return Ok(resolved);
+    }
+    let Ok(impls) = res.json::<Implementations>().await else {
+        return Ok(resolved);
     };
 
     let is_github = |r: &&Resource| {
@@ -639,13 +1196,41 @@ const MAX_PAPER_PDF_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `export.arxiv.org` is the host arXiv asks automated clients to use. Old-style
 /// ids (`hep-th/9901001`) carry a slash, so each segment is encoded separately.
+/// alphaXiv-exclusive papers (`2610.some-slug`) have no arXiv copy; alphaXiv serves their PDF.
 fn paper_pdf_url(paper_id: &str) -> String {
-    let path = versionless_id(paper_id)
+    let id = versionless_id(paper_id);
+    let path = id
         .split('/')
         .map(|segment| urlencoding::encode(segment).into_owned())
         .collect::<Vec<_>>()
         .join("/");
-    format!("https://export.arxiv.org/pdf/{path}")
+    if is_arxiv_id(id) {
+        format!("https://export.arxiv.org/pdf/{path}")
+    } else {
+        format!("https://www.alphaxiv.org/abs/{path}.pdf")
+    }
+}
+
+/// `2401.12345` or old-style `hep-th/9901001`; anything else is an alphaXiv id.
+pub(crate) fn is_arxiv_id(id: &str) -> bool {
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    id.contains('/')
+        || id.split_once('.').is_some_and(|(month, number)| {
+            month.len() == 4 && digits(month) && (4..=5).contains(&number.len()) && digits(number)
+        })
+}
+
+/// PDFs run to tens of MB, so the deadline is per read, not for the whole
+/// download: a slow link must still finish the paper (OR-468).
+fn paper_pdf_http() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        crate::net::remote_client()
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .read_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("http client")
+    })
 }
 
 /// Download a paper's PDF, for paper projects that start blank because the
@@ -657,21 +1242,26 @@ pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
         .split('/')
         .any(|segment| segment == "." || segment == "..")
     {
-        return Err(anyhow!("{} is not an arXiv id", paper_id));
+        return Err(anyhow!("{} is not a paper id", paper_id));
     }
     let url = paper_pdf_url(paper_id);
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach arXiv at {}: {}", url, e))?;
+    let host = if is_arxiv_id(versionless_id(paper_id)) {
+        "arXiv"
+    } else {
+        "alphaXiv"
+    };
+    let res = public_get(
+        || paper_pdf_http().get(&url),
+        host,
+        |e| anyhow!("Could not reach {} at {}: {}", host, url, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
         return Err(anyhow!(
-            "arXiv PDF download failed ({} {})",
+            "{} PDF download failed ({} {})",
+            host,
             status.as_u16(),
             reason
         ));
@@ -691,7 +1281,26 @@ pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
     {
         return Err(anyhow!("{} is too large to download", url));
     }
-    Ok(res.bytes().await?.to_vec())
+    capped_body(res, MAX_PAPER_PDF_BYTES, &url).await
+}
+
+/// Reads the body while enforcing `max` live: a response that never declares
+/// its length can't grow past the cap unchecked. A bare "error decoding
+/// response body" says nothing about which download died; the error names the
+/// URL so the failure is actionable.
+async fn capped_body(res: reqwest::Response, max: u64, url: &str) -> Result<Vec<u8>> {
+    use futures::StreamExt;
+    let mut body = Vec::new();
+    let mut stream = res.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| anyhow!("PDF download from {} was interrupted: {}", url, e))?;
+        body.extend_from_slice(&chunk);
+        if body.len() as u64 > max {
+            return Err(anyhow!("{} is too large to download", url));
+        }
+    }
+    Ok(body)
 }
 
 /// Look up a paper's linked GitHub repository (the most-starred repo associated
@@ -706,12 +1315,12 @@ pub async fn fetch_paper_github(paper_id: &str) -> Result<Option<String>> {
         base,
         urlencoding::encode(versionless)
     );
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -741,12 +1350,12 @@ pub async fn fetch_paper_github(paper_id: &str) -> Result<Option<String>> {
 pub async fn fetch_paper_markdown(kind: &str, paper_id: &str) -> Result<Option<String>> {
     let base = crate::config::alphaxiv_web_url();
     let url = format!("{}/{}/{}.md", base, kind, paper_id);
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if status.as_u16() == 404 {
         return Ok(None);
@@ -781,9 +1390,9 @@ pub const BIORXIV_SOURCE_ID: &str = "S4306402567";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LitHit {
-    /// `"alphaxiv" | "openalex" | "biorxiv"` — set by the search fn.
+    /// `"alphaxiv" | "openalex" | "biorxiv" | "pubmed"` — set by the search fn.
     pub source: String,
-    /// Self-routing id for `orx paper`: an arXiv id, a DOI, or an OpenAlex `W…` id.
+    /// Self-routing id for `orx paper`: an arXiv id, a DOI, an OpenAlex `W…` id, or a PMID.
     pub id: String,
     pub title: String,
     #[serde(rename = "abstract", default)]
@@ -1002,18 +1611,12 @@ fn openalex_discovery_url(
 
 fn rerank_openalex_works(works: &mut [OpenAlexWork], prioritize: &str) {
     match prioritize {
-        "recency" => works.sort_by(|a, b| match (&a.publication_date, &b.publication_date) {
-            (Some(a), Some(b)) => b.cmp(a),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }),
-        "historical" => works.sort_by(|a, b| match (&a.publication_date, &b.publication_date) {
-            (Some(a), Some(b)) => a.cmp(b),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }),
+        "recency" => {
+            works.sort_by(|a, b| compare_dates(&a.publication_date, &b.publication_date, true))
+        }
+        "historical" => {
+            works.sort_by(|a, b| compare_dates(&a.publication_date, &b.publication_date, false))
+        }
         "popular" => works.sort_by(|a, b| {
             b.cited_by_count
                 .unwrap_or_default()
@@ -1030,12 +1633,12 @@ pub async fn discover_openalex(
 ) -> Result<Vec<LitHit>> {
     let base = crate::config::openalex_api_url();
     let url = openalex_discovery_url(&base, query, &crate::config::openalex_mailto(), options)?;
-    let res = http()
-        .get(url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach OpenAlex at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(url.clone()),
+        "OpenAlex",
+        |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -1083,12 +1686,12 @@ pub async fn fetch_openalex_work(id_or_doi: &str) -> Result<Option<OpenAlexWork>
         openalex_selector(id_or_doi),
         urlencoding::encode(&crate::config::openalex_mailto()),
     );
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach OpenAlex at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "OpenAlex",
+        |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
+    )
+    .await?;
     let status = res.status();
     if status.as_u16() == 404 {
         return Ok(None);
@@ -1133,12 +1736,12 @@ pub struct BiorxivDetail {
 pub async fn fetch_biorxiv(doi: &str) -> Result<Option<BiorxivDetail>> {
     let base = crate::config::biorxiv_api_url();
     let url = format!("{}/details/biorxiv/{}/na/json", base, doi.trim());
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach bioRxiv at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "bioRxiv",
+        |e| anyhow!("Could not reach bioRxiv at {}: {}", base, e),
+    )
+    .await?;
     let status = res.status();
     if status.as_u16() == 404 {
         return Ok(None);
@@ -1161,15 +1764,553 @@ pub async fn fetch_biorxiv(doi: &str) -> Result<Option<BiorxivDetail>> {
     Ok(body.collection.into_iter().last())
 }
 
+// ---------------------------------------------------------------------------
+// PubMed via NCBI E-utilities: esearch ranks PMIDs (Best Match), efetch returns
+// the records. efetch serves abstracts only as XML, so records are parsed here.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub struct PubmedDiscoveryOptions<'a> {
+    pub limit: u32,
+    pub published_after: Option<&'a str>,
+    pub published_before: Option<&'a str>,
+    pub prioritize: &'a str,
+}
+
+/// One PubMed record, parsed from an efetch `<PubmedArticle>` or `<PubmedBookArticle>`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PubmedArticle {
+    pub pmid: String,
+    pub title: String,
+    pub abstract_: String,
+    pub authors: Vec<String>,
+    /// Journal title, or the book title for a book record.
+    pub journal: String,
+    /// `YYYY[-MM[-DD]]`: the electronic date when present, else the issue date.
+    pub publication_date: Option<String>,
+    pub doi: Option<String>,
+    pub pmcid: Option<String>,
+}
+
+impl PubmedArticle {
+    fn into_lit_hit(self) -> LitHit {
+        LitHit {
+            source: "pubmed".to_string(),
+            id: self.pmid,
+            title: self.title,
+            abstract_: self.abstract_,
+            publication_date: self.publication_date,
+            votes: None,
+            citations: None,
+            snippets: Vec::new(),
+        }
+    }
+}
+
+fn pubmed_discovery_url(
+    base: &str,
+    query: &str,
+    email: &str,
+    options: PubmedDiscoveryOptions<'_>,
+) -> Result<reqwest::Url> {
+    // PubMed has no citation counts, so only date priorities rerank a broader relevance page.
+    let fetch_limit = if matches!(options.prioritize, "recency" | "historical") {
+        options.limit.saturating_mul(4).max(50)
+    } else {
+        options.limit
+    };
+    let mut url = reqwest::Url::parse(&format!("{base}/esearch.fcgi"))?;
+    {
+        let mut params = url.query_pairs_mut();
+        params.append_pair("db", "pubmed");
+        params.append_pair("term", query);
+        params.append_pair("retmode", "json");
+        params.append_pair("retmax", &fetch_limit.clamp(1, 200).to_string());
+        params.append_pair("sort", "relevance");
+        params.append_pair("tool", "orx");
+        params.append_pair("email", email);
+        // E-utilities ignores a date range unless both bounds are set.
+        if options.published_after.is_some() || options.published_before.is_some() {
+            let bound = |date: Option<&str>, fallback: &str| {
+                date.map_or_else(|| fallback.to_string(), |d| d.replace('-', "/"))
+            };
+            params.append_pair("datetype", "pdat");
+            params.append_pair("mindate", &bound(options.published_after, "1000/01/01"));
+            params.append_pair("maxdate", &bound(options.published_before, "3000/12/31"));
+        }
+    }
+    Ok(url)
+}
+
+fn pubmed_fetch_url(base: &str, pmids: &[String], email: &str) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(&format!("{base}/efetch.fcgi"))?;
+    url.query_pairs_mut()
+        .append_pair("db", "pubmed")
+        .append_pair("id", &pmids.join(","))
+        .append_pair("retmode", "xml")
+        .append_pair("tool", "orx")
+        .append_pair("email", email);
+    Ok(url)
+}
+
+async fn pubmed_get(base: &str, url: reqwest::Url, action: &str) -> Result<reqwest::Response> {
+    let res = public_get(
+        || http().get(url.clone()),
+        "PubMed",
+        |e| anyhow!("Could not reach PubMed at {}: {}", base, e),
+    )
+    .await?;
+    let status = res.status();
+    if !status.is_success() {
+        let reason = status.canonical_reason().unwrap_or("");
+        return Err(anyhow!(
+            "PubMed {} failed ({} {})",
+            action,
+            status.as_u16(),
+            reason
+        ));
+    }
+    Ok(res)
+}
+
+async fn fetch_pubmed_articles(pmids: &[String]) -> Result<Vec<PubmedArticle>> {
+    let base = crate::config::pubmed_api_url();
+    let url = pubmed_fetch_url(&base, pmids, &crate::config::ncbi_email())?;
+    let xml = pubmed_get(&base, url, "lookup").await?.text().await?;
+    parse_pubmed_articles(&xml)
+}
+
+/// Search PubMed, keeping esearch's relevance order unless a date priority reranks it.
+pub async fn discover_pubmed(
+    query: &str,
+    options: PubmedDiscoveryOptions<'_>,
+) -> Result<Vec<LitHit>> {
+    let base = crate::config::pubmed_api_url();
+    let url = pubmed_discovery_url(&base, query, &crate::config::ncbi_email(), options)?;
+
+    #[derive(Deserialize)]
+    struct SearchResult {
+        #[serde(default)]
+        idlist: Vec<String>,
+        #[serde(rename = "ERROR")]
+        error: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct SearchResponse {
+        esearchresult: SearchResult,
+    }
+    let result = pubmed_get(&base, url, "search")
+        .await?
+        .json::<SearchResponse>()
+        .await?
+        .esearchresult;
+    if let Some(error) = result.error {
+        return Err(anyhow!("PubMed search failed: {error}"));
+    }
+    if result.idlist.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // efetch returns records in the order of the requested ids.
+    let mut articles = fetch_pubmed_articles(&result.idlist).await?;
+    rerank_pubmed_articles(&mut articles, options.prioritize);
+    Ok(articles
+        .into_iter()
+        .take(options.limit as usize)
+        .map(PubmedArticle::into_lit_hit)
+        .collect())
+}
+
+fn rerank_pubmed_articles(articles: &mut [PubmedArticle], prioritize: &str) {
+    match prioritize {
+        "recency" => {
+            articles.sort_by(|a, b| compare_dates(&a.publication_date, &b.publication_date, true))
+        }
+        "historical" => {
+            articles.sort_by(|a, b| compare_dates(&a.publication_date, &b.publication_date, false))
+        }
+        _ => {}
+    }
+}
+
+/// Undated records sort last in either direction.
+fn compare_dates(a: &Option<String>, b: &Option<String>, newest_first: bool) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) if newest_first => b.cmp(a),
+        (Some(a), Some(b)) => a.cmp(b),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Fetch one PubMed record by PMID. Returns `Ok(None)` when PubMed has no such
+/// record (efetch answers 200 with an empty set).
+pub async fn fetch_pubmed(pmid: &str) -> Result<Option<PubmedArticle>> {
+    Ok(fetch_pubmed_articles(&[pmid.to_string()])
+        .await?
+        .into_iter()
+        .next())
+}
+
+fn xml_child<'a, 'i>(node: roxmltree::Node<'a, 'i>, name: &str) -> Option<roxmltree::Node<'a, 'i>> {
+    node.children().find(|c| c.has_tag_name(name))
+}
+
+fn xml_path<'a, 'i>(
+    node: roxmltree::Node<'a, 'i>,
+    path: &[&str],
+) -> Option<roxmltree::Node<'a, 'i>> {
+    path.iter().try_fold(node, |n, name| xml_child(n, name))
+}
+
+/// All text under a node, so inline markup (`<i>`, `<sup>`) in titles and abstracts is kept as text.
+fn xml_text(node: roxmltree::Node<'_, '_>) -> String {
+    node.descendants()
+        .filter(|n| n.is_text())
+        .filter_map(|n| n.text())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// `<Year>/<Month>/<Day>` → `YYYY[-MM[-DD]]`. Month may be numeric or `Jan`…`Dec`;
+/// an issue date may instead be a free-form `<MedlineDate>` such as `2024 Jan-Feb`.
+fn pubmed_date(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    let year = match xml_child(node, "Year") {
+        Some(y) => xml_text(y),
+        None => xml_text(xml_child(node, "MedlineDate")?)
+            .get(..4)
+            .filter(|y| y.bytes().all(|b| b.is_ascii_digit()))?
+            .to_string(),
+    };
+    let month = xml_child(node, "Month").map(xml_text).and_then(|m| {
+        const MONTHS: [&str; 12] = [
+            "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+        ];
+        let lower = m.to_ascii_lowercase();
+        match lower.parse::<u32>() {
+            Ok(n) if (1..=12).contains(&n) => Some(n),
+            _ => MONTHS
+                .iter()
+                .position(|name| lower.starts_with(name))
+                .map(|i| i as u32 + 1),
+        }
+    });
+    let day = xml_child(node, "Day").and_then(|d| xml_text(d).parse::<u32>().ok());
+    Some(match (month, day) {
+        (Some(m), Some(d)) => format!("{year}-{m:02}-{d:02}"),
+        (Some(m), None) => format!("{year}-{m:02}"),
+        _ => year,
+    })
+}
+
+/// Labeled sections of a (possibly structured) `<Abstract>` under `parent`.
+fn pubmed_abstract(parent: roxmltree::Node<'_, '_>) -> String {
+    let Some(abs) = xml_child(parent, "Abstract") else {
+        return String::new();
+    };
+    abs.children()
+        .filter(|c| c.has_tag_name("AbstractText"))
+        .map(|section| match section.attribute("Label") {
+            Some(label) if !label.eq_ignore_ascii_case("unlabelled") => {
+                format!("{label}: {}", xml_text(section))
+            }
+            _ => xml_text(section),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Author names under `parent`.
+fn pubmed_authors(parent: roxmltree::Node<'_, '_>) -> Vec<String> {
+    let Some(list) = xml_child(parent, "AuthorList") else {
+        return Vec::new();
+    };
+    list.children()
+        .filter(|c| c.has_tag_name("Author"))
+        .filter_map(|author| {
+            if let Some(collective) = xml_child(author, "CollectiveName") {
+                return Some(xml_text(collective));
+            }
+            let last = xml_text(xml_child(author, "LastName")?);
+            Some(match xml_child(author, "ForeName") {
+                Some(fore) => format!("{} {last}", xml_text(fore)),
+                None => last,
+            })
+        })
+        .collect()
+}
+
+/// An id of `kind` from the record's own id list; each reference in `ReferenceList` carries one too.
+fn pubmed_article_id(data: roxmltree::Node<'_, '_>, kind: &str) -> Option<String> {
+    xml_child(data, "ArticleIdList")?
+        .children()
+        .find(|c| c.has_tag_name("ArticleId") && c.attribute("IdType") == Some(kind))
+        .map(xml_text)
+}
+
+fn parse_pubmed_article(node: roxmltree::Node<'_, '_>) -> Option<PubmedArticle> {
+    let citation = xml_child(node, "MedlineCitation")?;
+    let article = xml_child(citation, "Article")?;
+    let data = xml_child(node, "PubmedData");
+    let doi = data.and_then(|d| pubmed_article_id(d, "doi")).or_else(|| {
+        article
+            .children()
+            .find(|c| c.has_tag_name("ELocationID") && c.attribute("EIdType") == Some("doi"))
+            .map(xml_text)
+    });
+    Some(PubmedArticle {
+        pmid: xml_text(xml_child(citation, "PMID")?),
+        title: xml_child(article, "ArticleTitle")
+            .map(xml_text)
+            .unwrap_or_default(),
+        abstract_: pubmed_abstract(article),
+        authors: pubmed_authors(article),
+        journal: xml_path(article, &["Journal", "Title"])
+            .map(xml_text)
+            .unwrap_or_default(),
+        publication_date: xml_child(article, "ArticleDate")
+            .and_then(pubmed_date)
+            .or_else(|| {
+                xml_path(article, &["Journal", "JournalIssue", "PubDate"]).and_then(pubmed_date)
+            }),
+        doi,
+        pmcid: data.and_then(|d| pubmed_article_id(d, "pmc")),
+    })
+}
+
+/// Book chapters (e.g. StatPearls) come back as `<PubmedBookArticle>` and rank highly for clinical queries.
+fn parse_pubmed_book_article(node: roxmltree::Node<'_, '_>) -> Option<PubmedArticle> {
+    let document = xml_child(node, "BookDocument")?;
+    let book = xml_child(document, "Book");
+    let book_title = book
+        .and_then(|b| xml_child(b, "BookTitle"))
+        .map(xml_text)
+        .unwrap_or_default();
+    Some(PubmedArticle {
+        pmid: xml_text(xml_child(document, "PMID")?),
+        title: xml_child(document, "ArticleTitle")
+            .map(xml_text)
+            .unwrap_or_else(|| book_title.clone()),
+        abstract_: pubmed_abstract(document),
+        authors: pubmed_authors(document),
+        journal: book_title,
+        publication_date: book
+            .and_then(|b| xml_child(b, "PubDate"))
+            .and_then(pubmed_date),
+        doi: xml_child(node, "PubmedBookData").and_then(|d| pubmed_article_id(d, "doi")),
+        pmcid: None,
+    })
+}
+
+fn parse_pubmed_articles(xml: &str) -> Result<Vec<PubmedArticle>> {
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let doc = roxmltree::Document::parse_with_options(xml, options)
+        .map_err(|e| anyhow!("Could not parse the PubMed response: {e}"))?;
+    Ok(doc
+        .root_element()
+        .children()
+        .filter_map(|n| match n.tag_name().name() {
+            "PubmedArticle" => parse_pubmed_article(n),
+            "PubmedBookArticle" => parse_pubmed_book_article(n),
+            _ => None,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{
+        download_public_project, publish_project, published_project_slug, Credentials, Value,
+    };
     use super::{
         openalex_discovery_url, openalex_selector, paper_discovery_url, reconstruct_abstract,
         rerank_openalex_works, CreateSandboxBody, ListCatalog, ListCpuCatalog, LitHit,
         OpenAlexDiscoveryOptions, OpenAlexWork, PaperDiscoveryOptions, PaperHit, SandboxEnvelope,
         SandboxTarget, BIORXIV_SOURCE_ID,
     };
+    use super::{
+        parse_pubmed_articles, public_get, pubmed_discovery_url, pubmed_fetch_url,
+        rerank_pubmed_articles, retry_after_secs, retry_delay, PubmedArticle,
+        PubmedDiscoveryOptions,
+    };
     use serde_json::json;
+
+    #[test]
+    fn current_user_decodes_linked_and_legacy_accounts() {
+        for alphaxiv_url in [Some("https://www.alphaxiv.org"), None] {
+            let response: super::CurrentUserResponse = serde_json::from_value(json!({
+                "user": { "id": "user-1", "email": "person@example.org", "firstName": "A", "lastName": null, "alphaxivUrl": alphaxiv_url }
+            })).unwrap();
+            assert_eq!(response.user.email, "person@example.org");
+            assert_eq!(response.user.alphaxiv_url.as_deref(), alphaxiv_url);
+        }
+    }
+
+    #[test]
+    fn pubmed_discovery_url_fills_the_open_date_bound_and_widens_date_priorities() {
+        let url = pubmed_discovery_url(
+            "https://eutils.example/entrez/eutils",
+            "crispr base editing",
+            "orx@example.com",
+            PubmedDiscoveryOptions {
+                limit: 10,
+                published_after: Some("2024-01-01"),
+                published_before: None,
+                prioritize: "recency",
+            },
+        )
+        .expect("valid PubMed URL");
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.path(), "/entrez/eutils/esearch.fcgi");
+        assert_eq!(params["term"], "crispr base editing");
+        assert_eq!(params["retmax"], "50");
+        assert_eq!(params["sort"], "relevance");
+        assert_eq!(params["datetype"], "pdat");
+        assert_eq!(params["mindate"], "2024/01/01");
+        assert_eq!(params["maxdate"], "3000/12/31");
+        assert_eq!(params["tool"], "orx");
+        assert_eq!(params["email"], "orx@example.com");
+
+        let url = pubmed_discovery_url(
+            "https://eutils.example",
+            "q",
+            "e",
+            PubmedDiscoveryOptions {
+                limit: 10,
+                published_after: None,
+                published_before: None,
+                prioritize: "popular",
+            },
+        )
+        .unwrap();
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(params["retmax"], "10");
+        assert!(!params.contains_key("mindate"));
+    }
+
+    #[test]
+    fn pubmed_fetch_url_joins_pmids() {
+        let url =
+            pubmed_fetch_url("https://eutils.example", &["1".into(), "2".into()], "e").unwrap();
+        assert_eq!(url.path(), "/efetch.fcgi");
+        assert!(url.query().unwrap().contains("id=1%2C2"));
+    }
+
+    /// Trimmed from a real efetch response: DTD header, inline markup, structured
+    /// abstract, collective author, and a reference whose DOI must be ignored.
+    #[test]
+    fn parses_pubmed_efetch_records() {
+        let xml = r#"<?xml version="1.0" ?>
+<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">
+<PubmedArticleSet>
+<PubmedArticle><MedlineCitation><PMID Version="1">111</PMID><Article>
+<Journal><JournalIssue><PubDate><Year>2024</Year><Month>Jun</Month></PubDate></JournalIssue><Title>Nature reviews</Title></Journal>
+<ArticleTitle>CRISPR in <i>E. coli</i>.</ArticleTitle>
+<ELocationID EIdType="doi" ValidYN="Y">10.1/eloc</ELocationID>
+<Abstract><AbstractText Label="BACKGROUND">Why.</AbstractText><AbstractText Label="RESULTS">What.</AbstractText></Abstract>
+<AuthorList><Author><LastName>Villiger</LastName><ForeName>Lukas</ForeName></Author><Author><CollectiveName>CRISPR Consortium</CollectiveName></Author></AuthorList>
+<ArticleDate DateType="Electronic"><Year>2024</Year><Month>02</Month><Day>02</Day></ArticleDate>
+</Article></MedlineCitation>
+<PubmedData><ArticleIdList><ArticleId IdType="pubmed">111</ArticleId><ArticleId IdType="doi">10.1/own</ArticleId><ArticleId IdType="pmc">PMC123</ArticleId></ArticleIdList>
+<ReferenceList><Reference><ArticleIdList><ArticleId IdType="doi">10.1/ref</ArticleId></ArticleIdList></Reference></ReferenceList></PubmedData>
+</PubmedArticle>
+<PubmedArticle><MedlineCitation><PMID>222</PMID><Article>
+<Journal><JournalIssue><PubDate><MedlineDate>1998 Jan-Feb</MedlineDate></PubDate></JournalIssue><Title>J</Title></Journal>
+<ArticleTitle>Old</ArticleTitle><ELocationID EIdType="doi">10.1/eloc2</ELocationID>
+<Abstract><AbstractText Label="UNLABELLED">Plain.</AbstractText></Abstract>
+</Article></MedlineCitation><PubmedData><ArticleIdList><ArticleId IdType="pubmed">222</ArticleId></ArticleIdList></PubmedData></PubmedArticle>
+<PubmedBookArticle><BookDocument><PMID Version="1">333</PMID>
+<Book><BookTitle book="statpearls">StatPearls</BookTitle><PubDate><Year>2026</Year><Month>01</Month></PubDate>
+</Book>
+<ArticleTitle>Splenectomy</ArticleTitle>
+<AuthorList Type="authors"><Author><LastName>Menon</LastName><ForeName>Gopal</ForeName></Author></AuthorList>
+<Abstract><AbstractText>Removal of the spleen.</AbstractText><CopyrightInformation>Copyright</CopyrightInformation></Abstract>
+</BookDocument><PubmedBookData><ArticleIdList><ArticleId IdType="pubmed">333</ArticleId></ArticleIdList></PubmedBookData></PubmedBookArticle>
+</PubmedArticleSet>"#;
+        let articles = parse_pubmed_articles(xml).expect("valid PubMed XML");
+        assert_eq!(
+            articles[0],
+            PubmedArticle {
+                pmid: "111".into(),
+                title: "CRISPR in E. coli.".into(),
+                abstract_: "BACKGROUND: Why.\n\nRESULTS: What.".into(),
+                authors: vec!["Lukas Villiger".into(), "CRISPR Consortium".into()],
+                journal: "Nature reviews".into(),
+                publication_date: Some("2024-02-02".into()),
+                doi: Some("10.1/own".into()),
+                pmcid: Some("PMC123".into()),
+            }
+        );
+        assert_eq!(articles[1].publication_date.as_deref(), Some("1998"));
+        assert_eq!(articles[1].doi.as_deref(), Some("10.1/eloc2"));
+        assert_eq!(articles[1].pmcid, None);
+        assert_eq!(articles[1].abstract_, "Plain.");
+        assert_eq!(
+            articles[2],
+            PubmedArticle {
+                pmid: "333".into(),
+                title: "Splenectomy".into(),
+                abstract_: "Removal of the spleen.".into(),
+                authors: vec!["Gopal Menon".into()],
+                journal: "StatPearls".into(),
+                publication_date: Some("2026-01".into()),
+                doi: None,
+                pmcid: None,
+            }
+        );
+
+        let empty = r#"<?xml version="1.0" ?><PubmedArticleSet></PubmedArticleSet>"#;
+        assert!(parse_pubmed_articles(empty).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retry_delay_prefers_retry_after_over_backoff() {
+        let ms = |retry_after, attempt| retry_delay(retry_after, attempt).as_millis();
+        assert!((2000..2500).contains(&ms(Some(2), 1)));
+        assert!((1000..1500).contains(&ms(None, 1)));
+        assert!((2000..2500).contains(&ms(None, 2)));
+    }
+
+    #[test]
+    fn retry_after_accepts_seconds_or_an_http_date() {
+        assert_eq!(retry_after_secs(" 30 "), Some(30));
+        assert_eq!(retry_after_secs("Wed, 21 Oct 2015 07:28:00 GMT"), Some(0));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        let secs = retry_after_secs(&httpdate::fmt_http_date(later)).unwrap();
+        assert!((118..=120).contains(&secs));
+        assert_eq!(retry_after_secs("soon"), None);
+    }
+
+    #[test]
+    fn reranks_pubmed_by_date_with_undated_last() {
+        let article = |pmid: &str, date: Option<&str>| PubmedArticle {
+            pmid: pmid.into(),
+            publication_date: date.map(Into::into),
+            ..Default::default()
+        };
+        let articles = || {
+            vec![
+                article("a", Some("2020-05")),
+                article("b", None),
+                article("c", Some("2024-01-01")),
+            ]
+        };
+        let order = |a: &[PubmedArticle]| a.iter().map(|a| a.pmid.clone()).collect::<Vec<_>>();
+        let mut recency = articles();
+        rerank_pubmed_articles(&mut recency, "recency");
+        assert_eq!(order(&recency), ["c", "a", "b"]);
+        let mut historical = articles();
+        rerank_pubmed_articles(&mut historical, "historical");
+        assert_eq!(order(&historical), ["a", "c", "b"]);
+        let mut popular = articles();
+        rerank_pubmed_articles(&mut popular, "popular");
+        assert_eq!(order(&popular), ["a", "b", "c"]);
+    }
 
     #[test]
     fn paper_pdf_url_drops_the_version_and_keeps_legacy_id_slashes() {
@@ -1180,6 +2321,22 @@ mod tests {
         assert_eq!(
             super::paper_pdf_url("hep-th/9901001"),
             "https://export.arxiv.org/pdf/hep-th/9901001"
+        );
+    }
+
+    #[test]
+    fn alphaxiv_exclusive_pdfs_come_from_alphaxiv() {
+        assert_eq!(
+            super::paper_pdf_url("2610.learning-spectrum-matched-shellsort"),
+            "https://www.alphaxiv.org/abs/2610.learning-spectrum-matched-shellsort.pdf"
+        );
+        assert_eq!(
+            super::paper_pdf_url("2610.learning-spectrum-matched-shellsortv1"),
+            "https://www.alphaxiv.org/abs/2610.learning-spectrum-matched-shellsort.pdf"
+        );
+        assert_eq!(
+            super::paper_pdf_url("2610.deepseek-v4"),
+            "https://www.alphaxiv.org/abs/2610.deepseek-v4.pdf"
         );
     }
 
@@ -1278,7 +2435,7 @@ mod tests {
     }
 
     #[test]
-    fn openresearch_client_contains_only_account_and_compute_paths() {
+    fn openresearch_client_sends_research_only_when_publishing() {
         let source = include_str!("client.rs");
         let production = source
             .split("#[cfg(test)]")
@@ -1290,11 +2447,14 @@ mod tests {
                 "research-state endpoint remains in client.rs: {forbidden}"
             );
         }
+        // Publishing a project is the one upload of research, and only of the `.orx` file.
+        assert_eq!(production.matches("Body::wrap_stream").count(), 1);
         for retained in [
             "\"/orgs\"",
             "\"/compute/catalog",
             "\"/sandboxes",
             "\"/ssh-keys",
+            "\"/shared-projects\"",
         ] {
             assert!(
                 production.contains(retained),
@@ -1431,6 +2591,7 @@ mod tests {
     fn serializes_create_sandbox_body_without_project() {
         let body = CreateSandboxBody {
             organization_id: "org_123".into(),
+            rental_lease: None,
             target: SandboxTarget::NewCpu {
                 cpu_flavor: "cpu5c".into(),
                 vcpu_count: 2,
@@ -1714,5 +2875,310 @@ mod tests {
         assert_eq!(latest.version, "2");
         assert_eq!(latest.abstract_, "new");
         assert_eq!(latest.published, "10.1000/j.x");
+    }
+
+    const LIMITED: &str = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    async fn serve_statuses(
+        responses: &'static [&'static str],
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await.unwrap();
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    async fn loopback_public_get(url: &str) -> anyhow::Result<reqwest::Response> {
+        let client = crate::net::loopback_client().build().unwrap();
+        public_get(|| client.get(url), "Test", |e| anyhow::anyhow!("{e}")).await
+    }
+
+    #[tokio::test]
+    async fn public_get_retries_a_rate_limit_then_succeeds() {
+        let (url, server) = serve_statuses(&[
+            LIMITED,
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        ])
+        .await;
+        let res = loopback_public_get(&url).await.unwrap();
+        assert_eq!(res.status(), 200);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_get_gives_up_after_persistent_rate_limits() {
+        let (url, server) = serve_statuses(&[LIMITED, LIMITED, LIMITED]).await;
+        let err = loopback_public_get(&url).await.unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Test is rate-limiting requests (429 Too Many Requests); wait a minute before retrying"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_get_fails_fast_when_the_wait_is_long() {
+        let (url, server) = serve_statuses(&[
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let err = loopback_public_get(&url).await.unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Test is rate-limiting requests (429 Too Many Requests); retry in 60s"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_error_includes_the_source_chain() {
+        let err = crate::net::loopback_client()
+            .build()
+            .expect("build loopback client")
+            .get("http://127.0.0.1:1/unreachable")
+            .send()
+            .await
+            .expect_err("connection to port 1 must fail");
+
+        let mut cause = std::error::Error::source(&err).expect("transport error has a cause");
+        while let Some(next) = std::error::Error::source(cause) {
+            cause = next;
+        }
+        let deepest_cause = cause.to_string();
+        assert!(!err.to_string().contains(&deepest_cause));
+
+        let rendered = super::transport_error("https://api.example.test", err).to_string();
+
+        assert!(
+            rendered.starts_with("Could not reach alphaXiv at https://api.example.test: "),
+            "prefix preserved: {rendered}"
+        );
+        assert!(
+            rendered.contains(&deepest_cause),
+            "deepest cause {deepest_cause:?} missing: {rendered}"
+        );
+    }
+
+    /// Trickles `body` out in `parts` writes at `pace`; `Content-Length` is
+    /// declared only when asked, so tests can cover undeclared lengths too.
+    async fn serve_paced_body(
+        body: &'static [u8],
+        parts: usize,
+        pace: std::time::Duration,
+        declare_length: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+            let length = if declare_length {
+                format!("Content-Length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n{length}Connection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            for part in body.chunks((body.len() / parts).max(1)) {
+                tokio::time::sleep(pace).await;
+                stream.write_all(part).await.unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    /// Sends the response head then holds the body open forever.
+    async fn serve_stalled_body() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 10\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        (url, server)
+    }
+
+    /// The PDF client's contract, shrunk to test scale: a read may take no
+    /// longer than 500ms, however long the whole download runs.
+    fn short_read_client() -> reqwest::Client {
+        crate::net::loopback_client()
+            .read_timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn paper_pdf_download_finishes_a_slow_but_progressing_body() {
+        static BODY: &[u8] = &[b'%'; 8];
+        // The whole body takes ~1.2s — past a 500ms whole-request deadline —
+        // but every part lands inside the per-read timeout (OR-468).
+        let (url, server) =
+            serve_paced_body(BODY, 4, std::time::Duration::from_millis(300), true).await;
+        let res = short_read_client().get(&url).send().await.unwrap();
+        let body = super::capped_body(res, 64, &url).await.unwrap();
+        assert_eq!(body, BODY);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn paper_pdf_download_times_out_a_stalled_read() {
+        let (url, server) = serve_stalled_body().await;
+        let res = short_read_client().get(&url).send().await.unwrap();
+        let err = super::capped_body(res, 64, &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("was interrupted"), "{err}");
+        assert!(err.contains(&url), "{err}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn paper_pdf_download_stops_past_the_size_cap() {
+        static BODY: &[u8] = &[b'x'; 100];
+        // No declared length: the cap has to bite mid-stream.
+        let (url, server) = serve_paced_body(BODY, 1, std::time::Duration::ZERO, false).await;
+        let res = short_read_client().get(&url).send().await.unwrap();
+        let err = super::capped_body(res, 10, &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, format!("{url} is too large to download"));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn published_project_slug_accepts_links_and_bare_slugs() {
+        for link in [
+            "a1B2c3D4e5F6",
+            "https://openresearch.sh/p/a1B2c3D4e5F6",
+            "https://openresearch.sh/p/a1B2c3D4e5F6/?ref=x",
+            "openresearch://p/a1B2c3D4e5F6#top",
+        ] {
+            assert_eq!(published_project_slug(link), Some("a1B2c3D4e5F6"), "{link}");
+        }
+        for link in [
+            "https://openresearch.sh/p/short",
+            "../../etc/passwd",
+            "a1B2c3D4e5F-",
+        ] {
+            assert_eq!(published_project_slug(link), None, "{link}");
+        }
+    }
+
+    /// The upload carries the signed checksum header, publish names the reserved
+    /// upload, and the public download follows the redirect to the same bytes.
+    #[tokio::test]
+    async fn publishes_a_project_and_downloads_it_back() {
+        use axum::extract::{Path as UrlPath, State};
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::{get, post, put};
+        use std::sync::{Arc, Mutex};
+
+        type Blob = Arc<Mutex<Option<(Vec<u8>, String)>>>;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let blob: Blob = Arc::default();
+        let link = json!({
+            "id": "link-1", "slug": "a1B2c3D4e5F6", "url": "https://openresearch.sh/p/a1B2c3D4e5F6",
+            "sourceProjectId": "project-1", "name": "Tiny LM", "byteSize": 5,
+            "publishedAt": "2026-11-03T00:00:00.000Z",
+        });
+        let upload_url = format!("{base}/blob");
+        let app = axum::Router::new()
+            .route(
+                "/shared-projects",
+                post(move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| async move {
+                    assert_eq!(headers["authorization"], "Bearer pat");
+                    assert_eq!(body["sourceProjectId"], "project-1");
+                    assert_eq!(body["name"], "Tiny LM");
+                    assert_eq!(body["summary"]["experiments"], 0);
+                    axum::Json(json!({
+                        "sharedProjectId": "link-1",
+                        "uploadId": "upload-1",
+                        "upload": { "url": upload_url, "headers": { "x-amz-meta-sha256": body["sha256"] } },
+                    }))
+                }),
+            )
+            .route(
+                "/blob",
+                put(|State(blob): State<Blob>, headers: HeaderMap, bytes: axum::body::Bytes| async move {
+                    let sha = headers["x-amz-meta-sha256"].to_str().unwrap().to_string();
+                    *blob.lock().unwrap() = Some((bytes.to_vec(), sha));
+                    StatusCode::OK
+                })
+                .get(|State(blob): State<Blob>| async move {
+                    blob.lock().unwrap().as_ref().unwrap().0.clone()
+                }),
+            )
+            .route(
+                "/shared-projects/{id}/publish",
+                post(move |UrlPath(id): UrlPath<String>, State(blob): State<Blob>, axum::Json(body): axum::Json<Value>| {
+                    let link = link.clone();
+                    async move {
+                        assert_eq!((id.as_str(), &body["uploadId"]), ("link-1", &Value::from("upload-1")));
+                        let (bytes, sha) = blob.lock().unwrap().clone().unwrap();
+                        use sha2::Digest;
+                        assert_eq!(format!("{:x}", sha2::Sha256::digest(&bytes)), sha);
+                        axum::Json(json!({ "sharedProject": link }))
+                    }
+                }),
+            )
+            .route(
+                "/shared-projects/by-slug/{slug}/file",
+                get(|| async { axum::response::Redirect::to("/blob") }),
+            )
+            .with_state(blob);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-publish-test").unwrap();
+        let file = dir.path().join("project.orx");
+        std::fs::write(&file, b"hello").unwrap();
+        let creds = Credentials {
+            api_url: base.clone(),
+            token: "pat".into(),
+        };
+        let manifest = serde_json::from_value(json!({
+            "format": 1,
+            "project": { "name": "Tiny LM", "baselineBranch": "main" },
+        }))
+        .unwrap();
+        let published = publish_project(&creds, "project-1", &manifest, &file)
+            .await
+            .unwrap();
+        assert_eq!(published.slug, "a1B2c3D4e5F6");
+
+        let downloaded = dir.path().join("download.orx");
+        download_public_project(&base, &published.slug, &downloaded)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&downloaded).unwrap(), b"hello");
+        server.abort();
     }
 }

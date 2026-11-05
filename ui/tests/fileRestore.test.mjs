@@ -1,192 +1,98 @@
-import { queryModules } from "./queryModules.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
+import { act, createElement, useState } from "react";
+import { useLatexCompile } from "../src/useLatexCompile.ts";
+import { useOverleafSync } from "../src/useOverleafSync.ts";
+import { render, serve, settle } from "./render.mjs";
 
-// Execute the hooks with deterministic effect turns and timers, without a browser.
-function viewerHooks(restored) {
-  const slots = [];
-  const timers = new Map();
+/** Mounts both file-viewer hooks over a backend that counts compiles, syncs and status polls. */
+async function viewer(t, restored) {
+  t.mock.timers.enable({ apis: ["setInterval"] });
   const calls = { compile: 0, sync: 0, status: 0, activated: 0 };
-  let cursor = 0;
-  let changed = true;
-  let effects = [];
-  let timerId = 0;
-  let autoRun = !restored;
-  const same = (a, b) => a && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
-  const react = {
-    useState(initial) {
-      const index = cursor++;
-      if (!(index in slots)) slots[index] = initial;
-      return [slots[index], (update) => {
-        const next = typeof update === "function" ? update(slots[index]) : update;
-        if (!Object.is(next, slots[index])) { slots[index] = next; changed = true; }
-      }];
-    },
-    useRef(initial) {
-      const index = cursor++;
-      slots[index] ??= { current: initial };
-      return slots[index];
-    },
-    useMemo(factory, deps) {
-      const index = cursor++;
-      if (!same(slots[index]?.deps, deps)) slots[index] = { deps, value: factory() };
-      return slots[index].value;
-    },
-    useCallback(callback, deps) {
-      const index = cursor++;
-      if (!same(slots[index]?.deps, deps)) slots[index] = { deps, callback };
-      return slots[index].callback;
-    },
-    useEffect(effect, deps) {
-      const index = cursor++;
-      if (same(slots[index]?.deps, deps)) return;
-      const previous = slots[index];
-      slots[index] = { deps };
-      effects.push(() => {
-        previous?.cleanup?.();
-        slots[index].cleanup = effect();
-      });
-    },
-  };
   const link = { projectId: "paper", url: "https://overleaf.com/project/paper" };
-  const api = {
-    getLatexEngine: async () => ({ engine: "tectonic", hint: null, installCommand: null }),
-    compileLatex: async () => {
-      calls.compile++;
-      return { ok: true, pdfPath: "paper.pdf", hadErrors: false, note: null };
-    },
-    getOverleafState: async () => ({ hasToken: true, hasSession: false, link }),
-    getOverleafStatus: async () => { calls.status++; return { remoteChanged: true }; },
-    syncOverleaf: async () => {
-      calls.sync++;
-      return { pulled: [], pushed: [], conflicts: [] };
-    },
-    overleafUploadUrl: () => "https://overleaf.com/upload",
-    linkOverleaf: async () => ({ hasToken: true, link }),
-    saveOverleafToken: async () => ({ hasToken: true }),
-    saveOverleafSession: async () => ({ hasSession: true }),
-    importOverleafSession: async () => ({ hasSession: true, source: "Firefox" }),
-    startOverleafLive: async () => ({ key: "k", status: null }),
-    stopOverleafLive: async () => ({ key: "k", status: null }),
+  const routes = {
+    "GET /api/latex/engine": () => ({ engine: "tectonic", hint: null, installCommand: null }),
+    "POST /api/projects/project/file/latex": () => { calls.compile++; return { ok: true, pdfPath: "paper.pdf", hadErrors: false, note: null }; },
+    "GET /api/projects/project/file/overleaf": () => ({ hasToken: true, hasSession: false, link }),
+    "POST /api/projects/project/file/overleaf": () => ({ hasToken: true, link }),
+    "GET /api/projects/project/file/overleaf/status": () => { calls.status++; return { remoteChanged: true }; },
+    "POST /api/projects/project/file/overleaf/sync": () => { calls.sync++; return { pulled: [], pushed: [], conflicts: [] }; },
+    "POST /api/projects/project/file/overleaf/live": () => ({ key: "k", status: null }),
+    "DELETE /api/projects/project/file/overleaf/live": () => ({ key: "k", status: null }),
+    "POST /api/overleaf/token": () => ({ hasToken: true }),
   };
-  const queries = queryModules(api);
-  const queryHooks = {
-    useQuery(options) {
-      const [, render] = react.useState(0);
-      const key = JSON.stringify(options.queryKey);
-      react.useEffect(() => queries.client.getQueryCache().subscribe((event) => {
-        if (JSON.stringify(event.query.queryKey) === key) render((n) => n + 1);
-      }), [key]);
-      react.useEffect(() => {
-        if (options.enabled !== false) void queries.client.fetchQuery(options).catch(() => {});
-      }, [key, options.enabled]);
-      const state = queries.client.getQueryState(options.queryKey);
-      return { data: state?.data, error: state?.error, isPending: !state || state.status === "pending" };
-    },
-  };
-  function loadHook(name) {
-    const source = readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8");
-    const compiled = ts.transpileModule(source, {
-      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-    }).outputText;
-    const exports = {};
-    new Function("require", "exports", "setInterval", "clearInterval", compiled)(
-      (id) => {
-        if (id === "react") return react;
-        if (id === "@tanstack/react-query") return queryHooks;
-        if (id.startsWith("./queries/")) return queries.load(id.slice("./queries/".length));
-        if (id === "./api") return api;
-        if (id === "./paraglide/messages.js") return { m: {} };
-        // The Overleaf hook listens for live-channel events; no channel opens
-        // here, so the subscription is a no-op.
-        if (id === "./events") return { onOverleafEvent: () => () => {} };
-        throw new Error(`Unexpected dependency: ${id}`);
-      },
-      exports,
-      (callback) => { timers.set(++timerId, callback); return timerId; },
-      (id) => timers.delete(id),
-    );
-    return exports[name];
+  serve((path, init) => routes[`${init.method ?? "GET"} ${path.split("?")[0]}`]?.());
+
+  const hooks = {};
+  function Viewer() {
+    const [autoRun, setAutoRun] = useState(!restored);
+    const common = { projectId: "project", filePath: "paper.tex", enabled: true, autoRun, onManualAction: () => { calls.activated++; setAutoRun(true); } };
+    hooks.latex = useLatexCompile({ ...common, ready: true, source: "paper" });
+    hooks.overleaf = useOverleafSync({ ...common, savedSource: "paper", dirty: false, onPulled: () => {} });
+    return null;
   }
-  const useLatexCompile = loadHook("useLatexCompile");
-  const useOverleafSync = loadHook("useOverleafSync");
-  const onManualAction = () => { calls.activated++; autoRun = true; changed = true; };
-  const result = {
+  await render(createElement(Viewer));
+  await settle();
+  return {
     calls,
-    async flush() {
-      for (let turn = 0; turn < 20; turn++) {
-        if (changed) {
-          changed = false;
-          cursor = 0;
-          const common = { projectId: "project", filePath: "paper.tex", enabled: true, autoRun, onManualAction };
-          result.latex = useLatexCompile({ ...common, ready: true, source: "paper" });
-          result.overleaf = useOverleafSync({ ...common, savedSource: "paper", dirty: false, onPulled: () => {} });
-          const pending = effects;
-          effects = [];
-          pending.forEach((effect) => effect());
-        }
-        await Promise.resolve();
-      }
+    hooks,
+    async act(action) {
+      await act(action);
+      await settle();
     },
-    async focus() { changed = true; await result.flush(); },
-    async poll() { [...timers.values()].forEach((callback) => callback()); await result.flush(); },
+    async focus() {
+      await act(() => window.dispatchEvent(new Event("focus")));
+      await settle();
+    },
+    async poll() {
+      await act(() => t.mock.timers.tick(30_000));
+      await settle();
+    },
   };
-  return result;
 }
 
-test("restored tabs load controls but focus and polling never compile or sync", async () => {
-  const viewer = viewerHooks(true);
-  await viewer.flush();
-  assert.equal(viewer.latex.engine, "tectonic");
-  assert.equal(viewer.latex.compiled, null);
-  assert.equal(viewer.latex.showPdf, false);
-  assert.equal(viewer.overleaf.loaded, true);
-  await viewer.focus();
-  await viewer.poll();
-  assert.deepEqual(viewer.calls, { compile: 0, sync: 0, status: 0, activated: 0 });
+test("restored tabs load controls but focus and polling never compile or sync", async (t) => {
+  const tab = await viewer(t, true);
+  assert.equal(tab.hooks.latex.engine, "tectonic");
+  assert.equal(tab.hooks.latex.compiled, null);
+  assert.equal(tab.hooks.latex.showPdf, false);
+  assert.equal(tab.hooks.overleaf.loaded, true);
+  await tab.focus();
+  await tab.poll();
+  assert.deepEqual(tab.calls, { compile: 0, sync: 0, status: 0, activated: 0 });
 });
 
-test("explicit compile opts both hooks in without a duplicate initial compile", async () => {
-  const viewer = viewerHooks(true);
-  await viewer.flush();
-  viewer.latex.compile();
-  await viewer.flush();
-  assert.deepEqual(viewer.calls, { compile: 1, sync: 1, status: 0, activated: 1 });
-  await viewer.poll();
-  assert.equal(viewer.calls.status, 1);
-  assert.equal(viewer.calls.sync, 2);
+test("explicit compile opts both hooks in without a duplicate initial compile", async (t) => {
+  const tab = await viewer(t, true);
+  await tab.act(() => tab.hooks.latex.compile());
+  assert.deepEqual(tab.calls, { compile: 1, sync: 1, status: 0, activated: 1 });
+  await tab.poll();
+  assert.equal(tab.calls.status, 1);
+  assert.equal(tab.calls.sync, 2);
 });
 
-test("explicit sync opts both hooks in without a duplicate initial sync", async () => {
-  const viewer = viewerHooks(true);
-  await viewer.flush();
-  viewer.overleaf.sync();
-  await viewer.flush();
-  assert.deepEqual(viewer.calls, { compile: 1, sync: 1, status: 0, activated: 1 });
-  await viewer.poll();
-  assert.equal(viewer.calls.sync, 2);
+test("explicit sync opts both hooks in without a duplicate initial sync", async (t) => {
+  const tab = await viewer(t, true);
+  await tab.act(() => tab.hooks.overleaf.sync());
+  assert.deepEqual(tab.calls, { compile: 1, sync: 1, status: 0, activated: 1 });
+  await tab.poll();
+  assert.equal(tab.calls.sync, 2);
 });
 
-test("link-and-sync remains an explicit opt-in; saving a token alone is passive", async () => {
-  const viewer = viewerHooks(true);
-  await viewer.flush();
-  await viewer.overleaf.saveToken("token");
-  await viewer.flush();
-  assert.equal(viewer.calls.sync, 0);
-  await viewer.overleaf.linkProject("paper");
-  await viewer.flush();
-  assert.deepEqual(viewer.calls, { compile: 1, sync: 1, status: 0, activated: 1 });
+test("link-and-sync remains an explicit opt-in; saving a token alone is passive", async (t) => {
+  const tab = await viewer(t, true);
+  await tab.act(() => tab.hooks.overleaf.saveToken("token"));
+  assert.equal(tab.calls.sync, 0);
+  await tab.act(() => tab.hooks.overleaf.linkProject("paper"));
+  assert.deepEqual(tab.calls, { compile: 1, sync: 1, status: 0, activated: 1 });
 });
 
-test("intentionally opened tabs retain automatic compile and sync", async () => {
-  const viewer = viewerHooks(false);
-  await viewer.flush();
-  assert.deepEqual(viewer.calls, { compile: 1, sync: 1, status: 0, activated: 0 });
-  await viewer.focus();
-  assert.equal(viewer.calls.compile, 1);
-  assert.equal(viewer.calls.sync, 1);
-  await viewer.poll();
-  assert.equal(viewer.calls.sync, 2);
+test("intentionally opened tabs retain automatic compile and sync", async (t) => {
+  const tab = await viewer(t, false);
+  assert.deepEqual(tab.calls, { compile: 1, sync: 1, status: 0, activated: 0 });
+  await tab.focus();
+  assert.equal(tab.calls.compile, 1);
+  assert.equal(tab.calls.sync, 1);
+  await tab.poll();
+  assert.equal(tab.calls.sync, 2);
 });

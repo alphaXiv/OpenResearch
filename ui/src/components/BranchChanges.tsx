@@ -1,5 +1,6 @@
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { getExperimentDiffQuery } from "../queries/files";
+
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { type Experiment } from "../api";
@@ -11,6 +12,8 @@ export function BranchChanges({
 }: {
   experiment: Experiment;
 }) {
+  const { getExperimentDiffQuery } = useWorkspace().queries;
+
   const query = useQuery(getExperimentDiffQuery(experiment.id));
   const diff = query.data;
   const error = query.error?.message;

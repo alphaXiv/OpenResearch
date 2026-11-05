@@ -25,43 +25,49 @@ use super::detect::{resolve_symlinks, HarnessAuthState, HarnessInfo, ModelInfo};
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
-use super::{Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, TURN_WATCHDOG};
+use super::{
+    CompactCtx, CompactOutcome, Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
+    TURN_WATCHDOG,
+};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
     find_part_mut, harness_log, prepare_env, set_chat_session_env, DeliveryState, PromptAnswer,
     ResumeCtx, TurnCtx, WirePart, WirePrompt, WireToolState,
 };
 use crate::local::opencode::{ensure_playbook, PLAYBOOK_REL};
-use crate::local::shell_env::{find_in_dir, find_on_path};
+use crate::local::shell_env::installs;
 
 const AGY_REINSTALL: &str =
     "Reinstall Antigravity CLI via curl -fsSL https://antigravity.google/cli/install.sh | bash";
 const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
+const COMPACT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub struct Antigravity;
 
-#[async_trait]
-impl Harness for Antigravity {
-    fn id(&self) -> &'static str {
-        "antigravity"
-    }
-
-    fn name(&self) -> &'static str {
-        "Google Antigravity"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl Antigravity {
+    /// `snapshot` reports discovery only: `agy`'s auth *is* the model list,
+    /// so a child-free pass marks the install pending and leaves readiness to
+    /// the background full pass.
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some((bin, probe)) = find_agy_working().await {
-            info.record_bin(&bin, probe);
+        super::detect::record_selected(
+            &mut info,
+            snapshot,
+            "antigravity",
+            find_agy,
+            find_agy_working(),
+        )
+        .await;
+        // Nothing else about an installed agy is cheap to verify — `detect_one`
+        // marks the snapshot answer pending. A missing install still falls
+        // through to pick up its note.
+        if snapshot && info.installed {
+            return Some(info);
         }
         if info.installed && !info.install_broken {
             if let Some(bin) = info.bin_path.as_deref().map(Path::new) {
-                match agy_model_list(bin).await {
+                match super::detect::timed_probe("antigravity", "models", agy_model_list(bin)).await
+                {
                     Ok(models) => {
                         info.authenticated = true;
                         info.auth_state = HarnessAuthState::Ready;
@@ -98,12 +104,81 @@ impl Harness for Antigravity {
         }
         Some(info)
     }
+}
+
+#[async_trait]
+impl Harness for Antigravity {
+    fn id(&self) -> &'static str {
+        "antigravity"
+    }
+
+    fn name(&self) -> &'static str {
+        "Google Antigravity"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
+    }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         run_turn(ctx)
             .await
             .map(|()| TurnOutcome::Completed)
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
+    }
+
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        let native_id = ctx
+            .native_session_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("This Antigravity chat has no saved conversation to compact"))?;
+        let bin = find_agy().ok_or_else(|| {
+            anyhow!("agy not found on PATH — install Antigravity CLI and sign in first")
+        })?;
+        let project = ctx.project.clone();
+        let session_id = ctx.session_id.clone();
+        let (repo, _) = tokio::task::spawn_blocking(move || {
+            ensure_playbook(&project, &session_id, Antigravity.session_skills_dir())
+        })
+        .await??;
+        let mut cmd = crate::process::tokio_command(bin);
+        cmd.args([
+            "--conversation",
+            native_id,
+            "--print",
+            "/compact",
+            "--output-format",
+            "stream-json",
+            "--print-timeout",
+            "5m",
+        ]);
+        if let Some(model) = ctx.model.as_deref().filter(|model| !model.is_empty()) {
+            cmd.args(["--model", model]);
+        }
+        cmd.current_dir(&repo).arg("--add-dir").arg(&repo);
+        prepare_env(&mut cmd);
+        cmd.env("NO_COLOR", "1");
+        set_chat_session_env(&mut cmd, &ctx.session_id, "antigravity", ctx.host.up_port());
+        let log_name = format!("antigravity-compact-{}", uuid::Uuid::new_v4());
+        cmd.stderr(Stdio::from(harness_log(&log_name)?));
+        let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
+        compact_native(cmd, COMPACT_TIMEOUT)
+            .await
+            .map_err(|error| anyhow!("{error}; see {}", log_path.display()))?;
+        let _ = std::fs::remove_file(log_path);
+        Ok(CompactOutcome::Native)
     }
 
     fn options(&self) -> HarnessOptions {
@@ -171,13 +246,10 @@ impl Harness for Antigravity {
         Some(dirs::home_dir()?.join(".gemini").join("antigravity-cli"))
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        self.config_home()
+            .map(|home| vec![home.join("skills")])
+            .unwrap_or_default()
     }
 
     fn skill_shim(&self) -> Option<&'static str> {
@@ -189,23 +261,22 @@ impl Harness for Antigravity {
     }
 }
 
-/// `agy` on PATH, then common install locations under `~/.local/bin`,
-/// `~/.gemini/bin`, or `~/.gemini/antigravity-cli/bin`, in preference order.
+/// Every `agy` install, in preference order: Antigravity's own locations are
+/// `~/.gemini/bin`, `~/.gemini/antigravity-cli/bin` and the local data dir.
 fn agy_candidates() -> Vec<PathBuf> {
-    let home_dirs = dirs::home_dir().into_iter().flat_map(|home| {
-        let gemini = home.join(".gemini");
-        [
-            home.join(".local").join("bin"),
-            gemini.join("bin"),
-            gemini.join("antigravity-cli").join("bin"),
-        ]
-    });
-    let drops = home_dirs
+    let gemini = dirs::home_dir().map(|home| home.join(".gemini"));
+    let own = gemini
+        .iter()
+        .flat_map(|gemini| {
+            [
+                gemini.join("bin"),
+                gemini.join("antigravity-cli").join("bin"),
+            ]
+        })
         .chain(dirs::data_local_dir().map(|dir| dir.join("agy").join("bin")))
-        .filter_map(|dir| find_in_dir(&dir, "agy"));
-    find_on_path("agy")
+        .collect::<Vec<_>>();
+    installs("agy", own)
         .into_iter()
-        .chain(drops)
         .map(resolve_symlinks)
         .collect()
 }
@@ -222,7 +293,7 @@ pub(super) async fn find_agy_working() -> Option<(PathBuf, super::detect::BinPro
 }
 
 async fn agy_model_list(bin: &Path) -> Result<Vec<ModelInfo>> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("models")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -230,9 +301,9 @@ async fn agy_model_list(bin: &Path) -> Result<Vec<ModelInfo>> {
         .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(MODELS_TIMEOUT, cmd.output())
+    let out = super::detect::detect_spawn_output_timed(cmd, MODELS_TIMEOUT)
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             anyhow!("Antigravity model discovery timed out. Re-check when connected.")
         })??;
     if !out.status.success() {
@@ -310,7 +381,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         prompt = first_turn_prompt(&prompt);
     }
 
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
         "--input-format",
         "stream-json",
@@ -345,7 +416,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
     set_chat_session_env(&mut cmd, &ctx.session_id, "antigravity", Some(up_port));
-    cmd.env("ORX_SESSION_ID", &ctx.session_id);
+    if let Some(execution) = ctx.usage_execution_id() {
+        cmd.env("ORX_USAGE_EXECUTION_ID", execution);
+    }
     cmd.env(
         "ORX_GATE_TOKEN",
         ctx.host
@@ -381,7 +454,14 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let mut state = TurnState::default();
 
     loop {
-        match tokio::time::timeout(TURN_WATCHDOG, lines.next_line()).await {
+        let next = tokio::select! {
+            next = tokio::time::timeout(TURN_WATCHDOG, lines.next_line()) => next,
+            _ = ctx.flush_due() => {
+                let _ = ctx.flush();
+                continue;
+            }
+        };
+        match next {
             Ok(Ok(Some(line))) => {
                 let Ok(event) = serde_json::from_str::<Value>(&line) else {
                     continue;
@@ -440,6 +520,46 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     Ok(())
 }
 
+async fn compact_native(mut cmd: Command, timeout: Duration) -> Result<()> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn()?;
+    let mut cancellation = TurnProcesses(child.id());
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    tokio::time::timeout(timeout, async {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut saw_result = false;
+        while let Some(line) = lines.next_line().await? {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if event.get("event").and_then(Value::as_str) == Some("result") {
+                if let Some((_, error)) = result_failure(&event["result"]) {
+                    return Err(anyhow!("Antigravity compaction failed: {error}"));
+                }
+                saw_result = true;
+            }
+        }
+        let status = child.wait().await?;
+        cancellation.0 = None;
+        if !status.success() {
+            return Err(anyhow!("Antigravity compaction exited with {status}"));
+        }
+        if !saw_result {
+            return Err(anyhow!("Antigravity compaction ended without a result"));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "Antigravity did not finish compacting within {}s",
+            timeout.as_secs()
+        )
+    })?
+}
+
 struct TurnProcesses(Option<u32>);
 
 impl Drop for TurnProcesses {
@@ -459,10 +579,10 @@ fn stop_turn_process(pid: u32) {
     if unsafe { libc::kill(pid, libc::SIGSTOP) } != 0 {
         return;
     }
-    let snapshot = std::process::Command::new("ps")
+    let snapshot = crate::process::command("ps")
         .args(["-ww", "-axo", "pid=,ppid=,args="])
         .output();
-    let supervisor_exe = std::env::current_exe().ok();
+    let supervisor_exe = crate::paths::spawnable_exe().ok();
     match snapshot {
         Ok(output) if output.status.success() => {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -514,7 +634,7 @@ function Stop-TurnProcess([uint32] $processId) {
 }
 Stop-TurnProcess ([uint32] $env:ORX_STOP_PID)
 "#;
-    let result = std::process::Command::new("powershell.exe")
+    let result = crate::process::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("ORX_STOP_PID", pid.to_string())
         .stdout(Stdio::null())
@@ -526,7 +646,7 @@ Stop-TurnProcess ([uint32] $env:ORX_STOP_PID)
 
 fn write_approval_hook(repo: &Path, enabled: bool) -> Result<()> {
     std::fs::create_dir_all(repo)?;
-    let tracked = std::process::Command::new("git")
+    let tracked = crate::local::git::git_command()
         .args(["ls-files", "--error-unmatch", ".agents/hooks.json"])
         .current_dir(repo)
         .stdout(Stdio::null())
@@ -544,7 +664,7 @@ fn write_approval_hook(repo: &Path, enabled: bool) -> Result<()> {
     let object = hooks
         .as_object_mut()
         .ok_or_else(|| anyhow!("Antigravity hooks must be an object"))?;
-    let exe = std::env::current_exe()?;
+    let exe = crate::paths::spawnable_exe()?;
     #[cfg(not(windows))]
     let command = format!(
         "{} antigravity-gate",
@@ -562,11 +682,18 @@ fn write_approval_hook(repo: &Path, enabled: bool) -> Result<()> {
         // prepare_env puts this executable's directory first on PATH.
         "orx antigravity-gate".to_string()
     };
+    // Without approval the gate still sees shell commands, to export their invoking model.
     object.insert(
         "openresearch-approval".into(),
         serde_json::json!({
-            "enabled": enabled,
-            "PreToolUse": [{"matcher":"*","hooks":[{"type":"command","command":command,"timeout":3600}]}]
+            "enabled": enabled || !cfg!(windows),
+            "PreToolUse": [{"matcher": if enabled { "*" } else { "run_command" },"hooks":[{"type":"command","command":command,"timeout":3600}]}]
+        }),
+    );
+    object.insert(
+        "openresearch-accounting".into(),
+        serde_json::json!({
+            "enabled": true, "PostInvocation": [{"type":"command","command":command}]
         }),
     );
     std::fs::create_dir_all(path.parent().unwrap())?;
@@ -579,6 +706,7 @@ pub(crate) fn normalize_tool<'a>(
     params: Option<&Value>,
 ) -> (&'a str, Option<Value>) {
     let (tool, aliases): (&str, &[(&str, &str)]) = match name {
+        "invoke_subagent" => ("task", &[("Role", "description")]),
         "run_command" => ("Bash", &[("CommandLine", "command"), ("Cwd", "cwd")]),
         "view_file" => ("Read", &[("AbsolutePath", "file_path")]),
         "write_to_file" => (
@@ -648,6 +776,19 @@ fn denied_actions_error(result: &Value) -> Option<String> {
     })
 }
 
+fn result_failure(result: &Value) -> Option<(&'static str, String)> {
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("INVALID");
+    if status != "SUCCESS" {
+        let error = result.get("error").and_then(error_text).unwrap_or(status);
+        Some(("antigravity_terminal", format!("Antigravity: {error}")))
+    } else {
+        denied_actions_error(result).map(|error| ("antigravity_permission_denied", error))
+    }
+}
+
 #[derive(Default)]
 struct TurnState {
     conversation_id: Option<String>,
@@ -655,6 +796,22 @@ struct TurnState {
     text_seq: usize,
     saw_result: bool,
     turn_errored: bool,
+}
+
+pub(crate) fn invocation_sample_id(conversation: &str, step: i64) -> String {
+    format!("antigravity:{conversation}:step:{step}")
+}
+
+fn antigravity_step_usage(step: &Value) -> Option<crate::store::TokenUsage> {
+    let usage = step.get("usage")?;
+    let field = |key| usage.get(key).and_then(Value::as_u64);
+    Some(crate::store::TokenUsage {
+        input_tokens: field("input_tokens"),
+        output_tokens: field("output_tokens"),
+        cache_read_tokens: field("cache_read_tokens"),
+        cache_write_tokens: None,
+        reasoning_tokens: field("thinking_tokens"),
+    })
 }
 
 fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool {
@@ -672,16 +829,60 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         }
         "step_update" => {
             if let Some(step) = event.get("step_update") {
-                if let Some(cid) = step
+                // A forwarded sub-agent step names its own conversation; only the first is the root.
+                let own = step
                     .get("conversation_id")
                     .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                {
-                    state.conversation_id = Some(cid.to_string());
+                    .filter(|id| !id.is_empty());
+                if state.conversation_id.is_none() {
+                    state.conversation_id = own.map(str::to_string);
+                }
+                if let (Some(index), Some(usage)) = (
+                    step.get("step_index").and_then(Value::as_i64),
+                    antigravity_step_usage(step),
+                ) {
+                    let sample_id = own
+                        .or(state.conversation_id.as_deref())
+                        .map(|conversation| invocation_sample_id(conversation, index))
+                        .unwrap_or_else(|| {
+                            format!("antigravity-{}:{index}", ctx.attempt_count_for_usage())
+                        });
+                    ctx.record_native_usage(&sample_id, None, None, usage);
                 }
                 let step_type = step.get("step_type").and_then(Value::as_str).unwrap_or("");
                 let step_state = step.get("state").and_then(Value::as_str).unwrap_or("");
 
+                if own.is_some() && own != state.conversation_id.as_deref() {
+                    return false;
+                }
+                if step_type == "subagent" {
+                    let index = step["step_index"].as_i64().unwrap_or(0);
+                    if let Some(agents) = step
+                        .pointer("/subagent_info/subagents")
+                        .and_then(Value::as_array)
+                    {
+                        for (offset, agent) in agents.iter().enumerate() {
+                            let Some(child) = agent["conversation_id"].as_str() else {
+                                continue;
+                            };
+                            let id = if offset == 0 {
+                                format!("tool-{index}-invoke_subagent")
+                            } else {
+                                format!("tool-{index}-invoke_subagent:{child}")
+                            };
+                            let mut part = WirePart::tool(id, "task", "completed", None);
+                            if let Some(tool) = part.state.as_mut() {
+                                tool.input = Some(serde_json::json!({
+                                    "description": agent["role"],
+                                    "prompt": agent["initial_prompt"],
+                                    "nativeTranscript": {"antigravityConversationId": child}
+                                }));
+                            }
+                            ctx.upsert_part_preserving_children(part);
+                        }
+                    }
+                    return false;
+                }
                 match step_type {
                     "agent_response" => {
                         if let Some(delta) = step.get("text_delta").and_then(Value::as_str) {
@@ -765,6 +966,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                                 prompt: None,
                                 phase: None,
                                 children: Vec::new(),
+                                orx: None,
                             });
                         }
                     }
@@ -783,20 +985,13 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             {
                 state.conversation_id = Some(cid.to_string());
             }
-            let status = res
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("INVALID");
-            if status != "SUCCESS" {
-                state.turn_errored = true;
-                let error = res.get("error").and_then(error_text).unwrap_or(status);
-                ctx.mark_terminal_failure("antigravity_terminal", format!("Antigravity: {error}"));
-            } else if let Some(error) = denied_actions_error(res) {
+            if res.get("status").and_then(Value::as_str) == Some("SUCCESS") {
                 ctx.mark_delivery(DeliveryState::Accepted);
+            }
+            if let Some((kind, error)) = result_failure(res) {
                 state.turn_errored = true;
-                ctx.mark_terminal_failure("antigravity_permission_denied", error);
+                ctx.mark_terminal_failure(kind, error);
             } else {
-                ctx.mark_delivery(DeliveryState::Accepted);
                 ctx.mark_final_text_tail();
             }
             true
@@ -828,8 +1023,111 @@ fn plan_card(parts: &[WirePart], assistant_id: &str) -> Option<WirePart> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_step_usage_includes_reasoning_without_double_counting() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/antigravity-usage.json")).unwrap();
+        let usage = super::antigravity_step_usage(&fixture[0]["step_update"]).unwrap();
+        usage.validate().unwrap();
+        assert_eq!(usage.total(), Some(13155));
+        assert_eq!(usage.reasoning_tokens, Some(138));
+        assert_eq!(usage.cache_write_tokens, None);
+        assert!(super::antigravity_step_usage(&serde_json::json!({})).is_none());
+    }
+
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_requires_a_successful_result_and_exit() {
+        for (output, code, expected) in [
+            (
+                json!({"event":"result","result":{"status":"SUCCESS"}}),
+                "0",
+                None,
+            ),
+            (
+                json!({"event":"result","result":{"status":"ERROR","error":"quota exhausted"}}),
+                "0",
+                Some("quota exhausted"),
+            ),
+            (
+                json!({"event":"result","result":{"status":"SUCCESS"}}),
+                "7",
+                Some("exited with"),
+            ),
+            (
+                json!({"event":"init","conversation_id":"saved"}),
+                "0",
+                Some("without a result"),
+            ),
+            (json!({"event":"result","result":{}}), "0", Some("INVALID")),
+        ] {
+            let mut cmd = crate::process::tokio_command("sh");
+            cmd.args([
+                "-c",
+                "printf '%s\\n' \"$ORX_TEST_EVENT\"; exit \"$ORX_TEST_EXIT\"",
+            ])
+            .env("ORX_TEST_EVENT", output.to_string())
+            .env("ORX_TEST_EXIT", code);
+            let result = compact_native(cmd, Duration::from_secs(5)).await;
+            match expected {
+                None => result.unwrap(),
+                Some(message) => assert!(result.unwrap_err().to_string().contains(message)),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_timeout_and_cancellation_stop_the_child() {
+        for cancel in [false, true] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-agy-compact-stop").unwrap();
+            let pid_file = dir.path().join("pid");
+            let mut cmd = crate::process::tokio_command("sh");
+            cmd.args(["-c", "echo $$ > \"$ORX_TEST_PID\"; sleep 60"])
+                .env("ORX_TEST_PID", &pid_file);
+            let task = tokio::spawn(compact_native(
+                cmd,
+                if cancel {
+                    Duration::from_secs(60)
+                } else {
+                    Duration::from_millis(200)
+                },
+            ));
+            let pid: libc::pid_t = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        if let Ok(pid) = text.trim().parse() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if cancel {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                assert!(task
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("did not finish compacting"));
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while unsafe { libc::kill(pid, 0) } == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("compaction child survived cancellation");
+        }
+    }
 
     fn fold(events: &[Value]) -> (TurnCtx, TurnState) {
         let mut ctx = TurnCtx::test_stub();
@@ -1052,7 +1350,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancellation_kills_command_descendants() {
-        let mut child = Command::new("sh")
+        let mut child = crate::process::tokio_command("sh")
             .args(["-c", "sleep 60 & echo $!; wait"])
             .stdout(Stdio::piped())
             .kill_on_drop(true)
@@ -1078,13 +1376,13 @@ mod tests {
         std::fs::create_dir_all(repo.join(".agents")).unwrap();
         let path = repo.join(".agents/hooks.json");
         std::fs::write(&path, "{}").unwrap();
-        assert!(std::process::Command::new("git")
+        assert!(crate::process::command("git")
             .args(["init", "--quiet"])
             .current_dir(&repo)
             .status()
             .unwrap()
             .success());
-        assert!(std::process::Command::new("git")
+        assert!(crate::process::command("git")
             .args(["add", ".agents/hooks.json"])
             .current_dir(&repo)
             .status()
@@ -1106,7 +1404,19 @@ mod tests {
         let path = repo.join(".agents/hooks.json");
         let content: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["openresearch-approval"]["enabled"], false);
+        assert_eq!(content["openresearch-approval"]["enabled"], !cfg!(windows));
+        assert_eq!(
+            content["openresearch-approval"]["PreToolUse"][0]["matcher"],
+            "run_command"
+        );
+        assert_eq!(content["openresearch-accounting"]["enabled"], true);
+        assert_eq!(
+            content["openresearch-accounting"]["PostInvocation"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
 
         write_approval_hook(&repo, true).unwrap();
         let content: Value =

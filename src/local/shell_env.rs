@@ -8,13 +8,14 @@
 //! machine uses whatever the user exported. Two OpenResearch installs then
 //! disagree about which database they are looking at.
 //!
-//! macOS app mode probes the shell once at startup ([`crate::commands::app`])
-//! and installs the answer here; every other entry point falls through to the
-//! process environment unchanged.
+//! App mode on macOS and Linux probes the shell once at startup
+//! ([`crate::commands::app`]) and installs the answer here (only PATH if it
+//! arrives after startup has moved on); every other entry point falls through
+//! to the process environment unchanged. The Linux AppImage also hands host
+//! programs the session's GTK settings ([`host_gui_env`]).
 //!
-//! Scope is orx's own resolution, the children it spawns, and the dashboard's
-//! PTY terminals. The other things orx shells out to — `git`, `kubectl`, and
-//! `ssh` — still inherit the process environment.
+//! Scope is orx's own resolution, every child it spawns ([`crate::process`]),
+//! and the dashboard's PTY terminals.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -49,8 +50,110 @@ pub fn var(key: &str) -> Option<OsString> {
 }
 
 /// The PATH to search for the binaries orx spawns, and to hand its children.
+#[cfg(not(windows))]
 pub fn search_path() -> Option<OsString> {
     var("PATH")
+}
+
+/// The PATH to search, extended by the registry's current PATH so a tool installed
+/// while orx runs is found without a restart, then by the Git orx installs.
+#[cfg(windows)]
+pub fn search_path() -> Option<OsString> {
+    let base = var("PATH");
+    let mut path = base.clone().unwrap_or_default();
+    let mut seen: Vec<String> = std::env::split_paths(&path)
+        .map(|dir| path_key(&dir))
+        .collect();
+    let added = registry_path()
+        .into_iter()
+        .chain(super::portable_git::cmd_dir())
+        .filter(|dir| dir.is_absolute());
+    for dir in added {
+        let key = path_key(&dir);
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        if !path.is_empty() {
+            path.push(PATH_LIST_SEPARATOR);
+        }
+        path.push(dir);
+    }
+    (base.is_some() || !path.is_empty()).then_some(path)
+}
+
+/// Windows paths compare case-insensitively, with or without a trailing separator.
+#[cfg(windows)]
+fn path_key(dir: &std::path::Path) -> String {
+    dir.to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_lowercase()
+}
+
+/// The machine then user `Path`, as a new process would compose them, expanded.
+#[cfg(windows)]
+fn registry_path() -> Vec<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+    };
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(Some(0)).collect()
+    }
+    fn read(root: HKEY, key: &str) -> Option<OsString> {
+        let (key, value) = (wide(key), wide("Path"));
+        let mut buffer = vec![0u16; 4096];
+        // Expansion can outgrow the size a first call reports, so retry on ERROR_MORE_DATA.
+        for _ in 0..3 {
+            let mut bytes = u32::try_from(buffer.len() * 2).ok()?;
+            // SAFETY: both names are NUL-terminated and `bytes` is the buffer's size.
+            let status = unsafe {
+                RegGetValueW(
+                    root,
+                    key.as_ptr(),
+                    value.as_ptr(),
+                    // Expanding (no RRF_NOEXPAND) returns REG_EXPAND_SZ as REG_SZ;
+                    // naming RRF_RT_REG_EXPAND_SZ here fails with ERROR_INVALID_PARAMETER.
+                    RRF_RT_REG_SZ,
+                    std::ptr::null_mut(),
+                    buffer.as_mut_ptr().cast(),
+                    &mut bytes,
+                )
+            };
+            match status {
+                ERROR_SUCCESS => {
+                    buffer.truncate(bytes as usize / 2);
+                    return Some(OsString::from_wide(until_nul(&buffer)));
+                }
+                ERROR_MORE_DATA => buffer.resize((bytes as usize).div_ceil(2) + 1, 0),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    [
+        (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+        (HKEY_CURRENT_USER, "Environment"),
+    ]
+    .into_iter()
+    .filter_map(|(root, key)| read(root, key))
+    .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+    .collect()
+}
+
+/// The string before its terminator. An expanded value's reported size can run
+/// past it, and a NUL left in PATH makes every spawn fail ("nul byte found").
+#[cfg(any(windows, test))]
+fn until_nul(wide: &[u16]) -> &[u16] {
+    wide.iter()
+        .position(|&unit| unit == 0)
+        .map_or(wide, |end| &wide[..end])
 }
 
 /// What separates PATH entries when composing one for a child.
@@ -59,9 +162,67 @@ pub const PATH_LIST_SEPARATOR: &str = ":";
 #[cfg(windows)]
 pub const PATH_LIST_SEPARATOR: &str = ";";
 
-/// Where `binary` lives, or None when this machine has no such tool. The path
-/// is returned as it sits on PATH; a caller that needs the real binary behind a
-/// symlink composes with `resolve_symlinks`.
+/// Where `binary` lives: what detection reports and what [`crate::process`]
+/// runs for a bare name.
+pub fn find(binary: &str) -> Option<PathBuf> {
+    installs(binary, []).into_iter().next()
+}
+
+/// Every copy of `binary` worth trying, best first: the one on PATH, then the
+/// directories installers drop CLIs into without putting them on PATH, then the
+/// tool's `own` install locations. Only when none has it, `npx`'s cache. The path
+/// is returned as it sits in its directory; a caller that needs the real binary
+/// behind a symlink composes with `resolve_symlinks`.
+pub fn installs(binary: &str, own: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = dirs::home_dir()
+        .map(|home| vec![home.join(".local/bin"), home.join(".npm-global/bin")])
+        .unwrap_or_default();
+    #[cfg(windows)]
+    dirs.extend(dirs::config_dir().map(|roaming| roaming.join("npm")));
+    dirs.extend(own);
+    let found: Vec<PathBuf> = find_on_path(binary)
+        .into_iter()
+        .chain(dirs.iter().filter_map(|dir| find_in_dir(dir, binary)))
+        .collect();
+    if !found.is_empty() {
+        return found;
+    }
+    // Last, since reading the cache costs a stat for every run it ever kept.
+    npx_bins(npx_roots())
+        .iter()
+        .filter_map(|dir| find_in_dir(dir, binary))
+        .collect()
+}
+
+/// Where npm keeps `npx` runs by default.
+fn npx_roots() -> Vec<PathBuf> {
+    let windows_cache = cfg!(windows).then(dirs::cache_dir).flatten();
+    dirs::home_dir()
+        .map(|home| home.join(".npm/_npx"))
+        .into_iter()
+        .chain(windows_cache.map(|cache| cache.join("npm-cache/_npx")))
+        .collect()
+}
+
+/// Each `npx` run's `node_modules/.bin`, newest first: `npx -y <pkg>` installs
+/// nothing on PATH, and the most recent run is what `npx <pkg>` would start.
+fn npx_bins(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut bins: Vec<(std::time::SystemTime, PathBuf)> = roots
+        .into_iter()
+        .filter_map(|root| std::fs::read_dir(root).ok())
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let bin = entry.path().join("node_modules/.bin");
+            let modified = entry.metadata().and_then(|meta| meta.modified()).ok()?;
+            bin.is_dir().then_some((modified, bin))
+        })
+        .collect();
+    bins.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    bins.into_iter().map(|(_, bin)| bin).collect()
+}
+
+/// The first `binary` on the search PATH alone.
 pub fn find_on_path(binary: &str) -> Option<PathBuf> {
     search_in(&search_path()?, binary)
 }
@@ -74,8 +235,8 @@ pub fn find_in_dir(dir: &std::path::Path, binary: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Split from the PATH lookup so the search is testable without a probe.
-fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
+/// The first `binary` on `paths`, a PATH value.
+pub fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
     // A relative entry (`""`, meaning cwd, or `bin`) names no fixed directory —
     // it resolves against whichever cwd is current, so it is never a place to
     // pick up a binary.
@@ -86,7 +247,20 @@ fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
                 .into_iter()
                 .map(move |name| dir.join(name))
         })
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
+}
+
+/// Like execvp, pass over a non-executable file so a working binary later on PATH wins.
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// The filenames `binary` may have inside one PATH directory, in the order to
@@ -137,10 +311,51 @@ pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
     }
 }
 
+/// What the Linux AppImage's AppRun and GTK hook point at the image (keep in step
+/// with linux/AppRun, which saves the session's values as `ORX_HOST_<name>`).
+const APPIMAGE_GTK_VARS: [&str; 12] = [
+    "GDK_BACKEND",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GI_TYPELIB_PATH",
+    "GIO_EXTRA_MODULES",
+    "GIO_MODULE_DIR",
+    "GSETTINGS_SCHEMA_DIR",
+    "GTK_DATA_PREFIX",
+    "GTK_EXE_PREFIX",
+    "GTK_IM_MODULE_FILE",
+    "GTK_PATH",
+    "GTK_THEME",
+    "XDG_DATA_DIRS",
+];
+
+/// The session's own values (`None`: unset) of what AppRun set for the bundled GTK,
+/// for host programs, which fail on the image's schemas. Empty outside the AppImage.
+pub fn host_gui_env() -> Vec<(&'static str, Option<OsString>)> {
+    APPIMAGE_GTK_VARS
+        .iter()
+        .filter_map(|var| {
+            let saved = std::env::var_os(format!("ORX_HOST_{var}"))?;
+            let saved = saved.to_str()?;
+            // AppRun writes `=<value>` for a set variable and `-` for an unset one.
+            Some((*var, saved.strip_prefix('=').map(OsString::from)))
+        })
+        .collect()
+}
+
+/// [`host_gui_env`], applied to a command about to start a host program.
+pub fn restore_host_gui_env(command: &mut std::process::Command) {
+    for (var, value) in host_gui_env() {
+        match value {
+            Some(value) => command.env(var, value),
+            None => command.env_remove(var),
+        };
+    }
+}
+
 /// Install the probe's answer; the first call wins. Deliberately not
 /// `env::set_var` — app mode enters inside an already-running tokio runtime,
 /// where mutating the process environment races every live thread.
-#[cfg(target_os = "macos")]
+#[cfg(all(desktop_app, unix))]
 pub fn set(vars: HashMap<&'static str, OsString>) {
     let _ = OVERRIDE.set(vars);
 }
@@ -176,6 +391,45 @@ pub fn parse_probe(stdout: &str, marker: &str) -> Option<HashMap<&'static str, O
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_tool_off_path_is_found_in_its_own_install_dir() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-installs").unwrap();
+        let own = || [dir.path().to_path_buf()];
+        assert!(installs("orx-install-probe", own()).is_empty());
+        std::fs::write(dir.path().join(PROBE), "").unwrap();
+        assert_eq!(
+            installs("orx-install-probe", own()),
+            vec![dir.path().join(PROBE)]
+        );
+    }
+
+    #[test]
+    fn npx_runs_are_tried_newest_first_and_empty_ones_skipped() {
+        let root = crate::local::git::TemporaryDirectory::new("orx-npx").unwrap();
+        let older = root.path().join("older/node_modules/.bin");
+        std::fs::create_dir_all(&older).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let newer = root.path().join("newer/node_modules/.bin");
+        std::fs::create_dir_all(&newer).unwrap();
+        std::fs::create_dir_all(root.path().join("unpacking")).unwrap();
+
+        assert_eq!(
+            npx_bins(vec![root.path().to_path_buf()]),
+            vec![newer, older]
+        );
+    }
+
+    #[test]
+    fn a_registry_value_ends_at_its_first_nul() {
+        let wide: Vec<u16> = "C:\\bin\0stale\0\0".encode_utf16().collect();
+        assert_eq!(
+            until_nul(&wide),
+            "C:\\bin".encode_utf16().collect::<Vec<_>>()
+        );
+        let bare: Vec<u16> = "C:\\bin".encode_utf16().collect();
+        assert_eq!(until_nul(&bare), bare.as_slice());
+    }
+
     const M: &str = "__ORX_ENV_abc123__";
 
     /// `parse_probe` insists on one absolute PATH entry, and what counts as
@@ -195,6 +449,11 @@ mod tests {
     #[cfg(not(windows))]
     const TOOL: &str = "tool";
 
+    #[cfg(windows)]
+    const PROBE: &str = "orx-install-probe.exe";
+    #[cfg(not(windows))]
+    const PROBE: &str = "orx-install-probe";
+
     #[test]
     fn the_search_skips_relative_entries_and_takes_the_first_absolute_hit() {
         let root = std::env::temp_dir().join(format!("orx-path-search-{}", std::process::id()));
@@ -203,10 +462,20 @@ mod tests {
         std::fs::create_dir_all(&late).expect("late");
         std::fs::write(early.join(TOOL), "").expect("early tool");
         std::fs::write(late.join(TOOL), "").expect("late tool");
+        #[cfg(unix)]
+        for dir in [&early, &late] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join(TOOL), std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
 
-        let paths =
-            std::env::join_paths([PathBuf::new(), PathBuf::from("bin"), early.clone(), late])
-                .expect("join");
+        let paths = std::env::join_paths([
+            PathBuf::new(),
+            PathBuf::from("bin"),
+            early.clone(),
+            late.clone(),
+        ])
+        .expect("join");
         assert_eq!(search_in(&paths, "tool"), Some(early.join(TOOL)));
         assert_eq!(search_in(&paths, "absent"), None);
 
@@ -214,6 +483,14 @@ mod tests {
         // tests from the package root, so `src/main.rs` is a real hit here.
         let relative = std::env::join_paths([PathBuf::from("src")]).expect("join");
         assert_eq!(search_in(&relative, "main.rs"), None);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(early.join(TOOL), std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+            assert_eq!(search_in(&paths, "tool"), Some(late.join(TOOL)));
+        }
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -3,7 +3,7 @@
 //! the Codex TUI/IDE use; `jsonrpc` field omitted on the wire, requests flow
 //! in BOTH directions — the server sends us approval requests we must answer
 //! by id). Mirrors `AgentHost` (opencode.rs): spawn on demand, reap on read,
-//! kill on session delete / shutdown.
+//! release when idle (`agent_lifecycle`), kill on session delete / shutdown.
 //!
 //! Wire shapes were pinned against codex-cli 0.144.0 via
 //! `codex app-server generate-json-schema` plus a live spike (see the fixture
@@ -14,18 +14,20 @@
 //! so `thread/resume {threadId}` survives an `orx up` restart.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::{anyhow, Result};
+use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
 use crate::local::harness::codex::{ensure_orx_data_dir, find_codex_required};
 use crate::local::native_store::{self, NativeStore};
 
@@ -38,6 +40,8 @@ const HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A healthy app-server answers `initialize` immediately.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// `ensure` reaps under the host locks — a wedged child must not stall every bring-up.
+const TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One inbound line, classified. JSON-RPC over one stream: a message with both
 /// `id` and `method` is a server→client *request* (approvals — must be
@@ -125,6 +129,7 @@ pub fn classify_line(line: &str) -> Line {
 ///
 /// * `Approval` — `{"decision": accept|acceptForSession|decline|cancel}` (the two
 ///   sandbox-escalation requests).
+/// * `McpApproval` — `{"action": accept|decline|cancel, "content": ...}`.
 /// * `UserInput` — `{"answers": {<qid>: {"answers": [...]}}}`; `{}` is tolerated.
 /// * `Other` — a reply schema we don't speak (e.g.
 ///   `item/permissions/requestApproval`, whose reply is a permission-profile
@@ -132,6 +137,7 @@ pub fn classify_line(line: &str) -> Line {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerReqKind {
     Approval,
+    McpApproval,
     UserInput,
     Other,
 }
@@ -144,6 +150,7 @@ pub fn server_req_kind(method: &str) -> ServerReqKind {
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
             ServerReqKind::Approval
         }
+        "mcpServer/elicitation/request" => ServerReqKind::McpApproval,
         "item/tool/requestUserInput" => ServerReqKind::UserInput,
         _ => ServerReqKind::Other,
     }
@@ -170,6 +177,17 @@ pub enum TurnEvent {
 /// A live JSON-RPC connection to one session's `codex app-server` child.
 pub struct CodexClient {
     child: Mutex<Child>,
+    /// npm installs run a node wrapper whose native child survives a SIGKILL
+    /// to the wrapper alone, so teardown must signal the whole group.
+    #[cfg(unix)]
+    process_group_id: u32,
+    /// Windows has no process groups: the npm `codex.cmd` chain's native
+    /// descendants are confined to this Job Object so `terminate()` can kill
+    /// the tree (OR-409). `None` if job enrollment failed at spawn.
+    #[cfg(windows)]
+    job: Option<std::os::windows::io::OwnedHandle>,
+    /// Once set, the group id may be reused — never signal it again.
+    terminated: AtomicBool,
     stdin: Mutex<ChildStdin>,
     next_id: AtomicI64,
     /// Our outstanding requests. Sync mutex: touched from the reader task and
@@ -202,6 +220,13 @@ pub struct CodexClient {
     /// child (crash/restart replacement) — the DB signal covers that case.
     last_collab_mode: std::sync::Mutex<Option<&'static str>>,
     native_store: NativeStore,
+    alphaxiv_signed_in: bool,
+    session_id: String,
+    /// Each native (thread, turn)'s model, outliving any one orx turn: sub-agents do.
+    turn_models: std::sync::Mutex<HashMap<(String, String), String>>,
+    /// Last time this child was handed out, reported thread work, or ended a
+    /// turn — the idle reaper's clock.
+    last_active: std::sync::Mutex<Instant>,
 }
 
 impl CodexClient {
@@ -229,23 +254,16 @@ impl CodexClient {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
-        let sent = self
-            .write_line(&json!({ "id": id, "method": method, "params": params }))
-            .await;
-        if let Err(e) = sent {
-            self.pending.lock().unwrap().remove(&id);
-            return Err(e);
-        }
+        let _pending = PendingRequest { client: self, id };
+        self.write_line(&json!({ "id": id, "method": method, "params": params }))
+            .await?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(_)) => Err(anyhow!("codex app-server closed during {method}")),
-            Err(_) => {
-                self.pending.lock().unwrap().remove(&id);
-                Err(anyhow!(
-                    "codex app-server did not answer {method} within {}s",
-                    timeout.as_secs()
-                ))
-            }
+            Err(_) => Err(anyhow!(
+                "codex app-server did not answer {method} within {}s",
+                timeout.as_secs()
+            )),
         }
     }
 
@@ -273,10 +291,17 @@ impl CodexClient {
             .await
     }
 
-    /// Decline a server→client request — the fail-safe answer whenever no one
-    /// can (or should) decide, so the server is never left blocked on us.
+    pub fn approval_reply(&self, id: &Value, approve: bool) -> Value {
+        if self.unanswered.lock().unwrap().get(&id.to_string()) == Some(&ServerReqKind::McpApproval)
+        {
+            json!({"action":if approve {"accept"} else {"decline"}, "content":if approve {json!({})} else {Value::Null}, "_meta":null})
+        } else {
+            json!({"decision":if approve {"accept"} else {"decline"}})
+        }
+    }
+
     pub async fn respond_decline(&self, id: &Value) -> Result<()> {
-        self.respond(id, json!({ "decision": "decline" })).await
+        self.respond(id, self.approval_reply(id, false)).await
     }
 
     /// Reject a server→client request whose reply schema we don't speak (e.g.
@@ -313,6 +338,9 @@ impl CodexClient {
                 continue;
             };
             let msg = match kind {
+                ServerReqKind::McpApproval => {
+                    json!({"id":id,"result":{"action":"cancel","content":null,"_meta":null}})
+                }
                 ServerReqKind::Approval => json!({ "id": id, "result": { "decision": "cancel" } }),
                 ServerReqKind::UserInput => json!({ "id": id, "result": { "answers": {} } }),
                 ServerReqKind::Other => json!({
@@ -321,6 +349,46 @@ impl CodexClient {
                 }),
             };
             let _ = self.write_line(&msg).await;
+        }
+    }
+
+    /// Kill the child's whole process group and reap it; an orphaned native
+    /// app-server would keep the thread's writer lock.
+    async fn terminate(&self) {
+        // Locked first so a racing caller returns only after the reap.
+        let mut child = self.child.lock().await;
+        if self.terminated.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        #[cfg(unix)]
+        if let Ok(process_group_id) = i32::try_from(self.process_group_id) {
+            // SAFETY: spawn assigns the child its own process group before this id is captured.
+            unsafe {
+                libc::kill(-process_group_id, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        match self.job.as_ref() {
+            // Kills the wrapper and every descendant it spawned, at once,
+            // then waits them out: the replacement's thread/resume must not
+            // race a still-exiting writer lock holder.
+            Some(job) => {
+                windows_job::terminate(job);
+                windows_job::drain(job).await;
+            }
+            // Job enrollment failed at spawn — best-effort tree kill.
+            None => {
+                if let Some(pid) = child.id() {
+                    windows_job::kill_tree(pid);
+                }
+            }
+        }
+        let _ = child.start_kill();
+        if tokio::time::timeout(TERMINATION_TIMEOUT, child.wait())
+            .await
+            .is_err()
+        {
+            eprintln!("orx up: timed out reaping codex app-server");
         }
     }
 
@@ -345,6 +413,21 @@ impl CodexClient {
             client: self.clone(),
             tx,
         }
+    }
+
+    fn touch(&self) {
+        *self.last_active.lock().unwrap() = Instant::now();
+    }
+
+    /// When this child was last used, or `None` while a turn or request is in flight.
+    fn idle_since(&self) -> Option<Instant> {
+        if self.terminated.load(Ordering::Acquire)
+            || self.turn.lock().unwrap().is_some()
+            || !self.pending.lock().unwrap().is_empty()
+        {
+            return None;
+        }
+        Some(*self.last_active.lock().unwrap())
     }
 
     /// The thread this child has already started/resumed, if any.
@@ -382,6 +465,14 @@ impl CodexClient {
 
     pub fn native_store(&self) -> NativeStore {
         self.native_store
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn turn_models(&self) -> &std::sync::Mutex<HashMap<(String, String), String>> {
+        &self.turn_models
     }
 
     pub fn set_active_turn(&self, turn_id: &str) {
@@ -433,6 +524,19 @@ impl CodexClient {
     }
 }
 
+/// Removes a request's `pending` entry however its caller exits, including
+/// cancellation by an outer timeout; a stale entry would mark the child busy forever.
+struct PendingRequest<'a> {
+    client: &'a CodexClient,
+    id: i64,
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        self.client.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
 /// RAII turn registration — dropping (normal exit or task abort) detaches the
 /// event sink so a dangling turn can't receive another turn's events. An
 /// aborted task's guard drops *asynchronously*, possibly after a successor
@@ -450,6 +554,7 @@ impl Drop for TurnRoute {
             *turn = None;
             drop(turn);
             *self.client.active_turn.lock().unwrap() = None;
+            self.client.touch();
         }
     }
 }
@@ -461,11 +566,13 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
     while let Ok(Some(line)) = lines.next_line().await {
         match classify_line(&line) {
             Line::Response { id, result } => {
+                client.touch();
                 if let Some(tx) = client.pending.lock().unwrap().remove(&id) {
                     let _ = tx.send(result);
                 }
             }
             Line::Request { id, method, params } => {
+                client.touch();
                 let kind = server_req_kind(&method);
                 client
                     .unanswered
@@ -488,7 +595,7 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                     // server hanging on a request nobody will answer — each
                     // kind gets the reply shape its method can parse.
                     match kind {
-                        ServerReqKind::Approval => {
+                        ServerReqKind::Approval | ServerReqKind::McpApproval => {
                             let _ = client.respond_decline(&id).await;
                         }
                         ServerReqKind::UserInput => {
@@ -501,6 +608,10 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                 }
             }
             Line::Notification { method, params } => {
+                // Thread work (incl. sub-agent tails) is activity; account/status chatter is not.
+                if params.get("threadId").is_some() {
+                    client.touch();
+                }
                 // Codex settled a request itself (approval deadline, answer
                 // raced): the id is no longer answerable — drop it from the
                 // pending set so the stale-answer guard stays truthful.
@@ -512,6 +623,13 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                             .unwrap()
                             .remove(&request_id.to_string());
                     }
+                }
+                if method == "model/rerouted" {
+                    crate::local::harness::codex::capture_reroute(
+                        None,
+                        &client.turn_models,
+                        &params,
+                    );
                 }
                 let turn = client.turn.lock().unwrap();
                 // Raw event tracing for sub-agent lifecycle debugging; enable
@@ -536,8 +654,19 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                             .unwrap_or("-")
                     );
                 }
-                if let Some(tx) = turn.as_ref() {
-                    let _ = tx.send(TurnEvent::Notification { method, params });
+                let event = TurnEvent::Notification { method, params };
+                let unsent = match turn.as_ref() {
+                    Some(tx) => tx.send(event).err().map(|error| error.0),
+                    None => Some(event),
+                };
+                drop(turn);
+                if let Some(TurnEvent::Notification { method, params }) = unsent {
+                    crate::local::harness::codex::record_unowned(
+                        &client.session_id,
+                        &client.turn_models,
+                        &method,
+                        &params,
+                    );
                 }
             }
             Line::Junk => {}
@@ -548,29 +677,53 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
     // would eat a request timeout per turn until restart), then drop pending
     // senders so callers classify this as an ambiguous transport close rather
     // than a structured server rejection that would be safe to replay.
-    let _ = client.child.lock().await.kill().await;
+    client.terminate().await;
     client.pending.lock().unwrap().clear();
     client.unanswered.lock().unwrap().clear();
     if let Some(tx) = client.turn.lock().unwrap().as_ref() {
         let _ = tx.send(TurnEvent::Closed);
     }
+    crate::local::harness::codex::close_unowned(&client.session_id);
+}
+
+pub(crate) fn alphaxiv_config(servers: &Value) -> Result<Value> {
+    let name = if servers.get("alphaxiv").is_some() {
+        "orx_alphaxiv"
+    } else {
+        "alphaxiv"
+    };
+    if name == "orx_alphaxiv" && servers.get(name).is_some() {
+        return Err(anyhow!("Codex's orx_alphaxiv server name is reserved for OpenResearch. Rename that server in your Codex configuration."));
+    }
+    let mut overrides = json!({});
+    if name == "orx_alphaxiv" {
+        overrides["alphaxiv"] = json!({"enabled":false});
+    }
+    let tools: serde_json::Map<_, _> = crate::commands::alphaxiv_mcp::WRITE_TOOLS
+        .iter()
+        .map(|name| ((*name).to_owned(), json!({"approval_mode":"prompt"})))
+        .collect();
+    overrides[name] = json!({
+        "command":crate::paths::spawnable_exe()?, "args":["alphaxiv-mcp"],
+        "env_vars":["XDG_CONFIG_HOME", "ALPHAXIV_API_URL"],
+        "tool_timeout_sec":300,
+        "default_tools_approval_mode":"approve",
+        "tools":tools
+    });
+    Ok(overrides)
 }
 
 /// Spawn `codex app-server` (no handshake yet — see `CodexHost::ensure`, which
 /// registers the client *before* the handshake so every kill path can reach
 /// the child even if the spawning turn task is aborted mid-handshake).
-async fn spawn_client(
+fn spawn_client(
     session_id: &str,
     up_port: Option<u16>,
     native_store: NativeStore,
+    bin: PathBuf,
+    codex_home: PathBuf,
 ) -> Result<Arc<CodexClient>> {
-    let bin = find_codex_required()?;
-    let codex_home = tokio::task::spawn_blocking(move || {
-        crate::local::native_store::prepare_codex(native_store)
-    })
-    .await
-    .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.arg("app-server");
     if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
         cmd.args(["-c", &override_arg]);
@@ -595,13 +748,30 @@ async fn spawn_client(
         cmd.env("ORX_DATA_DIR", &dir);
     }
     // Own process group: a terminal SIGINT reaches orx up alone, which then
-    // tears the child down deliberately (kill_on_drop / shutdown()).
+    // tears the child's group down deliberately (terminate()).
     #[cfg(unix)]
     cmd.process_group(0);
+    // Windows has no process groups: spawn suspended so the npm wrapper's
+    // native descendants can be confined to a Job Object before any of them
+    // start (OR-409 — mirrors `jobs::localbox::windows`).
+    #[cfg(windows)]
+    cmd.creation_flags(windows_job::SPAWN_FLAGS);
 
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("Could not spawn {} app-server: {}", bin.display(), e))?;
+    #[cfg(unix)]
+    let process_group_id = child
+        .id()
+        .ok_or_else(|| anyhow!("codex app-server: spawned child has no process id"))?;
+    #[cfg(windows)]
+    let job = {
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow!("codex app-server: spawned child has no process id"))?;
+        windows_job::enroll(&mut child, pid)
+            .map_err(|e| anyhow!("Could not spawn {} app-server: {}", bin.display(), e))?
+    };
     let stdout = child
         .stdout
         .take()
@@ -613,6 +783,11 @@ async fn spawn_client(
 
     let client = Arc::new(CodexClient {
         child: Mutex::new(child),
+        #[cfg(unix)]
+        process_group_id,
+        #[cfg(windows)]
+        job,
+        terminated: AtomicBool::new(false),
         stdin: Mutex::new(stdin),
         next_id: AtomicI64::new(1),
         pending: std::sync::Mutex::new(HashMap::new()),
@@ -623,6 +798,10 @@ async fn spawn_client(
         thread_model: std::sync::Mutex::new(None),
         last_collab_mode: std::sync::Mutex::new(None),
         native_store,
+        alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+        session_id: session_id.to_string(),
+        turn_models: std::sync::Mutex::new(HashMap::new()),
+        last_active: std::sync::Mutex::new(Instant::now()),
     });
     tokio::spawn(read_loop(client.clone(), stdout));
     Ok(client)
@@ -694,71 +873,140 @@ impl CodexHost {
     /// child is alive; a dead child is replaced (its thread is re-resumed by
     /// the caller — `resumed_thread` starts empty on the replacement).
     ///
-    /// The spawn + registration + handshake run in a *detached* task: the
-    /// calling turn task is abortable (interrupt / delete), and an aborted
-    /// future would drop its `Arc` while the reader task keeps the child alive
-    /// — an unregistered client would be unreachable by every kill path and
-    /// leak the process for the rest of `orx up`'s life. Detached, the
-    /// bring-up always runs to completion: the client ends up registered
-    /// (killable via kill_session/shutdown) or killed on handshake failure.
-    /// One consequence of registering before the handshake: a reuse hit may
-    /// briefly hand out a still-mid-handshake client; its requests fail
-    /// cleanly (server "not initialized" / closed) and the next turn recovers.
+    /// Cancelled startup retires its child; the detached handoff owns cleanup.
     pub async fn ensure(
         self: &Arc<Self>,
         session_id: &str,
         native_store: NativeStore,
     ) -> Result<Arc<CodexClient>> {
-        let _spawning = self.spawn_lock.lock().await;
-        {
-            let mut guard = self.inner.lock().await;
-            if let Some(client) = guard.get(session_id) {
-                if client.native_store() == native_store
-                    && matches!(client.child.lock().await.try_wait(), Ok(None))
-                {
-                    return Ok(client.clone());
-                }
-            }
-            if let Some(stale) = guard.remove(session_id) {
-                let _ = stale.child.lock().await.kill().await;
-            }
-        }
+        let codex_home =
+            tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
+                .await
+                .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
         let host = self.clone();
         let session = session_id.to_string();
-        tokio::spawn(async move {
-            let client = spawn_client(&session, host.up_port.get().copied(), native_store).await?;
-            // Never displace a live entry: if an abandoned bring-up's insert
-            // races a successor's (spawn_lock was released by the abort), the
-            // loser kills its own child and defers to the live one.
-            {
-                let mut guard = host.inner.lock().await;
-                if let Some(existing) = guard.get(&session) {
-                    if existing.native_store() == native_store
-                        && matches!(existing.child.lock().await.try_wait(), Ok(None))
-                    {
-                        let existing = existing.clone();
-                        drop(guard);
-                        let _ = client.child.lock().await.kill().await;
-                        return Ok(existing);
-                    }
-                }
-                if let Some(stale) = guard.remove(&session) {
-                    let _ = stale.child.lock().await.kill().await;
-                }
-                guard.insert(session.clone(), client.clone());
-            }
-            if let Err(e) = handshake(&client).await {
-                let _ = client.child.lock().await.kill().await;
-                let mut guard = host.inner.lock().await;
-                if guard.get(&session).is_some_and(|c| Arc::ptr_eq(c, &client)) {
-                    guard.remove(&session);
-                }
-                return Err(e);
-            }
-            Ok(client)
+        self.ensure_with_spawn(session_id, native_store, async move {
+            let bin = find_codex_required()?;
+            Ok(move || {
+                spawn_client(
+                    &session,
+                    host.up_port.get().copied(),
+                    native_store,
+                    bin,
+                    codex_home,
+                )
+            })
         })
         .await
-        .map_err(|e| anyhow!("codex app-server bring-up task failed: {e}"))?
+    }
+
+    async fn ensure_with_spawn<F>(
+        self: &Arc<Self>,
+        session_id: &str,
+        native_store: NativeStore,
+        prepare: impl std::future::Future<Output = Result<F>>,
+    ) -> Result<Arc<CodexClient>>
+    where
+        F: FnOnce() -> Result<Arc<CodexClient>> + Send + 'static,
+    {
+        {
+            let _spawning = self.spawn_lock.lock().await;
+            if let Some(existing) = self.reusable_client(session_id, native_store).await {
+                return Ok(existing);
+            }
+        }
+        let spawn = prepare.await?;
+        let host = self.clone();
+        let session = session_id.to_string();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (accepted_tx, mut accepted_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let _spawning = host.spawn_lock.lock().await;
+            if ready_tx.is_closed() {
+                return;
+            }
+            // Another caller may have completed startup during preparation.
+            if let Some(existing) = host.reusable_client(&session, native_store).await {
+                let _ = ready_tx.send(Ok(existing));
+                return;
+            }
+            {
+                let mut guard = host.inner.lock().await;
+                if let Some(stale) = guard.remove(&session) {
+                    stale.terminate().await;
+                }
+            }
+            if ready_tx.is_closed() {
+                return;
+            }
+            // The process launch itself has no await; a detached owner always
+            // registers or reaps the child, even if the caller is cancelled.
+            let client = match spawn() {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
+            if ready_tx.is_closed() {
+                client.terminate().await;
+                return;
+            }
+            host.inner
+                .lock()
+                .await
+                .insert(session.clone(), client.clone());
+            let initialized = tokio::select! {
+                result = handshake(&client) => result,
+                _ = &mut accepted_rx => Err(anyhow!("Codex startup was cancelled")),
+            };
+            if let Err(error) = initialized {
+                host.retire_client(&session, &client).await;
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+            if ready_tx.send(Ok(client.clone())).is_err() || accepted_rx.await.is_err() {
+                host.retire_client(&session, &client).await;
+            }
+        });
+        let result = ready_rx
+            .await
+            .map_err(|error| anyhow!("codex app-server bring-up task failed: {error}"))?;
+        // No await between receiving and accepting: cancellation before this
+        // hand-off closes accepted_rx and leaves cleanup to the bring-up task.
+        let _ = accepted_tx.send(());
+        result
+    }
+
+    /// Called under spawn_lock, so a client cannot be reused mid-handshake.
+    async fn reusable_client(
+        &self,
+        session_id: &str,
+        native_store: NativeStore,
+    ) -> Option<Arc<CodexClient>> {
+        let guard = self.inner.lock().await;
+        let client = guard.get(session_id)?;
+        if client.native_store() == native_store
+            && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+            && matches!(client.child.lock().await.try_wait(), Ok(None))
+        {
+            client.touch();
+            Some(client.clone())
+        } else {
+            None
+        }
+    }
+
+    async fn retire_client(&self, session_id: &str, client: &Arc<CodexClient>) {
+        let mut guard = self.inner.lock().await;
+        if guard
+            .get(session_id)
+            .is_some_and(|c| Arc::ptr_eq(c, client))
+        {
+            guard.remove(session_id);
+        }
+        drop(guard);
+        client.terminate().await;
     }
 
     /// The session's live client, if any (for inline replies / interrupts).
@@ -766,11 +1014,14 @@ impl CodexHost {
         let mut guard = self.inner.lock().await;
         let client = guard.get(session_id)?;
         if matches!(client.child.lock().await.try_wait(), Ok(None)) {
-            Some(client.clone())
-        } else {
-            guard.remove(session_id);
-            None
+            client.touch();
+            return Some(client.clone());
         }
+        let dead = guard.remove(session_id)?;
+        drop(guard);
+        // The wrapper can die alone while its native child lives on.
+        dead.terminate().await;
+        None
     }
 
     /// Interrupt and harvest the in-flight turn while its child is reachable,
@@ -796,29 +1047,720 @@ impl CodexHost {
             }
         };
         if let Some(retired) = retired {
-            let _ = retired.child.lock().await.kill().await;
+            retired.terminate().await;
         }
         items
+    }
+
+    pub fn start_reaper(self: &Arc<Self>) {
+        let host = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(REAPER_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let Some(host) = host.upgrade() else {
+                    break;
+                };
+                host.reap_idle_at(Instant::now(), IdlePolicy::current())
+                    .await;
+            }
+        });
+    }
+
+    /// Release exited children and those idle past the policy's timeout or over
+    /// its idle limit; the next turn respawns and `thread/resume`s.
+    async fn reap_idle_at(&self, now: Instant, policy: IdlePolicy) {
+        let clients = self
+            .inner
+            .lock()
+            .await
+            .iter()
+            .map(|(session_id, client)| (session_id.clone(), client.clone()))
+            .collect::<Vec<_>>();
+        let mut doomed = Vec::new();
+        let mut idle = Vec::new();
+        for (session_id, client) in clients {
+            if client.terminated.load(Ordering::Acquire) {
+                continue;
+            }
+            let exited = !matches!(client.child.lock().await.try_wait(), Ok(None));
+            let Some(idle_since) = client.idle_since() else {
+                continue;
+            };
+            // An exited npm wrapper can leave its native app-server running: release
+            // it now rather than let it hold the warm slot.
+            if exited {
+                doomed.push((session_id, client, idle_since, "exited"));
+            } else {
+                idle.push((session_id, client, idle_since));
+            }
+        }
+        let idle_for = idle
+            .iter()
+            .map(|(_, _, idle_since)| now.duration_since(*idle_since))
+            .collect::<Vec<_>>();
+        let (expired, warm): (Vec<usize>, Vec<usize>) =
+            (0..idle.len()).partition(|&index| idle_for[index] >= policy.idle_timeout);
+        let warm_idle_for = warm
+            .iter()
+            .map(|&index| idle_for[index])
+            .collect::<Vec<_>>();
+        let released = expired
+            .into_iter()
+            .map(|index| (index, "idle-expired"))
+            .chain(
+                policy
+                    .over_limit(&warm_idle_for)
+                    .into_iter()
+                    .map(|index| (warm[index], "idle-limit")),
+            )
+            .collect::<Vec<_>>();
+        for (index, reason) in released {
+            let (session_id, client, idle_since) = idle[index].clone();
+            doomed.push((session_id, client, idle_since, reason));
+        }
+        for (session_id, client, idle_since, reason) in doomed {
+            let removed = {
+                // Atomic with the touch in `ensure`/`client_for`: a child handed out since
+                // the snapshot is spared.
+                let mut guard = self.inner.lock().await;
+                let untouched = guard
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &client))
+                    && client.idle_since() == Some(idle_since);
+                untouched.then(|| guard.remove(&session_id)).flatten()
+            };
+            if let Some(client) = removed {
+                eprintln!(
+                    "orx up: stopping codex app-server session={session_id} reason={reason} idle_s={}",
+                    now.duration_since(idle_since).as_secs()
+                );
+                client.terminate().await;
+            }
+        }
     }
 
     /// Kill and reap one session's child (on session delete).
     pub async fn kill_session(&self, session_id: &str) {
         if let Some(client) = self.inner.lock().await.remove(session_id) {
-            let _ = client.child.lock().await.kill().await;
+            client.terminate().await;
         }
     }
 
-    /// Kill and reap every child (also happens via kill_on_drop on exit).
+    /// Kill and reap every child's process group.
     pub async fn shutdown(&self) {
         for (_, client) in self.inner.lock().await.drain() {
-            let _ = client.child.lock().await.kill().await;
+            client.terminate().await;
         }
     }
 }
 
+/// Windows process-tree teardown (OR-409). npm's `codex` is a `cmd.exe` shim
+/// spawning `node.exe`/`codex.exe`; a wrapper-only kill orphans the native
+/// app-server, which keeps the thread's writer lock and breaks the
+/// replacement's `thread/resume`. The Job Object (`KILL_ON_JOB_CLOSE`)
+/// confines the whole tree: `TerminateJobObject` kills every descendant, and
+/// orx's own death can't orphan them either. Mirrors
+/// `crate::jobs::localbox::windows`.
+#[cfg(windows)]
+mod windows_job {
+    use std::io;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::time::Duration;
+
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenThread, ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+    };
+
+    use crate::error::{anyhow, Result};
+
+    use super::Child;
+
+    /// Suspended until the child is inside the job — a runnable npm wrapper
+    /// could spawn its native descendants before enrollment; no console
+    /// window, matching the localbox spawns.
+    pub(super) const SPAWN_FLAGS: u32 = CREATE_SUSPENDED | CREATE_NO_WINDOW;
+
+    fn own(handle: HANDLE) -> io::Result<OwnedHandle> {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: callers pass newly opened handles, transferred exactly once.
+        Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+    }
+
+    /// Confine a suspended `child`'s process tree to a fresh Job Object, then
+    /// resume it. Job-setup failure degrades to `Ok(None)` — `terminate()`
+    /// falls back to `kill_tree`; a resume failure is fatal (`Err`) because a
+    /// suspended child can never answer a request.
+    pub(super) fn enroll(child: &mut Child, pid: u32) -> Result<Option<OwnedHandle>> {
+        let assigned = (|| -> Result<OwnedHandle> {
+            // Anonymous job: the handle lives only on the client.
+            let job = own(unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) })?;
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: limits is live and correctly sized for the class requested.
+            if unsafe {
+                SetInformationJobObject(
+                    job.as_raw_handle(),
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+            let handle = child
+                .raw_handle()
+                .ok_or_else(|| anyhow!("codex app-server: spawned child has no handle"))?;
+            // SAFETY: both handles are live; the suspended child cannot have
+            // spawned descendants outside the job yet.
+            if unsafe { AssignProcessToJobObject(job.as_raw_handle(), handle) } == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            Ok(job)
+        })();
+        if let Err(error) = resume(pid) {
+            // A suspended child would hang every request — kill it.
+            let _ = child.start_kill();
+            return Err(error.context("codex app-server: could not resume spawned child"));
+        }
+        match assigned {
+            Ok(job) => Ok(Some(job)),
+            Err(error) => {
+                eprintln!("orx up: codex app-server job setup failed: {error}");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Resume the suspended spawn's threads (the toolhelp enumeration from
+    /// `jobs::localbox::windows::resume`).
+    fn resume(pid: u32) -> Result<()> {
+        // SAFETY: the snapshot owns no process resources and is closed by OwnedHandle.
+        let snapshot = own(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: entry has the required size and remains writable throughout enumeration.
+        let mut found = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) };
+        let mut resumed = false;
+        while found != 0 {
+            if entry.th32OwnerProcessID == pid {
+                // SAFETY: this is the primary thread of our still-suspended child.
+                let thread =
+                    own(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) })?;
+                // SAFETY: the thread handle has suspend/resume access.
+                let previous = unsafe { ResumeThread(thread.as_raw_handle()) };
+                if previous == u32::MAX {
+                    return Err(io::Error::last_os_error().into());
+                }
+                resumed |= previous == 1;
+            }
+            // SAFETY: same initialized entry and live snapshot as above.
+            found = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) };
+        }
+        if resumed {
+            Ok(())
+        } else {
+            Err(anyhow!("codex app-server: no suspended thread to resume"))
+        }
+    }
+
+    /// Kill every process the job confines — npm wrapper and all descendants.
+    pub(super) fn terminate(job: &OwnedHandle) {
+        // SAFETY: our job handle; terminating an already-empty job is a no-op.
+        if unsafe { TerminateJobObject(job.as_raw_handle(), 1) } == 0 {
+            eprintln!(
+                "orx up: codex app-server job terminate failed: {}",
+                io::Error::last_os_error()
+            );
+        }
+    }
+
+    /// Wait until the job's tree is empty — the wrapper's exit does not mean
+    /// its descendants finished exiting, and the native app-server must be
+    /// fully gone (writer lock released) before a replacement resumes.
+    pub(super) async fn drain(job: &OwnedHandle) {
+        for _ in 0..250 {
+            if active_processes(job) == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        eprintln!("orx up: timed out draining codex app-server's process tree");
+    }
+
+    /// Fallback for an unenrolled child: `taskkill /T` the tree. `/T` fails if
+    /// any descendant already exited, so the result is not checked — the
+    /// caller still reaps the wrapper.
+    pub(super) fn kill_tree(pid: u32) {
+        use std::os::windows::process::CommandExt;
+        let _ = crate::process::command("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    /// Processes still confined by the job — `drain` waits for this to reach
+    /// zero, and the tests assert teardown empties it.
+    pub(super) fn active_processes(job: &OwnedHandle) -> u32 {
+        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        // SAFETY: info is writable and its size matches the class requested.
+        if unsafe {
+            QueryInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectBasicAccountingInformation,
+                std::ptr::from_mut(&mut info).cast(),
+                std::mem::size_of_val(&info) as u32,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return u32::MAX;
+        }
+        info.ActiveProcesses
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    use std::os::windows::io::OwnedHandle;
+
+    #[cfg(windows)]
+    fn windows_test_client(mut child: Child, job: Option<OwnedHandle>) -> Arc<CodexClient> {
+        let stdin = child.stdin.take().unwrap();
+        Arc::new(CodexClient {
+            child: Mutex::new(child),
+            job,
+            terminated: AtomicBool::new(false),
+            stdin: Mutex::new(stdin),
+            next_id: AtomicI64::new(1),
+            pending: std::sync::Mutex::new(HashMap::new()),
+            turn: std::sync::Mutex::new(None),
+            unanswered: std::sync::Mutex::new(HashMap::new()),
+            active_turn: std::sync::Mutex::new(None),
+            resumed_thread: std::sync::Mutex::new(None),
+            thread_model: std::sync::Mutex::new(None),
+            last_collab_mode: std::sync::Mutex::new(None),
+            native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
+            session_id: String::new(),
+            turn_models: std::sync::Mutex::new(HashMap::new()),
+            last_active: std::sync::Mutex::new(Instant::now()),
+        })
+    }
+
+    #[cfg(unix)]
+    fn idle_test_client(last_active: Instant) -> Arc<CodexClient> {
+        test_client_running("sleep 600", last_active)
+    }
+
+    #[cfg(unix)]
+    fn test_client_running(shell: &str, last_active: Instant) -> Arc<CodexClient> {
+        test_client(shell, last_active, false)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn rpc_test_client(shell: &str) -> Arc<CodexClient> {
+        test_client(shell, Instant::now(), true)
+    }
+
+    #[cfg(unix)]
+    fn test_client(shell: &str, last_active: Instant, read_events: bool) -> Arc<CodexClient> {
+        let mut command = crate::process::tokio_command("sh");
+        command
+            .args(["-c", shell])
+            .stdin(Stdio::piped())
+            .stdout(if read_events {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_group_id = child.id().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take();
+        let client = Arc::new(CodexClient {
+            child: Mutex::new(child),
+            process_group_id,
+            terminated: AtomicBool::new(false),
+            stdin: Mutex::new(stdin),
+            next_id: AtomicI64::new(1),
+            pending: std::sync::Mutex::new(HashMap::new()),
+            turn: std::sync::Mutex::new(None),
+            unanswered: std::sync::Mutex::new(HashMap::new()),
+            active_turn: std::sync::Mutex::new(None),
+            resumed_thread: std::sync::Mutex::new(None),
+            thread_model: std::sync::Mutex::new(None),
+            last_collab_mode: std::sync::Mutex::new(None),
+            native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
+            session_id: String::new(),
+            turn_models: std::sync::Mutex::new(HashMap::new()),
+            last_active: std::sync::Mutex::new(last_active),
+        });
+        if let Some(stdout) = stdout {
+            tokio::spawn(read_loop(client.clone(), stdout));
+        }
+        client
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn stop_test_client(client: &CodexClient) {
+        client.terminate().await;
+    }
+
+    #[test]
+    fn configured_alphaxiv_is_disabled_when_our_server_uses_the_reserved_name() {
+        let configured =
+            json!({"alphaxiv":{"url":"https://example.com/mcp"},"other":{"command":"other"}});
+        let overrides = alphaxiv_config(&configured).unwrap();
+        assert_eq!(overrides["alphaxiv"], json!({"enabled":false}));
+        assert_eq!(overrides["orx_alphaxiv"]["args"], json!(["alphaxiv-mcp"]));
+        assert!(overrides.get("other").is_none());
+        assert!(alphaxiv_config(&json!({"alphaxiv":{},"orx_alphaxiv":{}})).is_err());
+        assert!(alphaxiv_config(&Value::Null)
+            .unwrap()
+            .get("alphaxiv")
+            .is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_approval_accepts_and_declines_in_its_native_reply_shape() {
+        let client = idle_test_client(Instant::now());
+        let id = json!(0);
+        client
+            .unanswered
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), ServerReqKind::McpApproval);
+        assert_eq!(
+            client.approval_reply(&id, true),
+            json!({"action":"accept","content":{},"_meta":null})
+        );
+        assert_eq!(
+            client.approval_reply(&id, false),
+            json!({"action":"decline","content":null,"_meta":null})
+        );
+        client.terminate().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_request_does_not_leave_the_child_busy() {
+        let client = idle_test_client(Instant::now());
+
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(20),
+            client.try_request("thread/read", json!({})),
+        )
+        .await;
+
+        assert!(cancelled.is_err());
+        assert!(client.pending.lock().unwrap().is_empty());
+        assert!(client.idle_since().is_some());
+        client.terminate().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initialized_bring_up_hands_off_a_reusable_client() {
+        let host = Arc::new(CodexHost::new());
+        let client = rpc_test_client(
+            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{}}'; sleep 600"#,
+        );
+        let spawned = client.clone();
+        let ensured = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("compact", NativeStore::Isolated, async {
+                Ok(move || Ok(spawned))
+            }),
+        )
+        .await;
+        let reused = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("compact", NativeStore::Isolated, async {
+                Ok(|| panic!("initialized client must be reused"))
+            }),
+        )
+        .await;
+        host.kill_session("compact").await;
+        assert!(Arc::ptr_eq(&ensured.unwrap().unwrap(), &client));
+        assert!(Arc::ptr_eq(&reused.unwrap().unwrap(), &client));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_bring_up_does_not_block_other_chats_or_leak_children() {
+        let host = Arc::new(CodexHost::new());
+        let warm = idle_test_client(Instant::now());
+        host.inner.lock().await.insert("warm".into(), warm.clone());
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let launched = Arc::new(AtomicBool::new(false));
+        let spawn_flag = launched.clone();
+        let operation_host = host.clone();
+        let operation = tokio::spawn(async move {
+            operation_host
+                .ensure_with_spawn("compact", NativeStore::Isolated, async move {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    Ok(move || {
+                        spawn_flag.store(true, Ordering::Release);
+                        Ok(idle_test_client(Instant::now()))
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        // A stalled preparation neither blocks reuse nor another cold startup.
+        let reused = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("warm", NativeStore::Isolated, async {
+                Ok(|| panic!("a warm client must not be spawned again"))
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(Arc::ptr_eq(&reused, &warm));
+        let cold = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("other", NativeStore::Isolated, async {
+                Err::<fn() -> Result<Arc<CodexClient>>, _>(anyhow!("preparation reached"))
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cold.err().unwrap().to_string(), "preparation reached");
+        operation.abort();
+        let _ = operation.await;
+        assert!(release_tx.send(()).is_err());
+        assert!(!launched.load(Ordering::Acquire));
+        host.kill_session("warm").await;
+
+        // Cancellation after process launch still reaps the registered child.
+        let client = idle_test_client(Instant::now());
+        let spawned = client.clone();
+        let operation_host = host.clone();
+        let operation = tokio::spawn(async move {
+            operation_host
+                .ensure_with_spawn("compact", NativeStore::Isolated, async {
+                    Ok(move || Ok(spawned))
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.pending.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        operation.abort();
+        let _ = operation.await;
+        let _settled = tokio::time::timeout(Duration::from_secs(2), host.spawn_lock.lock())
+            .await
+            .unwrap();
+        assert!(client.terminated.load(Ordering::Acquire));
+        assert!(host.inner.lock().await.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reaper_releases_an_exited_wrapper_instead_of_keeping_it_warm() {
+        let now = Instant::now();
+        let host = CodexHost::new();
+        let warm = idle_test_client(now - Duration::from_secs(60));
+        // The npm shape: the wrapper exits while its native child keeps running.
+        let exited = test_client_running("sleep 600 & exit 0", now - Duration::from_secs(40));
+        exited.child.lock().await.wait().await.unwrap();
+        for (session_id, client) in [("warm", &warm), ("exited", &exited)] {
+            host.inner
+                .lock()
+                .await
+                .insert(session_id.to_string(), client.clone());
+        }
+
+        host.reap_idle_at(now, IdlePolicy::LOW_MEMORY).await;
+
+        let live = host.inner.lock().await.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(live, ["warm"]);
+        assert!(exited.terminated.load(Ordering::Acquire));
+        let group = -(exited.process_group_id as i32);
+        let mut survivor = true;
+        for _ in 0..50 {
+            survivor = unsafe { libc::kill(group, 0) == 0 };
+            if !survivor {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!survivor, "the wrapper's native child survived the release");
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reaper_releases_idle_children_and_spares_busy_ones() {
+        let now = Instant::now();
+        let host = CodexHost::new();
+        let expired = idle_test_client(now - IdlePolicy::DEFAULT.idle_timeout);
+        let recent = idle_test_client(now - Duration::from_secs(60));
+        let newest = idle_test_client(now - Duration::from_secs(40));
+        let in_turn = idle_test_client(now - Duration::from_secs(3600));
+        let in_request = idle_test_client(now - Duration::from_secs(3600));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let _route = in_turn.register_turn(tx);
+        let (request_tx, _request_rx) = oneshot::channel();
+        in_request.pending.lock().unwrap().insert(1, request_tx);
+        for (session_id, client) in [
+            ("expired", &expired),
+            ("recent", &recent),
+            ("newest", &newest),
+            ("in-turn", &in_turn),
+            ("in-request", &in_request),
+        ] {
+            host.inner
+                .lock()
+                .await
+                .insert(session_id.to_string(), client.clone());
+        }
+
+        host.reap_idle_at(now, IdlePolicy::DEFAULT).await;
+
+        let mut live = host.inner.lock().await.keys().cloned().collect::<Vec<_>>();
+        live.sort();
+        assert_eq!(live, ["in-request", "in-turn", "newest", "recent"]);
+        assert!(expired.terminated.load(Ordering::Acquire));
+
+        host.reap_idle_at(now, IdlePolicy::LOW_MEMORY).await;
+        assert!(recent.terminated.load(Ordering::Acquire));
+        assert!(!newest.terminated.load(Ordering::Acquire));
+        assert!(!in_request.terminated.load(Ordering::Acquire));
+        assert!(!in_turn.terminated.load(Ordering::Acquire));
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_kills_the_native_child_behind_a_wrapper() {
+        // The npm `codex.js` shape: a wrapper whose child outlives its SIGKILL.
+        let mut command = crate::process::tokio_command("sh");
+        command
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_group_id = child.id().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut native_pid = String::new();
+        stdout.read_line(&mut native_pid).await.unwrap();
+        let client = CodexClient {
+            child: Mutex::new(child),
+            process_group_id,
+            terminated: AtomicBool::new(false),
+            stdin: Mutex::new(stdin),
+            next_id: AtomicI64::new(1),
+            pending: std::sync::Mutex::new(HashMap::new()),
+            turn: std::sync::Mutex::new(None),
+            unanswered: std::sync::Mutex::new(HashMap::new()),
+            active_turn: std::sync::Mutex::new(None),
+            resumed_thread: std::sync::Mutex::new(None),
+            thread_model: std::sync::Mutex::new(None),
+            last_collab_mode: std::sync::Mutex::new(None),
+            native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
+            session_id: String::new(),
+            turn_models: std::sync::Mutex::new(HashMap::new()),
+            last_active: std::sync::Mutex::new(Instant::now()),
+        };
+
+        client.terminate().await;
+        // A second call must not signal the (possibly reused) group again.
+        client.terminate().await;
+        assert!(client.terminated.load(Ordering::Acquire));
+
+        // EOF, not a pid probe: a killed child can linger as an unreaped zombie.
+        let mut rest = Vec::new();
+        let eof = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut rest),
+        )
+        .await;
+        assert!(
+            eof.is_ok(),
+            "native child {} survived terminate",
+            native_pid.trim()
+        );
+    }
+
+    /// The npm wrapper's child can outlive a wrapper-only kill (OR-409).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminate_kills_the_native_child_behind_a_wrapper() {
+        let mut command = crate::process::tokio_command("cmd");
+        command
+            .args(["/c", "ping.exe -n 600 127.0.0.1 > nul"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(windows_job::SPAWN_FLAGS);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let job = windows_job::enroll(&mut child, pid)
+            .unwrap()
+            .expect("job enrollment should succeed");
+        let client = windows_test_client(child, Some(job));
+
+        // Terminating before the wrapper spawns its native child would prove
+        // nothing — wait for the tree to hold both.
+        let job = client.job.as_ref().unwrap();
+        let mut populated = false;
+        for _ in 0..250 {
+            if windows_job::active_processes(job) >= 2 {
+                populated = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(populated, "the wrapper never spawned its native child");
+
+        client.terminate().await;
+        // A second call must not signal the (possibly reused) job again.
+        client.terminate().await;
+        assert!(client.terminated.load(Ordering::Acquire));
+        assert_eq!(
+            windows_job::active_processes(job),
+            0,
+            "the wrapper's native child survived terminate"
+        );
+    }
 
     #[test]
     fn classify_discriminates_the_three_wire_shapes() {

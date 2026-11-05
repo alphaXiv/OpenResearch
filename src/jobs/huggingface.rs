@@ -10,7 +10,7 @@
 //! plain `Bearer` header on every call including the log stream.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -19,116 +19,46 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::managed_env::ManagedEnv;
 use crate::error::{anyhow, Result};
 
 const SOURCE_LAUNCHER: &str = r#"
-import json, sys
+import contextlib, json, sys
 from huggingface_hub import HfApi
 
 spec = json.load(sys.stdin)
 api = HfApi(endpoint=spec["endpoint"], token=spec["token"])
-volume = api.sync_job_volume(
-    spec["sourceDir"],
-    "/orx-source",
-    namespace=spec["namespace"],
-    remote_name="orx-" + spec["digest"],
-    read_only=True,
-)
-job = api.run_job(
-    image=spec["image"],
-    command=spec["command"],
-    env=spec["environment"],
-    secrets=spec["secrets"],
-    flavor=spec["flavor"],
-    timeout=spec["timeoutSeconds"],
-    labels=spec["labels"],
-    volumes=[volume],
-    namespace=spec["namespace"],
-)
+# sync_job_volume prints its sync plan to stdout, which must carry only the job JSON.
+with contextlib.redirect_stdout(sys.stderr):
+    volume = api.sync_job_volume(
+        spec["sourceDir"],
+        "/orx-source",
+        namespace=spec["namespace"],
+        remote_name="orx-" + spec["digest"],
+        read_only=True,
+    )
+    job = api.run_job(
+        image=spec["image"],
+        command=spec["command"],
+        env=spec["environment"],
+        secrets=spec["secrets"],
+        flavor=spec["flavor"],
+        timeout=spec["timeoutSeconds"],
+        labels=spec["labels"],
+        volumes=[volume],
+        namespace=spec["namespace"],
+    )
 print(json.dumps({"id": job.id}))
 "#;
 
-fn managed_python() -> PathBuf {
-    let env = crate::config::config_dir().join("envs").join("huggingface");
-    if cfg!(windows) {
-        env.join("Scripts").join("python.exe")
-    } else {
-        env.join("bin").join("python")
-    }
-}
-
-async fn ensure_client_env() -> Result<PathBuf> {
-    static INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    let _install = INSTALL_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-    let python = managed_python();
-    if python.exists() {
-        let ready = tokio::process::Command::new(&python)
-            .args([
-                "-c",
-                "from huggingface_hub import HfApi; assert hasattr(HfApi, 'sync_job_volume')",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if ready {
-            return Ok(python);
-        }
-    }
-    let base = ["python3", "python"]
-        .into_iter()
-        .find(|candidate| {
-            std::process::Command::new(candidate)
-                .args(["-c", "import venv"])
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| anyhow!("Python 3 is required to stage source for Hugging Face Jobs."))?;
-    let env_dir = python
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| anyhow!("Invalid managed Hugging Face environment path."))?;
-    if !python.exists() {
-        if let Some(parent) = env_dir.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let status = tokio::process::Command::new(base)
-            .args(["-m", "venv"])
-            .arg(env_dir)
-            .status()
-            .await?;
-        if !status.success() {
-            return Err(anyhow!(
-                "Could not create the Hugging Face client environment."
-            ));
-        }
-    }
-    eprintln!("orx: installing the Hugging Face source-transfer client (one time)…");
-    let status = tokio::process::Command::new(&python)
-        .args([
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--disable-pip-version-check",
-            "huggingface_hub>=1.8.0",
-        ])
-        .status()
-        .await?;
-    if !status.success() {
-        return Err(anyhow!(
-            "Could not install the Hugging Face source-transfer client."
-        ));
-    }
-    Ok(python)
-}
+/// `huggingface_hub` gained `sync_job_volume` in 1.22, which requires Python 3.10.
+const CLIENT_ENV: ManagedEnv = ManagedEnv {
+    name: "huggingface",
+    label: "Hugging Face Jobs",
+    min_python: (3, 10),
+    requirement: "huggingface_hub>=1.22.0",
+    ready_check: "from huggingface_hub import HfApi; assert hasattr(HfApi, 'sync_job_volume')",
+};
 
 pub fn endpoint() -> String {
     std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string())
@@ -181,7 +111,7 @@ pub fn resolve_token_with_source() -> Result<(String, TokenSource)> {
 fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        Client::builder()
+        crate::net::remote_client()
             .connect_timeout(Duration::from_secs(15))
             .build()
             .expect("reqwest client")
@@ -208,10 +138,10 @@ async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> 
     if status.is_success() {
         return Ok(res);
     }
-    if status.as_u16() == 401 {
+    if matches!(status.as_u16(), 401 | 403) {
         res.error_for_status_ref().map_err(|error| {
             anyhow!(error).context(format!(
-                "Hugging Face rejected the token (HTTP 401) during {what}. Check HF_TOKEN."
+                "Hugging Face rejected the token (HTTP {status}) during {what}. Check HF_TOKEN."
             ))
         })?;
     }
@@ -292,11 +222,14 @@ pub async fn whoami_details(token: &str) -> Result<WhoamiDetails> {
     Ok(WhoamiDetails { name, jobs_write })
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct JobSubmission {
     pub command: Vec<String>,
     pub docker_image: String,
     pub flavor: String,
+    #[serde(default)]
     pub environment: HashMap<String, String>,
+    #[serde(default)]
     pub secrets: HashMap<String, String>,
     pub timeout_seconds: u64,
     pub labels: HashMap<String, String>,
@@ -311,8 +244,9 @@ pub async fn run_job_with_source(
     spec: &JobSubmission,
     archive: &Path,
     digest: &str,
+    fence: Option<&crate::engine::Fence<'_>>,
 ) -> Result<JobInfo> {
-    let python = ensure_client_env().await?;
+    let python = CLIENT_ENV.ensure().await?;
     let source_dir = archive
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -336,12 +270,24 @@ pub async fn run_job_with_source(
         "timeoutSeconds": spec.timeout_seconds,
         "labels": spec.labels,
     });
-    let mut child = tokio::process::Command::new(python)
+    let mut child = crate::process::tokio_command(python)
         .args(["-c", SOURCE_LAUNCHER])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    if let Some(fence) = fence {
+        let recorded = fence.record_submitter(
+            child
+                .id()
+                .ok_or_else(|| anyhow!("HF launcher exited before fencing"))?,
+        );
+        if let Err(error) = recorded {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    }
     use tokio::io::AsyncWriteExt as _;
     child
         .stdin
@@ -409,7 +355,7 @@ pub async fn stream_logs(
     namespace: &str,
     job_id: &str,
     skip: u64,
-    idle_timeout: Duration,
+    idle_timeout: Option<Duration>,
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     #[derive(Deserialize)]
@@ -432,9 +378,13 @@ pub async fn stream_logs(
     let mut seen = 0u64;
     let mut buf: Vec<u8> = Vec::new();
     loop {
-        let chunk = match tokio::time::timeout(idle_timeout, res.chunk()).await {
-            Err(_) => break,       // idle — likely end of buffered history
-            Ok(Err(_)) => break,   // stream error — caller reconnects if live
+        let next = match idle_timeout {
+            Some(idle) => tokio::time::timeout(idle, res.chunk()).await,
+            None => Ok(res.chunk().await),
+        };
+        let chunk = match next {
+            Err(_) => break, // idle — likely end of buffered history
+            Ok(Err(e)) => return Err(anyhow!("Hugging Face log stream failed: {}", e)),
             Ok(Ok(None)) => break, // server closed
             Ok(Ok(Some(c))) => c,
         };
@@ -476,12 +426,57 @@ pub fn parse_timeout(value: &str) -> Result<u64> {
     let n: u64 = num
         .parse()
         .map_err(|_| anyhow!("Bad --timeout '{}': use e.g. 30m, 4h, 1d.", value))?;
-    Ok(n * factor)
+    n.checked_mul(factor)
+        .filter(|seconds| *seconds > 0)
+        .ok_or_else(|| {
+            anyhow!(
+                "Bad --timeout '{}': use a positive duration that fits in seconds.",
+                value
+            )
+        })
 }
 
-/// Where to watch the job on huggingface.co.
-pub fn job_url(namespace: &str, job_id: &str) -> String {
-    format!("{}/jobs/{}/{}", endpoint(), namespace, job_id)
+pub async fn find_run(token: &str, namespace: &str, run: &str) -> Result<Vec<JobInfo>> {
+    let base = reqwest::Url::parse(&endpoint())?;
+    let mut url = base.join(&format!("/api/jobs/{namespace}"))?;
+    url.query_pairs_mut()
+        .append_pair("labels", &format!("or_run={run}"));
+    let mut visited = std::collections::HashSet::new();
+    let mut found = Vec::new();
+    loop {
+        if url.origin() != base.origin() || !visited.insert(url.clone()) {
+            return Err(anyhow!("Invalid HF pagination link"));
+        }
+        let response = check(
+            http().get(url.clone()).bearer_auth(token).send().await?,
+            "job lookup",
+        )
+        .await?;
+        let next = response
+            .headers()
+            .get("link")
+            .and_then(|header| header.to_str().ok())
+            .and_then(|links| links.split(',').find(|link| link.contains("rel=\"next\"")))
+            .map(|link| -> Result<reqwest::Url> {
+                let target = link
+                    .trim()
+                    .strip_prefix('<')
+                    .and_then(|link| link.split_once('>').map(|(target, _)| target))
+                    .ok_or_else(|| anyhow!("Invalid HF pagination link"))?;
+                Ok(url.join(target)?)
+            })
+            .transpose()?;
+        let jobs: Vec<serde_json::Value> = response.json().await?;
+        for job in jobs {
+            if job["labels"]["or_run"].as_str() == Some(run) {
+                found.push(serde_json::from_value(job)?);
+            }
+        }
+        match next {
+            Some(next) => url = next,
+            None => return Ok(found),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -490,7 +485,7 @@ mod settings_tests {
 
     #[tokio::test]
     async fn invalid_token_retains_http_status() {
-        for status in [401, 503] {
+        for status in [401, 403, 503] {
             let response = axum::http::Response::builder()
                 .status(status)
                 .body("")
@@ -500,8 +495,69 @@ mod settings_tests {
                 error
                     .downcast_ref::<reqwest::Error>()
                     .and_then(|e| e.status()),
-                (status == 401).then_some(reqwest::StatusCode::UNAUTHORIZED)
+                matches!(status, 401 | 403).then(|| reqwest::StatusCode::from_u16(status).unwrap())
             );
         }
+    }
+
+    #[tokio::test]
+    async fn source_launcher_keeps_library_output_off_stdout() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(CLIENT_ENV.min_python, CLIENT_ENV.label).await
+        else {
+            eprintln!(
+                "skipped: no Python {}.{}+ on PATH",
+                CLIENT_ENV.min_python.0, CLIENT_ENV.min_python.1
+            );
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-hf-launcher-{}", uuid::Uuid::new_v4()));
+        let package = dir.join("huggingface_hub");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("__init__.py"),
+            r#"
+class HfApi:
+    def __init__(self, **kwargs):
+        pass
+    def sync_job_volume(self, *args, **kwargs):
+        print("Sync plan: local -> hf://buckets/x")
+        return "volume"
+    def run_job(self, **kwargs):
+        print("Job started")
+        return type("Job", (), {"id": "job-123"})()
+"#,
+        )
+        .unwrap();
+        let spec = json!({
+            "endpoint": "", "token": "", "namespace": "", "sourceDir": "", "digest": "",
+            "image": "", "command": [], "environment": {}, "secrets": {}, "flavor": "",
+            "timeoutSeconds": 0, "labels": {},
+        });
+        let mut child = crate::process::command(python)
+            .args(["-c", SOURCE_LAUNCHER])
+            .env("PYTHONPATH", &dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(spec.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["id"], "job-123");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Sync plan"));
     }
 }

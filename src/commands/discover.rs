@@ -1,8 +1,9 @@
 //! Independent literature retrieval primitives for the main agent.
 
 use crate::client::{
-    discover_openalex, discover_papers_by_embedding, discover_papers_by_keyword, LitHit,
-    OpenAlexDiscoveryOptions, PaperDiscoveryOptions, BIORXIV_SOURCE_ID,
+    discover_openalex, discover_papers_by_embedding, discover_papers_by_keyword, discover_pubmed,
+    LitHit, OpenAlexDiscoveryOptions, PaperDiscoveryOptions, PubmedDiscoveryOptions,
+    BIORXIV_SOURCE_ID,
 };
 use crate::error::{anyhow, Result};
 use crate::LitSource;
@@ -40,6 +41,10 @@ pub async fn run(args: crate::DiscoverArgs) -> Result<()> {
             )
             .await?
         }
+        crate::DiscoverCommand::Pubmed(args) => {
+            ensure_source_enabled(LitSource::Pubmed, &disabled)?;
+            discover_pubmed(&args.query, pubmed_options(&args)).await?
+        }
     };
 
     println!("{}", serde_json::to_string_pretty(&results)?);
@@ -67,6 +72,15 @@ fn openalex_options<'a>(
     }
 }
 
+fn pubmed_options(args: &crate::DiscoverySearchArgs) -> PubmedDiscoveryOptions<'_> {
+    PubmedDiscoveryOptions {
+        limit: args.limit,
+        published_after: args.published_after.as_deref(),
+        published_before: args.published_before.as_deref(),
+        prioritize: args.prioritize.as_str(),
+    }
+}
+
 fn ensure_source_enabled(source: LitSource, disabled: &[String]) -> Result<()> {
     if disabled.iter().any(|disabled| disabled == source.as_str()) {
         return Err(anyhow!(
@@ -91,6 +105,9 @@ mod tests {
         let error = ensure_source_enabled(LitSource::Biorxiv, &["biorxiv".to_string()])
             .expect_err("disabled bioRxiv should reject retrieval");
         assert!(error.to_string().contains("bioRxiv is disabled"));
+        let error = ensure_source_enabled(LitSource::Pubmed, &["pubmed".to_string()])
+            .expect_err("disabled PubMed should reject retrieval");
+        assert!(error.to_string().contains("PubMed is disabled"));
         ensure_source_enabled(LitSource::Openalex, &[])
             .expect("enabled OpenAlex should permit retrieval");
     }

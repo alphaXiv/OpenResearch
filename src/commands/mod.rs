@@ -15,22 +15,25 @@
 //!   return `Err(anyhow!(...))` (clap already enforces required positionals, so
 //!   most of those usage guards are unnecessary in the Rust port).
 
-pub mod agent;
+pub mod alphaxiv_mcp;
 pub mod app;
 pub mod compute;
 pub mod create_experiment;
 pub mod delete;
 pub mod discover;
 pub mod exp;
+pub mod feedback;
 mod file_serve;
 pub mod install_cli;
 pub mod install_skills;
 pub mod instance;
+pub mod invocation_gate;
 pub mod library;
 pub mod login;
 pub mod logout;
 pub mod logs;
-pub mod mcp_gate;
+pub mod mcp;
+pub mod metrics;
 pub mod orgs;
 pub mod paper;
 pub mod plan_gate;
@@ -43,6 +46,7 @@ pub mod skill;
 pub mod ssh_key;
 pub mod supervise;
 pub mod telemetry;
+pub mod tensorboard;
 pub mod up;
 pub mod up_remote;
 pub mod update;

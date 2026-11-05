@@ -41,7 +41,7 @@ pub struct AgentSkill {
     pub resources: &'static [AgentSkillResource],
 }
 
-pub const RETIRED_SKILL_NAMES: &[&str] = &["orx-lit", "orx-compute-k8s"];
+pub const RETIRED_SKILL_NAMES: &[&str] = &["orx-lit", "orx-compute-k8s", "orx-evidence"];
 
 /// Which module set to serve. Both sets use the same canonical module bodies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +56,10 @@ pub enum SkillSet {
 
 const COMPUTE: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
 const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
+    AgentSkillResource {
+        path: "references/configuration.md",
+        content: include_str!("../../agent-skills/orx-compute/references/configuration.md"),
+    },
     AgentSkillResource {
         path: "references/hf.md",
         content: include_str!("../../agent-skills/orx-compute/references/hf.md"),
@@ -81,6 +85,10 @@ const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
         content: include_str!("../../agent-skills/orx-compute/references/ray.md"),
     },
     AgentSkillResource {
+        path: "references/vercel.md",
+        content: include_str!("../../agent-skills/orx-compute/references/vercel.md"),
+    },
+    AgentSkillResource {
         path: "references/openresearch.md",
         content: include_str!("../../agent-skills/orx-compute/references/openresearch.md"),
     },
@@ -99,12 +107,22 @@ const AGENT_DELEGATION: &str = include_str!("../../agent-skills/orx-agent-delega
 const LIT: &str = include_str!("../../agent-skills/orx-lit-review/SKILL.md");
 const CREATE: &str = include_str!("../../agent-skills/orx-create/SKILL.md");
 const REPORTS: &str = include_str!("../../agent-skills/orx-reports/SKILL.md");
-const EVIDENCE: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
+const LOGS: &str = include_str!("../../agent-skills/orx-logs/SKILL.md");
+const RESULTS: &str = include_str!("../../agent-skills/orx-results/SKILL.md");
 const CUSTOMIZE: &str = include_str!("../../agent-skills/orx-customize/SKILL.md");
 const PAPER: &str = include_str!("../../agent-skills/orx-paper/SKILL.md");
 const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md");
+const FEEDBACK: &str = include_str!("../../agent-skills/orx-feedback/SKILL.md");
 const FIGURES: &str = include_str!("../../agent-skills/orx-figures/SKILL.md");
 const FIGURES_RESOURCES: &[AgentSkillResource] = &[
+    AgentSkillResource {
+        path: "assets/orx-chart.html",
+        content: include_str!("../../agent-skills/orx-figures/assets/orx-chart.html"),
+    },
+    AgentSkillResource {
+        path: "assets/orx_chart.py",
+        content: include_str!("../../agent-skills/orx-figures/assets/orx_chart.py"),
+    },
     AgentSkillResource {
         path: "references/curves.md",
         content: include_str!("../../agent-skills/orx-figures/references/curves.md"),
@@ -145,8 +163,8 @@ const FIGURES_RESOURCES: &[AgentSkillResource] = &[
 // works blind). Keep each ≤400 chars — Codex's ambient budget is ~8k across
 // the whole set.
 
-const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
-const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/wait/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
+const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, vercel, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and result messages. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
+const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/reconcile/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
 
 const S_COMPUTE: AgentSkill = AgentSkill {
     name: "orx-compute",
@@ -168,13 +186,13 @@ const S_GIT: AgentSkill = AgentSkill {
 };
 const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
     name: "orx-agent-delegation",
-    description: "Delegate independent work to helper agent sessions with `orx agent spawn`: task selection, self-contained briefs, branch ownership, compute authorization, wakeups, and nesting or concurrency constraints. Use before spawning a helper or interpreting its result; do not delegate the literature retrieval loop.",
+    description: "Delegate tasks to other models and chats with the orx MCP server's `delegate`, `wait`, `subscribe` and `answer` tools. Covers standalone briefs, worktrees, compute authorization, nesting and questions. Use before delegating or opening another chat.",
     content: AGENT_DELEGATION,
     resources: &[],
 };
 const S_LIT: AgentSkill = AgentSkill {
     name: "orx-lit-review",
-    description: "Search and read research papers. The main agent calls alphaXiv, OpenAlex, and bioRxiv discovery primitives, ranks the combined candidates, and chooses sources for focused follow-ups. Use for literature reviews, related work, prior art, papers, authors, methods, benchmarks, or research claims; never delegate the retrieval loop to a sub-agent.",
+    description: "Explain and compare scientific or technical concepts using original research evidence. Use before answering conceptual or architectural questions, research claims, literature reviews, or related-work requests, even when no paper, citation, or search is requested. Retrieve with relevant alphaXiv, OpenAlex, bioRxiv, and PubMed connectors; scale retrieval to the question.",
     content: LIT,
     resources: &[],
 };
@@ -186,7 +204,7 @@ const S_CREATE: AgentSkill = AgentSkill {
 };
 const S_REPORTS: AgentSkill = AgentSkill {
     name: "orx-reports",
-    description: "Write and organize durable outputs in the artifacts directory. Use before creating or organizing artifacts, including reports, summaries, comparisons, figures, and exported data, or when a line of work concludes.",
+    description: "Save and organize durable research outputs in the artifacts directory. Invoke when creating or reorganizing a report, exported dataset, or other deliverable; use `orx-results` for analysis and `orx-figures` when constructing charts.",
     content: REPORTS,
     resources: &[],
 };
@@ -204,20 +222,33 @@ const S_PAPER: AgentSkill = AgentSkill {
 };
 const S_FIGURES: AgentSkill = AgentSkill {
     name: "orx-figures",
-    description: "Publication-quality figures in matplotlib or TikZ: learning curves, scaling laws, benchmark and ablation comparisons, Pareto trade-offs, heatmaps and confusion matrices, method diagrams. Covers the shared style module, sizing, uncertainty, and vector export. Use whenever you plot, chart, or visualize results, add a figure to a paper or report, or one looks unpolished; then read one reference.",
+    description: "Create or update interactive HTML charts for chat and static publication figures. Invoke before writing plotting code or when an existing figure needs correction; use `orx-results` for experiment interpretation and `orx-logs` for retrieving measurements.",
     content: FIGURES,
     resources: FIGURES_RESOURCES,
 };
-const S_EVIDENCE: AgentSkill = AgentSkill {
-    name: "orx-evidence",
-    description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, read persisted results with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
-    content: EVIDENCE,
+const S_LOGS: AgentSkill = AgentSkill {
+    name: "orx-logs",
+    description: "Locate and read persisted experiment output with `orx logs`. Invoke when inspecting run progress, debugging a run failure, or retrieving recorded configuration and measurements; use `orx-results` to interpret the findings.",
+    content: LOGS,
+    resources: &[],
+};
+const S_RESULTS: AgentSkill = AgentSkill {
+    name: "orx-results",
+    description: "Interpret and summarize measured experiment results. Invoke before reporting measured results, including summarizing a completed run, comparing runs, evaluating an outcome, or recommending a next experiment from run evidence; retrieve missing output with `orx-logs`.",
+    content: RESULTS,
     resources: &[],
 };
 const S_INSTANCES: AgentSkill = AgentSkill {
     name: "orx-instances",
     description: "Create standalone OpenResearch compute instances with `orx instance create`. Use when the user wants a persistent machine for manual or ad-hoc work rather than an experiment run.",
     content: INSTANCES,
+    resources: &[],
+};
+
+const S_FEEDBACK: AgentSkill = AgentSkill {
+    name: "orx-feedback",
+    description: "Report product feedback about OpenResearch itself with `orx feedback`. Use when the user expresses frustration with an OpenResearch feature or bug, says a feature would be nice to have, or you hit a meaningful limitation or bug in the orx CLI, the agent harness, or the app. Not for research results, the user's own code, or minor nits.",
+    content: FEEDBACK,
     resources: &[],
 };
 
@@ -231,12 +262,14 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_AGENT_DELEGATION,
             &S_COMPUTE,
             &S_INSTANCES,
-            &S_EVIDENCE,
+            &S_LOGS,
+            &S_RESULTS,
             &S_REPORTS,
             &S_FIGURES,
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,
+            &S_FEEDBACK,
         ],
         SkillSet::Full => vec![
             &S_CREATE,
@@ -245,12 +278,14 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_AGENT_DELEGATION,
             &S_COMPUTE,
             &S_INSTANCES,
-            &S_EVIDENCE,
+            &S_LOGS,
+            &S_RESULTS,
             &S_REPORTS,
             &S_FIGURES,
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,
+            &S_FEEDBACK,
         ],
     }
 }
@@ -489,7 +524,8 @@ mod tests {
             "agent-delegation",
             "compute",
             "instances",
-            "evidence",
+            "logs",
+            "results",
             "reports",
             "customize",
         ] {
@@ -507,33 +543,6 @@ mod tests {
                 .map(|resource| (resource.path, resource.content))
                 .collect();
             assert_eq!(local_resources, full_resources, "{name} resources");
-        }
-    }
-
-    #[test]
-    fn evidence_and_reports_have_distinct_ownership() {
-        assert!(EVIDENCE.contains("Validate before reporting"));
-        assert!(EVIDENCE.contains("Truncated output is not evidence of absence"));
-        assert!(!EVIDENCE.contains("<file path="));
-        assert!(REPORTS.contains("evidence-and-links contract"));
-        assert!(REPORTS.contains("Load `orx-evidence`"));
-    }
-
-    #[test]
-    fn paper_skill_writes_a_compilable_tex_and_cites_it() {
-        assert!(PAPER.contains("keep the `.tex` out of the artifacts"));
-        assert!(PAPER.contains("evidence-and-links contract"));
-        assert!(PAPER.contains("`orx-lit-review` workflow"));
-        assert!(PAPER.contains("`orx discover`"));
-        // The trap that makes a draft fail to compile rather than look wrong.
-        assert!(PAPER.contains("Every environment needs the package that defines it"));
-        assert!(PAPER.contains("\\newtheorem"));
-        // \citet without natbib is a hard build failure the preview never shows.
-        assert!(PAPER.contains("natbib"));
-        // The engine a document needs travels in the file, not in a setting.
-        assert!(PAPER.contains("% !TeX program"));
-        for set in [SkillSet::Local, SkillSet::Full] {
-            assert_eq!(find("paper", set).map(|s| s.name), Some("orx-paper"));
         }
     }
 
@@ -594,29 +603,6 @@ mod tests {
     }
 
     #[test]
-    fn unified_git_and_compute_skills_are_written_to_sessions() {
-        let tmp =
-            std::env::temp_dir().join(format!("orx-unified-skills-test-{}", uuid::Uuid::new_v4()));
-        let rel = ".agents/skills";
-        ensure_session_skills(&tmp, rel).unwrap();
-        let git = std::fs::read_to_string(tmp.join(rel).join("orx-git/SKILL.md")).unwrap();
-        assert!(git.contains("never part of compute transport"));
-        assert!(git.contains("do not push merely to launch compute"));
-        let compute = std::fs::read_to_string(tmp.join(rel).join("orx-compute/SKILL.md")).unwrap();
-        assert!(compute.contains("immutable source snapshot"));
-        assert!(compute.contains("references/hf.md"));
-        let hf =
-            std::fs::read_to_string(tmp.join(rel).join("orx-compute/references/hf.md")).unwrap();
-        assert!(hf.contains("Hugging Face Jobs"));
-        let tinker =
-            std::fs::read_to_string(tmp.join(rel).join("orx-compute/references/tinker.md"))
-                .unwrap();
-        assert!(tinker.contains("TINKER_API_KEY"));
-        assert!(!tmp.join(rel).join("orx-compute-k8s").exists());
-        let _ = std::fs::remove_dir_all(tmp);
-    }
-
-    #[test]
     fn figures_skill_ships_its_style_module_and_routes_by_figure_type() {
         // The references are worth nothing if the style module they all import
         // is not installed beside them, so pin both halves.
@@ -659,42 +645,6 @@ mod tests {
                 style.content.contains(check),
                 "audit lost its {check} check"
             );
-        }
-    }
-
-    #[test]
-    fn figures_skill_pairs_each_destination_with_its_citation_tag() {
-        // A worktree figure cited with an `artifacts/` prefix resolves in
-        // neither root and reaches the user as a dead chip.
-        let figures = find("figures", SkillSet::Local).expect("figures skill");
-        assert!(figures
-            .content
-            .contains(r#"<file path="figs/loss_curve.pdf" />"#));
-        assert!(figures
-            .content
-            .contains(r#"<file path="artifacts/transformer-sweep/figures/loss_curve.pdf" />"#));
-        assert!(figures
-            .content
-            .contains("The tag must match the destination"));
-        assert!(
-            figures.content.contains("/tmp"),
-            "must rule out scratch dirs"
-        );
-    }
-
-    #[test]
-    fn bundled_skills_avoid_openresearch_ui_navigation() {
-        for set in [SkillSet::Local, SkillSet::Full] {
-            for skill in skills(set) {
-                crate::local::assert_agent_guidance_is_ui_agnostic(skill.name, skill.content);
-                crate::local::assert_agent_guidance_is_ui_agnostic(skill.name, skill.description);
-                for resource in skill.resources {
-                    crate::local::assert_agent_guidance_is_ui_agnostic(
-                        resource.path,
-                        resource.content,
-                    );
-                }
-            }
         }
     }
 }

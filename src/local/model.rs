@@ -20,7 +20,7 @@ pub struct LocalProject {
     /// Local repository path.
     pub repo_path: String,
     pub run_command: Option<String>,
-    /// arXiv id the project starts from (versionless, e.g. `2401.12345`).
+    /// arXiv or alphaXiv paper id the project starts from (versionless, e.g. `2401.12345`).
     pub paper_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -82,6 +82,7 @@ pub struct LocalExperiment {
     /// Chat session that created this experiment. NULL for dashboard-created,
     /// legacy and out-of-session rows. Immutable once stamped.
     pub chat_session_id: Option<String>,
+    pub archived: bool,
 }
 
 impl LocalExperiment {
@@ -100,6 +101,7 @@ impl LocalExperiment {
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
             chat_session_id: row.get(11)?,
+            archived: row.get(12)?,
         })
     }
 

@@ -1,0 +1,17 @@
+[package]
+name = "openresearch-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "OpenResearch.exe: starts the orx.exe beside it as the Windows desktop app"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "OpenResearch"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+embed-resource = "3"

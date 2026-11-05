@@ -11,7 +11,7 @@ use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 #[cfg(unix)]
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -153,11 +153,6 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-pub(crate) enum DashboardLockMode {
-    Shared,
-    Exclusive,
-}
-
 pub(crate) struct DashboardLock {
     release: Option<std::sync::mpsc::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -173,7 +168,8 @@ impl Drop for DashboardLock {
 }
 
 impl DashboardLock {
-    pub(crate) fn acquire(data_dir: &Path, mode: DashboardLockMode) -> Result<Self> {
+    /// The engine lock: exclusive, so one server owns the data directory's runs.
+    pub(crate) fn acquire(data_dir: &Path) -> Result<Self> {
         let path = shared_path(data_dir, "lock")?;
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -182,34 +178,15 @@ impl DashboardLock {
                 let mut lock = open_lock(&path).map_err(|error| {
                     anyhow!("Could not open dashboard lock {}: {error}", path.display())
                 })?;
-                match mode {
-                    DashboardLockMode::Shared => {
-                        let _guard = lock.try_read().map_err(|error| {
-                            if is_lock_conflict(&error) {
-                                anyhow!(
-                                    "A persistent OpenResearch host is already using this database."
-                                )
-                            } else {
-                                lock_error(&path, error)
-                            }
-                        })?;
-                        ready_tx.send(Ok(())).ok();
-                        let _ = release_rx.recv();
+                let _guard = lock.try_write().map_err(|error| {
+                    if is_lock_conflict(&error) {
+                        anyhow!("Another OpenResearch dashboard is already using this database.")
+                    } else {
+                        lock_error(&path, error)
                     }
-                    DashboardLockMode::Exclusive => {
-                        let _guard = lock.try_write().map_err(|error| {
-                            if is_lock_conflict(&error) {
-                                anyhow!(
-                                    "Another OpenResearch dashboard is already using this database."
-                                )
-                            } else {
-                                lock_error(&path, error)
-                            }
-                        })?;
-                        ready_tx.send(Ok(())).ok();
-                        let _ = release_rx.recv();
-                    }
-                }
+                })?;
+                ready_tx.send(Ok(())).ok();
+                let _ = release_rx.recv();
                 Ok(())
             })();
             if let Err(error) = result {
@@ -284,8 +261,7 @@ pub(crate) async fn start_control_server(
 ) -> Result<ControlServer> {
     let data_dir = canonical_data_dir()?;
     let socket_path = control_socket_path(&data_dir)?;
-    if socket_path.exists() {
-        let metadata = std::fs::symlink_metadata(&socket_path)?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&socket_path) {
         if metadata.file_type().is_symlink() || metadata_uid(&metadata) != effective_uid() {
             return Err(anyhow!(
                 "Refusing to replace an unsafe remote-host control socket."
@@ -522,35 +498,32 @@ async fn ensure(expected_instance: Option<String>) -> Result<()> {
         ));
     }
 
-    let mut start_lock = open_lock(&shared_path(&data_dir, "start.lock")?)?;
-    let _start_guard = start_lock.write()?;
-    match live_descriptor(&data_dir).await {
-        LiveHost::Running(descriptor) => return print_descriptor(&descriptor),
-        LiveHost::Stopping(_) => wait_for_server_lock_free(&data_dir).await?,
-        LiveHost::Missing => ensure_server_lock_free(&data_dir)?,
-    }
-    let (mut child, log_path) = spawn_detached_host(&data_dir)?;
-    let started = tokio::time::timeout(START_TIMEOUT, async {
-        loop {
-            if let LiveHost::Running(descriptor) = live_descriptor(&data_dir).await {
-                return Ok(descriptor);
+    let started = ensure_started(
+        data_dir.clone(),
+        START_TIMEOUT,
+        ServerMode::Persistent,
+        vec![
+            "up".into(),
+            "--no-browser".into(),
+            "--remote-host".into(),
+            "--port".into(),
+            "0".into(),
+        ],
+        move || {
+            let data_dir = data_dir.clone();
+            async move {
+                match live_descriptor(&data_dir).await {
+                    LiveHost::Running(descriptor) => Ok(Some(descriptor)),
+                    LiveHost::Stopping(_) => {
+                        wait_for_server_lock_free(&data_dir).await?;
+                        Ok(None)
+                    }
+                    LiveHost::Missing => Ok(None),
+                }
             }
-            if let Some(status) = child.try_wait()? {
-                return Err(anyhow!(
-                    "The persistent OpenResearch host exited ({status}). See {}.",
-                    log_path.display()
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .map_err(|_| {
-        anyhow!(
-            "Timed out starting the persistent OpenResearch host. See {}.",
-            log_path.display()
-        )
-    })??;
+        },
+    )
+    .await?;
     print_descriptor(&started)
 }
 
@@ -743,22 +716,131 @@ fn print_descriptor(descriptor: &HostDescriptor) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)> {
+// Startup children must inherit neither the readiness pipe nor its environment capability.
+static READY_PIPE: Mutex<Option<File>> = Mutex::new(None);
+
+pub(crate) fn prepare_readiness_pipe() -> Result<()> {
+    let Some(pipe) = std::env::var_os("ORX_SERVER_READY_PIPE") else {
+        return Ok(());
+    };
+    std::env::remove_var("ORX_SERVER_READY_PIPE");
+    #[cfg(unix)]
+    let file = {
+        let pipe: usize = pipe.to_string_lossy().parse()?;
+        use std::os::fd::FromRawFd as _;
+        let pipe = i32::try_from(pipe)?;
+        let file = unsafe { File::from_raw_fd(pipe) };
+        if unsafe { libc::fcntl(pipe, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        file
+    };
+    #[cfg(windows)]
+    let file = OpenOptions::new().write(true).open(pipe)?;
+    *READY_PIPE.lock().unwrap() = Some(file);
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ServerMode {
+    Persistent,
+    Headless,
+}
+
+enum Readiness {
+    #[cfg(unix)]
+    Pipe(std::io::PipeReader),
+    #[cfg(windows)]
+    Named(tokio::net::windows::named_pipe::NamedPipeServer),
+}
+
+impl Readiness {
+    async fn wait(self) -> std::io::Result<()> {
+        let byte = match self {
+            #[cfg(unix)]
+            Self::Pipe(mut reader) => tokio::task::spawn_blocking(move || {
+                let mut byte = [0];
+                std::io::Read::read_exact(&mut reader, &mut byte)?;
+                Ok::<_, std::io::Error>(byte)
+            })
+            .await
+            .map_err(std::io::Error::other)??,
+            #[cfg(windows)]
+            Self::Named(mut server) => {
+                server.connect().await?;
+                let mut byte = [0];
+                server.read_exact(&mut byte).await?;
+                byte
+            }
+        };
+        if byte != [1] {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Incorrect readiness signal",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn spawn_detached_host(
+    data_dir: &Path,
+    args: &[String],
+    mode: ServerMode,
+) -> Result<(std::process::Child, PathBuf, Option<Readiness>)> {
+    #[cfg(unix)]
+    if args.iter().any(|arg| arg == "--remote-host") {
+        ensure_server_lock_free(data_dir)?;
+    }
+    #[cfg(unix)]
+    let readiness = if matches!(mode, ServerMode::Headless) {
+        Some(std::io::pipe()?)
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    let readiness = if matches!(mode, ServerMode::Headless) {
+        let path = format!(r"\\.\pipe\orx-ready-{}", uuid::Uuid::new_v4());
+        let server = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&path)?;
+        Some((server, path))
+    } else {
+        None
+    };
     let executable = std::env::current_exe()?;
-    let args = ["up", "--no-browser", "--remote-host", "--port", "0"];
     let log_path = runtime_path(data_dir, "log")?;
     let log = open_runtime_log(&log_path)?;
-    let mut command = std::process::Command::new(&executable);
+    let mut command = crate::process::command(&executable);
     command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
+    if matches!(mode, ServerMode::Headless) {
+        command.env("ORX_DATA_DIR", data_dir);
+    }
+    #[cfg(unix)]
+    if let Some((_, writer)) = &readiness {
+        use std::os::fd::AsRawFd as _;
+        command.env("ORX_SERVER_READY_PIPE", writer.as_raw_fd().to_string());
+    }
+    #[cfg(windows)]
+    if let Some((_, path)) = &readiness {
+        command.env("ORX_SERVER_READY_PIPE", path);
+    }
     #[cfg(unix)]
     unsafe {
+        use std::os::fd::AsRawFd as _;
         use std::os::unix::process::CommandExt as _;
-        command.pre_exec(|| {
+        let ready_fd = readiness.as_ref().map(|(_, writer)| writer.as_raw_fd());
+        command.pre_exec(move || {
+            if let Some(fd) = ready_fd {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             if libc::setsid() == -1 {
                 Err(std::io::Error::last_os_error())
             } else {
@@ -766,11 +848,25 @@ fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)
             }
         });
     }
-    if let Ok(child) = command.spawn() {
-        return Ok((child, log_path));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    match command.spawn() {
+        Ok(child) => {
+            #[cfg(unix)]
+            let readiness = readiness.map(|(reader, _)| Readiness::Pipe(reader));
+            #[cfg(windows)]
+            let readiness = readiness.map(|(server, _)| Readiness::Named(server));
+            return Ok((child, log_path, readiness));
+        }
+        Err(error) if matches!(mode, ServerMode::Headless) => return Err(error.into()),
+        Err(_) => {}
     }
     let log = open_runtime_log(&log_path)?;
-    let child = std::process::Command::new("nohup")
+    let child = crate::process::command("nohup")
         .arg(&executable)
         .args(args)
         .stdin(Stdio::null())
@@ -778,10 +874,9 @@ fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)
         .stderr(Stdio::from(log))
         .spawn()
         .map_err(|error| anyhow!("Could not start the persistent OpenResearch host: {error}"))?;
-    Ok((child, log_path))
+    Ok((child, log_path, None))
 }
 
-#[cfg(unix)]
 fn open_runtime_log(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -791,6 +886,7 @@ fn open_runtime_log(path: &Path) -> Result<File> {
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
+    #[cfg(unix)]
     set_mode(path, 0o600)?;
     Ok(file)
 }
@@ -858,7 +954,7 @@ pub(crate) fn canonical_data_dir() -> Result<PathBuf> {
 }
 
 pub(crate) fn hostname() -> String {
-    std::process::Command::new("hostname")
+    crate::process::command("hostname")
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -879,10 +975,17 @@ fn control_socket_path(data_dir: &Path) -> Result<PathBuf> {
     runtime_path(data_dir, "sock")
 }
 
-#[cfg(unix)]
 fn runtime_path(data_dir: &Path, extension: &str) -> Result<PathBuf> {
+    #[cfg(unix)]
     let root = PathBuf::from(format!("/tmp/orx-{}", effective_uid()));
+    #[cfg(unix)]
     ensure_private_dir(&root)?;
+    #[cfg(not(unix))]
+    let root = {
+        let root = data_dir.join("runtime");
+        std::fs::create_dir_all(&root)?;
+        root
+    };
     let lock_key = normalize_lock_key(data_dir)?;
     let hash = Sha256::digest(lock_key.as_os_str().as_encoded_bytes());
     let name = hash
@@ -1042,6 +1145,171 @@ mod tests {
             .starts_with(format!("/tmp/orx-{}", effective_uid())));
     }
 
+    #[cfg(unix)]
+    fn descriptor() -> HostDescriptor {
+        HostDescriptor {
+            instance_id: "instance".into(),
+            hostname: "box".into(),
+            port: 1,
+            version: "0".into(),
+            dashboard_protocol: 0,
+            control_protocol: CONTROL_PROTOCOL,
+        }
+    }
+
+    #[cfg(unix)]
+    fn chat() -> Arc<ChatHost> {
+        Arc::new(ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_server_never_replaces_a_symlinked_socket() {
+        let socket = control_socket_path(&canonical_data_dir().unwrap()).unwrap();
+        let target =
+            std::env::temp_dir().join(format!("orx-socket-target-{}", uuid::Uuid::new_v4()));
+        for target_exists in [true, false] {
+            if target_exists {
+                std::fs::write(&target, "").unwrap();
+            }
+            std::os::unix::fs::symlink(&target, &socket).unwrap();
+            let (stop, _) = watch::channel(false);
+            let started = start_control_server(
+                descriptor(),
+                RemoteAuth::new("callback"),
+                chat(),
+                Default::default(),
+                stop,
+            )
+            .await;
+            let link_kept =
+                std::fs::symlink_metadata(&socket).is_ok_and(|m| m.file_type().is_symlink());
+            std::fs::remove_file(&socket).unwrap();
+            let _ = std::fs::remove_file(&target);
+            assert!(started.is_err(), "target exists: {target_exists}");
+            assert!(link_kept, "target exists: {target_exists}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_dir_must_be_a_private_directory_of_ours() {
+        let root = crate::local::git::TemporaryDirectory::new("orx-runtime-dir").unwrap();
+        let private = root.path().join("private");
+        ensure_private_dir(&private).unwrap();
+        ensure_private_dir(&private).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&private, &link).unwrap();
+        let shared = root.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        set_mode(&shared, 0o755).unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        set_mode(&file, 0o600).unwrap();
+        for unsafe_dir in [&link, &shared, &file] {
+            assert!(
+                ensure_private_dir(unsafe_dir).is_err(),
+                "{}",
+                unsafe_dir.display()
+            );
+        }
+
+        let foreign = Path::new("/root");
+        if std::fs::symlink_metadata(foreign).is_ok_and(|metadata| {
+            metadata.is_dir()
+                && metadata_mode(&metadata) & 0o077 == 0
+                && metadata_uid(&metadata) != effective_uid()
+        }) {
+            assert!(ensure_private_dir(foreign).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_attachment_token_dies_with_its_heartbeat() {
+        const TOKEN: &str = "abcdefghijklmnopqrstuvwxyz-attachment";
+        for last_line in [Some("pong"), None] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let auth = RemoteAuth::new("callback");
+            let (stop, _) = watch::channel(false);
+            let host = tokio::spawn(handle_control(
+                server,
+                descriptor(),
+                auth.clone(),
+                chat(),
+                Default::default(),
+                stop,
+                Default::default(),
+            ));
+            let mut client = BufReader::new(client);
+            write_request(
+                client.get_mut(),
+                &ControlRequest::Attach {
+                    expected_instance_id: descriptor().instance_id,
+                    token: TOKEN.into(),
+                },
+            )
+            .await
+            .unwrap();
+            let attached = read_bounded_line(&mut client).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str(&attached).unwrap(),
+                ControlResponse::Attached { .. }
+            ));
+            assert!(auth.matches_attachment(&digest(TOKEN)));
+
+            match last_line {
+                Some(line) => client
+                    .get_mut()
+                    .write_all(format!("{line}\n").as_bytes())
+                    .await
+                    .unwrap(),
+                // Nothing is left to arrive, so the paused clock jumps straight to the expiry.
+                None => tokio::time::pause(),
+            }
+            assert!(host.await.unwrap().is_err());
+            assert!(!auth.matches_attachment(&digest(TOKEN)), "{last_line:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn attaching_to_another_instance_registers_nothing() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let auth = RemoteAuth::new("callback");
+        let (stop, _) = watch::channel(false);
+        let host = tokio::spawn(handle_control(
+            server,
+            descriptor(),
+            auth.clone(),
+            chat(),
+            Default::default(),
+            stop,
+            Default::default(),
+        ));
+        let mut client = BufReader::new(client);
+        write_request(
+            client.get_mut(),
+            &ControlRequest::Attach {
+                expected_instance_id: "a previous instance".into(),
+                token: "abcdefghijklmnopqrstuvwxyz-attachment".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let response = read_bounded_line(&mut client).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str(&response).unwrap(),
+            ControlResponse::Error { .. }
+        ));
+        host.await.unwrap().unwrap();
+        assert_eq!(auth.attachment_count(), 0);
+    }
+
     #[test]
     fn only_would_block_is_lock_contention() {
         assert!(is_lock_conflict(&std::io::ErrorKind::WouldBlock.into()));
@@ -1064,5 +1332,690 @@ mod tests {
             error.to_string(),
             "Remote-host control message was too large."
         );
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ServerDescriptor {
+    pub instance: String,
+    pub pid: u32,
+    pub starttime: u64,
+    pub port: u16,
+    pub version: String,
+    pub proto: u32,
+    pub token: String,
+}
+
+impl ServerDescriptor {
+    pub fn agent_session(port: Option<String>, token: Option<String>) -> Result<Option<Self>> {
+        match (port, token) {
+            (None, None) => Ok(None),
+            (Some(port), Some(token)) if !token.is_empty() => Ok(Some(Self {
+                instance: String::new(),
+                pid: 0,
+                starttime: 0,
+                port: port.parse()?,
+                version: String::new(),
+                proto: 2,
+                token,
+            })),
+            _ => Err(anyhow!(
+                "Agent server credentials are incomplete. Restart this agent session."
+            )),
+        }
+    }
+
+    pub fn publish(&self, data_dir: &Path) -> Result<()> {
+        crate::local::git::atomic_write_with_mode(
+            &runtime_path(data_dir, "server.json")?,
+            &serde_json::to_vec(self)?,
+            Some(0o600),
+        )?;
+        if let Some(mut file) = READY_PIPE.lock().unwrap().take() {
+            std::io::Write::write_all(&mut file, &[1])?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn live(data_dir: &Path) -> Result<Option<Self>> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let path = runtime_path(data_dir, "server.json")?;
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(anyhow!(
+                    "Unsafe server descriptor. Remove it and restart OpenResearch."
+                ));
+            }
+            #[cfg(unix)]
+            if metadata_uid(&metadata) != effective_uid() || metadata_mode(&metadata) & 0o077 != 0 {
+                return Err(anyhow!(
+                    "Unsafe server descriptor. Remove it and restart OpenResearch."
+                ));
+            }
+            let mut options = OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.custom_flags(libc::O_NOFOLLOW);
+            }
+            let mut file = options.open(&path)?;
+            #[cfg(unix)]
+            {
+                let metadata = file.metadata()?;
+                if metadata_uid(&metadata) != effective_uid()
+                    || metadata_mode(&metadata) & 0o077 != 0
+                {
+                    return Err(anyhow!(
+                        "Unsafe server descriptor. Remove it and restart OpenResearch."
+                    ));
+                }
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 65537), &mut bytes)?;
+            let descriptor: Self = match serde_json::from_slice(&bytes) {
+                Ok(value) => value,
+                Err(_) => return Ok(None),
+            };
+            if crate::engine::process::identity(descriptor.pid)
+                .is_none_or(|identity| identity.starttime != descriptor.starttime)
+            {
+                return Ok(None);
+            }
+            if descriptor.proto != 2 || descriptor.token.is_empty() {
+                return Err(anyhow!("The running OpenResearch server uses an unsupported discovery protocol. Restart it with this version of orx."));
+            }
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let response = crate::net::loopback_client()
+                .build()?
+                .get(format!("http://127.0.0.1:{}/api/v2/hello", descriptor.port))
+                .query(&[("nonce", &nonce)])
+                .timeout(Duration::from_millis(500))
+                .send()
+                .await;
+            let hello = match response {
+                Ok(response) if response.status().is_success() => {
+                    response.json::<serde_json::Value>().await.ok()
+                }
+                _ => None,
+            };
+            let Some(hello) = hello else {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(anyhow!(
+                        "The running OpenResearch server is not ready. Try again shortly."
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            };
+            let verified = hello["instance"].as_str() == Some(&descriptor.instance)
+                && hello["proto"] == 2
+                && hello["proof"].as_str().is_some_and(|proof| {
+                    use base64::Engine as _;
+                    use hmac::Mac;
+                    let Ok(proof) = base64::engine::general_purpose::STANDARD.decode(proof) else {
+                        return false;
+                    };
+                    hello_mac(&descriptor.token, &descriptor.instance, &nonce)
+                        .verify_slice(&proof)
+                        .is_ok()
+                });
+            if !verified {
+                return Err(anyhow!("The running OpenResearch server could not be verified. Restart it before trying again."));
+            }
+            return Ok(Some(descriptor));
+        }
+    }
+}
+
+async fn ensure_started<T, F, Fut>(
+    data_dir: PathBuf,
+    timeout: Duration,
+    mode: ServerMode,
+    args: Vec<String>,
+    mut inspect: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Option<T>>> + Send,
+{
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let mut lock = open_lock(&shared_path(&data_dir, "start.lock")?)?;
+        let _guard = lock.write()?;
+        runtime.block_on(async {
+            if let Some(descriptor) = inspect().await? {
+                return Ok(descriptor);
+            }
+            let (mut child, log, readiness) = spawn_detached_host(&data_dir, &args, mode)?;
+            if let Some(readiness) = readiness {
+                match tokio::time::timeout(timeout, readiness.wait()).await {
+                    Ok(Ok(())) => {
+                        return inspect()
+                            .await?
+                            .ok_or_else(|| anyhow!("Server published an invalid descriptor"));
+                    }
+                    result => {
+                        let eof = matches!(
+                            &result,
+                            Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+                        );
+                        let status = if eof {
+                            Some(child.wait()?)
+                        } else {
+                            child.try_wait()?
+                        };
+                        if let Some(status) = status {
+                            return Err(anyhow!(
+                                "OpenResearch server exited ({status}). See {}.",
+                                log.display()
+                            ));
+                        }
+
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return match result {
+                            Ok(Err(error)) => Err(anyhow!(
+                                "OpenResearch server readiness failed: {error}. See {}.",
+                                log.display()
+                            )),
+                            _ => Err(anyhow!(
+                                "Timed out starting OpenResearch server. See {}.",
+                                log.display()
+                            )),
+                        };
+                    }
+                }
+            }
+            tokio::time::timeout(timeout, async {
+                loop {
+                    if let Some(descriptor) = inspect().await? {
+                        return Ok(descriptor);
+                    }
+                    if let Some(status) = child.try_wait()? {
+                        return Err(anyhow!(
+                            "The persistent OpenResearch host exited ({status}). See {}.",
+                            log.display()
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Timed out starting the persistent OpenResearch host. See {}.",
+                    log.display()
+                )
+            })?
+        })
+    })
+    .await?
+}
+
+pub(crate) async fn discover() -> Result<ServerDescriptor> {
+    if let Some(descriptor) = ServerDescriptor::agent_session(
+        std::env::var("ORX_UP_PORT").ok(),
+        std::env::var("ORX_UP_AUTH_TOKEN").ok(),
+    )? {
+        return Ok(descriptor);
+    }
+    discover_at(canonical_data_dir()?).await
+}
+
+async fn discover_at(data_dir: PathBuf) -> Result<ServerDescriptor> {
+    if let Some(descriptor) = ServerDescriptor::live(&data_dir).await? {
+        return Ok(descriptor);
+    }
+    ensure_started(
+        data_dir.clone(),
+        Duration::from_secs(10),
+        ServerMode::Headless,
+        vec![
+            "up".into(),
+            "--headless".into(),
+            "--port".into(),
+            "0".into(),
+        ],
+        move || {
+            let data_dir = data_dir.clone();
+            async move { ServerDescriptor::live(&data_dir).await }
+        },
+    )
+    .await
+}
+
+pub(crate) fn hello_proof(token: &str, instance: &str, nonce: &str) -> String {
+    use base64::Engine as _;
+    use hmac::Mac;
+    base64::engine::general_purpose::STANDARD
+        .encode(hello_mac(token, instance, nonce).finalize().into_bytes())
+}
+
+fn hello_mac(token: &str, instance: &str, nonce: &str) -> hmac::Hmac<Sha256> {
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(instance.as_bytes());
+    mac.update(b"\0");
+    mac.update(nonce.as_bytes());
+    mac
+}
+
+#[cfg(all(test, unix))]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn exits_before_readiness_child() {
+        if std::env::var_os("ORX_SERVER_READY_PIPE").is_some() {
+            std::process::exit(7);
+        }
+    }
+
+    #[tokio::test]
+    async fn early_headless_exit_reports_the_child_status() {
+        let directory =
+            std::env::temp_dir().join(format!("orx-early-exit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let result: Result<ServerDescriptor> = ensure_started(
+            directory.clone(),
+            Duration::from_secs(2),
+            ServerMode::Headless,
+            vec![
+                "--exact".into(),
+                "commands::remote_host::discovery_tests::exits_before_readiness_child".into(),
+            ],
+            || async { Ok(None) },
+        )
+        .await;
+        let error = result.err().unwrap().to_string();
+        assert!(error.contains("exited") && error.contains('7'), "{error}");
+        assert!(!error.contains("persistent"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_spawn_child() {
+        let Some(output) = std::env::var_os("ORX_TEST_LEGACY_SPAWN") else {
+            return;
+        };
+        let source = if matches!(
+            crate::store::data_dir_source(),
+            crate::store::DataDirSource::Env
+        ) {
+            "env"
+        } else {
+            "not env"
+        };
+        std::fs::write(output, source).unwrap();
+    }
+
+    #[test]
+    fn legacy_spawn_parent() {
+        let Some(output) = std::env::var_os("ORX_TEST_LEGACY_SPAWN") else {
+            return;
+        };
+        let output = PathBuf::from(output);
+        let (mut child, log, readiness) = spawn_detached_host(
+            output.parent().unwrap(),
+            &[
+                "--exact".into(),
+                "commands::remote_host::discovery_tests::legacy_spawn_child".into(),
+            ],
+            ServerMode::Persistent,
+        )
+        .unwrap();
+        assert!(readiness.is_none());
+        assert!(child.wait().unwrap().success());
+        std::fs::remove_file(log).unwrap();
+    }
+
+    #[test]
+    fn legacy_spawn_does_not_change_data_directory_provenance() {
+        let directory =
+            std::env::temp_dir().join(format!("orx-legacy-spawn-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("source");
+        let result = crate::process::command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::remote_host::discovery_tests::legacy_spawn_parent",
+                "--nocapture",
+            ])
+            .env_remove("ORX_DATA_DIR")
+            .env("ORX_TEST_LEGACY_SPAWN", &output)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "not env");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_waits_for_a_live_owner_during_restart_without_spawning() {
+        let directory =
+            std::env::temp_dir().join(format!("orx-restart-discovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let descriptor = ServerDescriptor {
+            instance: "draining".into(),
+            pid: std::process::id(),
+            starttime: crate::engine::process::identity(std::process::id())
+                .unwrap()
+                .starttime,
+            port: listener.local_addr().unwrap().port(),
+            version: "test".into(),
+            proto: 2,
+            token: "secret".into(),
+        };
+        descriptor.publish(&directory).unwrap();
+        let app = axum::Router::new().route(
+            "/api/v2/hello",
+            axum::routing::get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let error = discover_at(directory.clone()).await.err().unwrap();
+        assert!(error.to_string().contains("not ready"));
+        assert!(!shared_path(&directory, "start.lock").unwrap().exists());
+        server.abort();
+        let _ = server.await;
+        let error = discover_at(directory.clone()).await.err().unwrap();
+        assert!(error.to_string().contains("not ready"));
+        assert!(!shared_path(&directory, "start.lock").unwrap().exists());
+        std::fs::remove_file(runtime_path(&directory, "server.json").unwrap()).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_succeeds_when_the_live_owner_becomes_ready_within_the_bound() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory =
+            std::env::temp_dir().join(format!("orx-ready-discovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let descriptor = ServerDescriptor {
+            instance: "restarting".into(),
+            pid: std::process::id(),
+            starttime: crate::engine::process::identity(std::process::id())
+                .unwrap()
+                .starttime,
+            port: listener.local_addr().unwrap().port(),
+            version: "test".into(),
+            proto: 2,
+            token: "secret".into(),
+        };
+        descriptor.publish(&directory).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let app = axum::Router::new().route("/api/v2/hello", axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| {
+            let count = count.clone();
+            async move {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+                }
+                Ok(axum::Json(serde_json::json!({"instance":"restarting", "proto":2, "proof":hello_proof("secret", "restarting", &query["nonce"])})))
+            }
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let started = tokio::time::Instant::now();
+        let found = discover_at(directory.clone()).await.unwrap();
+        assert_eq!(found.instance, descriptor.instance);
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+        assert!(!shared_path(&directory, "start.lock").unwrap().exists());
+        server.abort();
+        let _ = server.await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_checks_process_identity_and_a_nonce_proof_without_sending_the_token() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory =
+            std::env::temp_dir().join(format!("orx-discovery-proof-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut descriptor = ServerDescriptor {
+            instance: "instance".into(),
+            pid: std::process::id(),
+            starttime: crate::engine::process::identity(std::process::id())
+                .unwrap()
+                .starttime
+                + 1,
+            port: listener.local_addr().unwrap().port(),
+            version: "test".into(),
+            proto: 2,
+            token: "private-token".into(),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let app = axum::Router::new().route("/api/v2/hello", axum::routing::get(move |headers: axum::http::HeaderMap, axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String,String>>| {
+            let count = count.clone();
+            async move {
+                assert!(!headers.contains_key("authorization"));
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::Json(serde_json::json!({"instance":"instance", "proto":2, "proof":hello_proof("private-token", "instance", &query["nonce"])}))
+            }
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        descriptor.publish(&directory).unwrap();
+        assert!(ServerDescriptor::live(&directory).await.unwrap().is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        descriptor.starttime -= 1;
+        descriptor.publish(&directory).unwrap();
+        assert!(ServerDescriptor::live(&directory).await.unwrap().is_some());
+        descriptor.token = "incorrect-token".into();
+        descriptor.publish(&directory).unwrap();
+        assert!(ServerDescriptor::live(&directory).await.is_err());
+        let path = runtime_path(&directory, "server.json").unwrap();
+        set_mode(&path, 0o666).unwrap();
+        assert!(ServerDescriptor::live(&directory).await.is_err());
+        set_mode(&path, 0o600).unwrap();
+        let target = directory.join("descriptor");
+        std::fs::rename(&path, &target).unwrap();
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        assert!(ServerDescriptor::live(&directory).await.is_err());
+        std::fs::remove_file(path).unwrap();
+        server.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn agent_session_credentials_take_precedence_and_must_be_complete() {
+        let descriptor =
+            ServerDescriptor::agent_session(Some("1234".into()), Some("agent-token".into()))
+                .unwrap()
+                .unwrap();
+        assert_eq!(descriptor.port, 1234);
+        assert_eq!(descriptor.token, "agent-token");
+        assert!(ServerDescriptor::agent_session(Some("1234".into()), None).is_err());
+        assert!(ServerDescriptor::agent_session(None, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_session_child() {
+        if std::env::var_os("ORX_TEST_AGENT_DISCOVERY").is_none() {
+            return;
+        }
+        let descriptor = discover().await.unwrap();
+        assert_eq!(descriptor.port, 1234);
+        assert_eq!(descriptor.token, "agent-token");
+        assert!(!PathBuf::from(std::env::var("ORX_DATA_DIR").unwrap()).exists());
+    }
+
+    #[test]
+    fn discovery_uses_agent_environment_without_touching_a_descriptor_or_starting_a_server() {
+        let path =
+            std::env::temp_dir().join(format!("orx-agent-discovery-{}", uuid::Uuid::new_v4()));
+        let output = crate::process::command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::remote_host::discovery_tests::agent_session_child",
+                "--nocapture",
+            ])
+            .env("ORX_TEST_AGENT_DISCOVERY", "1")
+            .env("ORX_UP_PORT", "1234")
+            .env("ORX_UP_AUTH_TOKEN", "agent-token")
+            .env("ORX_DATA_DIR", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn autostart_child() {
+        let Ok(data_dir) = std::env::var("ORX_DATA_DIR").map(PathBuf::from) else {
+            return;
+        };
+        if !data_dir.join("autostart-fixture").exists() {
+            return;
+        }
+        prepare_readiness_pipe().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let descriptor = ServerDescriptor {
+            instance: uuid::Uuid::new_v4().to_string(),
+            pid: std::process::id(),
+            starttime: crate::engine::process::identity(std::process::id())
+                .unwrap()
+                .starttime,
+            port: listener.local_addr().unwrap().port(),
+            version: "test".into(),
+            proto: 2,
+            token: "private-test-token".into(),
+        };
+        use std::io::Write;
+        let mut count = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir.join("spawn-count"))
+            .unwrap();
+        writeln!(count, "started").unwrap();
+        let instance = descriptor.instance.clone();
+        let token = descriptor.token.clone();
+        let app = axum::Router::new().route(
+            "/api/v2/hello",
+            axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let instance = instance.clone(); let token = token.clone();
+                async move { axum::Json(serde_json::json!({"instance":instance,"proto":2,"proof":hello_proof(&token, &instance, &query["nonce"])})) }
+            }),
+        );
+        descriptor.publish(&data_dir).unwrap();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(20),
+            std::future::IntoFuture::into_future(axum::serve(listener, app)),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_autostarts_recheck_the_descriptor_under_the_shared_start_lock() {
+        let data_dir = std::env::temp_dir().join(format!("orx-discover-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("autostart-fixture"), []).unwrap();
+        let stale = ServerDescriptor {
+            instance: "dead".into(),
+            pid: i32::MAX as u32,
+            starttime: 0,
+            port: 1,
+            version: "test".into(),
+            proto: 2,
+            token: "old".into(),
+        };
+        stale.publish(&data_dir).unwrap();
+        assert!(ServerDescriptor::live(&data_dir).await.unwrap().is_none());
+        let start = |data_dir: PathBuf| {
+            ensure_started(
+                data_dir.clone(),
+                Duration::from_secs(10),
+                ServerMode::Headless,
+                vec![
+                    "--exact".into(),
+                    "commands::remote_host::discovery_tests::autostart_child".into(),
+                    "--nocapture".into(),
+                ],
+                move || {
+                    let data_dir = data_dir.clone();
+                    async move { ServerDescriptor::live(&data_dir).await }
+                },
+            )
+        };
+        let (left, right) = tokio::join!(start(data_dir.clone()), start(data_dir.clone()));
+        let left = left.unwrap();
+        let right = right.unwrap();
+        assert_eq!(left.instance, right.instance);
+        assert_eq!(
+            std::fs::read_to_string(data_dir.join("spawn-count")).unwrap(),
+            "started\n"
+        );
+        unsafe {
+            libc::kill(left.pid as i32, libc::SIGTERM);
+        }
+        let _ = std::fs::remove_file(runtime_path(&data_dir, "server.json").unwrap());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn wrong_instance_echo_and_reused_port_refuse_discovery() {
+        let data_dir =
+            std::env::temp_dir().join(format!("orx-wrong-server-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let descriptor = ServerDescriptor {
+            instance: "expected".into(),
+            pid: std::process::id(),
+            starttime: crate::engine::process::identity(std::process::id())
+                .unwrap()
+                .starttime,
+            port: listener.local_addr().unwrap().port(),
+            version: "test".into(),
+            proto: 2,
+            token: "secret".into(),
+        };
+        descriptor.publish(&data_dir).unwrap();
+        let app = axum::Router::new().route(
+            "/api/v2/hello",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({"instance":"different", "proto":2}))
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        assert!(ServerDescriptor::live(&data_dir).await.is_err());
+        task.abort();
+        task.await.unwrap_err();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", descriptor.port))
+            .await
+            .unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new()).await.unwrap();
+        });
+        assert!(ServerDescriptor::live(&data_dir).await.is_err());
+        task.abort();
+        let _ = std::fs::remove_file(runtime_path(&data_dir, "server.json").unwrap());
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

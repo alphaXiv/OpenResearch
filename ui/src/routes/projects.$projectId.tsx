@@ -20,7 +20,7 @@ function ProjectLayout() {
     if (search === null) return;
     void router.navigate({ href: `${location.pathname}${search}${location.hash ? `#${location.hash}` : ""}`, replace: true });
   }, [location, router]);
-  return <><Outlet /><App key={projectId} projectId={projectId} pane={pane} runtime={useRuntime()} /></>;
+  return <><Outlet /><App projectId={projectId} pane={pane} runtime={useRuntime()} /></>;
 }
 
 export function normalizedPaneSearch(searchStr: string): string | null {

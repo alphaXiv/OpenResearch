@@ -2,7 +2,6 @@
 //! history, and three curated harness-native conversations.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -32,27 +31,32 @@ const OWNER: &str = "openresearch-demo";
 const REPO: &str = "nanochat";
 const BRANCH: &str = "orx/cpu-apple-silicon-end-to-end-baseline";
 const LR_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_lr_probe_v1";
-const LR_PROBE_BRANCH: &str = "orx/matrix-lr-2x-probe";
+const LR_PROBE_BRANCH: &str = "orx/tiny-learning-rate-probe-interactive";
 const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
 const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
-// Same environment and data setup as runs/runcpu.sh, then a 200-step base-training probe.
 // Git Bash: uv has no shell installer there, and venvs may use `Scripts/` not `bin/`.
-fn probe_setup() -> String {
+fn probe_uv() -> String {
     let install_uv = if cfg!(windows) {
         "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
     } else {
         "curl -LsSf https://astral.sh/uv/install.sh | sh"
     };
     format!(
-        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
+        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${{ORX_CACHE_DIR:-$HOME/.cache/openresearch}}/uv\" \
          && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
-         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }} \
-         && ([ -d .venv ] || uv venv) \
-         && uv sync --extra cpu \
-         && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
-         && python -m nanochat.dataset -n 8"
+         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
     )
 }
+
+fn probe_setup() -> String {
+    format!(
+        "{} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
+         && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
+         && python -m nanochat.dataset -n 8",
+        probe_uv()
+    )
+}
+
 // --warmdown-ratio=0 keeps the LR schedule identical to the baseline's first 200 steps.
 const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
 const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
@@ -94,9 +98,9 @@ You inspected the repository and prepared the CPU pipeline before launching it: 
 
 Recorded results: a 6-layer 73.5M-parameter model trained for 5,000 base steps over 81.92M tokens; final training validation BPB 1.165758; base-eval train/validation BPB 1.152185/1.119301; SFT completed 1,500 steps with final validation BPB 0.7389. The final CLI loaded the SFT checkpoint and answered that the capital of France is Paris. The results are saved in cpu-apple-silicon-pipeline-results.md.
 
-Two idle follow-up experiments already branch from that baseline, each with a complete run command and no code changes needed: demo_nanochat_lr_probe_v1 (Muon matrix LR 2× probe) and demo_nanochat_vocab_probe_v1 (8,192-token vocabulary probe). Both are short 200-step base-training probes on the local backend whose learning-rate schedule matches the baseline's first 200 steps, so their validation BPB compares directly with the baseline's 1.940739 at step 100 and 1.762539 at step 200.
+The default follow-up is demo_nanochat_lr_probe_v1 (Tiny nanochat learning-rate comparison). It runs the actual nanochat GPT architecture with approximately 0.8M parameters: 2 layers, width 128, vocabulary 1,024, and context 64. It trains two arms for 20 steps each with AdamW learning rates 0.001 and 0.002, identical starting weights and batches, and bundled nanochat README text split into training and held-out validation sections. It writes artifacts/tiny-nanochat-loss.html, tiny-nanochat-loss.csv, and tiny-nanochat-results.json in the run checkout. Compare these two fresh arms; their loss in nats/token is not comparable to the recorded 73.5M-model BPB. This demonstrates early optimization, not coherent generation or a reliable scientific conclusion. The vocabulary probe remains an optional longer experiment requiring data downloads.
 
-Operational note: when the user asks to run one of them, launch it immediately with `orx exp run <expId>`. Do not load skills, read compute references, or re-inspect the experiment tree first; follow the run's logs and report the comparison.
+Operational note: when the user asks to run one of them, launch it with `orx exp run <expId>`. Use the applicable skills for running, monitoring, and interpreting the experiment, as in any other project. For the tiny probe, copy its ready-made HTML, CSV, and JSON into the project artifacts and embed the interactive HTML with image syntax: `![Tiny nanochat learning-rate comparison](artifacts/tiny-learning-rate-comparison/tiny-nanochat-loss.html)`. Keep the answer short; do not regenerate the figure or run extra experiments.
 
 Continue naturally from this completed state. Do not claim you are rerunning the historical training unless the user asks you to."#;
 
@@ -158,6 +162,10 @@ struct BaseAssets;
 struct ExperimentAssets;
 
 #[derive(RustEmbed)]
+#[folder = "demo/nanochat/quick/"]
+struct QuickProbeAssets;
+
+#[derive(RustEmbed)]
 #[folder = "demo/nanochat/figures/"]
 struct FigureAssets;
 
@@ -192,15 +200,97 @@ pub fn complete_onboarding(selection: DemoSelection) -> Result<DemoCompletion> {
     seed_at(&store, &data_root, &repo, selection)
 }
 
+thread_local! {
+    /// Set on `prewarm`'s blocking thread: its git children run at idle
+    /// priority on Windows so the demo build only takes cores the catalog
+    /// fill's probes and real user work leave free.
+    static BACKGROUND_BUILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Raised when the onboarding confirm path reaches for the demo install. A
+/// click that lands mid-prewarm makes its remaining git children run at
+/// normal priority, so the lock wait is only the rest of the build at full
+/// speed rather than at yield priority.
+static FOREGROUND_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Prepare the demo's bare origin during onboarding, leaving the final repo
+/// absent so `seed_at` still creates the full snapshot on confirmation.
+pub fn prewarm(
+    move_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    data_dir_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+) {
+    BACKGROUND_BUILD.with(|flag| flag.set(true));
+    // A move sets its flag before awaiting the gate, so a set flag here (or a
+    // contended lock) means a move owns the data dir — skip the warm-up and
+    // let `seed_at` cover the confirm path. The flag is checked again under
+    // the guard so one claimed between the two reads still wins. The guard
+    // covers only the store read: holding it across the install's ~15 git
+    // spawns would stall a mid-flight move for the whole clone.
+    if move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let onboarding_pending = {
+        let Ok(_guard) = data_dir_gate.try_lock() else {
+            return;
+        };
+        if move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Ok(store) = Store::open() else {
+            return;
+        };
+        !store
+            .ui_state()
+            .map(|state| state.onboarding_completed)
+            .unwrap_or(true)
+    };
+    // A move that starts here races the install's writes; `seed_at` repairs
+    // the origin on the confirm path.
+    if !onboarding_pending || move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if let Err(error) = prewarm_repository(&super::git::clone_path(OWNER, REPO), &demo_bare_path())
+    {
+        eprintln!("orx up: demo pre-install failed: {error}");
+    }
+}
+
+fn prewarm_repository(repo: &Path, bare: &Path) -> Result<()> {
+    if repo.exists() {
+        install_repository(repo, bare)?;
+        return Ok(());
+    }
+    let staging = super::git::TemporaryDirectory::new("orx-demo-prewarm")?;
+    install_repository(&staging.path().join(REPO), bare)?;
+    Ok(())
+}
+
+/// The bare repository the demo worktree's `origin` points at.
+fn demo_bare_path() -> PathBuf {
+    demo_bare_path_in(&crate::store::data_dir())
+}
+
+fn demo_bare_path_in(data_root: &std::path::Path) -> PathBuf {
+    data_root.join("demo-repos").join("nanochat.git")
+}
+
 pub(crate) fn installed_origin(owner: &str, repo: &str) -> Option<PathBuf> {
     if owner != OWNER || repo != REPO {
         return None;
     }
     Store::open().ok()?.get_local_project(PROJECT_ID).ok()??;
-    let origin = crate::store::data_dir()
-        .join("demo-repos")
-        .join("nanochat.git");
+    let origin = demo_bare_path();
     origin.exists().then_some(origin)
+}
+
+/// Analytics label for launching `experiment`, or `None` outside the demo project.
+pub(crate) fn run_label(experiment: &LocalExperiment) -> Option<&'static str> {
+    (experiment.project_id == PROJECT_ID).then_some(match experiment.id.as_str() {
+        EXPERIMENT_ID => "cpu_end_to_end",
+        LR_PROBE_EXPERIMENT_ID => "lr_probe",
+        VOCAB_PROBE_EXPERIMENT_ID => "vocab_probe",
+        _ => "other",
+    })
 }
 
 pub(crate) fn turn_context(project_id: &str) -> Option<&'static str> {
@@ -253,7 +343,7 @@ fn repair_installed_origin_at(data_root: &Path, repo: &Path) -> Result<()> {
     if !repo.join(".git").is_dir() {
         return Ok(());
     }
-    let bare = data_root.join("demo-repos").join("nanochat.git");
+    let bare = demo_bare_path_in(data_root);
     if !matches!(
         git(&bare, &["rev-parse", "--is-bare-repository"]).as_deref(),
         Ok("true")
@@ -286,6 +376,7 @@ fn seed_at(
     repo: &Path,
     selection: DemoSelection,
 ) -> Result<DemoCompletion> {
+    FOREGROUND_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(project) = store.get_local_project(PROJECT_ID)? {
         if !same_path(&project.repo_path, repo)
             || project.github_owner != OWNER
@@ -342,7 +433,7 @@ fn seed_at(
     // Seeded history is dated from onboarding so the demo reads as recent work. The
     // bundled run log and commit dates stay absolute; the commits are SHA-pinned.
     let seeded_at = now_ms();
-    let bare = data_root.join("demo-repos").join("nanochat.git");
+    let bare = demo_bare_path_in(data_root);
     let commit_sha = install_repository(repo, &bare)?;
 
     let project_slug = demo_project_slug(store)?;
@@ -393,26 +484,28 @@ fn seed_at(
         created_at: ago(seeded_at, 240, 0),
         updated_at: ago(seeded_at, 9, 0),
         chat_session_id: Some(SESSION_ID.into()),
+        archived: false,
     };
     let lr_probe = LocalExperiment {
             id: LR_PROBE_EXPERIMENT_ID.into(),
             project_id: PROJECT_ID.into(),
             parent_experiment_id: Some(EXPERIMENT_ID.into()),
-            slug: "matrix-lr-2x-probe".into(),
+            slug: "tiny-learning-rate-probe".into(),
             branch_name: LR_PROBE_BRANCH.into(),
-            title: Some("Muon matrix LR 2× probe (200 steps)".into()),
+            title: Some("Tiny nanochat learning-rate comparison (20 steps)".into()),
             description: Some(
-                "A lightweight early-training probe: the baseline d6 recipe with --matrix-lr raised from 0.02 to 0.04, trained for 200 steps with validation every 50 and no learning-rate warmdown, so the learning-rate schedule matches the baseline's first 200 steps. Compare against the baseline curve, which reached val_bpb 1.940739 at step 100 and 1.762539 at step 200. Skips base_eval and SFT: a few minutes on Apple Silicon, longer on plain CPU."
+                "Train a real 0.8M-parameter nanochat model for 20 steps per arm on bundled text, comparing AdamW LR 0.001 with 0.002 from identical initialization and batches. Saves training/held-out validation loss, an interactive HTML loss chart, and raw metrics. No dataset download or full tokenizer training. Demonstrates early optimization, not coherent generation; results are separate from the recorded 73.5M baseline. First use prepares Python dependencies."
                     .into(),
             ),
             run_command: format!(
-                "{} && {PROBE_TOK_TRAIN} && {PROBE_TRAIN} --matrix-lr=0.04",
-                probe_setup()
+                "{} && uv run --script scripts/demo_probe.py",
+                probe_uv()
             ),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 8, 0),
             updated_at: ago(seeded_at, 8, 0),
             chat_session_id: None,
+            archived: false,
         };
     let vocab_probe = LocalExperiment {
             id: VOCAB_PROBE_EXPERIMENT_ID.into(),
@@ -433,6 +526,7 @@ fn seed_at(
             created_at: ago(seeded_at, 6, 0),
             updated_at: ago(seeded_at, 6, 0),
             chat_session_id: None,
+            archived: false,
         };
     // created_at and run_ended_at must stay RUN_LOG_SPAN_MIN apart.
     let run_ended_at = ago(seeded_at, 10, 0);
@@ -450,6 +544,7 @@ fn seed_at(
         commit_sha: Some(commit_sha.clone()),
         result_markdown: Some(RESULT_MARKDOWN.into()),
         cancel_requested: false,
+        cancel_reason: None,
         chat_session_id: None,
     };
     let session = StoredChatSession {
@@ -468,8 +563,11 @@ fn seed_at(
         archived: false,
         context_usage_json: None,
         bootstrap_context: Some(BOOTSTRAP_CONTEXT.into()),
+        goal: None,
+        autonomy: None,
         active_leaf_id: Some(ASSISTANT_MESSAGE_ID.into()),
-        parent_session_id: None,
+        side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 240, 0),
         // Sessions list by updated_at DESC, the order validate_snapshot asserts.
         updated_at: ago(seeded_at, 9, 30),
@@ -484,6 +582,7 @@ fn seed_at(
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let assistant = StoredChatMessage {
         id: ASSISTANT_MESSAGE_ID.into(),
@@ -495,6 +594,7 @@ fn seed_at(
         parent_id: Some(USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let figure_session = StoredChatSession {
         id: FIGURE_SESSION_ID.into(),
@@ -512,8 +612,11 @@ fn seed_at(
         archived: false,
         context_usage_json: None,
         bootstrap_context: Some(FIGURE_BOOTSTRAP_CONTEXT.into()),
+        goal: None,
+        autonomy: None,
         active_leaf_id: Some(FIGURE_ASSISTANT_MESSAGE_ID.into()),
-        parent_session_id: None,
+        side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 70, 0),
         updated_at: ago(seeded_at, 69, 40),
     };
@@ -530,6 +633,7 @@ fn seed_at(
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let figure_assistant = StoredChatMessage {
         id: FIGURE_ASSISTANT_MESSAGE_ID.into(),
@@ -541,6 +645,7 @@ fn seed_at(
         parent_id: Some(FIGURE_USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let literature_session = StoredChatSession {
         id: LITERATURE_SESSION_ID.into(),
@@ -558,8 +663,11 @@ fn seed_at(
         archived: false,
         context_usage_json: None,
         bootstrap_context: Some(LITERATURE_BOOTSTRAP_CONTEXT.into()),
+        goal: None,
+        autonomy: None,
         active_leaf_id: Some(LITERATURE_ASSISTANT_MESSAGE_ID.into()),
-        parent_session_id: None,
+        side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 95, 0),
         updated_at: ago(seeded_at, 94, 40),
     };
@@ -576,6 +684,7 @@ fn seed_at(
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let literature_assistant = StoredChatMessage {
         id: LITERATURE_ASSISTANT_MESSAGE_ID.into(),
@@ -587,6 +696,7 @@ fn seed_at(
         parent_id: Some(LITERATURE_USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
+        native_harness: None,
     };
     let worktree = data_root
         .join("worktrees")
@@ -827,7 +937,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "setup-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 12000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Using CPython 3.10.19\nCreating virtual environment at: .venv\nResolved 105 packages\nPrepared 40 packages\nInstalled 40 packages"),
         Some("Read environment setup"),
     ));
@@ -838,7 +948,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "dataset-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 16000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Downloading 9 shards using 4 workers...\nSuccessfully downloaded shard_00000.parquet\nSuccessfully downloaded shard_00001.parquet\nSuccessfully downloaded shard_00002.parquet\nSuccessfully downloaded shard_00003.parquet\nSuccessfully downloaded shard_00004.parquet\nSuccessfully downloaded shard_00005.parquet\nSuccessfully downloaded shard_00006.parquet\nSuccessfully downloaded shard_00007.parquet\nSuccessfully downloaded shard_06542.parquet\nDone! Downloaded: 9/9 shards"),
         Some("Stream dataset setup"),
     ));
@@ -849,7 +959,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "tokenizer-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 32000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Starting BPE training: 32503 merges to compute\nProgress: 25% (8126/32503 merges)\nProgress: 50% (16251/32503 merges)\nProgress: 75% (24378/32503 merges)\nProgress: 100% (32503/32503 merges)\nFinished training: 32503 merges completed\nTraining time: 42.69s\nclimbmix-val 3024593 bytes 644939 tokens 4.69 bytes/token"),
         Some("Stream tokenizer training"),
     ));
@@ -860,7 +970,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "base-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 100000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Autodetected device type: mps\nCOMPUTE_DTYPE: torch.float32 (auto-detected: no CUDA (CPU/MPS))\nWARNING: Flash Attention 3 not available, using PyTorch SDPA fallback\nVocab size: 32,768\nNumber of parameters: 73,454,976\nTraining for 5,000 steps / 81,920,000 tokens"),
         Some("Stream base training"),
     ));
@@ -870,7 +980,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "base-eval-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 100000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Total training time: 131.55m\nMinimum validation bpb: 1.165758\n\nBPB Evaluation\ntrain bpb: 1.152185\nval bpb: 1.119301\n\nCORE Evaluation\nbigbench_qa_wikidata accuracy: 0.0000\nopenbook_qa accuracy: 0.2500\nwinogrande accuracy: 0.5625 | centered: 0.1250\nbigbench_operators accuracy: 0.0000"),
         Some("Read base evaluation"),
     ));
@@ -881,7 +991,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "sft-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 100000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Autodetected device type: mps\nLoading model from $ORX_RUN_DIR/repo/.cache/nanochat/base_checkpoints/d6 with step 5000\nTraining mixture: 789,759 rows (MMLU x3, GSM8K x4)\nStep 00000 | Validation bpb: 1.0174\nstep 00001 | loss: 1.817033\nstep 00004 | loss: 6.121520\nstep 00017 | loss: 5.378817\nstep 00100 | loss: 3.2589"),
         Some("Stream supervised fine-tuning"),
     ));
@@ -895,7 +1005,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "sft-complete-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 100000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("step 01498 (99.93%) | loss: 2.052968 | total time: 39.04m\nstep 01499 (100.00%) | loss: 2.026530 | total time: 39.07m\nStep 01499 | Validation bpb: 0.7389\nSaved model parameters to: $ORX_RUN_DIR/repo/.cache/nanochat/chatsft_checkpoints/d6/model_001499.pt\nTotal training time: 39.07m\nMinimum validation bpb: 0.7389"),
         Some("Read final SFT checkpoint"),
     ));
@@ -906,7 +1016,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "confirm",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 12000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Using completed SFT checkpoint model_001499.pt\nAutodetected device type: mps\nLoading model from $ORX_RUN_DIR/repo/.cache/nanochat/chatsft_checkpoints/d6 with step 1499\n\nAssistant:\n\nParis\nParis is a city known for its historical and cultural significance. The capital of France is Paris."),
         Some("Confirm the trained chat model"),
     ));
@@ -937,7 +1047,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     ));
     parts.push(WirePart::text(
         "final",
-        "Pipeline completed successfully.\n\n- Base training: 5,000 steps, 81.92M tokens, 131.55 min\n- Final base validation BPB: **1.165758**\n- Base evaluation train/validation BPB: **1.152185 / 1.119301**\n- CORE accuracy: OpenBookQA **0.2500**, Winogrande **0.5625**, Wikidata/operators **0.0000**\n- SFT: 1,500 steps, 39.07 min\n- Final/minimum SFT validation BPB: **0.7389**\n- Final run status: **done**\n\nThe CLI loaded SFT checkpoint 1499 on MPS and answered **Paris**. I preserved the full stitched run log and `cpu-apple-silicon-pipeline-results.md` in the project artifact.",
+        "Pipeline completed successfully. Base training finished at **1.1658 BPB**; SFT finished at **0.7389 BPB**. Explore each phase’s validation curve and the CORE benchmark scores below.\n\n![Nanochat pipeline results](artifacts/nanochat-pipeline-results.html)\n\nBase training took **131.55 min** (5,000 steps, 81.92M tokens), followed by **39.07 min** of SFT (1,500 steps). The SFT checkpoint answered **Paris**. These are recorded results from the demo pipeline.\n\n[Full results](artifacts/cpu-apple-silicon-pipeline-results.md) · [Metric data](artifacts/evidence/training-metrics.csv)",
     ));
     parts
 }
@@ -1011,7 +1121,7 @@ fn figure_assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "figure-parse-logs",
         shell_tool,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 2000000 | python $TMPDIR/create_nanochat_publication_figures.py --summarize" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; python $TMPDIR/create_nanochat_publication_figures.py --summarize < \"$log\"" }),
         Some("base loss rows: 5000\nsft loss rows: 1499\nbase validation: 3.195800 → 1.165758\nsft validation: 1.0174 → 0.7389\nbase median throughput: 10466 tok/s\nsft median throughput: 10551 tok/s\nCORE rows: 4"),
         Some("Parse complete training logs"),
     ));
@@ -1048,7 +1158,7 @@ fn figure_assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(WirePart::text(
         "figure-final",
         format!(
-            "Completed the requested SVG-only figure set.\n\n- **Base training:** loss falls from about 10.40 to 3.75 over 5,000 steps; validation BPB improves from 3.1958 to 1.1658, with post-training evaluation at 1.1193.\n- **SFT:** loss finishes near 2.03; validation BPB briefly rises from 1.0174 to 1.0580 at step 200, then falls steadily to 0.7389.\n- **Throughput:** median 10,466 tok/s for base and 10,551 tok/s for SFT on Apple Silicon.\n- **CORE:** Winogrande leads at 0.5625 accuracy (0.1250 centered); OpenBookQA is 0.2500; Wikidata QA and Operators are 0.0000.\n\nFiles:\n\n- {}\n- {}\n- {}\n- {}",
+            "Completed the requested SVG-only figure set.\n\n- **Base training:** loss falls from about 10.40 to 3.75 over 5,000 steps; validation BPB improves from 3.1958 to 1.1658, with post-training evaluation at 1.1193.\n- **SFT:** loss finishes near 2.03; validation BPB briefly rises from 1.0174 to 1.0580 at step 200, then falls steadily to 0.7389.\n- **Throughput:** median 10,466 tok/s for base and 10,551 tok/s for SFT on Apple Silicon.\n- **CORE:** Winogrande leads at 0.5625 accuracy (0.1250 centered); OpenBookQA is 0.2500; Wikidata QA and Operators are 0.0000.\n\n![Base training loss and validation BPB](artifacts/nanochat-base-training-curves.svg)\n\n![SFT loss and validation BPB](artifacts/nanochat-sft-training-curves.svg)\n\n![Training throughput on Apple Silicon](artifacts/nanochat-training-throughput.svg)\n\n![CORE evaluation results](artifacts/nanochat-core-evaluation.svg)\n\nFiles:\n\n- {}\n- {}\n- {}\n- {}",
             artifact_link("nanochat-base-training-curves.svg"),
             artifact_link("nanochat-sft-training-curves.svg"),
             artifact_link("nanochat-training-throughput.svg"),
@@ -1093,9 +1203,9 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
             "Load literature search workflow",
         ),
         (
-            "evidence-skill",
-            ".agents/skills/orx-evidence/SKILL.md",
-            "Load evidence workflow",
+            "results-skill",
+            ".agents/skills/orx-results/SKILL.md",
+            "Load results interpretation workflow",
         ),
         (
             "experiment-tree-skill",
@@ -1130,13 +1240,13 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
         ),
         (
             "inspect-base-log",
-            "orx logs demo_nanochat_run_v1 --bytes 1000000 | rg 'Validation bpb|CORE|step 05000'",
+            "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; rg 'Validation bpb|CORE|step 05000' \"$log\"",
             "Step 04000 | Validation bpb: 1.187774\nStep 04500 | Validation bpb: 1.1743\nStep 05000 | Validation bpb: 1.165758\nCORE: Wikidata 0.0000, OpenBookQA 0.2500, Winogrande 0.5625 (centered 0.1250), Operators 0.0000",
             "Read base-training evidence",
         ),
         (
             "inspect-sft-log",
-            "orx logs demo_nanochat_run_v1 --bytes 1000000 | rg 'SFT|Validation bpb|Paris'",
+            "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; rg 'SFT|Validation bpb|Paris' \"$log\"",
             "SFT validation bpb: 1.0174 → 0.7389\nfinal checkpoint: model_001499.pt\nfixed prompt answer: Paris, followed by repetitive continuation",
             "Read SFT and generation evidence",
         ),
@@ -1259,8 +1369,7 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(WirePart::text(
         "literature-final",
         format!(
-            "The main bottleneck is insufficient pretraining. Model size sets the eventual ceiling; the SFT recipe likely worsens repetition but cannot manufacture knowledge the base model never learned.\n\nWhy:\n\n- The model saw only 81.9M tokens. Under nanochat’s own scaling convention, that is 3.53 tokens per scaling parameter, versus its default target of 12.\n- Base validation BPB was still improving at the endpoint: 1.1878 at step 4,000 → 1.1743 at 4,500 → 1.1658 at 5,000. The model had not converged.\n- [Chinchilla](https://arxiv.org/abs/2203.15556) establishes that substantially scaling training tokens is generally preferable to leaving a model undertrained. Its canonical ~20-token ratio is not directly comparable because nanochat counts parameters differently, but the direction is unambiguous.\n- [LIMA](https://arxiv.org/abs/2305.11206) supports the view that SFT mostly exposes capabilities acquired during pretraining. It also reports that validation perplexity can continue improving after generation quality peaks—matching your falling SFT loss but poor free-running behavior.\n- [TinyStories](https://arxiv.org/abs/2305.07759) shows that 73.5M parameters are sufficient for coherent generation on a constrained, high-quality distribution. Thus size alone does not explain the repetition. Conversely, broad MMLU/GSM8K performance at this size will remain limited.\n- [Textbooks Are All You Need](https://arxiv.org/abs/2306.11644) makes pretraining-data quality an important subsequent axis, but your run is too undertrained to diagnose quality cleanly yet.\n\nRun this next:\n\n- Train the identical d6 model from scratch with the same data and recipe, changing only the pretraining horizon to `--target-param-data-ratio=12`.\n- That gives 278,396,928 tokens or 16,992 steps—3.4× the current exposure.\n- Evaluate checkpoints at 5,000, ~11,000, and 16,992 steps using fixed prompts, base BPB, CORE, and a repetition metric.\n- Apply the identical 1,500-step SFT recipe only to the final checkpoint and compare ChatCORE, MMLU, GSM8K, and generation.\n\nDo not change SFT simultaneously; that would obscure whether additional pretraining solved the problem. If repetition remains after the longer-pretrained base improves, the following round should test SFT early stopping/lower learning rate using generation and ChatCORE—not validation loss—as the selection criterion.\n\nI saved the full diagnosis as the project artifact [{}]({}).",
-            "nanochat-bottleneck-diagnosis.md",
+            "The recorded run suggests **insufficient pretraining is the leading bottleneck**. Test that inference by increasing pretraining while keeping the model, data, and SFT recipe fixed.\n\nValidation BPB was still improving at the endpoint after **81.92M tokens**. The literature below informs the next test; it does not establish the cause of this run’s behavior.\n\n| Paper | Relevant finding | Implication here |\n| --- | --- | --- |\n| [Chinchilla](https://arxiv.org/abs/2203.15556) | Training tokens matter alongside model size. | Test more pretraining; its parameter-count convention differs from nanochat’s. |\n| [LIMA](https://arxiv.org/abs/2305.11206) | SFT can expose capabilities learned during pretraining. | Falling SFT loss alone does not establish better generation. |\n| [TinyStories](https://arxiv.org/abs/2305.07759) | Small models can generate coherently on constrained text. | Size alone does not establish the cause of repetition. |\n| [Textbooks Are All You Need](https://arxiv.org/abs/2306.11644) | Curated data can improve sample efficiency. | Data quality remains a follow-up hypothesis. |\n\n**Next experiment:** train the same d6 model from scratch to `--target-param-data-ratio=12` (**16,992 steps**, about **3.4×** the recorded token budget).\n\n- Keep architecture, data, optimizer, and the 1,500-step SFT recipe fixed.\n- Evaluate base BPB, CORE, fixed-prompt generations, and repetition at 5,000, ~11,000, and 16,992 steps.\n- Apply SFT to the final checkpoint, then compare generation and downstream evaluations.\n\n[Full diagnosis and sources]({})",
             report_path,
         ),
     ));
@@ -1289,10 +1398,17 @@ fn tool_part(
         prompt: None,
         phase: None,
         children: Vec::new(),
+        orx: None,
     }
 }
 
 fn install_repository(repo: &Path, bare: &Path) -> Result<String> {
+    // The onboarding pre-warm and a "Get started" click can overlap; the lock
+    // makes the second caller validate the first's work instead of racing it.
+    static INSTALL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _install = INSTALL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if repo.exists() {
         validate_worktree(repo)?;
     } else if bare.join("HEAD").is_file() {
@@ -1337,6 +1453,34 @@ fn ensure_follow_up_branches(repo: &Path) -> Result<()> {
         .is_err()
         {
             git(repo, &["branch", branch, BRANCH])?;
+            if branch == LR_PROBE_BRANCH {
+                let previous = git(repo, &["symbolic-ref", "--short", "HEAD"])?;
+                git(repo, &["checkout", branch])?;
+                write_assets::<QuickProbeAssets>(repo)?;
+                for (name, content) in [
+                    (
+                        "orx-chart.html",
+                        include_str!("../../agent-skills/orx-figures/assets/orx-chart.html"),
+                    ),
+                    (
+                        "orx_chart.py",
+                        include_str!("../../agent-skills/orx-figures/assets/orx_chart.py"),
+                    ),
+                ] {
+                    std::fs::write(repo.join("scripts").join(name), content)?;
+                }
+                git(
+                    repo,
+                    &[
+                        "add",
+                        "scripts/demo_probe.py",
+                        "scripts/orx-chart.html",
+                        "scripts/orx_chart.py",
+                    ],
+                )?;
+                commit(repo, "Add a tiny nanochat learning-rate comparison")?;
+                git(repo, &["checkout", &previous])?;
+            }
         }
     }
     Ok(())
@@ -1509,7 +1653,19 @@ fn commit(repo: &Path, message: &str) -> Result<()> {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let mut command = Command::new("git");
+    let mut command = super::git::git_command();
+    // The prewarm's children yield to the catalog fill and to foreground work;
+    // a click landing mid-build flips the rest back to normal priority.
+    #[cfg(windows)]
+    if BACKGROUND_BUILD.with(|flag| flag.get())
+        && !FOREGROUND_WANTED.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS
+                | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+        );
+    }
     for name in [
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -1581,6 +1737,41 @@ fn set_executable(path: PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepare_origin(bare: &Path) {
+        // Bundle copies keep each test's refs and objects independent without rebuilding history.
+        static BUNDLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        let bundle = BUNDLE.get_or_init(|| {
+            let root = super::super::git::TemporaryDirectory::new("orx-demo-fixture").unwrap();
+            let repo = root.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            build_worktree(&repo).unwrap();
+            ensure_follow_up_branches(&repo).unwrap();
+            let path = root.path().join("repo.bundle");
+            git(
+                &repo,
+                &["bundle", "create", &path.to_string_lossy(), "--all"],
+            )
+            .unwrap();
+            std::fs::read(path).unwrap()
+        });
+        let parent = bare.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let path = bare.with_extension("bundle");
+        std::fs::write(&path, bundle).unwrap();
+        git(
+            parent,
+            &[
+                "clone",
+                "--bare",
+                &path.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+        git(bare, &["remote", "remove", "origin"]).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn transcript_variants_are_one_turn_and_use_native_tool_names() {
@@ -1684,7 +1875,9 @@ mod tests {
     fn every_demo_session_recovers_from_the_experiment_commit() {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let repo = root.join("repo");
-        install_repository(&repo, &root.join("origin.git")).unwrap();
+        let bare = root.join("origin.git");
+        prepare_origin(&bare);
+        install_repository(&repo, &bare).unwrap();
         for session_id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
             assert_eq!(
                 session_start_ref(&repo, OWNER, REPO, session_id),
@@ -1763,10 +1956,68 @@ mod tests {
     }
 
     #[test]
+    fn prewarmed_onboarding_seeds_full_demo() {
+        let acp_id = crate::local::acp::presets()[0].launch.id.clone();
+        for (prewarmed, harness) in [(false, "codex"), (true, "codex"), (false, acp_id.as_str())] {
+            let root = super::super::git::TemporaryDirectory::new("orx-demo-onboarding").unwrap();
+            let data = root.path().join("data");
+            let repo = data.join("repos").join(OWNER).join(REPO);
+            let bare = data.join("demo-repos").join("nanochat.git");
+            let store = Store::open_at(data.clone()).unwrap();
+            if prewarmed {
+                prewarm_repository(&repo, &bare).unwrap();
+                assert!(!repo.exists());
+                assert!(bare.join("HEAD").is_file());
+            } else if harness.starts_with("acp:") {
+                prepare_origin(&bare);
+            }
+            let started = std::time::Instant::now();
+            let completion = seed_at(
+                &store,
+                &data,
+                &repo,
+                DemoSelection {
+                    harness: harness.into(),
+                    model: None,
+                    permission_mode: None,
+                    reasoning_level: None,
+                },
+            )
+            .unwrap();
+            println!(
+                "onboarding_{}_ms={}",
+                if prewarmed { "warm" } else { "cold" },
+                started.elapsed().as_millis()
+            );
+            assert_eq!(completion.project.id, PROJECT_ID);
+            if harness.starts_with("acp:") {
+                for id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
+                    assert_eq!(
+                        store.acp_session_state(id).unwrap().unwrap().launch.id,
+                        harness
+                    );
+                }
+            }
+            assert_eq!(
+                store.list_experiments_by_project(PROJECT_ID).unwrap().len(),
+                3
+            );
+            assert_eq!(
+                store
+                    .list_chat_sessions_by_project(PROJECT_ID)
+                    .unwrap()
+                    .len(),
+                3
+            );
+        }
+    }
+
+    #[test]
     fn repository_and_snapshot_seed_are_idempotent() {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         let selection = DemoSelection {
             harness: "codex".into(),
@@ -1816,10 +2067,21 @@ mod tests {
                 Some(EXPERIMENT_ID)
             );
             assert_eq!(follow_up.agent_status, "idle");
-            assert_eq!(
-                git(&repo, &["rev-parse", &follow_up.branch_name]).unwrap(),
-                EXPERIMENT_SHA
-            );
+            let head = git(&repo, &["rev-parse", &follow_up.branch_name]).unwrap();
+            git(
+                &repo,
+                &["merge-base", "--is-ancestor", EXPERIMENT_SHA, &head],
+            )
+            .unwrap();
+            if follow_up.id == LR_PROBE_EXPERIMENT_ID {
+                assert!(
+                    git(&repo, &["show", &format!("{head}:scripts/demo_probe.py")])
+                        .unwrap()
+                        .contains("n_layer=2")
+                );
+            } else {
+                assert_eq!(head, EXPERIMENT_SHA);
+            }
             assert_eq!(
                 git(
                     &data.join("demo-repos").join("nanochat.git"),
@@ -1829,7 +2091,7 @@ mod tests {
                     ]
                 )
                 .unwrap(),
-                EXPERIMENT_SHA
+                head
             );
         }
         let runs = store.list_runs_by_project(PROJECT_ID).unwrap();
@@ -1908,7 +2170,7 @@ mod tests {
             .contains("My 73.5M-parameter nanochat model"));
         assert!(literature_messages[1]
             .parts_json
-            .contains("The main bottleneck is insufficient pretraining"));
+            .contains("insufficient pretraining is the leading bottleneck"));
         assert!(!literature_messages[1].parts_json.contains("/Users/"));
         assert!(!literature_messages[1]
             .parts_json
@@ -1945,7 +2207,7 @@ mod tests {
             std::fs::read_dir(data.join("files/nanochat"))
                 .unwrap()
                 .count(),
-            8
+            9
         );
         for name in FigureAssets::iter() {
             assert!(data.join("files/nanochat").join(name.as_ref()).is_file());
@@ -1982,6 +2244,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         store
             .create_local_project(&LocalProject {
@@ -2039,6 +2302,10 @@ mod tests {
         assert!(setup.contains(". .venv/bin/activate"), "{setup}");
         assert!(setup.contains(". .venv/Scripts/activate"), "{setup}");
         assert!(!setup.contains('\n'), "{setup}");
+        assert!(
+            setup.contains("UV_CACHE_DIR=\"${ORX_CACHE_DIR:-$HOME/.cache/openresearch}/uv\""),
+            "{setup}"
+        );
         assert!(!setup.contains("  "), "double space: {setup}");
     }
 
@@ -2063,6 +2330,7 @@ mod tests {
         let data = root.join("data");
         let moved = root.join("moved-data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         seed_at(
             &store,
@@ -2096,6 +2364,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let worktrees = data.join("worktrees").join(PROJECT_ID);
         let store = Store::open_at(data.clone()).unwrap();
         seed_at(
@@ -2166,6 +2435,7 @@ mod tests {
         let tmp = super::super::git::TemporaryDirectory::new("orx-demo-adopt").unwrap();
         let data = tmp.path().join("data");
         let repo = data.join("repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let selection = DemoSelection {
             harness: "codex".into(),
             model: None,
@@ -2174,6 +2444,10 @@ mod tests {
         };
         let original = Store::open_at(data.clone()).unwrap();
         seed_at(&original, &data, &repo, selection.clone()).unwrap();
+        let bare = data.join("demo-repos/nanochat.git");
+        std::fs::remove_dir_all(&bare).unwrap();
+        prewarm_repository(&repo, &bare).unwrap();
+        assert!(bare.join("HEAD").is_file());
         std::fs::write(repo.join("README.md"), "user changes").unwrap();
         let artifact = data.join("files/nanochat/user-notes.md");
         std::fs::write(&artifact, "user artifact").unwrap();

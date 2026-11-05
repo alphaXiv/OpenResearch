@@ -3,7 +3,8 @@
 //! The CLI can hand its update to the cargo-dist installer, which owns checksum
 //! verification and the atomic rename. There is no equivalent for the `.app`, so
 //! this module is the whole pipeline: fetch the manifest, download the DMG,
-//! prove it is ours, and swap the bundle.
+//! prove it is ours, and swap the bundle. While the app runs, everything but the
+//! swap happens in the background and the swap waits for the app's restart.
 //!
 //! Two independent things establish trust, and both must hold:
 //!   1. the `sha256` in `macos-app.json`, which pins the bytes to the release;
@@ -23,10 +24,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use semver::Version;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use super::{Outcome, SingleAssetManifest};
 use crate::error::{anyhow, Result};
+
+const BUNDLE: &str = "OpenResearch.app";
+
+/// Where a finished, launch-checked app waits beside the installed one for the
+/// restart that swaps it in. Deliberately not [`sweep_leftovers`]'
+/// `.OpenResearch-update-`: this one outlives the run that made it.
+const STAGED_DIR: &str = ".OpenResearch-staged";
+
+/// Gatekeeper and antivirus scan a bundle on its first run, which can take a while.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Release asset describing the published app build. Written by
 /// `.github/workflows/release-macos-app.yml` next to the DMG it describes.
@@ -48,48 +59,67 @@ fn signing_requirement() -> String {
     )
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AppManifest {
-    pub version: String,
-    /// Release tag the asset is pinned to, so the download can't drift to a
-    /// different release between the manifest fetch and the download.
-    pub tag: String,
-    pub asset: String,
-    pub sha256: String,
-}
-
-/// Fetches the published app manifest. `Ok(None)` for a 404 — the expected state
-/// between a release being published and its DMG being attached. That is
-/// "nothing to update to yet", never an error the user should see.
-pub async fn fetch_manifest(timeout: Duration) -> Result<Option<AppManifest>> {
-    let url = format!(
-        "{}/releases/latest/download/{}",
-        super::REPO_URL,
-        MANIFEST_ASSET
-    );
-    let res = super::http()
-        .get(&url)
-        .header("user-agent", super::UA)
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not fetch the macOS app manifest: {}", e))?;
-    if res.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
+/// Fetches the published app manifest; `Ok(None)` until the DMG is attached.
+pub async fn fetch_manifest(timeout: Duration) -> Result<Option<SingleAssetManifest>> {
+    let channel = crate::telemetry::update_channel();
+    if channel == super::ReleaseChannel::Canary {
+        return Ok(super::fetch_canary_manifest(timeout)
+            .await?
+            .and_then(|mut manifest| {
+                manifest
+                    .assets
+                    .remove("macos")
+                    .map(|asset| SingleAssetManifest {
+                        version: manifest.version,
+                        tag: manifest.tag,
+                        asset: asset.asset,
+                        sha256: asset.sha256,
+                        ancestors: manifest.ancestors,
+                    })
+            }));
     }
-    let status = res.status();
-    if !status.is_success() {
+    let manifest: Option<SingleAssetManifest> =
+        super::fetch_app_manifest(MANIFEST_ASSET, timeout).await?;
+    if manifest
+        .as_ref()
+        .is_some_and(|manifest| !super::valid_desktop_tag(channel, &manifest.tag))
+    {
         return Err(anyhow!(
-            "App manifest request failed ({} {})",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("")
+            "The app update belongs to a different release channel."
         ));
     }
-    Ok(Some(serde_json::from_str(&res.text().await?)?))
+    Ok(manifest)
 }
 
 /// Update the installed bundle at `root` in place.
-pub async fn update(root: &Path, current: &Version, dry_run: bool, background: bool) -> Result<()> {
+///
+/// While a backend runs from `root` the swap waits for its restart, but everything
+/// slow does not: the new app is downloaded, verified, and launched once here, so
+/// Gatekeeper and any antivirus have judged it before the restart depends on it,
+/// and a build that can't run is rejected with the installed app untouched.
+pub async fn update(
+    root: &Path,
+    current: &Version,
+    dry_run: bool,
+    background: bool,
+    backend_running: bool,
+) -> Result<Outcome> {
+    let parent = root
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", root.display()))?;
+    // Beside the target so the final move is a same-filesystem rename.
+    let staged = parent.join(STAGED_DIR);
+
+    // The restart installs what an earlier pass staged without asking the network
+    // again: offline, or in the minutes before a new release's manifest is
+    // published, it would find nothing to install.
+    if !backend_running && !dry_run {
+        if let Some((version, tag)) = super::staged_release(&staged, current) {
+            ensure_replaceable(root).await?;
+            return install(root, &staged, current, &version, &tag, background);
+        }
+    }
+
     let published = fetch_manifest(Duration::from_secs(10)).await?;
     let latest = published
         .as_ref()
@@ -106,18 +136,36 @@ pub async fn update(root: &Path, current: &Version, dry_run: bool, background: b
 
     // Keep the cache honest even when this install can't apply the update: it is
     // what the dashboard and the outdated warning read.
-    if let Some(latest) = &latest {
-        super::write_check_cache(&latest.to_string());
+    if let (Some(manifest), Some(latest)) = (&published, &latest) {
+        let compatible = super::release_is_compatible(
+            &manifest.tag,
+            &manifest.ancestors,
+            Duration::from_secs(10),
+        )
+        .await?;
+        super::record_checked_release(&super::LatestRelease {
+            version: latest.clone(),
+            tag: manifest.tag.clone(),
+            compatible,
+            #[cfg(windows)]
+            canary_asset: None,
+        });
+        if !compatible {
+            if !background {
+                println!("{}", super::compatibility_wait_message(&manifest.tag));
+            }
+            return Ok(Outcome::Done);
+        }
     }
 
     let Some((manifest, latest)) = published
         .zip(latest)
-        .filter(|(_, latest)| super::is_outdated(current, latest))
+        .filter(|(manifest, latest)| super::release_available(current, latest, &manifest.tag))
     else {
         if !background {
             println!("OpenResearch {} is up to date.", current);
         }
-        return Ok(());
+        return Ok(Outcome::Done);
     };
 
     if dry_run {
@@ -127,44 +175,55 @@ pub async fn update(root: &Path, current: &Version, dry_run: bool, background: b
             "OpenResearch {} → {} is available. Re-run without --dry-run to update.",
             current, latest
         );
-        return Ok(());
+        return Ok(Outcome::Done);
     }
 
     ensure_replaceable(root).await?;
-    if !background {
-        eprintln!("Updating OpenResearch {} → {} ...", current, latest);
+
+    // A kill or reboot mid-update leaves a whole bundle of staging behind, and this
+    // runs unattended for months — so clear any previous run's leftovers first.
+    sweep_leftovers(parent, root);
+    let staged_already =
+        super::staged_release(&staged, current).is_some_and(|(_, tag)| tag == manifest.tag);
+    if !staged_already {
+        if !background {
+            eprintln!("Updating OpenResearch {} → {} ...", current, latest);
+        }
+        stage_release(&manifest, &latest, parent, &staged).await?;
     }
 
-    // Stage beside the target so the final move is a same-filesystem rename.
-    let parent = root
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent directory", root.display()))?;
-    // A kill or reboot mid-update leaves ~500MB of staging behind, and this runs
-    // unattended for months — so clear any previous run's leftovers first.
-    sweep_leftovers(parent, root);
-    let staging = parent.join(format!(".OpenResearch-update-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&staging)
-        .map_err(|e| anyhow!("Could not create {}: {}", staging.display(), e))?;
-
-    let result = stage_verified_app(&manifest, &staging).await;
-    let staged = match result {
-        Ok(staged) => staged,
-        Err(err) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(err);
+    if backend_running {
+        super::record_deferred(&latest.to_string(), &manifest.tag);
+        if !background {
+            println!(
+                "OpenResearch {} is ready. The running app installs it when it restarts.",
+                latest
+            );
         }
-    };
+        return Ok(Outcome::Deferred);
+    }
 
-    let swapped = swap_bundle(root, &staged);
-    let _ = std::fs::remove_dir_all(&staging);
-    swapped?;
+    install(root, &staged, current, &latest, &manifest.tag, background)
+}
 
-    super::record_installed(&latest.to_string());
+/// Swap the staged app in for `root`.
+fn install(
+    root: &Path,
+    staged: &Path,
+    current: &Version,
+    version: &Version,
+    tag: &str,
+    background: bool,
+) -> Result<Outcome> {
+    swap_bundle(root, &staged.join(BUNDLE))?;
+    let _ = std::fs::remove_dir_all(staged);
+
+    super::record_installed(&version.to_string(), tag);
     if !background {
-        println!("✓ Updated OpenResearch {} → {}.", current, latest);
+        println!("✓ Updated OpenResearch {} → {}.", current, version);
         println!("Restart the app to run the new version.");
     }
-    Ok(())
+    Ok(Outcome::Done)
 }
 
 /// Refuse the installs where swapping the bundle is wrong or impossible, each
@@ -214,7 +273,7 @@ async fn ensure_replaceable(root: &Path) -> Result<()> {
 /// The Apple team identifier a bundle is signed by, or `None` when it is
 /// unsigned or unreadable.
 async fn team_id(root: &Path) -> Option<String> {
-    let out = tokio::process::Command::new("/usr/bin/codesign")
+    let out = crate::process::tokio_command("/usr/bin/codesign")
         .args(["-dv", "--verbose=4"])
         .arg(root)
         .output()
@@ -227,9 +286,61 @@ async fn team_id(root: &Path) -> Option<String> {
         .filter(|id| id != "not set")
 }
 
+/// Download, verify, and launch-check the release into `staged`, replacing what it
+/// held. Built under a scratch name and renamed last, so `staged` only ever holds
+/// an app that passed every check, and a failed attempt leaves the previous one.
+async fn stage_release(
+    manifest: &SingleAssetManifest,
+    version: &Version,
+    parent: &Path,
+    staged: &Path,
+) -> Result<()> {
+    let scratch = parent.join(format!(".OpenResearch-update-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| anyhow!("Could not create {}: {}", scratch.display(), e))?;
+
+    let built = async {
+        let app = stage_verified_app(manifest, &scratch).await?;
+
+        // The CLI path, so no window opens. The first run of a downloaded bundle is
+        // the slow one — Gatekeeper and antivirus scan it — and doing it here, where
+        // a failure just rejects the update, leaves the restart a fast second run of
+        // a bundle known to start.
+        let exe = app
+            .join("Contents/MacOS/OpenResearch")
+            .to_string_lossy()
+            .into_owned();
+        let args = ["--no-telemetry", "version", "--build-id"].map(String::from);
+        let launch = run_tool(&exe, &args, "The downloaded app failed to launch");
+        tokio::time::timeout(LAUNCH_TIMEOUT, launch)
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "The downloaded app did not start within {} seconds. Nothing was installed.",
+                    LAUNCH_TIMEOUT.as_secs()
+                )
+            })??;
+
+        super::write_staged_release(&scratch, version, &manifest.tag)?;
+        let _ = std::fs::remove_dir_all(staged);
+        std::fs::rename(&scratch, staged).map_err(|e| {
+            anyhow!(
+                "Could not move the new app into {}: {}",
+                staged.display(),
+                e
+            )
+        })
+    }
+    .await;
+    if built.is_err() {
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+    built
+}
+
 /// Download the DMG, verify it, and copy the app out into `staging`. Returns the
 /// staged bundle's path.
-async fn stage_verified_app(manifest: &AppManifest, staging: &Path) -> Result<PathBuf> {
+async fn stage_verified_app(manifest: &SingleAssetManifest, staging: &Path) -> Result<PathBuf> {
     let dmg_bytes = super::fetch_release_asset(
         &manifest.tag,
         &manifest.asset,
@@ -264,7 +375,7 @@ async fn stage_verified_app(manifest: &AppManifest, staging: &Path) -> Result<Pa
 /// Verify the app on the mounted image and copy it into `staging`. Split from
 /// [`stage_verified_app`] so the image is detached on every path out.
 async fn copy_verified_app(mount: &Path, staging: &Path) -> Result<PathBuf> {
-    let source = mount.join("OpenResearch.app");
+    let source = mount.join(BUNDLE);
     if !source.is_dir() {
         return Err(anyhow!(
             "The downloaded disk image has no OpenResearch.app. Nothing was installed."
@@ -288,7 +399,7 @@ async fn copy_verified_app(mount: &Path, staging: &Path) -> Result<PathBuf> {
 
     // codesign proves who signed it; only Gatekeeper's assessment proves Apple
     // notarized it, which is what catches a validly-signed but revoked build.
-    let assess = tokio::process::Command::new("/usr/sbin/spctl")
+    let assess = crate::process::tokio_command("/usr/sbin/spctl")
         .args(["--assess", "--type", "exec", "-vv"])
         .arg(&source)
         .output()
@@ -304,7 +415,7 @@ async fn copy_verified_app(mount: &Path, staging: &Path) -> Result<PathBuf> {
 
     // ditto, not a recursive copy: it preserves the extended attributes and
     // symlinks a signed bundle's seal covers.
-    let staged = staging.join("OpenResearch.app");
+    let staged = staging.join(BUNDLE);
     run_tool(
         "/usr/bin/ditto",
         &[
@@ -358,13 +469,14 @@ fn swap_bundle(root: &Path, staged: &Path) -> Result<()> {
 }
 
 /// Remove staging, backup, and probe litter an interrupted update left next to
-/// the bundle. Matches only our own `.`-prefixed names, so the live bundle and
-/// anything else in `/Applications` are never candidates.
+/// the app (the macOS bundle, or the Linux AppImage). Matches only our own
+/// `.`-prefixed names, so the live app and anything else beside it are never
+/// candidates.
 ///
-/// The age floor keeps this off a *concurrent* updater's staging directory: the
-/// lock lives under `config_dir()`, so two user accounts sharing one
-/// `/Applications` are not serialized against each other.
-fn sweep_leftovers(parent: &Path, root: &Path) {
+/// The age floor keeps this off a *concurrent* updater's staging: the lock
+/// lives under `config_dir()`, so two user accounts sharing one folder are not
+/// serialized against each other.
+pub(super) fn sweep_leftovers(parent: &Path, root: &Path) {
     const MIN_AGE: Duration = Duration::from_secs(60 * 60);
     let bundle = root.file_name().unwrap_or_default().to_string_lossy();
     let Ok(entries) = std::fs::read_dir(parent) else {
@@ -401,7 +513,7 @@ fn is_leftover(name: &str, bundle: &str) -> bool {
 
 /// Mount `dmg` read-only and return its mount point.
 async fn attach(dmg: &Path) -> Result<PathBuf> {
-    let out = tokio::process::Command::new("/usr/bin/hdiutil")
+    let out = crate::process::tokio_command("/usr/bin/hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-noautoopen"])
         .arg(dmg)
         .output()
@@ -445,7 +557,7 @@ fn mount_point(stdout: &str) -> Option<PathBuf> {
 }
 
 async fn detach(mount: &Path) {
-    let _ = tokio::process::Command::new("/usr/bin/hdiutil")
+    let _ = crate::process::tokio_command("/usr/bin/hdiutil")
         .arg("detach")
         .arg(mount)
         .arg("-force")
@@ -455,8 +567,10 @@ async fn detach(mount: &Path) {
 
 /// Run a helper that must succeed, folding its stderr into `context`.
 async fn run_tool(program: &str, args: &[String], context: &str) -> Result<()> {
-    let out = tokio::process::Command::new(program)
+    let out = crate::process::tokio_command(program)
         .args(args)
+        // So a timeout around this call doesn't leave a hung helper behind.
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|e| anyhow!("{context}: could not run {program} ({e})"))?;
@@ -526,6 +640,8 @@ mod tests {
             // The live bundle, and the app the user actually installed.
             "OpenResearch.app",
             "Safari.app",
+            // The staged update is kept on purpose until a restart installs it.
+            STAGED_DIR,
             // No leading dot: a real bundle someone renamed, not our backup.
             "OpenResearch.app.old-3f2a",
             // A different app whose name merely starts the same way.
@@ -538,6 +654,33 @@ mod tests {
         ] {
             assert!(!is_leftover(name, "OpenResearch.app"), "{name}");
         }
+    }
+
+    #[test]
+    fn a_restart_swaps_the_staged_app_in_and_leaves_no_backup() {
+        let apps = std::env::temp_dir().join(format!("orx-apps-{}", uuid::Uuid::new_v4()));
+        let root = apps.join(BUNDLE);
+        let staged = apps.join(STAGED_DIR).join(BUNDLE);
+        for (app, version) in [(&root, "old"), (&staged, "new")] {
+            std::fs::create_dir_all(app.join("Contents")).unwrap();
+            std::fs::write(app.join("Contents/version"), version).unwrap();
+        }
+
+        swap_bundle(&root, &staged).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("Contents/version")).unwrap(),
+            "new"
+        );
+        assert!(!staged.exists());
+        let mut entries: Vec<_> = std::fs::read_dir(&apps)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, [STAGED_DIR, BUNDLE]);
+
+        std::fs::remove_dir_all(&apps).unwrap();
     }
 
     #[test]

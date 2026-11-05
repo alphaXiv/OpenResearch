@@ -1,11 +1,11 @@
-export type LitSource = "alphaxiv" | "openalex" | "biorxiv";
+export type LitSource = "alphaxiv" | "openalex" | "biorxiv" | "pubmed";
 
 export type OrxLitCall =
   | { kind: "paper"; source: LitSource; id?: string }
   | {
       kind: "discover";
       source: LitSource;
-      strategy: "keyword" | "embedding" | "openalex" | "biorxiv";
+      strategy: "keyword" | "embedding" | "openalex" | "biorxiv" | "pubmed";
       query?: string;
     };
 
@@ -14,7 +14,7 @@ export function containsShellGlob(value: string): boolean {
 }
 
 function asSource(value: string | undefined): LitSource | undefined {
-  return value === "alphaxiv" || value === "openalex" || value === "biorxiv"
+  return value === "alphaxiv" || value === "openalex" || value === "biorxiv" || value === "pubmed"
     ? value
     : undefined;
 }
@@ -24,29 +24,42 @@ function detectPaperSource(id: string): LitSource {
   const lower = value.toLowerCase();
   if (lower.includes("biorxiv.org")) return "biorxiv";
   if (lower.includes("openalex.org")) return "openalex";
+  if (
+    lower.includes("pubmed.ncbi.nlm.nih.gov") ||
+    lower.includes("ncbi.nlm.nih.gov/pubmed") ||
+    lower.startsWith("pmid:")
+  ) return "pubmed";
   const doi = value.match(/10\.\d+\/\S+/);
   if (doi) return doi[0].startsWith("10.1101/") ? "biorxiv" : "openalex";
   const last = value.split("/").pop() ?? "";
   if (/^W\d+$/i.test(last)) return "openalex";
+  if (/^\d{1,9}$/.test(value)) return "pubmed";
   return "alphaxiv";
 }
 
-/** Shell-style tokens up to the first operator, including Codex's quoted argv display. */
-export function shellWords(input: string): string[] {
+/** Shell-style tokens; strict parsing rejects incomplete commands and shell operations. */
+export function shellWords(input: string, hideShellExpansions = false, requireWholeCommand = false): string[] {
   const words: string[] = [];
   let word = "";
   let hasWord = false;
+  let hasExpansion = false;
   let quote: '"' | "'" | null = null;
 
   const push = () => {
-    if (hasWord) words.push(word);
+    if (hasWord) words.push(hideShellExpansions && hasExpansion ? "" : word);
     word = "";
     hasWord = false;
+    hasExpansion = false;
   };
 
   for (let index = 0; index < input.length; index++) {
     const char = input[index];
     if (char === "\\" && quote !== "'") {
+      if (requireWholeCommand && !quote && /^[A-Za-z]:/.test(word)) {
+        word += char;
+        hasWord = true;
+        continue;
+      }
       const next = input[index + 1];
       const escapesInDoubleQuotes = next !== undefined && ["$", "`", '"', "\\", "\n"].includes(next);
       if (quote === '"' && !escapesInDoubleQuotes) {
@@ -55,6 +68,7 @@ export function shellWords(input: string): string[] {
         continue;
       }
       if (next === undefined) {
+        if (requireWholeCommand) throw new SyntaxError("Incomplete escape");
         word += char;
         hasWord = true;
         continue;
@@ -65,6 +79,10 @@ export function shellWords(input: string): string[] {
         hasWord = true;
       }
       continue;
+    }
+    if (quote !== "'" && (char === "`" || (char === "$" && /[A-Za-z_0-9{(?#@$!*-]/.test(input[index + 1] ?? "")))) {
+      if (requireWholeCommand) throw new SyntaxError("Shell expansion is not a launch argument");
+      hasExpansion = true;
     }
     if (quote) {
       if (char === quote) quote = null;
@@ -77,13 +95,18 @@ export function shellWords(input: string): string[] {
       hasWord = true;
       continue;
     }
-    if (char === "|" || char === ";" || char === ">" || char === "&") break;
+    if (char === "|" || char === ";" || char === ">" || char === "&") {
+      if (requireWholeCommand) throw new SyntaxError("Expected one command");
+      break;
+    }
+    if (requireWholeCommand && "<>()\r\n\0".includes(char)) throw new SyntaxError("Expected one command");
     if (/\s/.test(char)) push();
     else {
       word += char;
       hasWord = true;
     }
   }
+  if (requireWholeCommand && quote) throw new SyntaxError("Unclosed quote");
   push();
   return words;
 }
@@ -141,7 +164,7 @@ export function orxArgsMatch(command: string | readonly string[], args: string):
 
 /** Parse the first literature command from a shell segment. */
 export function parseOrxLit(command: string | readonly string[]): OrxLitCall | null {
-  const argv = orxArgv(command);
+  const argv = orxArgvFromTokens(typeof command === "string" ? shellWords(command, true) : command);
   if (!argv) return null;
   const kind = argv[0];
   if (kind !== "paper" && kind !== "discover") return null;
@@ -186,10 +209,26 @@ export function parseOrxLit(command: string | readonly string[]): OrxLitCall | n
     strategy !== "keyword" &&
     strategy !== "embedding" &&
     strategy !== "openalex" &&
-    strategy !== "biorxiv"
+    strategy !== "biorxiv" &&
+    strategy !== "pubmed"
   ) return null;
-  const discoverSource = strategy === "openalex" || strategy === "biorxiv"
+  const discoverSource = strategy === "openalex" || strategy === "biorxiv" || strategy === "pubmed"
     ? strategy
     : "alphaxiv";
-  return { kind, source: discoverSource, strategy, query: positionals[1] };
+  return { kind, source: discoverSource, strategy, query: positionals[1] || undefined };
+}
+
+export function recordedDiscoveryQueries(command: string, output: string, strategy: string): string[] {
+  const headings = new Set(output.split(/\r?\n/).filter((line) => line.startsWith("=== ")).map((line) => line.slice(4)));
+  const queries: string[] = [];
+  for (const loop of command.matchAll(/\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;\n]+);\s*do\b([\s\S]*?)\bdone\b/g)) {
+    const [, variable, values, body] = loop;
+    const search = new RegExp(`(?:^|[;\\n])\\s*orx\\s+discover\\s+${strategy}\\s+"?\\$${variable}"?(?=\\s|[;|]|$)`);
+    if (!search.test(body) || !body.includes(`echo "=== $${variable}"`)) continue;
+    const literals = shellWords(values, true);
+    for (const query of literals) {
+      if (query && headings.has(query)) queries.push(query);
+    }
+  }
+  return queries;
 }

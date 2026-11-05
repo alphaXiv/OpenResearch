@@ -3,16 +3,27 @@
 //! No scheduler: the target is a plain server you can `ssh` into. Everything
 //! shells out to the `ssh` binary (like the k8s backend shells out to
 //! `kubectl`), so auth is your `~/.ssh/config` + agent/keys — orx never reads a
-//! key. On unix, connections are multiplexed (ControlMaster) so the many status/log
-//! polls reuse one TCP session instead of a handshake apiece.
-//! Win32-OpenSSH cannot, so on Windows background calls need an agent key or no passphrase.
+//! key. A detached local service shares one persistent helper channel per target.
+//! Unix attaches only to an authenticated master; Windows keeps the explicitly
+//! authenticated ssh process alive. Background user-host work never logs in.
 //!
-//! The handle is a remote run directory `~/.orx/runs/<run_id>/` holding:
+//! The handle is a remote run directory `<root>/runs/<run_id>/` (root defaults to `~/.orx`) holding:
 //!   run.sh      the launcher (exported env + snapshot-and-run payload)
 //!   log         merged stdout/stderr
 //!   pid         the detached process-group leader
 //!   exit_code   written when the payload finishes
 //! A restarted `orx supervise` reattaches purely from that directory.
+
+pub(crate) mod cleanup;
+mod container;
+#[cfg(unix)]
+mod prepared;
+pub(crate) mod service;
+#[cfg(unix)]
+pub(crate) mod sharing;
+pub use container::{
+    resolve as resolve_container, validate_reference as validate_container_reference, ContainerRun,
+};
 
 use std::collections::HashMap;
 #[cfg(unix)]
@@ -20,18 +31,35 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::Command;
-
 use crate::error::{anyhow, Result};
+
+const ROUTE_FIELDS: &str = "hostname|user|port|controlpath|proxyjump|proxycommand|identityfile|certificatefile|identityagent|identitiesonly|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|preferredauthentications|gssapiauthentication|hostbasedauthentication|hostkeyalias|stricthostkeychecking|userknownhostsfile|globalknownhostsfile|hostkeyalgorithms|pubkeyacceptedalgorithms|proxyusefdpass|bindaddress|bindinterface";
+
+fn route_configuration(output: &str) -> String {
+    // Match final can repeat unrelated list settings such as SendEnv.
+    output
+        .lines()
+        .filter(|line| {
+            line.split_once(' ')
+                .is_some_and(|(key, _)| ROUTE_FIELDS.split('|').any(|field| field == key))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Keep sockets out of config paths, which can exceed macOS's 104-byte limit.
 #[cfg(unix)]
 fn control_dir() -> PathBuf {
+    control_dir_for(&crate::config::config_dir())
+}
+
+#[cfg(unix)]
+fn control_dir_for(config_dir: &std::path::Path) -> PathBuf {
     use std::hash::{Hash as _, Hasher as _};
 
     let uid = unsafe { libc::geteuid() };
     let mut namespace = std::collections::hash_map::DefaultHasher::new();
-    crate::config::config_dir().hash(&mut namespace);
+    config_dir.hash(&mut namespace);
     PathBuf::from("/tmp").join(format!("orx-ssh-{uid}-{:08x}", namespace.finish() as u32))
 }
 
@@ -65,14 +93,140 @@ fn prepare_control_dir() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedLaunch {
+    pub target: SshTarget,
+    pub container: Option<ContainerRun>,
+    pub remote_root: Option<String>,
+}
+
+pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> {
+    let settings = crate::config::ssh_settings()?;
+    let (host, options) = resolve_options(args, &settings)?;
+    let target = SshTarget::alias(&host);
+    let host_check = preflight(&target).await;
+    if !host_check.reachable || !host_check.tools_found {
+        return Err(anyhow!(
+            "{}",
+            host_check
+                .error
+                .unwrap_or_else(|| "SSH host needs bash and tar.".into())
+        ));
+    }
+    let container = match options.container {
+        Some(reference) => Some(container::resolve(&target, &reference).await?),
+        None => None,
+    };
+    Ok(ResolvedLaunch {
+        target,
+        container,
+        remote_root: options.remote_root,
+    })
+}
+
+pub fn validate_host_options(options: &crate::config::SshHostSettings) -> Result<()> {
+    if let Some(reference) = &options.container {
+        validate_container_reference(reference)?;
+    }
+    if let Some(root) = &options.remote_root {
+        validate_remote_root(root)?;
+    }
+    Ok(())
+}
+
+/// A configured remote storage root: absolute and free of shell metacharacters,
+/// so it stays one path however a remote shell or batch script reads it.
+pub fn validate_remote_root(root: &str) -> Result<()> {
+    let components = root.strip_prefix('/').map(|rest| rest.split('/'));
+    let valid = components.is_some_and(|mut components| {
+        components.all(|part| {
+            !matches!(part, "" | "." | "..")
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-+@".contains(c))
+        })
+    });
+    if !valid {
+        return Err(anyhow!(
+            "Remote storage root must be an absolute path like /scratch/<user>/orx (letters, digits, . _ - + @; no trailing slash)."
+        ));
+    }
+    Ok(())
+}
+
+/// A run's remote dir: under the configured root, or `$HOME`-relative by default.
+pub fn remote_run_dir(root: Option<&str>, run_id: &str) -> String {
+    match root {
+        Some(root) => format!("{root}/runs/{run_id}"),
+        None => format!(".orx/runs/{run_id}"),
+    }
+}
+
+fn remote_source_dir(root: Option<&str>) -> String {
+    match root {
+        Some(root) => format!("{root}/source"),
+        None => ".orx/source".into(),
+    }
+}
+
+fn remote_source_cache(root: Option<&str>, digest: &str) -> String {
+    format!("{}/{digest}.tar", remote_source_dir(root))
+}
+
+/// One shell word for a remote path; relative paths resolve against `$HOME`.
+pub(crate) fn shell_path(path: &str) -> String {
+    if path.starts_with('/') {
+        sh_quote(path)
+    } else {
+        format!("\"$HOME/{path}\"")
+    }
+}
+
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map_or(path, |(parent, _)| parent)
+}
+
+pub fn resolve_options(
+    args: &crate::ExpRunArgs,
+    settings: &crate::config::SshSettings,
+) -> Result<(String, crate::config::SshHostSettings)> {
+    let host = args
+        .host
+        .as_ref()
+        .or(settings.default_host.as_ref())
+        .filter(|host| !host.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!("SSH requires --host <alias> or a default host saved in SSH compute settings.")
+        })?
+        .clone();
+    let saved = settings.hosts.get(&host).cloned().unwrap_or_default();
+    let container = if args.no_container {
+        None
+    } else {
+        args.container.clone().or_else(|| saved.container.clone())
+    };
+    let options = crate::config::SshHostSettings { container, ..saved };
+    validate_host_options(&options)?;
+    Ok((host, options))
+}
+
 /// An ssh endpoint. The classic ssh backend connects by `~/.ssh/config` alias
 /// (`SshTarget::alias`); backends that learn an endpoint at runtime (an
 /// OpenResearch box on a provider-assigned host:port) pass an explicit
 /// `user@host` plus the options no config file knows about.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SshTarget {
+    #[serde(skip)]
+    pub(crate) transport:
+        Option<std::sync::Arc<crate::engine::adapters::openresearch::LegacyTransport>>,
     /// What goes after `--`: an alias, or `user@host`.
     pub dest: String,
+    #[serde(default)]
+    pub managed_generation: Option<String>,
+    #[serde(default)]
+    pub auth_agent: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<String>,
     /// Extra ssh args before `--` (e.g. `["-p", "2222", "-o", …]`).
     pub extra_opts: Vec<String>,
 }
@@ -96,10 +250,20 @@ pub enum HostKeyPolicy {
 }
 
 impl SshTarget {
+    pub fn for_run(mut self, run_id: &str) -> Self {
+        self.run_id = Some(run_id.to_owned());
+        self
+    }
+
     /// A bare alias — `~/.ssh/config` alone decides the endpoint.
     pub fn alias(host: &str) -> Self {
         Self {
             dest: host.to_string(),
+            managed_generation: None,
+            auth_agent: crate::local::shell_env::var("SSH_AUTH_SOCK")
+                .map(|value| value.to_string_lossy().into_owned()),
+            run_id: None,
+            transport: None,
             extra_opts: Vec::new(),
         }
     }
@@ -127,7 +291,15 @@ impl SshTarget {
                 ]);
             }
         }
-        Self { dest, extra_opts }
+        Self {
+            dest,
+            extra_opts,
+            managed_generation: None,
+            auth_agent: crate::local::shell_env::var("SSH_AUTH_SOCK")
+                .map(|value| value.to_string_lossy().into_owned()),
+            run_id: None,
+            transport: None,
+        }
     }
 }
 
@@ -144,38 +316,91 @@ fn discarded_known_hosts() -> std::path::PathBuf {
 
 #[cfg(unix)]
 fn control_path(target: &SshTarget) -> PathBuf {
+    if target.extra_opts.is_empty() {
+        return prepared::cached(target)
+            .map(|connection| control_dir().join(connection.publication.socket_name))
+            .unwrap_or_else(|| control_dir().join("%C"));
+    }
     // A 16-hex hash leaves room for ssh's temporary bind suffix. It folds in
     // the extra opts so different ports never share a control socket.
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     target.dest.hash(&mut h);
     target.extra_opts.hash(&mut h);
+    target.auth_agent.hash(&mut h);
     control_dir().join(format!("{:016x}", h.finish()))
 }
 
 /// Shared ssh options: setup may prompt, background work never does; on unix one shared
 /// socket lets a single login cover both.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        if let Some(connection) = prepared::cached(target) {
+            return ssh_opts_prepared(target, batch, &connection);
+        }
+    }
+    ssh_options(target, batch, multiplexing_opts(target), None)
+}
+
+#[cfg(unix)]
+fn ssh_opts_prepared(
+    target: &SshTarget,
+    batch: bool,
+    connection: &prepared::Prepared,
+) -> Vec<String> {
+    ssh_options(
+        target,
+        batch,
+        multiplexing_opts_for(
+            &connection
+                .path
+                .with_file_name(&connection.publication.socket_name),
+        ),
+        Some(&connection.snapshot),
+    )
+}
+
+fn ssh_options(
+    target: &SshTarget,
+    batch: bool,
+    multiplexing: Vec<String>,
+    config: Option<&std::path::Path>,
+) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
         format!("BatchMode={}", if batch { "yes" } else { "no" }),
         "-o".into(),
         "ConnectTimeout=10".into(),
+        "-o".into(),
+        "ServerAliveInterval=30".into(),
+        "-o".into(),
+        "ServerAliveCountMax=3".into(),
+        "-o".into(),
+        "TCPKeepAlive=yes".into(),
     ];
-    opts.extend(multiplexing_opts(target));
+    opts.extend(multiplexing);
     opts.extend(target.extra_opts.iter().cloned());
+    if let Some(config) = config {
+        opts.extend(["-F".into(), config.to_string_lossy().into_owned()]);
+    }
     opts
 }
 
 #[cfg(unix)]
 fn multiplexing_opts(target: &SshTarget) -> Vec<String> {
+    multiplexing_opts_for(&control_path(target))
+}
+
+#[cfg(unix)]
+fn multiplexing_opts_for(path: &std::path::Path) -> Vec<String> {
     vec![
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
-        format!("ControlPath={}", control_path(target).display()),
+        format!("ControlPath={}", path.display()),
         "-o".into(),
-        "ControlPersist=600".into(),
+        "ControlPersist=86400".into(),
     ]
 }
 
@@ -200,13 +425,7 @@ pub(crate) fn forward_args(
 ) -> Result<Vec<String>> {
     prepare_control_dir()?;
     let mut args = ssh_opts(target, true);
-    for option in [
-        "ExitOnForwardFailure=yes",
-        "ServerAliveInterval=30",
-        "ServerAliveCountMax=3",
-    ] {
-        args.extend(["-o".into(), option.into()]);
-    }
+    args.extend(["-o".into(), "ExitOnForwardFailure=yes".into()]);
     args.extend([
         // No PTY: the remote session bearer is delivered over stdin and must
         // never be echoed by terminal line discipline.
@@ -220,42 +439,175 @@ pub(crate) fn forward_args(
     Ok(args)
 }
 
-/// Arguments for the short interactive login opened by Settings. `true` ends
-/// the visible session after authentication while ControlPersist keeps its
-/// master available to the batch-mode calls below — on Windows there is no
-/// master, so this only proves the host reachable and primes nothing.
-pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
-    prepare_control_dir()?;
-    let mut args = ssh_opts(target, false);
-    args.extend(["--".into(), target.dest.clone(), "true".into()]);
-    Ok(args)
+pub(crate) struct InteractiveConnection {
+    pub args: Vec<String>,
+    #[cfg(unix)]
+    _lock: std::fs::File,
 }
 
-#[cfg(not(unix))]
-pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
-    Ok(false)
+/// Retires unusable Unix masters and holds their lock through the interactive login.
+pub(crate) async fn prepare_interactive_connection(
+    target: &SshTarget,
+    persist: Option<u64>,
+    remote_command: Option<String>,
+) -> Result<InteractiveConnection> {
+    prepare_control_dir()?;
+    #[cfg(unix)]
+    let connection = if target.extra_opts.is_empty() {
+        Some(prepared::prepare(target, true).await?)
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let path = connection
+        .as_ref()
+        .map(|connection| connection.path.clone())
+        .unwrap_or_else(|| control_path(target));
+    #[cfg(unix)]
+    let options = connection
+        .as_ref()
+        .map(|connection| ssh_opts_prepared(target, false, connection))
+        .unwrap_or_else(|| ssh_opts(target, false));
+    #[cfg(not(unix))]
+    let options = ssh_opts(target, false);
+    #[cfg(unix)]
+    let lock = lock_master(&path).await?;
+    #[cfg(unix)]
+    if control_master(target, &path, &options, "check").await? {
+        if !master_accepts_sessions(target, &path, &options).await?
+            && !control_master(target, &path, &options, "stop").await?
+        {
+            return Err(anyhow!("Could not retire the existing SSH connection; retry Connect once the gateway responds."));
+        }
+    } else {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut args = Vec::new();
+    if let Some(seconds) = persist {
+        args.extend(["-o".into(), format!("ControlPersist={seconds}")]);
+    }
+    args.extend(options);
+    args.extend([
+        "--".into(),
+        target.dest.clone(),
+        remote_command.unwrap_or_else(|| "true".into()),
+    ]);
+    Ok(InteractiveConnection {
+        args,
+        #[cfg(unix)]
+        _lock: lock,
+    })
 }
 
 #[cfg(unix)]
-pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
-    prepare_control_dir()?;
-    let path = control_path(target);
-    if !path.try_exists()? {
-        return Ok(false);
+async fn lock_master(path: &std::path::Path) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
     }
-    let status = Command::new("ssh")
-        .args(["-O", "check", "-S"])
+    Ok(file)
+}
+
+#[cfg(unix)]
+async fn control_master(
+    target: &SshTarget,
+    path: &std::path::Path,
+    options: &[String],
+    operation: &str,
+) -> Result<bool> {
+    let mut command = crate::process::tokio_command("ssh");
+    command
+        .env("ORX_SSH_PROBE", "1")
+        .args(["-O", operation, "-S"])
         .arg(path)
+        .args(options)
         .arg("--")
         .arg(&target.dest)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .status()
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(Duration::from_secs(10), command.status())
         .await
-        .map_err(|e| anyhow!("Could not check the SSH master: {e}"))?;
+        .map_err(|_| anyhow!("Timed out trying to {operation} the SSH master; retry Connect once the gateway responds."))?
+        .map_err(|e| anyhow!("Could not {operation} the SSH master: {e}"))?;
     Ok(status.success())
+}
+
+#[cfg(unix)]
+async fn master_accepts_sessions(
+    target: &SshTarget,
+    path: &std::path::Path,
+    options: &[String],
+) -> Result<bool> {
+    let mut command = crate::process::tokio_command("ssh");
+    command
+        .env("ORX_SSH_PROBE", "1")
+        // Refused mux sessions can fall back to a new transport; this probe must not.
+        .args([
+            "-oBatchMode=yes",
+            "-oControlMaster=no",
+            "-oControlPersist=no",
+            "-oProxyCommand=false",
+            "-oClearAllForwardings=yes",
+            "-oRemoteCommand=none",
+            "-T",
+            "-S",
+        ])
+        .arg(path)
+        .args(options)
+        .args(["--", &target.dest, "echo __ORX_SESSION_OK__"])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| anyhow!("Timed out probing the existing SSH connection; retry Connect once the gateway responds."))??;
+    Ok(output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == "__ORX_SESSION_OK__"))
+}
+
+#[cfg(unix)]
+async fn resolved_control_path(target: &SshTarget) -> Result<PathBuf> {
+    if !target.extra_opts.is_empty() {
+        return Ok(control_path(target));
+    }
+    Ok(prepared::prepare(target, false).await?.path)
+}
+
+pub(crate) fn prepare_sharing_env(cmd: &mut tokio::process::Command) {
+    cmd.env_remove("ORX_SSH_PROBE");
+    #[cfg(unix)]
+    cmd.env("ORX_SSH_CONTROL_DIR", control_dir());
+    #[cfg(not(unix))]
+    cmd.env_remove("ORX_SSH_CONTROL_DIR");
+}
+
+pub(crate) async fn setup_connection_sharing(target: &SshTarget) -> Option<String> {
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() && target.transport.is_none() {
+        return sharing::setup(target).await.err().map(|error| {
+            format!("SSH login succeeded, but connection sharing is unavailable: {error}")
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = target;
+    None
 }
 
 /// Run a command on `target` over ssh, feeding `stdin` if given, returning stdout.
@@ -267,16 +619,60 @@ pub(crate) async fn ssh_run(
     remote_cmd: &str,
     stdin: Option<&str>,
 ) -> Result<String> {
-    ssh_run_bytes(target, remote_cmd, stdin.map(str::as_bytes)).await
+    if let Some(transport) = &target.transport {
+        return transport
+            .execute(remote_cmd, stdin.map(str::as_bytes).unwrap_or_default())
+            .await;
+    }
+    service::execute(target, remote_cmd, stdin.map(str::as_bytes)).await
 }
 
-async fn ssh_run_bytes(
+pub(crate) async fn ssh_status(
+    target: &SshTarget,
+    command: &str,
+    input: Option<&str>,
+) -> Result<String> {
+    if let Some(transport) = &target.transport {
+        return transport
+            .execute(command, input.map(str::as_bytes).unwrap_or_default())
+            .await;
+    }
+    service::execute_lane(target, command, input.map(str::as_bytes), "status").await
+}
+
+pub(crate) async fn ssh_control(
+    target: &SshTarget,
+    command: &str,
+    input: Option<&str>,
+) -> Result<String> {
+    if let Some(transport) = &target.transport {
+        return transport
+            .execute(command, input.map(str::as_bytes).unwrap_or_default())
+            .await;
+    }
+    service::execute_lane(target, command, input.map(str::as_bytes), "control").await
+}
+
+pub(crate) async fn direct_run(
+    target: &SshTarget,
+    command: &str,
+    input: Option<&str>,
+) -> Result<String> {
+    direct_run_bytes(target, command, input.map(str::as_bytes)).await
+}
+
+pub(crate) async fn direct_run_bytes(
     target: &SshTarget,
     remote_cmd: &str,
     stdin: Option<&[u8]>,
 ) -> Result<String> {
     prepare_control_dir()?;
-    let mut cmd = Command::new("ssh");
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        prepared::prepare(target, false).await?;
+    }
+    let mut cmd = crate::process::tokio_command("ssh");
+    cmd.env("ORX_SSH_PROBE", "1");
     cmd.args(ssh_opts(target, true))
         .arg("--")
         .arg(&target.dest)
@@ -328,34 +724,43 @@ async fn ssh_run_file(
     remote_cmd: &str,
     source: &std::path::Path,
 ) -> Result<String> {
-    prepare_control_dir()?;
-    let mut child = Command::new("ssh")
-        .args(ssh_opts(target, true))
-        .arg("--")
-        .arg(&target.dest)
-        .arg(remote_cmd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow!("Could not run ssh: {e}"))?;
-    let mut file = tokio::fs::File::open(source).await?;
-    if let Some(mut pipe) = child.stdin.take() {
-        tokio::io::copy(&mut file, &mut pipe).await?;
-        drop(pipe);
+    if let Some(transport) = &target.transport {
+        return transport.upload(remote_cmd, source).await;
     }
-    let out = child
-        .wait_with_output()
-        .await
-        .map_err(|e| anyhow!("ssh wait failed: {e}"))?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "ssh {} failed: {}",
-            target.dest,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+
+    service::upload(target, remote_cmd, source).await
+}
+
+/// Source uploads are restarted a few times on failure: a dropped SSH
+/// connection mid-stream surfaces as a client-side write error (on Windows,
+/// broken pipe os error 232 writing to ssh's stdin) and the remote script's
+/// byte-length check makes any partial upload safe to re-run.
+const SOURCE_UPLOAD_ATTEMPTS: usize = 3;
+const SOURCE_UPLOAD_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Runs an upload `attempt` until it succeeds or the attempt budget is spent.
+/// Only call with attempts that are safe to re-run (see
+/// `source_cache_commands`). A final failure names the transport stage and
+/// target so a bare transport error reports what was being uploaded.
+async fn upload_source<F, Fut>(dest: &str, delay: Duration, mut attempt: F) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let mut last_err = None;
+    for n in 1..=SOURCE_UPLOAD_ATTEMPTS {
+        match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+        if n < SOURCE_UPLOAD_ATTEMPTS {
+            tokio::time::sleep(delay).await;
+        }
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Err(anyhow!(
+        "uploading source archive to {dest} failed after {SOURCE_UPLOAD_ATTEMPTS} attempts: {:#}",
+        last_err.unwrap_or_else(|| anyhow!("no upload attempt ran"))
+    ))
 }
 
 /// Upload a content-addressed tar once, then materialize it into this run's
@@ -366,33 +771,62 @@ pub async fn stage_source(
     run_id: &str,
     archive: &std::path::Path,
     digest: &str,
+    container: Option<&ContainerRun>,
+    root: Option<&str>,
 ) -> Result<String> {
-    let dir = format!(".orx/runs/{run_id}");
-    let cache = format!(".orx/source/{digest}.tar");
-    let present = ssh_run(
-        target,
-        &format!("test -f \"$HOME/{cache}\" && echo present || true"),
-        None,
-    )
-    .await?;
-    if present.trim() != "present" {
-        let upload = format!(
-            "umask 077; mkdir -p \"$HOME/.orx/source\"; \
-             tmp=\"$HOME/{cache}.tmp.$$\"; cat > \"$tmp\" && mv \"$tmp\" \"$HOME/{cache}\""
-        );
-        ssh_run_file(target, &upload, archive).await?;
+    let dir = remote_run_dir(root, run_id);
+    let cache = remote_source_cache(root, digest);
+    let size = tokio::fs::metadata(archive).await?.len();
+    let (check, upload) = source_cache_commands(&cache, size);
+    if ssh_run(target, &check, None).await?.trim() != "present" {
+        let cmd = upload.as_str();
+        upload_source(&target.dest, SOURCE_UPLOAD_RETRY_DELAY, || async move {
+            ssh_run_file(target, cmd, archive).await.map(|_| ())
+        })
+        .await?;
     }
-    ssh_run(
-        target,
-        &format!(
-            "umask 077; mkdir -p \"$HOME/.orx/runs\" \"$HOME/{dir}/repo\"; \
-             chmod 700 \"$HOME/.orx/runs\" \"$HOME/{dir}\" \"$HOME/{dir}/repo\"; \
-             tar -xf \"$HOME/{cache}\" -C \"$HOME/{dir}/repo\""
-        ),
-        None,
-    )
-    .await?;
+    if let Some(container) = container {
+        container.require_running(target).await?;
+        let path = sh_quote(&container.run_dir);
+        let extract = container.exec(&format!("set -e; umask 077; mkdir -p {path}/repo; chmod 700 {path} {path}/repo; tar -xf - -C {path}/repo"));
+        let (d, cache) = (shell_path(&dir), shell_path(&cache));
+        // Start the bound here too: submission may fail before detached launch.
+        ssh_run(target, &format!("umask 077; mkdir -p {d} && chmod 700 {d} && {extract} < {cache} && date +%s > {d}/launch_time.tmp && mv {d}/launch_time.tmp {d}/launch_time"), None).await?;
+    } else {
+        let (runs, d, cache) = (
+            shell_path(parent_dir(&dir)),
+            shell_path(&dir),
+            shell_path(&cache),
+        );
+        ssh_run(
+            target,
+            &format!(
+                "umask 077; mkdir -p {runs} {d}/repo; \
+             chmod 700 {runs} {d} {d}/repo; \
+             tar -xf {cache} -C {d}/repo"
+            ),
+            None,
+        )
+        .await?;
+    }
     Ok(dir)
+}
+
+/// Remote (check, upload) scripts for a cached source tar. An interrupted upload
+/// still lets `cat` exit 0 on EOF, so both sides require the exact byte length;
+/// a short cached file reads as absent and is replaced by the next upload.
+/// A reused tar is touched so cache cleanup sees it as recently used.
+fn source_cache_commands(cache: &str, size: u64) -> (String, String) {
+    let (dir, file) = (shell_path(parent_dir(cache)), shell_path(cache));
+    let check = format!(
+        "f={file}; test -f \"$f\" && test $(wc -c < \"$f\") -eq {size} && touch \"$f\" && echo present || true"
+    );
+    let upload = format!(
+        "umask 077; mkdir -p {dir}; f={file}; tmp=\"$f.tmp.$$\"; \
+         cat > \"$tmp\" && test $(wc -c < \"$tmp\") -eq {size} && mv \"$tmp\" \"$f\" \
+         || {{ rm -f \"$tmp\"; echo \"source archive upload incomplete\" >&2; exit 1; }}"
+    );
+    (check, upload)
 }
 
 /// Single-quote a value for safe embedding in the remote bash script.
@@ -403,49 +837,83 @@ pub(crate) fn sh_quote(s: &str) -> String {
 pub struct SshJobSpec {
     /// Where to run: a config alias (the ssh backend) or an explicit endpoint.
     pub target: SshTarget,
-    /// Names the remote run dir `~/.orx/runs/<run_id>`.
+    /// Names the remote run dir `<root>/runs/<run_id>`.
     pub run_id: String,
+    /// Configured storage root; `None` is `~/.orx`.
+    pub remote_root: Option<String>,
     /// The shared snapshot-and-run payload (`bash` script body).
     pub script: String,
     /// Exported inside run.sh on the remote (tokens, synced env).
     pub env: HashMap<String, String>,
+    pub container: Option<ContainerRun>,
 }
 
+const TERMINAL_TRAPS: &str = r#"trap 'code=$?; printf "%s\n" "$code" > exit_code' EXIT
+stop_child() {
+    kill -"$1" "$child" 2>/dev/null
+    set -m
+    set -o pipefail
+    (sleep 2 & timer=$!; trap 'kill "$timer" 2>/dev/null; exit' TERM; wait "$timer" 2>/dev/null; kill -KILL -"$$" 2>/dev/null; while ps -e -o pgid= -o stat= | awk -v p="$$" '$1 == p && $2 !~ /^[ZX]/ { alive=1 } END { exit !alive }'; do sleep 0.1; done; printf "%s\n" "$2" > exit_code) </dev/null >/dev/null 2>&1 &
+    killer=$!
+    wait "$child" 2>/dev/null
+    if ps -e -o pgid= -o pid= -o stat= | awk -v p="$$" '$1 == p && $2 != p && $3 !~ /^[ZX]/ { alive=1 } END { exit alive }'; then
+        kill "$killer" 2>/dev/null
+    fi
+    wait "$killer" 2>/dev/null
+    exit "$2"
+}
+trap 'stop_child TERM 143' TERM
+trap 'stop_child INT 130' INT"#;
+
+fn host_script(dir: &str, exports: &str, script: &str) -> String {
+    let dir = shell_path(dir);
+    format!("#!/usr/bin/env bash\ncd {dir} || exit 97\nchild=\n{TERMINAL_TRAPS}\n(\n{exports}\n{script}\n) > log 2>&1 &\nchild=$!\nwait \"$child\"\n")
+}
+
+#[derive(Debug)]
+pub struct LaunchUncertain;
+
+impl std::fmt::Display for LaunchUncertain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SSH launch acknowledgement failed")
+    }
+}
+
+impl std::error::Error for LaunchUncertain {}
+
 /// Submit the job: write run.sh, launch it detached, record its pid. Returns
-/// the remote run dir (relative to `$HOME`) — the reattach handle.
+/// the remote run dir (absolute, or relative to `$HOME`) — the reattach handle.
 pub async fn run_job(spec: &SshJobSpec) -> Result<String> {
-    let dir = format!(".orx/runs/{}", spec.run_id);
+    let dir = remote_run_dir(spec.remote_root.as_deref(), &spec.run_id);
     let env = super::default_python_env(&spec.env);
     let exports: String = env
         .iter()
         .map(|(k, v)| format!("export {}={}", k, sh_quote(v)))
         .collect::<Vec<_>>()
         .join("\n");
-    // run.sh: set up env, run the payload capturing all output to `log`, then
-    // record the exit status. The payload runs in a SUBSHELL `( … )` — not a
-    // `{ … }` group — so an `exit`/`set -e` failure inside it ends the subshell,
-    // not run.sh, and we still reach `echo $? > exit_code`.
-    let run_sh = format!(
-        "#!/usr/bin/env bash\n{exports}\ncd \"$HOME/{dir}\" || exit 97\n(\n{script}\n) > log 2>&1\necho $? > exit_code\n",
-        script = spec.script,
-    );
+    let run_sh = if let Some(container) = &spec.container {
+        container.require_running(&spec.target).await?;
+        let inner = container::inner_script(container, &exports, &spec.script);
+        container::upload_script(&spec.target, container, &inner).await?;
+        container::host_script(&dir, container)
+    } else {
+        host_script(&dir, &exports, &spec.script)
+    };
 
     // Create the dir (owner-only) and write run.sh from stdin.
-    let setup = format!(
-        "mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && cat > \"$HOME/{dir}/run.sh\"",
-    );
+    let d = shell_path(&dir);
+    let setup = format!("umask 077; mkdir -p {d} && chmod 700 {d} && cat > {d}/run.sh");
     ssh_run(&spec.target, &setup, Some(&run_sh)).await?;
 
-    // Launch detached so it survives the ssh channel closing. Prefer `setsid`
-    // (new session → pid == pgid, so cancel can TERM the whole group); fall back
-    // to `nohup` where setsid is absent (e.g. a macOS host). Record the pid.
-    let launch = format!(
-        "cd \"$HOME/{dir}\" && \
-         if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & \
-         else nohup bash run.sh </dev/null >/dev/null 2>&1 & fi; \
-         echo $! > pid",
-    );
-    ssh_run(&spec.target, &launch, None).await?;
+    // The container host wrapper records its own PID; direct runs retain the existing launcher.
+    let launch = if spec.container.is_some() {
+        format!("cd {d} && date +%s > launch_time.tmp && mv launch_time.tmp launch_time && {{ if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & else nohup bash run.sh </dev/null >/dev/null 2>&1 & fi; }}")
+    } else {
+        format!("cd {d} && if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & else set -m; trap '' HUP; bash run.sh </dev/null >/dev/null 2>&1 & fi; echo $! > pid")
+    };
+    ssh_run(&spec.target, &launch, None)
+        .await
+        .map_err(|error| error.context(LaunchUncertain))?;
     Ok(dir)
 }
 
@@ -456,19 +924,87 @@ pub struct JobState {
     pub message: Option<String>,
 }
 
-pub async fn inspect_job(target: &SshTarget, dir: &str) -> Result<JobState> {
-    // exit_code present -> finished; pid alive -> running; pid dead & no
-    // exit_code -> killed/crashed; no pid yet -> just starting.
-    let cmd = format!(
-        "d=\"$HOME/{dir}\"; \
-         if [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
-         elif [ -f \"$d/pid\" ] && kill -0 \"$(cat \"$d/pid\")\" 2>/dev/null; then echo RUNNING; \
+pub async fn inspect_job(
+    target: &SshTarget,
+    dir: &str,
+    container: Option<&ContainerRun>,
+) -> Result<JobState> {
+    match container {
+        Some(container) => container::inspect(target, dir, container).await,
+        None => inspect_host_job(target, dir).await,
+    }
+}
+
+async fn inspect_host_job(target: &SshTarget, dir: &str) -> Result<JobState> {
+    let script = host_job_script(dir);
+    let out = ssh_status(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
+    parse_job_state(out.trim())
+}
+
+/// The run dir exists before any supervisor polls it, so a missing one means the job is gone.
+fn host_job_script(dir: &str) -> String {
+    format!(
+        "{HOST_PROCESS_HELPERS}\n\
+         d={}; \
+         if [ ! -d \"$d\" ]; then echo MISSING; \
+         elif [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
+         elif [ -f \"$d/pid\" ] && host_process_alive \"$(cat \"$d/pid\")\"; then echo RUNNING; \
          elif [ -f \"$d/pid\" ]; then echo DEAD; else echo PENDING; fi",
-    );
-    let out = ssh_run(target, &cmd, None).await?;
-    let out = out.trim();
+        shell_path(dir),
+    )
+}
+
+const HOST_PROCESS_HELPERS: &str = r#"
+host_process_alive() {
+    local p="$1" stat fields pgid state file
+    if [ -r "/proc/$p/stat" ]; then
+        IFS= read -r stat < "/proc/$p/stat" || return 1
+        stat=${stat##*) }
+        read -ra fields <<< "$stat"
+        if [ "${fields[0]}" != Z ] && [ "${fields[0]}" != X ]; then return 0; fi
+        if [ "${fields[2]}" = "$p" ]; then
+            for file in /proc/[0-9]*/stat; do
+                IFS= read -r stat < "$file" 2>/dev/null || continue
+                stat=${stat##*) }
+                read -ra fields <<< "$stat"
+                if [ "${fields[2]}" = "$p" ] && [ "${fields[0]}" != Z ] && [ "${fields[0]}" != X ]; then return 0; fi
+            done
+            return 1
+        fi
+        return 1
+    else
+        stat=$(ps -o pgid= -o stat= -p "$p" 2>/dev/null) || return 1
+        read -r pgid state <<< "$stat"
+        if [[ $state != Z* && $state != X* ]]; then return 0; fi
+        if [ "$pgid" = "$p" ]; then
+            ps -e -o pgid= -o stat= | awk -v p="$p" '$1 == p && $2 !~ /^[ZX]/ { alive=1 } END { exit !alive }'
+        else
+            return 1
+        fi
+    fi
+}
+
+host_group_alive() {
+    local p="$1" file stat fields
+    if [ -d /proc ]; then
+        for file in /proc/[0-9]*/stat; do
+            IFS= read -r stat < "$file" 2>/dev/null || continue
+            stat=${stat##*) }
+            read -ra fields <<< "$stat"
+            if [ "${fields[2]}" = "$p" ] && [ "${fields[0]}" != Z ] && [ "${fields[0]}" != X ]; then return 0; fi
+        done
+        return 1
+    fi
+    ps -e -o pgid= -o stat= 2>/dev/null | awk -v p="$p" '$1 == p && $2 !~ /^[ZX]/ { alive=1 } END { exit !alive }'
+}
+"#;
+
+fn parse_job_state(out: &str) -> Result<JobState> {
     if let Some(code) = out.strip_prefix("EXIT ") {
-        let code: i32 = code.trim().parse().unwrap_or(-1);
+        let code: i32 = code
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("unexpected inspect output: {out}"))?;
         return Ok(if code == 0 {
             JobState {
                 stage: "COMPLETED".into(),
@@ -482,40 +1018,51 @@ pub async fn inspect_job(target: &SshTarget, dir: &str) -> Result<JobState> {
         });
     }
     Ok(match out {
-        "RUNNING" | "PENDING" => JobState {
+        "RUNNING" => JobState {
             stage: "RUNNING".into(),
+            message: None,
+        },
+        "PENDING" => JobState {
+            stage: "SCHEDULING".into(),
             message: None,
         },
         "DEAD" => JobState {
             stage: "ERROR".into(),
             message: Some("process died without an exit code (killed?)".into()),
         },
-        other => JobState {
-            stage: "RUNNING".into(),
-            message: Some(format!("unexpected inspect output: {other}")),
+        "MISSING" => JobState {
+            stage: "ERROR".into(),
+            message: Some(RUN_DIR_MISSING.into()),
         },
+        other => return Err(anyhow!("unexpected inspect output: {other}")),
     })
 }
 
+pub const RUN_DIR_MISSING: &str = "the remote run directory no longer exists (was the host \
+     rebuilt or cleaned up, or does the ssh alias now reach a different host?)";
+
 /// One poll of the remote log past `skip` lines. Unlike the streaming backends
 /// this returns promptly (the supervisor loops every ~2s); `idle` is unused.
+#[cfg(test)]
 pub async fn stream_logs(
     target: &SshTarget,
     dir: &str,
     skip: u64,
     _idle: Duration,
+    drain: bool,
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     let cmd = format!(
-        "tail -n +{} \"$HOME/{}/log\" 2>/dev/null || true",
+        "printf '__ORX_LOG_START__\\n'; tail -n +{} {}/log 2>/dev/null || true",
         skip + 1,
-        dir
+        shell_path(dir)
     );
     let out = ssh_run(target, &cmd, None).await?;
+    let out = out
+        .strip_prefix("__ORX_LOG_START__\n")
+        .ok_or_else(|| anyhow!("unexpected SSH log output: {out}"))?;
     let mut seen = skip;
-    // A trailing newline yields a final empty element under split('\n'); use
-    // lines() which ignores it, matching the "one line = one log line" contract.
-    for line in out.lines() {
+    for line in super::log_lines(out, drain) {
         seen += 1;
         sink(line);
     }
@@ -523,14 +1070,41 @@ pub async fn stream_logs(
 }
 
 /// Cancel = TERM the process group if we have one (setsid case), else the pid
-/// (nohup fallback). The negative-pid form targets the whole group.
-pub async fn cancel_job(target: &SshTarget, dir: &str) -> Result<()> {
-    let cmd = format!(
-        "p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
-         [ -n \"$p\" ] && {{ kill -TERM -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null; }}; true",
-    );
-    ssh_run(target, &cmd, None).await?;
+/// (nohup fallback). The negative-pid form targets the whole group. When TERM
+/// leaves members behind — a payload may block or ignore it — escalate to KILL
+/// after five seconds, matching the documented contract and the container
+/// path. run.sh's own escalation dies with its leader, so this sweep is the
+/// only one that still fires once the group leader is gone.
+pub async fn cancel_job(
+    target: &SshTarget,
+    dir: &str,
+    container: Option<&ContainerRun>,
+) -> Result<()> {
+    if let Some(container) = container {
+        container::cancel(target, container).await?;
+    }
+
+    let script = host_cancel_script(dir);
+    ssh_control(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
     Ok(())
+}
+
+/// The remote half of `cancel_job`: TERM the recorded process group, wait five
+/// seconds, then KILL whoever ignored it. Kept separate so tests can run it
+/// against a real local group.
+fn host_cancel_script(dir: &str) -> String {
+    format!(
+        "{HOST_PROCESS_HELPERS}\n\
+         p=$(cat {}/pid 2>/dev/null); \
+         [ -n \"$p\" ] || exit 0; \
+         case \"$p\" in ''|*[!0-9]*) exit 0;; esac; \
+         kill -TERM -- -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null || true; \
+         for ((i=0; i<50; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
+         kill -KILL -- -\"$p\" 2>/dev/null || true; \
+         for ((i=0; i<10; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
+         echo 'Experiment process group is still alive' >&2; exit 1",
+        shell_path(dir),
+    )
 }
 
 /// Per-host readiness for the Settings UI: can we reach it and execute snapshots?
@@ -551,6 +1125,9 @@ pub async fn preflight(target: &SshTarget) -> SshPreflight {
     .await
     {
         Ok(out) => {
+            if let Some(warning) = setup_connection_sharing(target).await {
+                eprintln!("orx: warning: {warning}");
+            }
             let missing_tools = [("MISSING_BASH", "bash"), ("MISSING_TAR", "tar")]
                 .into_iter()
                 .filter(|(marker, _)| out.contains(marker))
@@ -583,12 +1160,530 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inspect_rejects_transport_output_and_invalid_exit_codes() {
+        for output in [
+            "",
+            "cannot assign requested address",
+            "EXIT nope",
+            "RUNNING\nproxy error",
+        ] {
+            assert!(parse_job_state(output).is_err(), "{output}");
+        }
+        for (output, stage) in [
+            ("RUNNING", "RUNNING"),
+            ("PENDING", "SCHEDULING"),
+            ("EXIT 0", "COMPLETED"),
+            ("EXIT 42", "ERROR"),
+            ("DEAD", "ERROR"),
+            ("MISSING", "ERROR"),
+        ] {
+            assert_eq!(parse_job_state(output).unwrap().stage, stage);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_inspect_reports_a_vanished_run_dir_as_missing() {
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-inspect").unwrap();
+        let inspect = || {
+            let out = crate::process::command("bash")
+                .args(["-c", &host_job_script(".orx/runs/r1")])
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        assert_eq!(inspect(), "MISSING");
+        let dir = home.path().join(".orx/runs/r1");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(inspect(), "PENDING");
+        std::fs::write(dir.join("launch_started"), "").unwrap();
+        let state = parse_job_state(&inspect()).unwrap();
+        assert_eq!(
+            super::super::stage_to_run_status(&state.stage),
+            crate::store::RunStatus::Starting
+        );
+        std::fs::write(dir.join("pid"), std::process::id().to_string()).unwrap();
+        let state = parse_job_state(&inspect()).unwrap();
+        assert_eq!(
+            super::super::stage_to_run_status(&state.stage),
+            crate::store::RunStatus::Running
+        );
+        std::fs::write(dir.join("exit_code"), "0\n").unwrap();
+        assert_eq!(inspect(), "EXIT 0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_cache_rejects_and_replaces_truncated_archives() {
+        use std::io::Write;
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-source-cache").unwrap();
+        let (check, upload) = source_cache_commands(".orx/source/d.tar", 6);
+        let sh = |script: &str, input: &[u8]| {
+            let mut child = crate::process::command("sh")
+                .args(["-c", script])
+                .env("HOME", home.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            let out = child.wait_with_output().unwrap();
+            (out.status.success(), String::from_utf8(out.stdout).unwrap())
+        };
+        let cached = home.path().join(".orx/source/d.tar");
+        assert!(!sh(&upload, b"abc").0);
+        assert!(!cached.exists());
+        std::fs::write(&cached, b"abc").unwrap();
+        assert_eq!(sh(&check, b"").1, "");
+        assert!(sh(&upload, b"abcdef").0);
+        assert_eq!(sh(&check, b"").1.trim(), "present");
+        assert_eq!(std::fs::read(&cached).unwrap(), b"abcdef");
+        assert_eq!(
+            std::fs::read_dir(cached.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn remote_roots_are_absolute_plain_paths() {
+        for root in ["/scratch/me/orx", "/data/user.name/orx-1", "/gpfs/a+b@c"] {
+            validate_remote_root(root).unwrap();
+        }
+        for root in [
+            "",
+            "/",
+            "scratch/orx",
+            "~/orx",
+            "/scratch/orx/",
+            "/scratch//orx",
+            "/scratch/../etc",
+            "/scratch/$USER",
+            "/scratch/a b",
+            "/scratch/`id`",
+            "/scratch/x;rm",
+            "/scratch/'q'",
+        ] {
+            assert!(validate_remote_root(root).is_err(), "{root}");
+        }
+        assert_eq!(remote_run_dir(None, "r1"), ".orx/runs/r1");
+        assert_eq!(
+            remote_run_dir(Some("/scratch/orx"), "r1"),
+            "/scratch/orx/runs/r1"
+        );
+        assert_eq!(shell_path(".orx/runs/r1"), "\"$HOME/.orx/runs/r1\"");
+        assert_eq!(shell_path("/scratch/orx/runs/r1"), "'/scratch/orx/runs/r1'");
+        assert_eq!(
+            remote_source_cache(Some("/scratch/orx"), "d"),
+            "/scratch/orx/source/d.tar"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_root_holds_the_source_cache_and_run_state() {
+        use std::io::Write;
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-root-home").unwrap();
+        let scratch = crate::local::git::TemporaryDirectory::new("orx-ssh-root").unwrap();
+        let root = scratch.path().join("orx");
+        let root = root.to_str().unwrap();
+        let (_, upload) = source_cache_commands(&remote_source_cache(Some(root), "d"), 3);
+        let mut child = crate::process::command("sh")
+            .args(["-c", &upload])
+            .env("HOME", home.path())
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"abc").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            std::fs::read(scratch.path().join("orx/source/d.tar")).unwrap(),
+            b"abc"
+        );
+        let dir = remote_run_dir(Some(root), "r1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(format!("{dir}/exit_code"), "3\n").unwrap();
+        let out = crate::process::command("bash")
+            .args(["-c", &host_job_script(&dir)])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "EXIT 3");
+        assert!(!home.path().join(".orx").exists());
+    }
+
+    #[tokio::test]
+    async fn upload_source_retries_a_dropped_attempt_then_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        upload_source("host", Duration::ZERO, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Err(anyhow!("The pipe is being closed. (os error 232)"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn upload_source_stops_after_the_attempt_budget_and_names_the_stage() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let err = upload_source("box.example.com", Duration::ZERO, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(anyhow!("The pipe is being closed. (os error 232)")) }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls.load(Ordering::SeqCst), SOURCE_UPLOAD_ATTEMPTS);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("uploading source archive to box.example.com"),
+            "{msg}"
+        );
+        assert!(msg.contains(&SOURCE_UPLOAD_ATTEMPTS.to_string()), "{msg}");
+        assert!(msg.contains("os error 232"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn upload_source_runs_a_single_attempt_on_success() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        upload_source("host", Duration::ZERO, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interactive_login_removes_orphaned_sockets_and_broken_symlinks() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+        let target = SshTarget::alias(&format!("orx-test-{}", uuid::Uuid::new_v4()));
+        prepare_control_dir().unwrap();
+        let path = resolved_control_path(&target).await.unwrap();
+        drop(UnixListener::bind(&path).unwrap());
+        prepare_interactive_connection(&target, None, None)
+            .await
+            .unwrap();
+        assert!(std::fs::symlink_metadata(&path).is_err());
+        symlink(path.with_extension("missing"), &path).unwrap();
+        let args = prepare_interactive_connection(&target, Some(120), None)
+            .await
+            .unwrap();
+        assert!(std::fs::symlink_metadata(&path).is_err());
+        assert_eq!(args.args[..2], ["-o", "ControlPersist=120"]);
+        let socket = UnixListener::bind(&path).unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            prepare_interactive_connection(&target, None, None)
+        )
+        .await
+        .is_err());
+        assert!(path.exists());
+        drop(socket);
+        drop(args);
+        assert!(prepare_interactive_connection(&target, None, None)
+            .await
+            .is_ok());
+        let opts = ssh_opts(&target, true);
+        for option in [
+            "ServerAliveInterval=30",
+            "ServerAliveCountMax=3",
+            "TCPKeepAlive=yes",
+        ] {
+            assert!(opts.iter().any(|value| value == option));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_wrapper_finishes_cooperative_term_promptly() {
+        use std::os::unix::process::CommandExt;
+
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-term-fast").unwrap();
+        let dir = home.path().join("run");
+        std::fs::create_dir(&dir).unwrap();
+        let script = home.path().join("run.sh");
+        std::fs::write(&script, host_script("run", "", "sleep 30")).unwrap();
+        let mut command = crate::process::command("bash");
+        command
+            .arg(&script)
+            .env("HOME", home.path())
+            .process_group(0);
+        let mut wrapper = command.spawn().unwrap();
+        for _ in 0..100 {
+            if dir.join("log").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let start = std::time::Instant::now();
+        unsafe { libc::kill(wrapper.id() as i32, libc::SIGTERM) };
+        wrapper.wait().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("exit_code"))
+                .unwrap()
+                .trim(),
+            "143"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_wrapper_kills_term_ignoring_descendants_without_ps() {
+        use std::os::unix::process::CommandExt;
+
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-term").unwrap();
+        let dir = home.path().join("run");
+        std::fs::create_dir(&dir).unwrap();
+        let script = home.path().join("run.sh");
+        std::fs::write(
+            &script,
+            host_script(
+                "run",
+                "",
+                "bash -c 'trap \"\" TERM; sleep 30 & echo $! > child_pid; wait' & wait",
+            ),
+        )
+        .unwrap();
+        let bash_env = home.path().join("bash_env");
+        std::fs::write(&bash_env, "ps() { return 127; }\n").unwrap();
+        let mut command = crate::process::command("bash");
+        command
+            .arg(&script)
+            .env("HOME", home.path())
+            .env("BASH_ENV", &bash_env)
+            .process_group(0);
+        let mut wrapper = command.spawn().unwrap();
+        for _ in 0..100 {
+            if dir
+                .join("child_pid")
+                .metadata()
+                .is_ok_and(|file| file.len() > 0)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let child_pid: i32 = std::fs::read_to_string(dir.join("child_pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        unsafe { libc::kill(wrapper.id() as i32, libc::SIGTERM) };
+        wrapper.wait().unwrap();
+        let mut marker = String::new();
+        for _ in 0..100 {
+            marker = std::fs::read_to_string(dir.join("exit_code")).unwrap_or_default();
+            if !marker.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(marker.trim(), "143");
+        let output = crate::process::command("ps")
+            .args(["-o", "stat=", "-p", &child_pid.to_string()])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&output.stdout);
+        assert!(state.trim().is_empty() || state.trim().starts_with('Z'));
+    }
+
+    /// Replaces a forked child with `sleep`. Sleeping in place would hold every descriptor the
+    /// test process had open, so other tests' pipes, sockets and locks would not close.
+    #[cfg(unix)]
+    fn exec_sleep() -> ! {
+        let argv = [c"sleep".as_ptr(), c"60".as_ptr(), std::ptr::null()];
+        unsafe {
+            libc::execv(c"/bin/sleep".as_ptr(), argv.as_ptr());
+            libc::_exit(127)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_probe_waits_for_live_group_members() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::setsid() };
+            let member = unsafe { libc::fork() };
+            if member == 0 {
+                exec_sleep();
+            }
+            unsafe { libc::_exit(0) };
+        }
+
+        let mut zombie = false;
+        for _ in 0..100 {
+            let output = crate::process::command("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            zombie = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .starts_with('Z');
+            if zombie {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let alive = || {
+            crate::process::command("bash")
+                .arg("-c")
+                .arg(format!("{HOST_PROCESS_HELPERS}\nhost_process_alive {pid}"))
+                .status()
+                .unwrap()
+                .success()
+        };
+        let with_member = alive();
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        let mut without_member = false;
+        for _ in 0..100 {
+            if !alive() {
+                without_member = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+        assert!(zombie);
+        assert!(with_member);
+        assert!(without_member);
+    }
+
+    // Signal handlers do not guarantee that blocking syscalls restart automatically.
+    #[cfg(unix)]
+    fn retry_interrupted(mut syscall: impl FnMut() -> isize) -> std::io::Result<isize> {
+        loop {
+            let result = syscall();
+            if result != -1 {
+                return Ok(result);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_cancel_escalates_to_kill_when_the_leader_is_gone() {
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-cancel").unwrap();
+        let dir = home.path().join(".orx/runs/r1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ready = [0; 2];
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+        // OR-354: the group leader exits, leaving a member that ignores TERM.
+        let leader = unsafe { libc::fork() };
+        assert!(leader >= 0);
+        if leader == 0 {
+            unsafe {
+                libc::close(ready[0]);
+                libc::setsid();
+                if libc::fork() == 0 {
+                    // An ignored signal stays ignored across exec.
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    // Tell the test TERM is ignored before sleeping.
+                    libc::write(ready[1], b"r".as_ptr().cast(), 1);
+                    exec_sleep();
+                }
+                libc::_exit(0);
+            }
+        }
+        unsafe { libc::close(ready[1]) };
+        std::fs::write(dir.join("pid"), format!("{leader}\n")).unwrap();
+        // An unrelated process in another group must survive the sweep.
+        let bystander = unsafe { libc::fork() };
+        assert!(bystander >= 0);
+        if bystander == 0 {
+            unsafe {
+                libc::close(ready[0]);
+                libc::setsid();
+            }
+            exec_sleep();
+        }
+        // Wait for the member to confirm it ignores TERM and for the leader to
+        // exit before cancelling: a group liveness check can pass on the leader
+        // itself or on the member before it installs its handler.
+        let mut pfd = libc::pollfd {
+            fd: ready[0],
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let result = retry_interrupted(|| {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for worker readiness"
+            );
+            // SIGCHLD can interrupt poll even when the handler uses SA_RESTART.
+            unsafe { libc::poll(&mut pfd, 1, remaining.as_millis().max(1) as i32) as isize }
+        })
+        .expect("polling worker readiness failed");
+        assert_eq!(result, 1, "timed out waiting for worker readiness");
+        let mut byte = 0u8;
+        let result = retry_interrupted(|| unsafe {
+            libc::read(ready[0], &mut byte as *mut u8 as *mut libc::c_void, 1)
+        })
+        .expect("reading worker readiness failed");
+        assert_eq!(result, 1, "worker exited without confirming readiness");
+        unsafe { libc::close(ready[0]) };
+        let mut leader_dead = false;
+        for _ in 0..500 {
+            if unsafe { libc::waitpid(leader, std::ptr::null_mut(), libc::WNOHANG) } == leader {
+                leader_dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(leader_dead);
+        let group_alive = |pgid: i32| {
+            crate::process::command("bash")
+                .arg("-c")
+                .arg(format!("{HOST_PROCESS_HELPERS}\nhost_group_alive {pgid}"))
+                .status()
+                .unwrap()
+                .success()
+        };
+        let start = std::time::Instant::now();
+        let status = crate::process::command("bash")
+            .args(["-c", &host_cancel_script(".orx/runs/r1")])
+            .env("HOME", home.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        // TERM was ignored, so the sweep waited the full five seconds before KILL.
+        assert!(start.elapsed() >= Duration::from_secs(4));
+        assert!(!group_alive(leader));
+        // host_group_alive skips zombies, unlike kill(pid, 0) on our own child.
+        assert!(group_alive(bystander));
+        unsafe {
+            libc::kill(bystander, libc::SIGKILL);
+            libc::waitpid(bystander, std::ptr::null_mut(), 0);
+        }
+    }
+
+    #[test]
     fn alias_target_adds_no_extra_opts() {
         let target = SshTarget::alias("mybox");
         assert_eq!(target.dest, "mybox");
         assert!(target.extra_opts.is_empty());
         // No `-p`/`-o Strict…` beyond the shared multiplexing opts.
-        let shared = 4 + multiplexing_opts(&target).len(); // BatchMode, ConnectTimeout
+        let shared = 10 + multiplexing_opts(&target).len();
         assert_eq!(ssh_opts(&target, true).len(), shared);
     }
 
@@ -628,7 +1723,7 @@ mod tests {
         let opts = multiplexing_opts(&SshTarget::alias("cluster"));
         assert_eq!(opts[0..2], ["-o", "ControlMaster=auto"]);
         assert!(opts[3].starts_with("ControlPath="));
-        assert_eq!(opts[4..6], ["-o", "ControlPersist=600"]);
+        assert_eq!(opts[4..6], ["-o", "ControlPersist=86400"]);
     }
 
     /// Present and off, not absent: a user's own ssh_config would otherwise
@@ -655,6 +1750,11 @@ mod tests {
         };
         let mk = |port: &str| SshTarget {
             dest: "root@h".to_string(),
+            managed_generation: None,
+            auth_agent: crate::local::shell_env::var("SSH_AUTH_SOCK")
+                .map(|value| value.to_string_lossy().into_owned()),
+            run_id: None,
+            transport: None,
             extra_opts: vec!["-p".into(), port.into()],
         };
         assert_ne!(control_path(&mk("22022")), control_path(&mk("22023")));

@@ -1,29 +1,32 @@
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
 
-import { getChatMessagesQuery } from "../queries/chat";
 import { m } from "../paraglide/messages.js";
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { type ChatPart } from "../api";
 
-import { findPartById, SubagentTranscript } from "./ChatPanel";
+import { agentTranscript } from "../chatRendering";
+
+import { SubagentTranscript } from "./ChatPanel";
 import type { TabOpenIntent } from "../tabPreview";
+import { ChatImageScope } from "./Md";
 import { TabBody } from "./layout/TabBody";
 
 const PANE_CONTENT_CLASS_NAME = [
-  "pane-content flex-1 min-h-0 relative subagent-tab-content overflow-y-auto",
+  "pane-content flex-1 min-h-0 relative subagent-tab-content overflow-y-auto [overflow-anchor:none]",
   // Same breathing room top and bottom (matches the main chat thread's pb) so
   // the transcript isn't cramped under the tab strip or flush at the end.
   "bg-background py-8 px-4",
 ].join(" ");
 
-/** Right-pane tab body for a sub-agent transcript. The spawn part (and its
- * streamed `children`) lives on the parent session's chat messages, so this
- * seeds from `getChatMessages` and then follows the live `chat.message` stream —
- * the same source the inline block renders from, so it stays in sync as the
- * sub-agent works. No dedicated fetch endpoint needed. */
+/** Resolves agent events to one transcript and follows the live message cache. */
 export function SubagentTab({
+  projectId,
   sessionId,
   spawnPartId,
+  expansionState,
+  searchQuery,
+  searchNonce,
+  searchPartId,
   onOpenFile,
   onOpenRun,
   runExperimentName,
@@ -31,8 +34,13 @@ export function SubagentTab({
   experimentName,
   onOpenSubagent,
 }: {
+  projectId: string;
   sessionId: string;
   spawnPartId: string;
+  expansionState: Map<string, boolean>;
+  searchQuery?: string;
+  searchNonce?: number;
+  searchPartId?: string;
   onOpenFile?: (
     path: string,
     line: number | undefined,
@@ -50,8 +58,21 @@ export function SubagentTab({
     intent: TabOpenIntent,
   ) => void;
 }) {
+  const { getChatMessagesQuery } = useWorkspace().queries;
+  const { workspaceKey } = useWorkspace();
+  const { getSubagentTranscript } = useWorkspace().api;
+
   const query = useQuery(getChatMessagesQuery(sessionId));
   const messages = query.data?.messages ?? (query.isError ? [] : null);
+  const selectedSpawn = agentTranscript(messages ?? [], spawnPartId);
+  const nativeTranscript = useQuery({
+    queryKey: workspaceKey("getSubagentTranscript", sessionId, spawnPartId, selectedSpawn?.state?.input?.nativeTranscript ?? null, selectedSpawn?.state?.output?.match(/\(sessionID: (ses_\w+)\)/)?.[1] ?? null),
+    queryFn: ({ signal }) => getSubagentTranscript(sessionId, spawnPartId, signal),
+    refetchInterval: (query) => query.state.data?.state?.status === "running" ? 1500 : false,
+    refetchIntervalInBackground: true,
+    refetchOnMount: "always",
+  });
+  const loading = messages === null || nativeTranscript.isPending;
   // Same stick-to-bottom contract as the main transcript: pinned on mount,
   // unpinned when the user scrolls up, re-pinned within 60px of the bottom.
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -64,10 +85,12 @@ export function SubagentTab({
     if (el) el.scrollTop = el.scrollHeight;
   }, [sessionId, spawnPartId]);
 
+  useLayoutEffect(() => { if (searchQuery) stickToBottom.current = false; }, [searchQuery, searchNonce]);
+
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  }, [messages, nativeTranscript.data]);
 
   // Re-pin on growth without a message change — tool rows expanding, images
   // loading, the pane resizing.
@@ -81,24 +104,19 @@ export function SubagentTab({
     ro.observe(inner);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [messages === null]);
+  }, [loading]);
 
-  if (messages === null) {
+  if (loading) {
     return (
       <TabBody>
         <div className={PANE_CONTENT_CLASS_NAME}>
-          <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{m.subagent_tab_loading()}</div>
+          <div className="subagent-empty p-1 text-sm text-muted">{m.subagent_tab_loading()}</div>
         </div>
       </TabBody>
     );
   }
 
-  // Locate the spawn part across all messages; its `children` are the transcript.
-  let spawn: ChatPart | null = null;
-  for (const m of messages) {
-    spawn = findPartById(m.parts, spawnPartId);
-    if (spawn) break;
-  }
+  const spawn = nativeTranscript.data ?? selectedSpawn;
 
   return (
     <TabBody>
@@ -112,17 +130,23 @@ export function SubagentTab({
       >
         <div ref={innerRef}>
           {spawn ? (
-            <SubagentTranscript
-              spawn={spawn}
-              onOpenFile={onOpenFile}
-              onOpenRun={onOpenRun}
-              runExperimentName={runExperimentName}
-              onOpenExperiment={onOpenExperiment}
-              experimentName={experimentName}
-              onOpenSubagent={onOpenSubagent}
-            />
+            <ChatImageScope projectId={projectId} sessionId={sessionId}>
+              <SubagentTranscript
+                spawn={spawn}
+                expansionState={expansionState}
+                searchQuery={searchQuery}
+                searchNonce={searchNonce}
+                searchPartId={searchPartId}
+                onOpenFile={onOpenFile}
+                onOpenRun={onOpenRun}
+                runExperimentName={runExperimentName}
+                onOpenExperiment={onOpenExperiment}
+                experimentName={experimentName}
+                onOpenSubagent={onOpenSubagent}
+              />
+            </ChatImageScope>
           ) : (
-            <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{m.subagent_tab_this_sub_agent_is_no_longer_available()}</div>
+            <div className="subagent-empty p-1 text-sm text-muted">{m.subagent_tab_this_sub_agent_is_no_longer_available()}</div>
           )}
         </div>
       </div>

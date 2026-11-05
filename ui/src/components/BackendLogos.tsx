@@ -12,6 +12,8 @@ function backendName(kind: string): string {
   switch (kind) {
     case "modal_job":
       return "Modal";
+    case "vercel_job":
+      return "Vercel Sandbox";
     case "hf_job":
       return "Hugging Face";
     case "k8s_job":
@@ -155,11 +157,21 @@ export function GitHubMark({ size = 16 }: { size?: number }) {
   );
 }
 
+function VercelLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 2 24 22H0z" />
+    </svg>
+  );
+}
+
 /** The logo glyph for a backend kind. */
 export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }) {
   switch (kind) {
     case "modal_job":
       return <ModalLogo size={size} />;
+    case "vercel_job":
+      return <VercelLogo size={size} />;
     case "hf_job":
       return <HuggingFaceLogo size={size} />;
     case "k8s_job":
@@ -185,9 +197,9 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
 export function BackendBadge({ backend }: { backend: Run["backend"] }) {
   const kind = backendKind(backend);
   const detail = backendDetail(backend);
-  if (!kind) return <span className="backend-badge inline-flex items-center gap-[7px] [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted [&.muted]:text-muted muted text-muted">—</span>;
+  if (!kind) return <span className="backend-badge inline-flex items-center gap-2 [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted [&.muted]:text-muted muted text-muted">—</span>;
   return (
-    <span className="backend-badge inline-flex items-center gap-[7px] [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted [&.muted]:text-muted">
+    <span className="backend-badge inline-flex items-center gap-2 [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted [&.muted]:text-muted">
       <BackendLogo kind={kind} />
       <span className="backend-name">{backendName(kind)}</span>
       {detail && <span className="backend-detail text-sm">{detail}</span>}

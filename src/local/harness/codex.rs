@@ -42,12 +42,12 @@ use super::detect::{
     HarnessInfo, ModelInfo,
 };
 use super::options::{
-    resolve_reasoning, HarnessOptions, OptionChoice, PermissionMode, PlanActivation,
-    REASONING_DEFAULT_ID,
+    HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    should_synthesize_plan, synthesize_resume, Harness, OneShot, OneShotQuality, ResumeAction,
-    TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
+    should_synthesize_plan, synthesize_resume, CompactCtx, CompactOutcome, Harness, OneShot,
+    OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+    TURN_WATCHDOG,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -58,34 +58,258 @@ use crate::local::chat::{
 use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
-use crate::local::shell_env::find_on_path;
+use crate::local::shell_env::installs;
 use crate::store::{Store, StoredChatMessage};
 
-// FALLBACK model table, used only when the app-server catalog is unreachable
-// (codex < 0.144's legacy exec path, or a failed/timed-out `model/list`). The
-// primary source is `codex_model_list`: the app-server's `model/list` reports
-// every model with its `supportedReasoningEfforts`, exactly like opencode's
-// `models --verbose` — so models and tiers are normally *queried*, not curated.
-//
-// Each entry is `(model id, the `model_reasoning_effort` values it accepts)`,
-// mirroring the catalog as of codex-cli 0.144. Sol/Terra reach `ultra`; Luna
-// stops at `max`; 5.5 stops at `xhigh`. (A live `codex exec` turn on Luna
-// tolerated `ultra`, but the catalog is what codex's own picker offers — the
-// catalog wins for what WE offer.) Getting a tier wrong is not cosmetic: codex
-// forwards the value unvalidated and an unsupported one comes back as a 400
-// that kills the turn (observed: 5.5 + `max`).
-const CODEX_MODELS: [(&str, &[&str]); 4] = [
-    (
-        "gpt-5.6-sol",
-        &["low", "medium", "high", "xhigh", "max", "ultra"],
-    ),
-    (
-        "gpt-5.6-terra",
-        &["low", "medium", "high", "xhigh", "max", "ultra"],
-    ),
-    ("gpt-5.6-luna", &["low", "medium", "high", "xhigh", "max"]),
-    ("gpt-5.5", &["low", "medium", "high", "xhigh"]),
-];
+fn codex_native_usage(usage: &Value) -> crate::store::TokenUsage {
+    let field = |name| usage.get(name).and_then(Value::as_u64);
+    crate::store::TokenUsage {
+        input_tokens: field("inputTokens"),
+        output_tokens: field("outputTokens"),
+        cache_read_tokens: field("cachedInputTokens"),
+        cache_write_tokens: field("cacheWriteInputTokens"),
+        reasoning_tokens: field("reasoningOutputTokens"),
+    }
+}
+
+type TurnModels = std::sync::Mutex<HashMap<(String, String), String>>;
+
+struct TokenNotification<'a> {
+    thread: &'a str,
+    turn: &'a str,
+    model: Option<String>,
+    total: crate::store::TokenUsage,
+    last: crate::store::TokenUsage,
+}
+
+/// Token usage under the model that (thread, turn) natively ran: `model/rerouted` wins, else the
+/// thread's own rollout `turn_context` (notifications carry only configuration).
+fn token_notification<'a>(
+    store: Option<&Store>,
+    models: &TurnModels,
+    method: &str,
+    params: &'a Value,
+) -> Option<TokenNotification<'a>> {
+    let thread = params.get("threadId").and_then(Value::as_str)?;
+    let turn = event_turn_id(params)?;
+    let key = (thread.to_string(), turn.to_string());
+    let (true, Some(total), Some(last)) = (
+        method == "thread/tokenUsage/updated",
+        params.pointer("/tokenUsage/total"),
+        params.pointer("/tokenUsage/last"),
+    ) else {
+        return None;
+    };
+    let known = models.lock().unwrap().get(&key).cloned();
+    let model = known.or_else(|| {
+        let opened;
+        let store = match store {
+            Some(store) => Some(store),
+            None => {
+                opened = Store::open().ok();
+                opened.as_ref()
+            }
+        };
+        let model = store
+            .and_then(|store| rerouted_model(store, thread, turn))
+            .or_else(|| rollout_turn_model(thread, turn))?;
+        models.lock().unwrap().insert(key, model.clone());
+        Some(model)
+    });
+    Some(TokenNotification {
+        thread,
+        turn,
+        model,
+        total: codex_native_usage(total),
+        last: codex_native_usage(last),
+    })
+}
+
+fn reroute_key(thread: &str, turn: &str) -> String {
+    format!("codex-reroute:{thread}:{turn}")
+}
+
+/// Rollouts never persist reroutes, so the live notification is captured, before any consumer
+/// sees it, as the turn's durable latest model.
+pub(crate) fn capture_reroute(store: Option<&Store>, models: &TurnModels, params: &Value) {
+    let (Some(thread), Some(turn), Some(model)) = (
+        params.get("threadId").and_then(Value::as_str),
+        event_turn_id(params),
+        params.get("toModel").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    models
+        .lock()
+        .unwrap()
+        .insert((thread.to_string(), turn.to_string()), model.to_string());
+    let identity = crate::store::InvocationIdentity {
+        harness: "codex".into(),
+        model: model.to_string(),
+        provider: None,
+    };
+    let record = |store: &Store| store.record_native_reroute(&reroute_key(thread, turn), &identity);
+    if let Err(error) = store.map_or_else(|| Store::open().and_then(|store| record(&store)), record)
+    {
+        eprintln!("orx up: could not record codex reroute: {error}");
+    }
+}
+
+fn rerouted_model(store: &Store, thread: &str, turn: &str) -> Option<String> {
+    let identity = store.native_invocation_identity("codex", &reroute_key(thread, turn));
+    Some(identity.ok()??.model)
+}
+
+fn capture_token_notification(
+    ctx: &mut TurnCtx,
+    models: &TurnModels,
+    method: &str,
+    params: &Value,
+) {
+    if let Some(usage) = token_notification(None, models, method, params) {
+        ctx.record_cumulative_usage(
+            usage.thread,
+            usage.turn,
+            usage.model.as_deref(),
+            usage.total,
+            usage.last,
+        );
+    }
+}
+
+/// Usage no live turn owns (a sub-agent outliving its parent's bounded drain, or reporting during
+/// a later turn) goes to that native turn's own execution, closed by its own `turn/completed`.
+pub(crate) fn record_unowned(session: &str, models: &TurnModels, method: &str, params: &Value) {
+    if !matches!(method, "thread/tokenUsage/updated" | "turn/completed") {
+        return;
+    }
+    if let Err(error) =
+        Store::open().and_then(|store| record_unowned_in(&store, session, models, method, params))
+    {
+        eprintln!("orx up: could not record codex sub-agent usage: {error}");
+    }
+}
+
+pub(crate) fn record_unowned_in(
+    store: &Store,
+    session: &str,
+    models: &TurnModels,
+    method: &str,
+    params: &Value,
+) -> Result<()> {
+    let execution = |thread: &str, turn: &str| format!("codex-late:{session}:{thread}:{turn}");
+    if method == "turn/completed" {
+        let (Some(thread), Some(turn)) = (
+            params.get("threadId").and_then(Value::as_str),
+            event_turn_id(params),
+        ) else {
+            return Ok(());
+        };
+        let outcome = match params.pointer("/turn/status").and_then(Value::as_str) {
+            Some("completed") => "done",
+            Some("interrupted") => "cancelled",
+            Some("failed") => "failed",
+            _ => return Ok(()),
+        };
+        return store.finalize_turn_usage(&execution(thread, turn), outcome);
+    }
+    let Some(usage) = token_notification(Some(store), models, method, params) else {
+        return Ok(());
+    };
+    // A resumed thread replays its last turn's total, already counted by that turn.
+    if store.cumulative_counted("codex", usage.thread, usage.turn, &usage.total)? {
+        return Ok(());
+    }
+    let execution = execution(usage.thread, usage.turn);
+    store.begin_usage_execution(&execution, &execution, "codex")?;
+    store.record_cumulative_usage(
+        &execution,
+        "codex",
+        usage.thread,
+        usage.turn,
+        usage.model.as_deref(),
+        &usage.total,
+        &usage.last,
+    )
+}
+
+/// The connection is gone, and with it every sub-agent it was still running.
+pub(crate) fn close_unowned(session: &str) {
+    if let Err(error) = Store::open().and_then(|store| {
+        store.finalize_usage_turns(&format!("codex-late:{session}:"), "cancelled")
+    }) {
+        eprintln!("orx up: could not close codex sub-agent usage: {error}");
+    }
+}
+
+/// The invoking identity of a shell in `thread` (its `CODEX_THREAD_ID`): the model of the
+/// thread's running native turn.
+pub(crate) fn running_turn_identity(thread: &str) -> Option<crate::store::InvocationIdentity> {
+    let rollout = std::fs::read_to_string(native_store::codex_session(thread).ok()??.path).ok()?;
+    running_turn_identity_in(&Store::open().ok()?, thread, &rollout)
+}
+
+fn running_turn_identity_in(
+    store: &Store,
+    thread: &str,
+    rollout: &str,
+) -> Option<crate::store::InvocationIdentity> {
+    let (turn, model) = running_turn(rollout)?;
+    Some(crate::store::InvocationIdentity {
+        harness: "codex".into(),
+        model: rerouted_model(store, thread, &turn).or(model)?,
+        provider: None,
+    })
+}
+
+/// The rollout's running turn and its `turn_context` model.
+fn running_turn(rollout: &str) -> Option<(String, Option<String>)> {
+    let mut running: Option<(String, Option<String>)> = None;
+    for line in rollout.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let payload = &record["payload"];
+        let turn = payload["turn_id"].as_str();
+        let current = running.as_ref().map(|(id, _)| id.as_str());
+        match (record["type"].as_str(), payload["type"].as_str()) {
+            (Some("event_msg"), Some("task_started")) => {
+                running = turn.map(|turn| (turn.to_string(), None));
+            }
+            (Some("event_msg"), Some("task_complete" | "turn_aborted")) if turn == current => {
+                running = None;
+            }
+            (Some("turn_context"), _) if turn.is_some() && turn == current => {
+                if let Some((_, model)) = &mut running {
+                    *model = payload["model"].as_str().map(str::to_string);
+                }
+            }
+            _ => {}
+        }
+    }
+    running
+}
+
+/// The model in `turn`'s `turn_context` record of `thread`'s rollout.
+fn rollout_turn_model(thread: &str, turn: &str) -> Option<String> {
+    // ponytail: one blocking rollout read per (thread, turn); index it if rollouts grow huge.
+    let rollout = std::fs::read_to_string(native_store::codex_session(thread).ok()??.path).ok()?;
+    turn_context_model(&rollout, turn)
+}
+
+fn turn_context_model(rollout: &str, turn: &str) -> Option<String> {
+    rollout.lines().find_map(|line| {
+        let record: Value = serde_json::from_str(line).ok()?;
+        (record["type"] == "turn_context" && record.pointer("/payload/turn_id")? == turn)
+            .then(|| {
+                record
+                    .pointer("/payload/model")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .flatten()
+    })
+}
 
 /// Codex usage occupying the context window: `input_tokens + output_tokens`
 /// (`cached_input_tokens` is a subset of `input_tokens`, not additive). Returns
@@ -113,49 +337,34 @@ fn token_count_usage(info: &Value) -> (Option<u64>, Option<u64>) {
     (codex_used_tokens(usage), window)
 }
 
-/// The harness-wide fallback list — the conservative intersection, used for a
-/// model that isn't in `CODEX_MODELS` (a `-c model=…` override, or a newer id
-/// this build doesn't know).
 const CODEX_REASONING_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
 /// Deliberately channel-neutral: `find_codex` takes whatever is on PATH, and
 /// naming one installer would send a brew or standalone install to npm.
 const CODEX_REINSTALL: &str = "Reinstall Codex (developers.openai.com/codex)";
 
-/// The effort ids a given codex model accepts per the FALLBACK table, or the
-/// conservative intersection. Send-time validation only — detection prefers
-/// the live catalog (`codex_model_list`).
-fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
-    CODEX_MODELS
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, levels)| *levels)
-}
-
 /// Query the app-server's `model/list` — codex's own catalog, the same data its
 /// TUI picker renders: every model with its `supportedReasoningEfforts` and
-/// default. This is the primary model source for first-party accounts and for
-/// custom providers that declare an explicit model catalog (the static table is
-/// only the fallback), for the same reason opencode parses `models --verbose`:
-/// the installed CLI knows its catalog and we don't — a curated table here
-/// shipped missing three models and a wrong Luna tier before this existed.
+/// default. The installed CLI owns its catalog and per-model effort choices.
 ///
 /// Protocol: spawn `codex app-server`, `initialize` → `initialized` (the same
 /// handshake `local::codex` uses, incl. `experimentalApi` — `model/list` is
-/// part of the v2 surface), then one `model/list` request. Any failure —
-/// spawn, timeout, old codex without the method — returns `None` and the
-/// caller falls back to the static table. Hidden catalog entries are skipped
+/// part of the v2 surface), then one `model/list` request. Any failure returns
+/// `None`. Hidden catalog entries are skipped
 /// (the server already filters them by default; the guard is belt-and-braces).
 async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option<Vec<ModelInfo>> {
-    let fut = async {
-        let mut cmd = Command::new(bin);
+    // Acquire the spawn lane before the deadline — queue time must not spend
+    // the child's execution budget.
+    let permit = super::detect::detect_spawn_permit().await;
+    let fut = async move {
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
         prepare_env(&mut cmd);
-        let mut child = cmd.spawn().ok()?;
+        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
 
@@ -248,10 +457,11 @@ fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<Mode
             let default = configured_effort
                 .filter(|e| efforts.contains(e))
                 .or(catalog_default);
-            let info = ModelInfo::new(id).with_label(
+            let mut info = ModelInfo::new(id).with_label(
                 m.get("displayName").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
             );
+            info.context_window = m.get("contextWindow").and_then(Value::as_u64);
             let info = info.with_service_tiers(
                 m.get("serviceTiers")
                     .and_then(Value::as_array)
@@ -285,7 +495,6 @@ pub struct Codex;
 /// Only the fields detection needs off `config.toml`; codex has many more.
 #[derive(Deserialize)]
 struct CodexConfig {
-    model: Option<String>,
     model_provider: Option<String>,
     /// The user's configured effort override. Codex resolves it above the
     /// catalog's per-model `defaultReasoningEffort`, so the picker's
@@ -308,32 +517,6 @@ fn parse_configured_effort(raw: &str) -> Option<String> {
         .model_reasoning_effort
 }
 
-/// Keep the configured model first without discarding catalog metadata.
-/// With either input absent, preserve the other as-is.
-fn custom_provider_models(
-    configured_model: Option<&str>,
-    catalog: Option<Vec<ModelInfo>>,
-) -> Vec<ModelInfo> {
-    let Some(configured_model) = configured_model else {
-        return catalog.unwrap_or_default();
-    };
-    let Some(mut models) = catalog else {
-        return vec![ModelInfo::new(configured_model)];
-    };
-    match models.iter().position(|model| model.id == configured_model) {
-        Some(0) => {}
-        Some(index) => {
-            let configured = models.remove(index);
-            models.insert(0, configured);
-        }
-        None => {
-            // Unknown catalog metadata keeps "no override", so Codex applies configured effort.
-            models.insert(0, ModelInfo::new(configured_model));
-        }
-    }
-    models
-}
-
 #[derive(Deserialize)]
 struct CodexProvider {
     env_key: Option<String>,
@@ -342,7 +525,6 @@ struct CodexProvider {
 }
 
 struct CustomProvider {
-    model: Option<String>,
     env_key: Option<String>,
     has_model_catalog: bool,
 }
@@ -368,7 +550,6 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
         return None;
     }
     Some(CustomProvider {
-        model: cfg.model.filter(|model| !model.trim().is_empty()),
         env_key: provider.env_key.clone(),
         has_model_catalog: cfg
             .model_catalog_json
@@ -376,24 +557,34 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     })
 }
 
-/// `codex` on PATH then in installer locations, in preference order, symlinks
-/// resolved — codex needs to find its `codex-code-mode-host` helper next to the
-/// real binary.
+/// Every `codex` install, in preference order, symlinks resolved — codex needs
+/// to find its `codex-code-mode-host` helper next to the real binary.
 fn codex_candidates() -> Vec<PathBuf> {
-    let drops = dirs::home_dir()
-        .map(|home| home.join(".local").join("bin"))
+    installs("codex", codex_install_dirs(dirs::home_dir().as_deref()))
+        .into_iter()
+        .map(resolve_symlinks)
+        .collect()
+}
+
+/// Codex's own installer locations. ChatGPT.app bundles the Codex CLI without
+/// putting it on PATH, sometimes as the only install.
+fn codex_install_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    let chatgpt_apps = [
+        Some(PathBuf::from("/Applications")),
+        home.map(|home| home.join("Applications")),
+    ];
+    cfg!(windows)
+        .then(dirs::data_local_dir)
+        .flatten()
+        .map(|dir| dir.join("Programs/OpenAI/Codex/bin"))
         .into_iter()
         .chain(
-            cfg!(windows)
-                .then(dirs::data_local_dir)
+            chatgpt_apps
+                .into_iter()
                 .flatten()
-                .map(|dir| dir.join("Programs/OpenAI/Codex/bin")),
+                .filter(|_| cfg!(target_os = "macos"))
+                .map(|apps| apps.join("ChatGPT.app/Contents/Resources/codex-cli/bin")),
         )
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
-    find_on_path("codex")
-        .into_iter()
-        .chain(drops)
-        .map(resolve_symlinks)
         .collect()
 }
 
@@ -427,16 +618,15 @@ pub(crate) fn find_codex_required() -> Result<PathBuf> {
 /// every session store. Codex has no system-prompt flag, so `system` leads the
 /// message.
 ///
-/// Any failure — spawn, non-zero exit, timeout, garbage output — returns `None`
-/// and the caller keeps its fallback.
-async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
+/// A failed turn's error event becomes the error; stderr is only Codex's own logging.
+async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     let effort = match request.quality {
         OneShotQuality::Cheap => "low",
         OneShotQuality::Standard => "medium",
     };
     let message = format!("{}\n\n{}", request.system, request.prompt);
     let fut = async {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
             .args(["-c", "sandbox_mode=\"read-only\""])
             .args(["-c", "approval_policy=\"never\""])
@@ -459,27 +649,53 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
         prepare_env(&mut cmd);
         cmd.env(
             "CODEX_HOME",
-            native_store::prepare_codex(NativeStore::Isolated).ok()?,
+            native_store::prepare_codex(NativeStore::Isolated)?,
         );
         // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
         // would otherwise write escape codes straight into the reply.
         cmd.env("NO_COLOR", "1");
-        let mut child = cmd.spawn().ok()?;
-        let mut lines = BufReader::new(child.stdout.take()?).lines();
+        let mut child = cmd.spawn()?;
+        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+        let mut lines = BufReader::new(stdout).lines();
         // Keep the last agent message: a chatty run may narrate before it
         // answers, and the reply is what it settled on.
         let mut last = None;
+        let mut error = None;
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(text) = exec_line_agent_message(&line) {
                 last = Some(text);
+            } else if let Some(message) = exec_line_error(&line) {
+                error = Some(message);
             }
         }
-        if !child.wait().await.ok()?.success() {
-            return None;
+        let status = child.wait().await?;
+        match (status.success(), last, error) {
+            (true, Some(text), _) => Ok(text),
+            (_, _, Some(message)) => Err(anyhow!("{message}")),
+            (true, None, None) => Err(anyhow!("returned no reply")),
+            (false, _, None) => Err(anyhow!("{status}")),
         }
-        last
     };
-    tokio::time::timeout(request.timeout, fut).await.ok()?
+    tokio::time::timeout(request.timeout, fut)
+        .await
+        .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))?
+}
+
+/// A `codex exec --json` line's turn error, with the provider's message
+/// unwrapped from the JSON body Codex embeds in it.
+fn exec_line_error(line: &str) -> Option<String> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    let message = match event.get("type").and_then(Value::as_str)? {
+        "error" => event.get("message"),
+        "turn.failed" => event.get("error").and_then(|error| error.get("message")),
+        _ => None,
+    }?
+    .as_str()?;
+    let nested = serde_json::from_str::<Value>(message).ok();
+    let inner = nested
+        .as_ref()
+        .and_then(|body| body.get("error")?.get("message")?.as_str());
+    Some(inner.unwrap_or(message).to_string())
 }
 
 /// One `codex exec --json` stdout line → its agent message text, if it carries
@@ -505,31 +721,26 @@ fn exec_line_agent_message(line: &str) -> Option<String> {
     }
 }
 
-#[async_trait]
-impl Harness for Codex {
-    fn id(&self) -> &'static str {
-        "codex"
+fn codex_plan_label(plan: &str) -> String {
+    match plan {
+        "prolite" => "Pro 100".into(),
+        "pro" => "Pro 200".into(),
+        "promax" => "Pro 500".into(),
+        _ => title_case(plan),
     }
+}
 
-    fn name(&self) -> &'static str {
-        "Codex"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    /// The app-server takes `turn/steer` against the active turn; `detect`
-    /// withholds it from installations that fall back to the exec path.
-    fn supports_steering(&self) -> bool {
-        true
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl Codex {
+    /// `snapshot` skips the `model/list` handshake and leaves the catalog empty;
+    /// a
+    /// background full pass replaces it. It also skips the `--version` and
+    /// app-server capability spawns — install is decided by discovery alone
+    /// and auth is already a file read (`auth.json` / `config.toml`).
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some((bin, probe)) = find_codex_working().await {
-            info.record_bin(&bin, probe);
-        }
+        // The config/auth file reads run before selection: they cost nothing
+        // and their answer decides whether the app-server catalog child is
+        // worth spawning at all.
         let home = native_store::codex_home(NativeStore::Legacy);
         let config_raw = std::fs::read_to_string(home.join("config.toml")).ok();
         let custom_provider = config_raw.as_deref().and_then(parse_custom_provider);
@@ -560,10 +771,55 @@ impl Harness for Codex {
                 info.authenticated = true;
                 info.auth_method = Some("oauth");
                 info.account = nonempty_str(&claims, "email");
+                info.account_name = nonempty_str(&claims, "name");
                 if let Some(oa) = claims.get("https://api.openai.com/auth") {
-                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| title_case(&p));
+                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| codex_plan_label(&p));
                 }
             }
+        }
+
+        // The `model/list` handshake is only spawned where the auth evidence
+        // already says it can run — and for a custom provider, only when its
+        // config declares a catalog the bundled first-party one can't
+        // answer for. Either way it runs concurrently with the `--version`
+        // sweep instead of behind it.
+        let want_catalog = !snapshot
+            && info.authenticated
+            && custom_provider
+                .as_ref()
+                .is_none_or(|provider| provider.has_model_catalog);
+        let mut catalog = None;
+        if snapshot {
+            super::detect::record_selected(
+                &mut info,
+                true,
+                "codex",
+                find_codex,
+                find_codex_working(),
+            )
+            .await;
+        } else {
+            let effort = configured_effort.clone();
+            let (selected, probed) = super::detect::select_and_speculate(
+                "codex",
+                codex_candidates(),
+                None,
+                move |bin| {
+                    let effort = effort.clone();
+                    async move {
+                        if want_catalog {
+                            codex_model_list(&bin, effort.as_deref()).await
+                        } else {
+                            None
+                        }
+                    }
+                },
+            )
+            .await;
+            if let Some((bin, probe)) = selected {
+                info.record_bin(&bin, probe);
+            }
+            catalog = probed.flatten();
         }
 
         if info.installed && !info.install_broken {
@@ -580,58 +836,37 @@ impl Harness for Codex {
         }
         info.agent_ready = info.ready();
         if info.agent_ready {
-            // A custom provider's bundled first-party catalog is meaningless,
-            // so probe only when its config declares an explicit catalog.
-            let custom_catalog = match (
-                custom_provider.as_ref(),
-                info.bin_path.as_deref().map(Path::new),
-            ) {
-                (Some(provider), Some(bin)) if provider.has_model_catalog => {
-                    codex_model_list(bin, configured_effort.as_deref()).await
-                }
-                _ => None,
-            };
-            match custom_provider
-                .as_ref()
-                .map(|provider| provider.model.as_deref())
-            {
-                Some(configured_model) => {
-                    info =
-                        info.with_models(custom_provider_models(configured_model, custom_catalog))
-                }
-                None => {
-                    // First-party account: ask the installed CLI for its own
-                    // catalog (models + per-model efforts, the data codex's TUI
-                    // picker renders). The static table only covers a codex too
-                    // old to answer `model/list`.
-                    let bin = info.bin_path.as_deref().map(Path::new);
-                    let models = match bin {
-                        Some(bin) => codex_model_list(bin, configured_effort.as_deref()).await,
-                        None => None,
-                    };
-                    info = info.with_models(models.unwrap_or_else(|| {
-                        CODEX_MODELS
-                            .iter()
-                            .map(|(id, levels)| ModelInfo::new(*id).with_reasoning(levels))
-                            .collect()
-                    }));
-                }
+            let catalog_answered = catalog.is_some();
+            info = info.with_models(catalog.unwrap_or_default());
+            if want_catalog && !catalog_answered {
+                info.agent_note = Some("Could not load Codex models. Re-check this harness or update Codex; the CLI default model is still available.".to_string());
             }
             // Old CLIs still work via the legacy exec path, but miss the
             // app-server wins (permission prompts on sandbox escalations;
-            // thread resume).
-            // `turn/steer` is an app-server method, so this must follow the
-            // dispatch predicate rather than the version alone.
-            info.supports_steering = runs_app_server().await;
-            let too_old = info
-                .version
-                .as_deref()
-                .and_then(parse_version)
-                .is_some_and(|v| v < MIN_APP_SERVER_VERSION);
+            // thread resume). `turn/steer` is an app-server method, so this
+            // follows the dispatch predicate rather than the version alone —
+            // but a completed `model/list` handshake only proves the catalog
+            // method answered, not that the turn protocol is whole, so an
+            // explicitly too-old version still vetoes. Detection already
+            // holds the evidence — the probed version, or the handshake — so
+            // seeding the capability cell costs no extra spawn. The snapshot
+            // leaves it off.
+            let parsed = info.version.as_deref().and_then(parse_version);
+            let too_old = parsed.is_some_and(|v| v < MIN_APP_SERVER_VERSION);
+            let supported = !snapshot
+                && app_server_supported(Some(
+                    !too_old
+                        && (catalog_answered
+                            || parsed.is_some_and(|v| v >= MIN_APP_SERVER_VERSION)),
+                ))
+                .await;
+            info.supports_steering = !codex_exec_forced() && supported;
             if too_old {
-                info.agent_note = Some(
-                    "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.".to_string(),
-                );
+                let legacy_note = "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.";
+                info.agent_note = Some(match info.agent_note.take() {
+                    Some(note) => format!("{note} {legacy_note}"),
+                    None => legacy_note.to_string(),
+                });
             }
         } else if info.install_broken {
             // Outranks both notes below: neither signing in nor a provider key
@@ -649,6 +884,191 @@ impl Harness for Codex {
             );
         }
         Some(info)
+    }
+}
+
+/// Compaction re-reads a whole thread; a long one is not quick.
+const COMPACT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Load the persisted thread without creating a new one or adding user input.
+async fn resume_for_compaction(
+    client: &CodexClient,
+    thread_id: &str,
+    path: &Path,
+    mut setup: Value,
+) -> Result<()> {
+    if client.resumed_thread().as_deref() == Some(thread_id) {
+        return Ok(());
+    }
+    setup["threadId"] = Value::String(thread_id.to_string());
+    setup["path"] = Value::String(path.to_string_lossy().into_owned());
+    let resumed = client.request("thread/resume", setup).await?;
+    if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id) {
+        return Err(anyhow!(
+            "Codex resumed a different thread — cannot compact this chat"
+        ));
+    }
+    client.set_thread_model(resumed.get("model").and_then(Value::as_str));
+    client.set_resumed_thread(thread_id);
+    Ok(())
+}
+
+#[async_trait]
+impl Harness for Codex {
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+
+    fn name(&self) -> &'static str {
+        "Codex"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
+    /// The app server compacts a thread in place. The legacy `codex exec` path
+    /// spawns a fresh child per turn with no session-scoped RPC and takes the
+    /// shared fallback. An idle app-server is restored without sending a turn.
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        let Some(thread_id) = ctx.native_session_id.as_deref() else {
+            return Ok(CompactOutcome::Fallback);
+        };
+        if !runs_app_server().await {
+            return Ok(CompactOutcome::Fallback);
+        }
+        let live = ctx.host.codex.client_for(&ctx.session_id).await;
+        let client = match live {
+            Some(client) if client.resumed_thread().as_deref() == Some(thread_id) => client,
+            _ => {
+                let session = codex_native_session(thread_id).await?.ok_or_else(|| {
+                    anyhow!("Codex's saved thread is missing — cannot compact this chat")
+                })?;
+                let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
+                let client = ctx
+                    .host
+                    .codex
+                    .ensure(&ctx.session_id, session.store)
+                    .await?;
+                let config = match codex_turn_config(&client, &repo).await {
+                    Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
+                    config => config?,
+                };
+                let auto_review_supported = config_supports_auto_review(&config)
+                    && super::detect::api_key("OPENAI_BASE_URL").is_none();
+                let mut setup = codex_thread_setup(
+                    &repo,
+                    &playbook_md,
+                    ctx.permission_mode,
+                    auto_review_supported,
+                    ctx.model.as_deref(),
+                    ctx.service_tier.as_deref(),
+                    &config,
+                )?;
+                add_orx_server(&mut setup["config"], &ctx.session_id, ctx.host.up_port());
+                resume_for_compaction(&client, thread_id, &session.path, setup).await?;
+                client
+            }
+        };
+        // `thread/compact/start` only starts a turn: codex compacts in the
+        // background and reports through the same stream a prompt would, so the
+        // request returning is not the compaction being done.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _route = client.register_turn(tx);
+        client
+            .request(
+                "thread/compact/start",
+                serde_json::json!({ "threadId": thread_id }),
+            )
+            .await?;
+        // The response carries no turn id, so it comes from this thread's own
+        // `turn/started`. Another turn's tail can still be streaming into the
+        // shared channel, and its `turn/completed` must not settle this one.
+        let mut compaction_turn: Option<String> = None;
+        let settle = async {
+            loop {
+                let Some(event) = rx.recv().await else {
+                    return Err(anyhow!("codex stopped reporting during compaction"));
+                };
+                let (method, params) = match event {
+                    TurnEvent::Notification { method, params } => (method, params),
+                    // Leaving an approval unanswered blocks the child.
+                    TurnEvent::Request { id, .. } => {
+                        let _ = client.respond_decline(&id).await;
+                        continue;
+                    }
+                    TurnEvent::Closed => return Err(anyhow!("codex closed during compaction")),
+                };
+                if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
+                    record_unowned(client.session_id(), client.turn_models(), &method, &params);
+                    continue;
+                }
+                let event_turn = event_turn_id(&params);
+                match method.as_str() {
+                    "turn/started" if compaction_turn.is_none() => {
+                        compaction_turn = event_turn.map(str::to_string);
+                    }
+                    "turn/completed"
+                        if compaction_turn.is_some()
+                            && event_turn == compaction_turn.as_deref() =>
+                    {
+                        let turn = params.get("turn").cloned().unwrap_or(Value::Null);
+                        match turn.get("status").and_then(Value::as_str).unwrap_or("") {
+                            "completed" => return Ok(()),
+                            // Not final: codex would be regressing, but a
+                            // non-final status must not end the wait.
+                            "inProgress" => {}
+                            "failed" => {
+                                return Err(anyhow!(
+                                    "codex compaction failed: {}",
+                                    error_message(turn.get("error"))
+                                ))
+                            }
+                            other => {
+                                return Err(anyhow!("codex compaction ended as `{other}`"));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        match tokio::time::timeout(COMPACT_TURN_TIMEOUT, settle).await {
+            Ok(result) => result?,
+            Err(_) => {
+                if let Some(turn_id) = compaction_turn {
+                    let _ = client
+                        .request(
+                            "turn/interrupt",
+                            serde_json::json!({ "threadId": thread_id, "turnId": turn_id }),
+                        )
+                        .await;
+                }
+                return Err(anyhow!(
+                    "codex did not finish compacting within {}s",
+                    COMPACT_TURN_TIMEOUT.as_secs()
+                ));
+            }
+        }
+        Ok(CompactOutcome::Native)
+    }
+
+    /// The app-server takes `turn/steer` against the active turn; `detect`
+    /// withholds it from installations that fall back to the exec path.
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -670,8 +1090,9 @@ impl Harness for Codex {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
-        codex_one_shot(&find_codex()?, request).await
+    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        let bin = find_codex().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        codex_one_shot(&bin, request).await
     }
 
     fn options(&self) -> HarnessOptions {
@@ -699,22 +1120,18 @@ impl Harness for Codex {
                 "approve-for-me",
                 PlanActivation::Command,
             )
-            // Harness-wide fallback only — the real per-model lists ride on each
-            // `ModelInfo` (see `CODEX_MODELS`). The default is
-            // `Default`, so a configured `model_reasoning_effort` in
-            // `~/.codex/config.toml` is no longer overridden by an implicit
-            // per-turn `high` (issue #123).
+            // Unknown models use the CLI default unless the user picks an effort.
             .with_reasoning_levels(&CODEX_REASONING_LEVELS)
     }
 
-    /// Three prompt kinds resume differently:
+    /// Prompt kinds resume differently:
     ///
     /// * `permission` (native, held mid-turn): the answer is the JSON-RPC
     ///   `{decision}` reply, delivered inline over the live app-server child —
     ///   the still-running turn keeps streaming once codex unblocks
     ///   ([`ResumeAction::Handled`], never the new-message path).
-    /// * `question` (native, held mid-turn): a `request_user_input` reply,
-    ///   delivered inline the same way (`user_input_reply`).
+    /// * `question`: held requests receive `user_input_reply`; asynchronous
+    ///   questions receive a user message through the steering path.
     /// * `plan` (end-turn card, no `native_id`): resumes by a NEW user message
     ///   ([`ResumeAction::SendMessage`]) — approve sends the implementation
     ///   prompt with Plan cleared while preserving the selected permission;
@@ -762,12 +1179,26 @@ impl Harness for Codex {
                     plan_mode: Some(plan_mode),
                 })
             }
-            // Native held cards (permission / question): reply inline over the
-            // live child. A reply only lands if the turn is still paused on it —
-            // after an interrupt/error the request was already settled and a
-            // late reply would be a stale answer into the void. Mirror Claude's
-            // zombie collapse so a card left by a crashed turn stops swallowing
-            // answers.
+            // Async questions are answered by steering, not a held JSON-RPC reply.
+            "question" if prompt.native_id.is_none() => {
+                if !answer.approve {
+                    return Ok(ResumeAction::Handled { plan_mode: None });
+                }
+                let (text, shown) = answer.as_written(async_question_answer(prompt, answer)?);
+                ctx.host
+                    .steer_message(
+                        &ctx.session_id,
+                        text,
+                        Default::default(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        shown,
+                    )
+                    .await?;
+                Ok(ResumeAction::Handled { plan_mode: None })
+            }
+            // Held requests cannot receive answers after their turn ends.
             "permission" | "question" => {
                 if !ctx.is_busy().await {
                     ctx.host
@@ -783,22 +1214,19 @@ impl Harness for Codex {
                 // native_id is the JSON-RPC request id's raw text.
                 let rpc_id: Value = serde_json::from_str(native)
                     .map_err(|_| anyhow!("codex prompt reply id is invalid"))?;
-                // Build the reply BEFORE reaching the client, so a bad answer
-                // (a question with no selection/note) errs before delivery and
-                // leaves the card actionable.
-                let reply = if prompt.kind == "permission" {
-                    serde_json::json!({ "decision": approval_decision(answer.approve) })
-                } else {
-                    user_input_reply(prompt, answer)?
-                };
                 let client = ctx
                     .host
                     .codex
                     .client_for(&ctx.session_id)
                     .await
                     .ok_or_else(|| {
-                        anyhow!("codex app-server is not running — cannot deliver the reply")
+                        anyhow!("Codex app-server is not running — cannot deliver the reply")
                     })?;
+                let reply = if prompt.kind == "permission" {
+                    client.approval_reply(&rpc_id, answer.approve)
+                } else {
+                    user_input_reply(prompt, answer)?
+                };
                 client.respond(&rpc_id, reply).await?;
                 Ok(ResumeAction::Handled { plan_mode: None })
             }
@@ -808,6 +1236,16 @@ impl Harness for Codex {
 
     fn config_home(&self) -> Option<PathBuf> {
         Some(native_store::codex_home(NativeStore::Legacy))
+    }
+
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        [
+            dirs::home_dir().map(|home| home.join(".agents/skills")),
+            self.config_home().map(|home| home.join("skills")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -863,7 +1301,7 @@ impl Harness for Codex {
                 .build()
                 .ok()?;
             runtime.block_on(async {
-                let mut cmd = Command::new(bin);
+                let mut cmd = crate::process::tokio_command(bin);
                 cmd.args(["plugin", "list", "--json"])
                     .env("CODEX_HOME", &worker_home)
                     .current_dir(std::env::temp_dir())
@@ -944,30 +1382,39 @@ fn installed_plugin_skills_dirs(home: &Path, inventory: &Value) -> Vec<(String, 
 /// live spike). Older CLIs take the exec fallback below.
 const MIN_APP_SERVER_VERSION: (u64, u64, u64) = (0, 144, 0);
 
+/// ORX_CODEX_EXEC pins turns to the legacy exec path ("0"/empty don't count).
+fn codex_exec_forced() -> bool {
+    std::env::var("ORX_CODEX_EXEC").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Whether a turn will run over the app-server: a supported codex, unless
-/// ORX_CODEX_EXEC forces the legacy exec path ("0"/empty don't count).
+/// ORX_CODEX_EXEC forces the legacy exec path.
 /// Capability reporting reads the same answer, so the composer can't offer
 /// app-server-only features the exec path lacks.
 async fn runs_app_server() -> bool {
-    let force_exec = std::env::var("ORX_CODEX_EXEC").is_ok_and(|v| !v.is_empty() && v != "0");
-    !force_exec && app_server_supported().await
+    !codex_exec_forced() && app_server_supported(None).await
 }
 
 /// Whether the installed codex speaks the validated app-server protocol.
 /// Probed once per process (a codex upgrade mid-run takes an `orx up` restart
-/// to notice — acceptable).
-async fn app_server_supported() -> bool {
+/// to notice — acceptable). A caller that already holds the evidence —
+/// detection's probed version, or a completed `model/list` handshake — passes
+/// it as `known` and the cell seeds without paying another `--version` child.
+async fn app_server_supported(known: Option<bool>) -> bool {
     static SUPPORTED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
     *SUPPORTED
-        .get_or_init(|| async {
-            let Some(bin) = find_codex() else {
-                return false;
-            };
-            bin_version(&bin)
-                .await
-                .as_deref()
-                .and_then(parse_version)
-                .is_some_and(|v| v >= MIN_APP_SERVER_VERSION)
+        .get_or_init(|| async move {
+            match known {
+                Some(known) => known,
+                None => match find_codex() {
+                    Some(bin) => bin_version(&bin)
+                        .await
+                        .as_deref()
+                        .and_then(parse_version)
+                        .is_some_and(|v| v >= MIN_APP_SERVER_VERSION),
+                    None => false,
+                },
+            }
         })
         .await
 }
@@ -1015,9 +1462,9 @@ fn config_supports_auto_review(response: &Value) -> bool {
     first_party_provider && first_party_url
 }
 
-async fn codex_auto_review_supported(client: &CodexClient, workspace: &Path) -> bool {
-    let Ok(Ok(response)) = client
-        .try_request(
+async fn codex_turn_config(client: &CodexClient, workspace: &Path) -> Result<Value> {
+    client
+        .request(
             "config/read",
             serde_json::json!({
                 "cwd": workspace.to_string_lossy(),
@@ -1025,38 +1472,61 @@ async fn codex_auto_review_supported(client: &CodexClient, workspace: &Path) -> 
             }),
         )
         .await
-    else {
-        return false;
-    };
-    config_supports_auto_review(&response) && super::detect::api_key("OPENAI_BASE_URL").is_none()
+        .map_err(|error| anyhow!("Could not read Codex sandbox configuration: {error}"))
 }
 
-/// The per-turn `sandboxPolicy` object. workspace-write carries the same
-/// grants the exec path passed via `-c`: the orx data dir, its lifecycle lock,
-/// and the hub clone's `.git` as writable roots (see the helpers below), plus
-/// network (the agent's job is driving the orx API and git). Like the exec `-c`
-/// override, this is a full policy replacement for the turn — a user's own
-/// config.toml `sandbox_workspace_write.writable_roots` don't survive it (no
-/// append form exists on either transport).
-async fn sandbox_policy_json(mode: Option<PermissionMode>, workspace: &Path) -> Value {
-    match mode.unwrap_or(PermissionMode::Auto) {
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CodexWorkspaceWrite {
+    writable_roots: Vec<String>,
+    exclude_tmpdir_env_var: bool,
+    exclude_slash_tmp: bool,
+}
+
+fn workspace_write_policy(config: &Value, managed_roots: Vec<String>) -> Result<Value> {
+    let config = config
+        .get("config")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("Codex config/read returned no configuration object"))?;
+    let mut settings = match config.get("sandbox_workspace_write") {
+        None | Some(Value::Null) => CodexWorkspaceWrite::default(),
+        Some(settings) => serde_json::from_value::<CodexWorkspaceWrite>(settings.clone())
+            .map_err(|error| anyhow!("Invalid Codex workspace-write configuration: {error}"))?,
+    };
+    // Codex resolves configuration-layer-relative paths before returning config/read.
+    settings.writable_roots.extend(managed_roots);
+    Ok(serde_json::json!({
+        "type": "workspaceWrite",
+        "writableRoots": settings.writable_roots,
+        "networkAccess": true,
+        "excludeTmpdirEnvVar": settings.exclude_tmpdir_env_var,
+        "excludeSlashTmp": settings.exclude_slash_tmp,
+    }))
+}
+
+async fn sandbox_policy_json(
+    mode: Option<PermissionMode>,
+    workspace: &Path,
+    config: &Value,
+) -> Result<Value> {
+    Ok(match mode.unwrap_or(PermissionMode::Auto) {
         PermissionMode::Bypass => serde_json::json!({ "type": "dangerFullAccess" }),
         _ => {
             let mut roots: Vec<String> = Vec::new();
             roots.extend(ensure_orx_data_dir().map(|p| p.to_string_lossy().into_owned()));
-            roots.extend(ensure_orx_lifecycle_lock().map(|p| p.to_string_lossy().into_owned()));
+            roots.push(
+                ensure_orx_lifecycle_lock_dir()?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
             roots.extend(
                 shared_git_dir(workspace)
                     .await
                     .map(|p| p.to_string_lossy().into_owned()),
             );
-            serde_json::json!({
-                "type": "workspaceWrite",
-                "writableRoots": roots,
-                "networkAccess": true,
-            })
+            workspace_write_policy(config, roots)?
         }
-    }
+    })
 }
 
 /// The per-turn `collaborationMode` mask (experimental API). Codex's native
@@ -1117,6 +1587,20 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
         ctx.clear_retry_status();
     }
     match method {
+        "thread/tokenUsage/updated" => {
+            if let Some(last) = params.pointer("/tokenUsage/last") {
+                if let Some(used_tokens) =
+                    codex_native_usage(last).total().filter(|total| *total > 0)
+                {
+                    ctx.report_usage(ContextUsage {
+                        used_tokens,
+                        context_window: params
+                            .pointer("/tokenUsage/modelContextWindow")
+                            .and_then(Value::as_u64),
+                    });
+                }
+            }
+        }
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item") {
                 apply_item(ctx, item, method == "item/completed");
@@ -1292,6 +1776,7 @@ fn tool_part(
         prompt: None,
         phase: None,
         children: Vec::new(),
+        orx: None,
     }
 }
 
@@ -1307,26 +1792,26 @@ fn tool_status(completed: bool, failed: bool) -> &'static str {
 }
 
 /// A ThreadItem (from `item/started` / `item/completed`) → WirePart, applied to
-/// the parent transcript. Thin wrapper over the pure [`item_to_part`]: it owns
+/// the parent transcript. Thin wrapper over the pure [`item_parts`]: it owns
 /// the streaming-merge guards that need `ctx` (never wipe a streamed part with
-/// an empty final text), then upserts. The sub-agent path calls `item_to_part`
+/// an empty final text), then upserts. The sub-agent path calls `item_parts`
 /// directly against its own bucket (see the turn loop's routing).
 fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
-    let Some(part) = item_to_part(item, completed, &ctx.assistant.parts) else {
-        return;
-    };
-    // agentMessage / reasoning / plan stream via deltas before the completed
-    // item lands; a completed item with empty text must not wipe what the
-    // deltas built. `item_to_part` produces the part with its final id (plan
-    // uses `plan_part_id`), so the guard keys off that id.
-    if completed
-        && streamed_text_kind(item)
-        && part_text_is_empty(&part)
-        && part_exists(ctx, &part.id)
-    {
-        return;
+    for part in item_parts(item, completed, &ctx.assistant.parts) {
+        // agentMessage / reasoning / plan stream via deltas before the completed
+        // item lands; a completed item with empty text must not wipe what the
+        // deltas built. `item_to_part` produces the part with its final id (plan
+        // uses `plan_part_id`), so the guard keys off that id.
+        if completed
+            && part.kind != "prompt"
+            && streamed_text_kind(item)
+            && part_text_is_empty(&part)
+            && part_exists(ctx, &part.id)
+        {
+            continue;
+        }
+        upsert_preserving_children(&mut ctx.assistant.parts, part);
     }
-    upsert_preserving_children(&mut ctx.assistant.parts, part);
 }
 
 async fn reconcile_turn_items(
@@ -1371,36 +1856,57 @@ fn reconcile_items(parts: &mut Vec<WirePart>, items: &[Value]) {
     let mut claimed: Vec<String> = Vec::new();
     for item in items {
         let completed = item.get("status").and_then(Value::as_str) != Some("inProgress");
-        let Some(part) = item_to_part(item, completed, parts) else {
-            continue;
-        };
-        let id_exists = parts.iter().any(|prior| prior.id == part.id);
-        if completed && streamed_text_kind(item) && part_text_is_empty(&part) && id_exists {
-            continue;
-        }
-        // `thread/read` re-mints ids (`item-N`) for content the live stream
-        // keyed by its Responses id (`msg_…`/`rs_…`), so an unknown id whose
-        // text continues a non-empty same-kind part is that part's item
-        // renamed, not new content (OR-181) — adopt the authoritative text in
-        // place. An empty part carries no evidence of which item it is.
-        if !id_exists && renamable_text_kind(item) {
-            let incoming = part.text.as_deref().unwrap_or("");
-            let renamed = parts.iter().position(|prior| {
-                let prior_text = prior.text.as_deref().unwrap_or("");
-                !claimed.contains(&prior.id)
-                    && !prior.id.starts_with("plan-item-")
-                    && prior.kind == part.kind
-                    && !prior_text.is_empty()
-                    && incoming.starts_with(prior_text)
-            });
-            if let Some(i) = renamed {
-                claimed.push(parts[i].id.clone());
-                parts[i].text = part.text;
-                parts[i].phase = part.phase.or(parts[i].phase);
+        for part in item_parts(item, completed, parts) {
+            let id_exists = parts.iter().any(|prior| prior.id == part.id);
+            if completed
+                && part.kind != "prompt"
+                && streamed_text_kind(item)
+                && part_text_is_empty(&part)
+                && id_exists
+            {
                 continue;
             }
+            // `thread/read` re-mints ids (`item-N`) for content the live stream
+            // keyed by its Responses id (`msg_…`/`rs_…`), so an unknown id whose
+            // text continues a non-empty same-kind part is that part's item
+            // renamed, not new content (OR-181) — adopt the authoritative text in
+            // place. An empty part carries no evidence of which item it is.
+            if !id_exists && renamable_text_kind(item) {
+                if let Some(question) = part.prompt.as_ref() {
+                    if let Some(previous) = parts.iter().find(|prior| {
+                        !claimed.contains(&prior.id)
+                            && prior.prompt.as_ref().is_some_and(|prompt| {
+                                prompt.native_id.is_none()
+                                    && prompt.question == question.question
+                                    && prompt
+                                        .options
+                                        .iter()
+                                        .map(|option| &option.label)
+                                        .eq(question.options.iter().map(|option| &option.label))
+                            })
+                    }) {
+                        claimed.push(previous.id.clone());
+                        continue;
+                    }
+                }
+                let incoming = part.text.as_deref().unwrap_or("");
+                let renamed = parts.iter().position(|prior| {
+                    let prior_text = prior.text.as_deref().unwrap_or("");
+                    !claimed.contains(&prior.id)
+                        && !prior.id.starts_with("plan-item-")
+                        && prior.kind == part.kind
+                        && !prior_text.is_empty()
+                        && incoming.starts_with(prior_text)
+                });
+                if let Some(i) = renamed {
+                    claimed.push(parts[i].id.clone());
+                    parts[i].text = part.text;
+                    parts[i].phase = part.phase.or(parts[i].phase);
+                    continue;
+                }
+            }
+            upsert_preserving_children(parts, part);
         }
-        upsert_preserving_children(parts, part);
     }
 }
 
@@ -1439,6 +1945,65 @@ fn streamed_text_kind(item: &Value) -> bool {
 /// Whether a built part carries no display text (its `text` is absent/empty).
 fn part_text_is_empty(part: &WirePart) -> bool {
     part.text.as_deref().unwrap_or("").is_empty()
+}
+
+fn async_question_answer(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<String> {
+    let text = answer.contextualized_answer(answer.plain_answer_text());
+    if text.trim().is_empty() {
+        return Err(anyhow!("choose an option or enter an answer"));
+    }
+    Ok(match prompt.question.as_deref() {
+        Some(question) => format!("In response to: {question}\n\n{text}"),
+        None => text,
+    })
+}
+
+fn item_parts(item: &Value, completed: bool, prior: &[WirePart]) -> Vec<WirePart> {
+    let questions = item.get("questions").and_then(Value::as_array);
+    if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
+        if let (Some(id), Some(questions)) = (item.get("id").and_then(Value::as_str), questions) {
+            let parts: Vec<_> = questions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, question)| {
+                    let title = question.get("title").and_then(Value::as_str)?;
+                    let part_id = if index == 0 {
+                        id.to_string()
+                    } else {
+                        format!("{id}-question-{index}")
+                    };
+                    let mut prompt = WirePrompt {
+                        kind: "question".into(),
+                        question: Some(title.to_string()),
+                        options: question
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(|label| WireQuestionOption {
+                                label: label.to_string(),
+                                description: None,
+                            })
+                            .collect(),
+                        ..Default::default()
+                    };
+                    if let Some(previous) = prior
+                        .iter()
+                        .find(|part| part.id == part_id)
+                        .and_then(|part| part.prompt.as_ref())
+                    {
+                        prompt = previous.clone();
+                    }
+                    Some(WirePart::prompt(part_id, prompt))
+                })
+                .collect();
+            if !parts.is_empty() {
+                return parts;
+            }
+        }
+    }
+    item_to_part(item, completed, prior).into_iter().collect()
 }
 
 fn agent_text_part(id: String, item: &Value) -> WirePart {
@@ -1684,7 +2249,7 @@ fn subagent_thread_ids(item: &Value) -> Vec<String> {
 /// Build the "subagent" spawn part for a collab/sub-activity item. The UI reads
 /// `state.input` to label the row ("Spawned agent", "Sub-agent started", …); the
 /// sub-agent's streamed transcript is hung under `children` by the turn loop,
-/// and the UI locates it via this part's id, not any thread id in the payload.
+/// and thread identity links other events to the same transcript.
 fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
     // collabAgentToolCall carries a `status` (inProgress|completed|failed);
     // subAgentActivity has no status — treat it as a completed marker row.
@@ -1699,11 +2264,12 @@ fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
     } else {
         "completed"
     };
-    // Surface only what the UI labels the row from (`toolLine`'s subagent arm
-    // reads `tool` / `prompt` / `kind` / `nickname`) — the transcript is
-    // located via the spawn part id + `children`, not via any thread id in the
-    // payload.
+    // Keep thread identity so every event can open the same agent transcript.
     let mut input = serde_json::Map::new();
+    input.insert(
+        "agentThreadIds".into(),
+        serde_json::json!(subagent_thread_ids(item)),
+    );
     for key in ["tool", "prompt", "kind"] {
         if let Some(v) = item.get(key) {
             input.insert(key.into(), v.clone());
@@ -1856,7 +2422,7 @@ fn apply_sub_notification(
                 if let Some(id) = item.get("id").and_then(Value::as_str) {
                     scoped_item["id"] = Value::String(namespaced_part_id(tid, id));
                 }
-                if let Some(part) = item_to_part(&scoped_item, completed, bucket) {
+                for part in item_parts(&scoped_item, completed, bucket) {
                     // A grandchild spawn: register its threads under this part.
                     if part.tool.as_deref() == Some("subagent") {
                         for gtid in subagent_thread_ids(item) {
@@ -1867,8 +2433,10 @@ fn apply_sub_notification(
                             });
                         }
                     }
-                    let completed_streamed =
-                        completed && streamed_text_kind(item) && part_text_is_empty(&part);
+                    let completed_streamed = completed
+                        && part.kind != "prompt"
+                        && streamed_text_kind(item)
+                        && part_text_is_empty(&part);
                     if completed_streamed && bucket.iter().any(|p| p.id == part.id) {
                         // Don't wipe streamed deltas with an empty final.
                     } else {
@@ -2176,15 +2744,16 @@ fn error_message(error: Option<&Value>) -> String {
         .unwrap_or_else(|| "codex reported an error".to_string())
 }
 
-fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) {
-    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") else {
-        return;
+fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) -> Result<()> {
+    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? else {
+        return Ok(());
     };
     let instructions = setup
         .get("developerInstructions")
         .and_then(Value::as_str)
         .unwrap_or_default();
     setup["developerInstructions"] = Value::String(format!("{instructions}\n\n{recovery}"));
+    Ok(())
 }
 
 async fn ensure_codex_pre_accept(
@@ -2229,6 +2798,73 @@ async fn ensure_codex_pre_accept(
     }
 }
 
+async fn codex_playbook(
+    project: &crate::local::model::LocalProject,
+    session_id: &str,
+) -> Result<(PathBuf, String)> {
+    let project = project.clone();
+    let session_id = session_id.to_string();
+    let (repo, playbook) = tokio::task::spawn_blocking(move || {
+        ensure_playbook(&project, &session_id, Codex.session_skills_dir())
+    })
+    .await
+    .map_err(|e| anyhow!("playbook task failed: {e}"))??;
+    let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
+    Ok((repo, playbook_md))
+}
+
+/// Add orx's MCP server to a thread's config. Native sub-agents are off while
+/// it is on: delegation goes through orx, which can reach any model.
+fn add_orx_server(config: &mut Value, session_id: &str, up_port: Option<u16>) {
+    let Some(server) =
+        up_port.and_then(|port| crate::local::chat::delegation::mcp_server(session_id, port).ok())
+    else {
+        return;
+    };
+    let env: serde_json::Map<String, Value> = server
+        .env
+        .iter()
+        .map(|(name, value)| (name.to_string(), Value::String(value.clone())))
+        .collect();
+    config["mcp_servers"]["orx"] = serde_json::json!({
+        "command": server.command,
+        "args": server.args,
+        "env": env,
+        "default_tools_approval_mode": "approve",
+        "tool_timeout_sec": crate::local::chat::delegation::TOOL_TIMEOUT_SECONDS as f64,
+    });
+    config["features"] = serde_json::json!({"multi_agent": false, "multi_agent_v2": false});
+}
+
+/// Both a normal turn and idle compaction restore the same thread settings.
+fn codex_thread_setup(
+    repo: &Path,
+    playbook_md: &str,
+    permission_mode: Option<PermissionMode>,
+    auto_review_supported: bool,
+    model: Option<&str>,
+    service_tier: Option<&str>,
+    config: &Value,
+) -> Result<Value> {
+    let (sandbox_mode, approval_policy, approvals_reviewer) =
+        codex_policies(permission_mode, auto_review_supported);
+    let mut setup = serde_json::json!({
+        "cwd": repo.to_string_lossy(),
+        "sandbox": sandbox_mode,
+        "approvalPolicy": approval_policy,
+        "approvalsReviewer": approvals_reviewer,
+        "developerInstructions": playbook_md,
+        "config":{"mcp_servers":crate::local::codex::alphaxiv_config(&config["config"]["mcp_servers"])?},
+    });
+    if let Some(service_tier) = service_tier {
+        setup["serviceTier"] = Value::String(service_tier.to_string());
+    }
+    if let Some(model) = model {
+        setup["model"] = Value::String(model.to_string());
+    }
+    Ok(setup)
+}
+
 async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // Entry sweep: any HELD (native_id) card still unresolved from an earlier
     // turn is a zombie — its JSON-RPC request died with its turn (or child), and
@@ -2239,19 +2875,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // resume by message — the next user message replaces them, exactly like
     // Claude's precedent. Behavior-preserving for the pre-plan-mode cards (all
     // of which were native).
-    ctx.host
-        .resolve_stale_prompts(&ctx.session_id, true)
-        .await?;
-    let project = ctx.project.clone();
-    let session_id = ctx.session_id.clone();
-    // The modular orx skills land in the harness's session-skills dir, fresh,
-    // for this session's agent to auto-load — source of truth is the trait.
-    let skills_dir = Codex.session_skills_dir();
-    let (repo, playbook) =
-        tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
-            .await
-            .map_err(|e| anyhow!("playbook task failed: {e}"))??;
-    let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
+    ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
+    let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
 
     let native_session = match ctx.native_session_id.as_deref() {
         Some(id) => codex_native_session(id).await?,
@@ -2262,13 +2887,15 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         .map(|session| session.store)
         .unwrap_or(NativeStore::Isolated);
     let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
+    let config_client = client.clone();
+    // Bypass needs the configuration only to avoid MCP server name collisions.
+    let mut config = match codex_turn_config(&client, &repo).await {
+        Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
+        config => config?,
+    };
     let auto_review_supported =
-        if ctx.permission_mode.unwrap_or(PermissionMode::Auto) == PermissionMode::Auto {
-            codex_auto_review_supported(&client, &repo).await
-        } else {
-            false
-        };
-    let (sandbox_mode, approval_policy, approvals_reviewer) =
+        config_supports_auto_review(&config) && super::detect::api_key("OPENAI_BASE_URL").is_none();
+    let (_, approval_policy, approvals_reviewer) =
         codex_policies(ctx.permission_mode, auto_review_supported);
 
     // Thread bring-up: reuse the thread this child already carries, resume a
@@ -2277,23 +2904,29 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // both start and resume, so a long-lived session picks up playbook
     // improvements on the next restart rather than keeping its first version
     // forever.
-    let mut thread_setup = serde_json::json!({
-        "cwd": repo.to_string_lossy(),
-        "sandbox": sandbox_mode,
-        "approvalPolicy": approval_policy,
-        "approvalsReviewer": approvals_reviewer,
-        "developerInstructions": playbook_md,
-    });
-    if let Some(service_tier) = &ctx.service_tier {
-        thread_setup["serviceTier"] = Value::String(service_tier.clone());
-    }
-    if let Some(model) = &ctx.model {
-        thread_setup["model"] = Value::String(model.clone());
+    let mut thread_setup = codex_thread_setup(
+        &repo,
+        &playbook_md,
+        ctx.permission_mode,
+        auto_review_supported,
+        ctx.model.as_deref(),
+        ctx.service_tier.as_deref(),
+        &config,
+    )?;
+    add_orx_server(
+        &mut thread_setup["config"],
+        &ctx.session_id,
+        ctx.host.up_port(),
+    );
+    if ctx.reset_codex_model {
+        // Codex keeps the old thread model when a turn omits its model override.
+        append_native_recovery_context(ctx, &mut thread_setup)?;
+        ctx.native_session_id = None;
     }
     let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
         (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
         (Some(_), None) => {
-            append_native_recovery_context(ctx, &mut thread_setup);
+            append_native_recovery_context(ctx, &mut thread_setup)?;
             start_thread(ctx, &client, thread_setup).await?
         }
         (Some(id), Some(session)) => {
@@ -2323,13 +2956,18 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         ctx.host.codex.kill_session(&ctx.session_id).await;
                         client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
                     }
-                    append_native_recovery_context(ctx, &mut thread_setup);
+                    append_native_recovery_context(ctx, &mut thread_setup)?;
                     start_thread(ctx, &client, thread_setup).await?
                 }
             }
         }
         (None, _) => start_thread(ctx, &client, thread_setup).await?,
     };
+
+    if ctx.permission_mode != Some(PermissionMode::Bypass) && !Arc::ptr_eq(&client, &config_client)
+    {
+        config = codex_turn_config(&client, &repo).await?;
+    }
 
     // Route events to this turn before starting it — nothing is missed.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2339,10 +2977,10 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         "threadId": thread_id,
         "input": [{ "type": "text", "text": ctx.text }],
         // Explicit per turn — the composer can change mode/model mid-session,
-        // and `sandboxPolicy` is the only carrier of writable roots.
+        // and configuration can add writable roots to an already running chat.
         "approvalPolicy": approval_policy,
         "approvalsReviewer": approvals_reviewer,
-        "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo).await,
+        "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo, &config).await?,
     });
     if let Some(service_tier) = &ctx.service_tier {
         turn_params["serviceTier"] = Value::String(service_tier.clone());
@@ -2350,7 +2988,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(model) = &ctx.model {
         turn_params["model"] = Value::String(model.clone());
     }
-    let effort = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref());
+    let effort = codex_reasoning(ctx.reasoning_level.as_deref());
     if let Some(effort) = effort {
         turn_params["effort"] = Value::String(effort.to_string());
     }
@@ -2460,6 +3098,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         // `steering` is borrowed out of `ctx` so the borrow ends with the
         // select — the steer arm's handler needs `&mut ctx`.
         let waited = {
+            let flush_due = ctx.flush_due();
             let steering = &mut ctx.steering;
             let event = async {
                 if open_requests.is_empty() {
@@ -2471,9 +3110,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             tokio::select! {
                 event = event => Waited::Event(event),
                 steer = super::next_steer(steering) => Waited::Steer(steer),
+                _ = flush_due => Waited::Flush,
             }
         };
         let event = match waited {
+            Waited::Flush => {
+                let _ = ctx.flush();
+                continue;
+            }
             Waited::Steer(steer) => {
                 steer_turn(ctx, &client, &thread_id, turn_id.as_deref(), steer).await;
                 continue;
@@ -2524,9 +3168,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         };
         match event {
             TurnEvent::Notification { method, params } => {
-                match classify_event_thread(turn_id.as_deref(), &sub_threads, &params) {
+                let scope = classify_event_thread(turn_id.as_deref(), &sub_threads, &params);
+                if matches!(scope, EventScope::Stale) || method == "turn/completed" {
+                    record_unowned(client.session_id(), client.turn_models(), &method, &params);
+                }
+                match scope {
                     EventScope::Stale => continue,
                     EventScope::SubAgent(tid) => {
+                        capture_token_notification(ctx, client.turn_models(), &method, &params);
                         route_sub_event(ctx, &mut sub_threads, &thread_id, &tid, &method, &params);
                         ctx.maybe_flush();
                         // Draining after the parent's turn/completed: the last
@@ -2547,6 +3196,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     }
                     EventScope::Parent => {}
                 }
+                capture_token_notification(ctx, client.turn_models(), &method, &params);
                 // Codex settled a request itself (its approval deadline hit,
                 // or our reply raced this notification): the card must not
                 // stay live. Part ids are a pure function of the request id;
@@ -2617,7 +3267,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     settle_request(&client, &id, kind).await;
                 } else {
                     match kind {
-                        ServerReqKind::Approval => {
+                        ServerReqKind::Approval | ServerReqKind::McpApproval => {
                             let card = approval_card(turn_id.as_deref(), &method, &id, &params);
                             if let Some((part_id, part)) = card {
                                 if matches!(ctx.permission_mode, Some(PermissionMode::Bypass)) {
@@ -2625,14 +3275,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                     // if codex asks anyway, the user's chosen mode
                                     // answers for them. (Question cards are never
                                     // auto-answered — only approvals.)
-                                    let _ = client
-                                        .respond(
-                                            &id,
-                                            serde_json::json!({
-                                                "decision": approval_decision(true)
-                                            }),
-                                        )
-                                        .await;
+                                    let _ =
+                                        client.respond(&id, client.approval_reply(&id, true)).await;
                                 } else {
                                     // Surface the card and keep consuming events —
                                     // codex holds the command; the reply arrives
@@ -2715,7 +3359,7 @@ async fn sweep_open_requests(
 /// Other → a JSON-RPC method-not-found error.
 async fn settle_request(client: &CodexClient, id: &Value, kind: ServerReqKind) {
     match kind {
-        ServerReqKind::Approval => {
+        ServerReqKind::Approval | ServerReqKind::McpApproval => {
             let _ = client.respond_decline(id).await;
         }
         ServerReqKind::UserInput => {
@@ -2735,24 +3379,17 @@ fn event_turn_mismatch(expected: Option<&str>, params: &Value) -> bool {
     let Some(expected) = expected else {
         return false;
     };
-    let event_turn = params.get("turnId").and_then(Value::as_str).or_else(|| {
+    event_turn_id(params).is_some_and(|t| t != expected)
+}
+
+/// `item/*` events carry the turn id at the top level; `turn/*` nest it.
+fn event_turn_id(params: &Value) -> Option<&str> {
+    params.get("turnId").and_then(Value::as_str).or_else(|| {
         params
             .get("turn")
             .and_then(|t| t.get("id"))
             .and_then(Value::as_str)
-    });
-    event_turn.is_some_and(|t| t != expected)
-}
-
-/// PromptAnswer.approve → the codex decision string. Per-command `accept`
-/// (never `acceptForSession` — a single Allow must not silently widen future
-/// commands); `decline` lets the model continue and report the denial.
-fn approval_decision(approve: bool) -> &'static str {
-    if approve {
-        "accept"
-    } else {
-        "decline"
-    }
+    })
 }
 
 /// The WirePart id of a server-request card (approval OR question), a pure
@@ -2766,36 +3403,54 @@ fn request_part_id(turn: Option<&str>, id: &Value) -> String {
     format!("appr-{}-{id}", turn.unwrap_or("t"))
 }
 
-/// A server→client approval request → a permission card. Returns the WirePart
-/// id and the part; `native_id` carries the JSON-RPC request id's raw text —
-/// the reply target for `resume_from_prompt`. `None` for request methods we
-/// don't card (they get a JSON-RPC error reply instead — including
-/// `item/permissions/requestApproval`, whose reply is a permission-profile
-/// object, not a `{decision}`). The key list spans both carded schemas:
-/// command/cwd exist only on commandExecution; fileChange carries just
-/// reason/grantRoot, so its card leans on `reason`.
+/// Native approvals share transcript cards while retaining their own reply schemas.
 fn approval_card(
     turn: Option<&str>,
     method: &str,
     id: &Value,
     params: &Value,
 ) -> Option<(String, WirePart)> {
-    let tool = match method {
-        "item/commandExecution/requestApproval" => "bash",
-        "item/fileChange/requestApproval" => "edit",
-        _ => return None,
-    };
-    let mut input = serde_json::Map::new();
-    for key in ["command", "cwd", "reason", "grantRoot"] {
-        if let Some(v) = params.get(key).filter(|v| !v.is_null()) {
-            input.insert(key.to_string(), v.clone());
+    let (tool, input) = if method == "mcpServer/elicitation/request" {
+        if params
+            .pointer("/_meta/codex_approval_kind")
+            .and_then(Value::as_str)
+            != Some("mcp_tool_call")
+            || !params
+                .pointer("/requestedSchema/properties")
+                .and_then(Value::as_object)?
+                .is_empty()
+        {
+            return None;
         }
-    }
+        let server = params["serverName"].as_str()?;
+        // Codex supplies the tool's name only in its approval message.
+        let name = params["message"].as_str()?.split('"').nth(1)?;
+        (
+            format!("{server}:{name}"),
+            params
+                .pointer("/_meta/tool_params")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+    } else {
+        let tool = match method {
+            "item/commandExecution/requestApproval" => "bash",
+            "item/fileChange/requestApproval" => "edit",
+            _ => return None,
+        };
+        let mut input = serde_json::Map::new();
+        for key in ["command", "cwd", "reason", "grantRoot"] {
+            if let Some(v) = params.get(key).filter(|v| !v.is_null()) {
+                input.insert(key.to_string(), v.clone());
+            }
+        }
+        (tool.to_owned(), Value::Object(input))
+    };
     let part_id = request_part_id(turn, id);
     let prompt = WirePrompt {
         kind: "permission".into(),
-        tool: Some(tool.into()),
-        tool_input: Some(Value::Object(input)),
+        tool: Some(tool),
+        tool_input: Some(input),
         native_id: Some(id.to_string()),
         ..Default::default()
     };
@@ -2867,6 +3522,9 @@ fn user_input_card(turn: Option<&str>, id: &Value, params: &Value) -> Option<(St
 /// contextualized annotation answer; every other stashed id gets an empty
 /// `{"answers": []}`. `Err` when none were provided leaves the card actionable.
 fn user_input_reply(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    if !answer.approve {
+        return Ok(serde_json::json!({ "answers": {} }));
+    }
     let note = answer.note.as_deref().filter(|s| !s.trim().is_empty());
     let mut selected: Vec<String> = if !answer.answers.is_empty() {
         answer.answers.clone()
@@ -3153,7 +3811,7 @@ async fn steer_turn(
         )
         .await;
     match answered {
-        Ok(Ok(_)) => ctx.record_steer(&steer.display),
+        Ok(Ok(_)) => ctx.record_steer(&steer, true),
         Ok(Err(_)) => {
             if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                 ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -3162,10 +3820,8 @@ async fn steer_turn(
         Err(e) => {
             // Record it anyway: the composer is already cleared, so this is
             // the only copy of what the user typed.
-            ctx.record_steer(&steer.display);
-            ctx.push_error(format!(
-                "codex did not confirm the steering message ({e}) — send it again if the turn ignores it"
-            ));
+            ctx.record_steer(&steer, false);
+            ctx.push_error(format!("codex did not confirm the steering message ({e})"));
         }
     }
 }
@@ -3203,7 +3859,7 @@ async fn start_thread(ctx: &mut TurnCtx, client: &CodexClient, params: Value) ->
 /// clone and worktree). Canonicalized because codex requires absolute roots
 /// and seatbelt matches real paths (`/var` vs `/private/var`).
 async fn shared_git_dir(workspace: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
+    let out = Command::from(crate::local::git::git_command())
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(workspace)
         .stdin(Stdio::null())
@@ -3243,37 +3899,33 @@ pub(crate) fn ensure_orx_data_dir() -> Option<PathBuf> {
     crate::paths::canonicalize(&dir).ok()
 }
 
-/// The exact lifecycle lock file required by every stateful `orx` command.
-/// Granting only this file avoids exposing the neighboring credentials file.
-fn ensure_orx_lifecycle_lock() -> Option<PathBuf> {
-    let lock = crate::store::open_lifecycle_lock().ok()?;
-    drop(lock);
-    crate::paths::canonicalize(crate::store::lifecycle_lock_path()).ok()
+/// The lifecycle lock's own directory keeps credentials outside writable roots.
+fn ensure_orx_lifecycle_lock_dir() -> Result<PathBuf> {
+    ensure_orx_lifecycle_lock_dir_in(&crate::config::config_dir())
 }
 
-/// Session reasoning id → Codex `model_reasoning_effort` value. See
-/// [`resolve_reasoning`] for what a `None` result means.
-///
-/// Validation is per model, from the fallback table:
-///   * a model the table knows → validate against its tiers;
-///   * a model it doesn't (the catalog is discovered live now, so this is any
-///     model outside the frozen four) → forward the value. The composer only
-///     offered what `model/list` reported for that model, so an allowlist here
-///     would drop genuinely supported tiers — the same reasoning as
-///     `opencode_variant`. A stale/wrong value comes back as a codex 400,
-///     which is surfaced to the chat, not swallowed;
-///   * no model at all → the CLI's own configured default model, whose tiers
-///     we can't know. Conservative intersection; matches what the composer
-///     offers in that state, so nothing advertised is dropped.
-fn codex_reasoning<'a>(level: Option<&'a str>, model: Option<&str>) -> Option<&'a str> {
-    match model {
-        Some(m) => match codex_model_reasoning(m) {
-            Some(allowed) => resolve_reasoning(level, allowed),
-            // Catalog-discovered model: forward anything but the sentinel.
-            None => level.filter(|l| *l != REASONING_DEFAULT_ID),
-        },
-        None => resolve_reasoning(level, &CODEX_REASONING_LEVELS),
+fn ensure_orx_lifecycle_lock_dir_in(config_dir: &Path) -> Result<PathBuf> {
+    let lock = crate::store::open_lifecycle_lock_in(config_dir)?;
+    drop(lock);
+    let path = crate::store::lifecycle_lock_path_in(config_dir);
+    let unavailable = || {
+        anyhow!(
+            "Codex sandbox cannot access the lifecycle lock: its dedicated directory at {} is unavailable; check config filesystem hard-link support and directory permissions",
+            path.display()
+        )
+    };
+    let root = crate::paths::canonicalize(path.parent().ok_or_else(unavailable)?)
+        .map_err(|_| unavailable())?;
+    let file = crate::paths::canonicalize(&path).map_err(|_| unavailable())?;
+    if file.parent() != Some(root.as_path()) {
+        return Err(unavailable());
     }
+    Ok(root)
+}
+
+/// Session reasoning id → Codex `model_reasoning_effort` value.
+fn codex_reasoning(level: Option<&str>) -> Option<&str> {
+    level.filter(|l| *l != REASONING_DEFAULT_ID)
 }
 
 fn command_string(v: &Value) -> String {
@@ -3347,19 +3999,17 @@ fn codex_sandbox(mode: Option<PermissionMode>) -> Option<&'static str> {
     }
 }
 
-/// The `-c` value granting `roots` as sandbox writable roots, e.g.
-/// `sandbox_workspace_write.writable_roots=["/a", "/b"]`. `None` when there
-/// are no roots (omit the flag: `-c ...=[]` would still *replace* the user's
-/// configured roots with nothing).
-fn writable_roots_override(roots: &[PathBuf]) -> Option<String> {
-    if roots.is_empty() {
-        return None;
+fn codex_exec_command(bin: &Path, roots: &[PathBuf], native_id: Option<&str>) -> Command {
+    let mut cmd = crate::process::tokio_command(bin);
+    cmd.arg("exec");
+    for root in roots {
+        cmd.arg("--add-dir").arg(root);
     }
-    let list: Vec<String> = roots.iter().map(|p| native_store::toml_string(p)).collect();
-    Some(format!(
-        "sandbox_workspace_write.writable_roots=[{}]",
-        list.join(", ")
-    ))
+    // exec resume inherits parent options, but does not accept --add-dir itself.
+    if let Some(native_id) = native_id {
+        cmd.args(["resume", native_id]);
+    }
+    cmd
 }
 
 async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
@@ -3385,15 +4035,31 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     let codex_home = tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
         .await
         .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
-    let mut cmd = Command::new(&bin);
-    match (&ctx.native_session_id, &native_session) {
-        (Some(native_id), Some(_)) => {
-            cmd.args(["exec", "resume", native_id]);
-        }
-        _ => {
-            cmd.arg("exec");
-        }
-    }
+    let policy = if ctx.plan_mode {
+        Some("read-only")
+    } else {
+        codex_sandbox(ctx.permission_mode)
+    };
+    let data_dir = (policy == Some("workspace-write"))
+        .then(ensure_orx_data_dir)
+        .flatten();
+    let roots: Vec<PathBuf> = if policy == Some("workspace-write") {
+        [
+            data_dir.clone(),
+            Some(ensure_orx_lifecycle_lock_dir()?),
+            shared_git_dir(&repo).await,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    } else {
+        Vec::new()
+    };
+    let native_id = ctx
+        .native_session_id
+        .as_deref()
+        .filter(|_| native_session.is_some());
+    let mut cmd = codex_exec_command(&bin, &roots, native_id);
     cmd.args(["--json", "--skip-git-repo-check"])
         .current_dir(&repo)
         .stdin(Stdio::null())
@@ -3411,11 +4077,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     //
     // Yields the data dir granted as a writable root (if any), so the child's
     // store can be pinned to it below, after `prepare_env`.
-    let data_dir_pin = match if ctx.plan_mode {
-        Some("read-only")
-    } else {
-        codex_sandbox(ctx.permission_mode)
-    } {
+    let data_dir_pin = match policy {
         Some(policy) => {
             cmd.args([
                 "-c",
@@ -3436,31 +4098,15 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             //     every `orx` command that touches it fails with "unable to
             //     open database file"; grant the data dir (see
             //     `ensure_orx_data_dir`).
-            //   * Every stateful `orx` command takes a lifecycle lock in the
-            //     config dir before opening the store. Grant only that lock
-            //     file, not the neighboring credentials (see
-            //     `ensure_orx_lifecycle_lock`).
+            //   * Every stateful `orx` command takes a lifecycle lock before
+            //     opening the store. Grant its directory without granting
+            //     the neighboring credentials (see `ensure_orx_lifecycle_lock_dir`).
             //   * Git metadata isn't writable — codex protects `.git` inside
             //     the workspace, and a worktree's real metadata (the hub
             //     clone's `.git`) sits outside it — so `git fetch`/`commit`
             //     fail outright; grant the common dir (see `shared_git_dir`).
-            // Note `-c` *replaces* any `writable_roots` from the user's
-            // config.toml for the turn (there is no append form; `exec
-            // --add-dir` is unverified on the resume path).
             if policy == "workspace-write" {
                 cmd.args(["-c", "sandbox_workspace_write.network_access=true"]);
-                let data_dir = ensure_orx_data_dir();
-                let roots: Vec<PathBuf> = [
-                    data_dir.clone(),
-                    ensure_orx_lifecycle_lock(),
-                    shared_git_dir(&repo).await,
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                if let Some(override_arg) = writable_roots_override(&roots) {
-                    cmd.args(["-c", &override_arg]);
-                }
                 data_dir
             } else {
                 None
@@ -3472,7 +4118,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         }
     };
     // Reasoning level → Codex's own `model_reasoning_effort` config override.
-    if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref()) {
+    if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
     }
     if let Some(service_tier) = &ctx.service_tier {
@@ -3484,9 +4130,28 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
         cmd.args(["-c", &override_arg]);
     }
+    // Only for the server-name collision check; an unreadable file keeps the default name.
+    let configured: serde_json::Map<String, Value> = [
+        codex_home.join("config.toml"),
+        repo.join(".codex").join("config.toml"),
+    ]
+    .iter()
+    .filter_map(|path| {
+        std::fs::read_to_string(path)
+            .ok()?
+            .parse::<toml::Value>()
+            .ok()
+    })
+    .filter_map(|config| serde_json::to_value(config.get("mcp_servers")?).ok())
+    .filter_map(|servers| servers.as_object().cloned())
+    .flatten()
+    .collect();
+    let servers = crate::local::codex::alphaxiv_config(&Value::Object(configured))?;
+    let servers = toml::Value::try_from(servers)?;
+    cmd.args(["-c", &format!("mcp_servers={servers}")]);
     let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
     if ctx.native_session_id.is_some() && native_session.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? {
             turn_text = format!("{recovery}\n\n{turn_text}");
         }
     }
@@ -3540,7 +4205,17 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     let mut open_text: Option<String> = None;
     let mut open_reasoning: Option<String> = None;
 
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line?,
+            _ = ctx.flush_due() => {
+                let _ = ctx.flush();
+                continue;
+            }
+        };
+        let Some(line) = line else {
+            break;
+        };
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -3611,6 +4286,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
                     prompt: None,
                     phase: None,
                     children: Vec::new(),
+                    orx: None,
                 });
             }
             "exec_command_end" => {
@@ -3738,6 +4414,7 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
                 prompt: None,
                 phase: None,
                 children: Vec::new(),
+                orx: None,
             });
         }
         _ => {}
@@ -3746,9 +4423,172 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chatgpt_plan_labels_distinguish_pro_tiers() {
+        assert_eq!(super::codex_plan_label("plus"), "Plus");
+        assert_eq!(super::codex_plan_label("prolite"), "Pro 100");
+        assert_eq!(super::codex_plan_label("pro"), "Pro 200");
+        assert_eq!(super::codex_plan_label("promax"), "Pro 500");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_restores_the_saved_thread_once_without_a_user_turn() {
+        let client = crate::local::codex::tests::rpc_test_client(
+            r#"
+                IFS= read -r request
+                for expected in '"method":"thread/resume"' '"threadId":"saved-thread"' '"path":"/saved/rollout.jsonl"' '"developerInstructions":"project instructions"' '"approvalPolicy":"on-request"' '"serviceTier":"priority"'; do
+                    case "$request" in *"$expected"*) ;; *) exit 1 ;; esac
+                done
+                printf '%s\n' '{"id":1,"result":{"thread":{"id":"saved-thread"},"model":"saved-model"}}'
+                sleep 600
+            "#,
+        );
+        let setup = codex_thread_setup(
+            Path::new("/workspace"),
+            "project instructions",
+            Some(PermissionMode::Auto),
+            false,
+            Some("saved-model"),
+            Some("priority"),
+            &Value::Null,
+        )
+        .unwrap();
+        let restored = tokio::time::timeout(
+            Duration::from_secs(2),
+            resume_for_compaction(
+                &client,
+                "saved-thread",
+                Path::new("/saved/rollout.jsonl"),
+                setup.clone(),
+            ),
+        )
+        .await;
+        let warm = tokio::time::timeout(
+            Duration::from_millis(100),
+            resume_for_compaction(
+                &client,
+                "saved-thread",
+                Path::new("/saved/rollout.jsonl"),
+                setup,
+            ),
+        )
+        .await;
+        crate::local::codex::tests::stop_test_client(&client).await;
+        restored.unwrap().unwrap();
+        warm.unwrap().unwrap();
+        assert_eq!(client.resumed_thread().as_deref(), Some("saved-thread"));
+        assert_eq!(client.thread_model().as_deref(), Some("saved-model"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_refuses_a_different_resumed_thread() {
+        let client = crate::local::codex::tests::rpc_test_client(
+            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{"thread":{"id":"different-thread"},"model":"wrong-model"}}'; sleep 600"#,
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            resume_for_compaction(
+                &client,
+                "saved-thread",
+                Path::new("/saved/rollout.jsonl"),
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        crate::local::codex::tests::stop_test_client(&client).await;
+        assert!(outcome
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("different thread"));
+        assert!(client.resumed_thread().is_none());
+        assert!(client.thread_model().is_none());
+    }
+
+    #[test]
+    fn compaction_and_normal_turn_setup_preserve_permission_settings() {
+        for (mode, automatic_review, sandbox, approval, reviewer) in [
+            (
+                PermissionMode::Auto,
+                true,
+                "workspace-write",
+                "on-request",
+                "auto_review",
+            ),
+            (
+                PermissionMode::Auto,
+                false,
+                "workspace-write",
+                "on-request",
+                "user",
+            ),
+            (
+                PermissionMode::Bypass,
+                false,
+                "danger-full-access",
+                "never",
+                "user",
+            ),
+        ] {
+            let setup = codex_thread_setup(
+                Path::new("/workspace"),
+                "playbook",
+                Some(mode),
+                automatic_review,
+                None,
+                None,
+                &Value::Null,
+            )
+            .unwrap();
+            assert_eq!(setup["sandbox"], sandbox);
+            assert_eq!(setup["approvalPolicy"], approval);
+            assert_eq!(setup["approvalsReviewer"], reviewer);
+            assert_eq!(setup["developerInstructions"], "playbook");
+            assert!(setup.get("model").is_none());
+            assert!(setup.get("serviceTier").is_none());
+        }
+    }
+
+    #[test]
+    fn native_camel_case_usage_keeps_cache_and_reasoning_as_breakdowns() {
+        let events: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("fixtures/codex-token-usage.json")).unwrap();
+        assert_eq!(events.len(), 2);
+        let usage = super::codex_native_usage(&events[0]["total"]);
+        usage.validate().unwrap();
+        assert_eq!(usage.total(), Some(25162));
+        assert_eq!(usage.cache_read_tokens, Some(12672));
+        assert_eq!(usage.output_tokens, Some(6));
+        assert_eq!(usage.reasoning_tokens, Some(0));
+        let last = super::codex_native_usage(&events[1]["last"]);
+        assert_eq!(last.total(), Some(28916));
+    }
+
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn chatgpt_app_bundled_codex_is_an_install_candidate() {
+        let home = std::env::temp_dir().join(format!("orx-chatgpt-test-{}", uuid::Uuid::new_v4()));
+        let bin = home.join("Applications/ChatGPT.app/Contents/Resources/codex-cli/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex"), "").unwrap();
+
+        let dirs = codex_install_dirs(Some(&home));
+        assert!(dirs.contains(&PathBuf::from(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin"
+        )));
+        let found: Vec<_> = dirs
+            .iter()
+            .filter_map(|dir| crate::local::shell_env::find_in_dir(dir, "codex"))
+            .collect();
+        assert!(found.contains(&bin.join("codex")));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn plugin_skills_follow_enabled_installs_and_manifest_paths() {
@@ -3783,12 +4623,8 @@ mod tests {
         std::fs::remove_dir_all(home).unwrap();
     }
 
-    fn model_ids(models: &[ModelInfo]) -> Vec<&str> {
-        models.iter().map(|model| model.id.as_str()).collect()
-    }
-
     #[test]
-    fn custom_provider_uses_its_env_key_and_configured_model() {
+    fn custom_provider_uses_its_env_key() {
         // The exact shape from the bug report: a gateway provider that opts out
         // of OpenAI auth, so there is deliberately no auth.json to find.
         let provider = parse_custom_provider(
@@ -3804,7 +4640,6 @@ requires_openai_auth = false
 "#,
         )
         .unwrap();
-        assert_eq!(provider.model.as_deref(), Some("gateway-model"));
         assert_eq!(provider.env_key.as_deref(), Some("CUSTOM_API_KEY"));
 
         // A provider that still wants OpenAI auth falls through to auth.json.
@@ -3850,7 +4685,6 @@ requires_openai_auth = false
             .and_then(parse_custom_provider)
             .expect("config.toml should yield a custom provider");
 
-        assert_eq!(provider.model.as_deref(), Some("gateway-model"));
         // The credential is absent, so detection reports not-ready and the note
         // names the variable to set instead of telling the user to run
         // `codex login` (which would be the wrong instruction here).
@@ -3916,42 +4750,6 @@ requires_openai_auth = false
     }
 
     #[test]
-    fn custom_provider_models_keep_the_configured_model_first() {
-        let models = custom_provider_models(
-            Some("configured"),
-            Some(vec![
-                ModelInfo::new("first"),
-                ModelInfo::new("configured").with_label(Some("Configured model"), None),
-                ModelInfo::new("last"),
-            ]),
-        );
-
-        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
-        assert_eq!(models[0].display_name.as_deref(), Some("Configured model"));
-
-        let models = custom_provider_models(
-            Some("configured"),
-            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
-        );
-        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
-        assert!(models[0].reasoning_levels.is_none());
-        assert!(models[0].default_reasoning_level.is_none());
-    }
-
-    #[test]
-    fn custom_provider_models_preserve_catalog_fallbacks() {
-        let models = custom_provider_models(Some("configured"), None);
-        assert_eq!(model_ids(&models), ["configured"]);
-
-        let models = custom_provider_models(
-            None,
-            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
-        );
-        assert_eq!(model_ids(&models), ["first", "last"]);
-        assert!(custom_provider_models(None, None).is_empty());
-    }
-
-    #[test]
     fn version_parses_cli_output_and_gates() {
         assert_eq!(parse_version("codex-cli 0.144.0"), Some((0, 144, 0)));
         assert_eq!(parse_version("0.150.2"), Some((0, 150, 2)));
@@ -4010,6 +4808,63 @@ requires_openai_auth = false
         assert!(!config_supports_auto_review(&serde_json::json!({
             "config": {"model_provider": 42, "openai_base_url": null}
         })));
+    }
+
+    #[test]
+    fn async_questions_replace_plain_text_and_preserve_answers_on_reconcile() {
+        let mut ctx = TurnCtx::test_stub();
+        apply_item(
+            &mut ctx,
+            &json!({"id":"ask", "type":"agentMessage", "text":""}),
+            false,
+        );
+        ctx.append_part_text("ask", "Choose a formatter:\n- Flash\n- Original");
+        let item = json!({"id":"ask", "type":"agentMessage", "text":"Choose a formatter:\n- Flash\n- Original", "questions":[
+            {"title":"Which formatter?", "options":["Flash", "Original"]},
+            {"title":"Any additional guidance?", "options":null}
+        ]});
+        apply_item(&mut ctx, &item, true);
+        assert_eq!(ctx.assistant.parts.len(), 2);
+        let prompt = ctx.assistant.parts[0].prompt.as_mut().unwrap();
+        assert_eq!(prompt.question.as_deref(), Some("Which formatter?"));
+        assert_eq!(prompt.options[0].label, "Flash");
+        assert!(prompt.native_id.is_none());
+        prompt.resolved = true;
+        prompt.answers = vec!["Flash".into()];
+        apply_item(&mut ctx, &item, true);
+        let mut renamed = item.clone();
+        renamed["id"] = json!("item-3");
+        reconcile_items(&mut ctx.assistant.parts, &[renamed]);
+        assert_eq!(ctx.assistant.parts.len(), 2);
+        let prompt = ctx.assistant.parts[0].prompt.as_ref().unwrap();
+        assert!(prompt.resolved);
+        assert_eq!(prompt.answers, ["Flash"]);
+        assert!(ctx.assistant.parts[1]
+            .prompt
+            .as_ref()
+            .unwrap()
+            .options
+            .is_empty());
+        assert!(!ctx.assistant.parts.iter().any(|part| part.kind == "text"));
+    }
+
+    #[test]
+    fn async_question_answer_includes_question_and_validates_input() {
+        let prompt = WirePrompt {
+            kind: "question".into(),
+            question: Some("Which formatter?".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            async_question_answer(&prompt, &answer(true, None, &["Flash"], None)).unwrap(),
+            "In response to: Which formatter?\n\nFlash"
+        );
+        assert_eq!(
+            async_question_answer(&prompt, &answer(true, None, &[], Some("Use our proxy")))
+                .unwrap(),
+            "In response to: Which formatter?\n\nUse our proxy"
+        );
+        assert!(async_question_answer(&prompt, &answer(true, None, &[], None)).is_err());
     }
 
     #[test]
@@ -4578,6 +5433,20 @@ requires_openai_auth = false
         );
     }
 
+    #[test]
+    fn subagent_events_preserve_target_thread_identity() {
+        for item in [
+            json!({"receiverThreadIds": ["child"], "tool": "spawnAgent", "status": "inProgress"}),
+            json!({"agentThreadId": "child", "kind": "interacted"}),
+        ] {
+            let part = subagent_spawn_part("event", &item, false);
+            assert_eq!(
+                part.state.unwrap().input.unwrap()["agentThreadIds"],
+                json!(["child"])
+            );
+        }
+    }
+
     /// A later collab item (`sendInput`) on an already-spawned thread re-points
     /// the thread to the new spawn row, so its continued activity streams under
     /// the new row — not the original, already-completed spawn.
@@ -4789,7 +5658,7 @@ requires_openai_auth = false
     }
 
     /// The live spike's approval request (trimmed) → a permission card whose
-    /// native_id round-trips the JSON-RPC id, plus the decision mapping.
+    /// native_id round-trips the JSON-RPC id.
     #[test]
     fn approval_request_becomes_a_permission_card() {
         let id = serde_json::json!(0);
@@ -4850,9 +5719,42 @@ requires_openai_auth = false
             &params
         )
         .is_none());
+    }
 
-        assert_eq!(approval_decision(true), "accept");
-        assert_eq!(approval_decision(false), "decline");
+    #[test]
+    fn mcp_write_approval_uses_native_arguments_and_declines_other_elicitations() {
+        let mut params = serde_json::json!({
+            "serverName":"orx_alphaxiv", "mode":"form",
+            "message":"Allow the orx_alphaxiv MCP server to run tool \"create_folder\"?",
+            "_meta":{"codex_approval_kind":"mcp_tool_call", "tool_params":{"folder_name":"Reading"}},
+            "requestedSchema":{"type":"object", "properties":{}}
+        });
+        let (_, part) = approval_card(
+            Some("turn"),
+            "mcpServer/elicitation/request",
+            &serde_json::json!(0),
+            &params,
+        )
+        .unwrap();
+        let prompt = part.prompt.unwrap();
+        assert_eq!(prompt.tool.as_deref(), Some("orx_alphaxiv:create_folder"));
+        assert_eq!(prompt.tool_input.unwrap()["folder_name"], "Reading");
+        params["requestedSchema"]["properties"]["secret"] = serde_json::json!({"type":"string"});
+        assert!(approval_card(
+            Some("turn"),
+            "mcpServer/elicitation/request",
+            &serde_json::json!(0),
+            &params
+        )
+        .is_none());
+        params["_meta"] = Value::Null;
+        assert!(approval_card(
+            Some("turn"),
+            "mcpServer/elicitation/request",
+            &serde_json::json!(0),
+            &params
+        )
+        .is_none());
     }
 
     /// Part ids are turn-scoped: codex request ids restart at 0 per child
@@ -5096,6 +5998,28 @@ requires_openai_auth = false
     }
 
     #[test]
+    fn exec_line_error_unwraps_the_provider_message() {
+        let unsupported =
+            "The 'gpt-x' model is not supported when using Codex with a ChatGPT account.";
+        assert_eq!(
+            exec_line_error(
+                r#"{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-x' model is not supported when using Codex with a ChatGPT account.\"}}"}}"#
+            )
+            .as_deref(),
+            Some(unsupported)
+        );
+        assert_eq!(
+            exec_line_error(r#"{"type":"error","message":"stream disconnected"}"#).as_deref(),
+            Some("stream disconnected")
+        );
+        // A metadata warning rides an item, not a turn error.
+        assert!(exec_line_error(
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata not found"}}"#
+        )
+        .is_none());
+    }
+
+    #[test]
     fn git_dir_resolves_relative_and_absolute_rev_parse_answers() {
         let base = std::env::temp_dir().join(format!("orx-codex-test-{}", std::process::id()));
         let workspace = base.join("worktree");
@@ -5137,63 +6061,104 @@ requires_openai_auth = false
     }
 
     #[test]
-    fn writable_roots_override_joins_and_omits_empty() {
+    fn workspace_write_policy_preserves_native_roots_and_tmp_exclusions() {
+        let roots = vec![
+            "/configured directory".to_string(),
+            r"C:\tool chain\cache".to_string(),
+            r"\\server\share\toolchain".to_string(),
+        ];
+        let config = json!({"config": {"sandbox_workspace_write": {
+            "writable_roots": roots,
+            "exclude_tmpdir_env_var": true,
+            "exclude_slash_tmp": true,
+            "network_access": false,
+        }}});
+        let policy = workspace_write_policy(
+            &config,
+            vec!["/data".into(), "/locks".into(), "/project/.git".into()],
+        )
+        .unwrap();
         assert_eq!(
-            writable_roots_override(&[PathBuf::from("/data dir"), PathBuf::from("/hub/.git")]),
-            Some(r#"sandbox_workspace_write.writable_roots=["/data dir", "/hub/.git"]"#.into())
+            policy,
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": [
+                    "/configured directory", r"C:\tool chain\cache",
+                    r"\\server\share\toolchain", "/data", "/locks", "/project/.git",
+                ],
+                "networkAccess": true,
+                "excludeTmpdirEnvVar": true,
+                "excludeSlashTmp": true,
+            })
         );
-        // No roots → no flag at all; `=[]` would clobber the user's own
-        // config.toml roots for the turn.
-        assert_eq!(writable_roots_override(&[]), None);
     }
 
     #[test]
-    fn reasoning_accepts_only_codex_ids() {
-        let sol = Some("gpt-5.6-sol");
-        assert_eq!(codex_reasoning(Some("low"), sol), Some("low"));
-        assert_eq!(codex_reasoning(Some("high"), sol), Some("high"));
-        assert_eq!(codex_reasoning(Some("xhigh"), sol), Some("xhigh"));
-        // Junk is dropped (the flag is omitted → CLI default), never forwarded
-        // as an invalid `model_reasoning_effort`.
-        assert_eq!(codex_reasoning(Some("nonsense"), sol), None);
-        assert_eq!(codex_reasoning(None, sol), None);
-    }
-
-    /// The point of issue #123: the top tiers are model-specific, so the same
-    /// stored level resolves differently per model rather than being clamped to
-    /// one hard-coded intersection.
-    #[test]
-    fn reasoning_is_model_specific() {
-        // Sol/Terra reach `ultra`; Luna stops at `max` (the catalog's word —
-        // codex's own picker doesn't offer Luna `ultra`, so neither do we).
-        for model in ["gpt-5.6-sol", "gpt-5.6-terra"] {
-            assert_eq!(codex_reasoning(Some("ultra"), Some(model)), Some("ultra"));
+    fn workspace_write_policy_uses_defaults_only_for_absent_settings() {
+        for config in [
+            json!({"config": {}}),
+            json!({"config": {"sandbox_workspace_write": null}}),
+            json!({"config": {"sandbox_workspace_write": {}}}),
+        ] {
+            let policy = workspace_write_policy(&config, vec!["/data".into()]).unwrap();
+            assert_eq!(policy["writableRoots"], json!(["/data"]));
+            assert_eq!(policy["excludeTmpdirEnvVar"], false);
+            assert_eq!(policy["excludeSlashTmp"], false);
         }
+        for config in [
+            json!({}),
+            json!({"config": null}),
+            json!({"config": {"sandbox_workspace_write": {"writable_roots": [1]}}}),
+            json!({"config": {"sandbox_workspace_write": {"exclude_slash_tmp": "true"}}}),
+        ] {
+            assert!(workspace_write_policy(&config, vec!["/data".into()]).is_err());
+        }
+    }
+
+    #[test]
+    fn exec_additional_directories_precede_resume_and_preserve_path_arguments() {
+        let roots = [PathBuf::from("/data dir"), PathBuf::from(r"C:\hub\.git")];
+        for native_id in [None, Some("thread-id")] {
+            let cmd = codex_exec_command(Path::new("codex"), &roots, native_id);
+            let args: Vec<_> = cmd.as_std().get_args().collect();
+            let mut expected = vec![
+                std::ffi::OsStr::new("exec"),
+                std::ffi::OsStr::new("--add-dir"),
+                roots[0].as_os_str(),
+                std::ffi::OsStr::new("--add-dir"),
+                roots[1].as_os_str(),
+            ];
+            if native_id.is_some() {
+                expected.extend([
+                    std::ffi::OsStr::new("resume"),
+                    std::ffi::OsStr::new("thread-id"),
+                ]);
+            }
+            assert_eq!(args, expected);
+        }
+        let cmd = codex_exec_command(Path::new("codex"), &[], None);
         assert_eq!(
-            codex_reasoning(Some("max"), Some("gpt-5.6-luna")),
-            Some("max")
+            cmd.as_std().get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new("exec")]
         );
-        assert_eq!(codex_reasoning(Some("ultra"), Some("gpt-5.6-luna")), None);
-        // 5.5 stops at `xhigh`. An unsupported tier is dropped rather than sent
-        // — this is the "changing models clears a stale effort" guarantee,
-        // enforced backend-side too, and it matters because codex answers an
-        // unsupported effort with a 400 that kills the turn.
-        assert_eq!(
-            codex_reasoning(Some("xhigh"), Some("gpt-5.5")),
-            Some("xhigh")
-        );
-        assert_eq!(codex_reasoning(Some("max"), Some("gpt-5.5")), None);
-        // A model outside the fallback table is catalog-discovered: the
-        // composer offered only what `model/list` reported for it, so the value
-        // is forwarded rather than clamped (same reasoning as opencode).
-        assert_eq!(codex_reasoning(Some("ultra"), Some("gpt-9")), Some("ultra"));
-        assert_eq!(
-            codex_reasoning(Some(REASONING_DEFAULT_ID), Some("gpt-9")),
-            None
-        );
-        // No model at all → the conservative fallback intersection.
-        assert_eq!(codex_reasoning(Some("xhigh"), None), Some("xhigh"));
-        assert_eq!(codex_reasoning(Some("max"), None), None);
+    }
+
+    #[test]
+    fn lifecycle_lock_root_reports_unavailable_directory() {
+        let config_dir = std::env::temp_dir().join(format!("orx-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("locks"), "not a directory").unwrap();
+        let error = ensure_orx_lifecycle_lock_dir_in(&config_dir).unwrap_err();
+        assert!(error.to_string().contains("dedicated directory"));
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn reasoning_forwards_explicit_effort_without_model_assumptions() {
+        assert_eq!(codex_reasoning(Some("max")), Some("max"));
+        assert_eq!(codex_reasoning(Some("ultra")), Some("ultra"));
+        assert_eq!(codex_reasoning(Some(REASONING_DEFAULT_ID)), None);
+        assert_eq!(codex_reasoning(None), None);
     }
 
     /// The `model/list` parser against the live 0.144 response shape (headers
@@ -5300,27 +6265,7 @@ requires_openai_auth = false
     /// by the composer (the concrete bug in issue #123).
     #[test]
     fn reasoning_default_sends_no_override() {
-        for model in [Some("gpt-5.6-sol"), Some("gpt-5.5"), None] {
-            assert_eq!(codex_reasoning(Some(REASONING_DEFAULT_ID), model), None);
-        }
-    }
-
-    /// Every advertised per-model choice must survive the mapper for that same
-    /// model — the picker can never offer an effort `run_turn` would drop.
-    /// Iterating `CODEX_MODELS` also means a model added without tiers fails
-    /// here rather than silently degrading to the fallback.
-    #[test]
-    fn advertised_model_choices_all_map_back() {
-        for (model, levels) in CODEX_MODELS {
-            assert!(!levels.is_empty(), "{model} has no reasoning tiers");
-            for level in levels {
-                assert_eq!(
-                    codex_reasoning(Some(level), Some(model)),
-                    Some(*level),
-                    "{model} advertises {level} but the mapper drops it"
-                );
-            }
-        }
+        assert_eq!(codex_reasoning(Some(REASONING_DEFAULT_ID)), None);
     }
 
     fn answer(
@@ -5337,6 +6282,7 @@ requires_openai_auth = false
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
             annotations: Vec::new(),
+            from: None,
         }
     }
 
@@ -5565,6 +6511,10 @@ requires_openai_auth = false
 
         // Neither selection nor note → Err (card stays actionable).
         assert!(user_input_reply(&prompt, &answer(true, None, &[], None)).is_err());
+        assert_eq!(
+            user_input_reply(&prompt, &answer(false, None, &[], None)).unwrap(),
+            serde_json::json!({ "answers": {} })
+        );
     }
 
     /// Numeric question ids stringify to their JSON text as map keys.
@@ -5604,6 +6554,20 @@ requires_openai_auth = false
             session_id: "s".into(),
             native_session_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn skipped_async_question_closes_without_sending_a_message() {
+        let prompt = WirePrompt {
+            kind: "question".into(),
+            question: Some("Which color?".into()),
+            ..Default::default()
+        };
+        let action = Codex
+            .resume_from_prompt(&test_resume_ctx(), &prompt, &answer(false, None, &[], None))
+            .await
+            .unwrap();
+        assert!(matches!(action, ResumeAction::Handled { plan_mode: None }));
     }
 
     /// The codex plan card resume arms: approve → "Implement the plan." with
@@ -5709,11 +6673,29 @@ requires_openai_auth = false
             server_req_kind("item/tool/requestUserInput"),
             ServerReqKind::UserInput
         );
+        assert_eq!(
+            server_req_kind("mcpServer/elicitation/request"),
+            ServerReqKind::McpApproval
+        );
         // A reply schema we don't speak (permission-profile object).
         assert_eq!(
             server_req_kind("item/permissions/requestApproval"),
             ServerReqKind::Other
         );
+    }
+
+    #[test]
+    fn token_notification_reports_last_request_context() {
+        let mut ctx = TurnCtx::test_stub();
+        let params = serde_json::json!({"tokenUsage": {
+            "total": {"inputTokens": 5000, "outputTokens": 600},
+            "last": {"inputTokens": 100, "cachedInputTokens": 40, "outputTokens": 20},
+            "modelContextWindow": 272000
+        }});
+        apply_notification(&mut ctx, "thread/tokenUsage/updated", &params);
+        let usage = ctx.context_usage.unwrap();
+        assert_eq!(usage.used_tokens, 120);
+        assert_eq!(usage.context_window, Some(272000));
     }
 
     #[test]
@@ -5781,5 +6763,73 @@ requires_openai_auth = false
             )),
             None
         );
+    }
+
+    /// Each turn's model is its own native `turn_context`, never the thread's configuration.
+    #[test]
+    fn turn_context_names_each_turns_model() {
+        let rollout = [
+            json!({"type": "session_meta", "payload": {"id": "th"}}),
+            json!({"type": "turn_context", "payload": {"turn_id": "t1", "model": "gpt-6-sol"}}),
+            json!({"type": "turn_context", "payload": {"turn_id": "t2", "model": "gpt-6-luna"}}),
+        ]
+        .map(|record| record.to_string())
+        .join("\n");
+        assert_eq!(
+            turn_context_model(&rollout, "t2").as_deref(),
+            Some("gpt-6-luna")
+        );
+        assert_eq!(turn_context_model(&rollout, "t3"), None);
+    }
+
+    /// A shell's invoker is its thread's running turn, under its captured native reroute when one
+    /// exists (rollouts never persist reroutes); never a finished turn.
+    #[test]
+    fn running_turn_names_the_invoking_model() {
+        let dir = std::env::temp_dir().join(format!("orx-codex-invoker-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let record =
+            |kind: &str, payload: Value| json!({"type": kind, "payload": payload}).to_string();
+        let started = record(
+            "event_msg",
+            json!({"type": "task_started", "turn_id": "t2"}),
+        );
+        let context = record(
+            "turn_context",
+            json!({"turn_id": "t2", "model": "gpt-6-sol"}),
+        );
+        let mut rollout = vec![
+            record(
+                "event_msg",
+                json!({"type": "task_started", "turn_id": "t1"}),
+            ),
+            record(
+                "turn_context",
+                json!({"turn_id": "t1", "model": "gpt-6-luna"}),
+            ),
+            record(
+                "event_msg",
+                json!({"type": "task_complete", "turn_id": "t1"}),
+            ),
+        ];
+        let model = |rollout: &[String]| {
+            running_turn_identity_in(&store, "th", &rollout.join("\n"))
+                .map(|identity| identity.model)
+        };
+        assert_eq!(model(&rollout), None);
+        rollout.extend([started, context]);
+        assert_eq!(model(&rollout).as_deref(), Some("gpt-6-sol"));
+        for to in ["gpt-6-safe", "gpt-6-safer"] {
+            let reroute = json!({"threadId": "th", "turnId": "t2", "toModel": to});
+            capture_reroute(Some(&store), &Default::default(), &reroute);
+            assert_eq!(model(&rollout).as_deref(), Some(to));
+        }
+        rollout.push(record(
+            "event_msg",
+            json!({"type": "turn_aborted", "turn_id": "t2"}),
+        ));
+        assert_eq!(model(&rollout), None);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

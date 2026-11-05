@@ -1,4 +1,5 @@
 /target
+/windows/launcher/target
 # Built macOS .app bundle (scripts/build-macos-app.sh output).
 /dist
 *.log
@@ -22,3 +23,13 @@ Claude.local.md
 
 # This repo uses pnpm; ignore an accidental npm lockfile
 ui/package-lock.json
+
+# Per-worktree dev data, binaries, and states (dev.ts).
+/.dev/
+/.shots/
+
+# e2e harness dependencies and outputs.
+/e2e/node_modules/
+/e2e/.out/
+/e2e/playwright-report/
+/e2e/test-results/

@@ -3,7 +3,11 @@
 //!   orx exp status <expId>            inspect status, run command, latest run
 //!   orx exp run    <expId> …          launch a local orx-supervised run
 //!   orx exp cancel <expId>            cancel the in-flight run
-//!   orx exp wake   <expId>            resume this agent when the run succeeds or fails
+//!   orx exp wake   <expId>            send this chat the run's result when it finishes
+//!   orx exp archive <expId> --ancestors|--only|--descendants   hide the chosen scope
+//!   orx exp unarchive <expId> --ancestors|--only|--descendants restore the same nodes
+//!   orx exp move <expId> --parent <expId>|--baseline          re-parent a subtree
+//!   orx exp delete <expId>            permanently delete a leaf node, its runs and branch
 //!
 //! Unlike the project-scoped data commands, every verb here takes an
 //! *experiment* id from `orx project view <projectId>`.
@@ -16,12 +20,45 @@ use crate::store::Store;
 use crate::ExpCommand;
 
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
-    let store = Store::open()?;
+    if let ExpCommand::Abandon { run } = &args.command {
+        return crate::plane::local_plane::ApiClient::discover()
+            .await?
+            .abandon(run)
+            .await;
+    }
+    // `exp wait` opens its store itself: a transiently locked orx.db is
+    // retried inside the wait timeout rather than dying at startup.
+    if let ExpCommand::Wait {
+        exp_id,
+        project,
+        timeout,
+        interval,
+    } = args.command
+    {
+        return wait(exp_id, project, timeout, interval).await;
+    }
+    let mut store = Store::open()?;
     match args.command {
-        ExpCommand::Status { exp_id } => {
+        ExpCommand::Archive {
+            exp_id,
+            ancestors,
+            only,
+            descendants,
+            ..
+        } => archive(&mut store, &exp_id, ancestors, only, descendants, true),
+        ExpCommand::Unarchive {
+            exp_id,
+            ancestors,
+            only,
+            descendants,
+            ..
+        } => archive(&mut store, &exp_id, ancestors, only, descendants, false),
+        ExpCommand::Delete { exp_id } => delete(&store, &exp_id),
+        ExpCommand::Move { exp_id, parent, .. } => reparent(&store, &exp_id, parent.as_deref()),
+        ExpCommand::Status { exp_id, scheduler } => {
             crate::local::chat::record_chat_target("experiments", &exp_id);
             resolve_experiment(store, &exp_id)?
-                .experiment_status()
+                .experiment_status(scheduler)
                 .await
         }
         ExpCommand::Desc { exp_id, set, stdin } => {
@@ -36,15 +73,76 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
                 .launch(run_args)
                 .await
         }
-        ExpCommand::Cancel { exp_id } => resolve_experiment(store, &exp_id)?.cancel().await,
+        ExpCommand::Cancel { exp_id, run } => match exp_id {
+            Some(exp_id) => {
+                resolve_experiment(store, &exp_id)?
+                    .cancel(run.as_deref())
+                    .await
+            }
+            None => {
+                crate::plane::local_plane::ApiClient::discover()
+                    .await?
+                    .cancel(None, run.as_deref())
+                    .await
+            }
+        },
         ExpCommand::Wake { exp_id } => wake(&store, &exp_id),
-        ExpCommand::Wait {
-            exp_id,
-            project,
-            timeout,
-            interval,
-        } => wait(store, exp_id, project, timeout, interval).await,
+        ExpCommand::Wait { .. } | ExpCommand::Abandon { .. } => unreachable!("handled above"),
     }
+}
+
+fn archive(
+    store: &mut Store,
+    id: &str,
+    ancestors: bool,
+    only: bool,
+    descendants: bool,
+    archived: bool,
+) -> Result<()> {
+    let direction = if ancestors {
+        crate::local::experiments::ArchiveDirection::Ancestors
+    } else if only {
+        crate::local::experiments::ArchiveDirection::Only
+    } else if descendants {
+        crate::local::experiments::ArchiveDirection::Descendants
+    } else {
+        unreachable!("clap requires an archive scope")
+    };
+    let ids = crate::local::experiments::set_archived(store, id, direction, archived)?;
+    println!(
+        "{} {} experiment(s).",
+        if archived { "Archived" } else { "Restored" },
+        ids.len()
+    );
+    Ok(())
+}
+
+fn delete(store: &Store, id: &str) -> Result<()> {
+    let deleted = crate::local::experiments::delete_experiment(store, id)?;
+    println!(
+        "Deleted experiment {} ({}) and {} run(s).",
+        deleted.experiment.id,
+        deleted.experiment.display_name(),
+        deleted.runs
+    );
+    if let Some(sha) = &deleted.branch_commit {
+        let branch = &deleted.experiment.branch_name;
+        println!("  Deleted branch {branch} (restore with `git branch {branch} {sha}`).");
+    }
+    Ok(())
+}
+
+fn reparent(store: &Store, id: &str, parent: Option<&str>) -> Result<()> {
+    let before = crate::local::experiments::move_experiment(store, id, parent)?;
+    println!(
+        "Moved {} ({}) from {} to {}.",
+        before.id,
+        before.display_name(),
+        before.parent_experiment_id.as_deref().unwrap_or("a root"),
+        parent.unwrap_or("a new root")
+    );
+    println!("  Git branch {} is unchanged.", before.branch_name);
+    Ok(())
 }
 
 fn wake(store: &Store, exp_id: &str) -> Result<()> {
@@ -62,35 +160,37 @@ fn wake(store: &Store, exp_id: &str) -> Result<()> {
         .latest_run_for_experiment(exp_id)?
         .ok_or_else(|| anyhow!("Experiment {exp_id} has no runs to wake for."))?;
     if run.status == "cancelled" {
-        store.remove_run_wakeup(&run.id, &session_id)?;
         println!("Run {} was cancelled; no wake-up scheduled.", run.id);
         return Ok(());
     }
-    match store.register_run_wakeup(&run.id, &session_id)? {
-        crate::store::RunWakeupRegistration::Scheduled => {
-            println!("Wake-up scheduled for run {}.", run.id);
-        }
-        crate::store::RunWakeupRegistration::AlreadyPending => {
-            println!("Wake-up already scheduled for run {}.", run.id);
-        }
-        crate::store::RunWakeupRegistration::AlreadyDelivered => {
-            println!("Run {} already delivered its wake-up.", run.id);
-        }
+    let now = crate::store::now_ms();
+    store.subscribe_run(&run.id, &session_id, now)?;
+    if !crate::local::is_terminal(&run.status) {
+        println!("Wake-up scheduled for run {}.", run.id);
+        return Ok(());
+    }
+    let body = store.terminal_notice_body(&run)?;
+    let terminal = crate::store::TERMINAL;
+    if store.insert_run_notice(&run.id, &session_id, terminal, terminal, &body, now)? {
+        println!(
+            "Run {} already finished; its result is queued for this chat.",
+            run.id
+        );
+    } else {
+        println!("Run {} already delivered its result to this chat.", run.id);
     }
     Ok(())
 }
 
-/// `orx exp wait …` — block on run state, for agents driving a research loop.
+/// `orx exp wait …` — block on run state, one server event stream at a time.
 ///
 /// Two modes, picked by argument:
-///   - `<expId>` — level trigger: poll the experiment's latest run until it reaches a terminal state (done/failed/cancelled).
-///   - `--project` — edge trigger: snapshot every run in the project and return when the first run *completes* — i.e. transitions into a terminal state (done/failed/cancelled). This is the "a slot just freed" signal a budget-saturation loop wants; run starts and queued→running transitions are intentionally ignored.
+///   - `<expId>` — level trigger: wait until the experiment's latest run reaches a terminal state (done/failed/cancelled).
+///   - `--project` — edge trigger: snapshot every run in the project and return when the first run *completes* — i.e. transitions into a terminal state (done/failed/cancelled). A cancelled result can still report surviving processes; run starts and queued→running transitions are intentionally ignored.
 ///
-/// Polls every `--interval` seconds (default 5), gives up after `--timeout`
-/// seconds (default 1800) with a non-zero exit so callers can branch on it. The
-/// Polling reads only the local run store.
+/// Gives up after `--timeout` seconds (default 1800) with a non-zero exit so callers can
+/// branch on it.
 async fn wait(
-    store: Store,
     exp_id: Option<String>,
     project: Option<String>,
     timeout: Option<u64>,
@@ -106,16 +206,149 @@ async fn wait(
              `orx exp wait --project <projectId>` (any run in a project)."
         )),
         (Some(exp_id), None) => {
-            resolve_experiment(store, &exp_id)?
-                .wait_experiment(interval, deadline)
-                .await
+            let plane = crate::plane::local_plane::retry_on_db_lock(
+                || {
+                    let store = Store::open_with_busy_timeout(
+                        crate::plane::local_plane::busy_timeout_left(deadline),
+                    )?;
+                    resolve_experiment(store, &exp_id)
+                },
+                interval,
+                deadline,
+            )
+            .await?;
+            plane.wait(deadline).await
         }
         (None, Some(project_id)) => {
-            resolve_project(store, &project_id)?
-                .wait_project(interval, deadline)
-                .await
+            let plane = crate::plane::local_plane::retry_on_db_lock(
+                || {
+                    let store = Store::open_with_busy_timeout(
+                        crate::plane::local_plane::busy_timeout_left(deadline),
+                    )?;
+                    resolve_project(store, &project_id)
+                },
+                interval,
+                deadline,
+            )
+            .await?;
+            plane.wait(deadline).await
         }
     }
+}
+
+const SUPERVISOR_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
+    let exe = crate::paths::spawnable_exe().map_err(|e| {
+        anyhow!(
+            "Could not locate the orx binary to spawn the supervisor: {}",
+            e
+        )
+    })?;
+    // Supervisor diagnostics (retries, transitions) exist only on stderr; keep them per run.
+    let path =
+        crate::store::log_path(&crate::store::data_dir(), run_id).with_extension("supervisor.log");
+    if std::fs::metadata(&path).is_ok_and(|meta| meta.len() >= SUPERVISOR_LOG_MAX_BYTES) {
+        // Rename rather than truncate: a still-running supervisor keeps writing to its handle.
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+    }
+    let mut child = match supervise_command(&exe, run_id, &path).spawn() {
+        // `/proc/self/exe` can name a path this process cannot exec (OR-334); the `orx` on PATH still runs.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match crate::local::shell_env::find("orx").filter(|orx| *orx != exe) {
+                Some(orx) => {
+                    let tried = format!("`{}`{}: {error}", exe.display(), current_exe_note(&exe));
+                    let child = supervise_command(&orx, run_id, &path)
+                        .spawn()
+                        .map_err(|e| {
+                            anyhow!(
+                                "{} First tried {tried}.",
+                                supervise_spawn_error(&orx, run_id, e)
+                            )
+                        })?;
+                    let warning = format!(
+                        "warning: could not run {tried}; started the supervisor with `{}`.",
+                        orx.display()
+                    );
+                    eprintln!("{warning}");
+                    // A forwarded launch prints this on `orx up`'s stderr; keep it beside the run too.
+                    if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(&path) {
+                        use std::io::Write as _;
+                        let _ = log.write_all(format!("{warning}\n").as_bytes());
+                    }
+                    child
+                }
+                None => return Err(supervise_spawn_error(&exe, run_id, error)),
+            }
+        }
+        result => result.map_err(|e| supervise_spawn_error(&exe, run_id, e))?,
+    };
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn supervise_command(
+    exe: &std::path::Path,
+    run_id: &str,
+    log_path: &std::path::Path,
+) -> std::process::Command {
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_or_else(|_| std::process::Stdio::null(), std::process::Stdio::from);
+    // A long-lived `orx up` may be running a replaced binary; spawn the new file at its path.
+    let mut cmd = crate::process::command(exe);
+    cmd.arg("supervise")
+        .arg(run_id)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(stderr);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    // A console-less parent would otherwise give the supervisor a visible console window.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+fn supervise_spawn_error(
+    exe: &std::path::Path,
+    run_id: &str,
+    error: std::io::Error,
+) -> crate::error::Error {
+    let missing = if exe.exists() {
+        ""
+    } else {
+        " (no file at that path)"
+    };
+    let current = if crate::paths::spawnable_exe().is_ok_and(|own| own == exe) {
+        current_exe_note(exe)
+    } else {
+        String::new()
+    };
+    anyhow!(
+        "Could not spawn `{} supervise {run_id}`{missing}{current}: {error}. A running `orx up` retries \
+         within about 6 minutes; otherwise start `{} supervise {run_id}` in the background.",
+        exe.display(),
+        crate::invocation::orx(),
+    )
+}
+
+fn current_exe_note(exe: &std::path::Path) -> String {
+    std::env::current_exe()
+        .ok()
+        .filter(|raw| raw != exe)
+        .map(|raw| format!(" (current_exe: {})", raw.display()))
+        .unwrap_or_default()
 }
 
 // --- job-launch helpers shared with the src/local/* backends -----------------
@@ -130,52 +363,27 @@ pub(crate) fn default_hf_image(flavor: &str) -> String {
     }
 }
 
-/// Spawn `orx supervise <runId>` fully detached (own process group, no stdio),
-/// so it outlives this command and any SSH session that launched it.
-pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
-    let exe = std::env::current_exe().map_err(|e| {
-        anyhow!(
-            "Could not locate the orx binary to spawn the supervisor: {}",
-            e
-        )
-    })?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("supervise")
-        .arg(run_id)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    // The supervisor re-resolves its directories from its own environment, so
-    // without this a run launched from the macOS app is tracked in a different
-    // store than the app is reading.
-    if let Some(path) = crate::local::shell_env::search_path() {
-        cmd.env("PATH", path);
+/// Who asked `orx exp cancel` to stop a run, recorded on the run.
+pub(crate) fn exp_cancel_reason(chat_session_id: Option<&str>) -> String {
+    match chat_session_id {
+        Some(id) => format!("Cancel requested by agent session {id} with `orx exp cancel`."),
+        None => "Cancel requested with `orx exp cancel`.".into(),
     }
-    crate::local::shell_env::export_to(|key, value| {
-        cmd.env(key, value);
-    });
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    cmd.spawn()
-        .map_err(|e| anyhow!("Could not spawn `orx supervise {}`: {}", run_id, e))?;
-    Ok(())
 }
 
-/// Persist cancel intent and ensure an orphaned run gets a fresh supervisor.
-pub(crate) fn request_local_run_cancel(store: &Store, run_id: &str) -> Result<()> {
-    let lock_path = crate::store::log_path(run_id).with_extension("cancel.lock");
-    request_local_run_cancel_with(store, run_id, &lock_path, || {}, spawn_detached_supervise)
+/// Records cancel intent for a run a 0.2.x supervisor owns, under the `cancel.lock` it reads
+/// the intent under.
+pub(crate) fn request_legacy_run_cancel(store: &Store, run_id: &str, reason: &str) -> Result<()> {
+    let lock_path =
+        crate::store::log_path(&crate::store::data_dir(), run_id).with_extension("cancel.lock");
+    request_legacy_run_cancel_at(store, run_id, reason, &lock_path)
 }
 
-fn request_local_run_cancel_with(
+fn request_legacy_run_cancel_at(
     store: &Store,
     run_id: &str,
+    reason: &str,
     lock_path: &std::path::Path,
-    before_lock: impl FnOnce(),
-    spawn: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -183,26 +391,44 @@ fn request_local_run_cancel_with(
         .write(true)
         .open(lock_path)?;
     let mut cancel_lock = fd_lock::RwLock::new(lock_file);
-    before_lock();
     let _cancel_guard = cancel_lock.write()?;
-    let prior = store
+    store
         .get_run(run_id)?
-        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?
-        .cancel_requested;
-    store.set_cancel_requested(run_id, true)?;
-    if let Err(spawn_err) = spawn(run_id) {
-        if let Err(rollback_err) = store.set_cancel_requested(run_id, prior) {
-            return Err(anyhow!(
-                "Could not recover the supervisor: {spawn_err}; could not restore retryable cancel state: {rollback_err}"
-            ));
-        }
-        return Err(spawn_err);
-    }
+        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?;
+    store.request_cancel(run_id, reason)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn supervise_spawn_error_names_the_binary_and_the_manual_attach() {
+        let message = supervise_spawn_error(
+            std::path::Path::new("/nonexistent/orx"),
+            "run-1",
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        )
+        .to_string();
+        assert!(message.contains("`/nonexistent/orx supervise run-1` (no file at that path)"));
+        assert!(message.ends_with(" supervise run-1` in the background."));
+    }
+
+    #[tokio::test]
+    async fn wait_validates_both_and_neither_targets_before_opening_the_store() {
+        assert!(
+            super::wait(Some("exp".into()), Some("project".into()), Some(1), None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("either")
+        );
+        assert!(super::wait(None, None, Some(1), None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Specify"));
+    }
+
     use super::*;
     use crate::store::StoredRun;
 
@@ -221,93 +447,55 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         }
     }
 
     #[test]
-    fn failed_supervisor_spawn_restores_cancel_retry() {
+    fn cancel_reason_keeps_the_first_requester_and_shows_only_when_cancelled() {
+        use crate::store::RunStatus;
         let dir =
-            std::env::temp_dir().join(format!("orx-cancel-spawn-test-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("orx-cancel-reason-test-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        let run = run_fixture();
-        store.upsert_run(&run).unwrap();
         let lock_path = dir.join("cancel.lock");
+        let starting = StoredRun {
+            status: "starting".into(),
+            ..run_fixture()
+        };
+        let finishing = StoredRun {
+            id: "run-done".into(),
+            ..run_fixture()
+        };
+        store.upsert_run(&starting).unwrap();
+        store.upsert_run(&finishing).unwrap();
 
-        let result = request_local_run_cancel_with(
-            &store,
-            &run.id,
-            &lock_path,
-            || {},
-            |_| Err(anyhow!("synthetic spawn failure")),
-        );
-        assert!(result.is_err());
-        assert!(!store.get_run(&run.id).unwrap().unwrap().cancel_requested);
-
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn concurrent_spawn_failure_preserves_successful_cancel_intent() {
-        let dir = std::env::temp_dir().join(format!(
-            "orx-cancel-concurrency-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let store = Store::open_at(dir.clone()).unwrap();
-        let run = run_fixture();
-        store.upsert_run(&run).unwrap();
-        drop(store);
-        let lock_path = dir.join("cancel.lock");
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (attempted_tx, attempted_rx) = std::sync::mpsc::channel();
-        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
-
-        let first_dir = dir.clone();
-        let first_lock = lock_path.clone();
-        let first = std::thread::spawn(move || {
-            let store = Store::open_at(first_dir).unwrap();
-            request_local_run_cancel_with(
-                &store,
-                "run-1",
-                &first_lock,
-                || {},
-                |_| {
-                    entered_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                    Err(anyhow!("synthetic spawn failure"))
-                },
-            )
-            .unwrap_err();
-        });
-        entered_rx.recv().unwrap();
-
-        let second_dir = dir.clone();
-        let second_lock = lock_path.clone();
-        let second = std::thread::spawn(move || {
-            let store = Store::open_at(second_dir).unwrap();
-            request_local_run_cancel_with(
-                &store,
-                "run-1",
-                &second_lock,
-                || attempted_tx.send(()).unwrap(),
-                |_| Ok(()),
-            )
+        for (run_id, reason) in [
+            ("run-1", "first"),
+            ("run-1", "second"),
+            ("run-done", "first"),
+        ] {
+            request_legacy_run_cancel_at(&store, run_id, reason, &lock_path).unwrap();
+        }
+        // A backend's submit upsert lands after the cancel request.
+        store.upsert_run(&starting).unwrap();
+        store
+            .update_status("run-1", RunStatus::Cancelled, Some(2), None)
             .unwrap();
-            completed_tx.send(()).unwrap();
-        });
-        attempted_rx.recv().unwrap();
-        let completed_while_locked = completed_rx
-            .recv_timeout(std::time::Duration::from_millis(250))
-            .is_ok();
-        release_tx.send(()).unwrap();
-        first.join().unwrap();
-        second.join().unwrap();
+        store
+            .update_status("run-done", RunStatus::Done, Some(2), Some(0))
+            .unwrap();
 
-        let store = Store::open_at(dir.clone()).unwrap();
-        assert!(!completed_while_locked);
-        assert!(store.get_run("run-1").unwrap().unwrap().cancel_requested);
+        let detail =
+            |id| crate::plane::Run::from(&store.get_run(id).unwrap().unwrap()).failure_detail();
+        assert_eq!(detail("run-1").as_deref(), Some("reason: first"));
+        assert_eq!(detail("run-done"), None);
+        // The reason never leaks into a finished run's result.
+        assert_eq!(
+            store.get_run("run-done").unwrap().unwrap().result_markdown,
+            None
+        );
+
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

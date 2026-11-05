@@ -1,50 +1,37 @@
 ---
 name: orx-agent-delegation
-description: "Delegate independent work to helper agent sessions with `orx agent spawn`: task selection, self-contained briefs, branch ownership, compute authorization, wakeups, and nesting or concurrency constraints. Use before spawning a helper or interpreting its result; do not delegate the literature retrieval loop."
+description: "Delegate tasks to other models and chats with the orx MCP server's `delegate`, `wait`, `subscribe` and `answer` tools. Covers standalone briefs, worktrees, compute authorization, nesting and questions. Use before delegating or opening another chat."
 ---
 
-# Delegate work to another agent
+# Delegate to another chat
 
-`orx agent spawn` creates a new top-level session in the same project. The
-helper is visible to the user, receives its own worktree and transcript, and
-works independently from this session.
+The orx MCP server's tools are the only way to start another chat. `models`
+lists the versioned models you can name. `delegate` starts a chat on one and
+returns at once; you are subscribed to it, so its answer, or a question it
+asks, arrives here as a new message. Call `wait` only when you cannot continue
+without the answer, and end your turn otherwise.
 
-```sh
-orx agent spawn "<self-contained task>"
-orx agent spawn --title "<session title>" --stdin
-orx agent spawn "<task>" --harness <harness> --model <model>
-orx agent spawn "<task>" --no-wake
-```
+A delegate starts with nothing but its task. Write a standalone brief: the
+project, experiment or commit, constraints, permitted compute, expected output,
+and definition of done. Explicitly forbid compute launches when none are
+authorized. To pass the user's own words or a screenshot, cite the message's
+ref (`msg_3fa9c1d2`) in the task instead of retyping it.
 
-By default, this chat resumes with the helper's closing reply. Use `--no-wake`
-only when no follow-up is needed. A spawned session cannot spawn another helper,
-and the CLI enforces the number of helpers a session may have in flight. If the
-command refuses a spawn for either reason, do the work here or wait for a helper
-to finish.
-
-## Choose tasks with a clean boundary
-
-Delegate work that is genuinely independent from the node this session owns,
-such as surveying an unfamiliar codebase or writing up completed results. Do
-the work here when it is a step in the experiment loop already underway.
-
-Never delegate the retrieval loop covered by `orx-lit-review`: the main agent
-must inspect and rank the combined literature candidates itself.
-
-## Protect branches and compute
-
-- Never give a helper a branch checked out by this session. If it must change
-  experiment code, tell it to create its own node and work on that node's branch.
-- A frozen experiment node may not be edited by either session.
-- State exactly which `orx exp run` calls the helper may launch. Explicitly
-  forbid launches when none are authorized; otherwise the helper may infer that
-  the normal research loop is available.
-- The helper's edits remain in its worktree. Nothing merges into this branch
-  automatically.
-
-## Write a standalone brief
-
-The helper starts with an empty transcript and cannot see this conversation.
-Include the project, relevant experiment and branch, metric, constraints,
-allowed compute, expected output, and a concrete definition of done. Use
-`--stdin` for a multi-paragraph brief.
+- **Worktree.** By default a delegate works in this chat's worktree, so give
+  parallel delegates separate files. `worktree: "own"` gives it a fresh
+  worktree from the project's baseline that appears in the sidebar: commit
+  first and name the commit in the task when it should start from your work.
+  Its changes never merge here automatically.
+- **Independent chats.** `notify: false` starts a chat that is not your
+  delegate: your side chat, or with `worktree: "own"` a chat of its own, for
+  work that should not report back. You do not hear from it unless you
+  `subscribe`, and you cannot `cancel` it. Do not open one as a substitute for
+  a follow-up message; `send` the chat you already have.
+- **Nesting.** A delegate may delegate only when you allow it with
+  `canDelegate` or the user's setting does. Keep nesting shallow.
+- **Questions.** `answer` a delegate's question when the brief already
+  decides it; otherwise ask the user. Approvals are the user's.
+- **Effort.** Pass `effort` from `models` only when the task needs more or less
+  reasoning than the route's default.
+- **Retries.** Give `delegate` and `send` a `clientRequestId` when you may
+  retry, so a retry does not start the work twice.

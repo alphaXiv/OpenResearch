@@ -20,7 +20,15 @@ fn unix_bootstrap(harness: &str) -> Option<(&'static str, &'static str)> {
         "opencode" => Some(("https://opencode.ai/install", "bash")),
         "antigravity" => Some(("https://antigravity.google/cli/install.sh", "bash")),
         "cursor" => Some(("https://cursor.com/install", "bash")),
-        _ => None,
+        _ => match acp_executable(harness)?.as_str() {
+            "kimi" => Some(("https://code.kimi.com/kimi-code/install.sh", "bash")),
+            "mcode" => Some(("https://filecdn.minimax.chat/public/install.sh", "bash")),
+            "devin" => Some(("https://cli.devin.ai/install.sh", "bash")),
+            "grok" => Some(("https://x.ai/cli/install.sh", "bash")),
+            "omp" => Some(("https://omp.sh/install", "sh")),
+            "fx" => Some(("https://fx.sh/setup.sh", "bash")),
+            _ => None,
+        },
     }
 }
 
@@ -32,7 +40,14 @@ fn windows_install_command(harness: &str) -> Option<&'static str> {
         "opencode" => Some(include_str!("install_opencode.ps1")),
         "antigravity" => Some("irm https://antigravity.google/cli/install.ps1 | iex"),
         "cursor" => Some("irm 'https://cursor.com/install?win32=true' | iex"),
-        _ => None,
+        _ => match acp_executable(harness)?.as_str() {
+            "kimi" => Some("irm https://code.kimi.com/kimi-code/install.ps1 | iex"),
+            "mcode" => Some("irm https://filecdn.minimax.chat/public/install.ps1 | iex"),
+            "devin" => Some("irm https://static.devin.ai/cli/setup.ps1 | iex"),
+            "grok" => Some("irm https://x.ai/cli/install.ps1 | iex"),
+            "omp" => Some("irm https://omp.sh/install.ps1 | iex"),
+            _ => None,
+        },
     }
 }
 
@@ -40,6 +55,12 @@ fn windows_install_command(harness: &str) -> Option<&'static str> {
 /// uses, without its timeout and cleanup flags. Temp destination, since a
 /// relative path could clobber.
 fn install_command(harness: &str, windows: bool) -> Option<String> {
+    if let Some(package) = adapter_package(harness) {
+        if package == "pi-acp" && crate::local::acp::executable_path("pi").is_none() {
+            return Some("npm install -g @earendil-works/pi-coding-agent pi-acp".into());
+        }
+        return Some(format!("npm install -g {package}"));
+    }
     if windows {
         return windows_install_command(harness).map(str::to_string);
     }
@@ -47,6 +68,31 @@ fn install_command(harness: &str, windows: bool) -> Option<String> {
     Some(format!(
         "script=$(mktemp) && curl -fsSL {url} -o \"$script\" && {interpreter} \"$script\""
     ))
+}
+
+fn adapter_package(harness: &str) -> Option<&'static str> {
+    match acp_executable(harness)?.as_str() {
+        "pi-acp" => Some("pi-acp"),
+        "zcode-acp-server" => Some("zcode-acp-server"),
+        "dsh" => Some("@deepseek-ai/dsh"),
+        _ => None,
+    }
+}
+
+fn acp_executable(harness: &str) -> Option<String> {
+    let definition = crate::local::acp::registered_definitions()
+        .into_iter()
+        .find(|definition| definition.id == harness)?;
+    let executable = std::path::Path::new(&definition.executable)
+        .file_name()?
+        .to_str()?;
+    Some(
+        executable
+            .strip_suffix(".cmd")
+            .or_else(|| executable.strip_suffix(".exe"))
+            .unwrap_or(executable)
+            .to_string(),
+    )
 }
 
 /// Fetch the bootstrap to a temp file, then run it with the PTY as stdin.
@@ -68,7 +114,7 @@ fn unix_install_script(url: &str, interpreter: &str) -> String {
 /// Windows install with `CreateProcessW … (os error 2)` before any installer runs.
 #[cfg(windows)]
 fn windows_powershell() -> String {
-    if crate::local::shell_env::find_on_path("powershell.exe").is_some() {
+    if crate::local::shell_env::find("powershell.exe").is_some() {
         return "powershell.exe".into();
     }
     let system_root = crate::local::shell_env::var("SystemRoot")
@@ -80,6 +126,23 @@ fn windows_powershell() -> String {
     }
     // Nothing better to try; the spawn error names the real missing file.
     "powershell.exe".into()
+}
+
+/// `$LASTEXITCODE` persists from an earlier native call, so reset it or a
+/// failing cmdlet exits with its code.
+#[cfg(any(windows, test))]
+fn windows_install_script(install: &str) -> String {
+    format!(
+        "$LASTEXITCODE = 0\n{install}\nif (-not $?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }} else {{ exit 1 }} }}"
+    )
+}
+
+/// PowerShell's `-EncodedCommand` form: base64 of the script's UTF-16LE.
+#[cfg(any(windows, test))]
+fn encoded_command(script: &str) -> String {
+    use base64::Engine;
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 fn login_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
@@ -127,6 +190,15 @@ pub(super) async fn commands() -> Json<Value> {
                     "update": update,
                     "requiresNpm": cfg!(windows) && install.starts_with("npm "),
                 }),
+            );
+        }
+    }
+    for definition in crate::local::acp::registered_definitions() {
+        if let Some(install) = install_command(&definition.id, cfg!(windows)) {
+            let requires_npm = adapter_package(&definition.id).is_some();
+            result.insert(
+                definition.id,
+                json!({"install": install, "login": "", "update": "", "requiresNpm": requires_npm}),
             );
         }
     }
@@ -184,6 +256,9 @@ pub(super) async fn connect(
     if install_command(&request.harness, cfg!(windows)).is_none() {
         return bad_request("Unknown coding agent").into_response();
     }
+    if request.harness.starts_with("acp:") && !matches!(request.action, Action::Install) {
+        return bad_request("ACP adapters only support installation here").into_response();
+    }
     if request.trigger == Trigger::Automatic
         && (request.harness != "opencode" || !matches!(request.action, Action::Install))
     {
@@ -210,25 +285,32 @@ pub(super) async fn connect(
             &mut follow_up,
         )
         .await;
-        // Login rejection caches must not mask a successful new login.
-        if request.harness == "claude-code" {
-            state.claude.clear_runtime_rejection();
-        }
-        *state.harnesses.lock().await = None;
         let message = match result {
-            Ok(()) => json!({ "type": "complete" }),
-            Err(error) => json!({ "type": "error", "error": error }),
+            Ok(harness) => {
+                // Login rejection caches must not mask a successful new login.
+                if request.harness == "claude-code" {
+                    state.claude.clear_runtime_rejection();
+                }
+                super::publish_harness(&state, &harness).await;
+                json!({ "type": "complete" })
+            }
+            Err(error) => {
+                *state.harnesses.lock().await = None;
+                json!({ "type": "error", "error": error })
+            }
         };
         if socket
             .send(Message::Text(message.to_string().into()))
             .await
             .is_err()
-            || !request.shell
         {
             return;
         }
-        if let Some(env) = follow_up {
-            super::continue_in_shell(&mut socket, &mut size, env).await;
+        match follow_up {
+            Some(env) if request.shell => {
+                super::continue_in_shell(&mut socket, &mut size, env).await
+            }
+            _ => super::close_socket(&mut socket).await,
         }
     })
 }
@@ -241,7 +323,7 @@ async fn run(
     size: &mut PtySize,
     // Set once a command actually ran: the env its follow-up shell must share.
     follow_up: &mut Option<Vec<(&'static str, std::ffi::OsString)>>,
-) -> Result<(), String> {
+) -> Result<crate::local::harness::HarnessInfo, String> {
     let mut run_command = true;
     // Held, not terminal: an install whose optional launch failed still counts,
     // but only against evidence this command changed something.
@@ -258,6 +340,7 @@ async fn run(
             Query(super::HarnessQuery {
                 refresh: Some(1),
                 retry: None,
+                harness: None,
             }),
         )
         .await;
@@ -278,12 +361,10 @@ async fn run(
                     windows_powershell(),
                     vec![
                         "-NoProfile".into(),
-                        "-Command".into(),
-                        // `$LASTEXITCODE` persists from an earlier native call,
-                        // so reset it or a failing cmdlet exits with its code.
-                        format!(
-                            "$LASTEXITCODE = 0\n{install}\nif (-not $?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }} else {{ exit 1 }} }}"
-                        ),
+                        // Encoded: the console title echoes the command line into
+                        // the output, where the script's own phrases would be excerpted.
+                        "-EncodedCommand".into(),
+                        encoded_command(&windows_install_script(&install)),
                     ],
                 )
             }
@@ -291,17 +372,36 @@ async fn run(
             Action::Install => {
                 // The PTY is this shell's stdin, so the vendor script — and
                 // anything it launches — reads the real terminal.
-                let (url, interpreter) = unix_bootstrap(&request.harness).unwrap();
-                (
-                    "bash".to_string(),
-                    vec!["-c".into(), unix_install_script(url, interpreter)],
-                )
+                if adapter_package(&request.harness).is_some() {
+                    (
+                        "bash".to_string(),
+                        vec![
+                            "-c".into(),
+                            install_command(&request.harness, false).unwrap(),
+                        ],
+                    )
+                } else {
+                    let (url, interpreter) = unix_bootstrap(&request.harness).unwrap();
+                    (
+                        "bash".to_string(),
+                        vec!["-c".into(), unix_install_script(url, interpreter)],
+                    )
+                }
             }
             Action::Login | Action::Update => {
-                let Some(bin) = crate::local::harness::detect_harness(&request.harness)
-                    .await
-                    .and_then(|h| h.bin_path)
+                let Some(harness) = crate::local::harness::detect_harness(&request.harness).await
                 else {
+                    attempt.record("failed", "detect", Some("not_installed"), None, None);
+                    return Err("Agent not found. Install it, then retry.".into());
+                };
+                if request.harness == "claude-code"
+                    && matches!(request.action, Action::Login)
+                    && (!harness.login_eligible || state.claude.auth_snapshot().runtime_rejected)
+                {
+                    attempt.record("interrupted", "detect", Some("not_eligible"), None, None);
+                    return Err("Claude Code account login is not applicable to the reported provider or auth state. Check its provider configuration and re-check the harness.".into());
+                }
+                let Some(bin) = harness.bin_path else {
                     attempt.record("failed", "detect", Some("not_installed"), None, None);
                     return Err("Agent not found. Install it, then retry.".into());
                 };
@@ -419,13 +519,15 @@ async fn run(
             }
         }
     }
-    let harness = crate::local::harness::detect_harness(&request.harness).await;
+    let mut harness = crate::local::harness::detect_harness(&request.harness).await;
     let verified = setup_verified(request, harness.as_ref());
     if let Some(failure) = command_failure {
         // Only a brand-new working install overrides the failure (codex
         // installs, then its optional launch fails); a binary that was already
         // there proves nothing about a command that exited nonzero.
-        if verified && fresh_install(request.action, installed_before, harness.as_ref()) {
+        if let Some(harness) = harness
+            .take_if(|h| verified && fresh_install(request.action, installed_before, Some(h)))
+        {
             // One terminal event, with the failed step still visible on it.
             attempt.record(
                 "succeeded",
@@ -434,7 +536,7 @@ async fn run(
                 Some(failure.exit_code),
                 Some(&failure.output),
             );
-            return Ok(());
+            return Ok(harness);
         }
         attempt.record(
             "failed",
@@ -445,9 +547,9 @@ async fn run(
         );
         return Err(failure.message);
     }
-    if verified {
+    if let Some(harness) = harness.take_if(|_| verified) {
         attempt.record("succeeded", "verify", None, None, None);
-        return Ok(());
+        return Ok(harness);
     }
     let (reason, detail) = verify_reason(harness.as_ref());
     attempt.record("failed", "verify", Some(reason), None, Some(detail));
@@ -531,6 +633,11 @@ fn automatic_install_needed(payload: &Value) -> Option<bool> {
     if opencode["installed"] == true && opencode["installBroken"] == false {
         return Some(false);
     }
+    if entries.iter().any(|h| {
+        h["id"].as_str().is_some_and(|id| id.starts_with("acp:")) && h["installed"] == true
+    }) {
+        return None;
+    }
     crate::telemetry::harness::IDS
         .iter()
         .all(|id| {
@@ -548,7 +655,7 @@ fn setup_verified(
     harness: Option<&crate::local::harness::HarnessInfo>,
 ) -> bool {
     let Some(h) = harness else { return false };
-    if !h.installed || h.install_broken {
+    if !h.installed || h.install_broken || h.adapter_missing {
         return false;
     }
     if request.trigger == Trigger::Automatic {
@@ -581,6 +688,17 @@ pub(super) fn append_output(output: &mut String, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn acp_install_commands_are_allowlisted() {
+        for preset in crate::local::acp::presets() {
+            assert!(install_command(&preset.launch.id, false).is_some());
+            // fx is macOS/Linux only; `presets()` omits it on Windows.
+            if preset.launch.executable != "fx" {
+                assert!(install_command(&preset.launch.id, true).is_some());
+            }
+        }
+        assert!(install_command("acp:unconfigured", false).is_none());
+    }
     use super::*;
 
     #[test]
@@ -612,10 +730,23 @@ mod tests {
     }
 
     #[test]
+    fn automatic_setup_does_not_replace_an_installed_acp_agent() {
+        let mut entries: Vec<_> = crate::telemetry::harness::IDS
+            .iter()
+            .map(|id| json!({"id": id, "installed": false, "installBroken": false}))
+            .collect();
+        entries.push(json!({"id": "acp:565e351e-62c7-488f-a58a-914d30cc5776", "installed": true}));
+        assert_eq!(
+            automatic_install_needed(&json!({"harnesses": entries})),
+            None
+        );
+    }
+
+    #[test]
     fn setup_verification_distinguishes_install_login_and_automatic_readiness() {
         let mut h = crate::local::harness::HarnessInfo {
-            id: "opencode",
-            name: "OpenCode",
+            id: "opencode".into(),
+            name: "OpenCode".into(),
             ..blank_harness()
         };
         h.installed = true;
@@ -648,8 +779,8 @@ mod tests {
     /// A blank `HarnessInfo`; `HarnessInfo::new` is private to the harness module.
     fn blank_harness() -> crate::local::harness::HarnessInfo {
         crate::local::harness::HarnessInfo {
-            id: "claude-code",
-            name: "Claude Code",
+            id: "claude-code".into(),
+            name: "Claude Code".into(),
             installed: false,
             install_broken: false,
             bin_path: None,
@@ -657,13 +788,26 @@ mod tests {
             authenticated: false,
             auth_state: crate::local::harness::HarnessAuthState::Unknown,
             auth_method: None,
+            auth_provider: None,
+            login_eligible: false,
+            auth_check_failed: false,
+            auth_observation: None,
+            claude_ultracode: false,
             account: None,
+            account_name: None,
             org: None,
             plan: None,
             agent_ready: false,
             agent_note: None,
+            setup_url: None,
+            auth_env_key: None,
+            needs_connection_adapter: false,
+            adapter_missing: false,
+            logo: None,
             needs_config_repair: false,
             supports_steering: false,
+            supports_compaction: false,
+            catalog_pending: false,
             models: Vec::new(),
             options: crate::local::harness::HarnessOptions::none(),
         }
@@ -761,6 +905,23 @@ mod tests {
         h.install_broken = true;
         assert!(!fresh_install(Action::Install, false, Some(&h)));
         assert!(!fresh_install(Action::Install, false, None));
+    }
+
+    #[test]
+    fn the_windows_install_command_line_carries_none_of_its_phrases() {
+        let script = windows_install_script(windows_install_command("opencode").unwrap());
+        assert!(script.contains("GitHub download failed"));
+        // Nothing the script prints on failure may quote its own text either.
+        assert!(!script.contains("Write-Error"));
+        let encoded = encoded_command(&script);
+        assert_eq!(crate::telemetry::harness::excerpt_for_test(&encoded), None);
+        assert_eq!(
+            encoded_command("exit 1"),
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"e\0x\0i\0t\0 \x001\0"
+            )
+        );
     }
 
     #[test]

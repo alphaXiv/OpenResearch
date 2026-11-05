@@ -1,3 +1,5 @@
+import { defaultUrlTransform } from "react-markdown";
+
 export interface MarkdownTarget {
   path: string;
   query: string;
@@ -22,7 +24,7 @@ export function resolveMarkdownTarget(
 
   let pathname: string;
   try {
-    pathname = decodeURI(encodedPath);
+    pathname = decodeURIComponent(encodedPath);
   } catch {
     return null;
   }
@@ -48,6 +50,133 @@ export function resolveMarkdownTarget(
   };
 }
 
+/** Re-escapes a resolved path so resolving it again yields the same path. */
+export function encodeMarkdownPath(path: string): string {
+  return path.replace(/[%#?:]/g, encodeURIComponent);
+}
+
+/** An asset `src` of the document at decoded `documentPath`, in the document's own root. */
+export function documentAssetTarget(documentPath: string, src: string, preserveLeadingSlash = false): MarkdownTarget | null {
+  return resolveMarkdownTarget(documentPath.split("/").slice(0, -1).join("/"), src, preserveLeadingSlash);
+}
+
+/** One place an image may load from; `resolveAsset` serves an HTML document's assets from that same place. */
+export interface ImageCandidate {
+  url: string;
+  resolveAsset: (src: string) => string | null;
+}
+
+/** A cited file link's path; `resolveFilePath` takes the still-encoded target. */
+export function citedFilePath(path: string, resolveFilePath?: (path: string) => string | null): string | null {
+  const native = nativeMarkdownPath(path);
+  if (native || /^file:/i.test(path)) return native;
+  if (resolveFilePath) return resolveFilePath(path);
+  try {
+    const decoded = decodeURIComponent(path);
+    return decoded.includes("\0") ? null : decoded;
+  } catch {
+    return null;
+  }
+}
+
 export function markdownTargetUrl(url: string, target: MarkdownTarget): string {
   return `${url}${target.query ? `&${target.query}` : ""}${target.hash}`;
+}
+
+/** Split a cited `path:42`, `path:42:7`, `path:42-50`, or GitHub-style
+ * `path#L42[C3][-L50[C1]]` into the path and its first line. */
+export function splitLineSuffix(target: string): { path: string; line?: number } {
+  const match = /^(.+?)(?::(\d+)(?:[:-]\d+)?|#L(\d+)(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/.exec(target);
+  if (!match) return { path: target };
+  const line = Number(match[2] ?? match[3]);
+  return line > 0 ? { path: match[1], line } : { path: match[1] };
+}
+
+/** First line of a `<file lines=…>` value: "20", "20-40", or "L20-L40". */
+export function firstCitedLine(lines: string): number | undefined {
+  const line = Number.parseInt(lines.replace(/^L/i, ""), 10);
+  return line > 0 ? line : undefined;
+}
+
+export function isWindowsDrivePath(src: string): boolean {
+  return /^[a-z]:[\\/]/i.test(src);
+}
+
+export function nativeMarkdownPath(target: string): string | null {
+  let path = target;
+  const fileUrl = /^file:/i.test(target);
+  if (fileUrl) {
+    if (!/^file:\/\/(?:localhost)?\//i.test(target)) return null;
+    try {
+      const url = new URL(target);
+      if (url.hostname && url.hostname !== "localhost") return null;
+      path = url.pathname;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    return null;
+  }
+  if (path.includes("\0")) return null;
+  if (fileUrl && /^\/[a-z]:[\\/]/i.test(path)) path = path.slice(1);
+  if (isWindowsDrivePath(path)) return path.replaceAll("\\", "/");
+  return fileUrl && path.startsWith("/") && !path.startsWith("//") ? path : null;
+}
+
+export function chatImageTarget(src: string): (Pick<MarkdownTarget, "path" | "hash"> & { source: "absolute" | "artifact" | "checkout" }) | null {
+  const windows = isWindowsDrivePath(src);
+  if (!windows && isExternalMarkdownTarget(src)) return null;
+  const resolved = resolveMarkdownTarget("", windows ? src.replaceAll("\\", "/") : src, true);
+  if (!resolved) return null;
+  // Local-image queries must not override the selected file or session.
+  const target = { path: resolved.path, hash: resolved.hash };
+  // An encoded drive path (`C%3A/…`) decodes to `C:/…`, so classify the decoded
+  // path too — the re-resolve round trip keeps the absolute source.
+  if (isWindowsDrivePath(target.path)) {
+    return { ...target, path: target.path.replaceAll("\\", "/"), source: "absolute" };
+  }
+  if (target.path.startsWith("/") || target.path.startsWith("~/") || windows) {
+    return { ...target, source: "absolute" };
+  }
+  if (target.path.startsWith("artifacts/")) {
+    return { ...target, path: target.path.slice("artifacts/".length), source: "artifact" };
+  }
+  return { ...target, source: "checkout" };
+}
+
+/** `artifacts/` is both the legacy prefix for the artifact root and a real folder
+ * inside it, so try each reading in the established order. */
+export function chatImageTargets(src: string): NonNullable<ReturnType<typeof chatImageTarget>>[] {
+  const target = chatImageTarget(src);
+  if (!target) return [];
+  if (target.source !== "artifact") return [target];
+  const path = `artifacts/${target.path}`;
+  return [target, { ...target, path, source: "checkout" }, { ...target, path }];
+}
+
+interface HastNode {
+  tagName?: string;
+  children?: HastNode[];
+  properties?: Record<string, unknown>;
+}
+
+export function rehypeSafeUrls() {
+  return (tree: HastNode) => {
+    const visit = (node: HastNode) => {
+      for (const key of ["href", "src"]) {
+        if (node.properties && Object.hasOwn(node.properties, key)) {
+          const value = String(node.properties[key] || "");
+          // File destinations travel out of band, never as live browser protocols.
+          if (key === "href" && (splitLineSuffix(value).line != null || nativeMarkdownPath(value))) node.properties["data-cited-href"] = value;
+          node.properties[key] = key === "src" && node.tagName === "img" && isWindowsDrivePath(value)
+            ? value : defaultUrlTransform(value);
+        }
+      }
+      node.children?.forEach(visit);
+    };
+    visit(tree);
+  };
 }

@@ -9,26 +9,51 @@
 //! copy is deleted by a later start, once every process that mapped it has
 //! exited.
 //!
-//! There is no `exec`, so a restarting `orx up` spawns the new binary and exits;
+//! While the desktop app's backend runs, only the unpacking and a first run of the
+//! result happen; the restart then does just the two renames, from the staged
+//! directory. A CLI install is swapped in one go.
+//!
+//! There is no `exec`, so a restarting `orx up` or app spawns the new binary and exits;
 //! the child waits on the parent's process handle before binding the port.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::{Duration, Instant};
 
+use super::LatestRelease;
 use crate::error::{anyhow, Result};
 
-/// Environment a relaunched `orx up` reads to wait for the process it replaces.
+pub(crate) async fn fetch_manifest(
+    timeout: std::time::Duration,
+) -> Result<Option<super::SingleAssetManifest>> {
+    Ok(super::fetch_canary_manifest(timeout)
+        .await?
+        .and_then(|mut manifest| {
+            manifest
+                .assets
+                .remove("windows")
+                .map(|asset| super::SingleAssetManifest {
+                    version: manifest.version,
+                    tag: manifest.tag,
+                    asset: asset.asset,
+                    sha256: asset.sha256,
+                    ancestors: manifest.ancestors,
+                })
+        }))
+}
+
+/// Environment a relaunched `orx up` or app reads to wait for the process it replaces.
 const RELAUNCH_WAIT_PID_ENV: &str = "ORX_RELAUNCH_WAIT_PID";
 
-/// Spawn the copy on disk with `args`, telling it which process to wait for,
-/// then exit. Returns only when the spawn failed.
-pub(super) fn relaunch(args: Vec<std::ffi::OsString>) -> std::io::Error {
+/// Spawn the copy on disk with `args` and `envs`, telling it which process to
+/// wait for, then exit. Returns only when the spawn failed.
+pub(super) fn relaunch(args: Vec<std::ffi::OsString>, envs: &[(&str, String)]) -> std::io::Error {
     // The load-time path, which the update swapped a new file under.
     let Ok(exe) = std::env::current_exe() else {
         return std::io::Error::other("could not resolve the running executable");
     };
-    let spawned = Command::new(exe)
+    let spawned = crate::process::command(exe)
         .args(args)
+        .envs(envs.iter().cloned())
         .env(RELAUNCH_WAIT_PID_ENV, std::process::id().to_string())
         .spawn();
     match spawned {
@@ -93,26 +118,141 @@ fn sweep_stale_stages(dir: &Path) {
     }
 }
 
-/// Unpack the release with the PowerShell installer into a staging directory,
-/// then swap it in for `installed`. The old binary is restored if the swap fails.
+/// Where a launch-checked release waits beside the installed `orx.exe` for the
+/// restart that swaps it in. Deliberately not [`STAGE_PREFIX`]: the sweep would
+/// delete it, and it outlives the run that made it.
+const STAGED_DIR: &str = ".orx-staged";
+
+/// Defender and SmartScreen scan an executable on its first run, which can take a while.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub(crate) fn install(installed: &Path, script: &[u8], quiet: bool) -> Result<()> {
+    with_scratch(installed, |scratch| {
+        run_installer(scratch, script, quiet)?;
+        swap_staged(installed, &scratch.join("orx.exe"))
+    })
+}
+
+/// The stage directory for the install at `installed`, whether or not one is there.
+pub(crate) fn staged_dir(installed: &Path) -> PathBuf {
+    installed.with_file_name(STAGED_DIR)
+}
+
+/// Unpack `release` with the PowerShell installer and stage it for `installed`.
+pub(crate) fn stage_installer(
+    installed: &Path,
+    release: &LatestRelease,
+    script: &[u8],
+    quiet: bool,
+) -> Result<()> {
+    stage(installed, release, |scratch| {
+        run_installer(scratch, script, quiet)
+    })
+}
+
+/// Stage a desktop `orx.exe` for `release` after checking it is signed by the
+/// expected publisher.
+pub(crate) fn stage_binary(installed: &Path, release: &LatestRelease, bytes: &[u8]) -> Result<()> {
+    if crate::telemetry::build_channel() != "production" {
+        return Err(anyhow!("This OpenResearch app is not an official build."));
+    }
+    stage(installed, release, |scratch| {
+        let staged = scratch.join("orx.exe");
+        std::fs::write(&staged, bytes)?;
+        let status = crate::process::command(powershell())
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$s = Get-AuthenticodeSignature -LiteralPath $env:ORX_UPDATE_FILE; if ($s.Status -ne 'Valid' -or $s.SignerCertificate.GetNameInfo('SimpleName', $false) -ne 'alphaXiv Inc.' -or -not $s.TimeStamperCertificate) { exit 1 }"])
+            .env("ORX_UPDATE_FILE", &staged)
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!(
+                "The downloaded app is not signed by the expected publisher."
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// Build the release in a scratch directory with `produce`, run it once, and only
+/// then publish it as the staged directory, so that directory only ever holds an
+/// `orx.exe` that started and a failed attempt leaves the previous one.
+fn stage(
+    installed: &Path,
+    release: &LatestRelease,
+    produce: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    with_scratch(installed, |scratch| {
+        produce(scratch)?;
+        launch_check(&scratch.join("orx.exe"))?;
+        super::write_staged_release(scratch, &release.version, &release.tag)?;
+
+        let staged = staged_dir(installed);
+        let _ = std::fs::remove_dir_all(&staged);
+        std::fs::rename(scratch, &staged)
+            .map_err(|e| anyhow!("Could not stage the new orx at {}: {}", staged.display(), e))
+    })
+}
+
+fn with_scratch(installed: &Path, run: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
     // Beside the target, not in %TEMP%: a rename cannot cross volumes, and
     // preflight already proved this directory writable.
     let dir = installed
         .parent()
         .ok_or_else(|| anyhow!("{} has no parent directory", installed.display()))?;
     sweep_stale_stages(dir);
-    let stage = dir.join(format!("{STAGE_PREFIX}{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&stage)?;
-    let outcome = stage_and_swap(installed, script, quiet, &stage);
-    let _ = std::fs::remove_dir_all(&stage);
-    outcome
+    let scratch = dir.join(format!("{STAGE_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&scratch)?;
+
+    let result = run(&scratch);
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
 }
 
-fn stage_and_swap(installed: &Path, script: &[u8], quiet: bool, stage: &Path) -> Result<()> {
-    let script_path = stage.join("installer.ps1");
+/// Run the staged binary's CLI once. A first run is the slow one, so doing it here,
+/// where a failure just rejects the update, leaves the restart a fast second run of
+/// a binary known to start.
+fn launch_check(exe: &Path) -> Result<()> {
+    let mut child = crate::process::command(exe)
+        .args(["--no-telemetry", "version", "--build-id"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow!("The downloaded app could not be started: {e}"))?;
+    let deadline = Instant::now() + LAUNCH_TIMEOUT;
+    loop {
+        match child.try_wait()? {
+            Some(status) if status.success() => return Ok(()),
+            Some(status) => {
+                return Err(anyhow!(
+                    "The downloaded app failed to start ({status}). Nothing was installed."
+                ))
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!(
+                    "The downloaded app did not start within {} seconds. Nothing was installed.",
+                    LAUNCH_TIMEOUT.as_secs()
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+/// Swap the staged `orx.exe` in for `installed`. The old binary is restored if the
+/// swap fails.
+pub(crate) fn install_staged(installed: &Path) -> Result<()> {
+    let staged = staged_dir(installed);
+    swap_staged(installed, &staged.join("orx.exe"))?;
+    let _ = std::fs::remove_dir_all(&staged);
+    Ok(())
+}
+
+fn run_installer(scratch: &Path, script: &[u8], quiet: bool) -> Result<()> {
+    let script_path = scratch.join("installer.ps1");
     std::fs::write(&script_path, script)?;
-    let mut cmd = Command::new(powershell());
+    let mut cmd = crate::process::command(powershell());
     cmd.args([
         "-NoProfile",
         "-NonInteractive",
@@ -123,7 +263,7 @@ fn stage_and_swap(installed: &Path, script: &[u8], quiet: bool, stage: &Path) ->
     .arg(&script_path)
     // A flat unpack into the staging dir, with no receipt naming that dir as
     // the install prefix (UNMANAGED_INSTALL implies it; DISABLE_UPDATE makes sure).
-    .env("OPENRESEARCH_CLI_UNMANAGED_INSTALL", stage)
+    .env("OPENRESEARCH_CLI_UNMANAGED_INSTALL", scratch)
     .env("OPENRESEARCH_CLI_DISABLE_UPDATE", "1")
     // Both outrank UNMANAGED_INSTALL in the installer; a user's shell may export them.
     .env_remove("OPENRESEARCH_CLI_INSTALL_DIR")
@@ -141,14 +281,17 @@ fn stage_and_swap(installed: &Path, script: &[u8], quiet: bool, stage: &Path) ->
             status
         ));
     }
-    let staged = stage.join("orx.exe");
+    let staged = scratch.join("orx.exe");
     if !staged.exists() {
         return Err(anyhow!(
             "The installer did not produce {}. The previous orx is untouched.",
             staged.display()
         ));
     }
+    Ok(())
+}
 
+fn swap_staged(installed: &Path, staged: &Path) -> Result<()> {
     let retired = super::retired_path(installed);
     let moved_aside = match std::fs::rename(installed, &retired) {
         Ok(()) => true,
@@ -161,7 +304,7 @@ fn stage_and_swap(installed: &Path, script: &[u8], quiet: bool, stage: &Path) ->
             ))
         }
     };
-    if let Err(err) = std::fs::rename(&staged, installed) {
+    if let Err(err) = std::fs::rename(staged, installed) {
         if moved_aside {
             let _ = std::fs::rename(&retired, installed);
         }
@@ -180,5 +323,40 @@ fn powershell() -> PathBuf {
     match std::env::var_os("SystemRoot") {
         Some(root) => Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
         None => "powershell.exe".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restart_swaps_the_staged_exe_in_and_clears_the_stage() {
+        let dir = std::env::temp_dir().join(format!("orx-windows-{}", uuid::Uuid::new_v4()));
+        let installed = dir.join("orx.exe");
+        let staged = staged_dir(&installed);
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(&installed, "old").unwrap();
+        std::fs::write(staged.join("orx.exe"), "new").unwrap();
+        super::super::write_staged_release(
+            &staged,
+            &semver::Version::parse("0.2.18").unwrap(),
+            "v0.2.18",
+        )
+        .unwrap();
+
+        install_staged(&installed).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "new");
+        assert!(!staged.exists());
+        let retired: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| *path != installed)
+            .collect();
+        assert_eq!(retired.len(), 1);
+        assert_eq!(std::fs::read_to_string(&retired[0]).unwrap(), "old");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
