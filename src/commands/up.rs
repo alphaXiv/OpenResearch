@@ -650,6 +650,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/projects/{id}/github/push", post(push_project_github))
         .route("/api/projects/{id}/share", post(share_project))
+        .route(
+            "/api/projects/{id}/publish",
+            get(get_project_link).post(publish_project_link),
+        )
+        .route("/api/shared-projects/{slug}", get(get_published_project))
         .route("/api/projects/import", post(import_shared_project))
         .route("/api/github/account", get(github_account))
         .route("/api/github/organizations", get(github_organizations))
@@ -2213,20 +2218,7 @@ async fn share_project(
     // The worker owns the lease: a dropped request must not let a delete or move start mid-export.
     let (name, scratch, out, skipped) = tokio::task::spawn_blocking(move || -> Result<_> {
         let _admission = admission;
-        use local::share::{ChatSelection, ShareOptions};
-        let options = ShareOptions {
-            chats: if req.chats.is_empty() {
-                ChatSelection::None
-            } else {
-                ChatSelection::Only(req.chats)
-            },
-            logs: req.logs,
-            artifacts: req.artifacts,
-        };
-        let scratch = local::git::TemporaryDirectory::new("orx-share-download")?;
-        // A fixed name: project names can outgrow a file name's length limit.
-        let out = scratch.path().join("project.orx");
-        let manifest = local::share::export(&Store::open()?, &project, &options, &out)?;
+        let (scratch, out, manifest) = export_shared_project(&project, req)?;
         Ok((
             local::share::file_name(&project),
             scratch,
@@ -2259,6 +2251,105 @@ async fn share_project(
         .map_err(|error| ApiError::from(anyhow!("share response failed: {error}")))
 }
 
+/// Writes the project's `.orx` file into a scratch folder, which removes it when dropped.
+fn export_shared_project(
+    project: &local::model::LocalProject,
+    req: ShareProjectReq,
+) -> Result<(
+    local::git::TemporaryDirectory,
+    std::path::PathBuf,
+    local::share::Manifest,
+)> {
+    use local::share::{ChatSelection, ShareOptions};
+    let options = ShareOptions {
+        chats: if req.chats.is_empty() {
+            ChatSelection::None
+        } else {
+            ChatSelection::Only(req.chats)
+        },
+        logs: req.logs,
+        artifacts: req.artifacts,
+    };
+    let scratch = local::git::TemporaryDirectory::new("orx-share")?;
+    // A fixed name: project names can outgrow a file name's length limit.
+    let out = scratch.path().join("project.orx");
+    let manifest = local::share::export(&Store::open()?, project, &options, &out)?;
+    Ok((scratch, out, manifest))
+}
+
+async fn openresearch_credentials() -> std::result::Result<crate::config::Credentials, ApiError> {
+    crate::config::load_credentials().await?.ok_or_else(|| {
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Sign in to OpenResearch to publish a link.".into(),
+        )
+    })
+}
+
+/// Uploads the project as a `.orx` file to openresearch.sh; publishing again replaces the file behind the same link.
+async fn publish_project_link(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ShareProjectReq>,
+) -> ApiResult {
+    let creds = openresearch_credentials().await?;
+    reject_if_moving(&state)?;
+    let admission = state
+        .project_lifecycle
+        .admit(&id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    reject_if_moving(&state)?;
+    let project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    // The worker owns the lease, released once the file is written; the upload needs no lease.
+    let (_scratch, out, manifest) = tokio::task::spawn_blocking(move || {
+        let _admission = admission;
+        export_shared_project(&project, req)
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("share task failed: {error}")))?
+    .map_err(bad_request)?;
+    let link = crate::client::publish_project(&creds, &id, &manifest, &out)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(
+        json!({ "sharedProject": link, "skipped": manifest.skipped }),
+    ))
+}
+
+/// Whether this machine can publish, and the project's link if it has one. In an SSH
+/// workspace this answers for the remote, whose sign-in is not the laptop's.
+async fn get_project_link(Path(id): Path<String>) -> ApiResult {
+    let Some(creds) = crate::config::load_credentials().await? else {
+        return Ok(Json(json!({ "signedIn": false, "sharedProject": null })));
+    };
+    // Only a hint: an older or unreachable server must not stand in the way of saving a file.
+    match crate::client::find_published_project(&creds, &id).await {
+        Err(error)
+            if error
+                .downcast_ref::<crate::client::Unauthorized>()
+                .is_some() =>
+        {
+            Ok(Json(json!({ "signedIn": false, "sharedProject": null })))
+        }
+        link => Ok(Json(
+            json!({ "signedIn": true, "sharedProject": link.unwrap_or(None) }),
+        )),
+    }
+}
+
+/// A published link's public details, shown before opening it.
+async fn get_published_project(Path(slug): Path<String>) -> ApiResult {
+    let slug =
+        crate::client::published_project_slug(&slug).ok_or_else(|| not_found("project link"))?;
+    let project =
+        crate::client::get_public_project(&crate::config::openresearch_api_url().await, slug)
+            .await
+            .map_err(bad_request)?;
+    Ok(Json(json!({ "sharedProject": project })))
+}
+
 /// Most a shared project upload may be; it streams to disk, outside the JSON request cap.
 const SHARED_PROJECT_UPLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
@@ -2266,8 +2357,10 @@ const SHARED_PROJECT_UPLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 struct ImportSharedProjectQuery {
     /// Folder to create the project in.
     path: String,
-    /// A `.orx` file on this machine; without it the request body is the file.
+    /// A `.orx` file on this machine; without it or `shared` the request body is the file.
     file: Option<String>,
+    /// The slug of a published project link to download.
+    shared: Option<String>,
 }
 
 async fn import_shared_project(
@@ -2282,12 +2375,26 @@ async fn import_shared_project(
         .admit("__project_create__")
         .ok_or_else(|| bad_request("project creation is unavailable"))?;
     reject_if_moving(&state)?;
-    let (file, upload) = match query.file {
-        Some(file) => (
+    let (file, upload) = match (query.file, query.shared) {
+        (Some(file), _) => (
             local::projects::expand_path(&file).map_err(bad_request)?,
             None,
         ),
-        None => {
+        (None, Some(shared)) => {
+            let slug = crate::client::published_project_slug(&shared)
+                .ok_or_else(|| bad_request("That is not an OpenResearch project link."))?;
+            let download = local::git::TemporaryDirectory::new("orx-import")?;
+            let path = download.path().join("download.orx");
+            crate::client::download_public_project(
+                &crate::config::openresearch_api_url().await,
+                slug,
+                &path,
+            )
+            .await
+            .map_err(bad_request)?;
+            (path, Some(download))
+        }
+        (None, None) => {
             let upload = local::git::TemporaryDirectory::new("orx-import")?;
             let path = upload.path().join("upload.orx");
             let mut out = tokio::fs::File::create(&path)

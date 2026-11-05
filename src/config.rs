@@ -196,6 +196,14 @@ pub async fn load_credentials() -> Result<Option<Credentials>> {
     }
 }
 
+/// The signed-in API, else the default: where public endpoints such as project links resolve.
+pub async fn openresearch_api_url() -> String {
+    match load_credentials().await {
+        Ok(Some(creds)) => creds.api_url,
+        _ => default_api_url(),
+    }
+}
+
 /// Persists credentials as pretty JSON with a trailing newline, mode 0600.
 pub async fn save_credentials(creds: &Credentials) -> Result<()> {
     let path = credentials_path();

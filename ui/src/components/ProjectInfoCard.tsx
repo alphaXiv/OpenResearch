@@ -1,5 +1,6 @@
 import { useContext, useId, useRef, useState, type RefObject } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useQuery } from "@tanstack/react-query";
 import { useWorkspace } from "../workspace";
 import { type DialogContentProps } from "../dialog";
 import { useFileManagerLabel } from "./useFileManagerLabel";
@@ -33,9 +34,10 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
 
   const { showCustomDialog } = useWorkspace().dialogs;
 
-  const { deleteProject, updateProject, revealFileInManager, shareProject } = useWorkspace().api;
+  const { api: { deleteProject, updateProject, revealFileInManager, shareProject }, queries: { getRuntimeQuery } } = useWorkspace();
 
   const revealLabel = useFileManagerLabel();
+  const remote = useQuery(getRuntimeQuery()).data?.kind === "ssh";
   const [menuOpen, setMenuOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -86,7 +88,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
                 setMenuOpen(false);
                 showCustomDialog({
                   component: ShareProjectDialog,
-                  props: { project, returnFocus: triggerRef },
+                  props: { project, remote, returnFocus: triggerRef },
                   onCancel: "close",
                   onConfirm: async (choice) => {
                     const { file, fileName, skipped } = await shareProject(project.id, choice);
