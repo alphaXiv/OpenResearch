@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -29,19 +30,25 @@ function setup(query, folderError = null) {
       if (!(index in store)) store[index] = initial;
       return [store[index], (value) => { store[index] = typeof value === "function" ? value(store[index]) : value; }];
     } },
+    "@tanstack/react-query": { useQuery: () => ({ data: null }) },
     "../api": { AlphaXivNotConnectedError: NotConnected, OpenResearchAccountError: AccountError },
     "@base-ui/react/menu": { Menu: menu },
     "../dialog": { showCustomDialog: (options) => { dialogs.push(options); } },
-    "../queries/settings": { useOpenResearchAccount: () => query, useAlphaXivFolders: () => ({ error: folderError }), useSignOutOpenResearch: () => ({ isPending: false, mutateAsync: async () => { signedOut++; } }) },
+    "../queries/settings": {
+      getRuntimeQuery: () => ({ queryKey: ["gateway", "runtime"] }),
+      useOpenResearchAccount: () => query,
+      useAlphaXivFolders: () => ({ error: folderError }),
+      useSignOutOpenResearch: () => ({ isPending: false, mutateAsync: async () => { signedOut++; } }),
+    },
     "../queries/invalidation": { invalidateFamilies: () => { invalidated++; } },
-    "../queries/client": { queryClient: { invalidateQueries: async () => {} }, workspaceKey: (key) => [key] },
+    "../queries/client": { queryClient: { invalidateQueries: async () => {}, getQueryData: () => null }, workspaceKey: (key) => [key] },
     "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
-    "./confirmOpenResearchSignOut": { confirmOpenResearchSignOut: (onConfirm) => { confirm = onConfirm; } },
+    "./confirmOpenResearchSignOut": { confirmOpenResearchSignOut: (_dialogs, onConfirm) => { confirm = onConfirm; } },
     "./OpenResearchAccount": { OpenResearchAccount: "account", accountErrorMessage: (error) => error ? "outage reason" : null },
-    "./ui": { Button: "button", DialogContent: "dialog-content", DialogTitle: "dialog-title", MenuItem: "button", Spinner: "spinner" },
+    "./ui": { Button: "button", DialogContent: "dialog-content", DialogTitle: "dialog-title", MenuItem: "button", Spinner: "spinner", showAlert: () => {} },
   };
   const exports = {};
-  new Function("require", "exports", "window", code)((name) => mocks[name] ?? require(name), exports, { ipc: { postMessage: (message) => posted.push(message) } });
+  new Function("require", "exports", "window", code)(withWorkspaceMocks((name) => mocks[name] ?? require(name)), exports, { ipc: { postMessage: (message) => posted.push(message) } });
   const nodes = (tree) => React.isValidElement(tree) ? [tree, ...React.Children.toArray(tree.props.children).flatMap(nodes)] : [];
   const renderIn = (key, component) => {
     if (!stores.has(key)) stores.set(key, []);
@@ -55,7 +62,7 @@ function setup(query, folderError = null) {
     const options = dialogs.at(-1);
     return renderIn(options, () => options.component({ ...options.props, confirm: () => calls.push("confirm"), cancel: () => calls.push("cancel"), cancelable: true, isDisabled: false, isPending: false, errorMessage: null }));
   };
-  return { render, dialog, dialogs, posted, openSignIn: exports.openSignIn, confirm: () => confirm(), counts: () => [signedOut, invalidated] };
+  return { render, dialog, dialogs, posted, openSignIn: exports.useSignIn(), confirm: () => confirm(), counts: () => [signedOut, invalidated] };
 }
 
 const user = { id: "u", firstName: "Clover", lastName: null, email: "c@example.org", alphaxivUrl: "https://www.alphaxiv.org" };
@@ -147,4 +154,236 @@ test("sign-in started elsewhere returns focus to the control that started it", (
   const opener = { focus() {} };
   app.openSignIn(false, opener);
   assert.equal(app.dialog().find((node) => node.type === "dialog-content").props.finalFocus(), opener);
+});
+
+test("LoginSession navigates placeholder tab on remote sessions without opening a duplicate window", () => {
+  const opened = [];
+  const replaced = [];
+  let onMessage;
+  class MockWebSocket {
+    constructor(url) { this.url = url; }
+    set onmessage(handler) { onMessage = handler; }
+    close() {}
+  }
+  globalThis.WebSocket = MockWebSocket;
+  globalThis.location = { protocol: "http:", host: "127.0.0.1:4792" };
+
+  let capturedEffect;
+  const sessionMocks = {
+    react: {
+      ...React,
+      useState: (init) => [init, () => {}],
+      useRef: (init) => ({ current: init ?? null }),
+      useEffect: (fn) => { capturedEffect = fn; },
+    },
+    "@tanstack/react-query": { useQuery: () => ({ data: null }) },
+    "../api": { AlphaXivNotConnectedError: NotConnected, OpenResearchAccountError: AccountError },
+    "@base-ui/react/menu": { Menu: {} },
+    "../dialog": {},
+    "../queries/settings": { getRuntimeQuery: () => ({}) },
+    "../queries/invalidation": {},
+    "../queries/client": { queryClient: { getQueryData: () => null }, socketUrl: (path) => new URL(path, "ws://127.0.0.1:4792") },
+    "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
+    "./confirmOpenResearchSignOut": {},
+    "./OpenResearchAccount": {},
+    "./ui": { showAlert: () => {} },
+  };
+  const mockWindow = {
+    ipc: { postMessage() {} },
+    open: (url, target) => { opened.push({ url, target }); return {}; },
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+  };
+  const sessionExports = {};
+  new Function("require", "exports", "window", code)(
+    withWorkspaceMocks((name) => sessionMocks[name] ?? require(name)),
+    sessionExports,
+    mockWindow,
+  );
+
+  const placeholderWindow = {
+    location: { replace: (url) => replaced.push(url) },
+    closed: false,
+    close() {},
+  };
+
+  sessionExports.LoginSession({ connectOnly: true, remote: true, placeholderWindow, onComplete() {}, onError() {} });
+  assert.ok(capturedEffect);
+  capturedEffect();
+
+  assert.ok(onMessage);
+  const authUrl = "https://api.alphaxiv.org/auth/oauth2/authorize?client_id=123&state=abc";
+  const output = `Opening your browser to sign in with alphaXiv…\nIf it doesn't open, visit:\n  ${authUrl}\n`;
+  onMessage({ data: new TextEncoder().encode(output).buffer });
+
+  assert.deepEqual(replaced, [authUrl]);
+  assert.equal(opened.length, 0);
+});
+
+test("LoginSession prompts browser window on remote sessions without placeholder", () => {
+  const opened = [];
+  let onMessage;
+  class MockWebSocket {
+    constructor(url) { this.url = url; }
+    set onmessage(handler) { onMessage = handler; }
+    close() {}
+  }
+  globalThis.WebSocket = MockWebSocket;
+  globalThis.location = { protocol: "http:", host: "127.0.0.1:4792" };
+
+  let capturedEffect;
+  const sessionMocks = {
+    react: {
+      ...React,
+      useState: (init) => [init, () => {}],
+      useRef: (init) => ({ current: init ?? null }),
+      useEffect: (fn) => { capturedEffect = fn; },
+    },
+    "@tanstack/react-query": { useQuery: () => ({ data: null }) },
+    "../api": { AlphaXivNotConnectedError: NotConnected, OpenResearchAccountError: AccountError },
+    "@base-ui/react/menu": { Menu: {} },
+    "../dialog": {},
+    "../queries/settings": { getRuntimeQuery: () => ({}) },
+    "../queries/invalidation": {},
+    "../queries/client": { queryClient: { getQueryData: () => null }, socketUrl: (path) => new URL(path, "ws://127.0.0.1:4792") },
+    "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
+    "./confirmOpenResearchSignOut": {},
+    "./OpenResearchAccount": {},
+    "./ui": { showAlert: () => {} },
+  };
+  const mockWindow = {
+    ipc: { postMessage() {} },
+    open: (url, target) => { opened.push({ url, target }); return {}; },
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+  };
+  const sessionExports = {};
+  new Function("require", "exports", "window", code)(
+    withWorkspaceMocks((name) => sessionMocks[name] ?? require(name)),
+    sessionExports,
+    mockWindow,
+  );
+
+  sessionExports.LoginSession({ connectOnly: true, remote: true, onComplete() {}, onError() {} });
+  assert.ok(capturedEffect);
+  capturedEffect();
+
+  assert.ok(onMessage);
+  const authUrl = "https://api.alphaxiv.org/auth/oauth2/authorize?client_id=123&state=abc";
+  const output = `Opening your browser to sign in with alphaXiv…\nIf it doesn't open, visit:\n  ${authUrl}\n`;
+  onMessage({ data: new TextEncoder().encode(output).buffer });
+
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].url, authUrl);
+  assert.equal(opened[0].target, "_blank");
+
+  // A subsequent message does not prompt a second browser page
+  onMessage({ data: new TextEncoder().encode(output).buffer });
+  assert.equal(opened.length, 1);
+});
+
+test("LoginSession does not open browser on local sessions", () => {
+  const opened = [];
+  let onMessage;
+  class MockWebSocket {
+    constructor(url) { this.url = url; }
+    set onmessage(handler) { onMessage = handler; }
+    close() {}
+  }
+  globalThis.WebSocket = MockWebSocket;
+  globalThis.location = { protocol: "http:", host: "127.0.0.1:4792" };
+
+  let capturedEffect;
+  const sessionMocks = {
+    react: {
+      ...React,
+      useState: (init) => [init, () => {}],
+      useRef: (init) => ({ current: init ?? null }),
+      useEffect: (fn) => { capturedEffect = fn; },
+    },
+    "@tanstack/react-query": { useQuery: () => ({ data: null }) },
+    "../api": { AlphaXivNotConnectedError: NotConnected, OpenResearchAccountError: AccountError },
+    "@base-ui/react/menu": { Menu: {} },
+    "../dialog": {},
+    "../queries/settings": { getRuntimeQuery: () => ({}) },
+    "../queries/invalidation": {},
+    "../queries/client": { queryClient: { getQueryData: () => null }, socketUrl: (path) => new URL(path, "ws://127.0.0.1:4792") },
+    "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
+    "./confirmOpenResearchSignOut": {},
+    "./OpenResearchAccount": {},
+    "./ui": { showAlert: () => {} },
+  };
+  const mockWindow = {
+    ipc: { postMessage() {} },
+    open: (url, target) => { opened.push({ url, target }); return {}; },
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+  };
+  const sessionExports = {};
+  new Function("require", "exports", "window", code)(
+    withWorkspaceMocks((name) => sessionMocks[name] ?? require(name)),
+    sessionExports,
+    mockWindow,
+  );
+
+  sessionExports.LoginSession({ connectOnly: true, remote: false, onComplete() {}, onError() {} });
+  assert.ok(capturedEffect);
+  capturedEffect();
+
+  assert.ok(onMessage);
+  const authUrl = "https://api.alphaxiv.org/auth/oauth2/authorize?client_id=123&state=abc";
+  const output = `Opening your browser to sign in with alphaXiv…\nIf it doesn't open, visit:\n  ${authUrl}\n`;
+  onMessage({ data: new TextEncoder().encode(output).buffer });
+
+  assert.equal(opened.length, 0);
+});
+
+test("sign-in opens a placeholder tab in browser when remote and closes it on cancel", () => {
+  const opened = [];
+  const closed = [];
+  const mockPlaceholder = {
+    close: () => { closed.push("closed"); },
+    location: { replace() {} },
+  };
+  const mockWindow = {
+    open: (url, target) => {
+      opened.push({ url, target });
+      return mockPlaceholder;
+    },
+  };
+  const dialogs = [];
+  const mocks = {
+    react: { ...React, useEffect() {}, useRef: () => ({ current: null }), useState: (initial) => [initial, () => {}] },
+    "@tanstack/react-query": { useQuery: () => ({ data: { kind: "ssh" } }) },
+    "../api": { AlphaXivNotConnectedError: NotConnected, OpenResearchAccountError: AccountError },
+    "@base-ui/react/menu": { Menu: {} },
+    "../dialog": { showCustomDialog: (options) => { dialogs.push(options); } },
+    "../queries/settings": {
+      getRuntimeQuery: () => ({ queryKey: ["gateway", "runtime"] }),
+      useOpenResearchAccount: () => ({ data: null }),
+      useAlphaXivFolders: () => ({ error: null }),
+      useSignOutOpenResearch: () => ({ isPending: false }),
+    },
+    "../queries/invalidation": { invalidateFamilies: () => {} },
+    "../queries/client": { queryClient: { invalidateQueries: async () => {}, getQueryData: () => ({ kind: "ssh" }) }, workspaceKey: (key) => [key] },
+    "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
+    "./confirmOpenResearchSignOut": {},
+    "./OpenResearchAccount": { accountErrorMessage: () => null },
+    "./ui": { Button: "button", DialogContent: "dialog-content", DialogTitle: "dialog-title", MenuItem: "button", Spinner: "spinner", showAlert: () => {} },
+  };
+  const exports = {};
+  new Function("require", "exports", "window", code)(
+    withWorkspaceMocks((name) => mocks[name] ?? require(name)),
+    exports,
+    mockWindow,
+  );
+
+  exports.useSignIn()(true, null);
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].url, "/remote-launch");
+  assert.equal(opened[0].target, "_blank");
+
+  assert.equal(dialogs.length, 1);
+  dialogs[0].onCancel();
+  assert.equal(closed.length, 1);
 });

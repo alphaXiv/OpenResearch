@@ -1,3 +1,4 @@
+import { workspaceDom, mockWorkspace } from "./workspaceMocks.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -5,8 +6,9 @@ import ts from "typescript";
 
 const source = (file) => ts.createSourceFile(file, readFileSync(new URL(`../src/components/${file}`, import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 function evaluate(code, bindings) {
+  bindings = { useContext: () => workspaceDom, WorkspaceDomContext: {}, ...bindings, useWorkspace: () => mockWorkspace(bindings) };
   const js = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function(...Object.keys(bindings), js)(...Object.values(bindings));
+  return new Function(...Object.keys(bindings), "return (() => {" + js + "})();")(...Object.values(bindings));
 }
 function declaration(file, name) {
   let found;
@@ -33,7 +35,7 @@ function sendPreparation() {
   const statements = turn.tryBlock.statements;
   const optimisticIndex = statements.findIndex((node) => node.getText(file).includes('type: "optimisticUser"'));
   const prefix = statements.slice(0, optimisticIndex + 1).map((node) => node.getText(file)).join("\n");
-  return `const retry = null, mode = null;\nconst composerLiveRef = { current: { draft, attachments: pending, annotations: pendingAnnotations } };\nconst clearComposer = ${declaration(file, "clearComposer")};\n${prefix}`;
+  return `const retry = null, mode = null, attachmentsAtSend = pending;\nconst composerLiveRef = { current: { draft, attachments: attachmentsAtSend, annotations: pendingAnnotations } };\nconst clearComposer = ${declaration(file, "clearComposer")};\n${prefix}`;
 }
 
 function settingsRenderer(name, returns, bindings) {

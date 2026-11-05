@@ -1054,6 +1054,7 @@ pub(crate) fn to_wire_part(part: &Value) -> Option<WirePart> {
             prompt: None,
             phase: None,
             children: Vec::new(),
+            orx: None,
         }),
         "tool" => {
             let state = part.get("state");
@@ -1085,6 +1086,7 @@ pub(crate) fn to_wire_part(part: &Value) -> Option<WirePart> {
                 prompt: None,
                 phase: None,
                 children: Vec::new(),
+                orx: None,
             })
         }
         _ => None,
@@ -2721,6 +2723,7 @@ opencode/unknown
             answers: values.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_owned),
             annotations: Vec::new(),
+            from: None,
         };
         let mut saved = Vec::new();
         for (index, response) in [
@@ -2778,6 +2781,7 @@ opencode/unknown
             answers: vec![choice.into()],
             note: None,
             annotations: Vec::new(),
+            from: None,
         };
         assert_eq!(plan_exit_transition(&prompt, &response("Yes")), Some(false));
         assert_eq!(plan_exit_transition(&prompt, &response("No")), Some(true));

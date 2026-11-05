@@ -1,11 +1,12 @@
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { getUiStateQuery } from "../queries/projects";
+
 import { m } from "../paraglide/messages.js";
 import { useRef, useState } from "react";
 import { FileArchive, FolderOpen, Plus } from "lucide-react";
 import { type AgentSelection, type Project } from "../api";
 
-import { showCustomDialog, type DialogContentProps } from "../dialog";
+import { type DialogContentProps } from "../dialog";
 import { NewProjectForm } from "./NewProjectForm";
 import { OpenSharedProjectForm, reportMissingBranches } from "./OpenSharedProject";
 import { Button, DialogContent, DialogTitle } from "./ui";
@@ -20,6 +21,8 @@ export function ProjectsEmptyState({
   preferredAgent: AgentSelection | null;
   onCreated: (project: Project, githubPublicationError: string | null) => void;
 }) {
+  const { showCustomDialog } = useWorkspace().dialogs;
+
   return (
     <div className="home flex flex-1 min-h-0 flex-col items-center justify-center gap-3 bg-background p-6 text-center">
       <FolderOpen size={36} strokeWidth={1.5} className="shrink-0 text-muted" />
@@ -54,6 +57,8 @@ export function NewProjectDialog({
   /** A `.orx` file to open instead of creating a project. */
   initialShared?: File | string;
 }) {
+  const { getUiStateQuery } = useWorkspace().queries;
+
   const dialogRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [shared, setShared] = useState<File | string | null>(initialShared ?? null);

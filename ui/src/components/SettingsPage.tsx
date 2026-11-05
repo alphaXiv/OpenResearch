@@ -1,7 +1,18 @@
-import { openSignIn } from "./AccountChip";
+import { useMachines } from "../machineSelection";
+import { useSignIn } from "./AccountChip";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
+import {
+  useContext,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { cn } from "./ui/cn";
-import { showConfirmDialog, showCustomDialog, type DialogContentProps } from "../dialog";
+import { type DialogContentProps } from "../dialog";
 import { DialogContent, DialogTitle } from "./ui";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
@@ -11,43 +22,9 @@ import { OpenResearchSshKey } from "./OpenResearchSshKey";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarnessDialog";
-import {
-  setScopedQueryData,
-  workspaceScope,
-  workspaceKey,
-  isCurrentScope,
-  queryClient,
-} from "../queries/client";
+
 import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
 
-import {
-  getHarnessesQuery,
-  getHarnessSetupCommandsQuery,
-  refreshHarnesses,
-  getK8sSettingsQuery,
-  getModalSettingsQuery,
-  getVercelSettingsQuery,
-  getSshMasterStatusQuery,
-  getSshSettingsQuery,
-  getSlurmSettingsQuery,
-  getRaySettingsQuery,
-  getOpenResearchSettingsQuery,
-  useOpenResearchAccount,
-  useAlphaXivFolders,
-  useSignOutOpenResearch,
-  getLocalMachineQuery,
-  getComputeSettingsQuery,
-  getTinkerSettingsQuery,
-  getHfSettingsQuery,
-  getEnvVarsQuery,
-  getTelemetryQuery,
-  getProjectDefaultsQuery,
-  getProjectGitStatusQuery,
-  getDataDirQuery,
-} from "../queries/settings";
-
-import { getOverleafSettingsQuery } from "../queries/files";
-import { githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRunsQuery, repoAccessQuery } from "../queries/projects";
 import {
   ArrowLeft,
   ArrowRight,
@@ -65,41 +42,14 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+
 import {
-  deleteEnvVar,
-  listAcpHarnesses,
-  listAcpPresets,
-  removeAcpHarness,
   type AcpDefinition,
-  deleteOverleafSession,
-  deleteOverleafToken,
   fmtBytes,
   fmtDuration,
   fmtNumber,
-  setComputeDefault,
-  setProjectDefaults,
-  setTelemetry,
-  saveOverleafSession,
-  saveOverleafToken,
-  disableProjectGithub,
-  enableProjectGithub,
-  initializeProjectGit,
-  saveHfToken,
-  saveTinkerKey,
-  saveModalToken,
-  saveVercelSetup,
-  getVercelScopes,
-  saveK8sSettings,
-  saveRaySettings,
-  saveSlurmSettings,
-  setEnvVar,
-  validateDataDir,
-  moveDataDir,
   type DataDirSettings,
   type DataDirValidation,
-  rayPreflight,
-  trackioPreflight,
   runDisplayStatus,
   timeAgo,
   type ComputeSettings,
@@ -128,16 +78,11 @@ import {
   type SlurmSettings,
   type SshPreflight,
   type SshExecutionPreflight,
-  testSshExecution,
-  applyUpdate,
-  installCli,
-  setAutoUpdate as setAutoUpdateApi,
-  setReleaseChannel,
   type InstallChannel,
   type InstalledCli,
   AlphaXivNotConnectedError,
 } from "../api";
-import { onDataDirMove } from "../events";
+
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
@@ -408,6 +353,14 @@ export function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undef
 }
 
 function HarnessesTab({ remote }: { remote: boolean }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog } = useWorkspace().dialogs;
+
+  const { getHarnessesQuery, getHarnessSetupCommandsQuery, refreshHarnesses } = useWorkspace().queries;
+  const { workspaceKey, queryClient } = useWorkspace();
+  const { listAcpHarnesses, listAcpPresets, removeAcpHarness } = useWorkspace().api;
+
   const harnessesOptions = getHarnessesQuery();
   const { data: harnesses = null, isError: harnessesError } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId | null>(null);
@@ -518,7 +471,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 type="button"
                 onClick={() => setActive(expanded ? null : h.id)}
                 aria-expanded={expanded}
-                aria-controls={`harness-details-${h.id}`}
+                aria-controls={elementId(`harness-details-${h.id}`)}
                 className="flex min-h-14 w-full items-center gap-3 rounded-lg px-4.5 py-2 text-start text-text hover:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-[-2px]"
               >
                 <HarnessLogo harness={h.id} logo={h.logo} size={22} />
@@ -535,7 +488,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 </Button>
               )}
             </div>
-            <div id={`harness-details-${h.id}`} hidden={!expanded} className="px-4.5 pb-4 pt-2">
+            <div id={elementId(`harness-details-${h.id}`)} hidden={!expanded} className="px-4.5 pb-4 pt-2">
               {expanded && (
                 <>
                   <div className="settings-card-head flex items-center gap-2.5 mb-3">
@@ -620,7 +573,37 @@ function HarnessesTab({ remote }: { remote: boolean }) {
         </div>
       )}
       {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />}
+      <NestedDelegationRow />
     </>
+  );
+}
+
+function NestedDelegationRow() {
+  const { updateUiState } = useWorkspace().api;
+  const { getUiStateQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+  const uiStateOptions = getUiStateQuery();
+  const { data: uiState } = useQuery(uiStateOptions);
+  const save = useMutation({
+    mutationFn: (nestedDelegation: boolean) => updateUiState({ nestedDelegation }),
+    onSuccess: (saved) => setScopedQueryData(uiStateOptions.queryKey, saved),
+    onError: (error) => showAlert(error instanceof Error ? error.message : String(error), "error"),
+  });
+  if (!uiState) return null;
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+      <div>
+        <div className="project-default-title text-base font-medium">{m.settings_nested_subagents()}</div>
+        <p>{m.settings_nested_subagents_description()}</p>
+      </div>
+      <Switch
+        type="button"
+        checked={uiState.nestedDelegation}
+        aria-label={m.settings_nested_subagents()}
+        disabled={save.isPending}
+        onClick={() => save.mutate(!uiState.nestedDelegation)}
+      />
+    </div>
   );
 }
 
@@ -639,6 +622,10 @@ function K8sSection({
 }: {
   onEditState?: (state: { dirty: boolean; saving: boolean }) => void;
 }) {
+  const { saveK8sSettings } = useWorkspace().api;
+  const { getK8sSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveK8sSettingsMutation = useMutation({ mutationFn: saveK8sSettings });
 
   const settingsOptions = getK8sSettingsQuery();
@@ -785,6 +772,10 @@ function K8sSection({
 // --- compute (modal) ------------------------------------------------------------
 
 function ModalSection() {
+  const { saveModalToken } = useWorkspace().api;
+  const { getModalSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveModalTokenMutation = useMutation({ mutationFn: (args: Parameters<typeof saveModalToken>) => saveModalToken(...args) });
 
   const sOptions = getModalSettingsQuery();
@@ -887,6 +878,10 @@ const VERCEL_PLAN_LIMITS: Record<VercelPlan, () => string> = {
 };
 
 function VercelSection() {
+  const { saveVercelSetup, getVercelScopes } = useWorkspace().api;
+  const { getVercelSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const saveMutation = useMutation({ mutationFn: saveVercelSetup });
   const sOptions = getVercelSettingsQuery();
   const sQuery = useQuery(sOptions);
@@ -1051,6 +1046,9 @@ const CONNECTION_BADGE_CONNECTING_CLASS = "rounded-sm border-accent-blue bg-acce
 const SSH_MASTER_POLL_MS = 5_000;
 
 function useSshMasterStatuses(hosts: string[]) {
+  const { workspaceScope, isCurrentScope, setScopedQueryData } = useWorkspace();
+  const { getSshMasterStatusQuery } = useWorkspace().queries;
+
   const scope = workspaceScope();
   const options = hosts.map((host) => getSshMasterStatusQuery(host));
   const queries = useQueries({ queries: options.map((query) => ({ ...query, refetchInterval: SSH_MASTER_POLL_MS })) });
@@ -1093,6 +1091,10 @@ function HostTestCell({ test, connecting, masterRunning, containerFailed = false
 }
 
 function SshSection() {
+  const { dialogs } = useWorkspace();
+  const { getSshSettingsQuery } = useWorkspace().queries;
+  const { testSshExecution } = useWorkspace().api;
+
   const hostsOptions = getSshSettingsQuery();
   const hostsQuery = useQuery(hostsOptions);
   const hosts = hostsQuery.data?.hosts ?? (hostsQuery.isError ? [] : null);
@@ -1137,7 +1139,7 @@ function SshSection() {
       {hostsQuery.error && <p className="text-sm text-accent-red">{hostsQuery.error.message}</p>}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         {hostsQuery.data && <SshDefaultHost settings={hostsQuery.data} />}
-        <Button variant="ghost" className="ms-auto" onClick={() => showSshConfigDialog()}>
+        <Button variant="ghost" className="ms-auto" onClick={() => showSshConfigDialog(dialogs)}>
           <Settings size={14} /> {m.ssh_configure_hosts()}
         </Button>
       </div>
@@ -1311,6 +1313,12 @@ function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPrefli
 }
 
 function SlurmSection() {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { saveSlurmSettings } = useWorkspace().api;
+  const { getSlurmSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const saveSlurmSettingsMutation = useMutation({ mutationFn: saveSlurmSettings });
 
   const settingsOptions = getSlurmSettingsQuery();
@@ -1453,7 +1461,7 @@ function SlurmSection() {
                   }
                 }}
                 disabled={!host}
-                aria-describedby={!host ? "slurm-login-node-hint" : undefined}
+                aria-describedby={!host ? elementId("slurm-login-node-hint") : undefined}
               >
                 {connecting
                   ? connectionFailed
@@ -1463,7 +1471,7 @@ function SlurmSection() {
                     ? m.settings_reconnect()
                     : m.settings_connect()}
               </Button>
-              {!host && <span id="slurm-login-node-hint" className="text-sm text-subtext">{m.settings_pick_login_node()}</span>}
+              {!host && <span id={elementId("slurm-login-node-hint")} className="text-sm text-subtext">{m.settings_pick_login_node()}</span>}
               <span role="status">
                 <SlurmTestBadge
                   test={test}
@@ -1478,14 +1486,14 @@ function SlurmSection() {
                   {m.settings_page_partition()}
                   <Input
                     type="text"
-                    list="slurm-partitions"
+                    list={elementId("slurm-partitions")}
                     value={partition}
                     onChange={(e) => setPartition(e.target.value)}
                     placeholder={m.settings_page_cluster_default()}
                     autoComplete="off"
                     spellCheck={false}
                   />
-                  <datalist id="slurm-partitions">
+                  <datalist id={elementId("slurm-partitions")}>
                     {test?.partitions.map((p) => <option key={p} value={p} />)}
                   </datalist>
                 </label>
@@ -1575,6 +1583,10 @@ function SlurmSection() {
 }
 
 function RaySection() {
+  const { saveRaySettings, rayPreflight } = useWorkspace().api;
+  const { getRaySettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const saveRaySettingsMutation = useMutation({ mutationFn: saveRaySettings });
 
   const settingsOptions = getRaySettingsQuery();
@@ -1711,7 +1723,11 @@ function localMachineSummary(hw: LocalMachine) {
 // --- compute (openresearch) ---------------------------------------------------------
 
 function OpenResearchSection({ remote }: { remote: boolean }) {
+  const { getOpenResearchSettingsQuery } = useWorkspace().queries;
+
   const settingsQuery = useQuery(getOpenResearchSettingsQuery());
+  const { useOpenResearchAccount, useAlphaXivFolders, useSignOutOpenResearch } = useMachines().owner.queries;
+  const openSignIn = useSignIn();
   const accountQuery = useOpenResearchAccount();
   // A remote workspace's settings come from the remote host but its account from this machine; don't pair them.
   const account = remote ? undefined : accountQuery.data;
@@ -1726,6 +1742,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
   const loadError = settingsQuery.error?.message;
   const busy = settingsQuery.isFetching;
   const refresh = () => { void accountQuery.refetch(); return settingsQuery.refetch(); };
+  const { dialogs } = useWorkspace();
   const logout = useSignOutOpenResearch();
 
   return (
@@ -1819,7 +1836,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
       )}
       <div className="mt-4 flex flex-wrap justify-end gap-2">
         {(account?.apiUrl || s?.apiUrl) && <ButtonLink href={`${(account?.apiUrl || s?.apiUrl || "").replace(/\/$/, "")}/auth/login`} target="_blank" rel="noreferrer">{m.settings_openresearch_dashboard()} <ExternalLink size={14} /></ButtonLink>}
-        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || logout.isPending} onClick={() => confirmOpenResearchSignOut(logout.mutateAsync)}>{m.settings_openresearch_sign_out()}</Button>}
+        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || logout.isPending} onClick={() => confirmOpenResearchSignOut(dialogs, logout.mutateAsync)}>{m.settings_openresearch_sign_out()}</Button>}
         <Button onClick={() => void refresh()} disabled={busy}>
           <RefreshCw size={14} /> {busy ? m.common_checking() : m.settings_check_again()}
         </Button>
@@ -1907,6 +1924,8 @@ function DefaultDestinationEditor({
   projectId?: string;
   onSaved: (settings: ComputeSettings) => void;
 }) {
+  const { setComputeDefault } = useWorkspace().api;
+
   const setComputeDefaultMutation = useMutation({ mutationFn: setComputeDefault });
 
   const savedBackend = settings.configuredDefaultBackend ?? settings.defaultBackend ?? "local";
@@ -2099,7 +2118,9 @@ function TargetTile({
   onOpen?: () => void;
   onOpenEnvironment: () => void;
 }) {
-  const summaryId = `compute-${target.id}-summary`;
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const summaryId = elementId(`compute-${target.id}-summary`);
   const setupLabel = target.unverified
     ? m.settings_check_setup()
     : target.id === "openresearch" && !target.signedIn
@@ -2212,6 +2233,8 @@ function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onE
   remote: boolean;
   onEditState: (state: { dirty: boolean; saving: boolean }) => void;
 }) {
+  const { getComputeSettingsQuery } = useWorkspace().queries;
+
   const { data: settings } = useQuery(getComputeSettingsQuery(projectId));
   const target = settings?.targets.find((item) => item.id === targetId);
   const [editState, setEditState] = useState({ dirty: false, saving: false });
@@ -2255,6 +2278,11 @@ function ComputeTab({
   onOpenEnvironment: () => void;
   remote: boolean;
 }) {
+  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+
+  const { getComputeSettingsQuery, getLocalMachineQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const settingsOptions = getComputeSettingsQuery(project?.id);
   const settingsQuery = useQuery(settingsOptions);
   const settings = settingsQuery.data ?? null;
@@ -2381,6 +2409,10 @@ function ComputeTab({
 // --- compute (tinker) ----------------------------------------------------------
 
 function TinkerSection({ target }: { target: ComputeTargetSummary }) {
+  const { saveTinkerKey } = useWorkspace().api;
+  const { getTinkerSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveTinkerKeyMutation = useMutation({ mutationFn: saveTinkerKey });
 
   const [apiKey, setApiKey] = useState("");
@@ -2489,6 +2521,10 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
 }
 
 function HfSection({ remote }: { remote: boolean }) {
+  const { saveHfToken } = useWorkspace().api;
+  const { getHfSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveHfTokenMutation = useMutation({ mutationFn: saveHfToken });
 
   const settingsOptions = getHfSettingsQuery();
@@ -2642,6 +2678,8 @@ function EnvRow({
   entry: EnvVar | undefined;
   onVars: (vars: EnvVar[]) => void;
 }) {
+  const { setEnvVar, deleteEnvVar } = useWorkspace().api;
+
   const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
   const deleteEnvVarMutation = useMutation({ mutationFn: deleteEnvVar });
 
@@ -2649,7 +2687,12 @@ function EnvRow({
   const stored = entry?.value ?? "";
   const [value, setValue] = useState(stored);
   const [saving, setSaving] = useState(false);
-  useEffect(() => setValue(stored), [stored]);
+  // Reset during render: an effect would also rerun when a hidden machine is shown and erase the edit.
+  const [shownStored, setShownStored] = useState(stored);
+  if (shownStored !== stored) {
+    setShownStored(stored);
+    setValue(stored);
+  }
   const dirty = value.trim() !== stored;
 
   async function save() {
@@ -2746,6 +2789,8 @@ function AddVarRow({
   onVars: (vars: EnvVar[]) => void;
   onDone: () => void;
 }) {
+  const { setEnvVar } = useWorkspace().api;
+
   const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
 
   const [key, setKey] = useState("");
@@ -2831,6 +2876,9 @@ function AddVarRow({
 }
 
 function EnvVarsSection() {
+  const { getEnvVarsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const varsOptions = getEnvVarsQuery();
   const varsQuery = useQuery(varsOptions);
   const vars = varsQuery.data ?? null;
@@ -2895,6 +2943,8 @@ function EnvVarsSection() {
 }
 
 function TrackioCheck({ space }: { space: boolean }) {
+  const { trackioPreflight } = useWorkspace().api;
+
   const [test, setTest] = useState<"testing" | TrackioPreflight | null>(null);
 
   async function runPreflight() {
@@ -2952,6 +3002,7 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "ja", label: "日本語" },
   { id: "pl", label: "Polski" },
   { id: "ru", label: "Русский" },
+  { id: "tr", label: "Türkçe" },
 ];
 
 function AppearanceTab() {
@@ -3061,6 +3112,10 @@ const MANUAL_UPDATE_HINT: Partial<Record<InstallChannel, () => string>> = {
 };
 
 function UpdatesTab() {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { setAutoUpdate: setAutoUpdateApi, setReleaseChannel, applyUpdate } = useWorkspace().api;
+
   const setAutoUpdateApiMutation = useMutation({ mutationFn: (args: Parameters<typeof setAutoUpdateApi>) => setAutoUpdateApi(...args) });
 
   const { status, error: loadError, apply } = useUpdateStatus();
@@ -3276,6 +3331,10 @@ function UpdatesTab() {
 }
 
 function TelemetryTab() {
+  const { setTelemetry } = useWorkspace().api;
+  const { getTelemetryQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const setTelemetryMutation = useMutation({ mutationFn: setTelemetry });
 
   const settingsOptions = getTelemetryQuery();
@@ -3346,6 +3405,8 @@ function InstallCliRow({
   disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {
+  const { installCli } = useWorkspace().api;
+
   const installCliMutation = useMutation({ mutationFn: installCli });
 
   const [result, setResult] = useState<InstalledCli | null>(null);
@@ -3405,6 +3466,16 @@ function GithubSettings({ remote, onProjectUpdate }: {
   remote: boolean;
   onProjectUpdate: (project: Project) => void;
 }) {
+  const {
+    listProjectsQuery,
+    getProjectDefaultsQuery,
+    githubAccountQuery,
+    githubOrganizationsQuery,
+    getProjectGitStatusQuery,
+  } = useWorkspace().queries;
+  const { setProjectDefaults } = useWorkspace().api;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const projectsQuery = useQuery(listProjectsQuery());
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const selectedProject = projectsQuery.data?.find((project) => project.id === selectedProjectId);
@@ -3564,6 +3635,15 @@ function GitHubCliHelp({
 }
 
 function OverleafCard() {
+  const {
+    deleteOverleafToken,
+    deleteOverleafSession,
+    saveOverleafToken,
+    saveOverleafSession,
+  } = useWorkspace().api;
+  const { getOverleafSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const deleteToken = useMutation({ mutationFn: deleteOverleafToken });
   const deleteSession = useMutation({ mutationFn: deleteOverleafSession });
   const tokenOptions = getOverleafSettingsQuery();
@@ -3666,6 +3746,17 @@ export function GitTab({
   project: Project | null;
   onProjectUpdate: (project: Project) => void;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const {
+    getProjectGitStatusQuery,
+    repoAccessQuery,
+    githubAccountQuery,
+    githubOrganizationsQuery,
+  } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+  const { enableProjectGithub, initializeProjectGit, disableProjectGithub } = useWorkspace().api;
+
   const statusOptions = { ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) };
   const statusQuery = useQuery(statusOptions);
   const status = statusQuery.data ?? null;
@@ -3758,7 +3849,7 @@ export function GitTab({
                       ) : (
                         <Popover.Trigger render={<Button variant="primary" />} disabled={saving || checkingAccess || Boolean(accessQuery.error)}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()} {!checkingAccess && <ChevronDown size={14} />}</Popover.Trigger>
                       )}
-                      <Popover.Portal>
+                      <Popover.Portal container={portalContainer}>
                         <Popover.Positioner positionMethod="fixed" side="bottom" align="start" sideOffset={8} collisionPadding={16} className="z-50">
                           <Popover.Popup aria-label={m.settings_github_new_repository_destination()} className="outline-none w-72 max-w-[calc(100vw-2rem)] max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-2 shadow-modal">
                             <div className="px-2 py-1 text-sm font-medium text-subtext">{m.settings_github_enable_under()}</div>
@@ -3835,6 +3926,12 @@ type MoveState =
   | { kind: "error"; message: string };
 
 function StorageTab() {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { getDataDirQuery } = useWorkspace().queries;
+  const { onDataDirMove } = useWorkspace().events;
+  const { validateDataDir, moveDataDir } = useWorkspace().api;
+
   const settingsOptions = getDataDirQuery();
   const settingsQuery = useQuery(settingsOptions);
   const settings = settingsQuery.data ?? null;
@@ -4091,6 +4188,8 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
 }
 
 function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onViewHistory: () => void }) {
+  const { listRunsQuery } = useWorkspace().queries;
+
   const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
   const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
   const error = query.error?.message;
@@ -4139,6 +4238,8 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
 }
 
 function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: () => void }) {
+  const { listRunsQuery } = useWorkspace().queries;
+
   const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
   const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
   const error = query.error?.message;

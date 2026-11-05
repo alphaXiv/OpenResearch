@@ -5,13 +5,14 @@ import { useState, type RefObject } from "react";
 import type { Project, ShareChoice } from "../api";
 import type { DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
-import { listChatSessionsQuery } from "../queries/chat";
+import { useWorkspace } from "../workspace";
 import { Button, DialogContent, DialogTitle, IconButton, LoadingRow, Spinner } from "./ui";
 
 export function ShareProjectDialog({ project, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage }: DialogContentProps<ShareChoice> & {
   project: Project;
   returnFocus: RefObject<HTMLButtonElement | null>;
 }) {
+  const { listChatSessionsQuery } = useWorkspace().queries;
   const chatsQuery = useQuery(listChatSessionsQuery(project.id));
   const chats = chatsQuery.data?.filter((chat) => !chat.sideParentSessionId);
   const [unpicked, setUnpicked] = useState<string[]>([]);

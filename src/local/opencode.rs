@@ -90,10 +90,13 @@ pub fn agent_log_path() -> PathBuf {
 }
 
 /// Chat-server config; native questions are answered through the dashboard.
+/// With orx's MCP server present, native sub-agents are off: delegation goes
+/// through orx, which can reach any model.
 fn opencode_config_json(
     model: Option<&str>,
     instructions: &str,
     plugin: Option<&str>,
+    mcp: Option<&crate::local::chat::delegation::McpServer>,
 ) -> Result<String> {
     let mut cfg = json!({
         "$schema": "https://opencode.ai/config.json",
@@ -124,6 +127,24 @@ fn opencode_config_json(
     cfg["permission"]["orx_alphaxiv_*"] = json!("allow");
     for tool in crate::commands::alphaxiv_mcp::WRITE_TOOLS {
         cfg["permission"][format!("orx_alphaxiv_{tool}")] = json!("ask");
+    }
+    if let Some(server) = mcp {
+        // Side chats and delegates share this file with their parent's
+        // worktree, so it names the env vars and each chat's serve child
+        // supplies its own values (OpenCode substitutes `{env:…}`).
+        let environment: serde_json::Map<String, Value> = server
+            .env
+            .iter()
+            .map(|(name, _)| (name.to_string(), json!(format!("{{env:{name}}}"))))
+            .collect();
+        cfg["mcp"]["orx"] = json!({
+            "type": "local",
+            "command": [server.command.as_str(), server.args[0]],
+            "environment": environment,
+            "enabled": true,
+            "timeout": crate::local::chat::delegation::TOOL_TIMEOUT_SECONDS * 1000,
+        });
+        cfg["permission"]["task"] = json!("deny");
     }
     Ok(serde_json::to_string_pretty(&cfg)?)
 }
@@ -356,6 +377,7 @@ fn write_agent_files(
     project: &LocalProject,
     model: Option<&str>,
     session_id: &str,
+    up_port: Option<u16>,
     protocol: Protocol,
 ) -> Result<(PathBuf, Option<PathBuf>)> {
     // Source of truth for the session-skills dir is the harness trait.
@@ -373,6 +395,9 @@ fn write_agent_files(
     } else {
         None
     };
+    let mcp = up_port
+        .map(|port| crate::local::chat::delegation::mcp_server(session_id, port))
+        .transpose()?;
     let config_override = if git::is_tracked(&repo, "opencode.json") {
         // Out-of-root config: absolute instructions path (no root to anchor it).
         let path = repo
@@ -381,14 +406,19 @@ fn write_agent_files(
             .join("opencode.json");
         std::fs::write(
             &path,
-            opencode_config_json(model, &playbook.to_string_lossy(), plugin.as_deref())?,
+            opencode_config_json(
+                model,
+                &playbook.to_string_lossy(),
+                plugin.as_deref(),
+                mcp.as_ref(),
+            )?,
         )
         .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
         Some(path)
     } else {
         std::fs::write(
             repo.join("opencode.json"),
-            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref())?,
+            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref(), mcp.as_ref())?,
         )
         .map_err(|e| anyhow!("Could not write opencode.json: {}", e))?;
         None
@@ -456,7 +486,7 @@ async fn spawn_agent(
         let session = session_id.to_string();
         let protocol = binary.protocol;
         tokio::task::spawn_blocking(move || {
-            write_agent_files(&project, model.as_deref(), &session, protocol)
+            write_agent_files(&project, model.as_deref(), &session, up_port, protocol)
         })
         .await
         .map_err(|e| anyhow!("agent file task failed: {e}"))??
@@ -477,6 +507,11 @@ async fn spawn_agent(
     // be explicitly subscribed to. One serve child per session; set after the
     // synced-env loop so it isn't shadowed.
     crate::local::chat::set_chat_session_env(&mut cmd, session_id, "opencode", up_port);
+    if let Some(port) = up_port {
+        for (name, value) in crate::local::chat::delegation::mcp_server(session_id, port)?.env {
+            cmd.env(name, value);
+        }
+    }
     if let Some(config) = &config_override {
         // The repo tracks its own opencode.json; ours rides OPENCODE_CONFIG.
         // Project configs load after OPENCODE_CONFIG and would override our
@@ -993,7 +1028,7 @@ mod tests {
     #[test]
     fn alphaxiv_server_has_its_own_name_and_asks_before_writes() {
         let cfg: Value =
-            serde_json::from_str(&opencode_config_json(None, "p.md", None).unwrap()).unwrap();
+            serde_json::from_str(&opencode_config_json(None, "p.md", None, None).unwrap()).unwrap();
         assert!(cfg["mcp"].get("alphaxiv").is_none());
         assert_eq!(cfg["mcp"]["orx_alphaxiv"]["command"][1], "alphaxiv-mcp");
         assert_eq!(cfg["permission"]["orx_alphaxiv_*"], "allow");
@@ -1002,6 +1037,23 @@ mod tests {
             cfg["permission"]["orx_alphaxiv_save_papers_to_folder"],
             "ask"
         );
+    }
+
+    #[test]
+    fn shared_config_names_the_orx_server_env_without_any_chats_values() {
+        let server = crate::local::chat::delegation::mcp_server("chat_a", 4900).unwrap();
+        let config: Value =
+            serde_json::from_str(&opencode_config_json(None, "p.md", None, Some(&server)).unwrap())
+                .unwrap();
+        let environment = &config["mcp"]["orx"]["environment"];
+        assert_eq!(environment["ORX_SESSION_ID"], "{env:ORX_SESSION_ID}");
+        assert_eq!(environment["ORX_AGENT_TOKEN"], "{env:ORX_AGENT_TOKEN}");
+        assert!(!config.to_string().contains("chat_a"));
+        assert_eq!(config["permission"]["task"], "deny");
+        let without: Value =
+            serde_json::from_str(&opencode_config_json(None, "p.md", None, None).unwrap()).unwrap();
+        assert_eq!(without["permission"]["task"], "allow");
+        assert!(without["mcp"].get("orx").is_none());
     }
 
     #[test]

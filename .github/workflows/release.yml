@@ -331,9 +331,7 @@ jobs:
   custom-ci:
     needs:
       - plan
-      - build-local-artifacts
-      - custom-sign-macos-cli
-      - custom-sign-windows-cli
+      - build-ui
     uses: ./.github/workflows/ci.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
@@ -414,6 +412,8 @@ jobs:
           RELEASE_COMMIT: "${{ needs.plan.outputs.source-sha }}"
         run: |
           python3 scripts/release_notes.py "${{ needs.plan.outputs.tag }}" "$RELEASE_COMMIT" "$RUNNER_TEMP/notes.txt"
+          jq --argjson changes "$(node scripts/change-counts.mjs "$RELEASE_COMMIT")" '. + {orx_changes: $changes}' artifacts/dist-manifest.json > "$RUNNER_TEMP/dist-manifest.json"
+          mv "$RUNNER_TEMP/dist-manifest.json" artifacts/dist-manifest.json
           git rev-list "$RELEASE_COMMIT" | jq -R -s 'split("\n")[:-1]' > artifacts/desktop-ancestry.json
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 

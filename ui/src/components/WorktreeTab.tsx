@@ -1,15 +1,10 @@
-import { showConfirmDialog } from "../dialog";
+import { useWorkspace } from "../workspace";
+
 import { FolderOpen } from "lucide-react";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { isImmutableQuery } from "../queries/invalidation";
 import { useQuery } from "@tanstack/react-query";
-import { listChatSessionsQuery } from "../queries/chat";
-import {
-  workspaceKey,
-  queryClient,
-} from "../queries/client";
 
-import { getCodeTreeQuery, getSessionWorktreeQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 // The pinned Files home for the active chat session's private worktree — what
@@ -29,12 +24,7 @@ import { ltr } from "../i18n";
 // CodeTab's staleness handling.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  githubBranchUrl,
-  manageProjectFile,
-  revealFileInManager,
-  type Project,
-} from "../api";
+import { githubBranchUrl, type Project } from "../api";
 
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
@@ -82,6 +72,12 @@ export function WorktreeTab({
   ) => void;
   canRenameFile: (path: string) => boolean;
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { listChatSessionsQuery, getSessionWorktreeQuery, getCodeTreeQuery } = useWorkspace().queries;
+  const { queryClient, workspaceKey } = useWorkspace();
+  const { manageProjectFile, revealFileInManager } = useWorkspace().api;
+
   const projectId = project.id;
   const sessions = useQuery(listChatSessionsQuery(projectId));
   const busy = sessions.data?.some((session) => session.id === sessionId && session.busy) ?? false;

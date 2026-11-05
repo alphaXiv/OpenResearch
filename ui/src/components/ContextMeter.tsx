@@ -1,3 +1,5 @@
+import { useContext } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
@@ -17,6 +19,8 @@ const RING_R = 6.5;
 const RING_C = 2 * Math.PI * RING_R;
 
 export function ContextMeter({ usage }: { usage?: ContextUsage }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
   if (!usage || usage.usedTokens <= 0) return null;
 
   const { usedTokens, contextWindow } = usage;
@@ -35,7 +39,7 @@ export function ContextMeter({ usage }: { usage?: ContextUsage }) {
         <div className="option-picker relative inline-flex shrink-0">
           <Popover.Trigger
             type="button"
-            className={`${pct === null ? "inline-flex h-8 items-center rounded-md px-1 transition-[background,color] duration-150 ease-standard hover:bg-surface" : "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text transition-[background,color] duration-150 ease-standard hover:bg-surface"} composer-bare context-ring text-sm text-text`}
+            className={`${pct === null ? "inline-flex h-7 items-center rounded-md px-1" : "inline-flex size-7 shrink-0 items-center justify-center rounded-md"} composer-bare context-ring text-sm text-subtext transition-[background,color] duration-150 ease-standard hover:bg-hover-muted hover:text-text`}
             title={m.context_meter_context_window_used()}
             aria-label={m.context_meter_context_window_used()}
           >
@@ -65,7 +69,7 @@ export function ContextMeter({ usage }: { usage?: ContextUsage }) {
               </svg>
             )}
           </Popover.Trigger>
-          <Popover.Portal>
+          <Popover.Portal container={portalContainer}>
             <Popover.Positioner side="top" align="end" sideOffset={8} collisionPadding={8} className="z-50">
               <Popover.Popup aria-label={m.context_meter_context_window()} className="outline-none option-menu max-w-[calc(100vw-1rem)] max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu overflow-hidden min-w-47.5 context-meter-menu w-70 pt-2.5 px-3 pb-3 [&_.progress]:mt-2 [&_.progress]:mx-0 [&_.progress]:mb-0 [&_.progress-track]:h-[5px] [&_.progress-track]:border-0 [&_.progress-track]:bg-border">
                 <div className="context-meter-head flex justify-between items-baseline gap-3 text-sm text-muted">

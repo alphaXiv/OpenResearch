@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+
 import { Menu } from "@base-ui/react/menu";
 import { Menubar } from "@base-ui/react/menubar";
 import { formatForDisplay, useHeldKeys, useHotkeyRegistrations } from "@tanstack/react-hotkeys";
@@ -7,6 +9,8 @@ import { m } from "../paraglide/messages.js";
 import { EscapeScope } from "./EscapeScope";
 
 export function WindowMenu() {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
   const [visible, setVisible] = useState(false);
   const held = useHeldKeys();
   const wasAlt = useRef(false);
@@ -75,13 +79,13 @@ export function WindowMenu() {
             if (!open && (details.reason === "escape-key" || details.reason === "outside-press")) dismiss();
           }}>
             <Menu.Trigger className="h-8 px-3 outline-none hover:bg-surface data-popup-open:bg-surface focus-visible:bg-surface">{section.label}</Menu.Trigger>
-            <Menu.Portal>
+            <Menu.Portal container={portalContainer}>
               <Menu.Positioner side="bottom" align="start" className="z-300">
                 <Menu.Popup data-window-menu className="min-w-56 rounded-md border border-border bg-background p-1 text-sm text-text shadow-menu outline-none" finalFocus={false}>
                   {section.items.map((item, index) => {
                     if (item.kind === "separator") return <Menu.Separator key={index} className="my-1 border-t border-border" />;
                     const enabled = item.kind === "native" || registrations.some((registration) => registration.options.appHotkeyId === item.id && registration.status === "active");
-                    const checked = item.kind === "command" && item.checked !== undefined ? !!document.querySelector(".session-rail") : undefined;
+                    const checked = item.kind === "command" && item.checked !== undefined ? !!document.querySelector("[data-machine]:not([hidden]) .session-rail") : undefined;
                     const label = item.label;
                     const id = item.kind === "command" ? item.id : `native:${item.name === "select_all" ? "selectAll" : item.name}`;
                     return (

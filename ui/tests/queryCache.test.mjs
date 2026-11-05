@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { QueryObserver } from "@tanstack/react-query";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { QueryObserver, QueryClientProvider } from "@tanstack/react-query";
 import { queryModules } from "./queryModules.mjs";
 
 const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
@@ -28,7 +30,7 @@ test("components and imperative readers deduplicate and reuse fresh data", async
   unsubscribe();
 });
 
-test("ordinary data survives revisits and expires ten minutes after its last observer", async (t) => {
+test("a hidden machine keeps its data for an hour, and none once its workspace is retired", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 10_000 });
   const { client, load } = setup(t, { listProjects: async () => [{ id: "p" }] });
   const options = load("projects").listProjectsQuery();
@@ -36,19 +38,23 @@ test("ordinary data survives revisits and expires ten minutes after its last obs
   let off = observer.subscribe(() => {});
   await settle();
   off();
-  t.mock.timers.tick(599_999);
+  t.mock.timers.tick(3_599_000);
   assert.ok(client.getQueryData(options.queryKey));
   off = observer.subscribe(() => {});
   assert.equal(observer.getCurrentResult().data[0].id, "p");
   await settle();
   off();
-  t.mock.timers.tick(599_999);
-  assert.ok(client.getQueryData(options.queryKey));
-  t.mock.timers.tick(1);
+  t.mock.timers.tick(3_600_000);
+  assert.equal(client.getQueryData(options.queryKey), undefined);
+  off = observer.subscribe(() => {});
+  await settle();
+  off();
+  load("client").replaceWorkspace();
+  await settle();
   assert.equal(client.getQueryData(options.queryKey), undefined);
 });
 
-test("stream updates do not pin inactive transcripts or recreate expired snapshots", async (t) => {
+test("hidden transcripts retain stream updates and retired lifetimes reject later events", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 10_000 });
   const snapshot = { messages: [], queued: [], activeLeafId: null };
   const { client, load } = setup(t, { getChatMessages: async () => snapshot });
@@ -57,16 +63,19 @@ test("stream updates do not pin inactive transcripts or recreate expired snapsho
   t.mock.timers.tick(300_000);
   client.setQueryData(options.queryKey, (data) => data && { ...data, activeLeafId: "event" });
   t.mock.timers.tick(300_000);
-  assert.equal(client.getQueryData(options.queryKey), undefined);
-  client.setQueryData(options.queryKey, (data) => data && { ...data, activeLeafId: "late-event" });
+  assert.equal(client.getQueryData(options.queryKey).activeLeafId, "event");
+  const workspace = load("client");
+  workspace.replaceWorkspace();
+  await settle();
+  workspace.setScopedQueryData(options.queryKey, (data) => data && { ...data, activeLeafId: "late-event" });
   assert.equal(client.getQueryCache().find({ queryKey: options.queryKey }), undefined);
 });
 
-test("freshness is query-specific and immutable bodies still use finite retention", (t) => {
+test("freshness is query-specific and unobserved data lasts an hour", (t) => {
   const { client, load } = setup(t, {});
   const projects = load("projects");
   const files = load("files");
-  assert.equal(client.getDefaultOptions().queries.gcTime, 600_000);
+  assert.equal(client.getDefaultOptions().queries.gcTime, 3_600_000);
   assert.equal(client.getDefaultOptions().queries.retry, false);
   assert.equal(projects.listProjectsQuery().staleTime, 30_000);
   assert.equal(projects.getUiStateQuery().staleTime, 300_000);
@@ -80,25 +89,20 @@ test("freshness is query-specific and immutable bodies still use finite retentio
   assert.equal(load("settings").getSshMasterStatusQuery("host").staleTime, 5_000);
 });
 
-test("replacement cancels reads, clears old data, and preserves temporary reconnect identity", async (t) => {
+test("replacement cancels reads and prevents late results from repopulating the retired cache", async (t) => {
   const pending = deferred();
   let signal;
   const { client, load } = setup(t, { listProjects: (s) => { signal = s; return pending.promise; } });
   const scope = load("client");
-  scope.activateWorkspace("ssh:one");
   const old = load("projects").listProjectsQuery();
   const read = client.fetchQuery(old).catch(() => null);
-  assert.equal(scope.activateWorkspace("ssh:one"), false);
   assert.equal(signal.aborted, false);
-  scope.activateWorkspace("local");
+  scope.replaceWorkspace();
   assert.equal(signal.aborted, true);
   pending.resolve([{ id: "old" }]);
   await read;
   assert.equal(client.getQueryData(old.queryKey), undefined);
-  assert.notDeepEqual(old.queryKey, load("projects").listProjectsQuery().queryKey);
-  const generation = scope.getWorkspaceGeneration();
-  scope.replaceWorkspace();
-  assert.equal(scope.getWorkspaceGeneration(), generation + 1);
+  assert.equal(scope.isCurrentScope(old.queryKey), false);
 });
 
 test("snapshot repair is bounded while preserving events during the second read", async (t) => {
@@ -170,7 +174,7 @@ test("retiring a scope rejects a refresh even when it had cached data", async (t
   client.setQueryData(options.queryKey, [{ id: "old" }]);
   const read = client.fetchQuery({ ...options, staleTime: 0 });
   const rejected = assert.rejects(read);
-  load("client").activateWorkspace("other");
+  load("client").replaceWorkspace();
   pending.resolve([{ id: "late" }]);
   await rejected;
   await settle();
@@ -368,4 +372,20 @@ test("cached idle chats keep pending questions available when another chat is se
   const state = load("chatStore").readChatState("p", "active");
   assert.equal(state.messagesBySession.pending, snapshot.messages);
   assert.equal(state.busySessions.has("pending"), false);
+});
+
+
+test("account queries use the owning laptop cache inside another machine's provider", (t) => {
+  const owner = setup(t, { getOpenResearchAccount: async () => ({ loggedIn: false, user: null }) });
+  const remote = setup(t, {});
+  const key = owner.workspace.workspaceKey("getOpenResearchAccount");
+  owner.client.setQueryData(key, { loggedIn: true, user: { id: "owner", firstName: "Laptop account" } });
+  remote.client.setQueryData(key, { loggedIn: true, user: { id: "wrong", firstName: "Wrong cache" } });
+  const useAccount = owner.load("settings").useOpenResearchAccount;
+  function Identity() {
+    return React.createElement("span", null, useAccount().data?.user?.firstName);
+  }
+  const html = renderToStaticMarkup(React.createElement(QueryClientProvider, { client: remote.client }, React.createElement(Identity)));
+  assert.match(html, /Laptop account/);
+  assert.ok(!html.includes("Wrong cache"));
 });

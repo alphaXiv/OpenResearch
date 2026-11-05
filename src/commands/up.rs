@@ -48,8 +48,10 @@ use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
+mod agent_tools;
 pub(crate) mod compute_settings;
 mod harness_setup;
+mod network;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -128,7 +130,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         restart: Arc::new(tokio::sync::Notify::new()),
         trackio: Arc::default(),
     };
-    // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
+    // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
     state.chat.resume_persisted_queues();
     {
@@ -689,12 +691,14 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(profile_settings).post(set_profile_settings),
         )
         .route("/api/update", get(update_status))
+        .route("/api/update/notes", get(update_notes))
         .route("/api/update/apply", post(apply_update))
         .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
         .route("/api/update/channel", post(set_update_channel))
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
+        .route("/api/settings/network", get(network::public_network))
         .route(
             "/api/projects/{id}/ui-state",
             get(project_ui_state).post(set_project_ui_state),
@@ -721,6 +725,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             post(disconnect_remote_session),
         )
         .route("/_orx/runtime", get(local_runtime))
+        .route(
+            "/_orx/workspaces/{id}/{*path}",
+            axum::routing::any(remote_workspace),
+        )
         .route(
             "/api/settings/slurm",
             get(slurm_settings).post(set_slurm_settings),
@@ -811,6 +819,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .patch(update_chat_session),
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+        .route("/api/chat/messages/{cited}", get(cited_chat_message))
         .route(
             "/api/chat/sessions/{id}/submissions/{client_id}",
             get(chat_submission),
@@ -847,10 +856,13 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
         )
         .route("/api/chat/sessions/{id}/respond", post(respond_chat))
-        // Internal: the `orx mcp-gate` permission bridge's long-poll (plan
+        // Internal: the `orx mcp` permission bridge's long-poll (plan
         // mode). Token-authenticated in the handler; blocks until the surfaced
         // card is answered.
         .route("/api/internal/permissions", post(bridge_permission))
+        // Internal: the orchestration tools `orx mcp` relays for an agent,
+        // authenticated in the handler by that chat's agent token.
+        .route("/api/internal/mcp", post(agent_tools::agent_tools))
         .route("/api/chat/attachments/{name}", get(chat_attachment))
         .route("/api/agent/status", get(agent_status))
         .fallback(spa)
@@ -883,7 +895,7 @@ async fn require_remote_auth(
         )
         .into_response();
     }
-    if path == "/api/internal/permissions" {
+    if path == "/api/internal/permissions" || path == "/api/internal/mcp" {
         return next.run(request).await;
     }
     let provided = request
@@ -930,7 +942,6 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/alphaxiv/folders"
             | "/api/alphaxiv/papers"
             | "/api/settings/commands/run"
-            | "/api/harnesses/setup"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/")
             && (path.ends_with("/file/open")
@@ -940,7 +951,7 @@ fn remote_route_forbidden(path: &str) -> bool {
 
 fn is_remote_callback_route(method: &Method, path: &str) -> bool {
     if method == Method::GET {
-        // `orx agent spawn`'s install preflight (read-only).
+        // Older `orx agent spawn` clients' install preflight (read-only).
         return path
             .strip_prefix("/api/harnesses/")
             .and_then(|path| path.strip_suffix("/snapshot"))
@@ -2617,22 +2628,6 @@ pub(crate) async fn submit_run_via_up(
         job_id,
         slurm_resources,
     })
-}
-
-pub(crate) async fn chat_request_via_up(
-    port: u16,
-    method: reqwest::Method,
-    path: &str,
-    body: &Value,
-) -> Result<Value> {
-    let response = authenticate_up_request(
-        local_client()?.request(method, format!("http://127.0.0.1:{port}{path}")),
-    )
-    .json(body)
-    .send()
-    .await
-    .map_err(|error| anyhow!("Could not reach the trusted OpenResearch server: {error}"))?;
-    decode_local_response(response, "submit the chat request").await
 }
 
 pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
@@ -5927,6 +5922,10 @@ async fn update_status() -> ApiResult {
         .map_err(|e| ApiError::from(anyhow!("update status task failed: {e}")))?
 }
 
+async fn update_notes() -> ApiResult {
+    Ok(Json(json!(updates::fetch_build_notes().await?)))
+}
+
 #[derive(Deserialize)]
 struct SetAutoUpdateReq {
     enabled: bool,
@@ -5987,7 +5986,7 @@ async fn set_update_channel(Json(req): Json<SetUpdateChannelReq>) -> ApiResult {
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("update channel task failed: {e}")))??;
-    tokio::spawn(updates::periodic_update_pass());
+    updates::periodic_update_pass().await;
     Ok(Json(json!(updates::status())))
 }
 
@@ -6160,6 +6159,7 @@ struct SetUiStateReq {
     preferred_agent: Option<StoredAgentSelectionReq>,
     workspace: Option<GlobalWorkspaceState>,
     preferred_autonomy: Option<Autonomy>,
+    nested_delegation: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -6214,6 +6214,9 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
         }
         if let Some(autonomy) = req.preferred_autonomy {
             store.set_preferred_autonomy(autonomy)?;
+        }
+        if let Some(allowed) = req.nested_delegation {
+            store.set_nested_delegation(allowed)?;
         }
         if let Some(workspace) = req.workspace {
             store.set_global_workspace_state(&workspace)?;
@@ -7275,6 +7278,14 @@ async fn remote_sessions(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "sessions": state.remote_sessions.list().await }))
 }
 
+async fn remote_workspace(
+    State(state): State<AppState>,
+    Path((id, _)): Path<(String, String)>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    state.remote_sessions.serve_workspace(&id, request).await
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateRemoteSessionReq {
@@ -8187,7 +8198,7 @@ struct SessionsQuery {
 }
 
 fn sidebar_session_json(store: &Store, session: &StoredChatSession, busy: bool) -> Result<Value> {
-    let mut value = local::chat::session_json(session, busy);
+    let mut value = local::chat::session_json_with(Some(store), session, busy);
     value["awaitingInput"] = json!(store.chat_session_awaiting_input(&session.id, busy)?);
     Ok(value)
 }
@@ -8589,6 +8600,8 @@ struct UpdateChatSessionReq {
     #[serde(default, deserialize_with = "present_nullable_string")]
     goal: Option<Option<String>>,
     autonomy: Option<Autonomy>,
+    /// `false` keeps a delegate for the user: see `release_delegate`.
+    notify_parent: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -8650,7 +8663,9 @@ async fn set_chat_configuration(
                 .get(&id, &saved.launch, &cwd)
                 .await
                 .map_err(bad_request)?;
-            match client.restore(native_id, &cwd).await {
+            let mcp_servers = local::harness::acp::orx_mcp_servers(&id, state.chat.up_port())
+                .map_err(bad_request)?;
+            match client.restore(native_id, &cwd, mcp_servers).await {
                 Ok(configuration) => store.set_acp_configuration(&id, &configuration)?,
                 Err(error) => {
                     state.chat.acp.stop(&id).await;
@@ -8726,6 +8741,11 @@ async fn update_chat_session(
             .set_autonomy(&id, autonomy)
             .await?
             .ok_or_else(|| not_found("chat session"))?
+    } else if req.notify_parent == Some(false) {
+        let session = local::chat::delegation::release_delegate(&Store::open()?, &id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        state.chat.emit_session(Some(session.clone())).await;
+        session
     } else {
         return Err(bad_request("nothing to update"));
     };
@@ -8753,6 +8773,40 @@ async fn chat_subagent(Path(id): Path<String>, Query(query): Query<SubagentQuery
     Ok(Json(json!(local::chat::subagent::snapshot(
         &session, spawn
     )?)))
+}
+
+/// The message an agent cited by ref: where it lives, the agent that wrote it
+/// if one did, and its first words, for the dashboard's link to it.
+async fn cited_chat_message(Path(cited): Path<String>) -> ApiResult {
+    let store = Store::open()?;
+    let message = local::chat::delegation::cited_message(&store, &cited)?
+        .ok_or_else(|| not_found("message"))?;
+    let source = local::chat::stored_to_wire(&message)
+        .parts
+        .into_iter()
+        .find_map(|part| part.orx);
+    // An agent wrote it: this chat's own, or another chat's for the user.
+    let agent_chat = match &source {
+        Some(source) => source.from.clone().filter(|from| from.starts_with("chat_")),
+        None => (message.role == "assistant").then(|| message.session_id.clone()),
+    };
+    let harness = agent_chat
+        .map(|id| store.get_chat_session(&id))
+        .transpose()?
+        .flatten()
+        .map(|session| session.harness);
+    let preview =
+        local::chat::delegation::preview(&local::chat::delegation::message_text(&message));
+    let project_id = store
+        .get_chat_session(&message.session_id)?
+        .map(|session| session.project_id);
+    Ok(Json(json!({
+        "projectId": project_id,
+        "sessionId": message.session_id,
+        "messageId": message.id,
+        "harness": harness,
+        "preview": preview,
+    })))
 }
 
 async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
@@ -8921,6 +8975,7 @@ async fn send_chat_message(
                 req.images,
                 annotations,
                 req.client_turn_id,
+                None,
             )
             .await
             .map_err(|error| {
@@ -8948,6 +9003,7 @@ async fn send_chat_message(
                 req.images,
                 annotations,
                 req.client_turn_id,
+                None,
             )
             .await
             .map_err(|error| {
@@ -9206,13 +9262,14 @@ async fn respond_chat(
                 .into_iter()
                 .filter(|annotation| !annotation.text.trim().is_empty())
                 .collect(),
+            from: None,
         })
         .await
         .map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
-/// The `orx mcp-gate` bridge relaying one blocked tool call from a plan-mode
+/// The `orx mcp` bridge relaying one blocked tool call from a plan-mode
 /// claude turn. The response body is the permission decision verbatim
 /// (`{"behavior":"allow",…}` / `{"behavior":"deny",…}`) — the bridge
 /// stringifies it into the MCP tool result unchanged. Deliberately long-held:
@@ -9607,6 +9664,7 @@ mod tests {
             tour_completed: true,
             workspace: None,
             preferred_autonomy: Some(Autonomy::Copilot),
+            nested_delegation: false,
             preferred_agent: Some(StoredAgentSelection {
                 harness: "codex".into(),
                 model: Some("custom-model".into()),
@@ -9637,6 +9695,7 @@ mod tests {
             workspace: None,
             preferred_autonomy: None,
             preferred_agent: None,
+            nested_delegation: false,
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -9882,6 +9941,7 @@ mod tests {
             preferred_agent: None,
             workspace: Some(invalid),
             preferred_autonomy: None,
+            nested_delegation: None,
         }))
         .await;
         assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
@@ -9917,6 +9977,8 @@ mod tests {
         assert!(!remote_route_forbidden("/api/settings/ssh/master"));
         assert!(!remote_route_forbidden("/api/settings/ssh/preflight"));
         assert!(!remote_route_forbidden("/api/settings/ssh/connect"));
+        assert!(!remote_route_forbidden("/api/harnesses/setup"));
+        assert!(!remote_route_forbidden("/api/settings/network"));
         assert!(!remote_route_forbidden("/api/projects/p1/file"));
     }
 

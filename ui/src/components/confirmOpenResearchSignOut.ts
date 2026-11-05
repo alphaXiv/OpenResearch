@@ -1,7 +1,7 @@
-import { showConfirmDialog } from "../dialog";
+import type { Workspace } from "../workspace";
 import { m } from "../paraglide/messages.js";
 
-export function confirmOpenResearchSignOut(onConfirm: () => Promise<void>) {
+export function confirmOpenResearchSignOut({ showConfirmDialog }: Workspace["dialogs"], onConfirm: () => Promise<void>) {
   showConfirmDialog({
     title: m.settings_openresearch_sign_out_title(),
     description: m.settings_openresearch_sign_out_description(),

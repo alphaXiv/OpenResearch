@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -26,7 +27,7 @@ const text = (children) => React.Children.toArray(children).filter((child) => ty
 const stub = new Proxy({}, { get: (_, name) => (name === "__esModule" ? false : () => null) });
 const queryFactories = new Proxy({}, { get: (_, name) => (...args) => ({ queryKey: [name, ...args] }) });
 const mocks = {
-  react: { ...React, useState: (initial) => {
+  react: { ...React, useContext: () => undefined, useState: (initial) => {
     const index = stateIndex++;
     if (!(index in state)) state[index] = initial;
     return [state[index], (value) => {
@@ -79,7 +80,7 @@ const mocks = {
 };
 const exports = {};
 new Function("require", "exports", compiled)(
-  (name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name)),
+  withWorkspaceMocks((name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name))),
   exports,
 );
 

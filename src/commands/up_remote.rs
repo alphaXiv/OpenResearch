@@ -28,6 +28,7 @@ use futures::TryStreamExt as _;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::{watch, Mutex, RwLock};
+use tower::ServiceExt as _;
 
 use crate::commands::remote_host::{
     ControlResponse, HostDescriptor, ATTACHED_MARKER, CONTROL_PROTOCOL, HOST_MARKER,
@@ -40,7 +41,7 @@ use crate::{browser, UpArgs};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub(crate) const DASHBOARD_PROTOCOL: u32 = 2;
+pub(crate) const DASHBOARD_PROTOCOL: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +161,50 @@ impl RemoteSessionManager {
         }?;
         let info = session.info.read().await.clone();
         Some(info)
+    }
+
+    pub(crate) async fn serve_workspace(&self, id: &str, mut request: Request) -> Response {
+        let session = match self.session(id).await {
+            Ok(session) => session,
+            Err(error) => return gateway_error(StatusCode::NOT_FOUND, error.to_string()),
+        };
+        let prefix = format!("/_orx/workspaces/{id}");
+        let Some(path) = request
+            .uri()
+            .path_and_query()
+            .and_then(|path| path.as_str().strip_prefix(&prefix))
+        else {
+            return gateway_error(StatusCode::BAD_REQUEST, "Invalid workspace path.".into());
+        };
+        let uri = match path.parse() {
+            Ok(uri) => uri,
+            Err(_) => {
+                return gateway_error(StatusCode::BAD_REQUEST, "Invalid workspace path.".into())
+            }
+        };
+        *request.uri_mut() = uri;
+        let browser_origin = request
+            .headers()
+            .get(header::HOST)
+            .and_then(|host| host.to_str().ok())
+            .map(|host| format!("http://{host}"));
+        let mut response = workspace_router(session).oneshot(request).await.unwrap();
+        if let Some(location) = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+        {
+            let path = browser_origin
+                .as_deref()
+                .and_then(|origin| location.strip_prefix(origin))
+                .unwrap_or(location);
+            if path.starts_with('/') && !path.starts_with("//") {
+                if let Ok(value) = HeaderValue::from_str(&format!("{prefix}{path}")) {
+                    response.headers_mut().insert(header::LOCATION, value);
+                }
+            }
+        }
+        response
     }
 
     pub(crate) async fn create(
@@ -1124,6 +1169,12 @@ async fn authenticated_health(
 }
 
 fn gateway_router(session: Arc<RemoteSession>) -> Router {
+    workspace_router(session)
+        .layer(middleware::from_fn(super::up::track_active))
+        .layer(middleware::from_fn(gateway_loopback_guard))
+}
+
+fn workspace_router(session: Arc<RemoteSession>) -> Router {
     Router::new()
         .route("/_orx/runtime", get(gateway_runtime))
         .route(
@@ -1156,8 +1207,6 @@ fn gateway_router(session: Arc<RemoteSession>) -> Router {
         )
         .fallback(gateway_fallback)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .layer(middleware::from_fn(super::up::track_active))
-        .layer(middleware::from_fn(gateway_loopback_guard))
         .with_state(session)
 }
 
@@ -2563,6 +2612,79 @@ mod tests {
             generation: AtomicU64::new(0),
             dev_origin: None,
             expected_instance: std::sync::RwLock::new(None),
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_routes_pin_the_session_token_and_rewrite_redirects() {
+        let manager = RemoteSessionManager::new();
+        let mut servers = Vec::new();
+        for id in ["alpha", "beta"] {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = Router::new().fallback(move |request: Request| async move {
+                assert_eq!(request.headers()[header::AUTHORIZATION], format!("Bearer {id}"));
+                if request.uri().path() == "/api/redirect" {
+                    return (StatusCode::FOUND, [(header::LOCATION, "/api/file?path=plot.png")]).into_response();
+                }
+                Json(serde_json::json!({ "machine": id, "path": request.uri().to_string(), "method": request.method().as_str() })).into_response()
+            });
+            servers.push(tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            }));
+            let session = sample_session();
+            session.info.write().await.id = id.into();
+            *session.route.write().await = Some(UpstreamRoute {
+                port,
+                token: id.into(),
+            });
+            manager
+                .registry
+                .lock()
+                .await
+                .by_id
+                .insert(id.into(), Arc::new(session));
+        }
+
+        for id in ["alpha", "beta", "alpha"] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("/_orx/workspaces/{id}/api/same-id?value=1"))
+                .header(header::HOST, "127.0.0.1:4791")
+                .body(Body::empty())
+                .unwrap();
+            let response = manager.serve_workspace(id, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["machine"], id);
+            assert_eq!(value["path"], "/api/same-id?value=1");
+            assert_eq!(value["method"], "POST");
+        }
+        let redirect = manager
+            .serve_workspace(
+                "alpha",
+                Request::builder()
+                    .uri("/_orx/workspaces/alpha/api/redirect")
+                    .header(header::HOST, "127.0.0.1:4791")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            redirect.headers()[header::LOCATION],
+            "/_orx/workspaces/alpha/api/file?path=plot.png"
+        );
+        let missing = manager
+            .serve_workspace("missing", Request::new(Body::empty()))
+            .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        for server in servers {
+            server.abort();
         }
     }
 

@@ -112,7 +112,8 @@ When a run ends, the chats that asked to be woken for it get a wake-up turn
 with the outcome. Asking is explicit (`orx exp wake`), and the wake-ups are
 rows in the store with a claim and a TTL, so a crash between claiming and
 delivering never loses or duplicates one, and a wake-up never interrupts a
-turn already running or a message the user queued.
+turn already running or a message the user queued. They are delivered with a
+chat's other news, so runs and delegates that finish together wake it once.
 
 Remote run directories are removed later by a background pass, in bounded
 batches per host, which keeps the source archives that live runs still need.

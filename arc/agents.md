@@ -72,10 +72,13 @@ a message sent during a turn waits in the chat's queue.
 An agent runs in the chat's worktree with a configuration home orx prepares
 inside its data directory. The user's sign-in, settings, instructions, plugins
 and skills are linked into that home, so the agent behaves as the user set it
-up, while its sessions and history stay out of the user's own. **orx never
-edits the user's agent configuration.** What it needs to add, such as hooks,
-an MCP server or sandbox roots, goes in through the agent's command line or a
-settings file of orx's own.
+up, while its sessions and history stay out of the user's own. Codex shares
+home entries by default so relative configuration paths keep working; known
+session stores, databases, memories and runtime state are excluded. The links
+are reconciled before each turn, including when reusing a running Codex
+process. **orx never edits the user's agent configuration.** What it needs to
+add, such as hooks, an MCP server or sandbox roots, goes in through the agent's
+command line or a settings file of orx's own.
 
 Chats the user had in an agent's own CLI can be adopted. Those keep resolving
 to the user's native store, and orx copies recent history only for display.
@@ -96,9 +99,8 @@ to the user's native store, and orx copies recent history only for display.
   run, so the agent runs the same version as the dashboard. The environment
   names the chat and the owning dashboard's port (plus a token, on a
   persistent remote host). That
-  is how `orx exp run` records which chat launched a run, how an agent asks to
-  be woken when a run ends, and how `orx agent spawn` opens a new chat in the
-  project.
+  is how `orx exp run` records which chat launched a run and how an agent asks
+  to be woken when a run ends.
 - **alphaXiv tools.** Claude Code, Codex, OpenCode and ACP agents always get
   a stdio server, `orx alphaxiv-mcp`, named `alphaxiv`. If Codex already
   defines that name, orx disables it for the thread and uses `orx_alphaxiv`;
@@ -130,9 +132,9 @@ depends on the agent:
 - Agents that ask their client (Codex's app server, OpenCode's server, ACP)
   hold the request on the live connection until the user answers.
 - Claude Code in headless mode cannot prompt. For approvals mid-turn, orx
-  registers a small MCP server, `orx mcp-gate`, as Claude's permission tool.
-  It forwards each decision to the owning dashboard over loopback and blocks
-  until the user answers. The dashboard accepts it only with the per-chat
+  makes the `approve` tool of its own MCP server, `orx mcp`, Claude's
+  permission tool. It forwards each decision to the owning dashboard over
+  loopback and blocks until the user answers. The dashboard accepts it only with the per-chat
   token the child was spawned with, a new token for each respawn, because the
   endpoint grants permissions.
 - Plan mode puts a small automatic policy in front of the user: read-only
@@ -174,9 +176,64 @@ forever.
 
 ## Sub-agents and new chats
 
-An agent's own sub-agents (Claude's tasks, OpenCode's child sessions,
-Antigravity's spawned conversations) appear as parts nested under the call
-that started them, read from the agent's native records. An agent can also
-open an independent chat in the same project with `orx agent spawn`, which
-goes through the dashboard's API like a user's request and becomes an
-ordinary chat.
+Every agent whose harness takes an MCP server gets orx's own, `orx
+mcp`. It speaks stdio, the one transport every harness accepts (ACP
+requires it), and relays to the owning dashboard, which knows the calling
+chat by a token derived from a key that lives only in that dashboard's
+process. Through it an agent delegates. It names a versioned model, and orx
+picks a route that can run it, unless the agent names one: the vendor's own
+agent first, then flat-rate plans, direct APIs, and resellers last. The same
+model is spelled differently by every agent and provider, so routes are joined
+on a canonical id derived from each spelling.
+
+**A delegate is a side chat of the chat that started it,** working in the
+same worktree, unless it asks for a worktree of its own and stands as an
+ordinary chat. It starts with only the task it was given, runs with a
+permission mode no broader than its delegator's, and records who delegated to
+it, which is how its depth is counted. Stopping a chat, by the user's Stop or
+an agent's `cancel`, stops every delegate below it. An agent can also start a chat it does not hear from: that chat is
+no delegate and stands as the user's, as a delegate the user kept does. A
+retry of the same request finds the chat the first attempt started, by an id
+derived from the request.
+
+**Any chat can subscribe to any other.** A subscription tells its subscriber
+each finished turn of its target, and each question the target asks, as the
+first message of the subscriber's next turn. Run wake-ups go through the same
+delivery: a chat's news, from runs and chats alike, is never lost, never
+duplicated, never interrupts a running turn, and arrives as one turn however
+much of it is waiting, each piece kept in the transcript as its own message. A turn that ends while its own delegates are
+still working is not an answer yet. An agent can collect the same news inside
+its turn with `wait`, which marks it told. A delegator subscribes to its
+delegates. Once the user writes in a delegate, its composer lets them keep it:
+it stops reporting to the chat that started it and stands as that chat's side
+chat, or on its own with its own worktree, and the delegator's later
+`subscribe` or `wait` does not undo that. A side chat reports only when its
+agent `send`s. Agents answer questions through orx; approvals stay with the user.
+
+**Agents write to each other in the open.** Everything orx or another chat's
+agent writes into a chat (a task, a message, news) reaches its agent opening
+with `[orx]`, so the agent can tell it from the user. The transcript records
+it with its kind and sender and keeps what the sender wrote, refs included;
+only the agent reads the refs expanded and the instructions around them. The
+dashboard shows it as the sender's message, and a finished run by its outcome.
+
+**Messages travel by reference.** Each user message reaches its agent tagged
+with a short ref from its id. A ref in a task or message, the user's included,
+expands to the cited message, its chat and its attachments, so a delegate reads
+the user's own words rather than a paraphrase. In the dashboard, a ref is a
+link to that message wherever it is written, and a chat id an agent writes is a
+link to that chat; Copy link on a message puts its ref on the clipboard, and the
+composer shows a pasted ref as a chip. An agent can read any chat. It can message or answer
+its own delegates, and any other chat whose permission mode orx can read and is
+no broader than its own, and it can stop its own delegates.
+
+**Nesting is deliberate.** By default a delegate cannot delegate in turn. A delegation can let its delegate delegate in turn, a setting
+changes the default, and every delegate is told how many levels down it is.
+
+Where orx's server is present, the harness's own sub-agent tools are off
+(Claude's Agent and Task tools, Codex's multi-agent feature, OpenCode's task
+tool), so sub-agent work goes through orx and can run any model. A delegate
+on Claude Code also gets the prompt-cache lifetime Claude gives its own
+sub-agents, not the main conversation's longer one. Harnesses without the
+server keep their native sub-agents, which appear as parts nested under the
+call that started them, read from the agent's native records.

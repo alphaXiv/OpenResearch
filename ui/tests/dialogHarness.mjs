@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import React from "react";
@@ -13,7 +14,7 @@ export function dialogHarness() {
   const compiled = ts.transpileModule(readFileSync(new URL("../src/dialog.tsx", import.meta.url), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
-  new Function("require", "exports", "requestAnimationFrame", compiled)((name) => {
+  new Function("require", "exports", "requestAnimationFrame", compiled)(withWorkspaceMocks((name) => {
     if (name === "react") return {
       ...React,
       useState(initial) {
@@ -26,12 +27,14 @@ export function dialogHarness() {
         state[index] ??= { current: initial };
         return state[index];
       },
-      useEffect(effect) { if (!mounted) effect(); },
+      useLayoutEffect(effect) { if (!mounted) effect(); },
     };
     if (name === "./components/ui") return { Dialog: "dialog", DialogContent: "content", DialogTitle: "title", DialogDescription: "description", DialogHeader: "header", DialogFooter: "footer", Button: "button", Spinner: "spinner" };
     if (name === "./paraglide/messages.js") return { m: new Proxy({}, { get: (_, key) => () => key }) };
     return require(name);
-  }, exports, (callback) => callback());
+  }), exports, (callback) => callback());
+
+  Object.assign(exports, exports.createDialogs());
 
   function render() {
     cursor = 0;
@@ -40,5 +43,5 @@ export function dialogHarness() {
     return roots;
   }
   render();
-  return { ...exports, render };
+  return { ...exports, render, reactivate() { mounted = false; render(); return render(); } };
 }

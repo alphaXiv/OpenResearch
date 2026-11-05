@@ -1,8 +1,9 @@
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
 import { FlaskConical, Folder } from "lucide-react";
 import { useCallback, useId, useState } from "react";
 import { createPortal } from "react-dom";
-import { getSessionExperimentsQuery } from "../queries/chat";
+
 import { m } from "../paraglide/messages.js";
 import { fmtNumber, ltr } from "../i18n";
 import { fmtDuration, runDisplayStatus, timeAgo } from "../api";
@@ -85,6 +86,8 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
   onReturnToRow: () => void;
   onContinue: () => void;
 }) {
+  const { getSessionExperimentsQuery } = useWorkspace().queries;
+
   const measure = useMeasure();
   const headingId = useId();
   const { data, isPending, error } = useQuery(getSessionExperimentsQuery(session.id));

@@ -1,3 +1,4 @@
+import { workspaceDom, mockWorkspace } from "./workspaceMocks.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -14,8 +15,9 @@ function find(node, predicate) {
 }
 
 function evaluate(code, bindings) {
+  bindings = { ...bindings, useWorkspace: () => mockWorkspace(bindings) };
   const js = ts.transpileModule(`return (${code});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function(...Object.keys(bindings), js)(...Object.values(bindings));
+  return new Function(...Object.keys(bindings), "return (() => {" + js + "})();")(...Object.values(bindings));
 }
 
 test("onboarding selects the registered profile after a preset connects and refreshes", async () => {

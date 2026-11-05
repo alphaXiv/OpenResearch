@@ -1,14 +1,14 @@
 import { useNavigate, useRouteContext } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 
-import { showCustomDialog } from "../dialog";
-import { listProjectsQuery } from "../queries/projects";
 import { useRuntime } from "../RemoteRuntime";
 import { RoutePending } from "../routePages";
+import { useWorkspace } from "../workspace";
 import { NewProjectDialog } from "./ProjectsHome";
 
 /** Where a `.orx` file opened with the desktop app lands: the new-project dialog, opening that file. */
 export function OpenSharedProjectPage({ file }: { file: string | null }) {
+  const { dialogs: { showCustomDialog }, queries: { listProjectsQuery } } = useWorkspace();
   const runtime = useRuntime();
   const navigate = useNavigate();
   const { queryClient } = useRouteContext({ from: "__root__" });
@@ -35,6 +35,6 @@ export function OpenSharedProjectPage({ file }: { file: string | null }) {
       onConfirm: () => {},
       onCancel: () => { void navigate({ to: "/", replace: true }); },
     });
-  }, [file, runtime.kind, navigate, queryClient]);
+  }, [file, runtime.kind, navigate, queryClient, showCustomDialog, listProjectsQuery]);
   return file ? <div className="app flex flex-col h-full bg-background" /> : <RoutePending />;
 }

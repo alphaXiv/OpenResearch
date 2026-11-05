@@ -1,3 +1,4 @@
+import { useWorkspace } from "../workspace";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { useLocale } from "../locale";
@@ -23,11 +24,13 @@ import { looksLikeFilePath } from "../fileReferences";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, Dialog, DialogContent, IconButton, IconButtonLink, Tooltip } from "./ui";
-import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
+
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { FileChip, FileReference, FileScopeContext, type OpenFile } from "./FileReference";
 import { imageWheelZoom } from "../imageZoom";
+import { CITED_ID } from "../agentMessages";
+import { CitedRef } from "./ChatLinks";
 import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
 
 const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
@@ -37,6 +40,8 @@ export function ChatImageScope({ projectId, sessionId, children }: {
   sessionId?: string | null;
   children: ReactNode;
 }) {
+  const { absoluteFileUrl, artifactUrl, projectFileUrl } = useWorkspace().api;
+
   const resolver = useMemo(() => {
     const url = (target: NonNullable<ReturnType<typeof chatImageTarget>>) => (target.source === "absolute" ? absoluteFileUrl(target.path)
       : target.source === "artifact" ? artifactUrl(projectId, target.path)
@@ -269,12 +274,49 @@ function parseMentionHtml(node: MdastNode): MdastNode[] | null {
   return nodes;
 }
 
+function citedIdNode(cited: string, kind: "code" | "text", position?: MdastPosition): MdastNode {
+  return { type: "citedId", children: [], position, data: { hName: "cited-id", hProperties: { cited, kind } } };
+}
+
+/** Split the message refs and chat ids out of a text node, or null when it has none. */
+function splitCitedIds(node: MdastNode): MdastNode[] | null {
+  const value = node.value ?? "";
+  const nodes: MdastNode[] = [];
+  let lastIndex = 0;
+  for (const match of value.matchAll(CITED_ID)) {
+    if (match.index > lastIndex) {
+      nodes.push({ type: "text", value: value.slice(lastIndex, match.index), position: positionFor(node, lastIndex, match.index) });
+    }
+    const end = match.index + match[0].length;
+    nodes.push(citedIdNode(match[0], "text", positionFor(node, match.index, end)));
+    lastIndex = end;
+  }
+  if (lastIndex === 0) return null;
+  if (lastIndex < value.length) {
+    nodes.push({ type: "text", value: value.slice(lastIndex), position: positionFor(node, lastIndex, value.length) });
+  }
+  return nodes;
+}
+
 function replaceMentions(parent: MdastNode) {
   const children = parent.children;
   if (!children) return;
   for (let i = 0; i < children.length; i += 1) {
     const child = children[i];
     if (!child) continue;
+    if (child.type === "text" && parent.type !== "link") {
+      const replacement = splitCitedIds(child);
+      if (replacement) {
+        children.splice(i, 1, ...replacement);
+        i += replacement.length - 1;
+      }
+      continue;
+    }
+    const code = child.type === "inlineCode" && parent.type !== "link" ? child.value ?? "" : "";
+    if (code && code.match(CITED_ID)?.[0] === code) {
+      children.splice(i, 1, citedIdNode(code, "code", child.position));
+      continue;
+    }
     if (child.type === "html" && typeof child.value === "string") {
       const replacement = parseMentionHtml(child);
       if (replacement) {
@@ -337,6 +379,13 @@ const markdownProcessor = unified()
 
 const StreamingContext = createContext(false);
 const InsideLinkContext = createContext(false);
+
+/** A message's ref or a chat's id an agent wrote: a link to it, or as written outside a transcript. */
+function CitedId({ cited, code }: { cited: string; code: boolean }) {
+  const insideLink = useContext(InsideLinkContext);
+  const asWritten = code ? <code>{cited}</code> : <>{cited}</>;
+  return insideLink ? asWritten : <CitedRef cited={cited} fallback={asWritten} />;
+}
 
 /** Code that looks like a repo path becomes a file reference once it is verified; inside a link it stays code. */
 function InlinePathCode({ text, fallback, onOpenFile }: { text: string; fallback: ReactNode; onOpenFile: OpenFile }) {
@@ -455,6 +504,7 @@ export const Md = memo(function Md({
     "run-mention": (props) => (
       <RunChip id={props.id} label={props.label} onOpenRun={onOpenRun} />
     ),
+    "cited-id": (props) => <CitedId cited={props.cited} code={props.kind === "code"} />,
     a: ({ node: _node, href, children, "data-figure-src": figureSrc, "data-cited-href": citedHref, ...rest }) => {
       const figure = typeof figureSrc === "string" ? chatImageTarget(figureSrc) : null;
       if (figure && onOpenFile) {

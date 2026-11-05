@@ -1,94 +1,7 @@
-import { showConfirmDialog, showCustomDialog } from "../dialog";
+import { useMachines } from "../machineSelection";
 import { downloadFile } from "../download";
-import { Dialog } from "@base-ui/react/dialog";
-import { EscapeScope } from "./EscapeScope";
-import { commandRegion } from "../keyboardRegion";
-import { ComposerProjectPicker } from "./ComposerProjectPicker";
-import { LibraryPicker } from "./LibraryPicker";
-import { ProjectInfoCard } from "./ProjectInfoCard";
-import { SessionHoverCard } from "./SessionHoverCard";
-import { taskLocation } from "../workspaceState";
-import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
-import { useVirtualizer, defaultRangeExtractor, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
-import { markLiveUpdate } from "../queries/live";
-import { removeSession as removeCachedSession } from "../queries/invalidation";
-import { nativeOptions, sessionAcpHarness } from "../acp";
-import { resolveHarnessDefaultModel } from "../modelSelection";
-import { setChatConfiguration } from "../api";
-import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 import {
-  isCurrentScope,
-  setScopedQueryData,
-  deletedSessionIds,
-  queryClient,
-  subscribeWorkspace,
-  workspaceKey,
-} from "../queries/client";
-import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
-import { CancelledError, useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
-import { useChatState } from "../queries/chatStore";
-
-import {
-  getHarnessesQuery,
-  getHarnessSetupCommandsQuery,
-  getSkillsQuery,
-  useAlphaXivFolders,
-} from "../queries/settings";
-import { listChatActiveRunsQuery, listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery, readSidebarChatPage } from "../queries/chat";
-import { getProjectStarterPromptsQuery, listProjectsQuery, listProjectActivityQuery, resolvePaperQuery } from "../queries/projects";
-import { getCodeTreeQuery } from "../queries/files";
-import {
-  fileMentionContext,
-  insertFileMention,
-  matchFileMentions,
-  mentionCandidates,
-  type FileMentionMatch,
-} from "../fileMentions";
-import { m } from "../paraglide/messages.js";
-import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
-import { appHotkeys } from "../hotkeys";
-import { copyToClipboard } from "../clipboard";
-import { autoDir, ltr } from "../i18n";
-import { navigateKeyboardList } from "../keyboardNavigation";
-import { useLocale } from "../locale";
-import {
-  ArrowDown,
-  ArrowUpRight,
-  Blocks,
-  BookOpen,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  CircleX,
-  Clock,
-  CornerDownLeft,
-  Copy,
-  FileText,
-  FlaskConical,
-  FolderPlus,
-  Globe,
-  Gauge,
-  HelpCircle,
-  Goal,
-  Lightbulb,
-  MessageSquareQuote,
-  MessagesSquare,
-  MoreHorizontal,
-  Paperclip,
-  Pencil,
-  Plus,
-  Search,
-  SlidersHorizontal,
-  SquareTerminal,
-  ToggleRight,
-  TriangleAlert,
-  Trash2,
-  Users,
-  WifiOff,
-  X,
-} from "lucide-react";
-import {
+  useContext,
   memo,
   useCallback,
   useEffect,
@@ -99,53 +12,113 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
+
+import { Dialog } from "@base-ui/react/dialog";
+import { EscapeScope } from "./EscapeScope";
+import { commandRegion } from "../keyboardRegion";
+import { ComposerProjectPicker } from "./ComposerProjectPicker";
+import { LibraryPicker } from "./LibraryPicker";
+import { ProjectInfoCard } from "./ProjectInfoCard";
+import { SessionHoverCard } from "./SessionHoverCard";
+import { AgentMessageCard } from "./AgentMessageCard";
+import { DelegateCard } from "./DelegateCard";
+import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
+import { taskLocation } from "../workspaceState";
+import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { useVirtualizer, defaultRangeExtractor, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
+import { markLiveUpdate } from "../queries/live";
+
+import { nativeOptions, sessionAcpHarness } from "../acp";
+import { resolveHarnessDefaultModel } from "../modelSelection";
+
+import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
+
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
+import { CancelledError, useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
+
+import {
+  fileMentionContext,
+  insertFileMention,
+  insertMentionToken,
+  matchFileMentions,
+  mentionCandidates,
+  paperToken,
+} from "../fileMentions";
+import { m } from "../paraglide/messages.js";
+import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
+import { appHotkeys } from "../hotkeys";
+import { copyToClipboard } from "../clipboard";
+import { readClipboardImage } from "../clipboardImage";
+import { autoDir, ltr } from "../i18n";
+import { navigateKeyboardList } from "../keyboardNavigation";
+import { useLocale } from "../locale";
+import {
+  ArrowDown,
+  ArrowUpRight,
+  Bell,
+  Blocks,
+  BookOpen,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  CircleX,
+  Clock,
+  CornerDownLeft,
+  Copy,
+  Link,
+  FileText,
+  FlaskConical,
+  FolderPlus,
+  Globe,
+  Gauge,
+  HelpCircle,
+  Goal,
+  LibraryBig,
+  Lightbulb,
+  MessageSquareQuote,
+  MessagesSquare,
+  MoreHorizontal,
+  Paperclip,
+  Pencil,
+  Plus,
+  Search,
+  SlidersHorizontal,
+  SquareTerminal,
+  TriangleAlert,
+  Trash2,
+  Users,
+  WifiOff,
+  X,
+} from "lucide-react";
+
 import { BrandMark } from "./Wordmark";
 import {
   type SidebarChatCursor,
-  cancelQueuedMessage,
-  chatAttachmentUrl,
-  createChatSession,
-  openSideChat,
-  getChatSession,
-  deleteChatSession,
   DEMO_FIGURE_SESSION_ID,
   DEMO_LITERATURE_SESSION_ID,
-  captureUiEvent,
   DEMO_EXPERIMENT_LABELS,
   DEMO_PROJECT_ID,
   DEMO_RUN_EXPERIMENT_PROMPT,
   DEMO_SEEDED_LEAF_IDS,
-  forkChatTurn,
   fmtNumber,
   harnessModelLabel,
-  interruptChat,
   reasoningFor,
-  recoverChatTurn,
   reconcileReasoning,
   reconcileServiceTier,
-  renameChatSession,
-  retryQueuedMessage,
-  respondChat,
-  selectChatBranch,
-  compactChatSession,
-  runShellCommand,
   fmtDuration,
-  sendChatMessage,
-  getChatSubmission,
   RejectedResponseError,
-  setChatSessionArchived,
-  setChatSessionAutonomy,
-  setChatSessionPermissionMode,
-  importNativeChat,
-  setChatSessionGoal,
-  setChatSessionPlanMode,
   type FirstActionSurface,
   type ChatImageAttachment,
   type ChatMessage,
   type AlphaXivFolder,
   type ChatPart,
+  type OrxSource,
   type Autonomy,
   type ChatSession,
+  type CitedMessage,
   type Harness,
   type Project,
   type PromptAnswer,
@@ -178,7 +151,7 @@ import {
   transcriptFileName,
   transcriptMarkdown,
 } from "../chatRendering";
-import { onChatEvent } from "../events";
+
 import {
   queuedRetryLabel,
   recoveryAction as parseRecoveryAction,
@@ -186,10 +159,11 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
-  composerSeed,
+  attachmentToken,
+  citedAttachments,
   composerStashContent,
-  forgetComposerSeed,
   EMPTY_COMPOSER_STASH,
+  nextAttachmentId,
   type ComposerAnnotation,
   type ComposerAttachment,
   type ComposerStash,
@@ -206,12 +180,16 @@ import {
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
+import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
+import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { ExperimentRunBanner } from "./ExperimentRunBanner";
 import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
-import { FileMentionMenu } from "./FileMentionMenu";
-import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
+import { MentionMenu, type MentionMatch } from "./MentionMenu";
+import { useDebouncedValue } from "./NewProjectForm";
+import { MessageWithChips } from "./SkillChips";
+import { ComposerEditor, type ChipSource, type ComposerEditorHandle } from "./ComposerEditor";
 import { WorkspaceConnection } from "./WorkspaceConnection";
 import { SidebarToggle } from "./Header";
 import { AccountChip } from "./AccountChip";
@@ -808,6 +786,8 @@ const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 const NO_MESSAGES: ChatMessage[] = [];
 const EMPTY_SESSIONS: ChatSession[] = [];
+type DelegateRow = { session: ChatSession; status: DelegateStatus };
+const EMPTY_DELEGATES: DelegateRow[] = [];
 const EMPTY_RECOVERY_OVERRIDES = {};
 
 // --- rendering ---------------------------------------------------------------
@@ -1987,6 +1967,8 @@ function alphaxivApprovalLabel(
 
 /** The body of an alphaXiv write's approval card: what it writes, with each paper linked by title. */
 function AlphaXivApproval({ tool, input }: { tool: string; input: Record<string, unknown> }) {
+  const { useAlphaXivFolders } = useMachines().owner.queries;
+  const { resolvePaperQuery } = useWorkspace().queries;
   const folders = useAlphaXivFolders().data;
   const papers = tool === "save_papers_to_folder" ? exactInputStringArray(input, "paper_ids_or_urls") ?? [] : [];
   const resolved = useQueries({ queries: papers.map((paper) => resolvePaperQuery(paper)) });
@@ -2571,12 +2553,14 @@ function ToolRow({
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
   const state = part.state;
   const failed = state?.status === "error";
   const errorMessage = cleanToolError(state?.error || state?.output || "");
   const hasDetail = failed && Boolean(errorMessage);
   const [detailOpen, setDetailOpen] = useState(false);
-  const detailId = `tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  const detailId = elementId(`tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`);
   if (part.id === LOCAL_ERROR_PART_ID) {
     return (
       <div className="local-error mt-4 flex items-start gap-2 text-base text-subtext">
@@ -2847,6 +2831,7 @@ function PromptCard({
   onOpenFile?: OpenTranscriptFile;
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
   const p = part.prompt;
   const [picked, setPicked] = useState<string[]>([]);
   const [answerText, setAnswerText] = useState("");
@@ -2918,12 +2903,14 @@ function PromptCard({
     return (
       <div className="flex flex-col gap-3 py-1">
         {questionText && <div className="text-base text-text leading-normal whitespace-pre-line wrap-anywhere">{questionText}</div>}
-        {!answerInTranscript && (
+        {!answerInTranscript && (p.answeredBy ? (
+          <AgentMessageCard part={{ id: part.id, type: "text", text: chosen, orx: { kind: "message", from: p.answeredBy } }} onOpenFile={onOpenFile} />
+        ) : (
           <div className="ms-auto max-w-[88%] rounded-2xl bg-panel px-4 py-3 text-base text-text whitespace-pre-wrap wrap-anywhere">
             {questionText && <div className="mb-1 truncate text-subtext">{questionText}</div>}
             {chosen}
           </div>
-        )}
+        ))}
         {annotations.length > 0 && <AnnotationsPopover annotations={annotations} variant="sent" />}
       </div>
     );
@@ -2984,7 +2971,7 @@ function PromptCard({
       (typeof p.toolInput?.reason === "string" && p.toolInput.reason) || "";
     const description = inputString(toolInput, "description") || "";
     const explanation = p.header || reason || description || (summary ? "" : permissionActivityLabel(p.tool, toolInput));
-    const headingId = `permission-heading-${part.id}`;
+    const headingId = elementId(`permission-heading-${part.id}`);
     const alphaxivTool = p.tool?.match(ALPHAXIV_TOOL)?.[1]?.toLowerCase();
     const alphaxivWrite = alphaxivTool === "save_papers_to_folder" || alphaxivTool === "create_folder" ? alphaxivTool : null;
     return (
@@ -3056,13 +3043,13 @@ function PromptCard({
   };
   const skip = () => void respond({ approve: false });
   return (
-    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={`question-${part.id}`}>
+    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={elementId(`question-${part.id}`)}>
       <div className="flex items-center gap-2 text-subtext">
         <HelpCircle size={18} aria-hidden="true" />
         <span className="flex-1 text-sm">{p.header || m.chat_question()}</span>
         {onRespond && <IconButton aria-label={m.chat_question_skip()} disabled={done} onClick={skip}><X size={16} /></IconButton>}
       </div>
-      <div id={`question-${part.id}`} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
+      <div id={elementId(`question-${part.id}`)} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
       {(p.options?.length ?? 0) > 0 && (
         <div className="prompt-options flex flex-col">
           {p.options?.map((option, index) => {
@@ -3134,7 +3121,7 @@ function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | 
  * memo stops those from touching the rows at all. */
 /** Resolve an `image` (attachment) part into what the transcript renders: a
  * source URL, whether it's a PDF (file chip vs inline image), and a name. */
-function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: string } {
+function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isPdf: boolean; name: string } {
   const raw = p.text ?? "";
   const src = raw.startsWith("data:") ? raw : chatAttachmentUrl(raw);
   // Server file names embed the original after a `__` marker; optimistic parts
@@ -3163,6 +3150,7 @@ function ForkControls({
   pagerDisabled,
   onEdit,
   editDisabled,
+  citeRef,
 }: {
   text: string;
   createdAt: number;
@@ -3174,6 +3162,8 @@ function ForkControls({
   pagerDisabled: boolean;
   onEdit: () => void;
   editDisabled: boolean;
+  /** The ref Copy link puts on the clipboard, once the message is saved. */
+  citeRef?: string;
 }) {
   const many = count > 1;
   const sentAt = new Date(createdAt);
@@ -3216,6 +3206,13 @@ function ForkControls({
         <IconButton size="small" aria-label={m.md_copy()} disabled={!text} onClick={copy}>
           <Copy size={14} />
         </IconButton>
+        {citeRef && (
+          <Tooltip interactive content={m.chat_copy_message_link()}>
+            <IconButton size="small" aria-label={m.chat_copy_message_link()} onClick={() => void copyToClipboard(citeRef)}>
+              <Link size={14} />
+            </IconButton>
+          </Tooltip>
+        )}
       </div>
       <Tooltip interactive content={m.chat_panel_edit_and_re_send()}>
         <IconButton size="small"
@@ -3293,6 +3290,7 @@ export const Message = memo(function Message({
   onFork: (messageId: string, text: string) => void;
   onSelectFork: (leafId: string) => void;
 }) {
+  const { chatAttachmentUrl } = useWorkspace().api;
   useLocale();
   // Editing re-asks as a new fork rather than rewriting history, so the original
   // stays reachable through the pager.
@@ -3300,6 +3298,22 @@ export const Message = memo(function Message({
   const shell = shellExchangePart(message);
   if (shell) return <ShellExchangeCard part={shell} />;
   if (message.role === "user") {
+    const sent = message.parts.filter((part): part is ChatPart & { orx: OrxSource } => Boolean(part.orx));
+    if (sent.length > 0) {
+      return (
+        <div className="msg-agent-group flex flex-col items-start gap-2">
+          {sent.map((part) => (
+            <AgentMessageCard
+              key={part.id}
+              part={part}
+              runExperimentName={runExperimentName}
+              onOpenFile={onOpenFile}
+              onOpenRun={onOpenRun}
+            />
+          ))}
+        </div>
+      );
+    }
     const text = replies?.textById.get(message.id) ?? message.parts
       .filter((p) => p.type === "text")
       .map((p) => p.text ?? "")
@@ -3310,7 +3324,7 @@ export const Message = memo(function Message({
     // Optimistic parts carry a data URL; server parts carry a file name.
     const attachments = message.parts
       .filter((p) => p.type === "image" && p.text)
-      .map(attachmentPartView);
+      .map((part) => attachmentPartView(part, chatAttachmentUrl));
     const images = attachments.filter((a) => !a.isPdf);
     const files = attachments.filter((a) => a.isPdf);
     const annotations: ComposerAnnotation[] = message.parts
@@ -3376,7 +3390,7 @@ export const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div dir="auto" className="msg-user max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
+        <div dir="auto" className="msg-user max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border">
           {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
@@ -3411,6 +3425,7 @@ export const Message = memo(function Message({
             pagerDisabled={branchDisabled}
             onEdit={() => setEditDraft(text)}
             editDisabled={forkDisabled}
+            citeRef={messageRef(message.id)}
           />
         )}
       </div>
@@ -3423,6 +3438,7 @@ export const Message = memo(function Message({
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
   const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
+  const answerRef = messageRef(response.answerMessageId ?? message.id);
   return (
     <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
       {turns.length > 0 && <AssistantTurn messages={turns} response={response} options={{
@@ -3467,6 +3483,17 @@ export const Message = memo(function Message({
               <Copy size={14} />
             </IconButton>
           </Tooltip>
+          {answerRef && (
+            <Tooltip interactive content={m.chat_copy_message_link()}>
+              <IconButton
+                size="small"
+                aria-label={m.chat_copy_message_link()}
+                onClick={() => void copyToClipboard(answerRef)}
+              >
+                <Link size={14} />
+              </IconButton>
+            </Tooltip>
+          )}
         </div>
       )}
     </div>
@@ -3665,10 +3692,20 @@ function renderParts(
           predict={predictTextTail && part.id === visibleTail?.id}
         />,
       );
-    else if (part.type === "steer")
-      // A message the user sent into this turn while it ran — the same bubble a
-      // user message gets, sitting where the agent received it.
-      rendered.push(
+    else if (part.type === "steer") {
+      const { orx } = part;
+      rendered.push(orx ? (
+        <div key={part.id} className="my-2">
+          <AgentMessageCard
+            part={{ ...part, orx }}
+            runExperimentName={runExperimentName}
+            onOpenFile={onOpenFile}
+            onOpenRun={onOpenRun}
+          />
+        </div>
+      ) : (
+        // A message the user sent into this turn while it ran — the same bubble a
+        // user message gets, sitting where the agent received it.
         <div
           key={part.id}
           dir="auto"
@@ -3678,8 +3715,9 @@ function renderParts(
         >
           {replies?.questionById.has(part.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(part.id)}</div>}
           {replies?.textById.get(part.id) ?? part.text}
-        </div>,
-      );
+        </div>
+      ));
+    }
     else if (part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved)
       continue;
     else if (part.type === "prompt" && part.prompt)
@@ -4004,9 +4042,14 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
   return announcement;
 }
 
-// Measured heights outlive the per-chat remount so switching back paints at the real layout.
-const transcriptRowSizes = new Map<string, { size: number; width: number }>();
 const TRANSCRIPT_ROW_SIZES_LIMIT = 5_000;
+
+/** A message an agent cited, to scroll to once its chat is open. `nonce` tells one click from the next. */
+export type FocusedMessage = { sessionId: string; messageId: string; nonce: number };
+
+// A cited message scrolls into view once it has loaded, once per click: a
+// transcript remounts per chat, so revisiting one must not scroll back to it.
+let focusedNonce: number | undefined;
 
 const Transcript = memo(function Transcript({
   messages,
@@ -4031,6 +4074,12 @@ const Transcript = memo(function Transcript({
   recoveringTurnId,
   onRecover,
   skills,
+  delegates,
+  onOpenDelegate,
+  focusedMessageId,
+  focusNonce,
+  assistantLabel,
+  onLeaveFeed,
 }: {
   /** The branch on screen, oldest first. */
   messages: ChatMessage[];
@@ -4057,7 +4106,17 @@ const Transcript = memo(function Transcript({
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
   skills?: SkillInfo[];
+  /** Chats this one delegated to, oldest first. */
+  delegates: DelegateRow[];
+  onOpenDelegate?: (sessionId: string) => void;
+  focusedMessageId?: string | null;
+  focusNonce?: number;
+  /** Names each assistant article, as the Markdown export does. */
+  assistantLabel: string;
+  /** Ctrl+End and Ctrl+Home leave the feed, forward or back. */
+  onLeaveFeed: (forward: boolean) => void;
 }) {
+  const { transcriptRowSizes } = useWorkspace();
   useLocale();
   const replies = useMemo(() => questionReplies(messages), [messages]);
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
@@ -4070,6 +4129,19 @@ const Transcript = memo(function Transcript({
     },
     [messages, activePermissionId],
   );
+  // Each delegate sits under the turn that started it: the last row begun before it was.
+  const delegatesByRow = useMemo(() => {
+    const rows = new Map<number, DelegateRow[]>();
+    for (const delegate of delegates) {
+      const { session } = delegate;
+      let index = -1;
+      visibleMessages.forEach((group, row) => {
+        if (group[0].createdAt <= session.createdAt) index = row;
+      });
+      if (index >= 0) rows.set(index, [...(rows.get(index) ?? []), delegate]);
+    }
+    return rows;
+  }, [visibleMessages, delegates]);
   // forkPositions indexes only non-local ids, so a local bearer would page as 0/1.
   const positions = useMemo(() => {
     const bearers = visibleMessages.filter(
@@ -4079,16 +4151,15 @@ const Transcript = memo(function Transcript({
   }, [messages, visibleMessages, allMessages]);
   // ponytail: interacted rows stay mounted for this visit; lift row state if retention becomes costly.
   const retainedRows = useRef(new Set<string>());
-  const [fullHistory, setFullHistory] = useState(false);
+  const [focusedRow, setFocusedRow] = useState<string | null>(null);
   const getItemKey = useCallback((index: number) => visibleMessages[index][0].id, [visibleMessages]);
   const rangeExtractor = useCallback((range: VirtualRange) => {
-    if (fullHistory) return visibleMessages.map((_, index) => index);
     const indexes = new Set(defaultRangeExtractor(range));
     visibleMessages.forEach((group, index) => {
-      if (retainedRows.current.has(group[0].id)) indexes.add(index);
+      if (group[0].id === focusedRow || retainedRows.current.has(group[0].id)) indexes.add(index);
     });
     return [...indexes].sort((a, b) => a - b);
-  }, [visibleMessages, fullHistory]);
+  }, [visibleMessages, focusedRow]);
   // Seed via the measurement cache, not estimateSize, so remembered rows count as measured for anchoring.
   const [initialMeasurementsCache] = useState(() => visibleMessages.flatMap((group, index) => {
     const remembered = transcriptRowSizes.get(group[0].id);
@@ -4099,6 +4170,7 @@ const Transcript = memo(function Transcript({
   // Offscreen rows keep their old height through a resize, so each height carries its measuring width.
   const measuredWidths = useRef(new Map<string, number>());
   const virtualizer = useVirtualizer({
+    useFlushSync: false,
     count: visibleMessages.length,
     getScrollElement: () => scrollRef.current,
     getItemKey,
@@ -4153,22 +4225,77 @@ const Transcript = memo(function Transcript({
     document.addEventListener("selectionchange", retainSelection);
     return () => document.removeEventListener("selectionchange", retainSelection);
   }, [scrollRef]);
+  const [markedRowId, setMarkedRowId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focusedMessageId || focusedNonce === focusNonce) return;
+    const row = visibleMessages.find((group) => group.some((message) => message.id === focusedMessageId));
+    if (!row) return;
+    const nonce = focusNonce;
+    focusedNonce = nonce;
+    setMarkedRowId(row[0].id);
+    // A freshly opened transcript pins itself to the bottom first; scroll once that settles.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const { count, getItemKey } = virtualizer.options;
+      const index = Array.from({ length: count }, (_, i) => i).find((i) => getItemKey(i) === row[0].id);
+      if (focusedNonce !== nonce || index === undefined) return;
+      stickToBottom.current = false;
+      virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
+      virtualizer.scrollToIndex(index, { align: "center" });
+    }));
+  }, [focusedMessageId, focusNonce, visibleMessages, virtualizer, stickToBottom]);
+  useEffect(() => {
+    if (!markedRowId) return;
+    const timer = window.setTimeout(() => setMarkedRowId(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [markedRowId]);
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const row = focusedRow ? scroll?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focusedRow)}"]`) : null;
+    if (!scroll || !row || row.contains(document.activeElement)) return;
+    row.focus({ preventScroll: true });
+    const viewport = scroll.getBoundingClientRect();
+    const bounds = row.getBoundingClientRect();
+    if (bounds.top >= viewport.top && bounds.bottom <= viewport.bottom) return;
+    virtualizer.scrollToIndex(Number(row.dataset.index), { align: bounds.height > viewport.height ? "start" : "auto" });
+  }, [focusedRow, scrollRef, virtualizer]);
   const activeMessage = messages.at(-1);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
+  const userLabel = m.chat_export_you();
+  const headingPrefix = useId();
   return (
     <>
       <span className="sr-only" role="status" aria-live="polite">
         <span key={transcriptAnnouncement.sequence}>{transcriptAnnouncement.text}</span>
       </span>
-      <button type="button" className="sr-only focus:not-sr-only" aria-pressed={fullHistory} onClick={() => setFullHistory((value) => !value)}>
-        {m.chat_show_full_conversation()}
-      </button>
-      <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
+      {/* The WAI-ARIA feed pattern: assistive technology moves focus between articles, and the virtualizer mounts around it. */}
+      <div
+        role="feed"
+        aria-label={m.chat_messages_feed()}
+        className="relative"
+        style={{ height: virtualizer.getTotalSize() }}
+        onKeyDown={(event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLElement) || target.isContentEditable || target.matches("input, textarea, select")) return;
+          if (event.altKey || event.metaKey || event.shiftKey) return;
+          if (event.ctrlKey && (event.key === "Home" || event.key === "End")) {
+            event.preventDefault();
+            onLeaveFeed(event.key === "End");
+            return;
+          }
+          const step = event.ctrlKey ? 0 : event.key === "PageDown" ? 1 : event.key === "PageUp" ? -1 : 0;
+          const article = target.closest<HTMLElement>("[role=article]");
+          const next = step && article ? visibleMessages[Number(article.dataset.index) + step] : undefined;
+          if (!next) return;
+          event.preventDefault();
+          setFocusedRow(next[0].id);
+        }}
+      >
       {virtualizer.getVirtualItems().map((item) => {
         const group = visibleMessages[item.index];
         const m = group[group.length - 1];
         const rowId = group[0].id;
+        const headingId = `${headingPrefix}${rowId}`;
 
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
@@ -4176,19 +4303,34 @@ const Transcript = memo(function Transcript({
         return (
           <div
             key={rowId}
+            role="article"
+            tabIndex={0}
+            aria-labelledby={headingId}
+            aria-posinset={item.index + 1}
+            aria-setsize={visibleMessages.length}
             data-index={item.index}
             data-message-id={rowId}
             ref={virtualizer.measureElement}
-            className="absolute left-0 w-full pb-4"
+            className={`absolute left-0 w-full pb-4 isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
             style={{ top: item.start }}
             onClickCapture={(event) => {
+              retainedRows.current.add(rowId);
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
               stickToBottom.current = false;
               virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
             }}
             onPointerDownCapture={() => retainedRows.current.add(rowId)}
-            onFocusCapture={() => retainedRows.current.add(rowId)}
+            onInputCapture={() => retainedRows.current.add(rowId)}
+            // Screen readers can move focus through every row as they read, so focus holds a row only while it lasts.
+            onFocusCapture={() => setFocusedRow(rowId)}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow((current) => current === rowId ? null : current);
+            }}
           >
+          {/* NVDA leaves article names unspoken by default, so a hidden heading names the author. A reply nests under its prompt. */}
+          {group[0].role === "user"
+            ? <h5 id={headingId} className="sr-only select-none">{userLabel}</h5>
+            : <h6 id={headingId} className="sr-only select-none">{assistantLabel}</h6>}
           <Message
             message={m}
             responseMessages={group}
@@ -4218,6 +4360,13 @@ const Transcript = memo(function Transcript({
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
+          {onOpenDelegate && delegatesByRow.has(item.index) && (
+            <div className="mt-3 flex flex-col gap-2">
+              {delegatesByRow.get(item.index)?.map(({ session, status }) => (
+                <DelegateCard key={session.id} session={session} status={status} onOpen={onOpenDelegate} />
+              ))}
+            </div>
+          )}
           </div>
         );
       })}
@@ -4656,9 +4805,6 @@ const STARTER_TONES = [
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
-const composerStashes = new Map<string, ComposerStash>();
-const mountedComposers = new Map<string, (failed: ComposerStash) => void>();
-subscribeWorkspace(() => { composerStashes.clear(); });
 
 function mergeFailedComposer(current: ComposerStash, failed: ComposerStash): ComposerStash {
   const annotations = [...current.annotations];
@@ -4721,6 +4867,9 @@ export function ChatPanel({
   onOpenFile,
   onOpenRun,
   runExperimentName,
+  chatInfo,
+  onOpenMessage,
+  focusedMessage,
   onOpenExperiment,
   experimentName,
   onOpenPlan,
@@ -4737,6 +4886,7 @@ export function ChatPanel({
   embedded = false,
   sideParentSessionId,
   onOpenSideChat,
+  onOpenDelegate,
   onRunSetup,
   children,
 }: {
@@ -4778,6 +4928,12 @@ export function ChatPanel({
   onOpenRun?: OpenTranscriptTarget;
   /** Resolve a run to the experiment name shown on tool activity links. */
   runExperimentName?: (runId: string) => string;
+  /** A chat in this project, or undefined for one elsewhere. */
+  chatInfo?: ChatLinks["chat"];
+  /** Open the chat a message an agent cited lives in, at that message. */
+  onOpenMessage?: (cited: string) => void;
+  /** A message to scroll to and mark once its chat is on screen. */
+  focusedMessage?: FocusedMessage | null;
   /** Open an experiment overview, where its notes are displayed. */
   onOpenExperiment?: OpenTranscriptTarget;
   /** Resolve an experiment id to the name shown on tool activity links. */
@@ -4815,9 +4971,65 @@ export function ChatPanel({
   sideParentSessionId?: string;
   /** Branch a side chat off `parentSessionId`; a question, if given, is its first message. */
   onOpenSideChat?: (parentSessionId: string, question: string) => void;
+  /** Open a chat this one delegated to. */
+  onOpenDelegate?: (sessionId: string) => void;
   /** Middle-pane content when a settings section is active. */
   children?: React.ReactNode;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+
+  const {
+    setChatSessionPermissionMode,
+    setChatSessionPlanMode,
+    setChatSessionAutonomy,
+    setChatSessionGoal,
+    importNativeChat,
+    openSideChat,
+    createChatSession,
+    setChatSessionArchived,
+    releaseDelegate,
+    renameChatSession,
+    deleteChatSession,
+    setChatConfiguration,
+    compactChatSession,
+    captureUiEvent,
+    sendChatMessage,
+    getChatSubmission,
+    runShellCommand,
+    interruptChat,
+    recoverChatTurn,
+    forkChatTurn,
+    selectChatBranch,
+    cancelQueuedMessage,
+    retryQueuedMessage,
+    respondChat,
+    getChatSession,
+  } = useWorkspace().api;
+  const {
+    listProjectsQuery,
+    listProjectActivityQuery,
+    listChatSessionsQuery,
+    readSidebarChatPage,
+    listChatActiveRunsQuery,
+    getHarnessesQuery,
+    getSkillsQuery,
+    getHarnessSetupCommandsQuery,
+    getCodeTreeQuery,
+    listNativeChatsQuery,
+    getChatMessagesQuery,
+    getProjectStarterPromptsQuery,
+    citedMessageQuery,
+  } = useWorkspace().queries;
+  // The alphaXiv account and library belong to the machine the app runs on.
+  const owner = useMachines().owner;
+  const { workspaceKey, setScopedQueryData, queryClient, isCurrentScope, deletedSessionIds } = useWorkspace();
+  const { useChatState } = useWorkspace().chat;
+  const { composerStashes, mountedComposers, composerSeed, forgetComposerSeed } = useWorkspace().composers;
+  const { onChatEvent } = useWorkspace().events;
+  const { removeSession: removeCachedSession } = useWorkspace().invalidation;
+
   const setChatSessionPermissionModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPermissionMode>) => setChatSessionPermissionMode(...args) });
   const setChatSessionPlanModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPlanMode>) => setChatSessionPlanMode(...args) });
   const setChatSessionAutonomyMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAutonomy>) => setChatSessionAutonomy(...args) });
@@ -4826,6 +5038,7 @@ export function ChatPanel({
   const openSideChatMutation = useMutation({ mutationFn: openSideChat });
   const createChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createChatSession>) => createChatSession(...args) });
   const setChatSessionArchivedMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionArchived>) => setChatSessionArchived(...args) });
+  const releaseDelegateMutation = useMutation({ mutationFn: releaseDelegate });
   const renameChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof renameChatSession>) => renameChatSession(...args) });
   const deleteChatSessionMutation = useMutation({ mutationFn: deleteChatSession });
 
@@ -4836,15 +5049,18 @@ export function ChatPanel({
     try { return localStorage.getItem("sidebar-grouping") === "list" ? "list" : "projects"; }
     catch { return "projects"; }
   });
+  const machineSuffix = runtime.kind === "ssh" ? `:${encodeURIComponent(runtime.session.host)}` : "";
+  const pinnedProjectsKey = `sidebar-pinned-projects${machineSuffix}`;
+  const collapsedProjectsKey = `sidebar-collapsed-projects${machineSuffix}`;
   const [pinnedProjects, setPinnedProjects] = useState<string[]>(() => {
     try {
-      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-pinned-projects") ?? "[]");
+      const stored: unknown = JSON.parse(localStorage.getItem(pinnedProjectsKey) ?? "[]");
       return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
     } catch { return []; }
   });
   const [collapsedProjects, setCollapsedProjects] = useState<string[]>(() => {
     try {
-      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-collapsed-projects") ?? "[]");
+      const stored: unknown = JSON.parse(localStorage.getItem(collapsedProjectsKey) ?? "[]");
       return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
     } catch { return []; }
   });
@@ -4902,6 +5118,23 @@ export function ChatPanel({
     });
   }, [sessionsOptions]);
   const activeId = activeSessionId;
+  // Session rows keep their identity across unrelated updates, so the memoized
+  // transcript only re-renders when one of its delegates or their status changes.
+  const delegatesRef = useRef<DelegateRow[]>(EMPTY_DELEGATES);
+  const chatLinks = useMemo<ChatLinks | null>(
+    () => (chatInfo && onOpenDelegate && onOpenMessage ? { chat: chatInfo, onOpenChat: onOpenDelegate, onOpenMessage } : null),
+    [chatInfo, onOpenDelegate, onOpenMessage],
+  );
+  const delegates = useMemo(() => {
+    const next = activeId
+      ? delegatesOf(sessions, activeId).map((session) => ({ session, status: delegateStatus(session, sessions) }))
+      : EMPTY_DELEGATES;
+    const previous = delegatesRef.current;
+    const changed = next.length !== previous.length
+      || next.some((row, index) => row.session !== previous[index].session || row.status !== previous[index].status);
+    if (changed) delegatesRef.current = next;
+    return delegatesRef.current;
+  }, [sessions, activeId]);
   const onActiveSessionChangeRef = useRef(onActiveSessionChange);
   onActiveSessionChangeRef.current = onActiveSessionChange;
   const projectVisitRef = useRef({ projectId });
@@ -4926,6 +5159,7 @@ export function ChatPanel({
   const goalArmed = goalScope === composerScopeRef.current;
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const cited = citedAttachments(draft, attachments);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [imageRefusedFor, setImageRefusedFor] = useState<string | null>(null);
   // Unsent composer content belongs to the scope it was typed in — stash on
@@ -5039,7 +5273,7 @@ export function ChatPanel({
   const scrollToEndRef = useRef<(() => void) | null>(null);
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
-  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<ComposerEditorHandle>(null);
   const connection = useRemoteConnection();
   const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
@@ -5068,8 +5302,6 @@ export function ChatPanel({
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
   const [modelPickerRequest, setModelPickerRequest] = useState(0);
   const [composerCursor, setComposerCursor] = useState(0);
-  // IME guard: mid-composition text can transiently look like a full command.
-  const composingRef = useRef(false);
 
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
@@ -5081,53 +5313,26 @@ export function ChatPanel({
       return;
     }
     // The command replaces the `/query` token in place, so the chip lands where
-    // it was typed and the rest of the message stays untouched. Only a skill
-    // chip is painted wider than its token, so only it reserves a margin.
-    const tokenName = skill.name.replace(/@u$/, "^").replace(/@p$/, "~");
-    const marginSpaces = skill.source === "command" ? 1 : skillMarginSpaces(tokenName, composerRef.current);
-    const next = insertSlashCommand(draft, slashContext, tokenName, marginSpaces);
-    setDraft(next.text);
-    window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
-      setComposerCursor(next.cursor);
-    });
+    // it was typed and the rest of the message stays untouched.
+    const next = insertSlashCommand(draft, slashContext, skill.name.replace(/@u$/, "^").replace(/@p$/, "~"));
+    composerRef.current?.setText(next.text, next.cursor);
   }
 
-  function pickFileMention(match: FileMentionMatch) {
+  function pickMention(match: MentionMatch) {
     if (!mentionContext) return;
-    const next = insertFileMention(draft, mentionContext, match);
-    setDraft(next.text);
-    window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
-      setComposerCursor(next.cursor);
-    });
-  }
-
-  /** Backspace just behind a chip deletes the whole command, the way the chip
-   * it paints reads — a single object, not eight characters. */
-  function deleteCommandBehindCaret(textarea: HTMLTextAreaElement): boolean {
-    if (typingCommand) return false;
-    const cursor = textarea.selectionStart;
-    if (composingRef.current || cursor !== textarea.selectionEnd) return false;
-    const tokenEnd = draft.slice(0, cursor).replace(/[ \t]+$/, "").length;
-    const context = slashCommandContext(draft, tokenEnd);
-    if (!context || context.end !== tokenEnd) return false;
-    if (!knownCommand(context.query)) return false;
-    if (cursor > tokenEnd && cursor - tokenEnd !== skillMarginSpaces(context.query, textarea)) return false;
-    const next = removeSlashCommand(draft, { ...context, end: cursor });
-    setDraft(next.text);
-    setComposerCursor(next.cursor);
-    window.requestAnimationFrame(() =>
-      textarea.setSelectionRange(next.cursor, next.cursor),
-    );
-    return true;
+    const next = match.kind === "file"
+      ? insertFileMention(draft, mentionContext, match)
+      : insertMentionToken(draft, mentionContext, match.kind === "paper" ? paperToken(match.paper) : match.id);
+    composerRef.current?.setText(next.text, next.cursor);
   }
 
   /** Queue files (upload button, clipboard paste, or drag-drop) as composer
-   * attachments — images and PDFs, which the harness reads off disk by path. */
-  function addFiles(files: File[]) {
+   * attachments — images and PDFs, which the harness reads off disk by path —
+   * cited in the draft at the caret. */
+  function addFiles(
+    files: File[],
+    target?: { scope: typeof composerScopeRef.current; stashKey: string },
+  ) {
     // Per-file and total caps keep the base64-inflated (~33%) request body
     // under the backend's 64 MB limit — a single 30 MB file or a batch summing
     // to 40 MB both stay clear once encoded.
@@ -5135,7 +5340,9 @@ export function ChatPanel({
     const TOTAL_BYTES = 40 * 1024 * 1024;
     setAttachError(null);
     setImageRefusedFor(null);
-    let total = attachments.reduce((n, a) => n + a.size, 0);
+    let total = cited.attachments.reduce((n, a) => n + a.size, 0);
+    const scope = target?.scope ?? composerScopeRef.current;
+    const attachmentStashKey = target?.stashKey ?? stashKey;
     for (const file of files) {
       if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
       if (noImageInputError && file.type.startsWith("image/")) {
@@ -5151,12 +5358,11 @@ export function ChatPanel({
         continue;
       }
       total += file.size;
-      const scope = composerScopeRef.current;
-      const attachmentStashKey = stashKey;
       const reader = new FileReader();
       reader.onload = () => {
         if (!isCurrentScope(sessionsOptions.queryKey)) return;
         const attachment = {
+          id: nextAttachmentId(),
           dataUrl: reader.result as string,
           mediaType: file.type,
           name: file.name,
@@ -5164,13 +5370,15 @@ export function ChatPanel({
         };
         // The decode is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
-        if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId) {
+        if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId && composerScopeRef.current.mainView === scope.mainView) {
           setAttachments((cur) => [...cur, attachment]);
+          composerRef.current?.insertToken(attachmentToken(attachment));
           return;
         }
         const stash = composerStashes.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
         composerStashes.set(attachmentStashKey, {
           ...stash,
+          draft: [stash.draft, attachmentToken(attachment)].filter(Boolean).join(" "),
           attachments: [...stash.attachments, attachment],
         });
       };
@@ -5178,8 +5386,10 @@ export function ChatPanel({
     }
   }
 
-  function onComposerPaste(e: React.ClipboardEvent) {
-    const files = Array.from(e.clipboardData.items)
+  function onComposerPaste(e: ClipboardEvent) {
+    const data = e.clipboardData;
+    if (!data) return;
+    const files = Array.from(data.items)
       .filter(
         (item) =>
           item.kind === "file" &&
@@ -5187,15 +5397,41 @@ export function ChatPanel({
       )
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
-    if (files.length > 0) {
+    const usable = files.filter((file) => file.size > 0);
+    if (usable.length > 0) {
       e.preventDefault();
-      addFiles(files);
+      addFiles(usable);
+      return;
     }
+    const types = Array.from(data.types);
+    const hasImageType =
+      types.some((type) => type.startsWith("image/")) ||
+      files.some((file) => file.type.startsWith("image/"));
+    const mayContainImage = hasImageType || types.length === 0 || types.includes("Files");
+    const hasText =
+      types.some((type) => type.startsWith("text/")) ||
+      Boolean(data.getData("text/plain"));
+    if (!mayContainImage || (hasText && !hasImageType)) {
+      return;
+    }
+    if (!navigator.clipboard?.read) {
+      return;
+    }
+    e.preventDefault();
+    const scope = composerScopeRef.current;
+    const attachmentStashKey = stashKey;
+    void (async () => {
+      const file = await readClipboardImage();
+      if (file) {
+        addFiles([file], { scope, stashKey: attachmentStashKey });
+      }
+    })();
   }
 
   // The open session, if any (its harness is locked; its model/mode/reasoning
   // are what the composer should reflect and edit).
   const openSession = sessions.find((s) => s.id === activeId);
+  const assistantLabel = openSession ? harnessLabel(openSession.harness, openSession.harnessName) : m.chat_the_agent();
 
   // The selection the composer displays and edits:
   //  * with a session open — that session's stored settings, with any unsent
@@ -5268,15 +5504,46 @@ export function ChatPanel({
   const mentionQuery = mentionContext?.end === composerCursor ? mentionContext.query : null;
   const mentionTree = useQuery({
     ...getCodeTreeQuery(projectId, activeId ? { sessionId: activeId } : {}),
-    enabled: mentionQuery !== null,
+    // Also loaded for `@path` tokens already in the draft, which chip only when the path exists.
+    enabled: mentionQuery !== null || /(^|\s)@\S/.test(draft),
   });
   const mentionEntries = mentionTree.data?.entries;
   const mentionPool = useMemo(() => mentionCandidates(mentionEntries ?? []), [mentionEntries]);
-  const mentionMatches = useMemo(
-    () => (mentionQuery !== null && !skillMenuDismissed ? matchFileMentions(mentionPool, mentionQuery) : []),
-    [mentionPool, mentionQuery, skillMenuDismissed],
-  );
+  const libraryUserId = owner.queries.useOpenResearchAccount().data?.user?.id;
+  // A `/` in the query browses the checkout, so papers and chats sit that out.
+  const searchesBeyondFiles = mentionQuery !== null && !mentionQuery.includes("/");
+  const paperSearch = useDebouncedValue(mentionQuery ?? "", 200);
+  const mentionPapers = useQuery({
+    queryKey: owner.workspaceKey("mentionPapers", libraryUserId, paperSearch),
+    queryFn: ({ signal }) => owner.api.getAlphaXivPapers(null, null, paperSearch || undefined, signal),
+    enabled: Boolean(libraryUserId) && searchesBeyondFiles,
+    staleTime: 60_000,
+    retry: false,
+  }, owner.queryClient);
+  const mentionMatches = useMemo((): MentionMatch[] => {
+    if (mentionQuery === null || skillMenuDismissed) return [];
+    const files = matchFileMentions(mentionPool, mentionQuery).map((match) => ({ kind: "file" as const, ...match }));
+    if (!searchesBeyondFiles) return files;
+
+    const needle = mentionQuery.toLowerCase();
+    const papers = (mentionPapers.data?.papers ?? [])
+      .slice(0, 3)
+      .map((paper) => ({ kind: "paper" as const, paper }));
+    const chats = sessions
+      .filter((session) => session.id !== activeId && !session.archived)
+      .map((session) => ({
+        kind: "chat" as const,
+        id: session.id,
+        title: chatInfo?.(session.id)?.title ?? session.title ?? m.chat_untitled(),
+        harness: session.harness,
+      }))
+      .filter((chat) => chat.title.toLowerCase().includes(needle))
+      .slice(0, 3);
+    // Room for every section above the fold.
+    return [...files.slice(0, papers.length + chats.length > 0 ? 4 : undefined), ...papers, ...chats];
+  }, [mentionPool, mentionQuery, skillMenuDismissed, searchesBeyondFiles, mentionPapers.data, sessions, activeId, chatInfo]);
   const mentionMenuOpen = mentionMatches.length > 0;
+  const mentionPaths = useMemo(() => new Set(mentionPool.map((candidate) => candidate.path)), [mentionPool]);
   const activeMentionIdx = Math.min(mentionIdx, Math.max(0, mentionMatches.length - 1));
   useEffect(() => setMentionIdx(0), [mentionQuery]);
   // Reconcile the selected model's settings, including stale saved preferences,
@@ -5292,7 +5559,7 @@ export function ChatPanel({
     ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
     : null;
   const imageInputBlocked =
-    !!noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"));
+    !!noImageInputError && cited.attachments.some((a) => a.mediaType.startsWith("image/"));
   const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
   const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
   useEffect(() => setImageRefusedFor(null), [selectedModel?.id]);
@@ -5573,7 +5840,7 @@ export function ChatPanel({
         const markdown = openSession
           ? transcriptMarkdown(title, messages, {
             user: m.chat_export_you(),
-            assistant: harnessLabel(openSession.harness, openSession.harnessName),
+            assistant: assistantLabel,
           })
           : null;
         if (markdown) downloadFile(transcriptFileName(title), new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
@@ -5682,12 +5949,7 @@ export function ChatPanel({
     setDraft(next.text);
     setSkillMenuDismissed(true);
     if (runComposerCommand(name)) return;
-    window.requestAnimationFrame(() => {
-      if (composerRef.current?.value !== next.text) return;
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
-      setComposerCursor(next.cursor);
-    });
+    composerRef.current?.setText(next.text, next.cursor);
   }
 
   // Reconcile deletions and title animations after missed session events.
@@ -5744,10 +6006,6 @@ export function ChatPanel({
       if (projectVisitRef.current === visit) projectVisitRef.current = { projectId };
     };
   }, [projectId, syncSessionList]);
-
-  useEffect(() => {
-    setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-  }, [activeId]);
 
   useEffect(() => {
     return onChatEvent((ev) => {
@@ -5868,6 +6126,10 @@ export function ChatPanel({
     part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
   )), [messages, busy]);
   const activeSession = openSession;
+  // Once the user writes in a delegate, whether it still reports to its parent is theirs to decide.
+  const steeringDelegate = Boolean(activeSession?.delegate?.notifies) && (draft.trim() !== ""
+    || messages.some((message) => message.parts.some((part) =>
+      (part.type === "steer" || (message.role === "user" && part.type === "text")) && Boolean(part.text) && !part.orx)));
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
@@ -5901,6 +6163,27 @@ export function ChatPanel({
     }
     return draft.trim().toLowerCase() === `/${name}`;
   };
+
+  const draftRefs = useMemo(
+    () => [...new Set(Array.from(draft.matchAll(CITED_ID), ([cited]) => cited).filter((cited) => cited.startsWith("msg_")))],
+    [draft],
+  );
+  const combineCited = useCallback(
+    (results: { data?: CitedMessage }[]) => new Map(results.flatMap((result, i) => (result.data ? [[draftRefs[i], result.data] as const] : []))),
+    [draftRefs],
+  );
+  const citedInDraft = useQueries({ queries: draftRefs.map(citedMessageQuery), combine: combineCited });
+
+  const chipSource = useMemo<ChipSource>(() => ({
+    isCommand: knownCommand,
+    message: (ref) => citedInDraft.get(ref),
+    chat: (id) => chatInfo?.(id),
+    skill: (name) => commands.find((command) => command.name === canonicalSkillName(name) && command.source !== "command"),
+    isPath: (path) => !bashMode && mentionPaths.has(path),
+    attachment: (id) => attachments.find((attachment) => attachment.id === id),
+    // `knownCommand` reads the draft, commands and bash mode.
+  }), [draft, commands, bashMode, mentionPaths, attachments, citedInDraft, chatInfo]);
+
   /** Sent messages keep any command token as prose — it was never intercepted. */
   const transcriptSkills = useMemo(
     () => commands.filter((command) => command.source !== "command"),
@@ -5932,7 +6215,7 @@ export function ChatPanel({
     !pendingPlan &&
     !awaitingInput &&
     !pendingPermission &&
-    attachments.length === 0 &&
+    cited.attachments.length === 0 &&
     annotations.length === 0;
 
   // Plan opens are stamped with the session like file opens are. Memoized
@@ -5972,8 +6255,13 @@ export function ChatPanel({
   );
 
   // Drop any unsent composer tweak when switching sessions, so it never bleeds
-  // from one session's pickers onto another's.
+  // from one session's pickers onto another's. A hidden machine's effects rerun
+  // when it is shown again, so only a real session change resets them.
+  const overridesSession = useRef<string | null | undefined>(undefined);
   useEffect(() => {
+    if (overridesSession.current === activeId) return;
+    overridesSession.current = activeId;
+    setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
     settingsMutationSeq.current += 1;
     planMutationSeq.current += 1;
     const queuedMode = (activeId ? state.queuedBySession[activeId] ?? [] : []).reduce<
@@ -6008,15 +6296,8 @@ export function ChatPanel({
   const telemetrySurface: FirstActionSurface =
     projectId === DEMO_PROJECT_ID ? "demo" : "project";
   const applyStarterPrompt = (prompt: string) => {
-    setDraft(prompt);
     setSkillMenuDismissed(false);
-    window.requestAnimationFrame(() => {
-      const el = composerRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(prompt.length, prompt.length);
-      setComposerCursor(prompt.length);
-    });
+    composerRef.current?.setText(prompt, prompt.length);
   };
   // Seeds without taking focus; focus may still belong to the welcome dialog.
   // Declared after the stash-restore effect so `current` below is the scope's
@@ -6037,14 +6318,14 @@ export function ChatPanel({
     if ((!newChatPending && !composerPending) || mainView !== "chat" || contentLoading || contentError || historyLoading) return;
     // The welcome dialog restores its previous focus on unmount; run after that.
     const frame = window.requestAnimationFrame(() => {
-      const el = composerRef.current;
-      if (!el) return;
-      el.focus();
-      if (document.activeElement !== el) return;
+      const composer = composerRef.current;
+      if (!composer?.dom) return;
+      composer.focus();
+      if (!composer.dom.contains(document.activeElement)) return;
       focusedComposerNonce.current = composerFocusNonce;
       if (newChatPending) setNewChatFocusProject(null);
-      el.setSelectionRange(el.value.length, el.value.length);
-      el.scrollIntoView({ block: "nearest" });
+      composer.focus("end");
+      composer.dom.scrollIntoView({ block: "nearest" });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [composerFocusNonce, newChatFocusProject, projectId, activeId, mainView, contentLoading, contentError, historyLoading]);
@@ -6061,6 +6342,9 @@ export function ChatPanel({
     stickToBottom.current = true;
     setTranscriptAtBottom(true);
     scrollToEndRef.current?.();
+  }, []);
+  const leaveTranscriptFeed = useCallback((forward: boolean) => {
+    (forward ? composerRef.current : threadRef.current)?.focus();
   }, []);
   useEffect(() => {
     const el = threadRef.current;
@@ -6130,8 +6414,11 @@ export function ChatPanel({
     const planPermissionMode = planRequested && activeHarness?.id === "claude-code"
       ? toggledPlanMode ? "plan" : "auto"
       : undefined;
-    const text = composerCommand ? composerCommand.prompt : originalText;
-    const pending = attachments;
+    // Attachments travel in the order the text cites them.
+    const sending = citedAttachments(composerCommand ? composerCommand.prompt : originalText, attachments);
+    const text = sending.text;
+    const pending = sending.attachments;
+    const attachmentsAtSend = attachments;
     const pendingAnnotations = annotations;
     const wireAnnotations = pendingAnnotations.map((annotation) => ({
       text: annotation.text,
@@ -6265,11 +6552,11 @@ export function ChatPanel({
       composerLiveRef.current = {
         ...live,
         draft: live.draft === draft ? "" : live.draft,
-        attachments: live.attachments === pending ? [] : live.attachments,
+        attachments: live.attachments === attachmentsAtSend ? [] : live.attachments,
         annotations: live.annotations === pendingAnnotations ? [] : live.annotations,
       };
       setDraft((current) => current === draft ? "" : current);
-      setAttachments((current) => current === pending ? [] : current);
+      setAttachments((current) => current === attachmentsAtSend ? [] : current);
       setAnnotations((current) => current === pendingAnnotations ? [] : current);
       setAttachError(null);
       setImageRefusedFor(null);
@@ -6479,12 +6766,7 @@ export function ChatPanel({
 
   function exitBashMode() {
     const next = withoutBashPrefix(draft);
-    setDraft(next);
-    window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.length, next.length);
-      setComposerCursor(next.length);
-    });
+    composerRef.current?.setText(next, next.length);
   }
 
   /** Enter in bash mode: run the command where the agent works and show the
@@ -6627,6 +6909,22 @@ export function ChatPanel({
     [activeId, busy, queueSessionMutation],
   );
 
+  // A cited message on another fork: show that fork, once per click, and the
+  // transcript scrolls to the message once it is on screen.
+  const forkedForNonce = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (!focusedMessage || focusedMessage.sessionId !== activeId || busy) return;
+    if (forkedForNonce.current === focusedMessage.nonce) return;
+    const { messageId } = focusedMessage;
+    if (messages.some((message) => message.id === messageId)) {
+      forkedForNonce.current = focusedMessage.nonce;
+      return;
+    }
+    if (!allMessages.some((message) => message.id === messageId)) return;
+    forkedForNonce.current = focusedMessage.nonce;
+    selectBranch(messageId);
+  }, [focusedMessage, activeId, busy, messages, allMessages, selectBranch]);
+
   // Durable cancellation wins before the chip disappears. If persistence
   // fails, leave it visible so a restart cannot surprise the user by sending it.
   function cancelQueued(itemId: string) {
@@ -6703,6 +7001,15 @@ export function ChatPanel({
     updateSidebarSession(session, { archived });
     void setChatSessionArchivedMutation.mutateAsync([session.id, archived]).catch(() => {
       updateSidebarSession(session, { archived: prev });
+    });
+  }
+
+  function stopNotifyingParent(session: ChatSession) {
+    const prev = session.delegate;
+    updateSidebarSession(session, { delegate: null });
+    void releaseDelegateMutation.mutateAsync(session.id).catch((error) => {
+      updateSidebarSession(session, { delegate: prev });
+      showAlert(error instanceof Error ? error.message : String(error), "error");
     });
   }
 
@@ -6854,6 +7161,7 @@ export function ChatPanel({
   const defaultRowsHeight = defaultRows.reduce((height, row) => height + sidebarRowHeight(row), 0);
   const sidebarRowKey = (row: SidebarRow) => row.kind === "chat" ? row.session.id : `${row.kind}:${row.project.id}`;
   const sidebarVirtualizer = useVirtualizer({
+    useFlushSync: false,
     count: sidebarRows.length,
     getScrollElement: () => railBodyRef.current,
     getItemKey: (index) => sidebarRowKey(sidebarRows[index]),
@@ -7016,13 +7324,13 @@ export function ChatPanel({
                       onToggleCollapsed={() => {
                         const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
                         setCollapsedProjects(next);
-                        try { localStorage.setItem("sidebar-collapsed-projects", JSON.stringify(next)); } catch {}
+                        try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
                       }}
                       pinned={pinnedProjects.includes(project.id)}
                       onPin={() => {
                         const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
                         setPinnedProjects(next);
-                        try { localStorage.setItem("sidebar-pinned-projects", JSON.stringify(next)); } catch {}
+                        try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
                       }}
                       onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
                       onNewChat={() => {
@@ -7123,7 +7431,7 @@ export function ChatPanel({
   const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-titlebar relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
   const displayedRail = mobileRail ? (
     <Dialog.Root open={railOpen} onOpenChange={(open) => { if (!open) onCloseMobileRail?.(); }}>
-      <Dialog.Portal>
+      <Dialog.Portal container={portalContainer}>
         <Dialog.Backdrop className="fixed inset-0 z-70 bg-modal-backdrop" />
         <Dialog.Popup aria-modal="true" aria-label={m.chat_panel_show_sidebar()} className="mobile-rail-dialog fixed inset-y-0 start-0 z-80 outline-none">{rail}</Dialog.Popup>
       </Dialog.Portal>
@@ -7138,6 +7446,7 @@ export function ChatPanel({
     return (
       <>
         {displayedRail}
+        {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
         <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
           {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
@@ -7153,6 +7462,7 @@ export function ChatPanel({
   return (
     <>
       {displayedRail}
+      {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
       <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
@@ -7256,7 +7566,7 @@ export function ChatPanel({
                       action: "starter_click",
                     });
                     // Don't auto-send past an unavailable agent or a non-empty composer.
-                    const composerEmpty = !draft.trim() && attachments.length === 0 && annotations.length === 0;
+                    const composerEmpty = !draft.trim() && annotations.length === 0;
                     if (edit || !activeHarness?.agentReady || !composerEmpty) applyStarterPrompt(item.prompt);
                     else void send({ starter: item.prompt });
                   };
@@ -7303,6 +7613,7 @@ export function ChatPanel({
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <ChatLinksContext value={chatLinks}>
                 <Transcript
                   key={activeId}
                   scrollRef={threadRef}
@@ -7327,7 +7638,14 @@ export function ChatPanel({
                   recoveringTurnId={recoveringTurnId}
                   onRecover={recoverFailedTurn}
                   skills={transcriptSkills}
+                  delegates={delegates}
+                  onOpenDelegate={onOpenDelegate}
+                  focusedMessageId={focusedMessage?.sessionId === activeId ? focusedMessage.messageId : null}
+                  focusNonce={focusedMessage?.nonce}
+                  assistantLabel={assistantLabel}
+                  onLeaveFeed={leaveTranscriptFeed}
                 />
+                </ChatLinksContext>
               </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
@@ -7367,7 +7685,7 @@ export function ChatPanel({
 
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto">
           {threadMounted && (
             <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
               <IconButton
@@ -7401,9 +7719,7 @@ export function ChatPanel({
           {pendingPlan && !(revisingPlan && pendingPlan.promptId === revisingPlan.promptId) && (
             <PlanStrip
               synthesized={pendingPlan.synthesized}
-              agentLabel={
-                activeSession ? harnessLabel(activeSession.harness, activeSession.harnessName) : m.chat_the_agent()
-              }
+              agentLabel={assistantLabel}
               showResumeModes={activeSession?.harness === "claude-code"}
               onView={(intent) => openPlan?.(pendingPlan.plan, pendingPlan.promptId, intent)}
               onApprove={(resumeMode) =>
@@ -7520,257 +7836,244 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
-          <div inert={connection !== null} className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle${connection ? " opacity-60" : ""}`} data-onboarding="composer">
-            {unconfirmedSend !== null && (
-              <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
-                <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
-                <button type="button" className="underline cursor-pointer" onClick={() => {
-                  composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
-                  setUnconfirmedSend(null);
-                  composerRef.current?.focus();
-                }}>
-                  {m.chat_panel_dismiss_demo_hint()}
-                </button>
-              </div>
-            )}
-            {activeHarness && !activeHarness.agentReady && (
-              <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
-                {activeHarness.catalogPending ? (
-                  <span>{activeHarness.name} — {m.onboarding_checking()}</span>
-                ) : (
-                  <>
-                    <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
-                    {activeHarness.agentNote
-                      ? renderNote(activeHarness.agentNote, onRunSetup && {
-                        canRun: (command) => setupPath(command) !== undefined,
-                        onRun: (command) => {
-                          const path = setupPath(command);
-                          if (path) onRunSetup(command, path);
-                        },
-                      })
-                      : m.chat_recheck_setup()}
-                  </>
-                )}
-              </div>
-            )}
-            {skillMenuOpen && (
-              <SkillMenu
-                skills={skillMatches}
-                activeIndex={activeSkillIdx}
-                onPick={pickSkill}
-                onHover={setSkillIdx}
-              />
-            )}
-            {mentionMenuOpen && (
-              <FileMentionMenu
-                matches={mentionMatches}
-                activeIndex={activeMentionIdx}
-                onPick={pickFileMention}
-                onHover={setMentionIdx}
-              />
-            )}
-            {annotations.length > 0 && (
-              <ComposerAnnotations
-                annotations={annotations}
-                onClear={() => {
-                  setAnnotations([]);
-                  window.requestAnimationFrame(() => composerRef.current?.focus());
-                }}
-                onRemove={(id) => {
-                  const remaining = annotations.filter((annotation) => annotation.id !== id);
-                  setAnnotations(remaining);
-                  if (remaining.length === 0) {
-                    window.requestAnimationFrame(() => composerRef.current?.focus());
-                  }
-                }}
-              />
-            )}
-            {attachments.length > 0 && (
-              <div className="composer-attachments flex flex-wrap gap-1.5 pt-2 px-3 pb-0">
-                {attachments.map((a, i) => {
-                  const remove = () =>
-                    setAttachments((cur) => cur.filter((_, j) => j !== i));
-                  return a.mediaType === "application/pdf" ? (
-                    <div key={i} className="attachment-file [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background relative inline-flex items-center gap-2 max-w-55 py-2 px-2.5 border border-border rounded-sm text-text bg-surface [&_svg]:shrink-0 [&_svg]:text-muted" title={a.name}>
-                      <FileText size={22} />
-                      <span className="attachment-file-name overflow-hidden text-ellipsis whitespace-nowrap text-sm">{a.name ?? "document.pdf"}</span>
-                      <button title={m.chat_panel_remove_file()} aria-label={m.chat_panel_remove_file()} onClick={remove}>
-                        <X size={12} />
-                      </button>
-                    </div>
+          <div inert={connection !== null} className={`composer-frame flex flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+              {unconfirmedSend !== null && (
+                <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
+                  <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
+                  <button type="button" className="underline cursor-pointer" onClick={() => {
+                    composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
+                    setUnconfirmedSend(null);
+                    composerRef.current?.focus();
+                  }}>
+                    {m.chat_panel_dismiss_demo_hint()}
+                  </button>
+                </div>
+              )}
+              {activeHarness && !activeHarness.agentReady && (
+                <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
+                  {activeHarness.catalogPending ? (
+                    <span>{activeHarness.name} — {m.onboarding_checking()}</span>
                   ) : (
-                    <div key={i} className="attachment-thumb relative [&_img]:w-13 [&_img]:h-13 [&_img]:object-cover [&_img]:border [&_img]:border-border [&_img]:rounded-sm [&_img]:block [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background">
-                      <img src={a.dataUrl} alt={m.chat_pasted_image()} />
-                      <button title={m.chat_panel_remove_image()} aria-label={m.chat_panel_remove_image()} onClick={remove}>
-                        <X size={12} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {(imageInputError ?? attachError) && (
-              <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
-                {imageInputError ?? attachError}
-              </div>
-            )}
-            {settingsError && (
-              <div className="composer-settings-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
-                {settingsError}
-              </div>
-            )}
-            <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashMode ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
-              <textarea
-                dir="auto"
-                {...{ writingsuggestions: "false" }}
-                ref={composerRef}
-                aria-describedby={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
-                // Native prose stays visible; the aligned mirror paints only skill tokens.
-                className="relative z-1 min-w-0 overflow-x-hidden bg-transparent"
-                value={draft}
-                placeholder={
-                  steering && activeHarness
-                    ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
-                    : composerSelection
-                      ? activeHarness?.agentReady
-                        ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                        : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                      : m.chat_ask_agent_placeholder()
-                }
-                rows={2}
-                onPaste={onComposerPaste}
-                onDragOver={(e) => {
-                  if (e.dataTransfer.types.includes("Files")) e.preventDefault();
-                }}
-                onDrop={(e) => {
-                  if (e.dataTransfer.files.length === 0) return;
-                  e.preventDefault();
-                  addFiles(Array.from(e.dataTransfer.files));
-                }}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  const cursor = e.target.selectionStart;
-                  setComposerCursor(cursor);
-                  // Composer commands run rather than send: each fires the moment
-                  // its space lands, but not mid-IME-composition,
-                  // where the text can transiently look complete.
-                  const completedCommand =
-                    cursor > 0 && /\s/.test(v[cursor - 1]) && !composingRef.current && bashCommand(v) === null
-                      ? slashCommandContext(v, cursor - 1)
-                      : null;
-                  const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
-                  const restOfDraft = completedCommand
-                    ? (v.slice(0, completedCommand.start) + v.slice(completedCommand.end)).trim()
-                    : "";
-                  if (
-                    completedCommand && completedName
-                    && (completedName === "plan" || completedName === "goal" || (!takesArgument(completedName) && !restOfDraft))
-                    && commands.some((command) => command.name === completedName)
-                  ) {
-                    activateComposerCommand(completedName, v, completedCommand);
-                    return;
+                    <>
+                      <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
+                      {activeHarness.agentNote
+                        ? renderNote(activeHarness.agentNote, onRunSetup && {
+                          canRun: (command) => setupPath(command) !== undefined,
+                          onRun: (command) => {
+                            const path = setupPath(command);
+                            if (path) onRunSetup(command, path);
+                          },
+                        })
+                        : m.chat_recheck_setup()}
+                    </>
+                  )}
+                </div>
+              )}
+              {skillMenuOpen && (
+                <SkillMenu
+                  skills={skillMatches}
+                  activeIndex={activeSkillIdx}
+                  onPick={pickSkill}
+                  onHover={setSkillIdx}
+                />
+              )}
+              {mentionMenuOpen && (
+                <MentionMenu
+                  matches={mentionMatches}
+                  activeIndex={activeMentionIdx}
+                  onPick={pickMention}
+                  onHover={setMentionIdx}
+                />
+              )}
+              {annotations.length > 0 && (
+                <ComposerAnnotations
+                  annotations={annotations}
+                  onClear={() => {
+                    setAnnotations([]);
+                    window.requestAnimationFrame(() => composerRef.current?.focus());
+                  }}
+                  onRemove={(id) => {
+                    const remaining = annotations.filter((annotation) => annotation.id !== id);
+                    setAnnotations(remaining);
+                    if (remaining.length === 0) {
+                      window.requestAnimationFrame(() => composerRef.current?.focus());
+                    }
+                  }}
+                />
+              )}
+              {(imageInputError ?? attachError) && (
+                <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
+                  {imageInputError ?? attachError}
+                </div>
+              )}
+              {settingsError && (
+                <div className="composer-settings-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
+                  {settingsError}
+                </div>
+              )}
+              <div className="composer-input flex min-w-0 items-end">
+                <ComposerEditor
+                  ref={composerRef}
+                  value={draft}
+                  describedBy={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
+                  placeholder={
+                    steering && activeHarness
+                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
+                      : composerSelection
+                        ? activeHarness?.agentReady
+                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                        : m.chat_ask_agent_placeholder()
                   }
-                  setDraft(v);
-                  setSkillMenuDismissed(false);
-                }}
-                onSelect={(e) => setComposerCursor(e.currentTarget.selectionStart)}
-                onCompositionStart={() => {
-                  composingRef.current = true;
-                }}
-                onCompositionEnd={() => {
-                  composingRef.current = false;
-                }}
-                onKeyDown={(e) => {
-                  // WebKit can end composition before the confirming keydown (keyCode 229).
-                  if (composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
-                    e.stopPropagation();
-                    return;
-                  }
-                  if (skillMenuOpen) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      const delta = e.key === "ArrowDown" ? 1 : -1;
-                      if (activeSkillIdx >= 0) {
-                        const index = selectableSkillIndices.indexOf(activeSkillIdx);
-                        setSkillIdx(selectableSkillIndices[(index + delta + selectableSkillIndices.length) % selectableSkillIndices.length]);
-                      }
-                      return;
-                    }
-                    if ((e.key === "Tab" || e.key === "Enter") && activeSkillIdx >= 0) {
-                      e.preventDefault();
-                      pickSkill(skillMatches[activeSkillIdx]);
-                      return;
-                    }
-                    if (e.key === "Escape") {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      setSkillMenuDismissed(true);
-                      return;
-                    }
-                  }
-                  if (mentionMenuOpen) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      const delta = e.key === "ArrowDown" ? 1 : -1;
-                      setMentionIdx(
-                        (activeMentionIdx + delta + mentionMatches.length) % mentionMatches.length,
-                      );
-                      return;
-                    }
-                    // A bare trailing `@` still sends on Enter; `@` is common in prose.
+                  plain={bashMode}
+                  chipSource={chipSource}
+                  projectId={projectId}
+                  draftKey={stashKey}
+                  resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
+                  onFiles={addFiles}
+                  onPaste={onComposerPaste}
+                  onChange={(v, cursor, typed) => {
+                    setComposerCursor(cursor);
+                    if (v === draft) return;
+                    // Composer commands run rather than send: each fires the moment
+                    // its space lands, but not mid-IME-composition, where the text
+                    // can transiently look complete.
+                    const completedCommand =
+                      typed && cursor > 0 && /\s/.test(v[cursor - 1]) && bashCommand(v) === null
+                        ? slashCommandContext(v, cursor - 1)
+                        : null;
+                    const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
+                    const restOfDraft = completedCommand
+                      ? (v.slice(0, completedCommand.start) + v.slice(completedCommand.end)).trim()
+                      : "";
                     if (
-                      e.key === "Tab"
-                      || (mentionQuery !== "" && matchesKeyboardEvent(e.nativeEvent, "Enter"))
+                      completedCommand && completedName
+                      && (completedName === "plan" || completedName === "goal" || (!takesArgument(completedName) && !restOfDraft))
+                      && commands.some((command) => command.name === completedName)
                     ) {
-                      e.preventDefault();
-                      pickFileMention(mentionMatches[activeMentionIdx]);
+                      activateComposerCommand(completedName, v, completedCommand);
                       return;
                     }
-                    if (e.key === "Escape") {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      setSkillMenuDismissed(true);
-                      return;
+                    setDraft(v);
+                    setSkillMenuDismissed(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (skillMenuOpen) {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        const delta = e.key === "ArrowDown" ? 1 : -1;
+                        if (activeSkillIdx >= 0) {
+                          const index = selectableSkillIndices.indexOf(activeSkillIdx);
+                          setSkillIdx(selectableSkillIndices[(index + delta + selectableSkillIndices.length) % selectableSkillIndices.length]);
+                        }
+                        return;
+                      }
+                      if ((e.key === "Tab" || e.key === "Enter") && activeSkillIdx >= 0) {
+                        e.preventDefault();
+                        pickSkill(skillMatches[activeSkillIdx]);
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setSkillMenuDismissed(true);
+                        return;
+                      }
                     }
-                  }
-                  // Backspace just behind a chip deletes the whole command.
-                  if (e.key === "Backspace" && deleteCommandBehindCaret(e.currentTarget)) {
-                    e.preventDefault();
-                    return;
-                  }
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    if (bashMode) {
-                      void runShell();
-                      return;
+                    if (mentionMenuOpen) {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        const delta = e.key === "ArrowDown" ? 1 : -1;
+                        setMentionIdx(
+                          (activeMentionIdx + delta + mentionMatches.length) % mentionMatches.length,
+                        );
+                        return;
+                      }
+                      // A bare trailing `@` still sends on Enter; `@` is common in prose.
+                      if (
+                        e.key === "Tab"
+                        || (mentionQuery !== "" && matchesKeyboardEvent(e, "Enter"))
+                      ) {
+                        e.preventDefault();
+                        pickMention(mentionMatches[activeMentionIdx]);
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setSkillMenuDismissed(true);
+                        return;
+                      }
                     }
-                    void send({ queue: matchesKeyboardEvent(e.nativeEvent, "Mod+Enter") });
-                  }
-                }}
-              />
-              {/* After the textarea: its ref must be attached before the mirror
-              * measures it. */}
-              <ComposerSkillChips
-                text={draft}
-                editingTokenEnd={slashContext?.end}
-                isCommand={knownCommand}
-                skills={commands}
-                projectId={projectId}
-                textareaRef={composerRef}
-              />
+                  }}
+                  onSubmit={(e) => {
+                    if (bashMode) void runShell();
+                    else void send({ queue: matchesKeyboardEvent(e, "Mod+Enter") });
+                  }}
+                />
+                <div className="flex shrink-0 items-center gap-1 p-1.5">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      addFiles(Array.from(e.target.files ?? []));
+                      e.target.value = ""; // let the same file be re-picked
+                    }}
+                  />
+                  <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                    <IconButton
+                      type="button"
+                      className="composer-attach"
+                      aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Paperclip size={16} />
+                    </IconButton>
+                  </Tooltip>
+                  {busy ? (
+                    <Tooltip interactive content={m.chat_panel_stop()}>
+                      <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
+                        <X size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip interactive content={bashMode ? m.chat_panel_run() : m.chat_panel_send()}>
+                      <IconButton
+                        className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
+                        variant="primary"
+                        aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
+                        onClick={() => void (bashMode ? runShell() : send())}
+                        disabled={
+                          bashMode
+                            ? !shellCommand || (!activeId && !activeHarness?.agentReady)
+                            : !activeHarness?.agentReady ||
+                            (!draft.trim() && annotations.length === 0)
+                        }
+                      >
+                        <CornerDownLeft size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
             </div>
-            <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
+            <div className="composer-actions flex min-w-0 items-center gap-1 px-1.5 py-1">
               <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
                 <Tooltip interactive content={m.chat_panel_data_sources()}>
                   <IconButton
                     type="button"
-                    className="composer-bare"
+                    size="small"
+                    className={`composer-bare ${BAR_BUTTON}`}
                     aria-label={m.chat_panel_data_sources()}
                     aria-haspopup="dialog"
                     aria-expanded={dataSources.open}
                     onClick={() => dataSources.setOpen((open) => !open)}
                   >
-                    <ToggleRight size={16} />
+                    <LibraryBig size={16} />
                   </IconButton>
                 </Tooltip>
                 {dataSources.open && (
@@ -7780,42 +8083,33 @@ export function ChatPanel({
                   </div>
                 )}
               </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
-                multiple
-                hidden
-                onChange={(e) => {
-                  addFiles(Array.from(e.target.files ?? []));
-                  e.target.value = ""; // let the same file be re-picked
-                }}
-              />
-              <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
-                <IconButton
-                  type="button"
-                  className="composer-attach"
-                  aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <Paperclip size={16} />
-                </IconButton>
-              </Tooltip>
-              <LibraryPicker composerRef={composerRef} onAdd={(papers) => {
-                const references = papers.map((paper) => `${paper.title}\n${paper.url}`).join("\n\n");
-                const prefix = draft.trim() ? `${draft.trimEnd()}\n\n` : "";
-                const next = `${prefix}${references}\n\n`;
-                setDraft(next);
-                window.requestAnimationFrame(() => {
+              <LibraryPicker
+                className={`composer-bare ${BAR_BUTTON}`}
+                onAdd={(papers) => window.requestAnimationFrame(() => {
                   composerRef.current?.focus();
-                  composerRef.current?.setSelectionRange(next.length, next.length);
-                  setComposerCursor(next.length);
-                });
-              }} />
+                  composerRef.current?.insertToken(papers.map(paperToken).join(" "));
+                })}
+              />
+              {steeringDelegate && activeSession && (
+                <Tooltip interactive content={m.chat_notify_parent()}>
+                  <IconButton
+                    type="button"
+                    size="small"
+                    className={BAR_BUTTON}
+                    aria-label={m.chat_notify_parent()}
+                    aria-pressed
+                    active
+                    onClick={() => stopNotifyingParent(activeSession)}
+                  >
+                    <Bell size={16} />
+                  </IconButton>
+                </Tooltip>
+              )}
               {(sessionGoal || goalArmed) && (
                 <Tooltip interactive content={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}>
                   <Button
                     type="button"
+                    size="small"
                     variant="purple"
                     active
                     className="group max-w-60"
@@ -7837,6 +8131,7 @@ export function ChatPanel({
                 <Tooltip interactive content={m.chat_panel_exit_plan_mode()}>
                   <Button
                     type="button"
+                    size="small"
                     variant="amber"
                     active
                     className="group"
@@ -7855,9 +8150,10 @@ export function ChatPanel({
                 <Tooltip interactive content={m.chat_panel_exit_bash_mode()}>
                   <Button
                     type="button"
+                    size="small"
                     variant="ghost"
                     active
-                    className="group"
+                    className={`group ${BAR_BUTTON}`}
                     aria-label={m.chat_panel_exit_bash_mode()}
                     onClick={exitBashMode}
                   >
@@ -7873,7 +8169,7 @@ export function ChatPanel({
               {/* The model picker reflects the open session (harness locked once it
                 exists); the global default only applies before the first
                 message. */}
-              <div className="flex min-w-0 items-center">
+              <div className="flex min-w-0 items-center gap-0.5">
                 <ModelPicker
                   sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
                   value={composerSelection}
@@ -7898,30 +8194,6 @@ export function ChatPanel({
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>
-              {busy ? (
-                <Tooltip interactive content={m.chat_panel_stop()}>
-                  <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
-                    <X size={16} />
-                  </IconButton>
-                </Tooltip>
-              ) : (
-                <Tooltip interactive content={bashMode ? m.chat_panel_run() : m.chat_panel_send()}>
-                  <IconButton
-                    className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
-                    variant="primary"
-                    aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
-                    onClick={() => void (bashMode ? runShell() : send())}
-                    disabled={
-                      bashMode
-                        ? !shellCommand || (!activeId && !activeHarness?.agentReady)
-                        : !activeHarness?.agentReady ||
-                        (!draft.trim() && attachments.length === 0 && annotations.length === 0)
-                    }
-                  >
-                    <CornerDownLeft size={16} />
-                  </IconButton>
-                </Tooltip>
-              )}
             </div>
           </div>
         </div>
@@ -7931,6 +8203,9 @@ export function ChatPanel({
     </>
   );
 }
+
+/** Bar controls sit on the surface tint, where the default surface hover vanishes. */
+const BAR_BUTTON = "[&:hover:not(:disabled)]:bg-hover-muted [&.active]:bg-hover-muted";
 
 const COMPOSER_HINT_CLASS =
   "flex items-center gap-2.5 mb-2.5 py-2 ps-3.5 pe-2 rounded-lg border border-border bg-surface text-text text-sm leading-normal";

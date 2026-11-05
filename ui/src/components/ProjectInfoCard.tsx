@@ -1,10 +1,13 @@
-import { showCustomDialog, type DialogContentProps } from "../dialog";
+import { useContext, useId, useRef, useState, type RefObject } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
+import { type DialogContentProps } from "../dialog";
 import { useFileManagerLabel } from "./useFileManagerLabel";
-import { useId, useRef, useState, type RefObject } from "react";
+
 import { Menu } from "@base-ui/react/menu";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Share2, Trash2, X } from "lucide-react";
-import { deleteProject, revealFileInManager, shareProject, updateProject, type Project } from "../api";
+import { type Project } from "../api";
 import { downloadFile } from "../download";
 import { m } from "../paraglide/messages.js";
 import { ShareProjectDialog } from "./ShareProjectDialog";
@@ -26,6 +29,12 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
   pinned: boolean;
   onPin: () => void;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog } = useWorkspace().dialogs;
+
+  const { deleteProject, updateProject, revealFileInManager, shareProject } = useWorkspace().api;
+
   const revealLabel = useFileManagerLabel();
   const [menuOpen, setMenuOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -54,7 +63,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
       <Menu.Root open={menuOpen} onOpenChange={setMenuOpen} modal={false}>
         <Menu.Trigger ref={triggerRef} render={<IconButton size="small" className={`text-text group-hover:opacity-100 group-focus-within:opacity-100 ${menuOpen ? "bg-surface opacity-100" : "opacity-0"}`} />}
           aria-label={m.sidebar_project_details({ name: project.name })}><MoreHorizontal size={16} /></Menu.Trigger>
-        <Menu.Portal>
+        <Menu.Portal container={portalContainer}>
           <Menu.Positioner sticky positionMethod="fixed" side="inline-end" align="start" sideOffset={12} collisionPadding={8} className="z-100">
             <Menu.Popup aria-label={project.name}
               className="outline-none w-72 max-w-[calc(100vw-1rem)] max-h-(--available-height) overflow-y-auto rounded-xl border border-border bg-background p-2 text-text shadow-modal">

@@ -2,10 +2,10 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { FolderOpen } from "lucide-react";
 import { useId, useState } from "react";
 
-import { importSharedProject, type OpenedSharedProject } from "../api";
+import { type OpenedSharedProject } from "../api";
 import { m } from "../paraglide/messages.js";
-import { getProjectPathStatusQuery } from "../queries/projects";
 import { slugify } from "./NewProjectForm";
+import { useWorkspace } from "../workspace";
 import { Button, Input, Spinner, showAlert } from "./ui";
 
 /** Choose where a shared `.orx` project goes, then open it. */
@@ -14,6 +14,7 @@ export function OpenSharedProjectForm({ source, onCancel, onOpened }: {
   onCancel: () => void;
   onOpened: (opened: OpenedSharedProject) => void;
 }) {
+  const { api: { importSharedProject }, queries: { getProjectPathStatusQuery } } = useWorkspace();
   const pathId = useId();
   const problemId = useId();
   const name = typeof source === "string" ? source.split(/[\\/]/).pop() ?? source : source.name;

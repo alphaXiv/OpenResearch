@@ -1,6 +1,6 @@
+import { useWorkspace } from "../workspace";
 import { useEffect, useRef } from "react";
-import { fetchLog } from "../api";
-import { onRunLog } from "../events";
+
 import { mountTerminal } from "./terminal";
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -17,6 +17,9 @@ function b64ToBytes(b64: string): Uint8Array {
  * from the current byte offset, so output is never duplicated or reordered.
  */
 export function LogTerminal({ runId }: { runId: string }) {
+  const { fetchLog } = useWorkspace().api;
+  const { onRunLog } = useWorkspace().events;
+
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

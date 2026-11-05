@@ -1,10 +1,11 @@
 import { KeyRound } from "lucide-react";
 import type { OpenResearchSettings } from "../api";
 import { m } from "../paraglide/messages.js";
-import { useAddOpenResearchSshKey } from "../queries/settings";
+import { useWorkspace } from "../workspace";
 import { Button, Spinner, showAlert } from "./ui";
 
 export function OpenResearchSshKey({ sshKey }: { sshKey: NonNullable<OpenResearchSettings["sshKeyToAdd"]> }) {
+  const { useAddOpenResearchSshKey } = useWorkspace().queries;
   const add = useAddOpenResearchSshKey();
 
   return (
