@@ -1730,5 +1730,7 @@
   "settings_run_engine_description": "يحافظ المحرك الجديد على التشغيلات البعيدة عند انقطاع الاتصال وإعادة تشغيل التطبيق، ويتحقق من الإلغاء، ويصلح العديد من مشكلات استقرار SSH.",
   "settings_run_engine_override": "يتحكم ORX_RUN_ENGINE في هذا الإعداد للخادم.",
   "settings_run_engine_canary": "تستخدم إصدارات Canary المحرك الجديد دائمًا.",
-  "settings_run_engine_note": "لا يزال قيد الاختبار. ينطبق على التشغيلات الجديدة."
+  "settings_run_engine_note": "لا يزال قيد الاختبار. ينطبق على التشغيلات الجديدة.",
+  "chat_switched_agent": "تم التبديل إلى {agent} · {model}",
+  "chat_switch_agent_failed": "تعذر تبديل الوكيل. حاول مرة أخرى."
 }

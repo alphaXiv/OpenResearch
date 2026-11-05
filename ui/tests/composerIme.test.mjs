@@ -166,6 +166,7 @@ test("Enter on typed unsupported compact and its alias silently does nothing", a
     const bindings = {
     matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
       draft, planActivation: null, goalArmed: false, parseComposerCommand, takesArgument,
+      setChatSessionAgentMutation: { isPending: false },
       setDraft: () => {}, setSkillMenuDismissed: () => {},
       activeId: "saved-chat", activeHarness: { supportsCompaction: false },
       m: { chat_compact_unsupported: () => "unsupported" },

@@ -56,6 +56,7 @@ import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
 import {
   ArrowDown,
+  ArrowRightLeft,
   ArrowUpRight,
   Bell,
   Blocks,
@@ -109,6 +110,7 @@ import {
   reconcileServiceTier,
   fmtDuration,
   RejectedResponseError,
+  modelLabel,
   type FirstActionSurface,
   type ChatImageAttachment,
   type ChatMessage,
@@ -3308,6 +3310,19 @@ export const Message = memo(function Message({
   const [editDraft, setEditDraft] = useState<string | null>(null);
   const shell = shellExchangePart(message);
   if (shell) return <ShellExchangeCard part={shell} />;
+  const providerSwitch = message.parts.find((part) => part.tool === "provider_switch");
+  if (providerSwitch) {
+    const input = providerSwitch.state?.input ?? {};
+    const harness = inputString(input, "harness") ?? "";
+    const name = inputString(input, "name") ?? harness;
+    const model = inputString(input, "model");
+    return (
+      <div role="status" data-provider-switch className="flex items-center gap-2 py-2 text-sm text-subtext">
+        <ArrowRightLeft size={16} className="shrink-0" aria-hidden="true" />
+        <span className="min-w-0 wrap-anywhere">{m.chat_switched_agent({ agent: name, model: model ? modelLabel(model) : m.model_picker_default_model() })}</span>
+      </div>
+    );
+  }
   if (message.role === "user") {
     const sent = message.parts.filter((part): part is ChatPart & { orx: OrxSource } => Boolean(part.orx));
     if (sent.length > 0) {
@@ -4995,6 +5010,7 @@ export function ChatPanel({
     setChatSessionPermissionMode,
     setChatSessionPlanMode,
     setChatSessionAutonomy,
+    setChatSessionAgent,
     setChatSessionGoal,
     importNativeChat,
     openSideChat,
@@ -5044,6 +5060,7 @@ export function ChatPanel({
   const setChatSessionPermissionModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPermissionMode>) => setChatSessionPermissionMode(...args) });
   const setChatSessionPlanModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPlanMode>) => setChatSessionPlanMode(...args) });
   const setChatSessionAutonomyMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAutonomy>) => setChatSessionAutonomy(...args) });
+  const setChatSessionAgentMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAgent>) => queueSessionMutation(() => setChatSessionAgent(...args)) });
   const setChatSessionGoalMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionGoal>) => setChatSessionGoal(...args) });
   const importNativeChatMutation = useMutation({ mutationFn: (args: Parameters<typeof importNativeChat>) => importNativeChat(...args) });
   const openSideChatMutation = useMutation({ mutationFn: openSideChat });
@@ -5285,6 +5302,13 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<ComposerEditorHandle>(null);
+  useEffect(() => {
+    const focused = document.activeElement;
+    if (setChatSessionAgentMutation.isPending
+      && (focused === document.body || (focused instanceof HTMLButtonElement && focused.disabled))) {
+      composerRef.current?.focus();
+    }
+  }, [setChatSessionAgentMutation.isPending]);
   const connection = useRemoteConnection();
   const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
@@ -5439,8 +5463,6 @@ export function ChatPanel({
     })();
   }
 
-  // The open session, if any (its harness is locked; its model/mode/reasoning
-  // are what the composer should reflect and edit).
   const openSession = sessions.find((s) => s.id === activeId);
   const assistantLabel = openSession ? harnessLabel(openSession.harness, openSession.harnessName) : m.chat_the_agent();
 
@@ -5593,6 +5615,25 @@ export function ChatPanel({
     composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
   };
   const selectModel = (next: Partial<ModelSelection>) => {
+    if (openSession && composerSelection && next.harness && next.harness !== openSession.harness) {
+      const agent = { ...composerSelection, ...next };
+      const scope = stashKey;
+      invalidatePendingRetry();
+      setSettingsError(null);
+      setSelection(agent);
+      void onPreferredAgentChange(agent).catch(() => {});
+      void setChatSessionAgentMutation.mutateAsync([openSession.id, agent])
+        .then((session) => {
+          setSessions((current) => current.map((row) => row.id === session.id ? session : row));
+          if (pendingScope.current !== scope) return;
+          setSessionOverride({});
+          setRecoveryOverrides({});
+        })
+        .catch((error: unknown) => {
+          if (pendingScope.current === scope) setSettingsError(error instanceof Error ? error.message : m.chat_switch_agent_failed());
+        });
+      return;
+    }
     if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
       if (next.model !== acpModel.currentValue) invalidatePendingRetry();
       void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
@@ -6379,6 +6420,7 @@ export function ChatPanel({
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
   async function send({ queue = false, starter }: { queue?: boolean; starter?: string } = {}) {
+    if (setChatSessionAgentMutation.isPending) return;
     // Slash tokens stay in the wire form: the server resolves every selected
     // skill and supplies this exact message as their shared request context.
     const originalText = (starter ?? draft).trim();
@@ -6783,6 +6825,7 @@ export function ChatPanel({
   /** Enter in bash mode: run the command where the agent works and show the
    * exchange on the branch. A new chat gets its session first, as send() does. */
   async function runShell() {
+    if (setChatSessionAgentMutation.isPending) return;
     const command = shellCommand;
     if (!command) return;
     setSettingsError(null);
@@ -8060,8 +8103,8 @@ export function ChatPanel({
                         onClick={() => void (bashMode ? runShell() : send())}
                         disabled={
                           bashMode
-                            ? !shellCommand || (!activeId && !activeHarness?.agentReady)
-                            : !activeHarness?.agentReady ||
+                            ? setChatSessionAgentMutation.isPending || !shellCommand || (!activeId && !activeHarness?.agentReady)
+                            : setChatSessionAgentMutation.isPending || !activeHarness?.agentReady ||
                             (!draft.trim() && annotations.length === 0)
                         }
                       >
@@ -8177,9 +8220,6 @@ export function ChatPanel({
                 </Tooltip>
               )}
               <div className="min-w-0 flex-1" />
-              {/* The model picker reflects the open session (harness locked once it
-                exists); the global default only applies before the first
-                message. */}
               <div className="flex min-w-0 items-center gap-0.5">
                 <ModelPicker
                   sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
@@ -8195,7 +8235,8 @@ export function ChatPanel({
                   onSelectReasoning={setReasoningLevel}
                   autonomy={openSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
-                  lockHarness={!!openSession || !!sideParentSessionId}
+                  disabled={setChatSessionAgentMutation.isPending}
+                  lockHarness={busy || setChatSessionAgentMutation.isPending || (!openSession && !!sideParentSessionId)}
                   openRequest={modelPickerRequest}
                   nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
                   onSelectNativeOption={(optionId, value) => {

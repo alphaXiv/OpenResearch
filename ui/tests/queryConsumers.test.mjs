@@ -140,6 +140,32 @@ test("old prompt responses do not reconcile against the replacement workspace", 
   assert.equal(reads, 2);
 });
 
+test("a late provider switch cannot replace a newer chat's selection or draft settings", async () => {
+  let release, preferred, overrides = 0;
+  let sessions = [{ id: "original", harness: "claude-code", model: "source-model" }];
+  const pendingScope = { current: "original-scope" };
+  const writes = [];
+  const select = evaluate(`return ${declaration(source("ChatPanel.tsx"), "selectModel")}`, {
+    openSession: sessions[0], composerSelection: sessions[0], stashKey: "original-scope", pendingScope,
+    invalidatePendingRetry: () => {}, setSettingsError: () => {},
+    setSelection: (selection) => { preferred = selection; },
+    onPreferredAgentChange: async (selection) => { writes.push(selection); },
+    setSessions: (update) => { sessions = update(sessions); },
+    setSessionOverride: () => { overrides++; }, setRecoveryOverrides: () => { overrides++; },
+    setChatSessionAgentMutation: { mutateAsync: () => new Promise((resolve) => { release = resolve; }) },
+  });
+  select({ harness: "codex", model: "target-model" });
+  assert.equal(preferred.harness, "codex");
+  pendingScope.current = "new-chat-scope";
+  preferred = { harness: "opencode", model: "newer-model" };
+  release({ id: "original", harness: "codex", model: "target-model" });
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(sessions[0].harness, "codex");
+  assert.equal(preferred.model, "newer-model");
+  assert.equal(writes.length, 1);
+  assert.equal(overrides, 0);
+});
+
 for (const [card, family, field, upload] of [
   ["SkillsCard", "listUserSkills", "skills", "uploadUserSkill"],
   ["LatexTemplatesCard", "listLatexTemplates", "templates", "uploadLatexTemplate"],

@@ -1730,5 +1730,7 @@
   "settings_run_engine_description": "Новый движок сохраняет удалённые запуски при разрывах связи и перезапусках приложения, проверяет отмену и исправляет многие проблемы стабильности SSH.",
   "settings_run_engine_override": "Эта настройка сервера управляется переменной ORX_RUN_ENGINE.",
   "settings_run_engine_canary": "Сборки Canary всегда используют новый движок.",
-  "settings_run_engine_note": "Ещё тестируется. Применяется к новым запускам."
+  "settings_run_engine_note": "Ещё тестируется. Применяется к новым запускам.",
+  "chat_switched_agent": "Переключено на {agent} · {model}",
+  "chat_switch_agent_failed": "Не удалось сменить агента. Попробуйте ещё раз."
 }

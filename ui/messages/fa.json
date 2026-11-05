@@ -1730,5 +1730,7 @@
   "settings_run_engine_description": "موتور جدید اجراهای راه‌دور را هنگام قطع اتصال و راه‌اندازی مجدد برنامه ادامه می‌دهد. لغو را بررسی می‌کند و بسیاری از مشکلات پایداری SSH را برطرف می‌کند.",
   "settings_run_engine_override": "این تنظیم سرور با ORX_RUN_ENGINE کنترل می‌شود.",
   "settings_run_engine_canary": "نسخه‌های Canary همیشه از موتور جدید استفاده می‌کنند.",
-  "settings_run_engine_note": "هنوز در حال آزمایش است. برای اجراهای جدید اعمال می‌شود."
+  "settings_run_engine_note": "هنوز در حال آزمایش است. برای اجراهای جدید اعمال می‌شود.",
+  "chat_switched_agent": "به {agent} · {model} تغییر کرد",
+  "chat_switch_agent_failed": "تغییر عامل ممکن نشد. دوباره تلاش کنید."
 }

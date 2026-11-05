@@ -2541,6 +2541,11 @@ export function createApi(
       (r) => r.session,
     );
 
+  const setChatSessionAgent = (sessionId: string, agent: AgentSelection) =>
+    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { agent }).then(
+      (r) => r.session,
+    );
+
   const setChatSessionPermissionMode = (sessionId: string, permissionMode: string) =>
     patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { permissionMode }).then(
       (r) => r.session,
@@ -2831,6 +2836,7 @@ export function createApi(
     openSideChat,
     setChatSessionGoal,
     setChatSessionAutonomy,
+    setChatSessionAgent,
     setChatSessionPermissionMode,
     getChatMessages,
     cancelQueuedMessage,

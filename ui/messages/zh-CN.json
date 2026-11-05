@@ -1730,5 +1730,7 @@
   "settings_run_engine_description": "新引擎让远程运行在断开连接和应用重启后继续执行，验证取消结果，并修复多项 SSH 稳定性问题。",
   "settings_run_engine_override": "ORX_RUN_ENGINE 控制此服务器设置。",
   "settings_run_engine_canary": "Canary 构建始终使用新引擎。",
-  "settings_run_engine_note": "仍在测试中。适用于新运行。"
+  "settings_run_engine_note": "仍在测试中。适用于新运行。",
+  "chat_switched_agent": "已切换至 {agent} · {model}",
+  "chat_switch_agent_failed": "无法切换智能体，请重试。"
 }

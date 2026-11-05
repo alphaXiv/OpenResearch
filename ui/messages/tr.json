@@ -1730,5 +1730,7 @@
   "settings_run_engine_canary": "Canary derlemeleri her zaman yeni motoru kullanır.",
   "settings_run_engine_note": "Hâlâ test ediliyor. Yeni çalıştırmalar için geçerlidir.",
   "run_notice_provider_auth": "Sağlayıcı erişimi reddetti. Ayarlar → Ortam bölümünde kimlik bilgilerinizi kontrol edin.",
-  "run_notice_cluster_auth": "Kubernetes erişimi reddetti. Kubeconfig dosyanızı ve küme izinlerini kontrol edin."
+  "run_notice_cluster_auth": "Kubernetes erişimi reddetti. Kubeconfig dosyanızı ve küme izinlerini kontrol edin.",
+  "chat_switched_agent": "{agent} · {model} olarak değiştirildi",
+  "chat_switch_agent_failed": "Ajan değiştirilemedi. Tekrar deneyin."
 }

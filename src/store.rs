@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Result};
 use crate::local::autonomy::Autonomy;
@@ -1234,6 +1234,7 @@ impl Store {
             "ALTER TABLE chat_messages ADD COLUMN parent_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN base_native_session_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
+            "ALTER TABLE chat_messages ADD COLUMN native_harness TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
@@ -2374,8 +2375,10 @@ impl Store {
             tx.execute(
                 "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
                                             parent_id, base_native_session_id,
-                                            result_native_session_id, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                            result_native_session_id, completed_at, native_harness)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                         COALESCE(?10, (SELECT harness FROM chat_sessions WHERE id = ?2
+                             AND (?7 IS NOT NULL OR ?8 IS NOT NULL))))",
                 params![
                     message.id,
                     message.session_id,
@@ -2386,6 +2389,7 @@ impl Store {
                     message.base_native_session_id,
                     message.result_native_session_id,
                     message.completed_at,
+                    message.native_harness,
                 ],
             )?;
         }
@@ -3556,10 +3560,10 @@ impl Store {
                 WHERE harness IN (SELECT value FROM json_each(?2))
                 UNION
                 SELECT s.id, m.base_native_session_id FROM chat_sessions s JOIN chat_messages m
-                ON m.session_id = s.id WHERE s.harness IN (SELECT value FROM json_each(?2))
+                ON m.session_id = s.id WHERE COALESCE(m.native_harness, s.harness) IN (SELECT value FROM json_each(?2))
                 UNION
                 SELECT s.id, m.result_native_session_id FROM chat_sessions s JOIN chat_messages m
-                ON m.session_id = s.id WHERE s.harness IN (SELECT value FROM json_each(?2))
+                ON m.session_id = s.id WHERE COALESCE(m.native_harness, s.harness) IN (SELECT value FROM json_each(?2))
              )
              SELECT native_id, MAX(chat_id IN (SELECT value FROM json_each(?1))),
                  MAX(chat_id NOT IN (SELECT value FROM json_each(?1))) FROM refs
@@ -3764,6 +3768,49 @@ impl Store {
         Ok(())
     }
 
+    pub fn switch_chat_agent(
+        &self,
+        id: &str,
+        agent: &StoredAgentSelection,
+        native_id: Option<&str>,
+        marker: &StoredChatMessage,
+        plan_mode: bool,
+    ) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        tx.execute(
+            "UPDATE chat_messages SET native_harness = (SELECT harness FROM chat_sessions WHERE id = ?1)
+             WHERE session_id = ?1 AND native_harness IS NULL
+               AND (role = 'user' OR base_native_session_id IS NOT NULL OR result_native_session_id IS NOT NULL)",
+            [id],
+        )?;
+        upsert_chat_message_with(&tx, marker)?;
+        tx.execute(
+            "UPDATE chat_sessions SET harness = ?2, model = ?3, service_tier = ?4,
+             permission_mode = ?5, reasoning_level = ?6, native_session_id = ?7,
+             context_usage_json = NULL, active_leaf_id = ?8,
+             plan_mode = ?9,
+             plan_reset_pending = (?2 = 'codex' AND ?7 IS NOT NULL AND NOT ?9),
+             updated_at = ?10 WHERE id = ?1",
+            params![
+                id,
+                agent.harness,
+                agent.model,
+                agent.service_tier,
+                agent.permission_mode,
+                agent.reasoning_level,
+                native_id,
+                marker.id,
+                plan_mode,
+                now_ms()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Deliberately leaves `updated_at` alone: paging between forks is not
     /// activity, and would otherwise reorder the Recents list.
     pub fn set_chat_session_active_leaf(&self, id: &str, leaf_id: Option<&str>) -> Result<()> {
@@ -3810,20 +3857,12 @@ impl Store {
     pub fn chat_session_for_native_id(&self, native_id: &str) -> Result<Option<StoredChatSession>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE native_session_id = ?1
+             OR id IN (SELECT session_id FROM chat_messages
+                 WHERE base_native_session_id = ?1 OR result_native_session_id = ?1)
              ORDER BY created_at LIMIT 1"
         ))?;
         let mut rows = stmt.query_map(params![native_id], row_to_chat_session)?;
         Ok(rows.next().transpose()?)
-    }
-
-    /// Native ids orx already has a session for, so the `/resume` picker can
-    /// offer each of the agent's own chats exactly once.
-    pub fn native_session_ids(&self) -> Result<std::collections::HashSet<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT native_session_id FROM chat_sessions WHERE native_session_id IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        Ok(rows.flatten().collect())
     }
 
     pub fn set_chat_session_autonomy(&self, id: &str, autonomy: Autonomy) -> Result<()> {
@@ -4105,8 +4144,10 @@ impl Store {
             tx.execute(
                 "INSERT INTO chat_messages
                  (id, session_id, role, parts_json, created_at, parent_id,
-                  base_native_session_id, result_native_session_id, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  base_native_session_id, result_native_session_id, completed_at, native_harness)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                         COALESCE(?10, (SELECT harness FROM chat_sessions WHERE id = ?2
+                             AND (?7 IS NOT NULL OR ?8 IS NOT NULL))))",
                 params![
                     message.id,
                     message.session_id,
@@ -4117,6 +4158,7 @@ impl Store {
                     message.base_native_session_id,
                     message.result_native_session_id,
                     message.completed_at,
+                    message.native_harness,
                 ],
             )?;
             tx.execute(
@@ -4615,6 +4657,20 @@ impl Store {
         self.list_chat_messages_since(session_id, i64::MIN)
     }
 
+    pub fn unconfirmed_chat_replies(
+        &self,
+        session_id: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut query = self.conn.prepare(
+            "SELECT assistant_message_id FROM chat_turns WHERE session_id = ?1
+             AND state != 'completed' AND delivery_state != 'accepted'",
+        )?;
+        let replies = query
+            .query_map([session_id], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(replies)
+    }
+
     /// A chat's messages created at or after `since`, oldest first.
     pub fn list_chat_messages_since(
         &self,
@@ -4624,7 +4680,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             // rowid tiebreak: a user message and its reply can share a millisecond.
             "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                    base_native_session_id, result_native_session_id, completed_at
+                    base_native_session_id, result_native_session_id, completed_at, native_harness
              FROM chat_messages
              WHERE session_id = ?1 AND created_at >= ?2 ORDER BY created_at ASC, rowid ASC",
         )?;
@@ -4639,6 +4695,7 @@ impl Store {
                 parent_id: row.get(5)?,
                 base_native_session_id: row.get(6)?,
                 result_native_session_id: row.get(7)?,
+                native_harness: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -4672,7 +4729,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                        base_native_session_id, result_native_session_id, completed_at
+                        base_native_session_id, result_native_session_id, completed_at, native_harness
                  FROM chat_messages WHERE id = ?1",
                 params![id],
                 |row| {
@@ -4686,6 +4743,7 @@ impl Store {
                         parent_id: row.get(5)?,
                         base_native_session_id: row.get(6)?,
                         result_native_session_id: row.get(7)?,
+                        native_harness: row.get(9)?,
                     })
                 },
             )
@@ -4899,7 +4957,7 @@ pub struct StoredChatSession {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredAgentSelection {
     pub harness: String,
@@ -4943,6 +5001,8 @@ pub struct StoredChatMessage {
     /// Selecting a branch restores it, so the next message continues the branch
     /// on screen rather than whichever fork ran most recently.
     pub result_native_session_id: Option<String>,
+    /// The harness that owns both native session ids on this message.
+    pub native_harness: Option<String>,
 }
 
 fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<()> {
@@ -4952,13 +5012,16 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
         // the tree.
         "INSERT INTO chat_messages
                  (id, session_id, role, parts_json, created_at, parent_id,
-                  base_native_session_id, result_native_session_id, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                  base_native_session_id, result_native_session_id, completed_at, native_harness)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                     COALESCE(?10, (SELECT harness FROM chat_sessions WHERE id = ?2
+                         AND (?7 IS NOT NULL OR ?8 IS NOT NULL))))
              ON CONFLICT(id) DO UPDATE SET
                  parts_json = excluded.parts_json,
                  completed_at = COALESCE(excluded.completed_at, completed_at),
                  result_native_session_id = COALESCE(
-                     excluded.result_native_session_id, result_native_session_id)",
+                     excluded.result_native_session_id, result_native_session_id),
+                 native_harness = COALESCE(excluded.native_harness, native_harness)",
         params![
             m.id,
             m.session_id,
@@ -4968,7 +5031,8 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
             m.parent_id,
             m.base_native_session_id,
             m.result_native_session_id,
-            m.completed_at
+            m.completed_at,
+            m.native_harness
         ],
     )?;
     Ok(())
@@ -8467,6 +8531,7 @@ mod tests {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .unwrap();
         }
@@ -8512,6 +8577,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                native_harness: None,
             })
             .unwrap();
         let attachments = dir.join(crate::local::chat::ATTACHMENTS_DIR);
@@ -9000,6 +9066,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                native_harness: None,
             })
             .unwrap();
         assert!(store.has_chat_messages("chat_1").unwrap());
@@ -9051,6 +9118,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: Some("old-thread".into()),
+                native_harness: None,
             })
             .unwrap();
         assert!(store
@@ -9080,6 +9148,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         assert_eq!(
             store.admit_chat_turn(Some(&user), &turn).unwrap(),
@@ -9259,6 +9328,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         store.upsert_chat_message(&message).unwrap();
         message.completed_at = None;
@@ -9303,6 +9373,7 @@ mod tests {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .unwrap();
         }
@@ -9369,6 +9440,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         store.admit_chat_turn(Some(&user), &turn).unwrap();
         assert!(store
@@ -9458,6 +9530,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         assert!(store
             .mark_chat_turn_recovered_with_message("turn_1", "recovery_1", &assistant)
@@ -9505,6 +9578,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
+            native_harness: None,
         };
         store.admit_chat_turn(Some(&user), &turn).unwrap();
         let recovery = StoredChatMessage {
@@ -9517,6 +9591,7 @@ mod tests {
             parent_id: Some(user.id.clone()),
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
+            native_harness: None,
         };
         assert!(store
             .upsert_chat_recovery_message_if_actionable(&turn.id, &recovery)
@@ -9709,6 +9784,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            native_harness: None,
         };
         assert_eq!(
             store
@@ -10028,6 +10104,7 @@ mod tests {
                     completed_at: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .unwrap();
         }
@@ -11275,6 +11352,7 @@ mod tests {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    native_harness: None,
                 })
                 .unwrap();
         }

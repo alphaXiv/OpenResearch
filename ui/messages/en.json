@@ -1730,5 +1730,7 @@
   "settings_run_engine_description": "The new engine keeps remote runs going through disconnects and app restarts, verifies cancellation, and fixes many SSH stability issues.",
   "settings_run_engine_override": "ORX_RUN_ENGINE controls this setting for the server.",
   "settings_run_engine_canary": "Canary builds always use the new engine.",
-  "settings_run_engine_note": "Still in testing. Applies to new runs."
+  "settings_run_engine_note": "Still in testing. Applies to new runs.",
+  "chat_switched_agent": "Switched to {agent} · {model}",
+  "chat_switch_agent_failed": "Unable to switch agents. Try again."
 }

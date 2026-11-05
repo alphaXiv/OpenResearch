@@ -1720,15 +1720,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// The npm `codex.cmd` shape (OR-409): a `cmd.exe` wrapper whose native
-    /// child (`timeout.exe`) survives a wrapper-only kill while holding the
-    /// thread's writer lock. The Job Object must empty the whole tree.
+    /// The npm wrapper's child can outlive a wrapper-only kill (OR-409).
     #[cfg(windows)]
     #[tokio::test]
     async fn terminate_kills_the_native_child_behind_a_wrapper() {
         let mut command = crate::process::tokio_command("cmd");
         command
-            .args(["/c", "timeout /t 600 > nul"])
+            .args(["/c", "ping.exe -n 600 127.0.0.1 > nul"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
