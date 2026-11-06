@@ -53,6 +53,7 @@ pub(crate) mod api_v2;
 pub(crate) mod compute_settings;
 mod harness_setup;
 mod network;
+mod search;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -178,7 +179,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let gate = state.data_dir_gate.clone();
         tokio::spawn(async move {
             let interval =
-                Duration::from_millis((crate::store::CHAT_TURN_LEASE_TTL_MS + 1_000) as u64);
+                crate::config::paced(crate::store::CHAT_TURN_LEASE_TTL + Duration::from_secs(1));
             loop {
                 tokio::time::sleep(interval).await;
                 if moving.load(std::sync::atomic::Ordering::SeqCst) {
@@ -196,6 +197,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
 
     spawn_agent_preflight(state.clone());
+    search::spawn_backfill(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.
     // On Windows those spawns run at idle priority (see `demo::prewarm`) so
@@ -347,6 +349,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
+    // Before agents go down: a turn their shutdown ends must not start the next queued message.
+    state.chat.stop_admitting();
     if explicit_stop {
         state.chat.interrupt_all().await;
     }
@@ -355,6 +359,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     codex.shutdown().await;
     claude.shutdown().await;
     state.chat.acp.shutdown().await;
+    state.chat.release_turn_leases();
     if let Some(server) = control_server {
         server.shutdown().await;
     }
@@ -613,6 +618,7 @@ fn launch_admission(
 fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/search", get(search::search))
         .route("/api/file-manager", get(file_manager))
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))
@@ -643,6 +649,13 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             post(disable_project_github),
         )
         .route("/api/projects/{id}/github/push", post(push_project_github))
+        .route("/api/projects/{id}/share", post(share_project))
+        .route(
+            "/api/projects/{id}/publish",
+            get(get_project_link).post(publish_project_link),
+        )
+        .route("/api/shared-projects/{slug}", get(get_published_project))
+        .route("/api/projects/import", post(import_shared_project))
         .route("/api/github/account", get(github_account))
         .route("/api/github/organizations", get(github_organizations))
         .route(
@@ -852,6 +865,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/alphaxiv/login", get(alphaxiv_login))
+        .route("/api/alphaxiv/me", get(alphaxiv_me))
         .route("/api/alphaxiv/folders", get(alphaxiv_folders))
         .route("/api/alphaxiv/papers", get(alphaxiv_papers))
         .route("/api/settings/commands/run", get(run_settings_command))
@@ -1047,6 +1061,7 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/openresearch/login"
             | "/api/settings/openresearch/logout"
             | "/api/settings/alphaxiv/login"
+            | "/api/alphaxiv/me"
             | "/api/alphaxiv/folders"
             | "/api/alphaxiv/papers"
             | "/api/settings/commands/run"
@@ -1262,9 +1277,6 @@ fn normalize_research_profile(
     background: Option<String>,
     papers: Vec<crate::telemetry::ProfilePaper>,
 ) -> std::result::Result<crate::telemetry::ResearchProfile, ApiError> {
-    if research_areas.is_empty() {
-        return Err(bad_request("choose at least one research area"));
-    }
     let mut normalized_areas = Vec::with_capacity(research_areas.len());
     for area in research_areas {
         let area = area.trim().to_string();
@@ -1318,15 +1330,22 @@ async fn complete_onboarding(
         permission_mode,
         reasoning_level: nonempty(req.reasoning_level),
     };
-    let profile = normalize_research_profile(
-        req.research_areas,
-        req.other_area,
-        req.background,
-        req.papers,
-    )?;
+    // A request without areas carries no profile and must not erase a saved one.
+    let profile = (!req.research_areas.is_empty())
+        .then(|| {
+            normalize_research_profile(
+                req.research_areas,
+                req.other_area,
+                req.background,
+                req.papers,
+            )
+        })
+        .transpose()?;
     let profile_for_event = profile.clone();
     let completion = tokio::task::spawn_blocking(move || -> Result<_> {
-        let _ = crate::telemetry::set_profile(profile);
+        if let Some(profile) = profile {
+            let _ = crate::telemetry::set_profile(profile);
+        }
         let completion = local::demo::complete_onboarding(selection)?;
         let store = Store::open()?;
         store.set_preferred_agent(&StoredAgentSelection {
@@ -1346,7 +1365,9 @@ async fn complete_onboarding(
     .map_err(|e| ApiError::from(anyhow!("demo seed task failed: {e}")))??;
     if completion.newly_created {
         crate::telemetry::capture_onboarding_completed();
-        crate::telemetry::capture_onboarding_research_profile(&profile_for_event);
+        if let Some(profile) = &profile_for_event {
+            crate::telemetry::capture_onboarding_research_profile(profile);
+        }
     }
     Ok(Json(json!({
         "project": project_json(&completion.project),
@@ -2167,6 +2188,256 @@ async fn push_project_github(State(state): State<AppState>, Path(id): Path<Strin
     Ok(Json(
         json!({ "project": project_json(&project), "git": git_status }),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareProjectReq {
+    #[serde(default)]
+    chats: Vec<String>,
+    #[serde(default = "default_true")]
+    logs: bool,
+    #[serde(default = "default_true")]
+    artifacts: bool,
+}
+
+async fn share_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ShareProjectReq>,
+) -> std::result::Result<axum::response::Response, ApiError> {
+    reject_if_moving(&state)?;
+    let admission = state
+        .project_lifecycle
+        .admit(&id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    reject_if_moving(&state)?;
+    let project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    // The worker owns the lease: a dropped request must not let a delete or move start mid-export.
+    let (name, scratch, out, skipped) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let _admission = admission;
+        let (scratch, out, manifest) = export_shared_project(&project, req)?;
+        Ok((
+            local::share::file_name(&project),
+            scratch,
+            out,
+            manifest.skipped,
+        ))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("share task failed: {error}")))?
+    .map_err(bad_request)?;
+    let file = tokio::fs::File::open(out)
+        .await
+        .map_err(|error| ApiError::from(anyhow!("Could not read the shared project: {error}")))?;
+    // Streamed from disk, since a project can outgrow memory; the stream keeps the scratch folder alive.
+    let body = futures::StreamExt::map(tokio_util::io::ReaderStream::new(file), move |chunk| {
+        let _keep = &scratch;
+        chunk
+    });
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", urlencoding::encode(&name)),
+        )
+        .header(
+            "x-orx-share",
+            urlencoding::encode(&json!({ "skipped": skipped }).to_string()).into_owned(),
+        )
+        .body(axum::body::Body::from_stream(body))
+        .map_err(|error| ApiError::from(anyhow!("share response failed: {error}")))
+}
+
+/// Writes the project's `.orx` file into a scratch folder, which removes it when dropped.
+fn export_shared_project(
+    project: &local::model::LocalProject,
+    req: ShareProjectReq,
+) -> Result<(
+    local::git::TemporaryDirectory,
+    std::path::PathBuf,
+    local::share::Manifest,
+)> {
+    use local::share::{ChatSelection, ShareOptions};
+    let options = ShareOptions {
+        chats: if req.chats.is_empty() {
+            ChatSelection::None
+        } else {
+            ChatSelection::Only(req.chats)
+        },
+        logs: req.logs,
+        artifacts: req.artifacts,
+    };
+    let scratch = local::git::TemporaryDirectory::new("orx-share")?;
+    // A fixed name: project names can outgrow a file name's length limit.
+    let out = scratch.path().join("project.orx");
+    let manifest = local::share::export(&Store::open()?, project, &options, &out)?;
+    Ok((scratch, out, manifest))
+}
+
+async fn openresearch_credentials() -> std::result::Result<crate::config::Credentials, ApiError> {
+    crate::config::load_credentials().await?.ok_or_else(|| {
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Sign in to OpenResearch to publish a link.".into(),
+        )
+    })
+}
+
+/// Uploads the project as a `.orx` file to openresearch.sh; publishing again replaces the file behind the same link.
+async fn publish_project_link(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ShareProjectReq>,
+) -> ApiResult {
+    let creds = openresearch_credentials().await?;
+    reject_if_moving(&state)?;
+    let admission = state
+        .project_lifecycle
+        .admit(&id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    reject_if_moving(&state)?;
+    let project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    // The worker owns the lease, released once the file is written; the upload needs no lease.
+    let (_scratch, out, manifest) = tokio::task::spawn_blocking(move || {
+        let _admission = admission;
+        export_shared_project(&project, req)
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("share task failed: {error}")))?
+    .map_err(bad_request)?;
+    let link = crate::client::publish_project(&creds, &id, &manifest, &out)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(
+        json!({ "sharedProject": link, "skipped": manifest.skipped }),
+    ))
+}
+
+/// Whether this machine can publish, and the project's link if it has one. In an SSH
+/// workspace this answers for the remote, whose sign-in is not the laptop's.
+async fn get_project_link(Path(id): Path<String>) -> ApiResult {
+    let Some(creds) = crate::config::load_credentials().await? else {
+        return Ok(Json(json!({ "signedIn": false, "sharedProject": null })));
+    };
+    // Only a hint: an older or unreachable server must not stand in the way of saving a file.
+    match crate::client::find_published_project(&creds, &id).await {
+        Err(error)
+            if error
+                .downcast_ref::<crate::client::Unauthorized>()
+                .is_some() =>
+        {
+            Ok(Json(json!({ "signedIn": false, "sharedProject": null })))
+        }
+        link => Ok(Json(
+            json!({ "signedIn": true, "sharedProject": link.unwrap_or(None) }),
+        )),
+    }
+}
+
+/// A published link's public details, shown before opening it.
+async fn get_published_project(Path(slug): Path<String>) -> ApiResult {
+    let slug =
+        crate::client::published_project_slug(&slug).ok_or_else(|| not_found("project link"))?;
+    let project =
+        crate::client::get_public_project(&crate::config::openresearch_api_url().await, slug)
+            .await
+            .map_err(bad_request)?;
+    Ok(Json(json!({ "sharedProject": project })))
+}
+
+/// Most a shared project upload may be; it streams to disk, outside the JSON request cap.
+const SHARED_PROJECT_UPLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct ImportSharedProjectQuery {
+    /// Folder to create the project in.
+    path: String,
+    /// A `.orx` file on this machine; without it or `shared` the request body is the file.
+    file: Option<String>,
+    /// The slug of a published project link to download.
+    shared: Option<String>,
+}
+
+async fn import_shared_project(
+    State(state): State<AppState>,
+    Query(query): Query<ImportSharedProjectQuery>,
+    body: axum::body::Body,
+) -> ApiResult {
+    use futures::StreamExt;
+    reject_if_moving(&state)?;
+    let admission = state
+        .project_lifecycle
+        .admit("__project_create__")
+        .ok_or_else(|| bad_request("project creation is unavailable"))?;
+    reject_if_moving(&state)?;
+    let (file, upload) = match (query.file, query.shared) {
+        (Some(file), _) => (
+            local::projects::expand_path(&file).map_err(bad_request)?,
+            None,
+        ),
+        (None, Some(shared)) => {
+            let slug = crate::client::published_project_slug(&shared)
+                .ok_or_else(|| bad_request("That is not an OpenResearch project link."))?;
+            let download = local::git::TemporaryDirectory::new("orx-import")?;
+            let path = download.path().join("download.orx");
+            crate::client::download_public_project(
+                &crate::config::openresearch_api_url().await,
+                slug,
+                &path,
+            )
+            .await
+            .map_err(bad_request)?;
+            (path, Some(download))
+        }
+        (None, None) => {
+            let upload = local::git::TemporaryDirectory::new("orx-import")?;
+            let path = upload.path().join("upload.orx");
+            let mut out = tokio::fs::File::create(&path)
+                .await
+                .map_err(|error| ApiError::from(anyhow!("Could not stage the upload: {error}")))?;
+            let mut stream = body.into_data_stream();
+            let mut received: u64 = 0;
+            while let Some(chunk) = stream.next().await {
+                let chunk =
+                    chunk.map_err(|error| bad_request(format!("Upload failed: {error}")))?;
+                received += chunk.len() as u64;
+                if received > SHARED_PROJECT_UPLOAD_BYTES {
+                    return Err(bad_request("This project file is too large to open."));
+                }
+                tokio::io::AsyncWriteExt::write_all(&mut out, &chunk)
+                    .await
+                    .map_err(|error| {
+                        ApiError::from(anyhow!("Could not stage the upload: {error}"))
+                    })?;
+            }
+            // tokio writes in the background; the import must read the whole file.
+            tokio::io::AsyncWriteExt::flush(&mut out)
+                .await
+                .map_err(|error| ApiError::from(anyhow!("Could not stage the upload: {error}")))?;
+            drop(out);
+            (path, Some(upload))
+        }
+    };
+    let creation_guard = state.project_creation_lock.clone().lock_owned().await;
+    // The worker owns the lease and the upload: a dropped request must not delete either mid-import.
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let (_creation_guard, _admission, _upload) = (creation_guard, admission, upload);
+        let target = local::projects::expand_path(&query.path)?;
+        let imported = local::share::import(&Store::open()?, &file, &target)?;
+        Ok(json!({
+            "project": project_json(&imported.project),
+            "missingBranches": imported.missing_branches,
+        }))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("import task failed: {error}")))?
+    .map_err(bad_request)?;
+    Ok(Json(result))
 }
 
 async fn github_account() -> ApiResult {
@@ -6800,6 +7071,13 @@ fn alphaxiv_error(error: crate::error::Error) -> ApiError {
     ApiError(status, error.to_string())
 }
 
+async fn alphaxiv_me() -> ApiResult {
+    crate::alphaxiv::me()
+        .await
+        .map(Json)
+        .map_err(alphaxiv_error)
+}
+
 pub(crate) async fn alphaxiv_folders() -> ApiResult {
     crate::alphaxiv::folders()
         .await
@@ -7490,6 +7768,7 @@ impl AcpHarnessInput {
             name: self.name,
             executable: self.executable,
             arguments: self.arguments,
+            unknown: Default::default(),
         }
     }
 }
@@ -10348,10 +10627,7 @@ mod tests {
     }
 
     #[test]
-    fn research_profile_requires_an_area_and_other_description() {
-        let missing_area = normalize_research_profile(vec![], None, None, vec![]).unwrap_err();
-        assert_eq!(missing_area.1, "choose at least one research area");
-
+    fn research_profile_requires_an_other_description() {
         let missing_other =
             normalize_research_profile(vec!["Other".into()], Some("   ".into()), None, vec![])
                 .unwrap_err();
@@ -10370,6 +10646,7 @@ mod tests {
             vec![crate::telemetry::ProfilePaper {
                 paper_id: "1706.03762".into(),
                 title: Some("Attention Is All You Need".into()),
+                unknown: Default::default(),
             }],
         ));
 
@@ -10464,6 +10741,7 @@ mod tests {
             api_url: "https://example.invalid".into(),
             sandbox_id: "synthetic-only".into(),
             token: "private-rental-token".into(),
+            unknown: Default::default(),
         });
         let run = StoredRun {
             id: "run-1".into(),
@@ -10712,19 +10990,16 @@ mod tests {
         assert!(lifecycle.begin_delete("p1").is_some());
     }
 
-    #[tokio::test]
-    async fn artifact_delete_rejects_during_project_cleanup() {
+    fn test_state() -> AppState {
         let agent = Arc::new(AgentHost::new(None));
         let codex = Arc::new(local::codex::CodexHost::new());
         let claude = Arc::new(local::claude::ClaudeHost::new());
-        let lifecycle = Arc::new(ProjectLifecycle::default());
-        let _deletion = lifecycle.begin_delete("p1").unwrap();
-        let state = AppState {
+        AppState {
             agent: agent.clone(),
             chat: Arc::new(ChatHost::new(agent, codex, claude.clone())),
             claude,
             harnesses: Default::default(),
-            project_lifecycle: lifecycle,
+            project_lifecycle: Default::default(),
             project_creation_lock: Default::default(),
             publication_locks: Default::default(),
             harness_fill_in_flight: Default::default(),
@@ -10738,7 +11013,235 @@ mod tests {
             restart: Default::default(),
             reopen: Default::default(),
             trackio: Default::default(),
-        };
+        }
+    }
+
+    async fn serve(app: Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        address
+    }
+
+    /// The status of a request written byte for byte, so the test owns every header.
+    async fn status(address: std::net::SocketAddr, request: &str, headers: &[&str]) -> u16 {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let head: String = headers
+            .iter()
+            .map(|header| format!("{header}\r\n"))
+            .collect();
+        stream
+            .write_all(format!("{request} HTTP/1.1\r\n{head}Content-Length: 0\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::io::BufReader::new(stream)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        line.split(' ').nth(1).unwrap().parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_dashboard_answers_only_its_own_loopback_pages() {
+        let address = serve(router(test_state(), None)).await;
+        let host = format!("Host: {address}");
+        let origin = format!("Origin: http://{address}");
+        let websocket = ["Connection: Upgrade", "Upgrade: websocket"];
+        let cases: &[(&str, Vec<&str>, u16)] = &[
+            ("GET /api/health", vec![&host], 200),
+            ("GET /api/health", vec!["Host: localhost"], 200),
+            ("GET /api/health", vec!["Host: [::1]:9"], 200),
+            ("GET /api/health", vec!["Host: attacker.example"], 400),
+            (
+                "GET /api/health",
+                vec!["Host: 127.0.0.1.attacker.example"],
+                400,
+            ),
+            ("GET /api/health", vec![], 400),
+            // The router answers 405 once a POST to this GET route clears the guard.
+            ("POST /api/health", vec![&host], 405),
+            ("POST /api/health", vec![&host, &origin], 405),
+            (
+                "POST /api/health",
+                vec![&host, "Origin: http://attacker.example"],
+                403,
+            ),
+            ("POST /api/health", vec![&host, "Origin: null"], 403),
+            (
+                "POST /api/health",
+                vec![&host, &origin, "Sec-Fetch-Site: cross-site"],
+                403,
+            ),
+            (
+                "POST /api/health",
+                vec![&host, &origin, "Sec-Fetch-Site: same-origin"],
+                405,
+            ),
+            (
+                "GET /api/health",
+                vec![&host, "Sec-Fetch-Site: cross-site"],
+                200,
+            ),
+            (
+                "GET /api/health",
+                [&[host.as_str()][..], &websocket].concat(),
+                403,
+            ),
+            (
+                "GET /api/health",
+                [&[host.as_str(), origin.as_str()][..], &websocket].concat(),
+                200,
+            ),
+            (
+                "GET /api/health",
+                [
+                    &[host.as_str(), "Origin: http://attacker.example"][..],
+                    &websocket,
+                ]
+                .concat(),
+                403,
+            ),
+            (
+                "GET /api/health",
+                [
+                    &[host.as_str(), origin.as_str(), "Sec-Fetch-Site: cross-site"][..],
+                    &websocket,
+                ]
+                .concat(),
+                403,
+            ),
+        ];
+        for (request, headers, expected) in cases {
+            assert_eq!(
+                status(address, request, headers).await,
+                *expected,
+                "{request} {headers:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn no_route_answers_a_rebinding_host_or_a_cross_site_write() {
+        let address = serve(router(test_state(), None)).await;
+        let host = format!("Host: {address}");
+        let routes = [
+            "/",
+            "/index.html",
+            "/projects/p1/chat",
+            "/api/health",
+            "/api/events",
+            "/api/projects",
+            "/api/projects/p1/files/raw",
+            "/api/chat/sessions/s1/messages",
+            "/api/chat/sessions/s1/respond",
+            "/api/internal/permissions",
+            "/api/settings/data-dir/move",
+            "/api/update/apply",
+            "/api/ssh/connect",
+            "/api/not-a-route",
+        ];
+        for path in routes {
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                let request = format!("{method} {path}");
+                assert_eq!(
+                    status(address, &request, &["Host: attacker.example"]).await,
+                    400,
+                    "{request}"
+                );
+                if method != "GET" {
+                    assert_eq!(
+                        status(
+                            address,
+                            &request,
+                            &[&host, "Origin: http://attacker.example"]
+                        )
+                        .await,
+                        403,
+                        "{request}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_dev_server_origin_is_trusted_only_when_it_is_loopback_http() {
+        if !crate::config::in_test_child(&["ORX_UI_DEV_ORIGIN"]) {
+            return;
+        }
+        let address = serve(router(test_state(), None)).await;
+        let host = format!("Host: {address}");
+        for (dev_origin, expected) in [
+            ("http://127.0.0.1:5173", 405),
+            ("http://localhost:5173/", 405),
+            ("https://127.0.0.1:5173", 403),
+            ("http://attacker.example:5173", 403),
+        ] {
+            std::env::set_var("ORX_UI_DEV_ORIGIN", dev_origin);
+            let origin = format!("Origin: {}", dev_origin.trim_end_matches('/'));
+            assert_eq!(
+                status(address, "POST /api/health", &[&host, &origin]).await,
+                expected,
+                "{dev_origin}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remote_host_admits_only_attached_sessions_and_its_own_callbacks() {
+        const ATTACHMENT: &str = "abcdefghijklmnopqrstuvwxyz-attachment";
+        const CALLBACK: &str = "abcdefghijklmnopqrstuvwxyz-callback";
+        let auth = RemoteAuth::new(CALLBACK);
+        auth.register(ATTACHMENT);
+        let address = serve(router(test_state(), Some(auth.clone()))).await;
+        let host = format!("Host: {address}");
+        let attachment = format!("Authorization: Bearer {ATTACHMENT}");
+        let callback = format!("Authorization: Bearer {CALLBACK}");
+        let cases = [
+            ("GET /api/health", None, 401),
+            ("GET /api/health", Some("Authorization: Bearer guess"), 401),
+            ("GET /api/health", Some(attachment.as_str()), 200),
+            ("GET /api/health", Some(callback.as_str()), 401),
+            ("POST /api/update/apply", Some(attachment.as_str()), 403),
+            (
+                "POST /api/settings/data-dir/move",
+                Some(attachment.as_str()),
+                403,
+            ),
+            ("GET /api/remote/sessions", Some(attachment.as_str()), 403),
+            (
+                "POST /api/projects/p1/file/open",
+                Some(attachment.as_str()),
+                403,
+            ),
+            // Past authentication, an empty body is the handler's to refuse.
+            ("POST /api/runs", Some(callback.as_str()), 415),
+            ("POST /api/runs/r1/cancel", None, 401),
+            ("POST /api/internal/permissions", None, 415),
+        ];
+        for (request, authorization, expected) in cases {
+            let headers: Vec<&str> = [host.as_str()].into_iter().chain(authorization).collect();
+            assert_eq!(
+                status(address, request, &headers).await,
+                expected,
+                "{request} {authorization:?}"
+            );
+        }
+
+        auth.unregister(ATTACHMENT);
+        assert_eq!(
+            status(address, "GET /api/health", &[&host, &attachment]).await,
+            401
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_delete_rejects_during_project_cleanup() {
+        let state = test_state();
+        let _deletion = state.project_lifecycle.begin_delete("p1").unwrap();
         let error = delete_artifact(
             State(state),
             Path("p1".into()),

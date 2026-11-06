@@ -1,14 +1,17 @@
 import { useContext, useId, useRef, useState, type RefObject } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useQuery } from "@tanstack/react-query";
 import { useWorkspace } from "../workspace";
 import { type DialogContentProps } from "../dialog";
 import { useFileManagerLabel } from "./useFileManagerLabel";
 
 import { Menu } from "@base-ui/react/menu";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
-import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Trash2, X } from "lucide-react";
+import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Share2, Trash2, X } from "lucide-react";
 import { type Project } from "../api";
+import { downloadFile } from "../download";
 import { m } from "../paraglide/messages.js";
+import { ShareProjectDialog } from "./ShareProjectDialog";
 import { Button, DialogContent, DialogTitle, Spinner, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
 
 function deleteExplanation(project: Project) {
@@ -31,9 +34,10 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
 
   const { showCustomDialog } = useWorkspace().dialogs;
 
-  const { deleteProject, updateProject, revealFileInManager } = useWorkspace().api;
+  const { api: { deleteProject, updateProject, revealFileInManager, shareProject }, queries: { getRuntimeQuery } } = useWorkspace();
 
   const revealLabel = useFileManagerLabel();
+  const remote = useQuery(getRuntimeQuery()).data?.kind === "ssh";
   const [menuOpen, setMenuOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -80,6 +84,19 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
                   onConfirm: async (name) => { await updateProject(project.id, { name }); },
                 });
               }}><span className="flex items-center gap-2"><Settings size={16} />{m.activity_edit()}</span></Menu.Item>
+              <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
+                setMenuOpen(false);
+                showCustomDialog({
+                  component: ShareProjectDialog,
+                  props: { project, remote, returnFocus: triggerRef },
+                  onCancel: "close",
+                  onConfirm: async (choice) => {
+                    const { file, fileName, skipped } = await shareProject(project.id, choice);
+                    downloadFile(fileName, file);
+                    if (skipped.length > 0) showAlert(m.share_skipped({ paths: skipped.join(", ") }), "warning");
+                  },
+                });
+              }}><span className="flex items-center gap-2"><Share2 size={16} />{m.share_project()}</span></Menu.Item>
               <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
                 void revealFileInManager(project.id, ".").catch((err: unknown) => showAlert(err instanceof Error ? err.message : String(err), "error"));
               }}><span className="flex items-center gap-2"><FolderOpen size={16} />{revealLabel}</span></Menu.Item>

@@ -17,6 +17,7 @@ use super::harness::{OneShot, OneShotQuality};
 use super::model::LocalProject;
 
 const PAPER_PDF: &str = "paper.pdf";
+const ALPHAXIV_PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LISTED_FILES: usize = 5000;
 const MAX_WALK_DEPTH: usize = 4;
 /// Paths shown to the model; shallow ones first so the layout reads at a glance.
@@ -114,15 +115,16 @@ pub async fn prompts(project: &LocalProject, agent: &Agent, locale: &str) -> Sta
         let project = project.clone();
         move || {
             let files = list_files(Path::new(&project.repo_path));
-            if is_blank(project.paper_id.as_deref(), &files) {
-                blank_brief(&project.name, &crate::telemetry::load_profile())
-                    .map(|brief| (brief, Kind::Blank))
-            } else {
-                Some((brief(&project, &files), Kind::Project))
-            }
+            (!is_blank(project.paper_id.as_deref(), &files)).then(|| brief(&project, &files))
         }
     })
     .await;
+    let brief = match brief {
+        Ok(Some(brief)) => Ok(Some((brief, Kind::Project))),
+        Ok(None) => Ok(blank_brief(&project.name, &researcher_profile().await)
+            .map(|brief| (brief, Kind::Blank))),
+        Err(error) => Err(error),
+    };
     match brief {
         Ok(Some((brief, kind))) => {
             let prompts = generate(brief, kind, project.paper_id.as_deref(), agent, locale).await;
@@ -540,7 +542,27 @@ fn brief_parts(
     out
 }
 
-/// A blank project's brief: its name and the researcher's onboarding profile,
+/// The researcher's alphaXiv profile when they linked one that says something,
+/// else the profile saved from an earlier onboarding.
+async fn researcher_profile() -> crate::telemetry::ResearchProfile {
+    if crate::alphaxiv::signed_in() {
+        let fetched = tokio::time::timeout(
+            ALPHAXIV_PROFILE_TIMEOUT,
+            crate::alphaxiv::research_profile(),
+        )
+        .await;
+        if let Ok(Ok(profile)) = fetched {
+            if !profile.research_areas.is_empty() || profile.background.is_some() {
+                return profile;
+            }
+        }
+    }
+    tokio::task::spawn_blocking(crate::telemetry::load_profile)
+        .await
+        .unwrap_or_default()
+}
+
+/// A blank project's brief: its name and the researcher's profile,
 /// or `None` when the profile says nothing to tailor to.
 fn blank_brief(name: &str, profile: &crate::telemetry::ResearchProfile) -> Option<String> {
     let areas: Vec<&str> = profile
@@ -844,6 +866,7 @@ mod tests {
             papers: vec![ProfilePaper {
                 paper_id: "2401.12345".into(),
                 title: Some("Fold it".into()),
+                unknown: Default::default(),
             }],
         };
         assert_eq!(

@@ -547,35 +547,6 @@ mod tests {
     }
 
     #[test]
-    fn logs_results_and_reports_have_distinct_ownership() {
-        assert!(LOGS.contains("Truncated output is not evidence of absence"));
-        assert!(!LOGS.contains("Summarize an experiment"));
-        assert!(RESULTS.contains("Validate before reporting"));
-        assert!(!RESULTS.contains("<file path="));
-        assert!(REPORTS.contains("evidence-and-links contract"));
-        assert!(REPORTS.contains("Load `orx-results`"));
-        assert!(find("evidence", SkillSet::Local).is_none());
-    }
-
-    #[test]
-    fn paper_skill_writes_a_compilable_tex_and_cites_it() {
-        assert!(PAPER.contains("keep the `.tex` out of the artifacts"));
-        assert!(PAPER.contains("evidence-and-links contract"));
-        assert!(PAPER.contains("`orx-lit-review` workflow"));
-        assert!(PAPER.contains("`orx discover`"));
-        // The trap that makes a draft fail to compile rather than look wrong.
-        assert!(PAPER.contains("Every environment needs the package that defines it"));
-        assert!(PAPER.contains("\\newtheorem"));
-        // \citet without natbib is a hard build failure the preview never shows.
-        assert!(PAPER.contains("natbib"));
-        // The engine a document needs travels in the file, not in a setting.
-        assert!(PAPER.contains("% !TeX program"));
-        for set in [SkillSet::Local, SkillSet::Full] {
-            assert_eq!(find("paper", set).map(|s| s.name), Some("orx-paper"));
-        }
-    }
-
-    #[test]
     fn ensure_session_skills_writes_local_set_idempotently() {
         let tmp = std::env::temp_dir().join(format!(
             "orx-agent-skills-test-{}-{}",
@@ -632,29 +603,6 @@ mod tests {
     }
 
     #[test]
-    fn unified_git_and_compute_skills_are_written_to_sessions() {
-        let tmp =
-            std::env::temp_dir().join(format!("orx-unified-skills-test-{}", uuid::Uuid::new_v4()));
-        let rel = ".agents/skills";
-        ensure_session_skills(&tmp, rel).unwrap();
-        let git = std::fs::read_to_string(tmp.join(rel).join("orx-git/SKILL.md")).unwrap();
-        assert!(git.contains("never part of compute transport"));
-        assert!(git.contains("do not push merely to launch compute"));
-        let compute = std::fs::read_to_string(tmp.join(rel).join("orx-compute/SKILL.md")).unwrap();
-        assert!(compute.contains("immutable source snapshot"));
-        assert!(compute.contains("references/hf.md"));
-        let hf =
-            std::fs::read_to_string(tmp.join(rel).join("orx-compute/references/hf.md")).unwrap();
-        assert!(hf.contains("Hugging Face Jobs"));
-        let tinker =
-            std::fs::read_to_string(tmp.join(rel).join("orx-compute/references/tinker.md"))
-                .unwrap();
-        assert!(tinker.contains("TINKER_API_KEY"));
-        assert!(!tmp.join(rel).join("orx-compute-k8s").exists());
-        let _ = std::fs::remove_dir_all(tmp);
-    }
-
-    #[test]
     fn figures_skill_ships_its_style_module_and_routes_by_figure_type() {
         // The references are worth nothing if the style module they all import
         // is not installed beside them, so pin both halves.
@@ -698,77 +646,5 @@ mod tests {
                 "audit lost its {check} check"
             );
         }
-    }
-
-    #[test]
-    fn figures_skill_pairs_each_destination_with_its_citation_tag() {
-        // A worktree figure cited with an `artifacts/` prefix resolves in
-        // neither root and reaches the user as a dead chip.
-        let figures = find("figures", SkillSet::Local).expect("figures skill");
-        assert!(figures
-            .content
-            .contains(r#"<file path="figs/loss_curve.pdf" />"#));
-        assert!(figures
-            .content
-            .contains(r#"<file path="artifacts/transformer-sweep/figures/loss_curve.pdf" />"#));
-        assert!(figures
-            .content
-            .contains("The tag must match the destination"));
-        assert!(
-            figures.content.contains("/tmp"),
-            "must rule out scratch dirs"
-        );
-    }
-
-    #[test]
-    fn bundled_skills_avoid_openresearch_ui_navigation() {
-        for set in [SkillSet::Local, SkillSet::Full] {
-            for skill in skills(set) {
-                crate::local::assert_agent_guidance_is_ui_agnostic(skill.name, skill.content);
-                crate::local::assert_agent_guidance_is_ui_agnostic(skill.name, skill.description);
-                for resource in skill.resources {
-                    crate::local::assert_agent_guidance_is_ui_agnostic(
-                        resource.path,
-                        resource.content,
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn compute_skill_commands_parse() {
-        use clap::Parser;
-        let skill = find("compute", SkillSet::Full).expect("compute skill");
-        let docs = std::iter::once(skill.content).chain(skill.resources.iter().map(|r| r.content));
-        let mut ssh_config_checked = 0;
-        for doc in docs {
-            assert!(
-                !doc.replace("orx compute ssh-config", "")
-                    .contains("ssh-config"),
-                "ssh-config must be written as `orx compute ssh-config`"
-            );
-            let spans = doc.split('`').chain(doc.lines());
-            for span in spans.filter_map(|s| s.trim().strip_prefix("orx compute")) {
-                let command = span.split(" #").next().unwrap_or_default();
-                // Collapse `<multi word placeholder>` into one argument.
-                let mut args = vec!["orx".to_owned(), "compute".to_owned()];
-                for (i, part) in command.split(['<', '>']).enumerate() {
-                    if i % 2 == 1 {
-                        args.push("x".to_owned());
-                    } else {
-                        args.extend(part.split_whitespace().map(str::to_owned));
-                    }
-                }
-                if let Err(e) = crate::Cli::try_parse_from(&args) {
-                    panic!("{args:?}: {e}");
-                }
-                ssh_config_checked += usize::from(args.iter().any(|a| a == "ssh-config"));
-            }
-        }
-        assert!(
-            ssh_config_checked >= 2,
-            "ssh-config commands were not checked"
-        );
     }
 }

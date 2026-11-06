@@ -101,7 +101,7 @@ export function LogTerminal({ run }: { run: Pick<Run, "id" | "status" | "contact
       {paged && (
         <div className="shrink-0 bg-background text-xs text-subtext">
           <div className="flex items-center gap-1 border-b border-border-variant px-1.5 py-1">
-            <IconButton size="small" aria-label={m.log_go_start()} data-tip={m.log_go_start()} disabled={span.start === 0} onClick={() => follower.current?.goTo(0)}>
+            <IconButton size="small" aria-label={m.log_go_start()} data-tip={m.log_go_start()} data-tip-align="start" disabled={span.start === 0} onClick={() => follower.current?.goTo(0)}>
               <ChevronFirst size={14} />
             </IconButton>
             <IconButton size="small" aria-label={m.log_earlier()} data-tip={m.log_earlier()} disabled={span.start === 0} onClick={() => follower.current?.goTo(span.start - LOG_WINDOW)}>

@@ -57,7 +57,7 @@ permissions, and never changes a shared install itself. Installing or updating
 database and cache paths visible and changeable.
 
 A new remote machine opens agent configuration without repeating the welcome,
-research profile or demo setup. Agent installations and sign-ins belong to each
+alphaXiv sign-in or demo setup. Agent installations and sign-ins belong to each
 machine; the account picker and paper library continue to use the laptop account.
 Installing or signing in to Claude Code with a subscription first checks the
 remote's public egress IP; a known datacenter address prompts once per setup,
@@ -199,6 +199,9 @@ Idle ─► Connecting ─► Live ─(EOF, 35 s without a reply, clock jump)─
             └─ auth failure, host key, changed route, dead master ─► NeedsAuth
 Backoff: 5 s, 15 s, 60 s, 5 min, 15 min cap, jittered, persisted per root
 ```
+
+Managed rental hosts cap reconnect delays at 60 seconds, including jitter, so
+an outage leaves repeated collection attempts within the rental's grace.
 
 **After an authentication failure, no automatic login.** Repeated logins lock
 accounts and trip MFA, so the breaker is one per SSH alias, shared by all its

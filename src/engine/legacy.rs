@@ -20,8 +20,6 @@ pub enum Adoption {
         dir: String,
         container: Option<ContainerRun>,
     },
-    /// `openresearch_job`: `LegacyLoop` behind a `RunSink`.
-    Loop,
     /// Other kinds: the native adapter reading the old descriptor fields.
     Native { kind: String },
 }
@@ -32,9 +30,10 @@ fn adoption(descriptor: BackendDescriptor) -> Option<Adoption> {
             dir: descriptor.job_id?,
             container: descriptor.ssh_container,
         },
-        "openresearch_job" => Adoption::Loop,
-        kind if matches!(kind, "slurm_job" | "local_job" | "tinker_job")
-            || super::adapters::api::provider(kind).is_ok() =>
+        kind if matches!(
+            kind,
+            "slurm_job" | "local_job" | "tinker_job" | "openresearch_job"
+        ) || super::adapters::api::provider(kind).is_ok() =>
         {
             Adoption::Native {
                 kind: descriptor.kind,

@@ -215,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_reuses_a_ready_env() {
         let Some(dir) = fake_env().await else {
-            eprintln!("skipped: no Python on PATH");
+            crate::config::skip_without_tool("no Python on PATH");
             return;
         };
         let python = test_env("pass", (3, 0))
@@ -231,7 +231,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_keeps_a_stale_env_when_no_python_is_new_enough() {
         let Some(dir) = fake_env().await else {
-            eprintln!("skipped: no Python on PATH");
+            crate::config::skip_without_tool("no Python on PATH");
             return;
         };
         let error = test_env("raise SystemExit(1)", (99, 0))

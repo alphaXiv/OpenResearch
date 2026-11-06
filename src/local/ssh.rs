@@ -103,6 +103,7 @@ pub async fn submit_local_ssh_with_source(
         source_path: None,
         source_size: None,
         remote_root: launch.remote_root.clone(),
+        unknown: Default::default(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if container.is_some() {

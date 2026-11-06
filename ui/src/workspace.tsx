@@ -40,6 +40,7 @@ export function createWorkspace(identity: string, basePath = "") {
     dialogs,
     composers: createComposerState(),
     transcriptRowSizes: new Map<string, { size: number; width: number }>(),
+    transcriptDisclosures: new Map<string, Map<string, boolean>>(),
   };
 }
 

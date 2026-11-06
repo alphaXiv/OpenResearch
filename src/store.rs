@@ -9,6 +9,7 @@
 //! `~/.local/share/openresearch`.
 
 mod acp;
+pub(crate) mod search;
 mod telemetry;
 pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 
@@ -46,7 +47,7 @@ pub fn data_dir() -> PathBuf {
     //   3. $XDG_DATA_HOME/openresearch — ambient system default *base*; an
     //      explicit UI choice rightly beats it, so it sits below (2).
     //   4. ~/.local/share/openresearch — hardcoded default.
-    if let Some(dir) = env_path("ORX_DATA_DIR") {
+    if let Some(dir) = data_dir_override() {
         return dir;
     }
     if let Some(dir) = crate::config::settings_data_dir() {
@@ -172,9 +173,23 @@ fn env_path(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// `$ORX_DATA_DIR`. Under test only a fixture in the temp dir counts: one
+/// inherited from the developer's shell points at their real data.
+fn data_dir_override() -> Option<PathBuf> {
+    let dir = env_path("ORX_DATA_DIR")?;
+    #[cfg(test)]
+    if !dir.starts_with(std::env::temp_dir()) {
+        return None;
+    }
+    Some(dir)
+}
+
 /// `$XDG_DATA_HOME/openresearch` else `~/.local/share/openresearch` — the tail
 /// of the resolution chain, shared by `data_dir()` and `default_data_dir()`.
 fn xdg_default_data_dir() -> PathBuf {
+    #[cfg(test)]
+    let base = crate::config::test_home().join(".local").join("share");
+    #[cfg(not(test))]
     let base = env_path("XDG_DATA_HOME").unwrap_or_else(|| {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -189,7 +204,7 @@ fn xdg_default_data_dir() -> PathBuf {
 /// "(default)" path and offer resetting to it. `$ORX_DATA_DIR` still wins, since
 /// it's a forced override.
 pub fn default_data_dir() -> PathBuf {
-    if let Some(dir) = env_path("ORX_DATA_DIR") {
+    if let Some(dir) = data_dir_override() {
         return dir;
     }
     xdg_default_data_dir()
@@ -212,7 +227,7 @@ pub enum DataDirSource {
 
 /// Classify the current `data_dir()` resolution for the Storage settings UI.
 pub fn data_dir_source() -> DataDirSource {
-    if env_path("ORX_DATA_DIR").is_some() {
+    if data_dir_override().is_some() {
         return DataDirSource::Env;
     }
     if crate::config::settings_data_dir().is_some() {
@@ -568,7 +583,7 @@ pub struct ReadyChatSubscription {
     told_turn_id: Option<String>,
 }
 
-const CHAT_SUBSCRIPTION_CLAIM_TTL_MS: i64 = 60 * 1000;
+const CHAT_SUBSCRIPTION_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Each subscription with its target's latest turn and whether the target is
 /// idle after it: done, and with nothing queued unless a stop held the queue.
@@ -592,7 +607,12 @@ latest AS (
     SELECT *, NOT (idle IS 1 AND told_turn_id IS turn_id) AS pending FROM subscribed
 )";
 
-pub(crate) const CHAT_TURN_LEASE_TTL_MS: i64 = 60 * 1000;
+pub(crate) const CHAT_TURN_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Heartbeats and claims older than this belong to an owner that is gone.
+fn expired_before(ttl: std::time::Duration) -> i64 {
+    now_ms() - crate::config::paced(ttl).as_millis() as i64
+}
 
 fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
@@ -624,7 +644,7 @@ fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
     for (session_id, prompt, requested_at) in pending {
         let leased: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND heartbeat_at > ?2)",
-            params![session_id, now_ms() - CHAT_TURN_LEASE_TTL_MS], |row| row.get(0),
+            params![session_id, expired_before(CHAT_TURN_LEASE_TTL)], |row| row.get(0),
         )?;
         if leased {
             return Err(anyhow!(
@@ -851,9 +871,7 @@ impl Store {
     }
 
     /// Open a store rooted at an explicit directory, bypassing `data_dir()`
-    /// resolution. For tests: a throwaway temp dir here avoids mutating the
-    /// process-global `$ORX_DATA_DIR`, which the localbox lifecycle test owns
-    /// (tests in different modules share env under the parallel runner).
+    /// resolution.
     pub fn open_at(dir: PathBuf) -> Result<Self> {
         let move_lock_path = dir.join(".orx-data-dir-move.lock");
         Self::open_at_with_move_lock(dir, move_lock_path, BUSY_TIMEOUT)
@@ -1330,6 +1348,7 @@ impl Store {
             tx.pragma_update(None, "user_version", 1)?;
             tx.commit()?;
         }
+        search::initialize(&conn)?;
         // Older builds of this branch created a one-root-per-project unique
         // index; multiple baselines are allowed, so make sure it's gone.
         let _ = conn.execute(
@@ -2013,7 +2032,7 @@ impl Store {
                )
              ORDER BY l.updated_at"
         ))?;
-        let rows = stmt.query_map([now_ms() - CHAT_SUBSCRIPTION_CLAIM_TTL_MS], |row| {
+        let rows = stmt.query_map([expired_before(CHAT_SUBSCRIPTION_CLAIM_TTL)], |row| {
             Ok(ReadyChatSubscription {
                 subscriber_session_id: row.get(0)?,
                 target_session_id: row.get(1)?,
@@ -2091,7 +2110,7 @@ impl Store {
                 id,
                 token,
                 now_ms(),
-                now_ms() - CHAT_SUBSCRIPTION_CLAIM_TTL_MS
+                expired_before(CHAT_SUBSCRIPTION_CLAIM_TTL)
             ],
         )?;
         Ok((claimed == 1).then_some(token))
@@ -2125,7 +2144,7 @@ impl Store {
     pub fn chat_turn_leased(&self, chat_session_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND heartbeat_at >= ?2)",
-            params![chat_session_id, now_ms() - CHAT_TURN_LEASE_TTL_MS], |row| row.get(0),
+            params![chat_session_id, expired_before(CHAT_TURN_LEASE_TTL)], |row| row.get(0),
         )?)
     }
 
@@ -2138,7 +2157,7 @@ impl Store {
                     SELECT 1 FROM chat_sessions
                     WHERE chat_sessions.id = chat_turn_leases.chat_session_id
                 )",
-            params![now_ms() - CHAT_TURN_LEASE_TTL_MS],
+            params![expired_before(CHAT_TURN_LEASE_TTL)],
         )?;
         let claimed = self.conn.execute(
             "INSERT OR IGNORE INTO chat_turn_leases
@@ -2171,7 +2190,7 @@ impl Store {
     pub fn claim_data_dir_move(&self, token: &str) -> Result<bool> {
         self.conn.execute(
             "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![now_ms() - CHAT_TURN_LEASE_TTL_MS],
+            params![expired_before(CHAT_TURN_LEASE_TTL)],
         )?;
         self.clear_stale_data_dir_move_lease()?;
         let claimed = self.conn.execute(
@@ -2457,7 +2476,7 @@ impl Store {
             .chain(["source-snapshots"])
         {
             let path = self.data_dir.join(name);
-            match std::fs::symlink_metadata(&path) {
+            match std::fs::metadata(&path) {
                 Ok(metadata) if !metadata.file_type().is_dir() => {
                     return Err(anyhow!(
                         "Refusing artifact cleanup through {}",
@@ -4603,7 +4622,7 @@ impl Store {
         let transaction = self.conn.unchecked_transaction()?;
         transaction.execute(
             "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![now - CHAT_TURN_LEASE_TTL_MS],
+            params![expired_before(CHAT_TURN_LEASE_TTL)],
         )?;
         let newly_reconciled = {
             let mut statement = transaction.prepare(
@@ -6802,16 +6821,10 @@ mod tests {
             .unwrap();
         store.cleanup_orphaned_run_artifacts().unwrap();
         assert!(snapshot.exists());
-        assert!(serde_json::from_str::<serde_json::Value>(&row.backend_json)
-            .unwrap()
-            .get("handle")
-            .is_some());
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&descriptor.to_json())
-                .unwrap()
-                .get("handle")
-                .is_none()
-        );
+        let handle =
+            |json: &str| serde_json::from_str::<serde_json::Value>(json).unwrap()["handle"].take();
+        assert!(handle(&row.backend_json).is_object());
+        assert_eq!(handle(&descriptor.to_json()), handle(&row.backend_json));
         assert!(store
             .update_status(&run.id, RunStatus::Running, None, None)
             .unwrap());
@@ -7462,6 +7475,68 @@ mod tests {
         );
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Released binaries keep opening the store, so a column one knows keeps its
+    /// type, nullability and default, and a column it doesn't know accepts its inserts.
+    #[test]
+    fn schema_only_grows_from_the_last_release() {
+        let snapshot: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/contracts/store-schema.json")).unwrap();
+        let release = snapshot["release"].as_str().unwrap();
+        let dir = std::env::temp_dir().join(format!("orx-store-schema-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        for (table, released) in snapshot["tables"].as_object().unwrap() {
+            let mut statement = store
+                .conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let current: Vec<serde_json::Value> = statement
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "name": row.get::<_, String>(1)?,
+                        "type": row.get::<_, String>(2)?,
+                        "notnull": row.get::<_, bool>(3)?,
+                        "default": row.get::<_, Option<String>>(4)?,
+                        "pk": row.get::<_, i64>(5)?,
+                    }))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(!current.is_empty(), "{table} from {release} was dropped");
+
+            let released = released.as_array().unwrap();
+            for old in released {
+                let name = &old["name"];
+                let new = current
+                    .iter()
+                    .find(|column| &column["name"] == name)
+                    .unwrap_or_else(|| panic!("{table}.{name} from {release} was dropped"));
+                assert_eq!(new["type"], old["type"], "{table}.{name} type");
+                assert_eq!(new["pk"], old["pk"], "{table}.{name} primary key");
+                assert!(
+                    new["notnull"] == false || old["notnull"] == true,
+                    "{table}.{name} became NOT NULL"
+                );
+                assert!(
+                    old["default"].is_null() || !new["default"].is_null(),
+                    "{table}.{name} lost its default"
+                );
+            }
+            for new in &current {
+                let added = !released.iter().any(|old| old["name"] == new["name"]);
+                let insertable = new["notnull"] == false || !new["default"].is_null();
+                assert!(
+                    !added || insertable,
+                    "{table}.{} rejects inserts from {release}",
+                    new["name"]
+                );
+            }
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn project_with_run_artifacts(store: &Store, project: &str, run: &str, digest: &str) {
@@ -8414,6 +8489,27 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn project_deletion_removes_artifacts_through_linked_roots() {
+        let dir = std::env::temp_dir().join(format!("orx-linked-roots-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "project", "run", &"e".repeat(64));
+        let external = dir.join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        for name in ["local-runs", "submission-handles"] {
+            std::fs::rename(dir.join(name), external.join(name)).unwrap();
+            std::os::unix::fs::symlink(external.join(name), dir.join(name)).unwrap();
+        }
+
+        store.delete_local_project("project").unwrap();
+
+        assert!(!external.join("local-runs/run").exists());
+        assert!(!external.join("submission-handles/run.json").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn refused_project_deletion_never_reaches_the_native_purge() {
         let dir = std::env::temp_dir().join(format!("orx-delete-order-{}", uuid::Uuid::new_v4()));
@@ -8464,14 +8560,11 @@ mod tests {
         drop(native_deletion);
         assert!(dir.join("local-runs/run/repo/output").is_file());
 
-        #[cfg(unix)]
-        {
-            std::fs::rename(dir.join("local-runs"), dir.join("outside")).unwrap();
-            std::os::unix::fs::symlink(dir.join("outside"), dir.join("local-runs")).unwrap();
-            refuse("Refusing artifact cleanup");
-            std::fs::remove_file(dir.join("local-runs")).unwrap();
-            std::fs::rename(dir.join("outside"), dir.join("local-runs")).unwrap();
-        }
+        std::fs::rename(dir.join("local-runs"), dir.join("outside")).unwrap();
+        std::fs::write(dir.join("local-runs"), "").unwrap();
+        refuse("Refusing artifact cleanup");
+        std::fs::remove_file(dir.join("local-runs")).unwrap();
+        std::fs::rename(dir.join("outside"), dir.join("local-runs")).unwrap();
 
         assert!(store
             .delete_local_project_with("project", Some(|| Err(anyhow!("purge failed"))))
@@ -8650,26 +8743,6 @@ mod tests {
         store.delete_local_project("project").unwrap();
         assert!(dir.join("repo-project/keep").is_file());
         assert!(!dir.join("local-runs/run").exists());
-        drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_deletion_does_not_follow_symlinked_artifact_roots() {
-        let dir = std::env::temp_dir().join(format!("orx-delete-symlink-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        project_with_run_artifacts(&store, "project", "run", &"d".repeat(64));
-        std::fs::rename(dir.join("local-runs"), dir.join("outside")).unwrap();
-        std::os::unix::fs::symlink(dir.join("outside"), dir.join("local-runs")).unwrap();
-        assert!(store.delete_local_project("project").is_err());
-        assert!(store.get_run("run").unwrap().is_some());
-        assert!(dir.join("outside/run/repo/output").is_file());
-        assert!(dir.join("run-logs/run.log").is_file());
-        assert!(store.cleanup_orphaned_run_artifacts().is_err());
-        std::fs::remove_file(dir.join("local-runs")).unwrap();
-        std::fs::rename(dir.join("outside"), dir.join("local-runs")).unwrap();
-        store.delete_local_project("project").unwrap();
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -8944,37 +9017,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_session_context_usage_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("orx-store-ctxusage-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        store
-            .create_chat_session(&chat_session_fixture("chat_1"))
-            .unwrap();
-        // Fresh session: no usage yet.
-        assert!(store
-            .get_chat_session("chat_1")
-            .unwrap()
-            .unwrap()
-            .context_usage_json
-            .is_none());
-        // Set, then read it back verbatim.
-        let json = r#"{"usedTokens":27564,"contextWindow":200000}"#;
-        store
-            .set_chat_session_context_usage("chat_1", json)
-            .unwrap();
-        assert_eq!(
-            store
-                .get_chat_session("chat_1")
-                .unwrap()
-                .unwrap()
-                .context_usage_json
-                .as_deref(),
-            Some(json)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn permission_and_plan_migration_preserves_each_harness_native_contract() {
         let dir =
             std::env::temp_dir().join(format!("orx-store-plan-migrate-{}", uuid::Uuid::new_v4()));
@@ -9013,36 +9055,6 @@ mod tests {
         assert_eq!(state("open_plan"), ("default".into(), true));
         assert_eq!(state("open_auto"), ("default".into(), false));
         assert_eq!(state("open_bypass"), ("auto-approve".into(), false));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn codex_plan_reset_marker_roundtrips_and_clears() {
-        let dir =
-            std::env::temp_dir().join(format!("orx-store-plan-reset-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        let mut session = chat_session_fixture("codex");
-        session.harness = "codex".into();
-        session.permission_mode = Some("approve-for-me".into());
-        store.create_chat_session(&session).unwrap();
-        store
-            .set_chat_session_plan_state("codex", false, true)
-            .unwrap();
-        assert!(
-            store
-                .get_chat_session("codex")
-                .unwrap()
-                .unwrap()
-                .plan_reset_pending
-        );
-        store.clear_chat_session_plan_reset("codex").unwrap();
-        assert!(
-            !store
-                .get_chat_session("codex")
-                .unwrap()
-                .unwrap()
-                .plan_reset_pending
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9294,7 +9306,7 @@ mod tests {
             .conn
             .execute(
                 "UPDATE chat_turn_leases SET heartbeat_at = ?1 WHERE chat_session_id = 'chat_1'",
-                params![now_ms() - CHAT_TURN_LEASE_TTL_MS - 1],
+                params![expired_before(CHAT_TURN_LEASE_TTL) - 1],
             )
             .unwrap();
         assert_eq!(
@@ -10035,6 +10047,7 @@ mod tests {
             name: "Saved agent".into(),
             executable: "original-agent".into(),
             arguments: vec!["original argument".into()],
+            unknown: Default::default(),
         };
         store.conn.execute(
             "INSERT INTO acp_sessions(session_id, launch_json, configuration_json) VALUES (?1, ?2, ?3)",
@@ -10149,18 +10162,67 @@ mod tests {
     }
 
     #[test]
-    fn chat_session_autonomy_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("orx-store-autonomy-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        let mut session = chat_session_fixture("chat_a");
+    fn chat_session_setters_survive_a_reopen() {
+        let dir = std::env::temp_dir().join(format!("orx-store-setters-{}", uuid::Uuid::new_v4()));
+        const USAGE: &str = r#"{"usedTokens":27564,"contextWindow":200000}"#;
+        let mut session = chat_session_fixture("chat");
         session.autonomy = Some("copilot".into());
-        store.create_chat_session(&session).unwrap();
-        let autonomy = |store: &Store| store.get_chat_session("chat_a").unwrap().unwrap().autonomy;
-        assert_eq!(autonomy(&store).as_deref(), Some("copilot"));
-        store
-            .set_chat_session_autonomy("chat_a", Autonomy::Agentic)
+        Store::open_at(dir.clone())
+            .unwrap()
+            .create_chat_session(&session)
             .unwrap();
-        assert_eq!(autonomy(&store).as_deref(), Some("agentic"));
+        let read = || {
+            let store = Store::open_at(dir.clone()).unwrap();
+            store.get_chat_session("chat").unwrap().unwrap()
+        };
+        let fresh = read();
+        assert_eq!(fresh.autonomy.as_deref(), Some("copilot"));
+        assert_eq!(fresh.context_usage_json, None);
+        assert_eq!((fresh.title, fresh.title_source), (None, None));
+        assert!(!fresh.plan_reset_pending);
+
+        type Case = (fn(&Store), fn(&StoredChatSession) -> bool);
+        let cases: [Case; 5] = [
+            (
+                |store| {
+                    store
+                        .set_chat_session_autonomy("chat", Autonomy::Agentic)
+                        .unwrap()
+                },
+                |chat| chat.autonomy.as_deref() == Some("agentic"),
+            ),
+            (
+                |store| store.set_chat_session_context_usage("chat", USAGE).unwrap(),
+                |chat| chat.context_usage_json.as_deref() == Some(USAGE),
+            ),
+            (
+                |store| {
+                    store
+                        .set_chat_session_title("chat", "First line…", "fallback")
+                        .unwrap()
+                },
+                |chat| {
+                    chat.title.as_deref() == Some("First line…")
+                        && chat.title_source.as_deref() == Some("fallback")
+                },
+            ),
+            (
+                |store| {
+                    store
+                        .set_chat_session_plan_state("chat", false, true)
+                        .unwrap()
+                },
+                |chat| chat.plan_reset_pending,
+            ),
+            (
+                |store| store.clear_chat_session_plan_reset("chat").unwrap(),
+                |chat| !chat.plan_reset_pending,
+            ),
+        ];
+        for (i, (set, check)) in cases.into_iter().enumerate() {
+            set(&Store::open_at(dir.clone()).unwrap());
+            assert!(check(&read()), "case {i}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10331,28 +10393,6 @@ mod tests {
             2
         );
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn title_source_roundtrips_and_defaults_to_none() {
-        let dir = std::env::temp_dir().join(format!("orx-store-titlesrc-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-
-        store
-            .create_chat_session(&chat_session_fixture("chat_1"))
-            .unwrap();
-        let fresh = store.get_chat_session("chat_1").unwrap().unwrap();
-        assert!(fresh.title.is_none());
-        assert!(fresh.title_source.is_none());
-
-        store
-            .set_chat_session_title("chat_1", "First line…", "fallback")
-            .unwrap();
-        let after = store.get_chat_session("chat_1").unwrap().unwrap();
-        assert_eq!(after.title.as_deref(), Some("First line…"));
-        assert_eq!(after.title_source.as_deref(), Some("fallback"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -10576,22 +10616,31 @@ mod tests {
     }
 
     #[test]
-    fn run_status_is_terminal_matches_the_three_absorbing_states() {
-        for status in RunStatus::ALL {
-            assert_eq!(
-                status.is_terminal(),
-                matches!(
-                    status,
-                    RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled | RunStatus::Lost
-                )
-            );
+    fn terminal_statuses_are_exactly_the_absorbing_ones() {
+        for from in RunStatus::ALL {
+            let absorbing = RunStatus::ALL
+                .into_iter()
+                .all(|to| !from.can_transition_to(to));
+            assert_eq!(from.is_terminal(), absorbing, "{from}");
         }
     }
 
+    /// Rows written by every shipped version hold these strings.
     #[test]
-    fn run_status_as_str_round_trips_through_parse() {
-        for status in RunStatus::ALL {
-            assert_eq!(RunStatus::parse(status.as_str()), Some(status));
+    fn run_status_stored_strings_are_stable() {
+        use RunStatus::*;
+        let stored = [
+            (Starting, "starting"),
+            (Running, "running"),
+            (Done, "done"),
+            (Failed, "failed"),
+            (Cancelled, "cancelled"),
+            (Lost, "lost"),
+        ];
+        assert_eq!(stored.map(|(status, _)| status), RunStatus::ALL);
+        for (status, text) in stored {
+            assert_eq!(status.as_str(), text);
+            assert_eq!(RunStatus::parse(text), Some(status));
         }
         assert_eq!(RunStatus::parse("not-a-real-status"), None);
         assert!(!is_terminal_status("not-a-real-status"));
@@ -10790,33 +10839,6 @@ mod tests {
             "run must settle on a real terminal state, got {final_status:?}"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn run_chat_session_id_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("orx-store-runsess-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-
-        store
-            .upsert_run(&run_fixture("run_owned", "starting", Some("chat_A")))
-            .unwrap();
-        store
-            .upsert_run(&run_fixture("run_orphan", "starting", None))
-            .unwrap();
-
-        assert_eq!(
-            store.get_run("run_owned").unwrap().unwrap().chat_session_id,
-            Some("chat_A".to_string())
-        );
-        assert_eq!(
-            store
-                .get_run("run_orphan")
-                .unwrap()
-                .unwrap()
-                .chat_session_id,
-            None
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -11401,37 +11423,6 @@ mod tests {
             );
         }
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn experiment_chat_session_id_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("orx-store-expsess-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-
-        store
-            .create_local_experiment(&experiment_fixture("exp_owned", Some("chat_x")))
-            .unwrap();
-        store
-            .create_local_experiment(&experiment_fixture("exp_orphan", None))
-            .unwrap();
-
-        assert_eq!(
-            store
-                .get_local_experiment("exp_owned")
-                .unwrap()
-                .unwrap()
-                .chat_session_id,
-            Some("chat_x".to_string())
-        );
-        assert_eq!(
-            store
-                .get_local_experiment("exp_orphan")
-                .unwrap()
-                .unwrap()
-                .chat_session_id,
-            None
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

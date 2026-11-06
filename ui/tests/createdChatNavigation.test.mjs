@@ -1,50 +1,51 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import { runInNewContext } from "node:vm";
+import { act } from "react";
+import { m } from "../src/paraglide/messages.js";
+import { assistantMessage, deferred, renderChat, session, userMessage } from "./chat.mjs";
 
-const source = readFileSync(new URL("../src/components/ChatPanel.tsx", import.meta.url), "utf8");
-const callback = source.match(/const openSpawnedSession = useCallback\(\s*(async \(sessionId: string\) => \{[\s\S]*?\n    \}),/)[1]
-  .replace("sessionId: string", "sessionId");
+const created = "chat_0f8fad5b-d9cb-469f-a165-70867728950e";
+const spawn = assistantMessage("a1", [{
+  id: "tool-1", type: "tool", tool: "bash",
+  state: { status: "completed", input: { command: "orx agent spawn --title Sweep 'run the sweep'" }, output: `Started ${created}` },
+}], "u1");
 
-function navigation(getChatSession) {
-  const calls = [];
-  const projectVisitRef = { current: {} };
-  const composerScopeRef = { current: {} };
-  const open = runInNewContext(`(${callback})`, {
-    getChatSession,
-    projectVisitRef,
-    composerScopeRef,
-    setSessionFilter: (filter) => calls.push(["filter", filter]),
-    onActiveSessionChange: (id, options) => calls.push(["navigate", id, options.projectId]),
-    showAlert: (message, kind) => calls.push(["alert", message, kind]),
+/** Chat `s` whose agent spawned `created`; looking it up answers with `lookup`. */
+async function spawned(lookup) {
+  const chat = await renderChat("/projects/p/tasks/s", {
+    sessions: [session("s"), session("other"), session("elsewhere", { projectId: "q" })],
+    transcripts: { s: [userMessage("u1", "start a sweep"), spawn] },
+    routes: { [`GET /api/chat/sessions/${created}`]: lookup },
   });
-  return { calls, open, projectVisitRef, composerScopeRef };
+  const open = () => act(async () => document.querySelector(`button[title="${m.chat_panel_open_the_session_this_agent_spawned()}"]`).click());
+  return { chat, open, location: () => location.pathname };
 }
 
 test("a created-chat link navigates to its destination project", async () => {
-  const { calls, open } = navigation(async (id) => ({ id, projectId: "other-project" }));
-  await open("created-chat");
-  assert.deepEqual(calls, [["filter", "all"], ["navigate", "created-chat", "other-project"]]);
+  const { chat, open, location } = await spawned(() => ({ session: session(created, { projectId: "q" }) }));
+  await open();
+  await chat.navigate(location());
+  assert.equal(location(), `/projects/q/tasks/${created}`);
 });
 
 test("a missing created chat reports the error without changing navigation", async () => {
-  const { calls, open } = navigation(async () => { throw "Chat unavailable"; });
-  await open("deleted-chat");
-  assert.deepEqual(calls, [["alert", "Chat unavailable", "error"]]);
+  const { chat, open, location } = await spawned(() => Response.json({ error: "Chat unavailable" }, { status: 404 }));
+  await open();
+  await chat.navigate(location());
+  assert.equal(location(), "/projects/p/tasks/s");
+  assert.match(document.body.textContent, /Chat unavailable/);
 });
 
-for (const changedRef of ["projectVisitRef", "composerScopeRef"]) {
+for (const [change, destination] of [["chat", "/projects/p/tasks/other"], ["project", "/projects/q/tasks/elsewhere"]]) {
   for (const failure of [false, true]) {
-    test(`a late ${failure ? "error" : "chat lookup"} cannot override a changed ${changedRef}`, async () => {
-      let finish;
-      const request = new Promise((resolve, reject) => { finish = failure ? reject : resolve; });
-      const nav = navigation(() => request);
-      const pending = nav.open("created-chat");
-      nav[changedRef].current = {};
-      finish(failure ? "Chat unavailable" : { projectId: "other-project" });
-      await pending;
-      assert.deepEqual(nav.calls, []);
+    test(`a late ${failure ? "error" : "chat lookup"} cannot override a changed ${change}`, async () => {
+      const lookup = deferred();
+      const { chat, open, location } = await spawned(() => lookup.promise);
+      await open();
+      await chat.navigate(destination);
+      await lookup.resolve(failure ? Response.json({ error: "Chat unavailable" }, { status: 404 }) : { session: session(created, { projectId: "q" }) });
+      assert.equal(location(), destination);
+      assert.doesNotMatch(document.body.textContent, /Chat unavailable/);
     });
   }
 }

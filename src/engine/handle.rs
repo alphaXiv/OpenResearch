@@ -40,6 +40,9 @@ pub enum Handle {
         account: ApiAccount,
         ids: Vec<String>,
     },
+    OpenResearch {
+        descriptor: Box<BackendDescriptor>,
+    },
     Legacy {
         descriptor: Box<BackendDescriptor>,
     },
@@ -51,7 +54,9 @@ pub fn backend_json(
     metadata: &BackendDescriptor,
 ) -> Result<String> {
     let metadata = match handle {
-        Some(Handle::Legacy { descriptor }) => descriptor.as_ref(),
+        Some(Handle::Legacy { descriptor } | Handle::OpenResearch { descriptor }) => {
+            descriptor.as_ref()
+        }
         _ => metadata,
     };
 
@@ -66,7 +71,9 @@ pub fn backend_json(
         Some(Handle::Slurm { job: Some(job), .. }) => Some(job.clone()),
         Some(Handle::Local { dir } | Handle::Tinker { dir }) => Some(dir.clone()),
         Some(Handle::Api { ids, .. }) => ids.first().cloned(),
-        Some(Handle::Legacy { descriptor }) => descriptor.job_id.clone(),
+        Some(Handle::Legacy { descriptor } | Handle::OpenResearch { descriptor }) => {
+            descriptor.job_id.clone()
+        }
     };
 
     if handle.is_some() && job_id.as_deref().is_none_or(str::is_empty) {
@@ -200,7 +207,23 @@ mod tests {
                 serde_json::to_value(&decoded).unwrap(),
                 serde_json::to_value(&handle).unwrap()
             );
-            assert_eq!(serde_json::to_value(old).unwrap().get("handle"), None);
+            assert_eq!(
+                serde_json::to_value(old).unwrap()["handle"],
+                value["handle"]
+            );
+        }
+    }
+
+    /// Stored rows outlive the version that wrote them, so every engine handle
+    /// in the contract fixture decodes and re-encodes unchanged.
+    #[test]
+    fn stored_engine_handles_decode() {
+        let stored: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../tests/contracts/run-descriptors.json"))
+                .unwrap();
+        for row in stored.iter().filter(|row| row["kind"] == "engine") {
+            let handle: Handle = serde_json::from_value(row["handle"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(&handle).unwrap(), row["handle"]);
         }
     }
 

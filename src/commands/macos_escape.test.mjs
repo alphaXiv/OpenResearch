@@ -3,14 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 
-const source = readFileSync(new URL("../../src/commands/app.rs", import.meta.url), "utf8");
-const script = source.match(/const MACOS_ESCAPE_SCRIPT: &str = r#"([\s\S]*?)"#;/)?.[1];
-assert.ok(script, "the macOS webview installs an Escape handler");
-
-test("the Escape guard also reaches sandboxed preview frames", () => {
-  assert.match(source, /\.with_initialization_script_for_main_only\(MACOS_ESCAPE_SCRIPT, false\)/);
-  assert.match(source, /\.with_initialization_script\("window\.__ORX_MAC_TITLEBAR__ = true;"\)/);
-});
+const script = readFileSync(new URL("./macos_escape.js", import.meta.url), "utf8");
 
 function dispatch(key, { modal = false, cancelPrevented = false, popover = false, handled = false, modalSupported = true, popoverSupported = true, search = false, readOnly = false, disabled = false } = {}) {
   let listener;

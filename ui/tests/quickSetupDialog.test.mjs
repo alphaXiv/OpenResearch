@@ -1,59 +1,70 @@
-import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import React from "react";
-import ts from "typescript";
+import test from "node:test";
+import { act } from "react";
+import { TARGET_LABELS } from "../src/computeTargets.ts";
+import { m } from "../src/paraglide/messages.js";
+import { find, press, renderApp, serveApp, settle, type } from "./render.mjs";
 
-const source = ts.createSourceFile("SettingsPage.tsx", readFileSync(new URL("../src/components/SettingsPage.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let renderTarget;
-function visit(node) {
-  if (ts.isVariableDeclaration(node) && node.name.getText(source) === "renderTarget") renderTarget = node.initializer;
-  ts.forEachChild(node, visit);
-}
-visit(source);
+const k8s = {
+  configured: false, contexts: [], currentContext: null, context: null, namespace: "default",
+  preflight: { kubectlFound: true, reachable: true, canCreateJobs: true },
+};
 
-function openSetup() {
-  let dialog;
-  let discard;
-  const bindings = {
-    React,
-    TargetTile: "target-tile",
-    QuickSetupDialog: "quick-setup",
-    project: { id: "project" },
-    defaultBackend: "local",
-    remote: false,
-    QUICK_SETUP_TARGETS: ["k8s"],
-    TARGET_LABELS: { k8s: () => "Kubernetes" },
-    m: { settings_k8s_discard_changes: () => "Discard changes?" },
-    setSelectedTarget: () => assert.fail("Quick Setup must open a dialog"),
-    onOpenEnvironment: () => {},
-    showCustomDialog: (options) => { dialog = options; },
-    showConfirmDialog: (options) => { discard = options; },
+const click = async (element) => {
+  await act(async () => element.click());
+  await settle();
+};
+
+/** Opens Kubernetes Quick Setup from the compute page; saving its settings waits for `save`. */
+async function quickSetup(save = () => k8s) {
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
+    "GET /api/settings/compute": () => ({ defaultBackend: null, defaultFlavor: null, targets: [{ id: "k8s", configured: false, enabled: true, summary: "" }] }),
+    "GET /api/settings/k8s": () => k8s,
+    "POST /api/settings/k8s": save,
+  });
+  await renderApp("/projects/p/settings/compute");
+  const dialogs = () => document.querySelectorAll('[role="dialog"]').length;
+  const open = async () => {
+    await click(document.querySelector(`button[aria-label="${TARGET_LABELS.k8s()}"]`));
+    assert.equal(dialogs(), 1);
   };
-  const code = ts.transpileModule(`return (${renderTarget.getText(source)});`, {
-    compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const render = new Function(...Object.keys(bindings), code)(...Object.values(bindings));
-  render({ id: "k8s" }).props.onOpen();
-  return { dialog, get discard() { return discard; } };
+  const dismiss = async () => {
+    await press("Escape");
+    await settle();
+  };
+  const edit = () => type(document.querySelector(`[role="dialog"] input[placeholder="${m.settings_page_default()}"]`), "research");
+  const discard = () => document.body.textContent.includes(m.settings_k8s_discard_changes());
+  return { dialogs, open, dismiss, edit, discard };
 }
 
 test("Quick Setup closes clean edits and blocks dismissal while saving", async () => {
-  const setup = openSetup();
-  assert.equal(setup.dialog.onCancel(), undefined);
-  setup.dialog.props.onEditState({ dirty: true, saving: true });
-  await assert.rejects(setup.dialog.onCancel());
-  assert.equal(setup.discard, undefined);
+  const setup = await quickSetup(() => new Promise(() => {}));
+  await setup.open();
+  await setup.dismiss();
+  assert.equal(setup.dialogs(), 0);
+
+  await setup.open();
+  await setup.edit();
+  await click(find('[role="dialog"] button', m.common_save()));
+  assert.ok(find('[role="dialog"] button', m.common_saving()));
+  await setup.dismiss();
+  assert.equal(setup.dialogs(), 1);
+  assert.equal(setup.discard(), false);
 });
 
 test("Quick Setup awaits discard consent and keeps dirty edits when consent is cancelled", async () => {
-  const setup = openSetup();
-  setup.dialog.props.onEditState({ dirty: true, saving: false });
-  const cancelled = setup.dialog.onCancel();
-  assert.ok(setup.discard.destructive);
-  setup.discard.onCancel();
-  await assert.rejects(cancelled);
-  const accepted = setup.dialog.onCancel();
-  setup.discard.onConfirm();
-  await accepted;
+  const setup = await quickSetup();
+  await setup.open();
+  await setup.edit();
+  await setup.dismiss();
+  assert.equal(setup.discard(), true);
+  await click(find("button", m.common_cancel()));
+  assert.equal(setup.discard(), false);
+  assert.equal(setup.dialogs(), 1);
+  assert.equal(document.querySelector('[role="dialog"] input').value, "research");
+
+  await setup.dismiss();
+  await click(find("button", m.common_confirm()));
+  assert.equal(setup.dialogs(), 0);
 });

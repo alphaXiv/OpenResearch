@@ -45,7 +45,7 @@ pub fn launched_as_app_bundle() -> bool {
 }
 
 /// The argument the Windows launcher and the Linux AppImage's AppRun start `orx`
-/// with, followed by nothing or the `openresearch:` link that opened the app.
+/// with, followed by nothing or the `openresearch:` link or `.orx` file that opened the app.
 #[cfg_attr(not(all(desktop_app, not(target_os = "macos"))), allow(dead_code))]
 pub const APP_ARG: &str = "app";
 
@@ -67,7 +67,7 @@ fn launch_link() -> Option<String> {
     app_launch(std::env::args_os().skip(1)).flatten()
 }
 
-/// `None` unless `args` are `app` or `app <openresearch: link>`; then `Some` of the link, if any.
+/// `None` unless `args` are `app` or `app <link or .orx file>`; then `Some` of the link, if any.
 #[cfg_attr(not(all(desktop_app, not(target_os = "macos"))), allow(dead_code))]
 fn app_launch(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<Option<String>> {
     if args.next()? != APP_ARG {
@@ -75,16 +75,32 @@ fn app_launch(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<Opti
     }
     let link = match args.next() {
         None => None,
-        Some(arg) => Some(arg.into_string().ok().filter(|arg| is_app_link(arg))?),
+        Some(arg) => match arg.to_str().and_then(app_link) {
+            Some(link) => Some(link),
+            // The launchers pass any `.orx` along; one the app cannot open still starts it.
+            None if arg.to_string_lossy().to_ascii_lowercase().ends_with(".orx") => None,
+            None => return None,
+        },
     };
     args.next().is_none().then_some(link)
 }
 
-/// Whether `arg` is an `openresearch:` link, the only argument the app takes.
+/// `arg` as a link the app opens: an `openresearch:` link, or a `.orx` file as a `file:` URL.
 #[cfg_attr(not(all(desktop_app, not(target_os = "macos"))), allow(dead_code))]
-fn is_app_link(arg: &str) -> bool {
-    arg.get(..LINK_SCHEME.len())
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(LINK_SCHEME))
+fn app_link(arg: &str) -> Option<String> {
+    let starts_with = |prefix: &str| {
+        arg.get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    };
+    if starts_with(LINK_SCHEME) {
+        return Some(arg.to_string());
+    }
+    let url = if starts_with("file:") {
+        url::Url::parse(arg).ok()?
+    } else {
+        url::Url::from_file_path(arg).ok()?
+    };
+    link_path(url.as_str()).map(|_| url.into())
 }
 
 /// The dock and app grid name and icon a window only through a desktop entry.
@@ -100,31 +116,46 @@ fn install_desktop_entry() {
         return;
     };
     let entry = desktop_entry(appimage, icon_path);
-    let entry_changed = || -> std::io::Result<bool> {
+    let mime = data.join("mime");
+    let registration_changed = || -> std::io::Result<bool> {
         write_if_changed(&icon, include_bytes!("../../linux/OpenResearch.png"))?;
-        write_if_changed(
+        let file_type = write_if_changed(
+            &mime.join("packages/openresearch.xml"),
+            include_bytes!("../../linux/openresearch-mime.xml"),
+        )?;
+        let listed = write_if_changed(
             &data.join("applications/openresearch.desktop"),
             entry.as_bytes(),
-        )
+        )?;
+        Ok(file_type || listed)
     };
-    match entry_changed() {
-        // The entry's MimeType offers it; this makes it the handler for openresearch: links.
+    match registration_changed() {
+        // The entry's MimeType offers it; this makes it the handler for openresearch: links and .orx files.
         Ok(true) => {
+            let mut update_mime = crate::process::command("update-mime-database");
+            update_mime.arg(&mime);
             let mut handler = crate::process::command("xdg-mime");
             handler.args([
                 "default",
                 "openresearch.desktop",
                 "x-scheme-handler/openresearch",
+                "application/x-openresearch-project",
             ]);
-            crate::local::shell_env::restore_host_gui_env(&mut handler);
-            std::thread::spawn(move || match handler.output() {
-                Ok(out) if out.status.success() => {}
-                Ok(out) => eprintln!(
-                    "openresearch app: could not register openresearch: links: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-                Err(err) => {
-                    eprintln!("openresearch app: could not register openresearch: links: {err}")
+            for command in [&mut update_mime, &mut handler] {
+                crate::local::shell_env::restore_host_gui_env(command);
+            }
+            std::thread::spawn(move || {
+                for mut command in [update_mime, handler] {
+                    match command.output() {
+                        Ok(out) if out.status.success() => {}
+                        Ok(out) => eprintln!(
+                            "openresearch app: could not register OpenResearch links and files: {}",
+                            String::from_utf8_lossy(&out.stderr).trim()
+                        ),
+                        Err(err) => eprintln!(
+                            "openresearch app: could not register OpenResearch links and files: {err}"
+                        ),
+                    }
                 }
             });
         }
@@ -443,9 +474,28 @@ fn opens_in_browser(url: &str) -> bool {
 }
 
 /// The dashboard path an `openresearch://reproduce/<paper id>` link opens; the page validates the id.
+/// A `.orx` file opened with the app, or an `openresearch://p/<slug>` link from a
+/// published project's page, goes to the page that imports it.
 #[cfg_attr(not(desktop_app), allow(dead_code))]
 fn deep_link_path(url: &url::Url) -> Option<String> {
+    if url.scheme() == "file" {
+        let file = url.to_file_path().ok()?;
+        let shared = file.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case(crate::local::share::EXTENSION)
+        });
+        return shared.then(|| {
+            format!(
+                "/open?file={}",
+                urlencoding::encode(&file.to_string_lossy())
+            )
+        });
+    }
     let path = url.path();
+    if url.scheme() == "openresearch" && url.host_str() == Some("p") {
+        // Only the slug crosses over; the app fetches the file from its own API.
+        let slug = crate::client::published_project_slug(path.trim_start_matches('/'))?;
+        return Some(format!("/open?shared={slug}"));
+    }
     if url.scheme() != "openresearch" || url.host_str() != Some("reproduce") || path.len() < 2 {
         return None;
     }
@@ -480,7 +530,7 @@ mod link_file {
         std::fs::rename(dir.join(NAME), &taken).ok()?;
         let link = std::fs::read_to_string(&taken).ok();
         let _ = std::fs::remove_file(&taken);
-        link.filter(|link| super::is_app_link(link))
+        link.and_then(|link| super::app_link(&link))
     }
 
     #[cfg(test)]
@@ -745,7 +795,7 @@ mod instance {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
         let mut link = String::new();
         stream.take(8192).read_to_string(&mut link).ok()?;
-        Some(link).filter(|link| super::is_app_link(link))
+        super::app_link(&link)
     }
 
     impl FocusRequests {
@@ -854,22 +904,6 @@ mod imp {
     use objc2_web_kit::WKWebViewConfiguration;
     #[cfg(target_os = "macos")]
     use wry::{WebViewBuilderExtMacos, WebViewExtMacOS};
-
-    #[cfg(target_os = "macos")]
-    const MACOS_ESCAPE_SCRIPT: &str = r#"
-        window.addEventListener("keydown", (event) => {
-            if (event.key !== "Escape" || event.defaultPrevented) return;
-            if (event.target?.matches?.("input[type=search]:enabled:not([readonly])")) return;
-            // WebKit resends Escape to AppKit after its own dialog/popover dismissal, so dismiss here instead.
-            event.preventDefault();
-            // shortcut: last open popover stands in for the topmost; revisit if nested popovers render out of DOM order.
-            const popover = CSS.supports("selector(:popover-open)") && [...document.querySelectorAll("[popover]:popover-open:not([popover=manual])")].pop();
-            if (popover) return popover.hidePopover();
-            // shortcut: old WebKit treats open dialogs as modal; revisit if non-modal dialogs are added.
-            const dialog = [...document.querySelectorAll(CSS.supports("selector(:modal)") ? "dialog:modal" : "dialog[open]")].pop();
-            if (dialog?.dispatchEvent(new Event("cancel", { cancelable: true }))) dialog.close();
-        });
-    "#;
 
     enum UserEvent {
         ServerReady,
@@ -1262,7 +1296,7 @@ mod imp {
         // Run after dashboard handlers; keep overlay dismissal, not WebKit's native fullscreen exit.
         let builder = builder
             .with_initialization_script("window.__ORX_MAC_TITLEBAR__ = true;")
-            .with_initialization_script_for_main_only(MACOS_ESCAPE_SCRIPT, false);
+            .with_initialization_script_for_main_only(include_str!("macos_escape.js"), false);
         #[cfg(target_os = "macos")]
         let builder = {
             let mtm = MainThreadMarker::new().expect("desktop app runs on the main thread");
@@ -2191,7 +2225,9 @@ mod tests {
             "\nIcon=/home/me/.local/share/icons/hicolor/256x256/apps/openresearch.png\n"
         ));
         assert!(entry.contains("\nStartupWMClass=OpenResearch\n"));
-        assert!(entry.contains("\nMimeType=x-scheme-handler/openresearch;\n"));
+        assert!(entry.contains(
+            "\nMimeType=x-scheme-handler/openresearch;application/x-openresearch-project;\n"
+        ));
         assert!(!entry.contains("orx app"));
     }
 
@@ -2208,6 +2244,26 @@ mod tests {
         assert_eq!(link_path("openresearch://reproduce/"), None);
         assert_eq!(link_path("openresearch://reproduce"), None);
         assert_eq!(link_path("openresearch://settings/x"), None);
+        let shared = std::env::temp_dir().join("tiny lm.orx");
+        assert_eq!(
+            link_path(url::Url::from_file_path(&shared).unwrap().as_str()),
+            Some(format!(
+                "/open?file={}",
+                urlencoding::encode(&shared.to_string_lossy())
+            ))
+        );
+        let notes = url::Url::from_file_path(std::env::temp_dir().join("notes.txt")).unwrap();
+        assert_eq!(link_path(notes.as_str()), None);
+        assert_eq!(
+            link_path("openresearch://p/a1B2c3D4e5F6").as_deref(),
+            Some("/open?shared=a1B2c3D4e5F6")
+        );
+        assert_eq!(
+            link_path("openresearch://p/a1B2c3D4e5F6/").as_deref(),
+            Some("/open?shared=a1B2c3D4e5F6")
+        );
+        assert_eq!(link_path("openresearch://p/../../etc"), None);
+        assert_eq!(link_path("openresearch://p/short"), None);
         assert_eq!(link_path("https://reproduce/x"), None);
         assert_eq!(link_path("not a link"), None);
         assert_eq!(
@@ -2218,6 +2274,18 @@ mod tests {
 
     fn app_args(args: &[&str]) -> Option<Option<String>> {
         app_launch(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn the_app_takes_a_shared_project_file_as_a_file_url() {
+        let shared = std::env::temp_dir().join("tiny lm.orx");
+        let url = url::Url::from_file_path(&shared).unwrap().to_string();
+        let path = shared.to_str().unwrap();
+        assert_eq!(app_args(&["app", path]), Some(Some(url.clone())));
+        assert_eq!(app_args(&["app", &url]), Some(Some(url)));
+        let notes = std::env::temp_dir().join("notes.txt");
+        assert_eq!(app_args(&["app", notes.to_str().unwrap()]), None);
+        assert_eq!(app_args(&["app", "tiny.orx"]), Some(None));
     }
 
     #[test]

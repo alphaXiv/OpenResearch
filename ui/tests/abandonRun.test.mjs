@@ -1,72 +1,57 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import { dialogHarness } from "./dialogHarness.mjs";
-import { runLabelsHarness } from "./runLabelsHarness.mjs";
+import { act, createElement } from "react";
+import { RunContactNotice } from "../src/components/RunContactNotice.tsx";
+import { m } from "../src/paraglide/messages.js";
+import { find, render, serve, settle } from "./render.mjs";
 
-function openAbandon(locale = "en", contact = { type: "unreachable", since: 1, cause: "Offline" }, abandon = async () => {}) {
-  const dialogs = dialogHarness();
-  const { load } = runLabelsHarness(locale, [], {
-    react: { ...React, useState: (initial) => [initial, () => {}] },
-    dialog: dialogs,
-    api: { abandonRun: abandon },
+const dialog = () => document.querySelector('[role="dialog"], [role="alertdialog"]');
+const click = async (element) => {
+  await act(async () => element.click());
+  await settle();
+};
+
+/** Opens Abandon on a cancelling run whose machine reports `contact`; the backend answers the abandonment with `abandon`. */
+async function openAbandon(contact = { type: "unreachable", since: 1, cause: "Offline" }, abandon = () => ({ id: "run" })) {
+  const abandoned = [];
+  serve((path, init) => {
+    if (path === "/api/compute/hosts") return [];
+    if (path === "/api/runs/run/abandon" && init.method === "POST") {
+      abandoned.push("run");
+      return abandon();
+    }
   });
-  const { RunContactNotice } = load("components/RunContactNotice");
-  const notice = RunContactNotice({ run: { id: "run", status: "running", cancelling: true, contact, host: "gpu-box", backend: null } });
-  const actions = notice.props.children[1];
-  const button = actions.props.children.find((child) => child && child.props.onClick && child.props.children === load("paraglide/messages.js").m.run_abandon());
-  assert.ok(button, "the pending run offers Abandon");
-  button.props.onClick();
-  return dialogs;
+  await render(createElement(RunContactNotice, { run: { id: "run", status: "running", cancelling: true, contact, host: "gpu-box", backend: null } }));
+  await settle();
+  await click(find("button", m.run_abandon()));
+  return abandoned;
 }
 
-const settle = () => new Promise((resolve) => setImmediate(resolve));
-
-test("Abandon uses the shared confirmation and warns about unreachable compute", async () => {
-  const calls = [];
-  const dialogs = openAbandon("en", undefined, async (id) => { calls.push(id); });
-  const [root] = dialogs.render();
-  const content = root.props.children;
-  const html = renderToStaticMarkup(content);
-  assert.match(html, /Abandon this run\?/);
-  assert.match(html, /The machine is unreachable\./);
-  assert.match(html, /OpenResearch will stop tracking this run\./);
-  assert.match(html, /Double-check that the actual compute is shut down\./);
-  assert.match(html, /Abandon run/);
-  assert.equal(content.props.destructive, true);
-  assert.equal(content.props.cancelable, true);
-  assert.deepEqual(calls, []);
-  content.props.confirm();
-  await settle();
-  assert.deepEqual(calls, ["run"]);
-  assert.equal(dialogs.render()[0].props.open, false);
+test("Abandon confirms first and warns about unreachable compute", async () => {
+  const abandoned = await openAbandon();
+  for (const text of [m.run_abandon_title(), m.run_abandon_unreachable(), m.run_abandon_body()]) assert.ok(dialog().textContent.includes(text), text);
+  assert.deepEqual(abandoned, []);
+  await click(find("[role] button", m.run_abandon_confirm()));
+  assert.deepEqual(abandoned, ["run"]);
+  assert.equal(dialog()?.outerHTML, undefined);
 });
 
-test("dismissing Abandon leaves the run tracked", async () => {
-  const dialogs = openAbandon("en", undefined, () => assert.fail("dismissal must not abandon"));
-  dialogs.render()[0].props.children.props.cancel();
-  await settle();
-  assert.equal(dialogs.render()[0].props.open, false);
+test("keeping the run tracked abandons nothing", async () => {
+  const abandoned = await openAbandon();
+  await click(find("[role] button", m.run_abandon_keep()));
+  assert.deepEqual(abandoned, []);
+  assert.equal(dialog()?.outerHTML, undefined);
 });
 
-test("failed abandonment keeps the shared dialog open with the error", async () => {
-  const dialogs = openAbandon("en", undefined, async () => { throw new Error("Host changed"); });
-  dialogs.render()[0].props.children.props.confirm();
-  await settle();
-  const [root] = dialogs.render();
-  assert.equal(root.props.open, true);
-  assert.equal(root.props.children.props.isDisabled, false);
-  assert.equal(root.props.children.props.errorMessage, "Host changed");
+test("failed abandonment keeps the dialog open with the error", async () => {
+  await openAbandon(undefined, () => Response.json({ error: "Host changed" }, { status: 409 }));
+  await click(find("[role] button", m.run_abandon_confirm()));
+  assert.ok(dialog().textContent.includes("Host changed"));
+  assert.equal(find("[role] button", m.run_abandon_confirm()).disabled, false);
 });
 
-test("Japanese Abandon translates the warning; auth does not claim the machine is unreachable", () => {
-  const dialogs = openAbandon("ja");
-  const html = renderToStaticMarkup(dialogs.render()[0].props.children);
-  assert.ok(html.includes("マシンに接続できません。"), html);
-  assert.ok(html.includes("実際の計算リソースが停止していることを再確認してください。"), html);
-  const auth = openAbandon("en", { type: "needs_auth", since: 1, cause: "Connect" });
-  const authHtml = renderToStaticMarkup(auth.render()[0].props.children);
-  assert.doesNotMatch(authHtml, /The machine is unreachable/);
-  assert.match(authHtml, /Double-check that the actual compute is shut down/);
+test("Abandon on a host that needs sign-in does not claim the machine is unreachable", async () => {
+  await openAbandon({ type: "needs_auth", since: 1, cause: "Connect" });
+  assert.ok(!dialog().textContent.includes(m.run_abandon_unreachable()));
+  assert.ok(dialog().textContent.includes(m.run_abandon_body()));
 });

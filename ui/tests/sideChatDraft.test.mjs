@@ -1,88 +1,69 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import test from "node:test";
-import ts from "typescript";
+import { act, createElement } from "react";
+import { OptionPicker } from "../src/components/ModelPicker.tsx";
+import { m } from "../src/paraglide/messages.js";
+import { composer, renderChat, session } from "./chat.mjs";
+import { render, settle } from "./render.mjs";
 
-const require = createRequire(import.meta.url);
+const sideTab = (sessionId) => `?pane=${encodeURIComponent(JSON.stringify({ kind: "side", sessionId }))}`;
+const pointer = (target, type, pointerType = "mouse") => target.dispatchEvent(new PointerEvent(type, { bubbles: true, button: 0, pointerType }));
 
-function loadFunction(file, name, globals) {
-  const text = readFileSync(new URL(`../src/components/${file}`, import.meta.url), "utf8");
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let expression;
-  const visit = (node) => {
-    if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
-      expression = node.getText(source).replace(/^export /, "");
-    } else if (ts.isVariableDeclaration(node) && node.name.getText(source) === name) {
-      expression = node.initializer.getText(source);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  assert.ok(expression, name);
-  const code = ts.transpileModule(`exports.target = ${expression}`, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText;
-  const exports = {};
-  new Function("require", "exports", ...Object.keys(globals), code)(require, exports, ...Object.values(globals));
-  return exports.target;
+/** Picks the autonomy `label` in the `index`th composer's permissions menu. */
+async function chooseAutonomy(index, label) {
+  const box = document.querySelectorAll('[data-onboarding="composer"]')[index];
+  const settings = [...box.querySelectorAll('[data-onboarding="model-picker"] button')].find((button) => button.getAttribute("aria-label")?.startsWith(m.model_picker_permissions()));
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+    await act(async () => settings.dispatchEvent(new (type.startsWith("pointer") ? PointerEvent : MouseEvent)(type, { bubbles: true, button: 0, pointerType: "mouse" })));
+  }
+  await settle();
+  await act(async () => [...document.querySelectorAll('[role="menuitemradio"]')].find((item) => item.textContent.includes(label)).click());
+  await settle();
 }
 
-test("side-chat trigger opens the list on touch and a draft on mouse click", () => {
-  const opened = [];
+test("side-chat trigger opens the list on touch and a draft on mouse click", async () => {
   let created = 0;
-  const OptionPicker = loadFunction("ModelPicker.tsx", "OptionPicker", {
-    useRef: (value) => ({ current: value }),
-    useState: (value) => [value, () => {}],
-    useEffect: () => {},
-    useLayoutEffect: () => {},
-    usePopover: () => ({ open: false, setOpen: (value) => opened.push(typeof value === "function" ? value(false) : value), ref: { current: null } }),
-    IconButton: "button",
-    EscapeScope: "escape-scope",
-    REASONING_DEFAULT_ID: "default",
+  const { container } = await render(createElement(OptionPicker, {
+    triggerIcon: "+", triggerLabel: "Side chat", onTriggerClick: () => created++, openOnHover: true,
+    choices: [{ id: "saved", label: "Saved chat" }], value: null, onSelect: () => {},
+  }));
+  const trigger = container.querySelector('button[aria-haspopup="menu"]');
+  await act(async () => {
+    pointer(trigger, "pointerdown", "touch");
+    trigger.click();
   });
-  const tree = OptionPicker({ triggerIcon: "chat", onTriggerClick: () => created++, openOnHover: true, choices: [{ id: "saved", label: "Saved chat" }] });
-  const trigger = tree.props.children[0];
-  trigger.props.onPointerDown({ pointerType: "touch" });
-  trigger.props.onClick();
   assert.equal(created, 0);
-  assert.equal(opened.at(-1), true);
-  trigger.props.onPointerDown({ pointerType: "mouse" });
-  trigger.props.onClick();
+  assert.equal(trigger.getAttribute("aria-expanded"), "true");
+  await act(async () => {
+    pointer(trigger, "pointerdown");
+    trigger.click();
+  });
   assert.equal(created, 1);
-  assert.equal(opened.at(-1), false);
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
 });
 
-test("unsaved side-chat autonomy stays local while root drafts update defaults", () => {
-  for (const sideParentSessionId of ["parent", undefined]) {
-    const local = [];
-    const defaults = [];
-    const setAutonomy = loadFunction("ChatPanel.tsx", "setAutonomy", {
-      openSession: null, sideParentSessionId, preferredAutonomy: "agentic", invalidatePendingRetry: () => {},
-      setSideDraftAutonomy: (value) => local.push(value),
-      onPreferredAutonomyChange: (value) => defaults.push(value),
-    });
-    setAutonomy("copilot");
-    assert.deepEqual(local, sideParentSessionId ? ["copilot"] : []);
-    assert.deepEqual(defaults, sideParentSessionId ? [] : ["copilot"]);
-  }
-});
+for (const side of [true, false]) {
+  test(`${side ? "an unsaved side chat keeps its autonomy local" : "a new root chat's autonomy updates the default"}`, async () => {
+    const chat = await renderChat(side ? `/projects/p/tasks/s${sideTab(null)}` : "/projects/p/tasks/new", { sessions: [session("s")] });
+    await chooseAutonomy(side ? 1 : 0, m.model_picker_autonomy_copilot());
+    const defaults = chat.requests.filter(({ request, body }) => request === "POST /api/settings/ui-state" && body.preferredAutonomy);
+    assert.deepEqual(defaults.map(({ body }) => body.preferredAutonomy), side ? [] : ["copilot"]);
+  });
+}
 
 test("first send applies draft autonomy to the newly created side chat", async () => {
-  const changes = [];
-  let cached;
-  const openNewSession = loadFunction("ChatPanel.tsx", "openNewSession", {
-    composerScopeRef: { current: {} }, projectVisitRef: { current: {} },
-    sideParentSessionId: "parent", sideDraftAutonomy: "copilot",
-    openSideChatMutation: { mutateAsync: async (parent) => ({ id: "child", autonomy: "agentic", sideParentSessionId: parent }) },
-    setChatSessionAutonomyMutation: { mutateAsync: async ([id, autonomy]) => { changes.push([id, autonomy]); return { id, autonomy }; } },
-    isCurrentScope: () => true, sessionsOptions: { queryKey: [] },
-    setSessions: (update) => { cached = update([]); },
-    queryClient: { getQueryData: () => [] },
-    onActiveSessionChangeRef: { current: () => {} },
-  });
-  const session = await openNewSession({}, undefined);
-  assert.deepEqual(changes, [["child", "copilot"]]);
-  assert.equal(session.autonomy, "copilot");
-  assert.equal(cached[0].autonomy, "copilot");
+  const sessions = [session("s")];
+  const child = session("child", { sideParentSessionId: "s", autonomy: "agentic" });
+  const chat = await renderChat(`/projects/p/tasks/s${sideTab(null)}`, { sessions, routes: {
+    "POST /api/chat/sessions/s/side": () => { sessions.push(child); return { session: child }; },
+    "PATCH /api/chat/sessions/child": (init) => ({ session: { ...child, ...JSON.parse(init.body) } }),
+    "GET /api/chat/sessions/child/messages": () => ({ messages: [] }),
+    "POST /api/chat/sessions/child/message": () => ({ ok: true }),
+  } });
+  await chooseAutonomy(1, m.model_picker_autonomy_copilot());
+  await composer(1).type("side question");
+  await composer(1).send();
+  const order = chat.requests.map(({ request }) => request).filter((request) => /^(POST|PATCH) \/api\/chat/.test(request));
+  assert.deepEqual(order, ["POST /api/chat/sessions/s/side", "PATCH /api/chat/sessions/child", "POST /api/chat/sessions/child/message"]);
+  assert.deepEqual(chat.requests.find(({ request }) => request === "PATCH /api/chat/sessions/child").body, { autonomy: "copilot" });
 });

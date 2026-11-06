@@ -729,7 +729,14 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let mut state = TurnState::default();
 
     loop {
-        match tokio::time::timeout(TURN_WATCHDOG, lines.next_line()).await {
+        let next = tokio::select! {
+            next = tokio::time::timeout(TURN_WATCHDOG, lines.next_line()) => next,
+            _ = ctx.flush_due() => {
+                let _ = ctx.flush();
+                continue;
+            }
+        };
+        match next {
             Ok(Ok(Some(line))) => {
                 let Ok(event) = serde_json::from_str::<Value>(&line) else {
                     continue;

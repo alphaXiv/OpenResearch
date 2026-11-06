@@ -1236,8 +1236,8 @@ function SshSection() {
             // A Test run this session speaks for a connected host; trouble on the host outranks it.
             const engineShown = !connecting && engine !== undefined && ENGINE_HOST_SHOWN.has(engine.status)
               && !(engine.status === "live" && executionTest) ? engine : null;
-            const keyHost = engine?.class === "key";
-            // Key hosts never need Connect: Retry while backing off, otherwise Test.
+            const keyHost = engine?.class === "key" && !engine.connectRequired;
+            // Key hosts need no Connect: Retry while backing off, otherwise Test.
             const keyAction = !keyHost || engineShown?.status === "needs_auth" ? null : engineShown?.status === "backoff" ? "retry" : "test";
             const open = expandedHosts[h.host] ?? false;
             const hasTerminal = connecting || Boolean(connectionError);

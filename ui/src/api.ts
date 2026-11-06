@@ -268,6 +268,8 @@ export interface EngineHost {
   root: string;
   status: HostStatus;
   class: "key" | "interactive" | null;
+  /** The old launcher on Windows logs in only through Connect, even with a key. */
+  connectRequired: boolean;
   sinceMs: number;
   nextRetryMs: number | null;
   cause: string | null;
@@ -916,20 +918,6 @@ export interface GitSettings {
   githubAuthenticated: boolean;
 }
 
-/** A paper linked to the researcher profile during onboarding. */
-export interface LinkedPaper {
-  paperId: string;
-  title: string | null;
-}
-
-/** The local researcher profile captured in onboarding (settings.json). */
-export interface Profile {
-  researchAreas: string[];
-  otherArea: string | null;
-  background: string | null;
-  papers: LinkedPaper[];
-}
-
 /** Which literature sources discovery and paper reading may use (settings.json). */
 export interface LitSourcesSettings {
   alphaxiv: boolean;
@@ -1435,6 +1423,32 @@ export interface NativeChat {
   updatedAt: number;
 }
 
+export type ChatSearchScope = "chat" | "project" | "all";
+export interface ChatSearchParams {
+  q: string;
+  scope: ChatSearchScope;
+  sessionId?: string;
+  projectId?: string;
+}
+export interface ChatSearchHit {
+  sessionId: string;
+  projectId: string;
+  messageId: string;
+  partId: string | null;
+  spawnPartId: string | null;
+  role: string;
+  createdAt: number;
+  chatTitle: string | null;
+  archived: boolean;
+  onActiveBranch: boolean;
+  snippet: string;
+}
+export interface ChatSearchPage {
+  hits: ChatSearchHit[];
+  cursor: string | null;
+  indexing: boolean;
+  requiresLongerQuery: boolean;
+}
 export interface SidebarChatCursor { updatedAt: number; id: string }
 export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null }
 
@@ -1578,6 +1592,40 @@ export interface ChatActiveRun {
   run: Run;
   experimentName: string | null;
 }
+
+export interface ShareChoice {
+  chats: string[];
+  logs: boolean;
+  artifacts: boolean;
+}
+
+export interface OpenedSharedProject {
+  project: Project;
+  /** Experiment branches the file named but did not carry. */
+  missingBranches: string[];
+}
+
+/** A published project link on openresearch.sh. */
+export interface PublishedProject {
+  id: string;
+  slug: string;
+  url: string;
+  name: string;
+  byteSize: number;
+  publishedAt: string;
+}
+
+/** What anyone with a published link sees before opening it. */
+export interface PublicProject {
+  slug: string;
+  url: string;
+  name: string;
+  byteSize: number;
+  publisher: string | null;
+}
+
+/** Where a shared project comes from: a picked file, a file on this machine, or a published link. */
+export type SharedSource = File | string | { link: string };
 
 export interface RunEngineSettings {
   enabled: boolean;
@@ -1735,11 +1783,8 @@ export function createApi(
     nestedDelegation?: boolean;
   }) => post<UiState>("/api/settings/ui-state", body);
 
-  const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>
-    post<{ project: Project; selection: OnboardingSelection }>(
-      "/api/onboarding/complete",
-      { ...selection, ...profile },
-    );
+  const completeOnboarding = (selection: OnboardingSelection) =>
+    post<{ project: Project; selection: OnboardingSelection }>("/api/onboarding/complete", selection);
 
   const getProjectPathStatus = (path = "", signal?: AbortSignal) => {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -2251,6 +2296,7 @@ export function createApi(
     if (response.status === 401) throw new AlphaXivNotConnectedError();
     return json<T>(response);
   }
+  const getAlphaXivMe = (signal?: AbortSignal) => alphaXivGet<{ avatarUrl: string | null }>("/api/alphaxiv/me", signal);
   const getAlphaXivFolders = (signal?: AbortSignal) => alphaXivGet<AlphaXivFolder[]>("/api/alphaxiv/folders", signal);
   const getAlphaXivPapers = (folder: string | null, cursor: string | null, search?: string, signal?: AbortSignal) => {
     const params = new URLSearchParams();
@@ -2324,10 +2370,6 @@ export function createApi(
   const saveGitSettings = (body: { userName?: string; userEmail?: string }) =>
     post<GitSettings>("/api/settings/git", body);
 
-  const getProfile = (signal?: AbortSignal) => get<Profile>("/api/settings/profile", signal);
-
-  const setProfile = (body: Profile) => post<Profile>("/api/settings/profile", body);
-
   const getLitSources = (signal?: AbortSignal) =>
     get<LitSourcesSettings>("/api/settings/lit-sources", signal);
 
@@ -2362,6 +2404,44 @@ export function createApi(
 
   const pushProjectGithub = (projectId: string) =>
     post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github/push`);
+
+  /** The project as a `.orx` file, and the archive paths left out for size. */
+  async function shareProject(projectId: string, options: ShareChoice) {
+    const res = await writeResponse(`/api/projects/${projectId}/share`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    });
+    if (!res.ok) return json<never>(res);
+    const header = res.headers.get("x-orx-share");
+    const summary: { skipped: string[] } = header ? JSON.parse(decodeURIComponent(header)) : { skipped: [] };
+    const fileName = decodeURIComponent(/filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? "project.orx");
+    return { file: await res.blob(), fileName, skipped: summary.skipped };
+  }
+
+  /** Whether the machine running the project can publish, and the project's link if it has one. */
+  const getProjectLink = (projectId: string, signal?: AbortSignal) =>
+    get<{ signedIn: boolean; sharedProject: PublishedProject | null }>(`/api/projects/${projectId}/publish`, signal);
+
+  /** Upload the project to openresearch.sh; publishing again updates the same link. */
+  const publishProject = (projectId: string, options: ShareChoice) =>
+    post<{ sharedProject: PublishedProject; skipped: string[] }>(`/api/projects/${projectId}/publish`, options);
+
+  /** What anyone with a published link sees, fetched by the machine that will open it. */
+  const getPublicProject = (slug: string, signal?: AbortSignal) =>
+    get<{ sharedProject: PublicProject }>(`/api/shared-projects/${encodeURIComponent(slug)}`, signal);
+
+  /** Open a shared project as a new project in `path`. */
+  const importSharedProject = (path: string, source: SharedSource) => {
+    const query = `path=${encodeURIComponent(path)}`;
+    if (typeof source === "string") return post<OpenedSharedProject>(`/api/projects/import?${query}&file=${encodeURIComponent(source)}`);
+    if (!(source instanceof File)) return post<OpenedSharedProject>(`/api/projects/import?${query}&shared=${encodeURIComponent(source.link)}`);
+    return writeResponse(`/api/projects/import?${query}`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: source,
+    }).then((r) => json<OpenedSharedProject>(r));
+  };
 
   const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/api/settings/telemetry", signal);
 
@@ -2473,6 +2553,15 @@ export function createApi(
   /** Every project's sessions, newest first, for the composer's `/resume` picker. */
   const listAllChatSessions = (signal?: AbortSignal) =>
     get<{ sessions: ChatSession[] }>("/api/chat/sessions?scope=all", signal).then((r) => r.sessions);
+
+  const searchChatMessages = (query: ChatSearchParams, cursor: string | null, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ q: query.q, scope: query.scope });
+    if (query.sessionId) params.set("sessionId", query.sessionId);
+    if (query.projectId) params.set("projectId", query.projectId);
+    if (cursor) params.set("cursor", cursor);
+    return get<ChatSearchPage>(`/api/search?${params}`, signal);
+  };
+
   const listSidebarChatSessions = (filter: "active" | "archived" | "all", before: SidebarChatCursor | null, signal?: AbortSignal) => {
     const params = new URLSearchParams({ scope: "sidebar" });
     if (filter !== "all") params.set("archived", String(filter === "archived"));
@@ -2775,6 +2864,7 @@ export function createApi(
     getPublicNetwork,
     getOpenResearchSettings,
     getOpenResearchAccount,
+    getAlphaXivMe,
     getAlphaXivFolders,
     getAlphaXivPapers,
     logoutOpenResearch,
@@ -2787,8 +2877,6 @@ export function createApi(
     getArtifactFileMetadata,
     getGitSettings,
     saveGitSettings,
-    getProfile,
-    setProfile,
     getLitSources,
     setLitSources,
     getProjectDefaults,
@@ -2798,6 +2886,11 @@ export function createApi(
     enableProjectGithub,
     disableProjectGithub,
     pushProjectGithub,
+    shareProject,
+    getProjectLink,
+    publishProject,
+    getPublicProject,
+    importSharedProject,
     getTelemetry,
     setTelemetry,
     captureUiEvent,
@@ -2824,6 +2917,7 @@ export function createApi(
     listNativeChats,
     importNativeChat,
     listAllChatSessions,
+    searchChatMessages,
     listSidebarChatSessions,
     createChatSession,
     getChatSession,

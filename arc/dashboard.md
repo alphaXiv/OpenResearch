@@ -19,7 +19,7 @@ it runs it owns the work that needs a resident process:
 - the run engine: watching, cancelling and reporting runs, and launching new
   runs when enabled ([experiments](experiments.md));
 - background passes: agent detection and model catalogs, sweeping remote run
-  directories and orphaned files;
+  directories and orphaned files, indexing older chat messages;
 - remote workspace gateways ([remote](remote.md)).
 
 The jobs themselves are not. Each run's wrapper is its own process on the
@@ -116,6 +116,17 @@ the server knows.
   desktop app reopen where the user left off. Opening a project or the app
   resumes the last location that still exists, and falls back to the newest
   chat otherwise.
+
+Chat search opens above the transcript with chat, project and workspace scopes.
+Its field stays at the top right until closed. Selecting a result collapses
+the scopes and list; navigation shortcuts keep working while reading the chat.
+It reads this machine's index only while open, cancels superseded reads, and
+pages a virtual result list. A result selects its branch and opens the matching
+work, subagent transcript or plan. Transcript rows retain disclosure choices,
+active text selections and unfinished forms across virtualization; ordinary
+clicks do not keep rows mounted. Search measures its destination before showing
+it and holds the text position through later layout changes until the reader
+scrolls. Streaming follows the bottom only while the reader stays pinned there.
 
 ## Design system and text
 

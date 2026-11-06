@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const html = readFileSync(new URL("../../agent-skills/orx-figures/assets/orx-chart.html", import.meta.url), "utf8");
+const html = readFileSync(new URL("../agent-skills/orx-figures/assets/orx-chart.html", import.meta.url), "utf8");
 const script = html.split("<script>")[1].split("</script>")[0];
 
 // Only the SVG/DOM surface used by the renderer; no browser or network needed.

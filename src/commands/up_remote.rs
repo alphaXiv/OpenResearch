@@ -41,7 +41,7 @@ use crate::{browser, UpArgs};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub(crate) const DASHBOARD_PROTOCOL: u32 = 4;
+pub(crate) const DASHBOARD_PROTOCOL: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1528,7 +1528,12 @@ async fn proxy_request(
         .unwrap_or("/");
     let url = format!("{origin}{path}");
     let method = request.method().clone();
-    let (parts, body) = request.with_limited_body().into_parts();
+    // A shared project upload streams past the JSON request cap; the dashboard bounds it.
+    let (parts, body) = if path.split('?').next() == Some("/api/projects/import") {
+        request.into_parts()
+    } else {
+        request.with_limited_body().into_parts()
+    };
     let mut headers = sanitized_request_headers(parts.headers, origin, bearer);
     if websocket {
         headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));

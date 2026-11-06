@@ -3,7 +3,7 @@ import type { Api } from "../api";
 import type { WorkspaceClient } from "./client";
 
 import { readLiveSnapshot, mergeLiveList } from "./live";
-import { queryOptions } from "@tanstack/react-query";
+import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import type * as api from "../api";
 
 export function createChatQueries(
@@ -46,6 +46,23 @@ export function createChatQueries(
       (await api.listAllChatSessions(signal)).filter((row) => !deletedSessionIds.has(row.id)),
     staleTime: 0,
   });
+
+  const chatSearchQuery = (params: api.ChatSearchParams) => {
+    const queryKey = workspaceKey("chatSearch", params.scope, params.sessionId ?? null, params.projectId ?? null, params.q);
+    return infiniteQueryOptions({
+      queryKey,
+      initialPageParam: null as string | null,
+      queryFn: ({ pageParam, signal }) => api.searchChatMessages(params, pageParam, signal),
+      getNextPageParam: (last) => last.cursor,
+      enabled: params.q.length > 0,
+      staleTime: 0,
+      refetchOnWindowFocus: false,
+      refetchInterval: (query) => query.state.data?.pages[0]?.indexing ? 1000 : false,
+      placeholderData: (previous, query) => {
+        return params.q && query?.queryKey.slice(0, -1).every((part, index) => part === queryKey[index]) ? previous : undefined;
+      },
+    });
+  };
 
   const getChatMessagesQuery = (sessionId: string) =>
     queryOptions({
@@ -118,6 +135,7 @@ export function createChatQueries(
     getSessionExperimentsQuery,
     listNativeChatsQuery,
     listAllChatSessionsQuery,
+    chatSearchQuery,
     getChatMessagesQuery,
     readSidebarChatPage,
     listChatActiveRunsQuery,

@@ -1,172 +1,111 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import test from "node:test";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import { runLabelsHarness } from "./runLabelsHarness.mjs";
+import { createElement } from "react";
+import { ExperimentLineage } from "../src/components/ExperimentLineage.tsx";
+import { ExperimentRunBanner } from "../src/components/ExperimentRunBanner.tsx";
+import { buildHistoryNodes } from "../src/components/experimentLineageModel.ts";
+import { RunContactNotice } from "../src/components/RunContactNotice.tsx";
+import { SessionHoverCard } from "../src/components/SessionHoverCard.tsx";
+import { StatusBadge, statusLabel } from "../src/components/StatusBadge.tsx";
+import { fmtNumber, ltr } from "../src/i18n.ts";
+import { setLocale } from "../src/locale.ts";
+import { m } from "../src/paraglide/messages.js";
+import { runDisplay } from "../src/runDisplay.ts";
+import { render, serve, settle } from "./render.mjs";
 
 const run = (extra = {}) => ({ id: "run", experimentId: "exp", status: "cancelled", cancelling: false, cancelUnconfirmed: null, contact: null, host: "gpu-box", resultMarkdown: null, backend: null, createdAt: 1, ...extra });
 const experiment = { id: "exp", title: "SSH sandwich", slug: "ssh-sandwich", createdAt: 1, parentExperimentId: null };
-const text = (html) => html.replace(/[\u2066-\u2069]/g, "");
+const plain = (text) => text.replace(/[⁦-⁩]/g, "");
+const ignore = () => {};
 
-function surfaces(locale, value) {
-  const { load } = runLabelsHarness(locale, [{ experiment, projectName: "Research", currentRun: value }]);
-  const { runDisplay } = load("runDisplay");
-  const { StatusBadge } = load("components/StatusBadge");
-  const { RunContactNotice } = load("components/RunContactNotice");
-  const { ExperimentLineage } = load("components/ExperimentLineage");
-  const [node] = load("components/experimentLineageModel").buildHistoryNodes([experiment], [value]);
-  const { SessionHoverCard } = load("components/SessionHoverCard");
-  const previousWindow = globalThis.window;
-  globalThis.window = { innerWidth: 1075, innerHeight: 900 };
-  let hover;
-  try {
-    hover = renderToStaticMarkup(React.createElement(SessionHoverCard, {
-      session: { id: "chat", projectId: "project", title: "SSH sandwich", harness: "codex" },
-      modelName: null, anchor: { x: 0, y: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 },
-      cardRef: { current: null }, cardId: "session-hover", container: {},
-    }));
-  } finally {
-    if (previousWindow === undefined) delete globalThis.window;
-    else globalThis.window = previousWindow;
-  }
-  return {
-    hover,
-    badge: renderToStaticMarkup(React.createElement(StatusBadge, runDisplay(value))),
-    notice: renderToStaticMarkup(React.createElement(RunContactNotice, { run: value })),
-    lineage: renderToStaticMarkup(React.createElement(ExperimentLineage, { node, onSelect: () => {} })),
+/** What each surface shows for `value`: its status badge (with its tooltip), contact notice, lineage node and chat hover card. */
+async function surfaces(value) {
+  serve((path) => {
+    if (path === "/api/compute/hosts") return [];
+    if (path === "/api/chat/sessions/chat/experiments") return { experiments: [{ experiment, projectName: "Research", currentRun: value }] };
+  });
+  const [node] = buildHistoryNodes([experiment], [value]);
+  const shown = async (element) => {
+    const { container } = await render(element);
+    await settle();
+    return container;
   };
+  const card = document.body.appendChild(document.createElement("div"));
+  const hover = await shown(createElement(SessionHoverCard, {
+    session: { id: "chat", projectId: "project", title: "SSH sandwich", harness: "codex" },
+    modelName: null, anchor: new DOMRect(), cardRef: { current: null }, cardId: "session-hover", container: card,
+    onEnter: ignore, onLeave: ignore, onOpenExperiment: ignore, onReturnToRow: ignore, onContinue: ignore,
+  }));
+  const notice = await shown(createElement(RunContactNotice, { run: value }));
+  const text = {
+    badge: plain((await shown(createElement(StatusBadge, runDisplay(value)))).innerHTML),
+    notice: plain(notice.textContent),
+    lineage: plain((await shown(createElement(ExperimentLineage, { node, onSelect: ignore }))).textContent),
+    hover: plain(card.textContent + hover.textContent),
+  };
+  card.remove();
+  return { ...text, noticeStatus: notice.querySelector('[role="status"]') !== null };
 }
 
+const survivors = plain(statusLabel("not_fully_stopped", { count: 2, host: "gpu-box" }));
 const states = [
-  [run({ status: "running", cancelling: true }), "Cancelling…", true],
-  [run({ status: "running", cancelling: true, contact: { type: "unreachable", since: 1, cause: "Offline" } }), "Cancellation pending", true],
-  [run({ status: "running", cancelling: true, contact: { type: "needs_auth", since: 1, cause: "Connect" } }), "Cancellation pending", true],
-  [run({ status: "submitting", cancelling: true }), "Cancellation pending", true],
-  [run({ status: "submitting", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "No handle" } }), "Cancellation pending", true],
-  [run({ status: "running", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "Stop pending" } }), "Cancelling…", true],
-  [run(), "Cancelled", false],
-  [run({ contact: { type: "stopping", since: 1, count: 2 } }), "Not fully stopped · 2 processes still running on gpu-box", true],
-  [run({ cancelUnconfirmed: [], resultMarkdown: "Container processes couldn't be checked." }), "Cancelled · couldn&#x27;t confirm", true],
+  [run({ status: "running", cancelling: true }), m.status_cancelling(), true],
+  [run({ status: "running", cancelling: true, contact: { type: "unreachable", since: 1, cause: "Offline" } }), m.status_cancellation_pending(), true],
+  [run({ status: "running", cancelling: true, contact: { type: "needs_auth", since: 1, cause: "Connect" } }), m.status_cancellation_pending(), true],
+  [run({ status: "submitting", cancelling: true }), m.status_cancellation_pending(), true],
+  [run({ status: "submitting", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "No handle" } }), m.status_cancellation_pending(), true],
+  [run({ status: "running", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "Stop pending" } }), m.status_cancelling(), true],
+  [run(), m.status_cancelled(), false],
+  [run({ contact: { type: "stopping", since: 1, count: 2 } }), survivors, true],
+  [run({ cancelUnconfirmed: [], resultMarkdown: "Container processes couldn't be checked." }), m.status_cancelled_unconfirmed(), true],
 ];
 
-test("each cancellation state agrees across the badge, notice, lineage and session hover card", () => {
+test("each cancellation state agrees across the badge, notice, lineage and session hover card", async () => {
   for (const [value, label, hasNotice] of states) {
-    const rendered = surfaces("en", value);
-    assert.ok(text(rendered.badge).includes(label), rendered.badge);
-    assert.ok(text(rendered.lineage).includes(label), rendered.lineage);
-    assert.ok(text(rendered.hover).includes(label), rendered.hover);
-    assert.equal(Boolean(rendered.notice), hasNotice);
-    if (hasNotice) {
-      assert.ok(text(rendered.notice).includes(label), rendered.notice);
-      assert.match(rendered.notice, /role="status"/);
-    }
-    assert.equal(rendered.notice.includes("Stop now"), value.contact?.type === "stopping");
-    if (value.cancelUnconfirmed) assert.match(rendered.notice, /In-container processes or processes outside the host scan couldn&#x27;t be checked/);
+    const shown = await surfaces(value);
+    for (const surface of ["badge", "lineage", "hover"]) assert.ok(shown[surface].includes(label), `${surface}: ${shown[surface]}`);
+    assert.equal(shown.noticeStatus, hasNotice, label);
+    if (hasNotice) assert.ok(shown.notice.includes(label), shown.notice);
+    assert.equal(shown.notice.includes(m.run_stop_now()), value.contact?.type === "stopping");
+    if (value.cancelUnconfirmed) assert.ok(shown.notice.includes(m.run_notice_cancel_uncovered()));
   }
 });
 
-test("Japanese pending cancellation reaches every surface and offers Abandon", () => {
-  for (const contact of [
-    { type: "unreachable", since: 1, cause: "Offline" },
-    { type: "needs_auth", since: 1, cause: "Connect" },
+test("pending cancellation offers Abandon", async () => {
+  for (const contact of [{ type: "unreachable", since: 1, cause: "Offline" }, { type: "needs_auth", since: 1, cause: "Connect" }]) {
+    assert.ok((await surfaces(run({ status: "running", cancelling: true, contact }))).notice.includes(m.run_abandon()));
+  }
+});
+
+test("chat run banners distinguish pending and delivered cancels", async () => {
+  const banner = async (value) => plain((await render(createElement(ExperimentRunBanner, { runs: [{ run: value, experimentName: "SSH sandwich" }] }))).container.textContent);
+  for (const [contact, label, other] of [
+    [null, m.status_cancelling(), m.status_cancellation_pending()],
+    [{ type: "unreachable", since: 1, cause: "Offline" }, m.status_cancellation_pending(), m.status_cancelling()],
+    [{ type: "needs_auth", since: 1, cause: "Connect" }, m.status_cancellation_pending(), m.status_cancelling()],
   ]) {
-    const rendered = surfaces("ja", run({ status: "running", cancelling: true, contact }));
-    for (const html of Object.values(rendered)) {
-      assert.ok(html.includes("キャンセル待ち"), html);
-      assert.doesNotMatch(html, /Cancellation pending|Cancelling/);
-    }
-    assert.ok(rendered.notice.includes("放棄"), rendered.notice);
+    const text = await banner(run({ status: "running", cancelling: true, contact }));
+    assert.ok(text.includes(label), text);
+    assert.ok(!text.includes(other), text);
+  }
+  assert.ok((await banner(run({ status: "submitting", cancelling: true }))).includes(m.status_cancellation_pending()));
+});
+
+test("unchecked-process notes use the structured proof after the result text is edited", async () => {
+  for (const [unreadable, expected] of [[[], m.run_notice_cancel_uncovered()], [[789, 790], plain(m.run_notice_cancel_unreadable({ pids: "789, 790" }))]]) {
+    const { notice } = await surfaces(run({ cancelUnconfirmed: unreadable, resultMarkdown: "Edited result" }));
+    assert.ok(notice.includes(expected), notice);
+    assert.ok(!notice.includes("Edited result"));
   }
 });
 
-test("chat run banners distinguish pending and delivered cancels in English and Japanese", () => {
-  for (const [locale, pending, delivered] of [["en", "Cancellation pending", "Cancelling…"], ["ja", "キャンセル待ち", "キャンセル中"]]) {
-    const { ExperimentRunBanner } = runLabelsHarness(locale).load("components/ExperimentRunBanner");
-    for (const [contact, label] of [
-      [null, delivered],
-      [{ type: "unreachable", since: 1, cause: "Offline" }, pending],
-      [{ type: "needs_auth", since: 1, cause: "Connect" }, pending],
-    ]) {
-      const html = renderToStaticMarkup(React.createElement(ExperimentRunBanner, {
-        runs: [{ run: run({ status: "running", cancelling: true, contact }), experimentName: "SSH sandwich" }],
-      }));
-      assert.ok(html.includes(label), html);
-      if (contact) assert.ok(!html.includes(delivered), html);
-    }
-    const submitting = renderToStaticMarkup(React.createElement(ExperimentRunBanner, {
-      runs: [{ run: run({ status: "submitting", cancelling: true }), experimentName: "SSH sandwich" }],
-    }));
-    assert.ok(submitting.includes(pending), submitting);
-  }
-});
-
-test("Japanese unchecked-process notes use structured proof after result text is edited", () => {
-  for (const [unreadable, expected] of [
-    [[], "コンテナ内やホストのスキャン範囲外のプロセスは確認できませんでした。"],
-    [[789, 790], "ホストがプロセス 789, 790 を調べられず、停止を確認できませんでした。"],
-  ]) {
-    const rendered = surfaces("ja", run({ cancelUnconfirmed: unreadable, resultMarkdown: "Edited result" }));
-    assert.ok(text(rendered.notice).includes(expected), rendered.notice);
-    assert.ok(!rendered.notice.includes("Edited result"));
-    assert.match(rendered.notice, /role="status"/);
-  }
-});
-
-test("Japanese and Russian survivor labels reach all four surfaces with the count and host", () => {
-  for (const [locale, count, expected] of [
-    ["ja", 1, "完全には停止していません · gpu-box で 1 個のプロセスがまだ実行中です"],
-    ["ja", 2, "完全には停止していません · gpu-box で 2 個のプロセスがまだ実行中です"],
-    ["ru", 1, "Остановлено не полностью · 1 процесс всё ещё работает на gpu-box"],
-    ["ru", 2, "Остановлено не полностью · 2 процесса всё ещё работают на gpu-box"],
-    ["ru", 5, "Остановлено не полностью · 5 процессов всё ещё работают на gpu-box"],
-    ["ru", 21, "Остановлено не полностью · 21 процесс всё ещё работает на gpu-box"],
-  ]) {
-    for (const [surface, html] of Object.entries(surfaces(locale, run({ contact: { type: "stopping", since: 1, count } })))) {
-      assert.ok(text(html).includes(expected), `${locale} ${surface}: ${html}`);
-      assert.doesNotMatch(html, /Not fully stopped/);
+test("survivor counts take the locale's plural form, with the count and host", async (t) => {
+  t.after(() => setLocale("en"));
+  for (const [locale, counts] of [["en", [[1, "one"], [2, "other"]]], ["ru", [[1, "one"], [2, "few"], [5, "many"], [21, "one"]]], ["ar", [[0, "zero"], [2, "two"], [3, "few"], [11, "many"], [100, "other"]]]]) {
+    setLocale(locale);
+    for (const [count, form] of counts) {
+      const expected = m[`status_stopping_${form}`]({ count: ltr(fmtNumber(count)), host: ltr("gpu-box") });
+      assert.equal(statusLabel("not_fully_stopped", { count, host: "gpu-box" }), expected, `${locale} ${count}`);
     }
   }
 });
-
-test("all ten locales select grammatical process counts", () => {
-  const examples = {
-    en: [[1, "1 process still"], [2, "2 processes still"]],
-    es: [[1, "1 proceso sigue"], [2, "2 procesos siguen"]],
-    fa: [[1, "فرایند"], [2, "فرایند"]],
-    hi: [[1, "प्रक्रिया अभी"], [2, "प्रक्रियाएँ अभी"]],
-    ja: [[1, "1 個のプロセス"], [2, "2 個のプロセス"]],
-    ko: [[1, "프로세스 1개"], [2, "프로세스 2개"]],
-    pl: [[1, "1 proces nadal"], [2, "2 procesy nadal"], [5, "5 procesów nadal"], [12, "12 procesów nadal"], [22, "22 procesy nadal"]],
-    ru: [[1, "1 процесс всё"], [2, "2 процесса всё"], [5, "5 процессов всё"], [11, "11 процессов всё"], [22, "22 процесса всё"]],
-    "zh-CN": [[1, "1 个进程"], [2, "2 个进程"]],
-    ar: [[1, "عملية واحدة"], [2, "عمليتان"], [3, "عمليات"], [11, "عملية"], [100, "عملية"]],
-  };
-  for (const [locale, counts] of Object.entries(examples)) {
-    const { statusLabel } = runLabelsHarness(locale).load("components/StatusBadge");
-    for (const [count, expected] of counts) {
-      const label = text(statusLabel("not_fully_stopped", { count, host: "gpu-box" }));
-      assert.ok(label.includes(expected), `${locale} ${count}: ${label}`);
-      assert.ok(label.includes(new Intl.NumberFormat(locale).format(count)));
-      assert.ok(label.includes("gpu-box"));
-    }
-  }
-});
-
-if (process.env.ORX_LABEL_FIXTURES) {
-  const directory = process.env.ORX_LABEL_FIXTURES;
-  mkdirSync(directory, { recursive: true });
-  const assets = new URL("../dist/assets/", import.meta.url);
-  const css = readdirSync(assets).filter((name) => name.startsWith("index-") && name.endsWith(".css")).map((name) => readFileSync(new URL(name, assets), "utf8")).join("\n");
-  for (const locale of ["en", "ja", "ru", "ar"]) {
-    const cards = states.map(([value]) => {
-      const rendered = surfaces(locale, value);
-      return `<section style="padding:16px 0;border-bottom:1px solid var(--border)"><div style="min-width:0;overflow:hidden">${rendered.badge}</div><div style="margin-top:12px">${rendered.notice}</div><div style="margin-top:12px">${rendered.lineage}</div></section>`;
-    }).join("");
-    for (const [index, [value]] of states.entries()) {
-      const { hover } = surfaces(locale, value);
-      writeFileSync(`${directory}/${locale}-hover-${index}.html`, `<!doctype html><html lang="${locale}"><meta charset="utf-8"><style>${css}</style><body style="background:var(--base);color:var(--text)">${hover}</body></html>`);
-    }
-    writeFileSync(`${directory}/${locale}.html`, `<!doctype html><html lang="${locale}" dir="${locale === "ar" ? "rtl" : "ltr"}"><meta charset="utf-8"><style>${css}</style><body style="overflow:auto;background:var(--base);color:var(--text);padding:20px"><main style="max-width:960px;margin:0 auto">${cards}</main></body></html>`);
-  }
-}

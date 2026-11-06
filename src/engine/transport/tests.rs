@@ -38,6 +38,16 @@ impl Clock for TestClock {
 
 use orx_test_support::host_binaries as binaries;
 
+/// Runs the calling test alone in a child process where paced waits, the transport deadline
+/// among them, are ten times shorter. True in that child.
+fn paced_child() -> bool {
+    if !crate::config::in_test_child(&[]) {
+        return false;
+    }
+    std::env::set_var("ORX_TEST_SPEEDUP", "10");
+    true
+}
+
 fn config(server: &Sshd) -> Config {
     Config {
         alias: server.alias().into(),
@@ -474,6 +484,9 @@ async fn user_master_is_ignored_and_route_edits_require_explicit_approval() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn black_hole_is_unreachable_by_deadline_and_recovers_in_one_backoff_step() {
+    if !paced_child() {
+        return;
+    }
     let server = Sshd::start().unwrap();
     let clock = TestClock::new();
     let conn = start(&server, clock.clone());
@@ -488,7 +501,7 @@ async fn black_hole_is_unreachable_by_deadline_and_recovers_in_one_backoff_step(
     let began = Instant::now();
     let failed = status(&conn, Status::Backoff).await;
     assert!(
-        began.elapsed() <= Duration::from_secs(36),
+        began.elapsed() <= deadline() + Duration::from_secs(1),
         "{:?}",
         began.elapsed()
     );
@@ -501,6 +514,66 @@ async fn black_hole_is_unreachable_by_deadline_and_recovers_in_one_backoff_step(
     tokio::time::timeout(Duration::from_secs(6), status(&conn, Status::Live))
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_rental_reconnects_after_repeated_failures_within_collection_grace() {
+    if !paced_child() {
+        return;
+    }
+    let server = Sshd::start().unwrap();
+    let clock = TestClock::new();
+    let store = Store::open_at(server.directory().join("store")).unwrap();
+    let mut config = config(&server);
+    config.alias = "orx-box-recovery".into();
+    let text = fs::read_to_string(server.config_path()).unwrap();
+    fs::write(
+        server.config_path(),
+        text.replace(
+            &format!("Host {}", server.alias()),
+            &format!("Host {}", config.alias),
+        ),
+    )
+    .unwrap();
+    let auth = Auth::new(&store, &config.alias).unwrap();
+    let conn = HostConn::start_shared(config, store, clock.clone(), auth).unwrap();
+    status(&conn, Status::Live).await;
+    let disconnected_at = clock.wall_ms();
+    server
+        .proxy()
+        .set(Faults {
+            refuse_new: true,
+            ..Faults::default()
+        })
+        .unwrap();
+    server.proxy().reset().unwrap();
+
+    let mut state = conn.state();
+    for failures in 1..=5 {
+        let failed = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let snapshot = state.borrow_and_update().clone();
+                if snapshot.status == Status::Backoff && snapshot.failures >= failures {
+                    return snapshot;
+                }
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        if failures < 5 {
+            let delay = failed.next_retry_ms.unwrap() - clock.wall_ms();
+            clock.advance(delay.max(0) as u64 + 1);
+        }
+    }
+
+    server.proxy().clear().unwrap();
+    let elapsed = u64::try_from(clock.wall_ms() - disconnected_at).unwrap();
+    clock.advance(420_000_u64.saturating_sub(elapsed));
+    tokio::time::timeout(Duration::from_secs(6), status(&conn, Status::Live))
+        .await
+        .expect("rental must retry before collection grace expires");
+    assert!(clock.wall_ms() - disconnected_at < 900_000);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -878,6 +951,9 @@ async fn automatic_success_coalesces_queued_connect_without_another_login() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delayed_feed_uses_its_wait_budget_while_probes_keep_the_host_live() {
+    if !paced_child() {
+        return;
+    }
     let server = Sshd::start().unwrap();
     let conn = start(&server, TestClock::new());
     status(&conn, Status::Live).await;
@@ -886,11 +962,11 @@ async fn delayed_feed_uses_its_wait_budget_while_probes_keep_the_host_live() {
     server
         .proxy()
         .set(Faults {
-            latency: Duration::from_secs(6),
+            latency: crate::config::paced(Duration::from_secs(6)),
             ..Faults::default()
         })
         .unwrap();
-    tokio::time::sleep(Duration::from_secs(70)).await;
+    tokio::time::sleep(crate::config::paced(Duration::from_secs(70))).await;
     assert_eq!(conn.state.borrow().status, Status::Live);
     assert_eq!(ssh_pids(&server), before);
     assert_eq!(auth_attempts(&server), attempts);
@@ -1643,6 +1719,9 @@ async fn silent_proxy_failure_stays_behind_the_breaker_until_connect() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_key_mfa_deadline_opens_the_breaker_without_a_reconnect_storm() {
+    if !paced_child() {
+        return;
+    }
     let server = Sshd::start().unwrap();
     let store = Store::open_at(server.directory().join("store")).unwrap();
     store
@@ -1932,13 +2011,17 @@ async fn breaker_opened_during_route_resolution_prevents_login() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn engine_sharing_reuses_mfa_without_authentication() {
-    if std::env::var_os("ORX_TEST_SHARING_CHILD").is_none() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = crate::local::git::TemporaryDirectory::new("orx-sharing-client").unwrap();
-        let bin = temp.path().join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let shim = bin.join("ssh");
-        fs::write(&shim, r#"#!/bin/sh
+    use std::os::unix::fs::PermissionsExt;
+
+    if !crate::config::in_test_child(&["CLAUDE_CONFIG_DIR", "CODEX_HOME"]) {
+        return;
+    }
+    // Sharing derives the ordinary socket dir from `$HOME/.config`, so `$HOME` must hold the config dir.
+    let home = crate::config::test_home();
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let shim = bin.join("ssh");
+    fs::write(&shim, r#"#!/bin/sh
 if [ -f "$HOME/.ssh/config" ]; then
     config="$HOME/.ssh/probe-$$"
     sed "s|^Include openresearch_config$|Include $HOME/.ssh/openresearch_config|" "$HOME/.ssh/config" > "$config"
@@ -1947,37 +2030,10 @@ else
     exec /usr/bin/ssh -F /dev/null "$@"
 fi
 "#).unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut command = crate::process::command(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                "engine::transport::tests::engine_sharing_reuses_mfa_without_authentication",
-                "--nocapture",
-            ])
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CODEX_HOME")
-            .env("ORX_TEST_SHARING_CHILD", "1")
-            .env("HOME", temp.path())
-            .env("XDG_CONFIG_HOME", temp.path().join(".config"))
-            .env("XDG_CACHE_HOME", temp.path().join(".cache"))
-            .env("XDG_DATA_HOME", temp.path().join(".local/share"))
-            .env(
-                "PATH",
-                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
-            );
-        let output = orx_test_support::Process::spawn(&mut command)
-            .unwrap()
-            .wait(Duration::from_secs(180))
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    std::env::set_var("PATH", path);
+    std::env::set_var("HOME", &home);
 
     let passphrase = "orx sharing passphrase";
     let server = SshdBuilder {
@@ -1988,7 +2044,6 @@ fi
     }
     .start()
     .unwrap();
-    let home = dirs::home_dir().unwrap();
     fs::create_dir_all(home.join(".ssh")).unwrap();
     let user_config = fs::read_to_string(server.config_path())
         .unwrap()

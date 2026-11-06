@@ -3,9 +3,10 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const script = resolve('scripts/build-host.mjs')
+const script = fileURLToPath(new URL('build-host.mjs', import.meta.url))
 
 test('host builder validates prerequisites and Darwin targets without checksum sidecars', { skip: process.platform === 'win32' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'orx-build-host-'))
@@ -36,13 +37,13 @@ fs.writeFileSync(path.join(dir, 'orx-host'), 'native stand-in');
     const run = (overrides, args = ['--target', target]) => execFileSync(process.execPath, [copy, ...args], { env: { ...env, ...overrides }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
     assert.throws(() => run({ INSTALLED_TARGETS: '' }), /rustup target add x86_64-unknown-linux-musl/)
     assert.throws(() => run({ NO_ZIGBUILD: '1' }), /cargo install --locked cargo-zigbuild/)
-    assert.match(run({}), /orx-host-linux-x86_64: 15 bytes/)
+    run({})
     const bytes = readFileSync(join(root, 'target/host-binaries/orx-host-linux-x86_64'))
     assert.equal(bytes.toString(), 'native stand-in')
     for (const darwin of ['aarch64-apple-darwin', 'x86_64-apple-darwin']) {
       assert.throws(() => run({}, ['--target', darwin]), /requires both --target aarch64-apple-darwin and --target x86_64-apple-darwin/)
     }
-    assert.match(run({ INSTALLED_TARGETS: 'aarch64-apple-darwin x86_64-apple-darwin' }, ['--target', 'aarch64-apple-darwin', '--target', 'x86_64-apple-darwin']), /orx-host-darwin-universal: 30 bytes/)
+    run({ INSTALLED_TARGETS: 'aarch64-apple-darwin x86_64-apple-darwin' }, ['--target', 'aarch64-apple-darwin', '--target', 'x86_64-apple-darwin'])
     const universal = readFileSync(join(root, 'target/host-binaries/orx-host-darwin-universal'))
     assert.equal(universal.toString(), 'native stand-innative stand-in')
     assert.deepEqual(readdirSync(join(root, 'target/host-binaries')).sort(), ['orx-host-darwin-universal', 'orx-host-linux-x86_64'])

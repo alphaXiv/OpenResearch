@@ -1,83 +1,80 @@
-import { workspaceDom, mockWorkspace } from "./workspaceMocks.mjs";
-import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import ts from "typescript";
-import { dialogHarness } from "./dialogHarness.mjs";
+import test from "node:test";
+import { act } from "react";
+import { m } from "../src/paraglide/messages.js";
+import { find, renderApp, serveApp, settle, type } from "./render.mjs";
 
-function component(name) {
-  return ts.createSourceFile(name, readFileSync(new URL(`../src/components/${name}`, import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-}
+const preset = { id: "acp:preset", name: "Kimi Code", executable: "kimi", arguments: ["acp"], setupUrl: "https://example.com", needsConnectionAdapter: false };
+const harness = (id, name, extra = {}) => ({
+  id, name, installed: true, installBroken: false, authenticated: true, authState: "ready", agentReady: true, models: [], ...extra,
+});
+const codex = harness("codex", "Codex");
+const saved = (extra) => harness("acp:saved", "Saved ACP", extra);
 
-function find(node, predicate) {
-  if (predicate(node)) return node;
-  return ts.forEachChild(node, (child) => find(child, predicate));
-}
-
-function evaluate(code, bindings) {
-  bindings = { ...bindings, useWorkspace: () => mockWorkspace(bindings) };
-  const js = ts.transpileModule(`return (${code});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function(...Object.keys(bindings), "return (() => {" + js + "})();")(...Object.values(bindings));
-}
+const click = async (element) => {
+  await act(async () => element.click());
+  await settle();
+};
 
 test("onboarding selects the registered profile after a preset connects and refreshes", async () => {
-  const dialog = component("AcpHarnessDialog.tsx");
-  const run = find(dialog, (node) => ts.isVariableDeclaration(node) && node.name.getText(dialog) === "run").initializer.getText(dialog);
-  const onboarding = component("Onboarding.tsx");
-  const savedCallback = find(onboarding, (node) => ts.isPropertyAssignment(node) && node.name.getText(onboarding) === "onSaved").initializer.getText(onboarding);
-  const selectionEffect = find(onboarding, (node) => ts.isCallExpression(node) && node.expression.getText(onboarding) === "useEffect" && node.getText(onboarding).includes("const added = ready.find")).arguments[0].getText(onboarding);
-  const preset = { id: "acp:preset", name: "Kimi Code", executable: "kimi", arguments: ["acp"] };
-  const addedAcpHarness = { current: null };
-  let preferred = "codex", refreshes = 0, saved = 0, closed = 0;
-  let harnesses = [{ id: "codex", agentReady: true }, { id: "acp:saved", agentReady: true, catalogPending: true }];
-  const setPreferredHarness = (update) => { preferred = typeof update === "function" ? update(preferred) : update; };
-  const onSaved = evaluate(savedCallback, { queryClient: { getQueryData: () => harnesses }, getHarnessesQuery: () => ({ queryKey: [] }), addedAcpHarness, setPreferredHarness, load: (refresh, retry) => { assert.deepEqual([refresh, retry], [true, true]); refreshes++; } });
-  const harness = dialogHarness();
-  const connect = async (launch, harnessId) => {
-    const save = evaluate(run, {
-      cancelled: { current: false }, busy: false, valid: true, launch, preset: preset.id, presets: { data: [preset] }, definition: undefined,
-      setBusy: () => {}, setConnected: () => {}, setError: (error) => { if (error) assert.fail(error); },
-      testAcpHarness: async () => ({ harnessId }), saveAcpHarness: async (value) => { saved++; return { ...value, id: "acp:new" }; },
-      onSaved, name: launch.name, m: {},
-    });
-    harness.showCustomDialog({ component: () => null, props: {}, onConfirm: (submit) => submit(), onCancel: "close" });
-    const opened = harness.render()[0];
-    opened.props.children.props.confirm(() => save(false));
-    assert.equal(harness.render()[0].props.children.props.isDisabled, true);
-    assert.equal(harness.render()[0].props.onOpenChange, undefined);
-    await new Promise(setImmediate);
-    const closing = harness.render()[0];
-    assert.equal(closing.props.open, false);
-    assert.equal(harness.render().length, 1);
-    closing.props.onOpenChangeComplete(false);
-    assert.equal(harness.render().length, 0);
-    closed++;
-  };
-  const refresh = (snapshot) => {
+  let harnesses = [codex, saved({ catalogPending: true })];
+  let tested;
+  const refreshes = [];
+  const saves = [];
+  serveApp({
+    "GET /api/settings/ui-state": () => ({ onboardingCompleted: false, preferredAgent: null }),
+    "GET /api/harnesses": (init, path) => {
+      if (path.includes("retry=1")) refreshes.push(path);
+      return { harnesses };
+    },
+    "GET /api/project-path/status": () => ({ gitVersion: "2.50.0", resolvedPath: null, exists: null, directory: null, empty: null, initialized: null }),
+    "GET /api/harnesses/acp/presets": () => [preset],
+    "POST /api/harnesses/acp/test": () => ({ status: "ok", harnessId: tested }),
+    "POST /api/harnesses/acp": (init) => {
+      saves.push(JSON.parse(init.body));
+      return { ...JSON.parse(init.body), id: "acp:new" };
+    },
+  });
+  await renderApp("/projects");
+  await click(find("button", m.onboarding_continue()));
+
+  const selected = () => document.querySelector('button[aria-pressed="true"]')?.textContent ?? null;
+  const dialogs = () => document.querySelectorAll('[role="dialog"]').length;
+  const recheck = async (snapshot) => {
     harnesses = snapshot;
-    evaluate(selectionEffect, { harnesses, addedAcpHarness, preferredAgent: null, setPreferredHarness })();
+    await click(find("button", m.onboarding_re_check()));
+  };
+  /** Connects the preset through the ACP dialog, optionally renamed; the server's test answers `harnessId`. */
+  const connect = async (harnessId, name = preset.name) => {
+    tested = harnessId;
+    const before = refreshes.length;
+    await click(find("button", m.acp_add()));
+    if (name !== preset.name) await type(find('[role="dialog"] label', m.acp_name()).querySelector("input"), name);
+    await click(find('[role="dialog"] button', m.settings_connect()));
+    assert.equal(dialogs(), 0);
+    assert.equal(refreshes.length, before + 1);
   };
 
-  await connect({ name: preset.name, executable: preset.executable, arguments: preset.arguments }, "acp:saved");
-  assert.equal(addedAcpHarness.current, "acp:saved");
-  assert.equal(saved, 0);
-  refresh([{ id: "codex", agentReady: true }, { id: "acp:saved", agentReady: true, catalogPending: true }]);
-  assert.equal(preferred, "codex");
-  refresh([{ id: "codex", agentReady: true }, { id: "acp:saved", agentReady: true, catalogPending: false }]);
-  assert.equal(preferred, "acp:saved");
-  assert.equal(addedAcpHarness.current, null);
-  preferred = "codex";
-  refresh([{ id: "codex", agentReady: true }, { id: "acp:saved", agentReady: true }]);
-  assert.equal(preferred, "codex");
-  await connect({ name: preset.name, executable: preset.executable, arguments: preset.arguments }, "acp:saved");
-  assert.equal(preferred, "acp:saved");
-  assert.equal(addedAcpHarness.current, null);
+  assert.match(selected(), /Codex/);
+  await connect("acp:saved");
+  assert.match(selected(), /Codex/, "a profile still loading its catalog is not selected yet");
+  await recheck([codex, saved({ catalogPending: false })]);
+  assert.match(selected(), /Saved ACP/);
 
-  await connect({ name: preset.name, executable: preset.executable, arguments: preset.arguments }, "acp:preset");
-  assert.equal(addedAcpHarness.current, "acp:preset");
-  await connect({ name: "My configuration", executable: preset.executable, arguments: preset.arguments }, "acp:saved");
-  assert.equal(addedAcpHarness.current, "acp:new");
-  assert.equal(saved, 1);
-  assert.equal(refreshes, 4);
-  assert.equal(closed, 4);
+  await click(find("button", "Codex"));
+  await recheck([codex, saved()]);
+  assert.match(selected(), /Codex/, "a later refresh does not override the user's choice");
+
+  await connect("acp:saved");
+  assert.match(selected(), /Saved ACP/, "an already-ready profile is selected at once");
+
+  await click(find("button", "Codex"));
+  await connect("acp:preset");
+  await recheck([codex, saved(), harness("acp:preset", preset.name)]);
+  assert.match(selected(), /Kimi Code/, "the preset's own profile is selected once it appears");
+
+  await connect("acp:saved", "My configuration");
+  assert.deepEqual(saves, [{ name: "My configuration", executable: preset.executable, arguments: preset.arguments }]);
+  await recheck([codex, saved(), harness("acp:preset", preset.name), harness("acp:new", "My configuration")]);
+  assert.match(selected(), /My configuration/, "an edited preset registers and selects a new profile");
 });

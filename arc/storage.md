@@ -32,7 +32,9 @@ compute capabilities.
 **The config directory never moves**, which is why the settings that point
 at the data directory, the credentials for openresearch.sh, alphaXiv and
 Overleaf, and every cross-process lock live there. A lock inside the data
-directory could not guard a move of that directory.
+directory could not guard a move of that directory. Old and new binaries
+rewrite the same settings files, so each save keeps the fields its binary
+does not know.
 
 A desktop app launched from Finder inherits none of the user's shell
 environment, so app mode imports a short list of variables from the login
@@ -61,6 +63,22 @@ freshly updated CLI, so:
 - a new column needs a default an old binary can live with;
 - a column is never renamed, retyped or given a new meaning;
 - an old binary must be able to keep writing rows a new binary reads.
+
+Chat search is a contentless full-text index in this same database. Database
+triggers extract searchable message parts, including nested parts, so writes
+from older binaries keep it current too. Visible shell output, tool errors and
+subagent reports are searchable; hidden tool output and reasoning stay out.
+Session, project, archive and branch membership come from the source rows at
+query time. The dashboard indexes older messages in bounded transactions,
+committing its progress with each batch; SQLite's `user_version` records
+completion only after every batch finishes. Search reports when that history
+is still being indexed, and reads each result page from one database snapshot.
+Results follow newest stored messages first, with row-ID cursors that do not
+shift when a streaming reply changes. Scoped searches bound the full-text
+scan to their messages' row-ID range and check membership against session rows.
+
+`tests/contracts/store-schema.json` holds the last release's columns; a test
+checks the current schema against it.
 
 ## Code lives in Git
 
@@ -142,10 +160,11 @@ interrupted halfway resumes on the next run.
 
 ## What leaves the machine
 
-**Code, experiments, runs, logs, chats, transcripts and artifacts never go to
-openresearch.sh.** The client for it is limited to accounts, organizations,
-SSH keys, sandboxes and compute catalogs, and a test keeps research-state
-endpoints out of it. Other traffic:
+**Code, experiments, runs, logs, chats, transcripts and artifacts go to
+openresearch.sh only when the user publishes a project.** Otherwise the
+client for it is limited to accounts, organizations, SSH keys, sandboxes and
+compute catalogs, and a test keeps research-state endpoints out of it. Other
+traffic:
 
 - **Compute.** Work the user launches goes, as a source snapshot, to the
   backend they chose; logs and metrics come back.
@@ -160,24 +179,28 @@ endpoints out of it. Other traffic:
   reaches that service; no account credentials or research data are sent.
   The result is cached for five minutes and a failed lookup never blocks setup.
 - **Paper search.** Queries go to the public alphaXiv, OpenAlex, bioRxiv and
-  PubMed APIs, without credentials.
+  PubMed APIs, without credentials, except an `OPENALEX_API_KEY` the user sets,
+  which goes to OpenAlex.
 - **alphaXiv.** Sign-in is a browser trip to alphaXiv, whose identity token
   orx hands to openresearch.sh for its own token, or, with
   `orx login --alphaxiv`, to link alphaXiv to the signed-in account. orx keeps
   alphaXiv's tokens owner-only in the config directory, refreshing them under
   a file lock since each refresh retires the last one, and reads the user's
-  folders and papers with them. The chat's library picker loads paper
-  thumbnails from alphaXiv's public asset CDN. Agents also send research tool
-  calls to alphaXiv while signed out, limited by IP. Signed-in agents read
-  library notes and highlights and, when requested, create folders and save
-  papers to them. Tool arguments (including research queries, paper and
+  folders and papers with them. It also reads the user's public alphaXiv
+  profile, followed topics and researcher card: the dashboard shows the
+  profile picture alphaXiv names, and a blank project's starter prompts are
+  briefed from the profile, so it reaches the agent's model provider. The
+  chat's library picker loads paper thumbnails from alphaXiv's public asset
+  CDN. Agents also send research tool calls to alphaXiv while signed out,
+  limited by IP. Signed-in agents read library notes and highlights and, when
+  requested, create folders and save papers to them. Tool arguments (including research queries, paper and
   researcher identifiers, GitHub repository paths, folder identifiers and
   names) go to alphaXiv; tool results enter the agent's context and reach its
   model provider. The MCP proxy sends no chat transcript, project files,
   experiments or logs of its own.
 - **Telemetry.** Official builds send opt-out usage events to the first-party
   API under a random install ID that is not tied to an account: commands run,
-  harness detection states, and the research profile chosen at onboarding.
+  harness detection states, and a research profile when onboarding submits one.
   Source builds send nothing. Events wait in an outbox in the config directory
   and send in the background, so telemetry never blocks or fails a command. A
   change of the telemetry choice is itself recorded, so opt-outs are visible.
@@ -186,3 +209,20 @@ endpoints out of it. Other traffic:
 - **Integrations the user turns on.** Pushing a project to GitHub, syncing a
   paper with Overleaf, and the agents' own model providers, which the agent
   talks to directly.
+- **Sharing.** Nothing leaves on its own: sharing writes a `.orx` file the
+  user sends themselves. It is a zip of a Git bundle of the baseline and
+  experiment branches, the experiment tree, the finished runs (backend kind
+  and GPU type, never a descriptor), their logs, the artifacts, the chats the
+  user left ticked, and the sharer's artifacts path so transcript links can be
+  rewritten. Chat attachments stay behind. Chats, logs and artifacts are
+  scanned for credentials and a match refuses the share; the code is not
+  scanned, since it is what the user chose to send. Opening one clones the
+  bundle into a new project with fresh ids and no remote; its runs carry the
+  backend kind `imported`, which no supervisor or cleanup acts on.
+- **Published projects.** "Publish link" in the Share dialog, or
+  `orx project share --publish`, uploads exactly the `.orx` file that "Save"
+  would write, after the same credential scan, to openresearch.sh, which
+  serves it to anyone with the link until the publisher deletes it. Nothing is
+  published unless the user asks for it there. The upload names the local
+  project id, so publishing again replaces the file behind the same link. Opening a link downloads the file from the app's own API, without
+  signing in.

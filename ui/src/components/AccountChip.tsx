@@ -31,9 +31,10 @@ export function useSignIn() {
   const { invalidateFamilies } = owner.invalidation;
   const { showCustomDialog } = workspace.dialogs;
   function refreshAccount() {
-    invalidateFamilies(["getOpenResearchAccount", "getOpenResearchSettings", "getComputeSettings"]);
+    invalidateFamilies(["getOpenResearchAccount", "getOpenResearchSettings", "getComputeSettings", "getProjectLink"]);
     void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivFolders") });
     void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivPapers") });
+    void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivMe") });
   }
 
   return (connectOnly: boolean, returnFocus: HTMLElement | null, onSignedIn?: () => void) => {
