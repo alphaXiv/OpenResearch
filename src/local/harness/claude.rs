@@ -1117,10 +1117,12 @@ fn plugin_skill_roots(root: &Path) -> Vec<PathBuf> {
         return vec![root.to_path_buf()];
     }
     let mut dirs = Vec::new();
-    for dir in std::iter::once(PathBuf::from("skills"))
-        .chain(declared)
-        .map(|path| root.join(path))
-    {
+    // Claude Code confines manifest paths only; it follows a `skills/` symlink anywhere.
+    let skills = root.join("skills");
+    if skills.is_dir() {
+        dirs.push(skills);
+    }
+    for dir in declared.into_iter().map(|path| root.join(path)) {
         // A missing path, or a symlink out of the plugin, is skipped alone.
         let inside = dir
             .canonicalize()
@@ -2813,6 +2815,20 @@ mod tests {
                 ("single".to_string(), root("single").join("skills")),
             ]
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_skills_symlink_may_leave_the_plugin() {
+        let home = std::env::temp_dir().join(format!("orx-plugins-test-{}", uuid::Uuid::new_v4()));
+        let root = home.join("plugin");
+        let shared = home.join("shared");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::create_dir_all(&shared).expect("mkdir");
+        std::os::unix::fs::symlink(&shared, root.join("skills")).expect("symlink");
+
+        assert_eq!(plugin_skill_roots(&root), vec![root.join("skills")]);
         let _ = std::fs::remove_dir_all(&home);
     }
 
