@@ -1,192 +1,99 @@
 # The desktop app and releases
 
-The desktop app is the same `orx` binary the CLI is. One executable, built
-once per target, is the command-line tool an agent shells out to, the `orx
-up` server, and a windowed app that wraps that server. Shipping one binary
-means one version to reason about and one thing to update. It also means the
-binary has to decide, from how it was started, which of those it is, and the
-CLI an agent calls must never open a window.
+Each platform's package wraps one `orx` binary that is the CLI an agent shells out to, the `orx up` server, and a window around that server: one version to reason about, one thing to update. The binary therefore decides what it is from how it was started, and the CLI an agent calls must never open a window. App mode lives in `src/commands/app.rs`, under the `desktop_app` cfg (`build.rs`): Linux's static musl CLI archives have no window; only the AppImage's glibc build does.
 
 ## One binary, several faces
 
-```text
-macOS    OpenResearch.app/Contents/MacOS/OpenResearch, no arguments ─► app
-         the bundle's `orx` symlink, or any arguments               ─► CLI
-Windows  OpenResearch.exe (launcher) ─► `orx.exe app [link]`        ─► app
-         orx.exe double-clicked from Explorer                       ─► relaunch as app
-         orx.exe in a terminal                                      ─► CLI
-Linux    the AppImage's entry script ─► `orx app [link]`            ─► app
-         `orx`                                                      ─► CLI
-```
+| Platform | Started as | Becomes |
+| --- | --- | --- |
+| macOS | the bundle's executable under its own name, no arguments | app |
+| macOS | the bundle's `orx` symlink (an agent gets help, not a dashboard), or any arguments | CLI |
+| Windows | `OpenResearch.exe`, which starts `orx.exe app [link]` | app |
+| Windows | `orx.exe` double-clicked | relaunches as `orx.exe app` |
+| Linux | the AppImage, whose `linux/AppRun` starts `orx app [link]` | app |
+| Windows, Linux | `orx` in a terminal | CLI |
 
-- **macOS** enters app mode only when the bundle's executable is started
-  under its own name with no arguments, which is how Finder starts it. The
-  bundle also carries an `orx` symlink to the same file. The check compares
-  the name the process was invoked as with the canonical executable, so the
-  symlink stays a plain CLI and an agent running `orx` gets help, not a second
-  dashboard.
-- **Windows** gives a GUI program no console, and every console program it
-  starts would flash a window of its own. The installed launcher therefore
-  starts `orx.exe app` in a hidden console that orx and every Git, shell and
-  agent process it runs share.
-- **Linux** runs the AppImage's entry script, which points GTK and WebKit at
-  the bundled libraries, records the session's own values so the programs
-  orx opens get them back, and starts `orx app`. The app keeps a desktop
-  entry installed so it appears in the launcher and handles `openresearch:`
-  links and `.orx` files.
+Anything but `app`, `app <openresearch: link>` or `app <file.orx>` is a CLI invocation. A file becomes a `file:` link, so both travel one path, including to a running app.
 
-App mode takes only an `openresearch:` link or a `.orx` file as an argument;
-any other argument list is a CLI invocation. A file becomes a `file:` link, so
-both travel the same way, including to a running app.
+- **Windows** would flash a window for every console program a GUI process starts, so `windows/launcher/` starts `orx.exe app` in a hidden console shared by orx and everything it runs. **The launcher changes only with a new installer**, so `orx app [link]` is a contract with every installed launcher. `windows/OpenResearch.iss` installs per user, so `orx.exe` can replace itself without elevation.
+- **Linux** bundles WebKitGTK in the AppImage, so its library floor is glibc's, set for every user by the Ubuntu runners that build it. AppRun points GTK at the bundle, records the session's values and starts orx inside the read-only mount; orx restores those values for the host programs it opens (`src/local/shell_env.rs`, in step with AppRun's list). Each start points a desktop entry at the AppImage's current path, which also claims `openresearch:` links and `.orx` files.
 
 ## App mode
 
-The main thread owns the window's run loop, as every desktop toolkit requires,
-while the dashboard server runs on the async runtime's worker threads. A
-single-threaded runtime would deadlock here.
+The main thread owns the window's run loop, as every desktop toolkit requires, while the server runs on the async runtime's workers; a single-threaded runtime would deadlock.
 
-- **A fixed port.** The window's local storage is keyed by origin, so the app
-  binds the same port every time. If a terminal `orx up` or another install
-  holds it, the app falls back to a free port. After an update relaunch it
-  keeps the port it had.
-- **One server per data directory.** If an `orx up` already owns the data
-  directory, the window opens on it instead of starting a second engine.
-  Closing the window while runs are active hides it and keeps the engine
-  running until it is idle.
-- **One app per user.** macOS enforces this itself. On Windows a named event
-  and on Linux a socket in the user's private runtime directory let a second
-  launch bring the running window forward, handing it any link it was opened
-  with, and exit.
-- **The user's shell environment.** An app started by launchd or a desktop
-  session sees a bare `PATH` and none of the user's exports. At startup the
-  app asks the user's interactive login shell for a short list of variables
-  (the `PATH`, the orx and XDG directory overrides, each agent's config
-  location) and uses those. Otherwise it would miss agents installed through
-  the shell and open a different database than a terminal `orx`
-  ([storage](storage.md)). Every child is built in one place that hands it
-  those variables and finds its program where detection looks, so "installed"
-  on the dashboard and "found" at spawn cannot disagree.
-- **The same locks as `orx up`.** The app takes the lifecycle lock before
-  anything else, so `orx delete` from a terminal cannot remove the store from
-  under a running app.
+- **A fixed port.** The window's local storage is keyed by origin, so the app binds the same port every time, falls back to a free one if something holds it, and keeps its port across an update relaunch.
+- **One server per data directory.** If an `orx up` already owns the data directory, the window opens on it instead of starting a second engine.
+- **One app per user.** macOS enforces this itself; on Windows and Linux a second launch signals the first, which comes forward and takes any link.
+- **The lifecycle lock.** App mode takes it itself, so `orx delete` from a terminal cannot remove the store under a running app ([storage](storage.md)).
+- **The user's shell environment.** On macOS and Linux an app started by launchd or a desktop session sees a bare `PATH` and none of the user's exports, so it would miss shell-installed agents and open a different database than a terminal `orx`. Before touching storage it asks the interactive login shell for a short list of variables (`src/local/shell_env.rs`). A late answer supplies `PATH` alone, because switching directories in use would split state. Every child is built in `src/process.rs`, so it gets those values, and "installed" on the dashboard and "found" at spawn cannot disagree.
+
+## Closing and quitting
+
+**Closing the window never stops the engine's work.** When the app runs its own server:
+
+- **Close while busy:** the window hides, the page unloads and the engine runs windowless. Busy means an unfinished run, an undelivered notice, a running chat turn or an open dashboard event stream. The window's own page holds such a stream until it unloads, so a close with a local workspace open goes windowless even with no work.
+- **Close while not busy:** the app quits.
+- **Windowless and idle:** the app quits after the idle wait of a headless `orx up` ([experiments](experiments.md)).
+- **Windowless, then a second launch, a link or a macOS Dock reopen:** the window returns on a fresh page load.
+- **Explicit quit, which only macOS has:** with unfinished runs it asks first, and they continue on their hosts for the next start to collect. System logout and shutdown never ask.
+
+A window opened on another process's server just closes.
 
 ## The window and the page
 
-The page talks to the window through a small message bridge. It may ask for:
-zoom in, out and reset, persisted per user; dragging and maximizing from a
-titlebar the page draws; the window's appearance following the page's theme;
-on Windows, custom window controls; and on macOS, a native menu bar whose
-structure and state the page sends. The window never runs commands on the
-page's behalf.
+The page reaches the window through a small message bridge: zoom; on macOS and Windows, a titlebar the page draws; on macOS, the appearance and a native menu the page specifies. The window never runs commands on the page's behalf.
 
-Remote machines share the main window. The machine switcher selects a retained
-workspace with its own route, cache, dialogs and drafts; connecting a server
-keeps the progress dialog visible until that workspace is ready to open.
-
-What leaves the window:
-
-- A pop-up never opens inside the app. `http:`, `https:` and `mailto:` links
-  go to the system browser; any other scheme is dropped, because the browser
-  would ask before launching another app and a direct open would not.
-- A download asks where to save, as a browser does.
-- `openresearch:` links, from the system or a second launch, become in-page
-  navigation, so the page's guards against losing unsaved work still apply.
-  `openresearch://p/<slug>`, from a published project's page, carries only
-  the slug: the app downloads the file from its own API, so a link can never
-  make it fetch from anywhere else.
+- `http:`, `https:` and `mailto:` pop-ups go to the system browser; any other scheme is dropped, because the browser would ask before launching another app and a direct open would not.
+- `openresearch:` links become in-page navigation, so the page's guards against losing unsaved work still apply. A published project's link carries only its slug, and the app downloads the file from its own API, so a link can never make it fetch from anywhere else.
 
 ## Updates
 
-Every surface learns about releases the same way: it fetches a small manifest
-through GitHub's latest-release download link, a CDN redirect with no API rate
-limit, and caches the answer for a day. How the update is applied depends on
-how this copy of orx was installed.
+Every surface discovers releases through a small manifest at a release download link, a CDN redirect with no API rate limit, because the addresses agents run from exhaust the REST API's. **Manifests serve every client in the wild, so their names and fields only grow.** The macOS and Linux apps read their own, since their packages attach after the release and the CLI's version can run ahead of them. A manifest goes up only after the assets it names; a missing app manifest means nothing to update to yet.
+
+How an update applies depends on the install (`src/updates.rs`, `src/updates/`, `src/commands/update.rs`):
 
 | Installed by | Applies its own updates by |
 | --- | --- |
 | the shell or PowerShell installer | running the installer again; a receipt proves the binary is the installer's |
-| the macOS app | downloading the DMG, checking its hash, signature and notarization, renaming the new bundle into place |
-| the AppImage | downloading the new file, checking its hash, renaming it over the old one |
-| a Windows portable copy | staging the new `orx.exe`, then two renames |
+| the macOS app | checking the DMG's hash, pinned signature and notarization, renaming the bundle into place |
+| the AppImage | checking the new file's hash, renaming it over the old one |
+| the Windows app or a zip's `orx.exe` | staging the new `orx.exe`, then two renames |
 | cargo, Homebrew, Nix, anything else | never; writing over a package manager's files would break it |
 
-**Replacement is always a rename.** A running process keeps its old file and
-code signature until it restarts; nothing is ever half-written underneath it.
+**Replacement is always a rename.** A running process keeps its old file and code signature until it restarts; nothing is ever half-written underneath it.
 
-**An update never swaps the binary under a running `orx up`.** Each server
-holds a shared lock on its install for its whole life, and an updater needs
-that lock exclusively, because agents would otherwise get a different `orx`
-than the server running them. If a server is up, the update is recorded as
-deferred. The server relaunches into it when idle ([dashboard](dashboard.md)),
-and the relaunched process waits for its predecessor to release the port.
+**An update never swaps the binary under a running `orx up`.** Each server holds a shared lock on its install for its whole life, and an updater needs it exclusively, because agents would otherwise get a different `orx` than the server running them. Under a running server a desktop install stages the verified release beside itself and a CLI install only records it. A terminal or headless server relaunches into it once idle; the desktop app's server only when its page asks ([dashboard](dashboard.md)).
 
-Background updates run as a detached process and back off after repeated
-failures. The CLI prints a one-line warning when a newer release exists.
-
-**Channels.** The desktop apps can follow stable releases (`v1.2.3`) or canary
-builds (`canary-YYYYMMDD.N`), one per merge to main. Switching channels is
-refused while a downloaded update waits for a restart.
-
-**What an update brings.** Every release publishes cumulative totals of its
-commit titles by prefix (`feat`, `fix`, everything else) next to what the
-updater already reads: `orx_changes` in a stable release's `dist-manifest.json`,
-`changes` in the canary manifest. The update's summary is its totals minus the
-running build's, which a canary build has compiled in and a stable build reads
-from its own release. A release or build without totals has no summary; nothing
-else depends on it. The canary manifest also lists
-the commits between the latest stable release and its own commit, which the
-canary release's notes repeat; a canary build shows the part from its own
-commit down, so the list matches the build rather than the newest canary.
+**Channels.** The desktop apps follow stable releases (`v1.2.3`) or canary builds (`canary-YYYYMMDD.N`). A build moves to a canary, or from a canary to stable, only when the target's history contains its own commit, so a switch never moves an install backward. Switching is refused while an installed update waits for a restart.
 
 ## The build channel
 
-A build is **production** only when it is an official release built in the
-project's own GitHub Actions; every other build, including every local one,
-is **development**. The build script refuses to mark a build official
-anywhere else. Production builds may send telemetry and may install released
-binaries on remote machines. Development builds do neither, and a locally
-built AppImage or Windows app never replaces itself with a release. Canary
-builds also embed the exact source commit they were built from, checked
-against the workflow's own commit.
+A build is **production** only when it is an official release or canary built in the project's own GitHub Actions; every other build is **development**. `build.rs` enforces this and requires production builds to embed `orx-host`. Only production builds send telemetry and install released binaries on remote machines. A locally built desktop app never replaces itself with a release.
 
 ## How a version ships
 
-**The release act is merging a reviewed pull request that bumps the version
-in the manifest.** A push to main that changes the version dispatches the
-release workflow; nothing pushes tags, and a version never moves without a
-human decision. A version check on every pull request requires the version
-to move forward, to never reuse a released tag, and to come with a
-regenerated lockfile.
+**The release act is merging a reviewed pull request that bumps the version in `Cargo.toml`.** Nothing pushes tags. Workflows are in `.github/workflows/`; setup, recovery and the signing identity's contract with installed apps are in `macos/DISTRIBUTION.md`.
 
-```text
-merge bump ─► release workflow ─► build and sign every target
-                                ─► CI on the exact packaged commit, beside the builds
-                                ─► verify the build channel and telemetry contract
-                                ─► publish the release (creates the tag)
-           ─► desktop workflows ─► DMG (signed, notarized), Windows installer,
-                                   AppImages; update manifests; download links
-merge any  ─► canary workflow  ─► canary desktop builds, beside CI on that commit
-                                ─► publish once both pass
-```
+1. A push to main that changes the version makes `release-on-bump.yml` dispatch `release.yml`.
+2. `release.yml` builds and signs every CLI target, with `ci.yml` beside the builds on the packaged commit.
+3. Once CI, `verify-build-channel.yml` and `telemetry-contract.yml` pass, it publishes the release, creating the tag.
+4. `release-macos-app.yml`, `release-windows-app.yml` and `release-linux-app.yml` follow, each gated on a repository variable, and attach the desktop packages.
 
-- **Nothing publishes untested code.** The release workflow calls the same CI
-  workflow on the commit being packaged, and publishing requires it, the
-  build-channel check and the telemetry-contract check to pass. CI runs beside
-  the builds but stays in the release tool's global-artifacts jobs, so a
-  regenerated workflow still gates publishing on it.
-- **Release notes** are GitHub's generated notes, preceded by download buttons
-  that link only assets actually uploaded, refreshed as each desktop package
-  attaches, plus the issues the release's pull requests closed.
+Every push to main also runs `release-canary.yml`: desktop builds beside CI on that commit, published once both pass, possibly skipping intermediate commits. No pull request job builds an AppImage or the Windows installer, so packaging first runs here.
+
+- **Nothing publishes untested code.** `dist-workspace.toml` keeps the checks among dist's global-artifacts jobs, so a regenerated `release.yml` still gates on them. `dist generate` otherwise skips that hand-edited file.
+- **Signing runs in the `release-signing` environment**, for canaries too. Windows signs the CLI archive before dist checksums it, so self-updates keep a signed `orx.exe`.
 
 ## The gate on main
 
-Main accepts a merge only when two checks pass, administrators included:
-"fmt, clippy, test" and "version sanity". There is no merge queue and no
-requirement to be up to date with main.
+Main requires `fmt, clippy, test` and `version sanity`, administrators included. Branch protection matches those job names in `.github/workflows/ci.yml`, so renaming either blocks every merge. There is no merge queue and no requirement to be up to date with main.
 
-- Pull request CI tests GitHub's simulated merge of the branch into main.
-  It selects jobs by which files changed. The required aggregate check fails
-  on any failed job and on any job skipped that the changed files should
-  have run.
-- Pull requests run a lighter platform matrix. Full platform tests, optimized
-  builds and packaging run only after merge.
+- Pull request CI tests GitHub's simulated merge. `scripts/ci-changes.mjs` selects jobs by changed files, and `fmt, clippy, test` fails on any failed job and on any job skipped that those files should have run.
+
+## Scripts and workflows
+
+`build-macos-app.sh` and `package-macos-app.sh` sign and notarize the app and DMG (`macos/DISTRIBUTION.md`), `build-linux-appimage.sh` builds the AppImage, and `build-host.mjs` builds the `orx-host` binaries that official builds embed through `ORX_EMBED_HOST_DIR`. `generate-*` draw brand assets and the demo's evidence; `ci-*`, `canary-*`, `change-counts.mjs`, `release-source.sh`, `find-release-run.sh` and `release_notes.py` serve the workflows.
+
+- **Workflows pass `actionlint` and `zizmor --offline`** (with `.github/zizmor.yml`), and every action is pinned to a commit.
+- **CI runs current runner images and toolchains.** Pin the floor that matters, such as `MACOSX_DEPLOYMENT_TARGET` in `.cargo/config.toml`, never an old image.

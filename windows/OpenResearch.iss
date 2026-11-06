@@ -2,8 +2,6 @@
 ; (OpenResearch.exe plus the orx.exe it starts) with a Start menu entry.
 ;
 ;   iscc /DAppVersion=<version> /DSourceDir=<dir with both exes> /DOutputDir=<dir> windows\OpenResearch.iss
-;
-; See docs/windows.md.
 
 #ifndef AppVersion
   #error Pass /DAppVersion=<version>

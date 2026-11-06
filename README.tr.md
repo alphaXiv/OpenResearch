@@ -30,7 +30,7 @@ Araştırma ajanları için yerel öncelikli harness ve çalışma alanı.
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Sürümler" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · Windows beta sürümü <a href="docs/windows.md">Git for Windows</a> gerektirir · <a href="docs/linux.md">Linux</a> uygulaması glibc 2.35+ gerektirir</sub></p>
+<p><sub>macOS 11+ · Windows beta sürümü <a href="https://gitforwindows.org">Git for Windows</a> gerektirir · <a href="https://openresearch.sh/docs/install">Linux</a> uygulaması glibc 2.35+ gerektirir</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: Günün #1 Deposu" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
@@ -78,7 +78,7 @@ Ayrıca OpenCode ile
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
 <img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama veya özel bir uç nokta aracılığıyla
-[yerel bir model kullanabilirsiniz](docs/local-models.md).
+[yerel bir model kullanabilirsiniz](https://openresearch.sh/docs/agents).
 
 **Araştırma hipotezlerinizi en güncel literatüre dayandırın.** OpenResearch, <img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv, <img src=".github/readme-assets/biorxiv.svg" alt="" width="18" height="18" align="absmiddle" /> bioRxiv ve <img src=".github/readme-assets/pubmed.svg" alt="" width="18" height="18" align="absmiddle" /> PubMed ile entegre çalışır; böylece ajanlar ilgili makaleleri bulabilir, bilgiye dayalı hipotezler geliştirebilir ve deneylerini mevcut araştırmalarla ilişkilendirebilir.
 
