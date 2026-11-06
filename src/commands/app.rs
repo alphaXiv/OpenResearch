@@ -984,6 +984,7 @@ mod imp {
             tokio::spawn(async move {
                 let args = crate::UpArgs {
                     port,
+                    host: std::net::Ipv4Addr::LOCALHOST.into(),
                     remote: None,
                     no_browser: true,
                     headless: false,

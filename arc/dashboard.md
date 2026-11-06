@@ -39,6 +39,14 @@ passes one guard:
   must be the server's own. A websocket must send an `Origin`.
 - Responses carry headers that forbid framing, MIME sniffing and referrers.
 
+`orx up --host 0.0.0.0` opts into a trusted private network, such as a
+headless workstation driven from a laptop. orx's own clients still use
+`127.0.0.1`, so no other address is accepted. The guard then also refuses any
+peer outside the loopback, RFC 1918, link-local and CGNAT IPv4
+ranges, and accepts a Host only when it is `localhost` or a literal address in
+those ranges, so DNS rebinding still fails. Anyone on that network can use the
+dashboard.
+
 A request without an `Origin` is a CLI or another non-browser client on the
 same machine, which already has the user's privileges. The only extra origin
 the guard accepts is the development UI server's, named by an environment

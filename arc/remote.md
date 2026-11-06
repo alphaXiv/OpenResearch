@@ -7,9 +7,11 @@ reach it. orx gets the dashboard to those machines without ever listening on
 a public interface, and without asking for anything SSH does not already
 hold.
 
-**orx never binds anything but loopback.** An unauthenticated dashboard on a
-shared host is an open door to the account that runs it. Everything in this
-essay keeps the server on `127.0.0.1` and carries the user to it over SSH.
+**orx binds only loopback unless the user asks.** An unauthenticated dashboard
+on a shared host is an open door to the account that runs it. Everything in
+this essay keeps the server on `127.0.0.1` and carries the user to it over
+SSH; `orx up --host` is the user's own opt-in for a trusted private network
+([dashboard](dashboard.md#the-loopback-guard)).
 
 This essay covers the dashboard on a remote machine. SSH as a place to run
 jobs belongs to [experiments](experiments.md); the host side of those jobs and
@@ -235,7 +237,7 @@ by existing runs; a second MFA prompt may be required.
 
 ## What must stay true
 
-- Nothing binds a non-loopback address.
+- Nothing binds a non-loopback address unless the user passes `orx up --host`.
 - Remote API requests carry a token that is valid only while an SSH
   attachment is alive.
 - The control channel is same-user only: owner-only paths, symlinks refused,
