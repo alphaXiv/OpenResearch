@@ -593,7 +593,7 @@ impl Actor {
         let result = tokio::time::timeout(deadline, async {
             #[cfg(windows)]
             if resuming {
-                return session.resume(self.config.binary_dir.as_deref()).await;
+                return session.resume().await;
             }
             let (os, arch) = session.handshake().await?;
             if askpass

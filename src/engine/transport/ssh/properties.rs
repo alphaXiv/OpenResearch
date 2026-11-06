@@ -97,6 +97,29 @@ async fn seeded_bootstrap_stub_responses_are_bounded_and_validated() {
 }
 
 #[tokio::test]
+async fn a_held_login_outlives_an_orx_host_update_but_not_a_protocol_change() {
+    for (proto, resumes) in [(PROTOCOL_VERSION, true), (PROTOCOL_VERSION + 1, false)] {
+        let mut hello = Vec::new();
+        let body = Response::Hello {
+            proto,
+            binary_sha: "an older orx-host".into(),
+            boot_id: "boot".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            kernel: "test".into(),
+        };
+        orx_host_proto::write_frame(&mut hello, &Message { id: 0, body }).unwrap();
+        let mut session = stub(&hello);
+        let resumed = session.resume().await;
+        assert_eq!(resumed.is_ok(), resumes, "proto {proto}: {resumed:?}");
+        if let Err(error) = resumed {
+            assert!(error.to_string().contains("press Connect"), "{error}");
+        }
+        session.close().await;
+    }
+}
+
+#[tokio::test]
 async fn seeded_base64_pages_round_trip_through_async_frames() {
     let mut rng = Rng(0xef528d041a9bb673);
     for case in 0..256 {

@@ -236,9 +236,11 @@ engine login.
 ControlMaster, so Connect starts each root's `ssh` inside the detached
 `orx ssh-service`, reached on loopback with the token in its owner-only
 directory, and `orx up` talks to orx-host through it. A restarted or reopened
-server attaches to that login with no prompt. It ends when the user signs out
-of Windows, Connect replaces it, its route changes, or no server has attached
-for 24 hours. Plain `ssh` does not share it, and Connect still logs in the
+server attaches to that login with no prompt, even after an update while the
+control protocol is unchanged: the older orx-host then serves, and wraps new
+runs, until the login ends. It ends when the user signs out of Windows,
+Connect replaces it, its route changes, or no server has attached for 24
+hours. Plain `ssh` does not share it, and Connect still logs in the
 transports existing 0.2.x runs need, so a second MFA prompt may be required.
 
 ## What must stay true

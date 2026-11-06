@@ -636,18 +636,13 @@ impl Session {
         Ok(())
     }
 
-    /// Checks that a held login still runs the orx-host this build installs.
-    #[cfg(windows)]
-    pub async fn resume(&mut self, directory: Option<&Path>) -> Result<()> {
-        let (os, arch, sha) = self.hello().await?;
-        let os = match os.as_str() {
-            "linux" => "Linux",
-            "macos" => "Darwin",
-            os => os,
-        };
-        if binary(directory, os, &arch)?.sha != sha {
-            bail!("orx-host changed since this SSH login; press Connect");
-        }
+    /// Checks that a held login's orx-host speaks this build's control protocol. An older
+    /// binary that does keeps serving, and wrapping new runs, until the login ends.
+    #[cfg(any(windows, test))]
+    pub async fn resume(&mut self) -> Result<()> {
+        self.hello()
+            .await
+            .context("The SSH login's orx-host is gone or incompatible; press Connect")?;
         Ok(())
     }
 
