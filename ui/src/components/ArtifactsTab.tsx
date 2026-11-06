@@ -17,7 +17,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -27,9 +27,9 @@ import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
-import { isExternalMarkdownTarget, rehypeNetworkImages, resolveMarkdownTarget } from "../markdownTarget";
+import { chatImageTarget, isExplicitNativeTarget, isExternalMarkdownTarget, isNetworkImage, nativeMarkdownPath, rehypeNetworkImages, resolveMarkdownTarget } from "../markdownTarget";
 import { useFileVersion } from "../useFileVersion";
-import { mdCodeComponents, remarkMathOptions } from "./Md";
+import { ImageResolverContext, MermaidBlock, mdCodeComponents, remarkMathOptions } from "./Md";
 import {
   FileContextMenu,
   FileRenameInput,
@@ -91,23 +91,40 @@ export function findArtifactEntry(entries: ArtifactEntry[], path: string): Artif
 
 /** Artifact markdown with relative image/link paths rewritten to the raw
  * artifact endpoint, scoped to the markdown file's parent directory. */
-export function ArtifactMarkdown({
-  projectId,
-  folder,
-  markdown,
-  entries,
-}: {
-  projectId: string;
-  folder: string;
-  markdown: string;
-  entries: ArtifactEntry[];
+function useArtifactMermaidImages(projectId: string, folder: string, entries: ArtifactEntry[]) {
+  const { absoluteFileUrl, artifactUrl } = useWorkspace().api;
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
+  const entriesVersion = useMemo(() => JSON.stringify(entries), [entries]);
+  return useMemo(() => (src: string) => {
+    const absolute = chatImageTarget(src);
+    if (absolute?.source === "absolute" && isExplicitNativeTarget(src)) {
+      return [{ url: absoluteFileUrl(absolute.path) + absolute.hash, resolveAsset: () => null }];
+    }
+    const target = resolveMarkdownTarget(folder, src);
+    if (!target) return [];
+    const entry = findArtifactEntry(entriesRef.current, target.path);
+    const query = new URLSearchParams(target.query);
+    query.delete("path");
+    const suffix = query.toString();
+    const version = entry ? `&v=${entry.modifiedAt}:${entry.size}` : "";
+    const url = `${artifactUrl(projectId, target.path)}${suffix ? `&${suffix}` : ""}${version}${target.hash}`;
+    return [{ url, resolveAsset: () => null }];
+  }, [absoluteFileUrl, artifactUrl, projectId, folder, entriesVersion]);
+}
+
+export function ArtifactMarkdown({ projectId, folder, markdown, entries }: {
+  projectId: string; folder: string; markdown: string; entries: ArtifactEntry[];
 }) {
-  const { artifactUrl } = useWorkspace().api;
+  const { absoluteFileUrl, artifactUrl } = useWorkspace().api;
   // Artifact writes refresh `src` through this ref; a new `img` type would remount images.
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
+  const mermaidImages = useArtifactMermaidImages(projectId, folder, entries);
   const components = useMemo((): Components => {
     const resolve = (src: string) => {
+      const absolute = chatImageTarget(src);
+      if (absolute?.source === "absolute" && isExplicitNativeTarget(src)) return absoluteFileUrl(absolute.path) + absolute.hash;
       if (isExternalMarkdownTarget(src)) return src;
       const target = resolveMarkdownTarget(folder, src);
       if (!target) return null;
@@ -136,7 +153,7 @@ export function ArtifactMarkdown({
         );
       },
       img: ({ src, alt }) => {
-        if (!src || typeof src !== "string") return null;
+        if (!src || typeof src !== "string" || isNetworkImage(src)) return null;
         const url = resolve(src);
         if (!url) return null;
         return (
@@ -148,16 +165,19 @@ export function ArtifactMarkdown({
       },
       ...mdCodeComponents,
     };
-  }, [projectId, folder]);
+  }, [absoluteFileUrl, artifactUrl, projectId, folder]);
   return (
     <div className="md min-w-0 wrap-anywhere text-text leading-relaxed [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-border-muted [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-sm [&_code]:font-normal [&_code]:text-text [&_code]:bg-surface [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-1 [&_.katex]:text-prose-emphasis [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-sm [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:max-w-65 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-subtext [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:font-semibold [&_h2]:text-text [&_h2]:font-semibold [&_h3]:text-text [&_h3]:font-semibold [&_h4]:text-text [&_h4]:font-semibold [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:ps-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:ps-5.5 [&_li::marker]:text-subtext [&_table]:border-collapse [&_table]:text-sm [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-start [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-start [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pe-0 [&_blockquote]:pb-0.5 [&_blockquote]:ps-2.5 [&_blockquote]:border-s-[3px] [&_blockquote]:border-s-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text artifact-md text-lg [&_h1]:text-4xl [&_h1]:leading-tight [&_h1]:mt-7 [&_h1]:mx-0 [&_h1]:mb-3.5 [&_h2]:text-3xl [&_h2]:leading-tight [&_h2]:mt-7 [&_h2]:mx-0 [&_h2]:mb-2.5 [&_h3]:text-xl [&_h3]:leading-snug [&_h3]:mt-5.5 [&_h3]:mx-0 [&_h3]:mb-2 [&_h4]:text-lg [&_h4]:leading-snug [&_h4]:mt-4.5 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:overflow-x-auto [&_.artifact-img]:block [&_.artifact-img]:my-3 [&_.artifact-img]:mx-0 [&_.artifact-img_img]:max-w-full [&_.artifact-img_img]:h-auto [&_.artifact-img_img]:border [&_.artifact-img_img]:border-border [&_.artifact-img_img]:rounded-sm [&_.artifact-img-caption]:block [&_.artifact-img-caption]:mt-1 [&_.artifact-img-caption]:text-center [&_.artifact-img-caption]:text-sm [&_.artifact-img-caption]:text-subtext">
+      <ImageResolverContext value={mermaidImages}>
       <ReactMarkdown
+        urlTransform={(url, key, node) => key === "src" && node.tagName === "img" && nativeMarkdownPath(url) ? url : defaultUrlTransform(url)}
         remarkPlugins={[remarkGfm, [remarkMath, remarkMathOptions]]}
         rehypePlugins={[rehypeNetworkImages, rehypeKatex]}
         components={components}
       >
         {normalizeMarkdownForRendering(stripFrontmatter(markdown))}
       </ReactMarkdown>
+      </ImageResolverContext>
     </div>
   );
 }
@@ -221,6 +241,8 @@ function PreviewPane({
   const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const isDoc = kind === "markdown";
   const mdFolder = entry.path.split("/").slice(0, -1).join("/");
+  const isMermaid = kind === "text" && /\.(mmd|mermaid)$/i.test(entry.name);
+  const mermaidImages = useArtifactMermaidImages(projectId, mdFolder, artifactEntries);
   const rawUrl = `${artifactUrl(projectId, entry.path)}&v=${encodeURIComponent(version ?? `${entry.modifiedAt}:${entry.size}`)}`;
 
   let body: ReactNode;
@@ -256,6 +278,8 @@ function PreviewPane({
     );
   } else if (isDoc && !showSource) {
     body = <ArtifactMarkdown projectId={projectId} folder={mdFolder} markdown={text} entries={artifactEntries} />;
+  } else if (isMermaid && !showSource && !truncated) {
+    body = <MermaidBlock code={text} sourceToggle={false} imageResolver={mermaidImages} />;
   } else {
     body = <CodeView text={text} path={entry.path} />;
   }
@@ -279,7 +303,7 @@ function PreviewPane({
         {(kind === "text" || kind === "download") && (
           <span className="fpreview-size text-xs text-muted whitespace-nowrap shrink-0">{fmtBytes(entry.size)}</span>
         )}
-        {isDoc && (
+        {(isDoc || isMermaid) && (
           <IconButton
             size="small"
             active={showSource}

@@ -1,4 +1,6 @@
 import { defaultUrlTransform } from "react-markdown";
+import { isWindowsDrivePath } from "./nativePath.ts";
+export { isWindowsDrivePath } from "./nativePath.ts";
 
 export interface MarkdownTarget {
   path: string;
@@ -6,12 +8,13 @@ export interface MarkdownTarget {
   hash: string;
 }
 
-export function isNetworkImage(target: string): boolean {
-  return /^(https?:)?\/\//i.test(target.trim());
-}
-
 export function isExternalMarkdownTarget(target: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("//");
+}
+
+export function isNetworkImage(target: string): boolean {
+  const value = target.replace(/[\u0000-\u0020]/g, "");
+  return /^https?:/i.test(value) || value.startsWith("//") || value.startsWith("\\\\");
 }
 
 export function resolveMarkdownTarget(
@@ -103,10 +106,6 @@ export function firstCitedLine(lines: string): number | undefined {
   return line > 0 ? line : undefined;
 }
 
-export function isWindowsDrivePath(src: string): boolean {
-  return /^[a-z]:[\\/]/i.test(src);
-}
-
 export function nativeMarkdownPath(target: string): string | null {
   let path = target;
   const fileUrl = /^file:/i.test(target);
@@ -131,7 +130,17 @@ export function nativeMarkdownPath(target: string): string | null {
   return fileUrl && path.startsWith("/") && !path.startsWith("//") ? path : null;
 }
 
+/** Explicit local URI or drive path, including malformed inputs that must not
+ * be mistaken for ordinary artifact-relative paths. */
+export function isExplicitNativeTarget(target: string): boolean {
+  return /^file:/i.test(target) || isWindowsDrivePath(target);
+}
+
 export function chatImageTarget(src: string): (Pick<MarkdownTarget, "path" | "hash"> & { source: "absolute" | "artifact" | "checkout" }) | null {
+  if (/^file:/i.test(src)) {
+    const native = nativeMarkdownPath(src);
+    return native ? { path: native, hash: new URL(src).hash, source: "absolute" } : null;
+  }
   const windows = isWindowsDrivePath(src);
   if (!windows && isExternalMarkdownTarget(src)) return null;
   const resolved = resolveMarkdownTarget("", windows ? src.replaceAll("\\", "/") : src, true);
@@ -192,7 +201,7 @@ export function rehypeSafeUrls() {
           const value = String(node.properties[key] || "");
           // File destinations travel out of band, never as live browser protocols.
           if (key === "href" && (splitLineSuffix(value).line != null || nativeMarkdownPath(value))) node.properties["data-cited-href"] = value;
-          node.properties[key] = key === "src" && node.tagName === "img" && isWindowsDrivePath(value)
+          node.properties[key] = key === "src" && node.tagName === "img" && (isWindowsDrivePath(value) || nativeMarkdownPath(value))
             ? value : defaultUrlTransform(value);
         }
       }

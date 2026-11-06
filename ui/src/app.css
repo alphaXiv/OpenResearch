@@ -544,3 +544,21 @@
   --surface: var(--material-hover);
   --panel: var(--material-selected);
 }
+.pele {
+  --pele-bg: var(--base);
+  --pele-fg: var(--text);
+  --pele-muted: var(--subtext);
+  --pele-line: var(--text);
+  --pele-surface: var(--surface);
+  --pele-surface-alt: var(--base);
+  --pele-border: var(--border);
+  --pele-accent: var(--accent-blue);
+  --pele-series-1: var(--accent-blue);
+  --pele-series-2: var(--accent-teal);
+  --pele-series-3: var(--accent-purple);
+  --pele-series-4: var(--accent-amber);
+  --pele-series-5: var(--accent-red);
+  --pele-series-6: var(--accent-green);
+  --pele-series-7: var(--accent-orange);
+  --pele-series-8: var(--lineage);
+}
