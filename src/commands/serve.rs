@@ -23,7 +23,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::error::{anyhow, Result};
 use crate::local::is_terminal;
-use crate::store::{log_path, Store, StoredRun};
+use crate::store::{Store, StoredRun};
 
 pub async fn run(args: crate::ServeArgs) -> Result<()> {
     let port = args.port.unwrap_or(4790);
@@ -124,8 +124,17 @@ async fn handle(mut stream: TcpStream) -> Result<()> {
                             .get("offset")
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(0);
-                        let bytes = read_log_from(id, offset);
-                        respond(&mut stream, 200, "text/plain; charset=utf-8", &bytes).await
+                        let snapshot = crate::jobs::ssh::service::logs::read(
+                            id,
+                            offset,
+                            4_000_000,
+                            query.get("generation").map(String::as_str),
+                        )?;
+                        let head = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nX-Log-Generation: {}\r\nX-Log-Offset: {}\r\nConnection: close\r\n\r\n", snapshot.bytes.len(), snapshot.generation, snapshot.offset);
+                        stream.write_all(head.as_bytes()).await?;
+                        stream.write_all(&snapshot.bytes).await?;
+                        stream.flush().await?;
+                        Ok(())
                     }
                     _ => {
                         respond(
@@ -148,18 +157,6 @@ async fn handle(mut stream: TcpStream) -> Result<()> {
             }
         }
     }
-}
-
-fn read_log_from(run_id: &str, offset: u64) -> Vec<u8> {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(log_path(run_id)) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if f.seek(SeekFrom::Start(offset)).is_ok() {
-        let _ = f.take(4_000_000).read_to_end(&mut out);
-    }
-    out
 }
 
 async fn respond(
@@ -198,7 +195,7 @@ async fn serve_events(stream: &mut TcpStream) -> Result<()> {
     // Baseline: emit current runs once so a fresh subscriber can render
     // without a separate /runs fetch, then only diffs.
     let mut known: HashMap<String, (String, i64)> = HashMap::new();
-    let mut log_offsets: HashMap<String, u64> = HashMap::new();
+    let mut log_offsets: HashMap<String, (u64, String)> = HashMap::new();
     {
         let runs = Store::open()?.list_runs(200)?;
         for run in &runs {
@@ -207,12 +204,13 @@ async fn serve_events(stream: &mut TcpStream) -> Result<()> {
             // (chunked per tick), so a subscriber needs no separate backfill
             // fetch and byte offsets make reconnect dedup exact. Terminal runs
             // start at EOF — their history lives in R2 via the run's logKey.
+            let snapshot = crate::jobs::ssh::service::logs::read(&run.id, 0, 0, None)?;
             let start = if is_terminal(&run.status) {
-                log_size(&run.id)
+                snapshot.size
             } else {
                 0
             };
-            log_offsets.insert(run.id.clone(), start);
+            log_offsets.insert(run.id.clone(), (start, snapshot.generation));
             write_event(stream, "run.updated", &serde_json::json!({ "run": run })).await?;
         }
     }
@@ -243,34 +241,33 @@ async fn serve_events(stream: &mut TcpStream) -> Result<()> {
     }
 }
 
-fn log_size(run_id: &str) -> u64 {
-    std::fs::metadata(log_path(run_id))
-        .map(|m| m.len())
-        .unwrap_or(0)
-}
-
 async fn emit_log_delta(
     stream: &mut TcpStream,
     run: &StoredRun,
-    offsets: &mut HashMap<String, u64>,
+    offsets: &mut HashMap<String, (u64, String)>,
 ) -> Result<()> {
-    let offset = *offsets.entry(run.id.clone()).or_insert(0);
-    let size = log_size(&run.id);
-    if size <= offset {
+    let (offset, generation) = offsets.get(&run.id).cloned().unwrap_or_default();
+    let snapshot =
+        crate::jobs::ssh::service::logs::read(&run.id, offset, 4_000_000, Some(&generation))?;
+    if snapshot.bytes.is_empty() && snapshot.generation == generation && snapshot.offset == offset {
         return Ok(());
     }
-    let chunk = read_log_from(&run.id, offset);
-    offsets.insert(run.id.clone(), offset + chunk.len() as u64);
-    // base64, not lossy UTF-8: chunk boundaries are arbitrary byte positions,
-    // and exact byte lengths are what lets the client dedup replays.
+    offsets.insert(
+        run.id.clone(),
+        (
+            snapshot.offset + snapshot.bytes.len() as u64,
+            snapshot.generation.clone(),
+        ),
+    );
     use base64::Engine as _;
     write_event(
         stream,
         "run.log",
         &serde_json::json!({
             "runId": run.id,
-            "offset": offset,
-            "chunkB64": base64::engine::general_purpose::STANDARD.encode(&chunk),
+            "generation": snapshot.generation,
+            "offset": snapshot.offset,
+            "chunkB64": base64::engine::general_purpose::STANDARD.encode(&snapshot.bytes),
         }),
     )
     .await

@@ -3,6 +3,7 @@ import type { ReactElement } from "react";
 const MD_RE = /\.(md|mdx|markdown)$/i;
 const LATEX_RE = /\.tex$/i;
 const HTML_RE = /\.html?$/i;
+const CSV_RE = /\.[ct]sv$/i;
 const IMAGE_RE = /\.(apng|avif|bmp|gif|heic|heif|ico|jpe?g|jfif|jxl|pbm|pgm|png|pnm|ppm|svg|tiff?|webp)$/i;
 
 export function isImageFile(name: string): boolean {
@@ -19,6 +20,10 @@ export function isLatexFile(name: string): boolean {
 
 export function isHtmlFile(name: string): boolean {
   return HTML_RE.test(name);
+}
+
+export function isCsvFile(name: string): boolean {
+  return CSV_RE.test(name);
 }
 
 type Glyph =

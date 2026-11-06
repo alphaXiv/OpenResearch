@@ -1,42 +1,34 @@
+import { useMachines } from "../machineSelection";
+import { useSignIn } from "./AccountChip";
+import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
+import {
+  useContext,
+  useId,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { cn } from "./ui/cn";
+import { type DialogContentProps } from "../dialog";
+import { DialogContent, DialogTitle } from "./ui";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
+import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
+import { OpenResearchSshKey } from "./OpenResearchSshKey";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
-import {
-  setScopedQueryData,
-  workspaceScope,
-  workspaceKey,
-  isCurrentScope,
-  queryClient,
-} from "../queries/client";
+import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarnessDialog";
+
 import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
 
-import {
-  getHarnessesQuery,
-  getHarnessSetupCommandsQuery,
-  refreshHarnesses,
-  getK8sSettingsQuery,
-  getModalSettingsQuery,
-  getSshMasterStatusQuery,
-  getSshSettingsQuery,
-  getSlurmSettingsQuery,
-  getRaySettingsQuery,
-  getOpenResearchSettingsQuery,
-  getLocalMachineQuery,
-  getComputeSettingsQuery,
-  getTinkerSettingsQuery,
-  getHfSettingsQuery,
-  getEnvVarsQuery,
-  getTelemetryQuery,
-  getProjectDefaultsQuery,
-  getProjectGitStatusQuery,
-  getDataDirQuery,
-} from "../queries/settings";
+import { worstPerAlias } from "../engineHosts";
+import { runActive, runDisplay } from "../runDisplay";
 
-import { getOverleafSettingsQuery } from "../queries/files";
-import { githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRunsQuery, repoAccessQuery } from "../queries/projects";
 import {
   ArrowLeft,
   ArrowRight,
@@ -54,40 +46,16 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+
 import {
-  deleteEnvVar,
-  listAcpHarnesses,
-  removeAcpHarness,
   type AcpDefinition,
-  deleteOverleafSession,
-  deleteOverleafToken,
   fmtBytes,
   fmtDuration,
   fmtNumber,
-  setComputeDefault,
-  setProjectDefaults,
-  setTelemetry,
-  saveOverleafSession,
-  saveOverleafToken,
-  disableProjectGithub,
-  enableProjectGithub,
-  initializeProjectGit,
-  saveHfToken,
-  saveTinkerKey,
-  saveModalToken,
-  saveK8sSettings,
-  saveRaySettings,
-  saveSlurmSettings,
-  setEnvVar,
-  validateDataDir,
-  moveDataDir,
   type DataDirSettings,
   type DataDirValidation,
-  rayPreflight,
-  trackioPreflight,
-  runDisplayStatus,
   timeAgo,
+  type EngineHost,
   type ComputeSettings,
   type ComputeTargetId,
   type ComputeTargetSummary,
@@ -105,6 +73,7 @@ import {
   type K8sSettings,
   type LocalMachine,
   type ModalSettings,
+  type VercelPlan,
   type RayPreflight,
   type TrackioPreflight,
   type RaySettings,
@@ -113,18 +82,15 @@ import {
   type SlurmSettings,
   type SshPreflight,
   type SshExecutionPreflight,
-  testSshExecution,
-  applyUpdate,
-  installCli,
-  setAutoUpdate as setAutoUpdateApi,
   type InstallChannel,
   type InstalledCli,
+  AlphaXivNotConnectedError,
 } from "../api";
-import { onDataDirMove } from "../events";
+
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
-import { useThemePreference, type ThemePreference } from "../theme";
+import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
-import { ltr } from "../i18n";
+import { fmtClock, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
@@ -132,13 +98,16 @@ import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
-import { OptionPicker, usePopover } from "./ModelPicker";
+import { OptionPicker } from "./ModelPicker";
+import { useDebouncedValue } from "./NewProjectForm";
+import { Popover } from "@base-ui/react/popover";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { HarnessLogo } from "./HarnessLogo";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
-import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
+import { SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
-import { SshConfigDialog } from "./SshConfigDialog";
+import { showSshConfigDialog } from "./SshConfigDialog";
 import {
   Badge,
   Button,
@@ -148,6 +117,7 @@ import {
   Input,
   LoadingRow,
   MenuItem,
+  SEGMENTED_CLASS_NAME,
   showAlert,
   Spinner,
   Switch,
@@ -165,9 +135,9 @@ const SETTINGS_CARD_CLASS_NAME = [
 ].join(" ");
 
 const KV_CLASS_NAME = [
-  "kv grid grid-cols-[auto_1fr] items-baseline gap-y-[3px] gap-x-3.5 text-base",
+  "kv grid grid-cols-[auto_1fr] items-baseline gap-y-1 gap-x-3.5 text-base",
   "[&_.k]:text-sm [&_.k]:text-subtext [&_.v]:text-base [&_.v]:text-text",
-  "[&_.v]:break-all",
+  "[&_.v]:wrap-anywhere",
 ].join(" ");
 
 const COMPUTE_DETAILS_CLASS_NAME = [
@@ -192,7 +162,7 @@ const FORM_CLASS_NAME = [
   "[&_.repo-hint]:font-normal [&_.repo-hint]:text-sm",
   "[&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal",
   "[&_.folder-picker-control]:flex [&_.folder-picker-control]:items-center",
-  "[&_.folder-picker-control]:gap-[9px] [&_.folder-picker-control]:w-full",
+  "[&_.folder-picker-control]:gap-2 [&_.folder-picker-control]:w-full",
   "[&_.folder-picker-control]:min-w-0 [&_.folder-picker-control]:py-2 [&_.folder-picker-control]:px-2.5",
   "[&_.folder-picker-control]:overflow-hidden [&_.folder-picker-control]:bg-background",
   "[&_.folder-picker-control]:border [&_.folder-picker-control]:border-border",
@@ -201,7 +171,7 @@ const FORM_CLASS_NAME = [
   "[&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard",
   "[&_.folder-picker-control:hover:not(:disabled)]:border-muted",
   "[&_.folder-picker-control:hover:not(:disabled)]:shadow-control-subtle",
-  "[&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-text",
+  "[&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-focus",
   "[&_.folder-picker-control:focus-visible]:outline-offset-2 [&_.folder-picker-control_span]:flex-1",
   "[&_.folder-picker-control_span]:min-w-0 [&_.folder-picker-control_span]:overflow-hidden",
   "[&_.folder-picker-control_span]:text-ellipsis [&_.folder-picker-control_span]:whitespace-nowrap",
@@ -210,7 +180,7 @@ const FORM_CLASS_NAME = [
   "[&_.folder-picker-chevron]:text-muted",
   "[&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:text-subtext",
   "[&_.folder-picker-hint]:text-subtext [&_.folder-picker-hint]:text-sm",
-  "[&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-[1.4]",
+  "[&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-snug",
   "[&_.project-location-field]:flex [&_.project-location-field]:flex-col",
   "[&_.project-location-field]:gap-2 [&_.project-location-label]:text-text",
   "[&_.project-location-label]:text-base",
@@ -225,11 +195,11 @@ const FORM_CLASS_NAME = [
   "[&_.paper-destination_code]:text-text [&_.paper-destination_code]:text-sm",
   "[&_.paper-destination_code]:font-normal",
   "[&_.paper-destination_code]:text-ellipsis [&_.paper-destination_code]:whitespace-nowrap",
-  "[&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-[9px] [&_.project-path-notice]:px-[11px]",
+  "[&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-2 [&_.project-path-notice]:px-3",
   "[&_.project-path-notice]:border [&_.project-path-notice]:border-border-variant",
   "[&_.project-path-notice]:rounded-sm [&_.project-path-notice]:bg-surface",
-  "[&_.project-path-notice]:text-base [&_.project-path-notice]:leading-relaxed [&_.project-path-notice]:text-text",
-  "[&_.project-path-notice]:leading-[1.4]",
+  "[&_.project-path-notice]:text-base [&_.project-path-notice]:text-text",
+  "[&_.project-path-notice]:leading-snug",
   "[&_.project-path-notice.error]:border-danger-notice-border",
   "[&_.paper-results]:flex [&_.paper-results]:flex-col",
   "[&_.paper-results]:border [&_.paper-results]:border-border [&_.paper-results]:rounded-md",
@@ -264,8 +234,8 @@ const FORM_CLASS_NAME = [
 ].join(" ");
 
 const PROJECT_DEFAULT_ROW_CLASS_NAME = [
-  "project-default-row flex items-center justify-between gap-6",
-  "pt-3.5 border-t border-t-border-variant [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0",
+  "project-default-row flex items-center justify-between gap-6 [.project-default-row+&]:mt-3.5",
+  "pt-3.5 border-t border-t-border-variant [&_p]:mt-1 [&_p]:mx-0 [&_p]:mb-0",
   "[&_.project-default-title]:text-base [&_p]:text-sm [&_p]:leading-relaxed [&_p]:text-text",
 ].join(" ");
 
@@ -387,16 +357,22 @@ export function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undef
 }
 
 function HarnessesTab({ remote }: { remote: boolean }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog } = useWorkspace().dialogs;
+
+  const { getHarnessesQuery, getHarnessSetupCommandsQuery, refreshHarnesses } = useWorkspace().queries;
+  const { workspaceKey, queryClient } = useWorkspace();
+  const { listAcpHarnesses, listAcpPresets, removeAcpHarness } = useWorkspace().api;
+
   const harnessesOptions = getHarnessesQuery();
-  const { data: harnesses = null } = useQuery(harnessesOptions);
+  const { data: harnesses = null, isError: harnessesError } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
-  const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
-  const [authHarness, setAuthHarness] = useState<Harness | null>(null);
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const definitions = useQuery({ queryKey: workspaceKey("getAcpHarnesses"), queryFn: listAcpHarnesses });
-  const [acpDialog, setAcpDialog] = useState<AcpDefinition | "new" | null>(null);
+  const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets });
   const reloadAcp = () => { void definitions.refetch(); load(true); };
   const removeAcp = async (id: string) => {
     try { await removeAcpHarness(id); reloadAcp(); }
@@ -410,132 +386,228 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       .finally(() => setRefreshing(false));
   };
 
-  const orderedHarnesses = [...(harnesses ?? [])].sort(
-    (a, b) => Number(b.agentReady) - Number(a.agentReady),
-  );
-  const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
-  const acp = definitions.data?.find((definition) => definition.id === h?.id);
+  const orderedHarnesses = sortHarnesses(harnesses ?? []);
+  const added = orderedHarnesses.filter((h) => h.installed || h.installBroken || definitions.data?.some((definition) => definition.id === h.id));
+  const ready = added.filter((h) => h.agentReady);
+  const suggestions = orderedHarnesses
+    .filter((h) => !h.agentReady && !h.catalogPending && (["claude-code", "codex", "opencode"].includes(h.id) || h.installed || (!h.setupUrl && definitions.data?.some((definition) => definition.id === h.id))))
+    .filter((h, index, all) => !h.setupUrl || all.findIndex((other) => other.setupUrl === h.setupUrl) === index);
+
+  const openAcp = (definition?: AcpDefinition) => showCustomDialog({
+    component: AcpHarnessDialog,
+    props: { customOnly: !definition, definition, onSaved: reloadAcp },
+    onConfirm: (save) => save(),
+    onCancel: "close",
+  });
+  const openAuth = (harness: Harness) => showCustomDialog({
+    component: AcpAuthDialog,
+    props: { remote, harness },
+    onConfirm: () => {},
+    onCancel: "close",
+  });
+  const openSetup = (harness: Harness, commands = queryClient.getQueryData(getHarnessSetupCommandsQuery().queryKey)?.[harness.id]) => {
+    if (remote || !commands) return;
+    showCustomDialog({
+      component: HarnessSetupDialog,
+      props: { harness, commands, onAuth: openAuth, onBack: () => openAdd() },
+      onConfirm: () => {},
+      onCancel: "close",
+    });
+  };
+  const openAdd = (initialCandidate?: HarnessId) => showCustomDialog({
+    component: AddHarnessDialog,
+    props: {
+      initialCandidate,
+      remote,
+      onCustom: () => openAcp(),
+      onEdit: openAcp,
+      onSetup: (harness, commands) => {
+        if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) openAuth(harness);
+        else openSetup(harness, commands);
+      },
+    },
+    onConfirm: () => {},
+    onCancel: "close",
+  });
+  const chooseHarness = (id: HarnessId) => {
+    const harness = orderedHarnesses.find((item) => item.id === id);
+    if (!harness) return;
+    if (canConfigureHarness(harness, remote, setupCommands.data?.[harness.id])) {
+      if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) openAuth(harness);
+      else openSetup(harness);
+    } else openAdd(id);
+  };
 
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
-      {acpDialog && <AcpHarnessDialog definition={acpDialog === "new" ? undefined : acpDialog} onClose={() => setAcpDialog(null)} onSaved={reloadAcp} />}
-      {authHarness && <AcpAuthDialog remote={remote} harness={authHarness} onClose={() => setAuthHarness(null)} />}
-      {!remote && setupHarness && setupCommands.data && (
-        <HarnessSetupDialog
-          harness={setupHarness}
-          commands={setupCommands.data[setupHarness.id]}
-          onClose={() => setSetupHarness(null)}
-        />
-      )}
-      <div className="mt-3 mb-3.5 flex w-full flex-wrap items-center justify-between gap-3 [&_.option-menu]:w-max">
-        <div className="w-96 max-w-full">
-          <OptionPicker
-            variant="field"
-            dropDown
-            title={m.settings_page_harnesses()}
-            choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
-            value={h?.id ?? null}
-            onSelect={(id) => {
-              const selected = orderedHarnesses.find((harness) => harness.id === id);
-              if (selected) setActive(selected.id);
-            }}
-            renderIcon={(choice) => {
-              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-              return harness && <HarnessLogo harness={harness.id} logo={harness.logo} />;
-            }}
-            renderLabel={(choice) => {
-              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-              const status = harness && harnessStatus(harness);
-              return (
-                <span className="inline-flex items-center gap-2 whitespace-nowrap">
-                  {choice.label}
-                  {status && (
-                    <>
-                      <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
-                      <span className="sr-only">{status.label}</span>
-                    </>
-                  )}
-                </span>
-              );
-            }}
-          />
-        </div>
-        <Button className="ms-auto shrink-0" onClick={() => setAcpDialog("new")} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
+      <div className="my-3 flex flex-wrap items-center gap-2">
+        <Button onClick={() => openAdd()} disabled={!harnesses} aria-haspopup="dialog"><Plus size={14} />{m.harness_add()}</Button>
+        <Button onClick={() => load(true, true)} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+        </Button>
       </div>
-      {!harnesses ? (
-        <LoadingRow>
-          <Spinner /> {m.settings_page_detecting_harnesses()}
-        </LoadingRow>
-      ) : !h ? null : (
-        <div className={SETTINGS_CARD_CLASS_NAME}>
-          <div className="settings-card-head flex items-center gap-2.5 mb-3">
-            {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
-            <Badge variant={harnessStatus(h).variant}>{h.adapterMissing ? m.acp_adapter_required() : harnessStatus(h).label}</Badge>
-            <div className="spacer flex-1" />
-            {!remote && h.adapterMissing && <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
-            {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => setAuthHarness(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
-            {acp && <><Button size="small" onClick={() => setAcpDialog(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
-            {!h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
-              <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
-                <SquareTerminal size={14} /> {m.harness_setup_login()}
-              </Button>
-            )}
-            <Button size="small" onClick={() => load(true, true)} disabled={refreshing}>
-              <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-            </Button>
-          </div>
-          <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
-            <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
-            <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
-            <span className="k">{m.settings_page_version()}</span>
-            <span className="v">{h.version ?? "—"}</span>
-            {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
-              <>
-                <span className="k">{m.settings_page_auth()}</span>
-                <span className="v"><AuthLabel h={h} /></span>
-              </>
-            )}
-            {h.account && (
-              <>
-                <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
-                <span className="v">{h.account}</span>
-              </>
-            )}
-            {h.org && (
-              <>
-                <span className="k">{m.settings_page_org()}</span>
-                <span className="v">{h.org}</span>
-              </>
-            )}
-            <span className="k">{m.settings_page_agent_models()}</span>
-            <span className="v">
-              {h.catalogPending
-                ? m.onboarding_checking()
-                : h.models.length > 0
-                ? m.settings_models_available({ count: fmtNumber(h.models.length) })
-                : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
-            </span>
-          </div>
-          {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
-            note={h.agentNote}
-            className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
-            disabled={remote}
-            resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
-            onRun={(command, path) => setupRun.start(command, path, h.id)}
-          />}
-          {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
-          {setupRun.run && (
-            // Hidden, not unmounted, while another harness tab is showing: a
-            // switch mid-OAuth must not kill the sign-in.
-            <div hidden={setupRun.run.owner !== h.id}>
-              <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />
+      {definitions.isError && <p role="alert" className="text-sm text-accent-red">{m.acp_definitions_load_failed()} <Button variant="ghost" onClick={() => void definitions.refetch()}>{m.app_retry()}</Button></p>}
+      {!harnesses && harnessesError ? (
+        <p role="alert" className="text-sm text-accent-red">{m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => load(true, true)}>{m.app_retry()}</Button></p>
+      ) : !harnesses ? (
+        <LoadingRow><Spinner /> {m.settings_page_detecting_harnesses()}</LoadingRow>
+      ) : ready.length === 0 && suggestions.length === 0 && definitions.data && !definitions.isError ? (
+        <p className="text-sm text-subtext">{m.harness_none_added()}</p>
+      ) : ready.map((h) => {
+        const acp = definitions.data?.find((definition) => definition.id === h.id);
+        const expanded = active === h.id;
+        const optionalLogin = h.id === "opencode" && !h.authenticated && !remote && !h.catalogPending && !h.needsConfigRepair;
+        const status = harnessStatus(h);
+        const detail = h.authCheckFailed
+          ? status.label
+          : [h.accountName, h.id === "opencode" ? h.account : undefined, h.plan].filter(Boolean).join(" · ") ||
+            (h.accountLoading
+              ? m.onboarding_loading_account()
+              : h.id === "opencode" && !h.authenticated && !h.authMethod
+                ? m.settings_free_models_no_sign_in()
+                : claudeProviderLabel(h) ||
+                  (h.authMethod === "apiKey" ? m.onboarding_api_key() : h.authMethod === "local" ? m.projects_local() : status.label));
+        return (
+          <div key={h.id} className={cn(SETTINGS_CARD_CLASS_NAME, "mb-3 p-0")}>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setActive(expanded ? null : h.id)}
+                aria-expanded={expanded}
+                aria-controls={elementId(`harness-details-${h.id}`)}
+                className="flex min-h-14 w-full items-center gap-3 rounded-lg px-4.5 py-2 text-start text-text hover:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-[-2px]"
+              >
+                <HarnessLogo harness={h.id} logo={h.logo} size={22} />
+                <span className={cn("flex min-w-0 flex-1 flex-col", optionalLogin && "me-24")}>
+                  <span className="font-medium">{h.name}</span>
+                  <span dir="auto" className={cn("wrap-anywhere text-sm", h.authCheckFailed ? "text-accent-amber" : "text-subtext")}>{detail}</span>
+                </span>
+                <ChevronDown size={16} aria-hidden="true" className={cn("shrink-0 text-muted", expanded && "rotate-180")} />
+              </button>
+              {optionalLogin && (
+                <Button size="small" className="absolute end-9 top-1/2 -translate-y-1/2" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
+                  <SquareTerminal size={14} />
+                  {m.harness_setup_login()}
+                </Button>
+              )}
             </div>
-          )}
-          {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
+            <div id={elementId(`harness-details-${h.id}`)} hidden={!expanded} className="px-4.5 pb-4 pt-2">
+              {expanded && (
+                <>
+                  <div className="settings-card-head flex items-center gap-2.5 mb-3">
+                    {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
+                    {!remote && h.adapterMissing && <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
+                    {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => openAuth(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
+                    {acp && <><Button size="small" onClick={() => openAcp(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
+                    {!h.id.startsWith("acp:") && !remote && !h.catalogPending && !h.needsConfigRepair && (h.installBroken || h.authState === "unsupported") && (
+                      <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
+                        <SquareTerminal size={14} />
+                        {h.installBroken ? m.harness_setup_install() : m.harness_setup_update()}
+                      </Button>
+                    )}
+                    {h.id !== "opencode" && !h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
+                      <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
+                        <SquareTerminal size={14} /> {m.harness_setup_login()}
+                      </Button>
+                    )}
+                  </div>
+                  <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
+                    <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
+                    <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
+                    <span className="k">{m.settings_page_version()}</span>
+                    <span className="v">{h.version ?? "—"}</span>
+                    {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
+                      <>
+                        <span className="k">{m.settings_page_auth()}</span>
+                        <span className="v"><AuthLabel h={h} /></span>
+                      </>
+                    )}
+                    {h.account && (
+                      <>
+                        <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
+                        <span className="v">{h.account}</span>
+                      </>
+                    )}
+                    {h.org && (
+                      <>
+                        <span className="k">{m.settings_page_org()}</span>
+                        <span className="v">{h.org}</span>
+                      </>
+                    )}
+                    <span className="k">{m.settings_page_agent_models()}</span>
+                    <span className="v">
+                      {h.catalogPending
+                        ? m.onboarding_checking()
+                        : h.models.length > 0
+                        ? m.settings_models_available({ count: fmtNumber(h.models.length) })
+                        : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
+                    </span>
+                  </div>
+                  {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
+                    note={h.agentNote}
+                    className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
+                    disabled={remote}
+                    resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
+                    onRun={(command, path) => setupRun.start(command, path, h.id)}
+                  />}
+                  {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
+                  {h.id === "opencode" && <LocalModelSetup />}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {suggestions.length > 0 && (
+        <div className="mt-4">
+          <h3 className="mb-2 text-sm font-medium text-subtext">{m.harness_suggested()}</h3>
+          <div className="flex flex-wrap gap-2">
+            {suggestions.map((h) => {
+              const name = presets.data?.find((preset) => preset.setupUrl === h.setupUrl)?.name ?? h.name;
+              return (
+                <Button key={h.id} onClick={() => chooseHarness(h.id)} aria-haspopup="dialog" aria-label={`${m.harness_add()}: ${name}`}>
+                  <HarnessLogo harness={h.id} logo={h.logo} size={16} />
+                  {name}
+                  <Plus size={14} aria-hidden="true" />
+                </Button>
+              );
+            })}
+          </div>
         </div>
       )}
+      {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />}
+      <NestedDelegationRow />
     </>
+  );
+}
+
+function NestedDelegationRow() {
+  const { updateUiState } = useWorkspace().api;
+  const { getUiStateQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+  const uiStateOptions = getUiStateQuery();
+  const { data: uiState } = useQuery(uiStateOptions);
+  const save = useMutation({
+    mutationFn: (nestedDelegation: boolean) => updateUiState({ nestedDelegation }),
+    onSuccess: (saved) => setScopedQueryData(uiStateOptions.queryKey, saved),
+    onError: (error) => showAlert(error instanceof Error ? error.message : String(error), "error"),
+  });
+  if (!uiState) return null;
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+      <div>
+        <div className="project-default-title text-base font-medium">{m.settings_nested_subagents()}</div>
+        <p>{m.settings_nested_subagents_description()}</p>
+      </div>
+      <Switch
+        type="button"
+        checked={uiState.nestedDelegation}
+        aria-label={m.settings_nested_subagents()}
+        disabled={save.isPending}
+        onClick={() => save.mutate(!uiState.nestedDelegation)}
+      />
+    </div>
   );
 }
 
@@ -554,6 +626,10 @@ function K8sSection({
 }: {
   onEditState?: (state: { dirty: boolean; saving: boolean }) => void;
 }) {
+  const { saveK8sSettings } = useWorkspace().api;
+  const { getK8sSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveK8sSettingsMutation = useMutation({ mutationFn: saveK8sSettings });
 
   const settingsOptions = getK8sSettingsQuery();
@@ -684,7 +760,7 @@ function K8sSection({
             {error && <p className="m-0 text-sm text-accent-red whitespace-pre-wrap break-words">{error}</p>}
             <div className="flex justify-end gap-2">
               <Button type="button" onClick={() => void checkAgain()} disabled={saving || checking || !unchanged}>
-                <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+                <RefreshCw size={14} /> {checking ? m.common_checking() : m.settings_check_again()}
               </Button>
               <Button variant="primary" type="submit" disabled={saving || checking || unchanged}>
                 {saving ? m.common_saving() : m.common_save()}
@@ -700,6 +776,10 @@ function K8sSection({
 // --- compute (modal) ------------------------------------------------------------
 
 function ModalSection() {
+  const { saveModalToken } = useWorkspace().api;
+  const { getModalSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveModalTokenMutation = useMutation({ mutationFn: (args: Parameters<typeof saveModalToken>) => saveModalToken(...args) });
 
   const sOptions = getModalSettingsQuery();
@@ -779,9 +859,182 @@ function ModalSection() {
         {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={loading || saving} onClick={() => void refresh()}>
-            <RefreshCw size={13} /> {m.settings_page_refresh()}
+            <RefreshCw size={14} /> {m.settings_page_refresh()}
           </Button>
           <Button variant="primary" type="submit" disabled={!tokenId.trim() || !tokenSecret.trim() || loading || saving || s?.processEnv}>
+            {saving ? m.common_saving() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+    </>
+  );
+}
+
+// --- compute (vercel) ------------------------------------------------------------
+
+/** Offered when the team has no project by this name; orx creates it on save. */
+const VERCEL_NEW_PROJECT = "openresearch";
+
+const VERCEL_PLAN_LIMITS: Record<VercelPlan, () => string> = {
+  hobby: m.settings_vercel_plan_hobby,
+  pro: m.settings_vercel_plan_pro,
+  enterprise: m.settings_vercel_plan_enterprise,
+};
+
+function VercelSection() {
+  const { saveVercelSetup, getVercelScopes } = useWorkspace().api;
+  const { getVercelSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
+  const saveMutation = useMutation({ mutationFn: saveVercelSetup });
+  const sOptions = getVercelSettingsQuery();
+  const sQuery = useQuery(sOptions);
+  const s = sQuery.data ?? null;
+  const [token, setToken] = useState("");
+  const [pickedTeam, setPickedTeam] = useState<string | null>(null);
+  const [pickedProject, setPickedProject] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const typedToken = useDebouncedValue(token.trim(), 400);
+
+  const savedScopes = s?.scopes ?? null;
+  const lookup = typedToken || (pickedTeam && pickedTeam !== savedScopes?.teamId)
+    ? { token: typedToken || null, teamId: pickedTeam }
+    : null;
+  const lookupQuery = useQuery({
+    queryKey: ["vercelScopes", lookup?.token, lookup?.teamId],
+    queryFn: () => getVercelScopes(lookup!.token, lookup!.teamId),
+    enabled: lookup !== null,
+    retry: false,
+    gcTime: 0,
+  });
+  const scopes = lookup ? lookupQuery.data ?? null : savedScopes;
+  const lookupError = lookup ? lookupQuery.error?.message ?? null : s?.error ?? null;
+  const finding = lookup !== null && lookupQuery.isFetching;
+
+  const teamId = pickedTeam ?? scopes?.teamId ?? null;
+  const team = scopes?.teams.find((item) => item.id === teamId) ?? null;
+  const projects = scopes?.teamId === teamId ? scopes.projects : [];
+  const hasDefaultProject = projects.some((project) => project.name === VERCEL_NEW_PROJECT);
+  const savedProject = teamId === savedScopes?.teamId && projects.some((project) => project.id === s?.projectId)
+    ? s?.projectId ?? null
+    : null;
+  const projectId = pickedProject
+    ?? savedProject
+    ?? projects.find((project) => project.name === VERCEL_NEW_PROJECT)?.id
+    ?? "new";
+  const projectChoices = [
+    ...(hasDefaultProject ? [] : [{ id: "new", label: m.settings_vercel_new_project({ name: VERCEL_NEW_PROJECT }) }]),
+    ...projects.map((project) => ({ id: project.id, label: project.name })),
+  ];
+
+  const locked = !!s?.processEnv;
+  const changed = !!typedToken || teamId !== savedScopes?.teamId || projectId !== s?.projectId;
+  const canSave = !locked && !saving && !finding && changed && !!scopes && !!teamId && (!!typedToken || !!s?.maskedToken);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!canSave || !teamId) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const next = await saveMutation.mutateAsync({
+        token: typedToken || null,
+        teamId,
+        projectId: projectId === "new" ? null : projectId,
+        newProject: projectId === "new" ? VERCEL_NEW_PROJECT : null,
+      });
+      setScopedQueryData(sOptions.queryKey, next);
+      setToken("");
+      setPickedTeam(null);
+      setPickedProject(null);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!s) {
+    return sQuery.error
+      ? <div className="error">{sQuery.error.message}</div>
+      : <LoadingRow><Spinner /> {m.settings_page_checking_vercel()}</LoadingRow>;
+  }
+
+  return (
+    <>
+      <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+        <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+        <dd className="m-0">
+          {!s.configured ? (
+            <Badge variant="warning">{m.settings_page_not_configured()}</Badge>
+          ) : s.error ? (
+            <Badge variant="error">{m.settings_vercel_cant_connect()}</Badge>
+          ) : (
+            <Badge variant="success">{m.settings_page_ready()}</Badge>
+          )}
+        </dd>
+      </dl>
+      {locked && <p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_vercel_env_override()}</p>}
+      {!locked && s.oidc && <p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_vercel_replaces_oidc()}</p>}
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {s.maskedToken ? m.settings_replace_token() : m.settings_vercel_access_token()}
+          <Input
+            type="password"
+            value={token}
+            onChange={(event) => {
+              setToken(event.target.value);
+              setPickedTeam(null);
+              setPickedProject(null);
+            }}
+            placeholder={s.maskedToken ?? undefined}
+            autoComplete="new-password"
+            disabled={locked}
+          />
+        </label>
+        <a className="self-start text-sm text-subtext underline" href="https://vercel.com/account/settings/tokens" target="_blank" rel="noreferrer">
+          {m.settings_vercel_create_token()}
+        </a>
+        {finding && !scopes ? (
+          <LoadingRow><Spinner /> {m.settings_vercel_finding_teams()}</LoadingRow>
+        ) : lookupError ? (
+          <p className="m-0 text-sm text-accent-red break-words">{lookupError}</p>
+        ) : scopes && (
+          <>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_vercel_team()}
+              <OptionPicker
+                choices={scopes.teams.map((item) => ({ id: item.id, label: item.name }))}
+                value={teamId}
+                variant="field"
+                floating
+                dropDown
+                disabled={locked || saving}
+                onSelect={(id) => {
+                  setPickedTeam(id);
+                  setPickedProject(null);
+                }}
+              />
+              {team?.plan && <span className="font-normal">{VERCEL_PLAN_LIMITS[team.plan]()}</span>}
+            </label>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_vercel_project()}
+              <OptionPicker
+                choices={projectChoices}
+                value={projectId}
+                variant="field"
+                floating
+                dropDown
+                disabled={locked || saving || finding}
+                onSelect={setPickedProject}
+              />
+            </label>
+          </>
+        )}
+        {saveError && <p className="m-0 text-sm text-accent-red break-words">{saveError}</p>}
+        <div className="flex justify-end gap-2">
+          <Button variant="primary" type="submit" disabled={!canSave}>
             {saving ? m.common_saving() : m.common_save()}
           </Button>
         </div>
@@ -797,6 +1050,9 @@ const CONNECTION_BADGE_CONNECTING_CLASS = "rounded-sm border-accent-blue bg-acce
 const SSH_MASTER_POLL_MS = 5_000;
 
 function useSshMasterStatuses(hosts: string[]) {
+  const { workspaceScope, isCurrentScope, setScopedQueryData } = useWorkspace();
+  const { getSshMasterStatusQuery } = useWorkspace().queries;
+
   const scope = workspaceScope();
   const options = hosts.map((host) => getSshMasterStatusQuery(host));
   const queries = useQueries({ queries: options.map((query) => ({ ...query, refetchInterval: SSH_MASTER_POLL_MS })) });
@@ -806,6 +1062,31 @@ function useSshMasterStatuses(hosts: string[]) {
   };
   return [statuses, markRunning] as const;
 }
+
+/** The run engine's view of a host, when it has one worth showing over the last manual check. */
+function EngineHostCell({ host }: { host: EngineHost }) {
+  let badge = <Badge className="rounded-sm" variant="success">{m.settings_host_connected()}</Badge>;
+  let note: string | null = null;
+
+  if (host.status === "needs_auth") {
+    badge = <Badge className="rounded-sm" variant="warning">{m.status_needs_auth()}</Badge>;
+  } else if (host.status === "backoff") {
+    badge = <Badge className="rounded-sm" variant="warning">{m.status_unreachable()}</Badge>;
+    const since = fmtClock(host.sinceMs);
+    note = host.nextRetryMs === null
+      ? m.settings_host_since({ time: since })
+      : m.settings_host_since_next_try({ time: since, next: fmtClock(host.nextRetryMs) });
+  }
+
+  return (
+    <div className="flex flex-col items-start gap-1" role="status">
+      {badge}
+      {note && <span className="text-xs text-subtext">{note}</span>}
+    </div>
+  );
+}
+
+const ENGINE_HOST_SHOWN: ReadonlySet<EngineHost["status"]> = new Set(["live", "backoff", "needs_auth"]);
 
 function HostTestCell({ test, connecting, masterRunning, containerFailed = false }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | null | undefined; containerFailed?: boolean }) {
   if (connecting)
@@ -839,10 +1120,17 @@ function HostTestCell({ test, connecting, masterRunning, containerFailed = false
 }
 
 function SshSection() {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+  const { useEngineHosts, setEngineHost } = useWorkspace().queries;
+  const { takeHostConnect, onHostConnectRequest } = useWorkspace().events;
+  const { retryEngineHost } = useWorkspace().api;
+  const { dialogs } = useWorkspace();
+  const { getSshSettingsQuery } = useWorkspace().queries;
+  const { testSshExecution } = useWorkspace().api;
+
   const hostsOptions = getSshSettingsQuery();
   const hostsQuery = useQuery(hostsOptions);
   const hosts = hostsQuery.data?.hosts ?? (hostsQuery.isError ? [] : null);
-  const [configOpen, setConfigOpen] = useState(false);
   const [tests, setTests] = useState<Record<string, SshExecutionPreflight>>({});
   const [drafts, setDrafts] = useState<Record<string, string | null>>({});
   const activeAttempt = useRef(0);
@@ -858,6 +1146,10 @@ function SshSection() {
     })
     .map((host) => host.host) ?? [];
   const [masterRunning, markMasterRunning] = useSshMasterStatuses(checkedHosts);
+  const engineHosts = useEngineHosts();
+  const engineByAlias = worstPerAlias(engineHosts ?? []);
+  const [busyHost, setBusyHost] = useState<string | null>(null);
+  const [hostError, setHostError] = useState<{ host: string; message: string } | null>(null);
 
   function connect(host: string) {
     activeAttempt.current += 1;
@@ -867,6 +1159,38 @@ function SshSection() {
     setConnectingHost(host);
     setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
   }
+
+  // A run's Connect lands here: start that host's flow and bring its row into view.
+  useEffect(() => {
+    const take = () => {
+      const host = takeHostConnect();
+      if (!host) return;
+      connect(host);
+      requestAnimationFrame(() => document.getElementById(elementId(`ssh-host-${host}`))?.scrollIntoView({ block: "center" }));
+    };
+    take();
+    return onHostConnectRequest(take);
+  }, []);
+
+  /** Retry and Test on key hosts: one request, its error shown under the host's row. */
+  async function hostAction(host: string, action: () => Promise<void>) {
+    setBusyHost(host);
+    setHostError(null);
+    try {
+      await action();
+    } catch (error) {
+      setHostError({ host, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusyHost(null);
+    }
+  }
+
+  const retry = (host: string) => hostAction(host, async () => setEngineHost(await retryEngineHost(host)));
+
+  const test = (host: string, reference: string | null) => hostAction(host, async () => {
+    const result = await testSshExecution(host, reference?.trim() || null);
+    setTests((tests) => ({ ...tests, [host]: result }));
+  });
 
   function cancelConnect() {
     activeAttempt.current += 1;
@@ -884,7 +1208,7 @@ function SshSection() {
       {hostsQuery.error && <p className="text-sm text-accent-red">{hostsQuery.error.message}</p>}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         {hostsQuery.data && <SshDefaultHost settings={hostsQuery.data} />}
-        <Button variant="ghost" className="ms-auto" onClick={() => setConfigOpen(true)}>
+        <Button variant="ghost" className="ms-auto" onClick={() => showSshConfigDialog(dialogs)}>
           <Settings size={14} /> {m.ssh_configure_hosts()}
         </Button>
       </div>
@@ -908,12 +1232,19 @@ function SshSection() {
             const containerFailed = containerTest?.container?.ready === false;
             const connectionError = hostTest?.error || containerError;
             const connecting = connectingHost === h.host;
+            const engine = engineByAlias.get(h.host);
+            // A Test run this session speaks for a connected host; trouble on the host outranks it.
+            const engineShown = !connecting && engine !== undefined && ENGINE_HOST_SHOWN.has(engine.status)
+              && !(engine.status === "live" && executionTest) ? engine : null;
+            const keyHost = engine?.class === "key" && !engine.connectRequired;
+            // Key hosts need no Connect: Retry while backing off, otherwise Test.
+            const keyAction = !keyHost || engineShown?.status === "needs_auth" ? null : engineShown?.status === "backoff" ? "retry" : "test";
             const open = expandedHosts[h.host] ?? false;
             const hasTerminal = connecting || Boolean(connectionError);
             const address =
               `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
             return (
-              <div key={h.host}>
+              <div key={h.host} id={elementId(`ssh-host-${h.host}`)} data-ssh-host={h.host}>
                 <div
                   className="flex items-center gap-3 py-3"
                 >
@@ -925,7 +1256,9 @@ function SshSection() {
                   </div>
                   <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
                     <div className="flex items-center gap-2 text-start">
-                      <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={masterRunning[h.host]} containerFailed={containerFailed} />
+                      {engineShown
+                        ? <EngineHostCell host={engineShown} />
+                        : <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={keyHost ? undefined : masterRunning[h.host]} containerFailed={containerFailed} />}
                       {hasTerminal && (
                         <button
                           type="button"
@@ -944,28 +1277,38 @@ function SshSection() {
                         </button>
                       )}
                     </div>
-                    <Button size="small"
-                      type="button"
-                      className="justify-self-end"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (connecting && !connectionFailed) cancelConnect();
-                        else connect(h.host);
-                      }}
-                      disabled={!connecting && ((connectingHost !== null && !connectionFailed) || (reference !== null && !reference.trim()))}
-                    >
-                      {connecting
-                        ? connectionFailed
-                          ? m.app_retry()
-                          : m.settings_page_cancel()
-                        : hostTest?.reachable === false || containerFailed
-                          ? m.app_retry()
-                          : hostTest
-                            ? m.settings_reconnect()
-                            : m.settings_connect()}
-                    </Button>
+                    {keyAction ? (
+                      <Button size="small" type="button" className="justify-self-end" disabled={busyHost === h.host} onClick={() => void (keyAction === "retry" ? retry(h.host) : test(h.host, reference))}>
+                        {keyAction === "retry" ? m.app_retry() : m.settings_host_test()}
+                      </Button>
+                    ) : (
+                      <Button size="small"
+                        type="button"
+                        variant={engineShown?.status === "needs_auth" ? "primary" : "default"}
+                        className="justify-self-end"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (connecting && !connectionFailed) cancelConnect();
+                          else connect(h.host);
+                        }}
+                        disabled={!connecting && ((connectingHost !== null && !connectionFailed) || (reference !== null && !reference.trim()))}
+                      >
+                        {connecting
+                          ? connectionFailed
+                            ? m.app_retry()
+                            : m.settings_page_cancel()
+                          : engineShown?.status === "needs_auth"
+                            ? m.settings_connect()
+                            : hostTest?.reachable === false || containerFailed
+                              ? m.app_retry()
+                              : hostTest
+                                ? m.settings_reconnect()
+                                : m.settings_connect()}
+                      </Button>
+                    )}
                   </div>
                 </div>
+                {hostError?.host === h.host && <p role="alert" className="m-0 pb-3 text-sm text-accent-red">{hostError.message}</p>}
                 <SshExecutionSettings host={h} connecting={connecting && !connectionFailed} reference={reference}
                   onChange={(value) => {
                     if (connecting) cancelConnect();
@@ -1040,11 +1383,6 @@ function SshSection() {
           })}
         </div>
       )}
-      {configOpen && (
-        <SshConfigDialog
-          onClose={() => setConfigOpen(false)}
-        />
-      )}
     </>
   );
 }
@@ -1063,6 +1401,12 @@ function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPrefli
 }
 
 function SlurmSection() {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { saveSlurmSettings } = useWorkspace().api;
+  const { getSlurmSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const saveSlurmSettingsMutation = useMutation({ mutationFn: saveSlurmSettings });
 
   const settingsOptions = getSlurmSettingsQuery();
@@ -1193,7 +1537,7 @@ function SlurmSection() {
                 />
               </label>
             </div>
-            <div className="actions">
+            <div className="actions flex-wrap items-center">
               <Button
                 type="button"
                 onClick={() => {
@@ -1205,7 +1549,7 @@ function SlurmSection() {
                   }
                 }}
                 disabled={!host}
-                title={host ? undefined : m.settings_pick_login_node()}
+                aria-describedby={!host ? elementId("slurm-login-node-hint") : undefined}
               >
                 {connecting
                   ? connectionFailed
@@ -1215,6 +1559,7 @@ function SlurmSection() {
                     ? m.settings_reconnect()
                     : m.settings_connect()}
               </Button>
+              {!host && <span id={elementId("slurm-login-node-hint")} className="text-sm text-subtext">{m.settings_pick_login_node()}</span>}
               <span role="status">
                 <SlurmTestBadge
                   test={test}
@@ -1229,14 +1574,14 @@ function SlurmSection() {
                   {m.settings_page_partition()}
                   <Input
                     type="text"
-                    list="slurm-partitions"
+                    list={elementId("slurm-partitions")}
                     value={partition}
                     onChange={(e) => setPartition(e.target.value)}
                     placeholder={m.settings_page_cluster_default()}
                     autoComplete="off"
                     spellCheck={false}
                   />
-                  <datalist id="slurm-partitions">
+                  <datalist id={elementId("slurm-partitions")}>
                     {test?.partitions.map((p) => <option key={p} value={p} />)}
                   </datalist>
                 </label>
@@ -1326,6 +1671,10 @@ function SlurmSection() {
 }
 
 function RaySection() {
+  const { saveRaySettings, rayPreflight } = useWorkspace().api;
+  const { getRaySettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const saveRaySettingsMutation = useMutation({ mutationFn: saveRaySettings });
 
   const settingsOptions = getRaySettingsQuery();
@@ -1462,14 +1811,27 @@ function localMachineSummary(hw: LocalMachine) {
 // --- compute (openresearch) ---------------------------------------------------------
 
 function OpenResearchSection({ remote }: { remote: boolean }) {
+  const { getOpenResearchSettingsQuery } = useWorkspace().queries;
+
   const settingsQuery = useQuery(getOpenResearchSettingsQuery());
+  const { useOpenResearchAccount, useAlphaXivFolders, useSignOutOpenResearch } = useMachines().owner.queries;
+  const openSignIn = useSignIn();
+  const accountQuery = useOpenResearchAccount();
+  // A remote workspace's settings come from the remote host but its account from this machine; don't pair them.
+  const account = remote ? undefined : accountQuery.data;
+  const accountFailed = !remote && accountQuery.isError;
+  const folders = useAlphaXivFolders();
+  const alphaXivStatus = folders.isSuccess ? m.library_connected() : folders.error instanceof AlphaXivNotConnectedError ? m.library_not_connected() : null;
+  const [editProfileBefore, editProfileAfter] = m.settings_openresearch_edit_profile({ settings: "\0" }).split("\0");
+  const accountError = remote ? null : accountErrorMessage(accountQuery.error);
   const s = settingsQuery.data;
+  const signedOut = account && !account.loggedIn;
+  const expired = signedOut && s?.loggedIn;
   const loadError = settingsQuery.error?.message;
   const busy = settingsQuery.isFetching;
-  const [loginAttempt, setLoginAttempt] = useState(0);
-  const [terminalLogin, setTerminalLogin] = useState(true);
-  const [signingIn, setSigningIn] = useState(false);
-  const refresh = () => settingsQuery.refetch();
+  const refresh = () => { void accountQuery.refetch(); return settingsQuery.refetch(); };
+  const { dialogs } = useWorkspace();
+  const logout = useSignOutOpenResearch();
 
   return (
     <>
@@ -1480,9 +1842,11 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">{m.settings_page_status()}</span>
             <span className="v">
-              {(!s && busy) || signingIn ? (
-                <Badge className="gap-1.5" role="status"><Spinner />{signingIn ? m.settings_openresearch_setting_up() : m.common_checking()}</Badge>
-              ) : loadError ? (
+              {!s && busy ? (
+                <Badge className="gap-1.5" role="status"><Spinner />{m.common_checking()}</Badge>
+              ) : signedOut ? (
+                <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
+              ) : loadError || s?.error || accountFailed ? (
                 <Badge variant="warning">{m.settings_page_unable_to_verify()}</Badge>
               ) : !s ? null : !s.loggedIn ? (
                 <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
@@ -1494,11 +1858,27 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
                 <Badge variant="warning">{m.settings_page_not_configured()}</Badge>
               )}
             </span>
-            <span className="k">{m.settings_page_orgs()}</span>
-            <span className="v">{s?.loggedIn && s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
+            {s?.loggedIn && !signedOut && <>
+              {!remote && !accountFailed && <>
+              <span className="k self-start">{account?.user?.alphaxivUrl ? m.settings_openresearch_alphaxiv_account() : m.settings_page_account()}</span>
+              <span className="v">
+                {accountQuery.isLoading ? m.common_checking() : <><OpenResearchAccount user={account?.user ?? null} />{alphaXivStatus && <span className="basis-full text-sm text-subtext">{alphaXivStatus}</span>}{account?.user?.alphaxivUrl && <span className="basis-full text-sm text-subtext">{editProfileBefore}<a className="text-text underline" href={new URL("/settings", account.user.alphaxivUrl).href} target="_blank" rel="noreferrer">{m.settings_openresearch_alphaxiv_settings()}</a>{editProfileAfter}</span>}</>}
+              </span>
+              </>}
+              <span className="k self-start">{m.settings_openresearch_organizations()}</span>
+              <div className="v">
+                {s.organizations == null ? "—" : s.organizations.length === 0 ? m.settings_openresearch_no_orgs() : <ul className="m-0 list-none p-0 space-y-2">
+                  {s.organizations.map((org) => <li key={org.id} className="min-w-0">
+                    <div dir="auto">{org.name}{account?.user?.id === org.createdBy && <span className="text-sm text-subtext"> · {m.settings_openresearch_owner()}</span>}</div>
+                    {s.organizations && s.organizations.length > 1 && <code className="text-sm text-subtext break-all">{org.id}</code>}
+                  </li>)}
+                </ul>}
+                {s.organizations && s.organizations.length > 0 && <p className="basis-full m-0 text-sm text-subtext">{s.organizations.length === 1 ? m.settings_openresearch_one_org() : m.settings_openresearch_choose_org()}</p>}
+              </div>
+            </>}
             <span className="k">{m.settings_page_ssh_key()}</span>
             <span className="v">
-              {!s?.loggedIn ? "—" : s.sshKeyStatus === "matched" ? (
+              {!s?.loggedIn || signedOut ? "—" : s.sshKeyStatus === "matched" ? (
                 <Badge variant="success">{m.settings_page_on_this_computer()}</Badge>
               ) : s.sshKeyStatus === "no_local_match" ? (
                 <Badge variant="warning">{m.settings_page_not_on_this_computer()}</Badge>
@@ -1514,21 +1894,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
               {m.settings_login_help({ command: ltr("orx login") })}
             </p>
           )}
-          {!remote && loginAttempt > 0 && (
-            <OpenResearchSetupTerminal
-              key={loginAttempt}
-              login={terminalLogin}
-              onComplete={() => {
-                setSigningIn(false);
-                setLoginAttempt(0);
-                void refresh();
-              }}
-              onError={(error) => {
-                setSigningIn(false);
-                showAlert(error, "error");
-              }}
-            />
-          )}
+          {!remote && !signedOut && s?.sshKeyToAdd && <OpenResearchSshKey sshKey={s.sshKeyToAdd} />}
           {remote && s?.loggedIn && s.sshKeyStatus === "none_registered" &&
             (s.sshKeyPath ? (
               <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
@@ -1553,20 +1919,18 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
                 <code>ssh-keygen -t ed25519</code>.
               </p>
             ))}
-          {!busy && (loadError || s?.error) && <p dir="auto" className="mt-4 mb-0 text-sm text-accent-red whitespace-pre-wrap break-words">{loadError || s?.error}</p>}
+          {!busy && (expired || accountError || loadError || s?.error) && <p role="status" dir="auto" className="mt-4 mb-0 text-sm text-accent-red whitespace-pre-wrap break-words">{expired ? m.account_sign_in_expired() : accountError || loadError || s?.error}</p>}
         </>
       )}
-      <div className="mt-4 flex justify-end gap-2">
-        <Button onClick={() => void refresh()} disabled={busy || signingIn}>
-          <RefreshCw size={13} /> {busy ? m.common_checking() : m.settings_check_again()}
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        {(account?.apiUrl || s?.apiUrl) && <ButtonLink href={`${(account?.apiUrl || s?.apiUrl || "").replace(/\/$/, "")}/auth/login`} target="_blank" rel="noreferrer">{m.settings_openresearch_dashboard()} <ExternalLink size={14} /></ButtonLink>}
+        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || logout.isPending} onClick={() => confirmOpenResearchSignOut(dialogs, logout.mutateAsync)}>{m.settings_openresearch_sign_out()}</Button>}
+        <Button onClick={() => void refresh()} disabled={busy}>
+          <RefreshCw size={14} /> {busy ? m.common_checking() : m.settings_check_again()}
         </Button>
-        {!remote && s && (!s.loggedIn || s.sshKeyStatus !== "matched") && (
-          <Button variant="primary" disabled={busy || signingIn} onClick={() => {
-            setTerminalLogin(!s.loggedIn);
-            setSigningIn(true);
-            setLoginAttempt((attempt) => attempt + 1);
-          }}>
-            {signingIn ? <Spinner /> : <SquareTerminal size={13} />} {s.loggedIn ? m.settings_setup_ssh_key() : m.settings_sign_in()}
+        {!remote && s && signedOut && (
+          <Button variant="primary" disabled={busy} onClick={(event) => openSignIn(false, event.currentTarget)}>
+            {m.account_sign_in_alphaxiv()}
           </Button>
         )}
       </div>
@@ -1585,6 +1949,7 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   k8s: m.compute_description_k8s,
   slurm: m.compute_description_slurm,
   ray: m.compute_description_ray,
+  vercel: m.compute_description_vercel,
   openresearch: m.compute_description_openresearch,
 };
 
@@ -1598,11 +1963,19 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   ssh: "ssh_job",
   slurm: "slurm_job",
   ray: "ray_job",
+  vercel: "vercel_job",
   openresearch: "openresearch_job",
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
+const FLAVORED_TARGETS: ComputeTargetId[] = [
+  "hf",
+  "modal",
+  "slurm",
+  "ray",
+  "vercel",
+  "openresearch",
+];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
@@ -1611,10 +1984,11 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
+  vercel: ["cpu", "cpu-1", "cpu-4", "cpu-8", "cpu-16", "cpu-32"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
 };
 
-const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s"];
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s", "vercel"];
 
 const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
   tinker: m.compute_usage_tinker,
@@ -1638,6 +2012,8 @@ function DefaultDestinationEditor({
   projectId?: string;
   onSaved: (settings: ComputeSettings) => void;
 }) {
+  const { setComputeDefault } = useWorkspace().api;
+
   const setComputeDefaultMutation = useMutation({ mutationFn: setComputeDefault });
 
   const savedBackend = settings.configuredDefaultBackend ?? settings.defaultBackend ?? "local";
@@ -1747,7 +2123,7 @@ function DefaultDestinationEditor({
               {customFlavor ? (
                 <div className="relative">
                   <input
-                    className="h-9 w-full rounded-md border border-border bg-background py-0 pe-10 ps-3 font-sans text-sm text-text outline-none focus:border-text"
+                    className="h-9 w-full rounded-md border border-border bg-background py-0 pe-10 ps-3 font-sans text-sm text-text outline-none focus:border-focus-border focus:ring-3 focus:ring-focus-ring"
                     type="text"
                     value={flavor}
                     onChange={(event) => setFlavor(event.target.value)}
@@ -1821,19 +2197,24 @@ function TargetTile({
   target,
   isDefault,
   summary,
+  attention,
   onOpen,
   onOpenEnvironment,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
   summary?: string;
+  /** A problem on this target that needs the user, such as a host waiting for Connect. */
+  attention?: string;
   onOpen?: () => void;
   onOpenEnvironment: () => void;
 }) {
-  const summaryId = `compute-${target.id}-summary`;
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const summaryId = elementId(`compute-${target.id}-summary`);
   const setupLabel = target.unverified
     ? m.settings_check_setup()
-    : target.id === "openresearch"
+    : target.id === "openresearch" && !target.signedIn
       ? m.settings_sign_in()
       : target.id === "ray"
         ? m.settings_connect()
@@ -1841,12 +2222,12 @@ function TargetTile({
 
   return (
     <div
-      className={`group relative flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans ${onOpen && target.enabled ? "transition-colors duration-120 ease-standard hover:border-text hover:bg-surface" : ""} ${!target.enabled ? "opacity-52" : ""}`}
+      className={`group relative flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans ${onOpen && target.enabled ? "transition-colors duration-120 ease-standard hover:border-border-hover-strong hover:bg-surface" : ""} ${!target.enabled ? "opacity-52" : ""}`}
     >
       {onOpen && (
         <button
           type="button"
-          className="absolute inset-0 z-10 rounded-lg focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-2 disabled:cursor-default"
+          className="absolute inset-0 z-10 rounded-lg focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-offset-2 disabled:cursor-default"
           onClick={onOpen}
           disabled={!target.enabled}
           aria-label={TARGET_LABELS[target.id]()}
@@ -1867,7 +2248,7 @@ function TargetTile({
             {target.id === "tinker" ? m.settings_key_from() : m.settings_token_from()}{" "}
             <button
               type="button"
-              className="relative z-20 text-primary underline-offset-2 hover:text-primary-hover hover:underline"
+              className="relative z-20 text-accent-blue-strong underline-offset-2 hover:underline"
               onClick={onOpenEnvironment}
             >
               {m.settings_environment_tab()}
@@ -1875,8 +2256,9 @@ function TargetTile({
           </>
         ) : summary ?? target.summary}
       </span>
+      {attention && <span className="mt-1 text-xs font-medium text-accent-amber">{attention}</span>}
       <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-sm">
-        <span className={isDefault ? "font-medium text-primary" : "text-subtext"}>
+        <span className={isDefault ? "font-medium text-text" : "text-subtext"}>
           {isDefault
             ? m.settings_page_default_808d7dc()
             : target.configured
@@ -1923,7 +2305,7 @@ function BackendDetailPage({
           <h1 className="m-0 min-w-0 text-2xl">{TARGET_LABELS[target.id]()}</h1>
         </div>
         {isDefault && (
-          <Badge className="flex-none border-primary bg-primary-subtle text-primary">
+          <Badge className="flex-none">
             {m.settings_page_default_808d7dc()}
           </Badge>
         )}
@@ -1937,56 +2319,77 @@ function BackendDetailPage({
   );
 }
 
-function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSummary; remote: boolean; onClose: () => void }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
+function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onEditState }: DialogContentProps<void> & {
+  targetId: ComputeTargetId;
+  projectId: string | undefined;
+  remote: boolean;
+  onEditState: (state: { dirty: boolean; saving: boolean }) => void;
+}) {
+  const { getComputeSettingsQuery } = useWorkspace().queries;
+
+  const { data: settings } = useQuery(getComputeSettingsQuery(projectId));
+  const target = settings?.targets.find((item) => item.id === targetId);
   const [editState, setEditState] = useState({ dirty: false, saving: false });
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    dialog?.showModal();
-    return () => dialog?.close();
-  }, []);
+  const updateEditState = useCallback((state: { dirty: boolean; saving: boolean }) => {
+    setEditState(state);
+    onEditState(state);
+  }, [onEditState]);
 
-  const close = () => {
-    if (editState.saving) return;
-    if (editState.dirty && !window.confirm(m.settings_k8s_discard_changes())) return;
-    onClose();
-  };
-
-  return (
-    <dialog
-      ref={dialogRef}
-      className="m-auto w-140 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
-      aria-labelledby="compute-quick-setup-title"
-      // Escape on keydown (not just cancel) so a declined discard confirm can't be
-      // force-closed by the close watcher; an open OptionPicker swallows it first.
-      onKeyDown={(event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        close();
-      }}
-      onCancel={(event) => {
-        event.preventDefault();
-        close();
-      }}
-    >
+  return <DialogContent className="w-140 max-h-[calc(100vh_-_40px)] overflow-y-auto p-5">
       <div className="mb-5 flex items-center justify-between gap-4">
         <div className="flex min-w-0 items-center gap-3">
-          <BackendLogo kind={TARGET_KIND[target.id]} size={32} />
-          <h2 id="compute-quick-setup-title" className="m-0 text-xl font-medium text-text">
-            {TARGET_LABELS[target.id]()}
-          </h2>
+          <BackendLogo kind={TARGET_KIND[targetId]} size={32} />
+          <DialogTitle>
+            {TARGET_LABELS[targetId]()}
+          </DialogTitle>
         </div>
-        <IconButton title={m.app_close_panel()} aria-label={m.app_close_panel()} onClick={close} disabled={editState.saving}>
-          <X size={14} />
-        </IconButton>
+        <Tooltip interactive content={m.app_close_panel()}>
+          <IconButton aria-label={m.app_close_panel()} onClick={cancel} disabled={isDisabled || editState.saving}>
+            <X size={14} />
+          </IconButton>
+        </Tooltip>
       </div>
-      {target.id === "tinker" && <TinkerSection target={target} />}
-      {target.id === "hf" && <HfSection remote={remote} />}
-      {target.id === "modal" && <ModalSection />}
-      {target.id === "ray" && <RaySection />}
-      {target.id === "k8s" && <K8sSection onEditState={setEditState} />}
-    </dialog>
+      {targetId === "tinker" && target && <TinkerSection target={target} />}
+      {targetId === "hf" && <HfSection remote={remote} />}
+      {targetId === "modal" && <ModalSection />}
+      {targetId === "ray" && <RaySection />}
+      {targetId === "k8s" && <K8sSection onEditState={updateEditState} />}
+      {targetId === "vercel" && <VercelSection />}
+    </DialogContent>;
+}
+
+function RunEngineSetting() {
+  const { getRunEngineQuery } = useWorkspace().queries;
+  const { setRunEngine } = useWorkspace().api;
+
+  const id = useId();
+  const engineQuery = useQuery(getRunEngineQuery());
+  const engineMutation = useMutation({ mutationFn: setRunEngine });
+
+  return (
+    <div className={SETTINGS_CARD_CLASS_NAME}>
+      <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div>
+          <div id={`run-engine-label-${id}`} className="project-default-title text-base font-medium">{m.settings_run_engine_label()}</div>
+          <div id={`run-engine-description-${id}`}>
+            <p>{m.settings_run_engine_description()}</p>
+            <p>{m.settings_run_engine_note()}</p>
+            {engineQuery.data?.forcedBy === "canary" && <p>{m.settings_run_engine_canary()}</p>}
+            {engineQuery.data?.forcedBy === "environment" && <p>{m.settings_run_engine_override()}</p>}
+          </div>
+        </div>
+        <Switch
+          type="button"
+          checked={engineQuery.data?.enabled ?? false}
+          disabled={!engineQuery.data || engineQuery.data.forcedBy !== null || engineMutation.isPending}
+          aria-labelledby={`run-engine-label-${id}`}
+          aria-describedby={`run-engine-description-${id}`}
+          onClick={() => engineMutation.mutate(!engineQuery.data?.enabled)}
+        />
+      </div>
+      {(engineQuery.error || engineMutation.error) && <div role="alert" className="error">{(engineMutation.error ?? engineQuery.error)?.message}</div>}
+    </div>
   );
 }
 
@@ -2001,6 +2404,13 @@ function ComputeTab({
   onOpenEnvironment: () => void;
   remote: boolean;
 }) {
+  const { useEngineHosts } = useWorkspace().queries;
+  const { pendingHostConnect, onHostConnectRequest } = useWorkspace().events;
+  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+
+  const { getComputeSettingsQuery, getLocalMachineQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const settingsOptions = getComputeSettingsQuery(project?.id);
   const settingsQuery = useQuery(settingsOptions);
   const settings = settingsQuery.data ?? null;
@@ -2015,6 +2425,12 @@ function ComputeTab({
   const localMachine = localMachineQuery.data ?? null;
   const localMachineError = localMachineQuery.error?.message ?? null;
   useEffect(() => { setSelectedTarget(null); setError(null); }, [project?.id]);
+  useEffect(() => {
+    const open = () => { if (pendingHostConnect()) setSelectedTarget("ssh"); };
+    open();
+    return onHostConnectRequest(open);
+  }, []);
+  const needsConnect = [...worstPerAlias(useEngineHosts() ?? []).values()].filter((host) => host.status === "needs_auth");
 
   const apply = (s: ComputeSettings) => {
     setSettings(s);
@@ -2037,7 +2453,39 @@ function ComputeTab({
       target={target}
       isDefault={defaultBackend === target.id}
       summary={target.id === "local" ? localMachine ? localMachineSummary(localMachine) : localMachineError ?? m.settings_page_detecting_hardware() : undefined}
-      onOpen={target.id === "local" ? undefined : () => setSelectedTarget(target.id)}
+      attention={target.id !== "ssh" || needsConnect.length === 0
+        ? undefined
+        : needsConnect.length === 1
+          ? m.settings_ssh_host_needs_connect({ host: ltr(needsConnect[0].alias) })
+          : m.settings_ssh_hosts_need_connect({ count: fmtNumber(needsConnect.length) })}
+      onOpen={target.id === "local" ? undefined : () => {
+        if (!QUICK_SETUP_TARGETS.includes(target.id)) {
+          setSelectedTarget(target.id);
+          return;
+        }
+        let editState = { dirty: false, saving: false };
+        showCustomDialog({
+          component: QuickSetupDialog,
+          props: {
+            targetId: target.id,
+            projectId: project?.id,
+            remote,
+            onEditState: (state) => { editState = state; },
+          },
+          onConfirm: () => {},
+          onCancel: () => {
+            if (editState.saving) return Promise.reject();
+            if (!editState.dirty) return;
+            return new Promise<void>((resolve, reject) => showConfirmDialog({
+              title: TARGET_LABELS[target.id](),
+              description: m.settings_k8s_discard_changes(),
+              destructive: true,
+              onConfirm: resolve,
+              onCancel: reject,
+            }));
+          },
+        });
+      }}
       onOpenEnvironment={onOpenEnvironment}
     />
   );
@@ -2058,10 +2506,11 @@ function ComputeTab({
 
   return (
     <>
-      <h1>{m.settings_page_compute()}</h1>
+      <h1 tabIndex={-1}>{m.settings_page_compute()}</h1>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
+      <RunEngineSetting />
       <ComputeActivity projectId={project?.id} onViewHistory={onViewHistory} />
       {loadError ? (
         <div className="error">{loadError}</div>
@@ -2091,7 +2540,6 @@ function ComputeTab({
               </div>
             </section>
           )}
-          {selected && <QuickSetupDialog target={selected} remote={remote} onClose={() => setSelectedTarget(null)} />}
         </>
       )}
     </>
@@ -2101,6 +2549,10 @@ function ComputeTab({
 // --- compute (tinker) ----------------------------------------------------------
 
 function TinkerSection({ target }: { target: ComputeTargetSummary }) {
+  const { saveTinkerKey } = useWorkspace().api;
+  const { getTinkerSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveTinkerKeyMutation = useMutation({ mutationFn: saveTinkerKey });
 
   const [apiKey, setApiKey] = useState("");
@@ -2178,7 +2630,7 @@ function TinkerSection({ target }: { target: ComputeTargetSummary }) {
         {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={saving || checking} onClick={() => void refresh()}>
-            <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+            <RefreshCw size={14} /> {checking ? m.common_checking() : m.settings_check_again()}
           </Button>
           <Button variant="primary" type="submit" disabled={!apiKey.trim() || saving || checking}>
             {saving ? m.settings_validating() : m.common_save()}
@@ -2201,7 +2653,7 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
       <span className="inline-flex items-center gap-2">
         <Badge variant="warning">{m.settings_page_no_job_write_permission()}</Badge>
         <Tooltip content={m.settings_hf_write_permission_help()} className="text-subtext">
-          <Info size={15} />
+          <Info size={16} />
         </Tooltip>
       </span>
     );
@@ -2209,6 +2661,10 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
 }
 
 function HfSection({ remote }: { remote: boolean }) {
+  const { saveHfToken } = useWorkspace().api;
+  const { getHfSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveHfTokenMutation = useMutation({ mutationFn: saveHfToken });
 
   const settingsOptions = getHfSettingsQuery();
@@ -2312,7 +2768,7 @@ function HfSection({ remote }: { remote: boolean }) {
         {error && <div className="error">{error}</div>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={saving || refreshing || (!settings && !loadError)} onClick={() => void refresh()}>
-            <RefreshCw size={13} /> {refreshing ? m.common_checking() : m.settings_check_again()}
+            <RefreshCw size={14} /> {refreshing ? m.common_checking() : m.settings_check_again()}
           </Button>
           <Button variant="primary" type="submit" disabled={!token.trim() || saving || refreshing || (!settings && !loadError)}>
             {saving ? m.settings_validating() : m.common_save()}
@@ -2362,6 +2818,8 @@ function EnvRow({
   entry: EnvVar | undefined;
   onVars: (vars: EnvVar[]) => void;
 }) {
+  const { setEnvVar, deleteEnvVar } = useWorkspace().api;
+
   const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
   const deleteEnvVarMutation = useMutation({ mutationFn: deleteEnvVar });
 
@@ -2369,7 +2827,12 @@ function EnvRow({
   const stored = entry?.value ?? "";
   const [value, setValue] = useState(stored);
   const [saving, setSaving] = useState(false);
-  useEffect(() => setValue(stored), [stored]);
+  // Reset during render: an effect would also rerun when a hidden machine is shown and erase the edit.
+  const [shownStored, setShownStored] = useState(stored);
+  if (shownStored !== stored) {
+    setShownStored(stored);
+    setValue(stored);
+  }
   const dirty = value.trim() !== stored;
 
   async function save() {
@@ -2434,15 +2897,16 @@ function EnvRow({
         </td>
         <td>
           {entry && !(plain && dirty && value.trim()) ? (
-            <IconButton
-              className="[&:hover:not(:disabled)]:text-accent-red"
-              title={m.a11y_delete_item({ name: ltr(name) })}
-              aria-label={m.a11y_delete_item({ name: ltr(name) })}
-              onClick={() => void remove()}
-              disabled={saving}
-            >
-              <Trash2 size={13} />
-            </IconButton>
+            <Tooltip interactive content={m.a11y_delete_item({ name: ltr(name) })}>
+              <IconButton
+                className="[&:hover:not(:disabled)]:text-accent-red"
+                aria-label={m.a11y_delete_item({ name: ltr(name) })}
+                onClick={() => void remove()}
+                disabled={saving}
+              >
+                <Trash2 size={14} />
+              </IconButton>
+            </Tooltip>
           ) : (
             value.trim() && (
               <Button size="small" onClick={() => void save()} disabled={saving}>
@@ -2465,6 +2929,8 @@ function AddVarRow({
   onVars: (vars: EnvVar[]) => void;
   onDone: () => void;
 }) {
+  const { setEnvVar } = useWorkspace().api;
+
   const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
 
   const [key, setKey] = useState("");
@@ -2532,14 +2998,16 @@ function AddVarRow({
           >
             {saving ? m.common_saving() : m.common_save()}
           </Button>
-          <IconButton
-            title={m.settings_page_cancel()}
-            aria-label={m.settings_page_cancel_new_variable()}
-            onClick={onDone}
-            disabled={saving}
-          >
-            <X size={13} />
-          </IconButton>
+          <Tooltip interactive content={m.settings_page_cancel()}>
+            <IconButton
+              aria-description={m.settings_page_cancel()}
+              aria-label={m.settings_page_cancel_new_variable()}
+              onClick={onDone}
+              disabled={saving}
+            >
+              <X size={14} />
+            </IconButton>
+          </Tooltip>
         </td>
       </tr>
       {key.trim() !== "HF_TOKEN" && HF_TOKEN_RE.test(value.trim()) && <HfHintRow />}
@@ -2548,6 +3016,9 @@ function AddVarRow({
 }
 
 function EnvVarsSection() {
+  const { getEnvVarsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const varsOptions = getEnvVarsQuery();
   const varsQuery = useQuery(varsOptions);
   const vars = varsQuery.data ?? null;
@@ -2612,6 +3083,8 @@ function EnvVarsSection() {
 }
 
 function TrackioCheck({ space }: { space: boolean }) {
+  const { trackioPreflight } = useWorkspace().api;
+
   const [test, setTest] = useState<"testing" | TrackioPreflight | null>(null);
 
   async function runPreflight() {
@@ -2668,11 +3141,14 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "ko", label: "한국어" },
   { id: "ja", label: "日本語" },
   { id: "pl", label: "Polski" },
+  { id: "ru", label: "Русский" },
+  { id: "tr", label: "Türkçe" },
 ];
 
 function AppearanceTab() {
   const locale = useLocale();
   const [preference, setPreference] = useThemePreference();
+  const [coloredMarkdown, setColoredMarkdown] = useColoredMarkdown();
 
   // Arrow keys move selection relative to the focused radio, with focus
   // following the new choice (WAI-ARIA radio pattern).
@@ -2700,10 +3176,10 @@ function AppearanceTab() {
     <>
       <h2>{m.settings_appearance_heading()}</h2>
       <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
-        <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} pb-3.5`}>
+        <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`}>
           <div className="project-default-title text-base font-medium">{m.settings_theme_heading()}</div>
           <div
-            className="theme-segmented inline-flex flex-none gap-0.5 p-0.5 border border-border rounded-md bg-surface"
+            className={`${SEGMENTED_CLASS_NAME} theme-segmented flex-none`}
             role="radiogroup"
             aria-label={m.settings_theme_heading()}
             onKeyDown={onKeyDown}
@@ -2715,7 +3191,7 @@ function AppearanceTab() {
                 role="radio"
                 aria-checked={preference === value}
                 tabIndex={preference === value ? 0 : -1}
-                className={`theme-segment inline-flex items-center gap-1.5 py-[5px] px-2.5 rounded-sm text-subtext text-sm cursor-pointer transition-[background,color] duration-120 ease-standard [&:hover:not(.on)]:text-text [&:hover:not(.on)]:bg-highlight [&.on]:text-background [&.on]:bg-primary [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid [&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2 ${preference === value ? "on" : ""}`}
+                className={`theme-segment ${preference === value ? "active" : ""}`}
                 onClick={() => setPreference(value)}
               >
                 <Icon size={14} />
@@ -2723,6 +3199,18 @@ function AppearanceTab() {
               </button>
             ))}
           </div>
+        </div>
+        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+          <div>
+            <div className="project-default-title text-base font-medium">{m.settings_colored_markdown_heading()}</div>
+            <p>{m.settings_colored_markdown_description()}</p>
+          </div>
+          <Switch
+            type="button"
+            checked={coloredMarkdown}
+            aria-label={m.settings_colored_markdown_heading()}
+            onClick={() => setColoredMarkdown(!coloredMarkdown)}
+          />
         </div>
         <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
           <div className="project-default-title text-base font-medium">{m.settings_language_heading()}</div>
@@ -2764,13 +3252,18 @@ const MANUAL_UPDATE_HINT: Partial<Record<InstallChannel, () => string>> = {
 };
 
 function UpdatesTab() {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { setAutoUpdate: setAutoUpdateApi, setReleaseChannel, applyUpdate } = useWorkspace().api;
+
   const setAutoUpdateApiMutation = useMutation({ mutationFn: (args: Parameters<typeof setAutoUpdateApi>) => setAutoUpdateApi(...args) });
 
   const { status, error: loadError, apply } = useUpdateStatus();
   // Per-action only so the right button reads "Working…"; any write disables
   // all of them, since they mutate overlapping state.
-  const [busy, setBusy] = useState<"auto" | "apply" | "cli" | null>(null);
+  const [busy, setBusy] = useState<"auto" | "apply" | "cli" | "channel" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const channelGroupRef = useRef<HTMLDivElement>(null);
   const restart = useRestartApp(status);
   const locked = busy !== null || restart.restarting;
 
@@ -2793,7 +3286,7 @@ function UpdatesTab() {
 
   // Every mutating call returns the authoritative status; adopting it is what
   // keeps the switch honest when a write fails or another client changes it.
-  const run = async (which: "auto" | "apply" | "cli", action: () => Promise<unknown>) => {
+  const run = async (which: "auto" | "apply" | "cli" | "channel", action: () => Promise<unknown>) => {
     setBusy(which);
     setError(null);
     try {
@@ -2805,7 +3298,38 @@ function UpdatesTab() {
     }
   };
 
-  return (
+  const applyChannel = (channel: "stable" | "canary") => {
+    void run("channel", async () => {
+      const next = await setReleaseChannel(channel);
+      apply(next);
+      requestAnimationFrame(() => {
+        const group = channelGroupRef.current;
+        if (group?.contains(document.activeElement)) group.querySelector<HTMLButtonElement>(`[data-channel="${next.releaseChannel}"]`)?.focus();
+      });
+    });
+  };
+
+  const changeChannel = (channel: "stable" | "canary") => {
+    if (locked || status.releaseChannel === channel) return;
+    if (channel === "canary") showConfirmDialog({
+      title: m.settings_canary_confirm_title(),
+      description: m.settings_canary_confirm_description(),
+      confirmLabel: m.settings_canary_confirm_action(),
+      onCancel: "close",
+      onConfirm: async () => {
+        setBusy("channel");
+        setError(null);
+        try {
+          apply(await setReleaseChannel("canary"));
+        } finally {
+          setBusy(null);
+        }
+      },
+    });
+    else applyChannel(channel);
+  };
+
+  return <>{(
     <>
       <h2>{m.settings_page_updates()}</h2>
       <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
@@ -2845,6 +3369,31 @@ function UpdatesTab() {
 
         {status.selfUpdates ? (
           <>
+            {status.releaseChannelsAvailable && (
+              <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+                <div>
+                  <div className="project-default-title text-base font-medium">{m.settings_update_channel()}</div>
+                  <p>{status.releaseChannel === "stable" ? m.settings_update_stable_description() : m.settings_update_canary_description()}</p>
+                </div>
+                <div ref={channelGroupRef} className={SEGMENTED_CLASS_NAME} role="radiogroup" aria-label={m.settings_update_channel()}
+                  aria-disabled={locked}
+                  onKeyDown={(event) => {
+                    if (locked || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+                    event.preventDefault();
+                    const next = status.releaseChannel === "stable" ? "canary" : "stable";
+                    changeChannel(next);
+                  }}>
+                  {(["stable", "canary"] as const).map((channel) => (
+                    <button key={channel} type="button" role="radio" data-channel={channel}
+                      aria-checked={status.releaseChannel === channel} tabIndex={status.releaseChannel === channel ? 0 : -1}
+                      className={status.releaseChannel === channel ? "active" : ""}
+                      onClick={() => changeChannel(channel)}>
+                      {channel === "stable" ? m.settings_update_channel_stable() : m.settings_update_channel_canary()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-base font-medium">
@@ -2869,10 +3418,14 @@ function UpdatesTab() {
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-base font-medium">
-                  {status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
+                  {status.waitingForStable ? m.settings_waiting_for_stable() : status.waitingForCanary ? m.settings_waiting_for_canary() : status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
                 </div>
                 <p>
-                  {status.updateAvailable
+                  {status.waitingForStable
+                    ? m.settings_stable_catches_up()
+                    : status.waitingForCanary
+                    ? m.settings_canary_catches_up()
+                    : status.updateAvailable
                     ? m.settings_install_release_now()
                     : m.settings_checks_automatically()}
                   {status.updateAvailable && status.latestTag && (
@@ -2914,10 +3467,14 @@ function UpdatesTab() {
         {error && <div className="error">{error}</div>}
       </div>
     </>
-  );
+  )}</>;
 }
 
 function TelemetryTab() {
+  const { setTelemetry } = useWorkspace().api;
+  const { getTelemetryQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const setTelemetryMutation = useMutation({ mutationFn: setTelemetry });
 
   const settingsOptions = getTelemetryQuery();
@@ -2956,7 +3513,7 @@ function TelemetryTab() {
                     content={`${m.settings_page_currently_off()} ${settings.reason}.`}
                     className="text-subtext"
                   >
-                    <Info size={15} />
+                    <Info size={16} />
                   </Tooltip>
                 )}
               </div>
@@ -2984,10 +3541,12 @@ function InstallCliRow({
   disabled,
   run,
 }: {
-  busy: "auto" | "apply" | "cli" | null;
+  busy: "auto" | "apply" | "cli" | "channel" | null;
   disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {
+  const { installCli } = useWorkspace().api;
+
   const installCliMutation = useMutation({ mutationFn: installCli });
 
   const [result, setResult] = useState<InstalledCli | null>(null);
@@ -3047,6 +3606,16 @@ function GithubSettings({ remote, onProjectUpdate }: {
   remote: boolean;
   onProjectUpdate: (project: Project) => void;
 }) {
+  const {
+    listProjectsQuery,
+    getProjectDefaultsQuery,
+    githubAccountQuery,
+    githubOrganizationsQuery,
+    getProjectGitStatusQuery,
+  } = useWorkspace().queries;
+  const { setProjectDefaults } = useWorkspace().api;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const projectsQuery = useQuery(listProjectsQuery());
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const selectedProject = projectsQuery.data?.find((project) => project.id === selectedProjectId);
@@ -3095,14 +3664,14 @@ function GithubSettings({ remote, onProjectUpdate }: {
               <div className="mb-4 flex justify-start"><div className="h-6 w-48 rounded-full bg-surface" /></div>
               <div className="flex items-center justify-between gap-6">
                 <div className="flex-1 space-y-2">
-                  <div className="h-5 w-2/3 rounded bg-surface" />
-                  <div className="h-4 rounded bg-surface" />
-                  <div className="h-4 w-3/4 rounded bg-surface" />
+                  <div className="h-5 w-2/3 rounded-xs bg-surface" />
+                  <div className="h-4 rounded-xs bg-surface" />
+                  <div className="h-4 w-3/4 rounded-xs bg-surface" />
                 </div>
                 <div className="h-6 w-10 shrink-0 rounded-full bg-surface" />
               </div>
-              <div className="mt-6 h-4 w-44 rounded bg-surface" />
-              <div className="mt-2 h-8 rounded bg-surface" />
+              <div className="mt-6 h-4 w-44 rounded-xs bg-surface" />
+              <div className="mt-2 h-8 rounded-xs bg-surface" />
             </div>
           </div>
         )
@@ -3206,6 +3775,15 @@ function GitHubCliHelp({
 }
 
 function OverleafCard() {
+  const {
+    deleteOverleafToken,
+    deleteOverleafSession,
+    saveOverleafToken,
+    saveOverleafSession,
+  } = useWorkspace().api;
+  const { getOverleafSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const deleteToken = useMutation({ mutationFn: deleteOverleafToken });
   const deleteSession = useMutation({ mutationFn: deleteOverleafSession });
   const tokenOptions = getOverleafSettingsQuery();
@@ -3308,6 +3886,17 @@ export function GitTab({
   project: Project | null;
   onProjectUpdate: (project: Project) => void;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const {
+    getProjectGitStatusQuery,
+    repoAccessQuery,
+    githubAccountQuery,
+    githubOrganizationsQuery,
+  } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+  const { enableProjectGithub, initializeProjectGit, disableProjectGithub } = useWorkspace().api;
+
   const statusOptions = { ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) };
   const statusQuery = useQuery(statusOptions);
   const status = statusQuery.data ?? null;
@@ -3324,10 +3913,9 @@ export function GitTab({
   });
   const checkingAccess = hasGithubRepository && !accessQuery.data && !accessQuery.error;
   const canResumeRepository = hasGithubRepository && Boolean(accessQuery.data?.canPush);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const ownerMenu = usePopover(triggerRef);
-  const accountQuery = useQuery({ ...githubAccountQuery(), enabled: ownerMenu.open });
-  const organizationsQuery = useQuery({ ...githubOrganizationsQuery(), enabled: ownerMenu.open });
+  const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
+  const accountQuery = useQuery({ ...githubAccountQuery(), enabled: ownerMenuOpen });
+  const organizationsQuery = useQuery({ ...githubOrganizationsQuery(), enabled: ownerMenuOpen });
   const githubLogin = accountQuery.data?.login ?? null;
   const owners = [
     ...(githubLogin ? [githubLogin] : []),
@@ -3353,7 +3941,7 @@ export function GitTab({
   };
 
   const enableSync = (owner?: string) => {
-    ownerMenu.setOpen(false);
+    setOwnerMenuOpen(false);
     if (!project) return;
     setSaving(true);
     setError(null);
@@ -3376,10 +3964,10 @@ export function GitTab({
         <div className="mt-4 min-h-22" role="status" aria-label={m.settings_page_loading()} aria-busy="true">
           <div aria-hidden="true" className="motion-safe:animate-pulse">
             <div className="flex items-center gap-4">
-              <div className="h-4 w-16 rounded bg-surface" />
+              <div className="h-4 w-16 rounded-xs bg-surface" />
               <div className="h-6 w-24 rounded-full bg-surface" />
             </div>
-            <div className="mt-3.5 h-8 w-48 rounded bg-surface" />
+            <div className="mt-3.5 h-8 w-48 rounded-xs bg-surface" />
           </div>
         </div>
       ) : (
@@ -3393,34 +3981,40 @@ export function GitTab({
             {status.github.authenticated && !status.github.enabled && (
               <div className="flex flex-wrap gap-2 mt-3.5">
                 {hasGithubRepository && status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
-                <div ref={ownerMenu.ref} className="relative">
-                  <Button variant="primary" disabled={saving || checkingAccess || Boolean(accessQuery.error)} aria-expanded={ownerMenu.open} aria-haspopup={canResumeRepository ? undefined : "menu"} onClick={(event) => {
-                    triggerRef.current = event.currentTarget;
-                    if (canResumeRepository) enableSync();
-                    else ownerMenu.setOpen(!ownerMenu.open);
-                  }}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()} {!canResumeRepository && !checkingAccess && <ChevronDown size={14} />}</Button>
-                  {ownerMenu.open && (
-                    <div role="menu" aria-label={m.settings_github_new_repository_destination()} className="absolute start-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-2rem)] max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-2 shadow-modal">
-                      <div className="px-2 py-1 text-sm font-medium text-subtext">{m.settings_github_enable_under()}</div>
-                      {hasGithubRepository && <p className="px-2 py-1 m-0 text-sm text-text">{m.settings_create_private_github_repository()}</p>}
-                      {owners.map((owner) => <MenuItem key={owner} role="menuitem" onClick={() => enableSync(owner)}>{owner}</MenuItem>)}
-                      {!owners.length && (accountQuery.isFetching || organizationsQuery.isFetching) && (
-                        <div role="status" aria-label={m.settings_page_loading()} aria-busy="true" className="px-2 py-2">
-                          <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse">
-                            <div className="h-4 w-28 rounded bg-surface" />
-                            <div className="h-4 w-36 rounded bg-surface" />
-                          </div>
-                        </div>
+                <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+                  <Popover.Root open={ownerMenuOpen} onOpenChange={setOwnerMenuOpen}>
+                    <div className="relative">
+                      {canResumeRepository ? (
+                        <Button variant="primary" disabled={saving || checkingAccess || Boolean(accessQuery.error)} onClick={() => enableSync()}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()}</Button>
+                      ) : (
+                        <Popover.Trigger render={<Button variant="primary" />} disabled={saving || checkingAccess || Boolean(accessQuery.error)}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()} {!checkingAccess && <ChevronDown size={14} />}</Popover.Trigger>
                       )}
-                      {(accountQuery.error || organizationsQuery.error || !githubLogin && !accountQuery.isFetching) && (
-                        <div className="px-2 py-1 text-sm text-text">
-                          <p className="m-0">{accountQuery.error?.message ?? organizationsQuery.error?.message ?? m.settings_github_account_unavailable()}</p>
-                          <Button size="small" className="mt-2" onClick={() => { void accountQuery.refetch(); void organizationsQuery.refetch(); }}>{m.app_retry()}</Button>
-                        </div>
-                      )}
+                      <Popover.Portal container={portalContainer}>
+                        <Popover.Positioner positionMethod="fixed" side="bottom" align="start" sideOffset={8} collisionPadding={16} className="z-50">
+                          <Popover.Popup aria-label={m.settings_github_new_repository_destination()} className="outline-none w-72 max-w-[calc(100vw-2rem)] max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-2 shadow-modal">
+                            <div className="px-2 py-1 text-sm font-medium text-subtext">{m.settings_github_enable_under()}</div>
+                            {hasGithubRepository && <p className="px-2 py-1 m-0 text-sm text-text">{m.settings_create_private_github_repository()}</p>}
+                            {owners.map((owner) => <MenuItem key={owner} onClick={() => enableSync(owner)}>{owner}</MenuItem>)}
+                            {!owners.length && (accountQuery.isFetching || organizationsQuery.isFetching) && (
+                              <div role="status" aria-label={m.settings_page_loading()} aria-busy="true" className="px-2 py-2">
+                                <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse">
+                                  <div className="h-4 w-28 rounded-xs bg-surface" />
+                                  <div className="h-4 w-36 rounded-xs bg-surface" />
+                                </div>
+                              </div>
+                            )}
+                            {(accountQuery.error || organizationsQuery.error || !githubLogin && !accountQuery.isFetching) && (
+                              <div className="px-2 py-1 text-sm text-text">
+                                <p className="m-0">{accountQuery.error?.message ?? organizationsQuery.error?.message ?? m.settings_github_account_unavailable()}</p>
+                                <Button size="small" className="mt-2" onClick={() => { void accountQuery.refetch(); void organizationsQuery.refetch(); }}>{m.app_retry()}</Button>
+                              </div>
+                            )}
+                          </Popover.Popup>
+                        </Popover.Positioner>
+                      </Popover.Portal>
                     </div>
-                  )}
-                </div>
+                  </Popover.Root>
+                </DirectionProvider>
                 {accessQuery.error && (
                   <div className="basis-full text-sm text-text">
                     <p className="mt-2 mb-0">{accessQuery.error.message}</p>
@@ -3472,6 +4066,12 @@ type MoveState =
   | { kind: "error"; message: string };
 
 function StorageTab() {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { getDataDirQuery } = useWorkspace().queries;
+  const { onDataDirMove } = useWorkspace().events;
+  const { validateDataDir, moveDataDir } = useWorkspace().api;
+
   const settingsOptions = getDataDirQuery();
   const settingsQuery = useQuery(settingsOptions);
   const settings = settingsQuery.data ?? null;
@@ -3534,21 +4134,21 @@ function StorageTab() {
     e.preventDefault();
     if (move.kind === "moving" || !trimmed || unchanged) return;
     setError(null);
-    // Confirm — this relocates all projects' data. Same-disk moves are atomic;
-    // cross-disk moves copy and leave the old folder for you to remove.
-    if (
-      !window.confirm(m.storage_move_confirm({ path: ltr(trimmed) }))
-    )
-      return;
-    setMove({ kind: "moving", phase: "preparing", copied: 0, total: validation?.treeBytes ?? 0 });
-    try {
-      await moveDataDir(trimmed);
-      // 202 accepted — progress/done arrive over SSE. Nothing else to do here.
-    } catch (err) {
-      // 409 in-flight guard or a validation error surfaces here.
-      setMove({ kind: "idle" });
-      setError(err instanceof Error ? err.message : String(err));
-    }
+    showConfirmDialog({
+      title: m.storage_move_here(),
+      description: m.storage_move_confirm({ path: ltr(trimmed) }),
+      confirmLabel: m.storage_move_here(),
+      onCancel: "close",
+      onConfirm: async () => {
+        setMove({ kind: "moving", phase: "preparing", copied: 0, total: validation?.treeBytes ?? 0 });
+        try {
+          await moveDataDir(trimmed);
+        } catch (err) {
+          setMove({ kind: "idle" });
+          throw err;
+        }
+      },
+    });
   }
 
   return (
@@ -3662,13 +4262,12 @@ function StorageTab() {
 
 // --- instances ---------------------------------------------------------------
 
-const isLive = (status: string) => status === "running" || status === "starting";
 
 /** Runtime: live instances show elapsed-so-far, finished ones total duration.
  *  Both start at submission time, so provisioning/queue time is included —
  *  that's the span the provider bills for. */
 function runtimeLabel(inst: Run): string {
-  if (isLive(inst.status)) return fmtDuration(Date.now() - inst.createdAt);
+  if (runActive(inst.status)) return fmtDuration(Date.now() - inst.createdAt);
   if (inst.endedAt) return fmtDuration(inst.endedAt - inst.createdAt);
   return "—";
 }
@@ -3699,21 +4298,22 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
                   <span className="backend-cell inline-flex items-center gap-0.5">
                     <BackendBadge backend={inst.backend} />
                     {url && (
-                      <IconButtonLink size="small"
-                        href={url}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={m.settings_page_open_job_page()}
-                        aria-label={m.settings_page_open_job_page()}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <ExternalLink size={12} />
-                      </IconButtonLink>
+                      <Tooltip interactive content={m.settings_page_open_job_page()}>
+                        <IconButtonLink size="small"
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={m.settings_page_open_job_page()}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ExternalLink size={12} />
+                        </IconButtonLink>
+                      </Tooltip>
                     )}
                   </span>
                 </td>
                 <td>
-                  <StatusBadge status={runDisplayStatus(inst)} />
+                  <StatusBadge {...runDisplay(inst)} className="flex" />
                 </td>
                 <td>{timeAgo(inst.createdAt)}</td>
                 <td>{runtimeLabel(inst)}</td>
@@ -3727,6 +4327,8 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
 }
 
 function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onViewHistory: () => void }) {
+  const { listRunsQuery } = useWorkspace().queries;
+
   const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
   const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
   const error = query.error?.message;
@@ -3743,12 +4345,12 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
   const load = () => { if (projectId) void query.refetch(); };
 
   const byRecent = (a: Run, b: Run) => b.createdAt - a.createdAt;
-  const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
-  const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
+  const running = instances?.filter((i) => runActive(i.status)).sort(byRecent);
+  const past = instances?.filter((i) => !runActive(i.status)).sort(byRecent);
 
   return (
-    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
-      <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
+    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-1 [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
+      <div className="compute-activity-head flex flex-wrap items-start justify-between gap-x-5 gap-y-2 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
         <div>
           <h2>
             {m.settings_page_running_instances()}
@@ -3775,6 +4377,8 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
 }
 
 function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: () => void }) {
+  const { listRunsQuery } = useWorkspace().queries;
+
   const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
   const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
   const error = query.error?.message;
@@ -3825,14 +4429,14 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   {
     id: "compute",
     label: m.settings_page_compute,
-    icon: <Cpu size={15} />,
-    activeTabs: ["compute", "instances"],
+    icon: <Cpu size={16} />,
+    activeTabs: ["compute", "openresearch", "instances"],
   },
-  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={15} />, activeTabs: ["environment"] },
+  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={16} />, activeTabs: ["environment"] },
   {
     id: "settings",
     label: m.settings_page_settings,
-    icon: <Settings size={15} />,
+    icon: <Settings size={16} />,
     activeTabs: ["settings", ...SETTINGS_SECTIONS],
   },
 ];
@@ -3879,8 +4483,11 @@ export function SettingsView({
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
       {showsSettings && (
         <>
-          <h1>{m.settings_page_settings()}</h1>
+          <h1 tabIndex={-1}>{m.settings_page_settings()}</h1>
           <div className="settings-stack mt-4.5">
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <RunEngineSetting />
+            </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
             </section>
@@ -3919,6 +4526,13 @@ export function SettingsView({
           onOpenEnvironment={() => onSelectTab("environment")}
           remote={remote}
         />
+      )}
+      {tab === "openresearch" && (
+        <>
+          <button type="button" className="settings-back mb-6 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text" onClick={() => onSelectTab("compute")}><ArrowLeft size={16} /> {m.settings_page_back_to_compute()}</button>
+          <h1>OpenResearch</h1>
+          <div className="mt-6 font-sans text-base text-text"><OpenResearchSection remote={remote} /></div>
+        </>
       )}
       {tab === "instances" && (
         <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />

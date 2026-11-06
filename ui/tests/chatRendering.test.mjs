@@ -41,6 +41,13 @@ test("question replies stay visible and only represented question tool echoes di
   assert.ok(splitResponseParts([message(tool)], false).answer.includes(tool));
 });
 
+test("a held card an agent answered leaves its answer to that chat's steered card", () => {
+  const card = { id: "card", type: "prompt", prompt: { kind: "question", question: "Which?", resolved: true, nativeId: "q1", answers: ["A"], answeredBy: "chat_parent" } };
+  const steer = { id: "steer", type: "steer", text: "A", orx: { kind: "message", from: "chat_parent" } };
+  assert.ok(questionReplies([message(card, steer)]).prompts.has("card"));
+  assert.ok(!questionReplies([message(card)]).prompts.has("card"), "without a steer the card shows the answer");
+});
+
 test("a recovery error replaces the identical terminal error without hiding other errors", () => {
   const duplicate = { id: "err-0", type: "tool", tool: "error", state: { error: "Invalid model" } };
   const other = { id: "err-1", type: "tool", tool: "error", state: { error: "Other failure" } };
@@ -301,6 +308,27 @@ test("automatic continuations share a response until the next user message", asy
   assert.equal(groupResponseMessages([user, first, continuation, nextUser], groups)[1], groups[1]);
 });
 
+test("a local send failure stands apart from the previous response", async () => {
+  const { groupResponseMessages } = await import("../src/chatRendering.ts");
+  const { LOCAL_ERROR_PART_ID } = await import("../src/queries/chatState.ts");
+  const user = { id: "user", role: "user", parts: [], createdAt: 0 };
+  const answer = { ...message({ id: "a", type: "text", text: "Plan", phase: "final_answer" }), id: "answer" };
+  const failure = { ...message({ id: LOCAL_ERROR_PART_ID, type: "tool", tool: "error", state: { status: "error", error: "Message not sent" } }), id: "local-senderr-1" };
+  const groups = groupResponseMessages([user, answer, failure]);
+  assert.deepEqual(groups, [[user], [answer], [failure]]);
+});
+
+test("provider switches preserve the answers on both sides as separate transcript rows", async () => {
+  const { groupResponseMessages, splitResponseParts } = await import("../src/chatRendering.ts");
+  const before = { ...message({ id: "before-text", type: "text", text: "Original answer", phase: "final_answer" }), id: "before" };
+  const switched = { ...message({ id: "switch", type: "tool", tool: "provider_switch", state: { status: "completed" } }), id: "switched" };
+  const after = { ...message({ id: "after-text", type: "text", text: "Continued answer", phase: "final_answer" }), id: "after" };
+  const groups = groupResponseMessages([before, switched, after]);
+  assert.deepEqual(groups, [[before], [switched], [after]]);
+  assert.equal(splitResponseParts(groups[0], false).answer[0].text, "Original answer");
+  assert.equal(splitResponseParts(groups[2], false).answer[0].text, "Continued answer");
+});
+
 test("a continuation retains the previous answer until a new answer arrives", async () => {
   const { splitResponseParts } = await import("../src/chatRendering.ts");
   const oldAnswer = { id: "old-answer", type: "text", phase: "final_answer", text: "Run launched" };
@@ -314,6 +342,23 @@ test("a continuation retains the previous answer until a new answer arrives", as
   const updated = splitResponseParts([first, { ...continuation, parts: [progress, newAnswer] }], true);
   assert.deepEqual(updated.answer, [newAnswer]);
   assert.deepEqual(updated.work, [
+    { id: "first", parts: [oldAnswer] },
+    { id: "continuation", parts: [progress] },
+  ]);
+});
+
+test("a message the user wrote into a continuation stays visible with its reply", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const oldAnswer = { id: "old-answer", type: "text", phase: "final_answer", text: "Run launched" };
+  const progress = { id: "progress", type: "text", phase: "commentary", text: "Checking the result" };
+  const steer = { id: "steer", type: "steer", text: "Does this need GPUs?" };
+  const reply = { id: "reply", type: "text", phase: "commentary", text: "Yes, it runs a backward pass." };
+  const first = { ...message(oldAnswer), id: "first", completedAt: 10 };
+  const continuation = { ...message(progress, steer, reply), id: "continuation", createdAt: 100 };
+  const live = splitResponseParts([first, continuation], true);
+  assert.deepEqual(live.answer, [steer, reply]);
+  assert.equal(live.answerMessageId, "continuation");
+  assert.deepEqual(live.work, [
     { id: "first", parts: [oldAnswer] },
     { id: "continuation", parts: [progress] },
   ]);

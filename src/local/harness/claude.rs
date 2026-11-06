@@ -12,7 +12,7 @@
 //! `--permission-mode` from the session's setting (`auto`/`bypassPermissions` — see
 //! `options`). AskUserQuestion / ExitPlanMode surface as interactive cards: the
 //! turn ends on them and the user's answer resumes the session — except in plan
-//! mode, where the mcp-gate bridge holds both open mid-turn and the answer
+//! mode, where the `orx mcp` bridge holds both open mid-turn and the answer
 //! continues the same turn.
 //!
 //! Detection: `claude auth status --json` is the readiness source of truth.
@@ -27,7 +27,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 use super::detect::{
     bin_version, nonempty_str, parse_version, read_json, HarnessAuthState, HarnessInfo, ModelInfo,
@@ -47,7 +46,7 @@ use crate::local::chat::{
 use crate::local::claude::{SpawnConfig, SpawnSpec, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
-use crate::local::shell_env::find_on_path;
+use crate::local::shell_env::installs;
 
 /// Harness-wide effort choices when no model-specific catalog is available.
 const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -73,6 +72,7 @@ pub(crate) struct AuthProbe {
     pub state: HarnessAuthState,
     pub method: Option<&'static str>,
     pub provider: Option<String>,
+    subscription_type: Option<String>,
     pub sequence: u64,
     pub failed_check: bool,
     reported_method_present: bool,
@@ -97,6 +97,7 @@ impl AuthProbe {
             state: HarnessAuthState::Unknown,
             method: None,
             provider: None,
+            subscription_type: None,
             sequence,
             failed_check: true,
             reported_method_present: false,
@@ -162,6 +163,9 @@ pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence:
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
             })
             .map(str::to_string),
+        subscription_type: value
+            .as_ref()
+            .and_then(|value| nonempty_str(value, "subscriptionType")),
         sequence,
         failed_check: state == HarnessAuthState::Unknown,
         reported_method_present: reported_method.is_some(),
@@ -170,7 +174,7 @@ pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence:
 }
 
 async fn probe_auth(bin: &Path, sequence: u64) -> AuthProbe {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.args(["auth", "status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -284,7 +288,7 @@ pub(crate) fn external_provider(method: Option<&str>, provider: Option<&str>) ->
 /// Any failure reports unsupported: a missing choice is a smaller harm than a
 /// choice that silently runs at the default effort.
 async fn probe_auth_and_ultracode(bin: &Path, sequence: u64) -> (AuthProbe, bool) {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.args(["--effort", CLAUDE_ULTRACODE, "auth", "status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -326,7 +330,7 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
     let fut = async move {
-        let mut cmd = Command::new(&bin);
+        let mut cmd = crate::process::tokio_command(&bin);
         cmd.args([
             "--print",
             "--input-format",
@@ -473,6 +477,11 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
             let mut info = ModelInfo::new(value)
                 .with_reasoning(&efforts)
                 .with_label(name, blurb);
+            info.resolved_model = m
+                .get("resolvedModel")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            info.context_window = m.get("contextWindow").and_then(Value::as_u64);
             // Claude reports no default *tier* because its unset default isn't
             // one: with adaptive thinking, the CLI scales effort per request.
             // Name the sentinel row for what actually runs — preselecting a
@@ -491,6 +500,9 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
 
 pub struct ClaudeCode;
 
+/// Override inherited launch metadata so children identify OpenResearch.
+pub(crate) const CLAUDE_ENTRYPOINT: &str = "openresearch";
+
 /// Either credential Claude Code accepts. `ANTHROPIC_AUTH_TOKEN` is the one a
 /// custom `ANTHROPIC_BASE_URL` gateway uses, so detecting only the api key
 /// reports those working setups as signed out.
@@ -505,9 +517,17 @@ fn has_api_credential() -> bool {
 /// Turn Claude's private billing enum into a stable user-facing label. Unknown
 /// values are deliberately hidden: exposing a new server-side enum verbatim is
 /// both confusing and makes the dashboard depend on an undocumented contract.
-fn billing_label(value: Option<&str>) -> Option<String> {
-    match value {
-        Some("stripe_subscription" | "stripe_subscription_contracted") => {
+fn billing_label(
+    subscription: Option<&str>,
+    tier: Option<&str>,
+    value: Option<&str>,
+) -> Option<String> {
+    match (subscription, tier, value) {
+        (Some("max") | None, Some("default_claude_max_5x"), _) => Some("Max 5x".into()),
+        (Some("max") | None, Some("default_claude_max_20x"), _) => Some("Max 20x".into()),
+        (Some("max"), _, _) => Some("Max".into()),
+        (Some("pro"), _, _) => Some("Pro".into()),
+        (_, _, Some("stripe_subscription" | "stripe_subscription_contracted")) => {
             Some("Subscription".to_string())
         }
         _ => None,
@@ -528,7 +548,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         OneShotQuality::Cheap => "haiku",
         OneShotQuality::Standard => "sonnet",
     };
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.args([
         "-p",
         request.prompt,
@@ -560,6 +580,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     // cwd's CLAUDE.md / settings into a request that carries its own context.
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
+    cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
     cmd.env(
         "CLAUDE_CONFIG_DIR",
         native_store::prepare_claude(NativeStore::Isolated)?,
@@ -585,17 +606,10 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `claude` on PATH, then the common install drop locations, in preference order.
+/// Every `claude` install, in preference order.
 fn claude_candidates() -> Vec<PathBuf> {
-    let drops = dirs::home_dir().into_iter().flat_map(|home| {
-        [
-            home.join(".claude").join("local"),
-            home.join(".local").join("bin"),
-        ]
-        .into_iter()
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "claude"))
-    });
-    find_on_path("claude").into_iter().chain(drops).collect()
+    let own = dirs::home_dir().map(|home| home.join(".claude").join("local"));
+    installs("claude", own)
 }
 
 /// The executable detection selected, else `claude` on PATH / the drop
@@ -675,13 +689,40 @@ impl ClaudeCode {
             if info.auth_state == HarnessAuthState::Ready {
                 info.authenticated = true;
                 if probe.method == Some("oauth") {
+                    let credential_tier = if cfg!(target_os = "macos") {
+                        None
+                    } else {
+                        read_json(
+                            native_store::claude_home(NativeStore::Legacy)
+                                .join(".credentials.json"),
+                        )
+                        .and_then(|credentials| {
+                            credentials
+                                .get("claudeAiOauth")
+                                .and_then(|oauth| nonempty_str(oauth, "rateLimitTier"))
+                        })
+                    };
+                    info.plan = billing_label(
+                        probe.subscription_type.as_deref(),
+                        credential_tier.as_deref(),
+                        None,
+                    );
                     if let Some(acct) = dirs::home_dir()
                         .and_then(|h| read_json(h.join(".claude.json")))
                         .and_then(|cfg| cfg.get("oauthAccount").cloned())
                     {
                         info.account = nonempty_str(&acct, "emailAddress");
+                        info.account_name = nonempty_str(&acct, "displayName")
+                            .or_else(|| nonempty_str(&acct, "fullName"));
                         info.org = nonempty_str(&acct, "organizationName");
-                        info.plan = billing_label(nonempty_str(&acct, "billingType").as_deref());
+                        info.plan = billing_label(
+                            probe.subscription_type.as_deref(),
+                            credential_tier.as_deref().or_else(|| {
+                                acct.get("organizationRateLimitTier")
+                                    .and_then(Value::as_str)
+                            }),
+                            nonempty_str(&acct, "billingType").as_deref(),
+                        );
                     }
                 }
             }
@@ -785,6 +826,7 @@ impl Harness for ClaudeCode {
                 effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
                 model: ctx.model.clone(),
                 native_store: native_session.store,
+                alphaxiv_signed_in: crate::alphaxiv::signed_in(),
                 bridge_active: uses_permission_bridge(ctx.permission_mode)
                     && ctx.host.up_port().is_some(),
             },
@@ -984,13 +1026,10 @@ impl Harness for ClaudeCode {
         Some(native_store::claude_home(NativeStore::Legacy))
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        self.config_home()
+            .map(|home| vec![home.join("skills")])
+            .unwrap_or_default()
     }
 
     fn skill_shim(&self) -> Option<&'static str> {
@@ -1080,9 +1119,10 @@ pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
 /// is already git-excluded.
 const PLAN_SETTINGS_REL: &str = ".openresearch/agent/claude-plan-settings.json";
 
-/// Path (relative to the worktree) of the plan-mode MCP config wiring the
-/// `orx mcp-gate` permission bridge. Same git-excluded agent dir.
-const MCP_CONFIG_REL: &str = ".openresearch/agent/claude-mcp.json";
+/// Directory (relative to the worktree) of the MCP configs wiring the
+/// `orx mcp` bridge, one per chat: chats sharing a worktree spawn at once,
+/// and each config names its own chat. Same git-excluded agent dir.
+const MCP_CONFIG_DIR_REL: &str = ".openresearch/agent";
 
 // Attribution updates input without granting permission; plan decisions stay separate.
 pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathBuf> {
@@ -1102,7 +1142,26 @@ pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathB
         hooks.push(serde_json::json!({"matcher":"Bash","hooks":hook}));
         hooks.push(serde_json::json!({"matcher":"ExitPlanMode","hooks":hook}));
     }
-    let settings = serde_json::json!({"hooks":{"PreToolUse":hooks}});
+    let allow: Vec<_> = crate::commands::alphaxiv_mcp::RESEARCH_TOOLS
+        .iter()
+        .chain(crate::commands::alphaxiv_mcp::LIBRARY_READ_TOOLS)
+        .map(|name| format!("mcp__alphaxiv__{name}"))
+        .collect();
+    let ask: Vec<_> = crate::commands::alphaxiv_mcp::WRITE_TOOLS
+        .iter()
+        .map(|name| format!("mcp__alphaxiv__{name}"))
+        .collect();
+    let mut settings =
+        serde_json::json!({"hooks":{"PreToolUse":hooks}, "permissions":{"allow":allow, "ask":ask}});
+    // Dev data lives under the checkout (dev.ts), so Claude would load its
+    // CLAUDE.md, which also suppresses a test repo's own AGENTS.md.
+    if cfg!(debug_assertions) {
+        if let Ok(checkout) = crate::paths::canonicalize(env!("CARGO_MANIFEST_DIR")) {
+            let checkout = checkout.to_string_lossy();
+            settings["claudeMdExcludes"] =
+                serde_json::json!([format!("{checkout}/*"), format!("{checkout}/.claude/**")]);
+        }
+    }
     let path = repo.join(PLAN_SETTINGS_REL);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -1113,34 +1172,41 @@ pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathB
     Ok(path)
 }
 
-/// Write the per-spawn `--mcp-config` file pointing Claude at `orx mcp-gate`
-/// (this same binary) and return its path. The bridge's env block carries the
-/// `orx up` port, the session id, and a fresh per-child token minted at spawn —
-/// everything the resident bridge needs to relay permission requests back to
-/// the running server for the child's whole life.
+/// Write the chat's `--mcp-config` file and return its path: alphaXiv always,
+/// and with `gate` the `orx mcp` bridge (this same binary), whose env
+/// block carries the `orx up` port, the session id, and a fresh per-child
+/// token minted at spawn — everything the resident bridge needs to relay
+/// requests back to the running server for the child's whole life.
 pub(crate) fn write_mcp_config(
     repo: &std::path::Path,
-    up_port: u16,
     session_id: &str,
-    token: &str,
+    gate: Option<(u16, &str)>,
 ) -> Result<PathBuf> {
     let orx = crate::paths::spawnable_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
-    let config = serde_json::json!({
-        "mcpServers": {
-            "orx": {
-                "type": "stdio",
-                "command": orx.to_string_lossy(),
-                "args": ["mcp-gate"],
-                "env": {
-                    "ORX_UP_PORT": up_port.to_string(),
-                    "ORX_SESSION_ID": session_id,
-                    "ORX_GATE_TOKEN": token,
-                },
+    let orx = orx.to_string_lossy();
+    let mut config = serde_json::json!({"mcpServers": {
+        "alphaxiv": {"type":"stdio", "command":orx, "args":["alphaxiv-mcp"]}
+    }});
+    if let Some((up_port, token)) = gate {
+        config["mcpServers"]["orx"] = serde_json::json!({
+            "type": "stdio",
+            "command": orx,
+            "args": ["mcp"],
+            // Orchestration tools are few and needed unprompted, so they
+            // skip tool search.
+            "alwaysLoad": true,
+            "env": {
+                "ORX_UP_PORT": up_port.to_string(),
+                "ORX_SESSION_ID": session_id,
+                "ORX_GATE_TOKEN": token,
+                "ORX_AGENT_TOKEN": crate::local::chat::delegation::agent_token(session_id),
             },
-        }
-    });
-    let path = repo.join(MCP_CONFIG_REL);
+        });
+    }
+    let path = repo
+        .join(MCP_CONFIG_DIR_REL)
+        .join(format!("claude-mcp-{session_id}.json"));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
@@ -1394,7 +1460,7 @@ fn observe_turn_boundary(event: &Value, text: &str, saw_user_echo: &mut bool) ->
 /// the fixture tests.
 #[derive(Default)]
 struct TurnState {
-    /// Whether this child was spawned with the mcp-gate bridge active. With the
+    /// Whether this child was spawned with the `orx mcp` bridge active. With the
     /// bridge on, ExitPlanMode / AskUserQuestion come from the bridge (held,
     /// mid-turn-answerable), so their `tool_use` renders nothing.
     bridge_active: bool,
@@ -1519,6 +1585,7 @@ fn apply_subagent_blocks(
                         prompt: None,
                         phase: None,
                         children: Vec::new(),
+                        orx: None,
                     },
                 );
             }
@@ -1839,6 +1906,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                                 prompt: None,
                                 phase: None,
                                 children: Vec::new(),
+                                orx: None,
                             });
                         }
                     }
@@ -2166,6 +2234,7 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
         native_store,
+        alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         // A failed bridge setup must respawn next turn rather than reuse a child without input.
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
     }
@@ -2250,19 +2319,25 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         let waited = match queued.take() {
             Some(event) => Waited::Event(Ok(Some(event))),
             None => {
+                let flush_due = ctx.flush_due();
                 let steering = &mut ctx.steering;
                 tokio::select! {
                     event = tokio::time::timeout_at(deadline, rx.recv()) => Waited::Event(event),
                     steer = super::next_steer(steering) => Waited::Steer(steer),
+                    _ = flush_due => Waited::Flush,
                 }
             }
         };
         let event = match waited {
+            Waited::Flush => {
+                let _ = ctx.flush();
+                continue;
+            }
             Waited::Steer(steer) => {
                 // A failed write means the child is gone and this turn is about
                 // to error out — park the text so it survives into the next one.
                 match client.send_user_message(&steer.text).await {
-                    Ok(()) => ctx.record_steer(&steer.display),
+                    Ok(()) => ctx.record_steer(&steer, true),
                     Err(_) => {
                         if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                             ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -2348,6 +2423,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                     if !state.saw_background_task || state.turn_errored {
                         break;
                     }
+                    let _ = ctx.flush();
                     match tokio::time::timeout(BACKGROUND_RESUME_GRACE, rx.recv()).await {
                         Ok(Some(event)) => queued = Some(event),
                         _ => break,
@@ -2422,7 +2498,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .clone()
         .filter(|_| native_session.is_some());
     if ctx.native_session_id.is_some() && resume.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code")? {
             ctx.text = format!("{recovery}\n\n{}", ctx.text);
         }
     }
@@ -2546,7 +2622,7 @@ mod tests {
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {
         let repo = std::env::temp_dir().join(format!("orx-mcp-test-{}", uuid::Uuid::new_v4()));
-        let path = write_mcp_config(&repo, 4791, "session", "gate").unwrap();
+        let path = write_mcp_config(&repo, "session", Some((4791, "gate"))).unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let env = config["mcpServers"]["orx"]["env"].as_object().unwrap();
@@ -2605,16 +2681,41 @@ mod tests {
 
     #[test]
     fn billing_labels_hide_private_enums() {
+        let probe = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"pro"}"#,
+            1,
+        );
+        assert_eq!(probe.subscription_type.as_deref(), Some("pro"));
         assert_eq!(
-            billing_label(Some("stripe_subscription")),
+            billing_label(None, None, Some("stripe_subscription")),
             Some("Subscription".to_string())
         );
         assert_eq!(
-            billing_label(Some("stripe_subscription_contracted")),
+            billing_label(None, None, Some("stripe_subscription_contracted")),
             Some("Subscription".to_string())
         );
-        assert_eq!(billing_label(Some("future_internal_value")), None);
-        assert_eq!(billing_label(None), None);
+        assert_eq!(
+            billing_label(Some("pro"), None, None).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            billing_label(Some("max"), Some("default_claude_max_5x"), None).as_deref(),
+            Some("Max 5x")
+        );
+        assert_eq!(
+            billing_label(Some("max"), Some("default_claude_max_20x"), None).as_deref(),
+            Some("Max 20x")
+        );
+        assert_eq!(
+            billing_label(Some("pro"), Some("default_claude_max_20x"), None).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            billing_label(None, None, Some("future_internal_value")),
+            None
+        );
+        assert_eq!(billing_label(None, None, None), None);
     }
 
     /// A `list_models` response in the live 2.1.212 shape (fields we don't
@@ -2628,7 +2729,7 @@ mod tests {
             "models": [
                 {
                     "value": "default",
-                    "resolvedModel": "claude-opus-4-8[1m]",
+                    "resolvedModel": "claude-fable-5",
                     "displayName": "Default (recommended)",
                     "supportsEffort": true,
                     "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
@@ -2673,6 +2774,10 @@ mod tests {
             "Adaptive"
         );
         assert_eq!(with[0].default_reasoning_level, None);
+        assert_eq!(
+            with[1].resolved_model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
         // No description → the plain displayName stands.
         assert_eq!(with[1].display_name.as_deref(), Some("Haiku"));
         assert_eq!(with[1].description, None);
@@ -2773,6 +2878,7 @@ mod tests {
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
             annotations: Vec::new(),
+            from: None,
         }
     }
 

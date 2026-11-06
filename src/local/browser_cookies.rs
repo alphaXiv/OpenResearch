@@ -14,7 +14,6 @@
 #[cfg(target_os = "macos")]
 mod imp {
     use std::path::{Path, PathBuf};
-    use std::process::Command;
 
     use crate::error::{anyhow, Result};
 
@@ -277,7 +276,7 @@ mod imp {
         /// Keychain value and, on first use, shows the system access prompt.
         fn key(&self) -> Result<[u8; 16]> {
             let (service, account) = self.keychain;
-            let output = Command::new("security")
+            let output = crate::process::command("security")
                 .args(["find-generic-password", "-w", "-s", service, "-a", account])
                 .output()
                 .map_err(|e| anyhow!("could not ask the Keychain for {}'s key: {e}", self.name))?;

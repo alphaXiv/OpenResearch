@@ -105,14 +105,38 @@ def remote_install(repository, tag):
     )
 
 
-def compose(notes, issues, highlights, remote):
+def compose(notes, issues, remote):
     notes = notes.strip()
     if issues:
         section = "## Fixed issues\n\n" + "\n".join(issues)
         marker = "**Full Changelog**:"
         before, found, after = notes.partition(marker)
         notes = (before.rstrip() + "\n\n" + section + "\n\n" + found + after) if found else notes + "\n\n" + section
-    return "\n\n".join(part for part in (downloads(), remote.strip(), highlights.strip(), notes) if part) + "\n"
+    return "\n\n".join(part for part in (downloads(), remote.strip(), notes) if part) + "\n"
+
+
+def previous_stable_release(repository, tag, commit):
+    version = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.+-]+)?", tag)
+    if not version:
+        raise ValueError(f"Invalid release tag: {tag}")
+    target = tuple(map(int, version.groups()))
+    pages = gh(f"repos/{repository}/releases?per_page=100", "--paginate", "--slurp")
+    releases = [release for page in pages for release in page if not release["draft"] and not release["prerelease"]]
+    if any(release["tag_name"] == tag for release in releases):
+        raise ValueError(f"{tag} is already a stable release")
+    candidates = []
+    for release in releases:
+        name = release["tag_name"]
+        match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", name)
+        if match and tuple(map(int, match.groups())) < target:
+            candidates.append((tuple(map(int, match.groups())), name))
+    for _, name in sorted(candidates, reverse=True):
+        comparison = gh(f"repos/{repository}/compare/{name}...{commit}")
+        if comparison["status"] in ("ahead", "identical"):
+            return name
+    if releases:
+        raise ValueError(f"No earlier stable release is an ancestor of {commit}")
+    return None
 
 
 def main():
@@ -127,13 +151,14 @@ def main():
         gh(f"repos/{repository}/releases/{release['id']}", "-X", "PATCH", "-f", f"body={body}")
         return
     tag, commit, output_file = sys.argv[1:]
+    previous = previous_stable_release(repository, tag, commit)
+    previous_arg = ["-f", f"previous_tag_name={previous}"] if previous else []
     generated = gh(
         f"repos/{repository}/releases/generate-notes", "-X", "POST",
         "-f", f"tag_name={tag}", "-f", f"target_commitish={commit}",
+        *previous_arg,
     )["body"]
-    highlights_file = Path("release-notes") / f"{tag}.md"
-    highlights = highlights_file.read_text() if highlights_file.is_file() else ""
-    Path(output_file).write_text(compose(generated, fixed_issues(generated, repository), highlights, remote_install(repository, tag)))
+    Path(output_file).write_text(compose(generated, fixed_issues(generated, repository), remote_install(repository, tag)))
 
 
 if __name__ == "__main__":

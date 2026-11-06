@@ -428,7 +428,25 @@ fn projected_parts(message: &Value) -> Vec<(WirePart, &Value)> {
                     part["state"]["error"] = Value::Null;
                 }
             }
-            to_wire_part(&part).map(|part| (part, content))
+            let mut wire = to_wire_part(&part)?;
+            if content["name"] == "execute" {
+                wire.children = content
+                    .pointer("/state/metadata/toolCalls")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .filter_map(|(call_index, call)| {
+                        let tool = call["tool"].as_str()?.strip_prefix("orx_alphaxiv.")?;
+                        to_wire_part(&json!({
+                            "id":format!("{id}:{index}:alphaxiv:{call_index}"),
+                            "type":"tool", "tool":format!("orx_alphaxiv_{tool}"),
+                            "state":{"status":call["status"], "input":call["input"]}
+                        }))
+                    })
+                    .collect();
+            }
+            Some((wire, content))
         })
         .collect()
 }
@@ -774,7 +792,7 @@ pub(super) async fn detect(
     let catalog = tokio::spawn(async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let _lease = crate::local::opencode::prepare_database(&binary, &db).await?;
-        let mut cmd = tokio::process::Command::new(&binary.path);
+        let mut cmd = crate::process::tokio_command(&binary.path);
         crate::local::local_models::prepare_env(&mut cmd, None)?;
         cmd.env("OPENCODE_DB", _lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
@@ -849,30 +867,88 @@ pub(super) async fn detect(
 }
 
 async fn discover_models(endpoint: &AgentEndpoint) -> Result<(Value, Value)> {
+    discover_models_within(
+        endpoint,
+        Duration::from_secs(30),
+        Duration::from_millis(200),
+    )
+    .await
+}
+
+async fn catalog_get(endpoint: &AgentEndpoint, path: &str) -> Result<Option<Value>> {
+    let response = endpoint
+        .client
+        .get(format!("{}{path}", endpoint.base_url))
+        .send()
+        .await?;
+    let status = response.status();
+    let text = response.text().await?;
+    let body = serde_json::from_str::<Value>(&text);
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        && body.as_ref().is_ok_and(|body| {
+            body["_tag"] == "ServiceUnavailableError" && body["service"] == "plugin"
+        })
+    {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(anyhow!(
+            "OpenCode {path} returned {status}: {}",
+            crate::local::harness::one_line(&text, 300)
+        ));
+    }
+    let body = body?;
+    if !body["data"].is_array() {
+        return Err(anyhow!("OpenCode {path} returned an invalid catalog"));
+    }
+    Ok(Some(body))
+}
+
+async fn discover_models_within(
+    endpoint: &AgentEndpoint,
+    timeout: Duration,
+    retry: Duration,
+) -> Result<(Value, Value)> {
     let mut catalog = None;
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
+    let mut plugins_pending = false;
+    let result = tokio::time::timeout(timeout, async {
         if endpoint.legacy_v2_api {
             post(endpoint, "/api/plugin/await-activation", &json!({})).await?;
         }
         loop {
-            let models = get(endpoint, "/api/model").await?;
-            let integrations = get(endpoint, "/api/integration").await?;
-            let ready = models["data"]
-                .as_array()
-                .is_some_and(|models| !models.is_empty());
-            catalog = Some((models, integrations));
-            if endpoint.legacy_v2_api || ready {
-                return Ok::<_, anyhow::Error>(());
+            let models = catalog_get(endpoint, "/api/model").await?;
+            plugins_pending = models.is_none();
+            if let Some(models) = models {
+                let integrations = catalog_get(endpoint, "/api/integration").await?;
+                plugins_pending = integrations.is_none();
+                if let Some(integrations) = integrations {
+                    let ready = models["data"]
+                        .as_array()
+                        .is_some_and(|models| !models.is_empty());
+                    catalog = Some((models, integrations));
+                    if endpoint.legacy_v2_api || ready {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                }
             }
             // OpenCode 2.0.4 removed await-activation; cold catalogs can initially be empty.
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(retry).await;
         }
     })
     .await;
     if let Ok(result) = result {
         result?;
     }
-    catalog.ok_or_else(|| anyhow!("OpenCode model discovery timed out"))
+    catalog.ok_or_else(|| {
+        if plugins_pending {
+            anyhow!(
+                "OpenCode plugins did not finish activating within {} seconds. Re-check OpenCode.",
+                timeout.as_secs()
+            )
+        } else {
+            anyhow!("OpenCode model discovery timed out")
+        }
+    })
 }
 
 pub(super) async fn generate(
@@ -890,7 +966,7 @@ pub(super) async fn generate(
     tokio::spawn(async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let lease = crate::local::opencode::prepare_database(&binary, &db).await?;
-        let mut cmd = tokio::process::Command::new(&binary.path);
+        let mut cmd = crate::process::tokio_command(&binary.path);
         crate::local::local_models::prepare_generation_env(
             &mut cmd,
             Some(&model),
@@ -1024,6 +1100,7 @@ mod tests {
                     answers: Vec::new(),
                     note: None,
                     annotations: Vec::new(),
+                    from: None,
                 };
                 reply(&ctx, &endpoint, &prompt, &answer).await.unwrap();
             }
@@ -1079,6 +1156,7 @@ mod tests {
                 answers: Vec::new(),
                 note: Some("Skipped".into()),
                 annotations: Vec::new(),
+                from: None,
             };
             let result = reply(&ctx, &endpoint, &prompt, &answer).await;
             server.abort();
@@ -1086,51 +1164,213 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn discovery_waits_for_a_cold_v2_catalog_without_generation() {
-        use axum::{routing::get, Json, Router};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        let requests = Arc::new(AtomicUsize::new(0));
-        let count = requests.clone();
-        let app = Router::new()
-            .route(
-                "/api/model",
-                get(move || {
-                    let count = count.clone();
-                    async move {
-                        Json(if count.fetch_add(1, Ordering::SeqCst) == 0 {
-                            json!({"data":[]})
-                        } else {
-                            json!({"data":[{"id":"fixture"}]})
-                        })
-                    }
-                }),
-            )
-            .route(
-                "/api/integration",
-                get(|| async { Json(json!({"data":[]})) }),
-            )
-            .layer(axum::middleware::from_fn(
-                |request: axum::extract::Request, next: axum::middleware::Next| async move {
-                    assert_eq!(request.method(), reqwest::Method::GET);
-                    assert!(["/api/model", "/api/integration"].contains(&request.uri().path()));
-                    next.run(request).await
-                },
-            ));
+    async fn catalog_server(
+        app: axum::Router,
+        legacy: bool,
+    ) -> (AgentEndpoint, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = AgentEndpoint {
             base_url: format!("http://{}", listener.local_addr().unwrap()),
             client: crate::net::loopback_client().build().unwrap(),
             protocol: crate::local::opencode::Protocol::V2,
-            legacy_v2_api: false,
+            legacy_v2_api: legacy,
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let (models, _) = discover_models(&endpoint).await.unwrap();
-        assert_eq!(models["data"][0]["id"], "fixture");
-        assert_eq!(requests.load(Ordering::SeqCst), 2);
-        server.abort();
+        (endpoint, server)
+    }
+
+    const RETRY: Duration = Duration::from_millis(1);
+
+    fn plugin_pending() -> Value {
+        json!({"_tag":"ServiceUnavailableError", "service":"plugin", "message":"fixture", "extra":true})
+    }
+
+    #[tokio::test]
+    async fn discovery_retries_plugin_activation_on_both_catalog_routes() {
+        use axum::{http::StatusCode, routing::get, routing::post, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        for legacy in [false, true] {
+            for pending_path in ["/api/model", "/api/integration"] {
+                let polls = Arc::new(AtomicUsize::new(0));
+                let activations = Arc::new(AtomicUsize::new(0));
+                let count = activations.clone();
+                let mut app = Router::new().route(
+                    "/api/plugin/await-activation",
+                    post(move || {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        async { Json(json!({})) }
+                    }),
+                );
+                for path in ["/api/model", "/api/integration"] {
+                    let count = polls.clone();
+                    app = app.route(
+                        path,
+                        get(move || {
+                            let count = count.clone();
+                            async move {
+                                if path == pending_path && count.fetch_add(1, Ordering::SeqCst) == 0
+                                {
+                                    (StatusCode::SERVICE_UNAVAILABLE, Json(plugin_pending()))
+                                } else {
+                                    (StatusCode::OK, Json(json!({"data":[{"id":path}]})))
+                                }
+                            }
+                        }),
+                    );
+                }
+                let (endpoint, server) = catalog_server(app, legacy).await;
+                let result = discover_models_within(&endpoint, Duration::from_secs(2), RETRY).await;
+                server.abort();
+                let (models, integrations) = result.unwrap();
+                assert_eq!(models["data"][0]["id"], "/api/model");
+                assert_eq!(integrations["data"][0]["id"], "/api/integration");
+                assert_eq!(polls.load(Ordering::SeqCst), 2);
+                assert_eq!(activations.load(Ordering::SeqCst), usize::from(legacy));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_retry_other_errors_or_invalid_catalogs() {
+        use axum::{http::StatusCode, routing::get, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        for (status, body, diagnostic) in [
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{\"_tag\":\"ServiceUnavailableError\",\"service\":\"storage\"}",
+                "storage",
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{\"_tag\":\"OtherError\",\"service\":\"plugin\"}",
+                "OtherError",
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "not JSON\nserver unavailable",
+                "not JSON server unavailable",
+            ),
+            (StatusCode::UNAUTHORIZED, "not signed in", "not signed in"),
+            (StatusCode::OK, "not JSON", "expected"),
+            (StatusCode::OK, "{\"data\":null}", "invalid catalog"),
+        ] {
+            for path in ["/api/model", "/api/integration"] {
+                let polls = Arc::new(AtomicUsize::new(0));
+                let count = polls.clone();
+                let mut app = Router::new();
+                if path == "/api/integration" {
+                    app = app.route("/api/model", get(|| async { "{\"data\":[]}" }));
+                }
+                app = app.route(
+                    path,
+                    get(move || {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        async move { (status, body) }
+                    }),
+                );
+                let (endpoint, server) = catalog_server(app, false).await;
+                let result = discover_models_within(&endpoint, Duration::from_secs(1), RETRY).await;
+                server.abort();
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains(diagnostic), "{error}");
+                if !status.is_success() {
+                    assert!(error.contains(&status.to_string()), "{error}");
+                }
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_deadline_bounds_pending_plugins_and_stalled_requests() {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+
+        for stalled in [false, true] {
+            let app = Router::new().route(
+                "/api/model",
+                get(move || async move {
+                    if stalled {
+                        std::future::pending::<()>().await;
+                    }
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(plugin_pending()))
+                }),
+            );
+            let (endpoint, server) = catalog_server(app, false).await;
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                discover_models_within(&endpoint, Duration::from_millis(100), RETRY),
+            )
+            .await;
+            server.abort();
+            let error = result.unwrap().unwrap_err().to_string();
+            if stalled {
+                assert_eq!(error, "OpenCode model discovery timed out");
+            } else {
+                assert!(error.starts_with("OpenCode plugins did not finish activating"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_polls_cold_catalogs_and_keeps_the_last_complete_pair() {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        for plugins_reload in [false, true] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let count = polls.clone();
+            let seen = polls.clone();
+            let app = Router::new()
+                .route(
+                    "/api/model",
+                    get(move || {
+                        let count = count.clone();
+                        async move {
+                            Json(if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                                json!({"data":[]})
+                            } else {
+                                json!({"data":[{"id":"fixture"}]})
+                            })
+                        }
+                    }),
+                )
+                .route(
+                    "/api/integration",
+                    get(move || {
+                        let seen = seen.clone();
+                        async move {
+                            if plugins_reload && seen.load(Ordering::SeqCst) > 1 {
+                                (StatusCode::SERVICE_UNAVAILABLE, Json(plugin_pending()))
+                            } else {
+                                (StatusCode::OK, Json(json!({"data":[{"id":"complete"}]})))
+                            }
+                        }
+                    }),
+                );
+            let (endpoint, server) = catalog_server(app, false).await;
+            let result = discover_models_within(&endpoint, Duration::from_millis(100), RETRY).await;
+            server.abort();
+            let (models, integrations) = result.unwrap();
+            let expected = if plugins_reload {
+                json!([])
+            } else {
+                json!([{"id":"fixture"}])
+            };
+            assert_eq!(models["data"], expected);
+            assert_eq!(integrations["data"][0]["id"], "complete");
+            assert!(polls.load(Ordering::SeqCst) >= 2);
+        }
     }
 
     #[test]
@@ -1252,6 +1492,37 @@ mod tests {
         );
         assert!(field_answer(&json!({"type":"number"}), &["NaN".into()]).is_err());
     }
+    #[test]
+    fn code_mode_alphaxiv_calls_keep_inputs_without_duplicating_execute_output() {
+        let parts = wire_parts(&json!({"id":"message", "content":[{
+            "type":"tool", "name":"execute", "state":{
+                "status":"completed", "content":[{"type":"text","text":"library output"}],
+                "metadata":{"toolCalls":[
+                    {"tool":"orx_alphaxiv.list_library", "status":"completed", "input":{"include_papers":true}},
+                    {"tool":"other.read", "status":"completed", "input":{}},
+                    {"tool":"orx_alphaxiv.get_paper_notes", "status":"completed", "input":{"paper_id_or_url":"2502.16982"}}
+                ]}
+            }
+        }]}));
+        let execute = &parts[0];
+        assert_eq!(
+            execute.state.as_ref().unwrap().output.as_deref(),
+            Some("library output")
+        );
+        assert_eq!(execute.children.len(), 2);
+        let library = &execute.children[0];
+        assert_eq!(library.tool.as_deref(), Some("orx_alphaxiv_list_library"));
+        assert_eq!(
+            library.state.as_ref().unwrap().input.as_ref().unwrap()["include_papers"],
+            true
+        );
+        assert!(library.state.as_ref().unwrap().output.is_none());
+        assert_eq!(
+            execute.children[1].tool.as_deref(),
+            Some("orx_alphaxiv_get_paper_notes")
+        );
+    }
+
     #[test]
     fn dismissed_question_is_a_completed_interaction() {
         for (tool, message, status) in [

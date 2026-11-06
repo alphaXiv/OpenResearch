@@ -58,7 +58,7 @@ use crate::local::chat::{
 use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
-use crate::local::shell_env::find_on_path;
+use crate::local::shell_env::installs;
 use crate::store::{Store, StoredChatMessage};
 
 fn codex_native_usage(usage: &Value) -> crate::store::TokenUsage {
@@ -357,7 +357,7 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
     let fut = async move {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -457,10 +457,11 @@ fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<Mode
             let default = configured_effort
                 .filter(|e| efforts.contains(e))
                 .or(catalog_default);
-            let info = ModelInfo::new(id).with_label(
+            let mut info = ModelInfo::new(id).with_label(
                 m.get("displayName").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
             );
+            info.context_window = m.get("contextWindow").and_then(Value::as_u64);
             let info = info.with_service_tiers(
                 m.get("serviceTiers")
                     .and_then(Value::as_array)
@@ -556,24 +557,34 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     })
 }
 
-/// `codex` on PATH then in installer locations, in preference order, symlinks
-/// resolved — codex needs to find its `codex-code-mode-host` helper next to the
-/// real binary.
+/// Every `codex` install, in preference order, symlinks resolved — codex needs
+/// to find its `codex-code-mode-host` helper next to the real binary.
 fn codex_candidates() -> Vec<PathBuf> {
-    let drops = dirs::home_dir()
-        .map(|home| home.join(".local").join("bin"))
+    installs("codex", codex_install_dirs(dirs::home_dir().as_deref()))
+        .into_iter()
+        .map(resolve_symlinks)
+        .collect()
+}
+
+/// Codex's own installer locations. ChatGPT.app bundles the Codex CLI without
+/// putting it on PATH, sometimes as the only install.
+fn codex_install_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    let chatgpt_apps = [
+        Some(PathBuf::from("/Applications")),
+        home.map(|home| home.join("Applications")),
+    ];
+    cfg!(windows)
+        .then(dirs::data_local_dir)
+        .flatten()
+        .map(|dir| dir.join("Programs/OpenAI/Codex/bin"))
         .into_iter()
         .chain(
-            cfg!(windows)
-                .then(dirs::data_local_dir)
+            chatgpt_apps
+                .into_iter()
                 .flatten()
-                .map(|dir| dir.join("Programs/OpenAI/Codex/bin")),
+                .filter(|_| cfg!(target_os = "macos"))
+                .map(|apps| apps.join("ChatGPT.app/Contents/Resources/codex-cli/bin")),
         )
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
-    find_on_path("codex")
-        .into_iter()
-        .chain(drops)
-        .map(resolve_symlinks)
         .collect()
 }
 
@@ -615,7 +626,7 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     };
     let message = format!("{}\n\n{}", request.system, request.prompt);
     let fut = async {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
             .args(["-c", "sandbox_mode=\"read-only\""])
             .args(["-c", "approval_policy=\"never\""])
@@ -710,6 +721,15 @@ fn exec_line_agent_message(line: &str) -> Option<String> {
     }
 }
 
+fn codex_plan_label(plan: &str) -> String {
+    match plan {
+        "prolite" => "Pro 100".into(),
+        "pro" => "Pro 200".into(),
+        "promax" => "Pro 500".into(),
+        _ => title_case(plan),
+    }
+}
+
 impl Codex {
     /// `snapshot` skips the `model/list` handshake and leaves the catalog empty;
     /// a
@@ -751,8 +771,9 @@ impl Codex {
                 info.authenticated = true;
                 info.auth_method = Some("oauth");
                 info.account = nonempty_str(&claims, "email");
+                info.account_name = nonempty_str(&claims, "name");
                 if let Some(oa) = claims.get("https://api.openai.com/auth") {
-                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| title_case(&p));
+                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| codex_plan_label(&p));
                 }
             }
         }
@@ -933,21 +954,22 @@ impl Harness for Codex {
                     .codex
                     .ensure(&ctx.session_id, session.store)
                     .await?;
-                let config = if ctx.permission_mode == Some(PermissionMode::Bypass) {
-                    Value::Null
-                } else {
-                    codex_turn_config(&client, &repo).await?
+                let config = match codex_turn_config(&client, &repo).await {
+                    Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
+                    config => config?,
                 };
                 let auto_review_supported = config_supports_auto_review(&config)
                     && super::detect::api_key("OPENAI_BASE_URL").is_none();
-                let setup = codex_thread_setup(
+                let mut setup = codex_thread_setup(
                     &repo,
                     &playbook_md,
                     ctx.permission_mode,
                     auto_review_supported,
                     ctx.model.as_deref(),
                     ctx.service_tier.as_deref(),
-                );
+                    &config,
+                )?;
+                add_orx_server(&mut setup["config"], &ctx.session_id, ctx.host.up_port());
                 resume_for_compaction(&client, thread_id, &session.path, setup).await?;
                 client
             }
@@ -1162,7 +1184,7 @@ impl Harness for Codex {
                 if !answer.approve {
                     return Ok(ResumeAction::Handled { plan_mode: None });
                 }
-                let text = async_question_answer(prompt, answer)?;
+                let (text, shown) = answer.as_written(async_question_answer(prompt, answer)?);
                 ctx.host
                     .steer_message(
                         &ctx.session_id,
@@ -1171,6 +1193,7 @@ impl Harness for Codex {
                         Vec::new(),
                         Vec::new(),
                         None,
+                        shown,
                     )
                     .await?;
                 Ok(ResumeAction::Handled { plan_mode: None })
@@ -1191,22 +1214,19 @@ impl Harness for Codex {
                 // native_id is the JSON-RPC request id's raw text.
                 let rpc_id: Value = serde_json::from_str(native)
                     .map_err(|_| anyhow!("codex prompt reply id is invalid"))?;
-                // Build the reply BEFORE reaching the client, so a bad answer
-                // (a question with no selection/note) errs before delivery and
-                // leaves the card actionable.
-                let reply = if prompt.kind == "permission" {
-                    serde_json::json!({ "decision": approval_decision(answer.approve) })
-                } else {
-                    user_input_reply(prompt, answer)?
-                };
                 let client = ctx
                     .host
                     .codex
                     .client_for(&ctx.session_id)
                     .await
                     .ok_or_else(|| {
-                        anyhow!("codex app-server is not running — cannot deliver the reply")
+                        anyhow!("Codex app-server is not running — cannot deliver the reply")
                     })?;
+                let reply = if prompt.kind == "permission" {
+                    client.approval_reply(&rpc_id, answer.approve)
+                } else {
+                    user_input_reply(prompt, answer)?
+                };
                 client.respond(&rpc_id, reply).await?;
                 Ok(ResumeAction::Handled { plan_mode: None })
             }
@@ -1216,6 +1236,16 @@ impl Harness for Codex {
 
     fn config_home(&self) -> Option<PathBuf> {
         Some(native_store::codex_home(NativeStore::Legacy))
+    }
+
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        [
+            dirs::home_dir().map(|home| home.join(".agents/skills")),
+            self.config_home().map(|home| home.join("skills")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -1271,7 +1301,7 @@ impl Harness for Codex {
                 .build()
                 .ok()?;
             runtime.block_on(async {
-                let mut cmd = Command::new(bin);
+                let mut cmd = crate::process::tokio_command(bin);
                 cmd.args(["plugin", "list", "--json"])
                     .env("CODEX_HOME", &worker_home)
                     .current_dir(std::env::temp_dir())
@@ -1746,6 +1776,7 @@ fn tool_part(
         prompt: None,
         phase: None,
         children: Vec::new(),
+        orx: None,
     }
 }
 
@@ -2713,15 +2744,16 @@ fn error_message(error: Option<&Value>) -> String {
         .unwrap_or_else(|| "codex reported an error".to_string())
 }
 
-fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) {
-    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") else {
-        return;
+fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) -> Result<()> {
+    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? else {
+        return Ok(());
     };
     let instructions = setup
         .get("developerInstructions")
         .and_then(Value::as_str)
         .unwrap_or_default();
     setup["developerInstructions"] = Value::String(format!("{instructions}\n\n{recovery}"));
+    Ok(())
 }
 
 async fn ensure_codex_pre_accept(
@@ -2781,6 +2813,29 @@ async fn codex_playbook(
     Ok((repo, playbook_md))
 }
 
+/// Add orx's MCP server to a thread's config. Native sub-agents are off while
+/// it is on: delegation goes through orx, which can reach any model.
+fn add_orx_server(config: &mut Value, session_id: &str, up_port: Option<u16>) {
+    let Some(server) =
+        up_port.and_then(|port| crate::local::chat::delegation::mcp_server(session_id, port).ok())
+    else {
+        return;
+    };
+    let env: serde_json::Map<String, Value> = server
+        .env
+        .iter()
+        .map(|(name, value)| (name.to_string(), Value::String(value.clone())))
+        .collect();
+    config["mcp_servers"]["orx"] = serde_json::json!({
+        "command": server.command,
+        "args": server.args,
+        "env": env,
+        "default_tools_approval_mode": "approve",
+        "tool_timeout_sec": crate::local::chat::delegation::TOOL_TIMEOUT_SECONDS as f64,
+    });
+    config["features"] = serde_json::json!({"multi_agent": false, "multi_agent_v2": false});
+}
+
 /// Both a normal turn and idle compaction restore the same thread settings.
 fn codex_thread_setup(
     repo: &Path,
@@ -2789,7 +2844,8 @@ fn codex_thread_setup(
     auto_review_supported: bool,
     model: Option<&str>,
     service_tier: Option<&str>,
-) -> Value {
+    config: &Value,
+) -> Result<Value> {
     let (sandbox_mode, approval_policy, approvals_reviewer) =
         codex_policies(permission_mode, auto_review_supported);
     let mut setup = serde_json::json!({
@@ -2798,6 +2854,7 @@ fn codex_thread_setup(
         "approvalPolicy": approval_policy,
         "approvalsReviewer": approvals_reviewer,
         "developerInstructions": playbook_md,
+        "config":{"mcp_servers":crate::local::codex::alphaxiv_config(&config["config"]["mcp_servers"])?},
     });
     if let Some(service_tier) = service_tier {
         setup["serviceTier"] = Value::String(service_tier.to_string());
@@ -2805,7 +2862,7 @@ fn codex_thread_setup(
     if let Some(model) = model {
         setup["model"] = Value::String(model.to_string());
     }
-    setup
+    Ok(setup)
 }
 
 async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
@@ -2831,10 +2888,10 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         .unwrap_or(NativeStore::Isolated);
     let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
     let config_client = client.clone();
-    let mut config = if ctx.permission_mode == Some(PermissionMode::Bypass) {
-        Value::Null
-    } else {
-        codex_turn_config(&client, &repo).await?
+    // Bypass needs the configuration only to avoid MCP server name collisions.
+    let mut config = match codex_turn_config(&client, &repo).await {
+        Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
+        config => config?,
     };
     let auto_review_supported =
         config_supports_auto_review(&config) && super::detect::api_key("OPENAI_BASE_URL").is_none();
@@ -2854,16 +2911,22 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         auto_review_supported,
         ctx.model.as_deref(),
         ctx.service_tier.as_deref(),
+        &config,
+    )?;
+    add_orx_server(
+        &mut thread_setup["config"],
+        &ctx.session_id,
+        ctx.host.up_port(),
     );
     if ctx.reset_codex_model {
         // Codex keeps the old thread model when a turn omits its model override.
-        append_native_recovery_context(ctx, &mut thread_setup);
+        append_native_recovery_context(ctx, &mut thread_setup)?;
         ctx.native_session_id = None;
     }
     let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
         (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
         (Some(_), None) => {
-            append_native_recovery_context(ctx, &mut thread_setup);
+            append_native_recovery_context(ctx, &mut thread_setup)?;
             start_thread(ctx, &client, thread_setup).await?
         }
         (Some(id), Some(session)) => {
@@ -2893,7 +2956,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         ctx.host.codex.kill_session(&ctx.session_id).await;
                         client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
                     }
-                    append_native_recovery_context(ctx, &mut thread_setup);
+                    append_native_recovery_context(ctx, &mut thread_setup)?;
                     start_thread(ctx, &client, thread_setup).await?
                 }
             }
@@ -3035,6 +3098,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         // `steering` is borrowed out of `ctx` so the borrow ends with the
         // select — the steer arm's handler needs `&mut ctx`.
         let waited = {
+            let flush_due = ctx.flush_due();
             let steering = &mut ctx.steering;
             let event = async {
                 if open_requests.is_empty() {
@@ -3046,9 +3110,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             tokio::select! {
                 event = event => Waited::Event(event),
                 steer = super::next_steer(steering) => Waited::Steer(steer),
+                _ = flush_due => Waited::Flush,
             }
         };
         let event = match waited {
+            Waited::Flush => {
+                let _ = ctx.flush();
+                continue;
+            }
             Waited::Steer(steer) => {
                 steer_turn(ctx, &client, &thread_id, turn_id.as_deref(), steer).await;
                 continue;
@@ -3198,7 +3267,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     settle_request(&client, &id, kind).await;
                 } else {
                     match kind {
-                        ServerReqKind::Approval => {
+                        ServerReqKind::Approval | ServerReqKind::McpApproval => {
                             let card = approval_card(turn_id.as_deref(), &method, &id, &params);
                             if let Some((part_id, part)) = card {
                                 if matches!(ctx.permission_mode, Some(PermissionMode::Bypass)) {
@@ -3206,14 +3275,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                     // if codex asks anyway, the user's chosen mode
                                     // answers for them. (Question cards are never
                                     // auto-answered — only approvals.)
-                                    let _ = client
-                                        .respond(
-                                            &id,
-                                            serde_json::json!({
-                                                "decision": approval_decision(true)
-                                            }),
-                                        )
-                                        .await;
+                                    let _ =
+                                        client.respond(&id, client.approval_reply(&id, true)).await;
                                 } else {
                                     // Surface the card and keep consuming events —
                                     // codex holds the command; the reply arrives
@@ -3296,7 +3359,7 @@ async fn sweep_open_requests(
 /// Other → a JSON-RPC method-not-found error.
 async fn settle_request(client: &CodexClient, id: &Value, kind: ServerReqKind) {
     match kind {
-        ServerReqKind::Approval => {
+        ServerReqKind::Approval | ServerReqKind::McpApproval => {
             let _ = client.respond_decline(id).await;
         }
         ServerReqKind::UserInput => {
@@ -3329,17 +3392,6 @@ fn event_turn_id(params: &Value) -> Option<&str> {
     })
 }
 
-/// PromptAnswer.approve → the codex decision string. Per-command `accept`
-/// (never `acceptForSession` — a single Allow must not silently widen future
-/// commands); `decline` lets the model continue and report the denial.
-fn approval_decision(approve: bool) -> &'static str {
-    if approve {
-        "accept"
-    } else {
-        "decline"
-    }
-}
-
 /// The WirePart id of a server-request card (approval OR question), a pure
 /// function of (turn, request id) — shared by `approval_card`, `user_input_card`,
 /// and the `serverRequest/resolved` reconciliation so none needs a reverse
@@ -3351,36 +3403,54 @@ fn request_part_id(turn: Option<&str>, id: &Value) -> String {
     format!("appr-{}-{id}", turn.unwrap_or("t"))
 }
 
-/// A server→client approval request → a permission card. Returns the WirePart
-/// id and the part; `native_id` carries the JSON-RPC request id's raw text —
-/// the reply target for `resume_from_prompt`. `None` for request methods we
-/// don't card (they get a JSON-RPC error reply instead — including
-/// `item/permissions/requestApproval`, whose reply is a permission-profile
-/// object, not a `{decision}`). The key list spans both carded schemas:
-/// command/cwd exist only on commandExecution; fileChange carries just
-/// reason/grantRoot, so its card leans on `reason`.
+/// Native approvals share transcript cards while retaining their own reply schemas.
 fn approval_card(
     turn: Option<&str>,
     method: &str,
     id: &Value,
     params: &Value,
 ) -> Option<(String, WirePart)> {
-    let tool = match method {
-        "item/commandExecution/requestApproval" => "bash",
-        "item/fileChange/requestApproval" => "edit",
-        _ => return None,
-    };
-    let mut input = serde_json::Map::new();
-    for key in ["command", "cwd", "reason", "grantRoot"] {
-        if let Some(v) = params.get(key).filter(|v| !v.is_null()) {
-            input.insert(key.to_string(), v.clone());
+    let (tool, input) = if method == "mcpServer/elicitation/request" {
+        if params
+            .pointer("/_meta/codex_approval_kind")
+            .and_then(Value::as_str)
+            != Some("mcp_tool_call")
+            || !params
+                .pointer("/requestedSchema/properties")
+                .and_then(Value::as_object)?
+                .is_empty()
+        {
+            return None;
         }
-    }
+        let server = params["serverName"].as_str()?;
+        // Codex supplies the tool's name only in its approval message.
+        let name = params["message"].as_str()?.split('"').nth(1)?;
+        (
+            format!("{server}:{name}"),
+            params
+                .pointer("/_meta/tool_params")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+    } else {
+        let tool = match method {
+            "item/commandExecution/requestApproval" => "bash",
+            "item/fileChange/requestApproval" => "edit",
+            _ => return None,
+        };
+        let mut input = serde_json::Map::new();
+        for key in ["command", "cwd", "reason", "grantRoot"] {
+            if let Some(v) = params.get(key).filter(|v| !v.is_null()) {
+                input.insert(key.to_string(), v.clone());
+            }
+        }
+        (tool.to_owned(), Value::Object(input))
+    };
     let part_id = request_part_id(turn, id);
     let prompt = WirePrompt {
         kind: "permission".into(),
-        tool: Some(tool.into()),
-        tool_input: Some(Value::Object(input)),
+        tool: Some(tool),
+        tool_input: Some(input),
         native_id: Some(id.to_string()),
         ..Default::default()
     };
@@ -3741,7 +3811,7 @@ async fn steer_turn(
         )
         .await;
     match answered {
-        Ok(Ok(_)) => ctx.record_steer(&steer.display),
+        Ok(Ok(_)) => ctx.record_steer(&steer, true),
         Ok(Err(_)) => {
             if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                 ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -3750,10 +3820,8 @@ async fn steer_turn(
         Err(e) => {
             // Record it anyway: the composer is already cleared, so this is
             // the only copy of what the user typed.
-            ctx.record_steer(&steer.display);
-            ctx.push_error(format!(
-                "codex did not confirm the steering message ({e}) — send it again if the turn ignores it"
-            ));
+            ctx.record_steer(&steer, false);
+            ctx.push_error(format!("codex did not confirm the steering message ({e})"));
         }
     }
 }
@@ -3932,7 +4000,7 @@ fn codex_sandbox(mode: Option<PermissionMode>) -> Option<&'static str> {
 }
 
 fn codex_exec_command(bin: &Path, roots: &[PathBuf], native_id: Option<&str>) -> Command {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("exec");
     for root in roots {
         cmd.arg("--add-dir").arg(root);
@@ -4062,9 +4130,28 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
         cmd.args(["-c", &override_arg]);
     }
+    // Only for the server-name collision check; an unreadable file keeps the default name.
+    let configured: serde_json::Map<String, Value> = [
+        codex_home.join("config.toml"),
+        repo.join(".codex").join("config.toml"),
+    ]
+    .iter()
+    .filter_map(|path| {
+        std::fs::read_to_string(path)
+            .ok()?
+            .parse::<toml::Value>()
+            .ok()
+    })
+    .filter_map(|config| serde_json::to_value(config.get("mcp_servers")?).ok())
+    .filter_map(|servers| servers.as_object().cloned())
+    .flatten()
+    .collect();
+    let servers = crate::local::codex::alphaxiv_config(&Value::Object(configured))?;
+    let servers = toml::Value::try_from(servers)?;
+    cmd.args(["-c", &format!("mcp_servers={servers}")]);
     let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
     if ctx.native_session_id.is_some() && native_session.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? {
             turn_text = format!("{recovery}\n\n{turn_text}");
         }
     }
@@ -4118,7 +4205,17 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     let mut open_text: Option<String> = None;
     let mut open_reasoning: Option<String> = None;
 
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line?,
+            _ = ctx.flush_due() => {
+                let _ = ctx.flush();
+                continue;
+            }
+        };
+        let Some(line) = line else {
+            break;
+        };
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -4189,6 +4286,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
                     prompt: None,
                     phase: None,
                     children: Vec::new(),
+                    orx: None,
                 });
             }
             "exec_command_end" => {
@@ -4316,6 +4414,7 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
                 prompt: None,
                 phase: None,
                 children: Vec::new(),
+                orx: None,
             });
         }
         _ => {}
@@ -4324,6 +4423,14 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chatgpt_plan_labels_distinguish_pro_tiers() {
+        assert_eq!(super::codex_plan_label("plus"), "Plus");
+        assert_eq!(super::codex_plan_label("prolite"), "Pro 100");
+        assert_eq!(super::codex_plan_label("pro"), "Pro 200");
+        assert_eq!(super::codex_plan_label("promax"), "Pro 500");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn compaction_restores_the_saved_thread_once_without_a_user_turn() {
@@ -4344,7 +4451,9 @@ mod tests {
             false,
             Some("saved-model"),
             Some("priority"),
-        );
+            &Value::Null,
+        )
+        .unwrap();
         let restored = tokio::time::timeout(
             Duration::from_secs(2),
             resume_for_compaction(
@@ -4430,7 +4539,9 @@ mod tests {
                 automatic_review,
                 None,
                 None,
-            );
+                &Value::Null,
+            )
+            .unwrap();
             assert_eq!(setup["sandbox"], sandbox);
             assert_eq!(setup["approvalPolicy"], approval);
             assert_eq!(setup["approvalsReviewer"], reviewer);
@@ -4458,6 +4569,26 @@ mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn chatgpt_app_bundled_codex_is_an_install_candidate() {
+        let home = std::env::temp_dir().join(format!("orx-chatgpt-test-{}", uuid::Uuid::new_v4()));
+        let bin = home.join("Applications/ChatGPT.app/Contents/Resources/codex-cli/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex"), "").unwrap();
+
+        let dirs = codex_install_dirs(Some(&home));
+        assert!(dirs.contains(&PathBuf::from(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin"
+        )));
+        let found: Vec<_> = dirs
+            .iter()
+            .filter_map(|dir| crate::local::shell_env::find_in_dir(dir, "codex"))
+            .collect();
+        assert!(found.contains(&bin.join("codex")));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn plugin_skills_follow_enabled_installs_and_manifest_paths() {
@@ -5527,7 +5658,7 @@ requires_openai_auth = false
     }
 
     /// The live spike's approval request (trimmed) → a permission card whose
-    /// native_id round-trips the JSON-RPC id, plus the decision mapping.
+    /// native_id round-trips the JSON-RPC id.
     #[test]
     fn approval_request_becomes_a_permission_card() {
         let id = serde_json::json!(0);
@@ -5588,9 +5719,42 @@ requires_openai_auth = false
             &params
         )
         .is_none());
+    }
 
-        assert_eq!(approval_decision(true), "accept");
-        assert_eq!(approval_decision(false), "decline");
+    #[test]
+    fn mcp_write_approval_uses_native_arguments_and_declines_other_elicitations() {
+        let mut params = serde_json::json!({
+            "serverName":"orx_alphaxiv", "mode":"form",
+            "message":"Allow the orx_alphaxiv MCP server to run tool \"create_folder\"?",
+            "_meta":{"codex_approval_kind":"mcp_tool_call", "tool_params":{"folder_name":"Reading"}},
+            "requestedSchema":{"type":"object", "properties":{}}
+        });
+        let (_, part) = approval_card(
+            Some("turn"),
+            "mcpServer/elicitation/request",
+            &serde_json::json!(0),
+            &params,
+        )
+        .unwrap();
+        let prompt = part.prompt.unwrap();
+        assert_eq!(prompt.tool.as_deref(), Some("orx_alphaxiv:create_folder"));
+        assert_eq!(prompt.tool_input.unwrap()["folder_name"], "Reading");
+        params["requestedSchema"]["properties"]["secret"] = serde_json::json!({"type":"string"});
+        assert!(approval_card(
+            Some("turn"),
+            "mcpServer/elicitation/request",
+            &serde_json::json!(0),
+            &params
+        )
+        .is_none());
+        params["_meta"] = Value::Null;
+        assert!(approval_card(
+            Some("turn"),
+            "mcpServer/elicitation/request",
+            &serde_json::json!(0),
+            &params
+        )
+        .is_none());
     }
 
     /// Part ids are turn-scoped: codex request ids restart at 0 per child
@@ -6118,6 +6282,7 @@ requires_openai_auth = false
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
             annotations: Vec::new(),
+            from: None,
         }
     }
 
@@ -6507,6 +6672,10 @@ requires_openai_auth = false
         assert_eq!(
             server_req_kind("item/tool/requestUserInput"),
             ServerReqKind::UserInput
+        );
+        assert_eq!(
+            server_req_kind("mcpServer/elicitation/request"),
+            ServerReqKind::McpApproval
         );
         // A reply schema we don't speak (permission-profile object).
         assert_eq!(

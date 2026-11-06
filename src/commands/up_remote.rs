@@ -11,7 +11,6 @@
 //! `~/.ssh/config` + agent/keys — orx never reads a key.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -29,6 +28,7 @@ use futures::TryStreamExt as _;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::{watch, Mutex, RwLock};
+use tower::ServiceExt as _;
 
 use crate::commands::remote_host::{
     ControlResponse, HostDescriptor, ATTACHED_MARKER, CONTROL_PROTOCOL, HOST_MARKER,
@@ -41,7 +41,7 @@ use crate::{browser, UpArgs};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub(crate) const DASHBOARD_PROTOCOL: u32 = 2;
+pub(crate) const DASHBOARD_PROTOCOL: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +161,50 @@ impl RemoteSessionManager {
         }?;
         let info = session.info.read().await.clone();
         Some(info)
+    }
+
+    pub(crate) async fn serve_workspace(&self, id: &str, mut request: Request) -> Response {
+        let session = match self.session(id).await {
+            Ok(session) => session,
+            Err(error) => return gateway_error(StatusCode::NOT_FOUND, error.to_string()),
+        };
+        let prefix = format!("/_orx/workspaces/{id}");
+        let Some(path) = request
+            .uri()
+            .path_and_query()
+            .and_then(|path| path.as_str().strip_prefix(&prefix))
+        else {
+            return gateway_error(StatusCode::BAD_REQUEST, "Invalid workspace path.".into());
+        };
+        let uri = match path.parse() {
+            Ok(uri) => uri,
+            Err(_) => {
+                return gateway_error(StatusCode::BAD_REQUEST, "Invalid workspace path.".into())
+            }
+        };
+        *request.uri_mut() = uri;
+        let browser_origin = request
+            .headers()
+            .get(header::HOST)
+            .and_then(|host| host.to_str().ok())
+            .map(|host| format!("http://{host}"));
+        let mut response = workspace_router(session).oneshot(request).await.unwrap();
+        if let Some(location) = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+        {
+            let path = browser_origin
+                .as_deref()
+                .and_then(|origin| location.strip_prefix(origin))
+                .unwrap_or(location);
+            if path.starts_with('/') && !path.starts_with("//") {
+                if let Ok(value) = HeaderValue::from_str(&format!("{prefix}{path}")) {
+                    response.headers_mut().insert(header::LOCATION, value);
+                }
+            }
+        }
+        response
     }
 
     pub(crate) async fn create(
@@ -1125,8 +1169,32 @@ async fn authenticated_health(
 }
 
 fn gateway_router(session: Arc<RemoteSession>) -> Router {
+    workspace_router(session)
+        .layer(middleware::from_fn(super::up::track_active))
+        .layer(middleware::from_fn(gateway_loopback_guard))
+}
+
+fn workspace_router(session: Arc<RemoteSession>) -> Router {
     Router::new()
         .route("/_orx/runtime", get(gateway_runtime))
+        .route(
+            "/api/account/openresearch",
+            get(super::up::compute_settings::openresearch_account),
+        )
+        .route(
+            "/api/settings/openresearch/logout",
+            post(super::up::compute_settings::openresearch_logout),
+        )
+        .route(
+            "/api/settings/openresearch/login",
+            get(super::up::openresearch_login),
+        )
+        .route(
+            "/api/settings/alphaxiv/login",
+            get(super::up::alphaxiv_login),
+        )
+        .route("/api/alphaxiv/folders", get(super::up::alphaxiv_folders))
+        .route("/api/alphaxiv/papers", get(super::up::alphaxiv_papers))
         .route("/_orx/ssh/connect", get(gateway_ssh_connect))
         .route("/_orx/ssh/repair", get(gateway_ssh_repair))
         .route("/_orx/install", post(gateway_install))
@@ -1139,8 +1207,6 @@ fn gateway_router(session: Arc<RemoteSession>) -> Router {
         )
         .fallback(gateway_fallback)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .layer(middleware::from_fn(super::up::track_active))
-        .layer(middleware::from_fn(gateway_loopback_guard))
         .with_state(session)
 }
 
@@ -1283,6 +1349,7 @@ async fn gateway_runtime(State(session): State<Arc<RemoteSession>>) -> Json<serd
     Json(serde_json::json!({
         "kind": "ssh",
         "version": env!("CARGO_PKG_VERSION"),
+        "buildChannel": crate::telemetry::build_channel(),
         "dashboardProtocol": DASHBOARD_PROTOCOL,
         "session": session.info.read().await.clone(),
     }))
@@ -1340,7 +1407,7 @@ async fn gateway_stop_host(
     let result = async {
         let (_, _, remote_orx, paths) = remote_stop_context(&session).await?;
         let body = format!("{}\n", serde_json::to_string(&request)?);
-        let output = crate::jobs::ssh::ssh_run(
+        let output = crate::jobs::ssh::direct_run(
             &session.target,
             &remote_host_cmd(&remote_orx.path, &paths, "stop")?,
             Some(&body),
@@ -1461,7 +1528,12 @@ async fn proxy_request(
         .unwrap_or("/");
     let url = format!("{origin}{path}");
     let method = request.method().clone();
-    let (parts, body) = request.with_limited_body().into_parts();
+    // A shared project upload streams past the JSON request cap; the dashboard bounds it.
+    let (parts, body) = if path.split('?').next() == Some("/api/projects/import") {
+        request.into_parts()
+    } else {
+        request.with_limited_body().into_parts()
+    };
     let mut headers = sanitized_request_headers(parts.headers, origin, bearer);
     if websocket {
         headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
@@ -1944,11 +2016,27 @@ fn parse_remote_install_paths(output: &str) -> Option<RemoteInstallPaths> {
     })
 }
 
+fn is_posix_absolute(path: &str) -> bool {
+    path.starts_with('/') && !path.split('/').any(|part| part == "..")
+}
+
+fn posix_join(dir: &str, file: &str) -> String {
+    format!("{}/{}", dir.trim_end_matches('/'), file)
+}
+
+fn posix_path_parent(path: &str) -> Option<String> {
+    if !is_posix_absolute(path) || path == "/" {
+        return None;
+    }
+    path.rsplit_once('/')
+        .map(|(parent, _)| posix_parent(parent))
+}
+
 /// The parent directory of a path on the *remote* machine, checked as a string: the remote
 /// is POSIX, and Windows `Path` rules would reject it or rejoin it with backslashes.
 fn storage_root(path: &str, filename: &str, label: &str) -> Result<String> {
     // Only `..` is refused; an interior `.` (which a probe can report) was always allowed.
-    if !path.starts_with('/') || path.split('/').any(|part| part == "..") {
+    if !is_posix_absolute(path) {
         return Err(anyhow!("{label} must be an absolute path without . or .."));
     }
     let (parent, last) = path
@@ -1992,7 +2080,7 @@ async fn read_remote_settings(
     let command = remote_orx_cmd(&format!(
         "if [ -f {quoted} ]; then cat {quoted}; else printf '{{}}'; fi"
     ));
-    let raw = crate::jobs::ssh::ssh_run(target, &command, None)
+    let raw = crate::jobs::ssh::direct_run(target, &command, None)
         .await
         .map_err(|error| anyhow!("Could not read OpenResearch settings on '{host}': {error}"))?;
     let settings: serde_json::Value = serde_json::from_str(&raw)
@@ -2011,16 +2099,15 @@ async fn write_remote_json(
 ) -> Result<()> {
     let body = format!("{}\n", serde_json::to_string_pretty(value)?);
     let quoted_path = crate::jobs::ssh::sh_quote(path);
-    let parent = Path::new(path)
-        .parent()
+    let parent = posix_path_parent(path)
         .ok_or_else(|| anyhow!("Remote settings path has no parent directory"))?;
-    let parent = crate::jobs::ssh::sh_quote(&parent.to_string_lossy());
+    let parent = crate::jobs::ssh::sh_quote(&parent);
     let command = remote_orx_cmd(&format!(
         "mkdir -p {parent} && umask 077 && tmp={quoted_path}.tmp.$$ && \
          trap 'rm -f \"$tmp\"' EXIT && cat > \"$tmp\" && chmod 600 \"$tmp\" && \
          mv \"$tmp\" {quoted_path} && trap - EXIT"
     ));
-    crate::jobs::ssh::ssh_run(target, &command, Some(&body))
+    crate::jobs::ssh::direct_run(target, &command, Some(&body))
         .await
         .map_err(|error| anyhow!("Could not save OpenResearch settings on '{host}': {error}"))?;
     Ok(())
@@ -2061,37 +2148,38 @@ pub(crate) async fn remote_install_paths(
         REMOTE_CACHE_PATH_MARKER,
         REMOTE_SETTINGS_PATH_MARKER,
     ));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+    let output = crate::jobs::ssh::direct_run(target, &probe, None)
         .await
         .map_err(|error| anyhow!("Can't resolve OpenResearch paths on '{host}': {error}"))?;
-    let mut paths = parse_remote_install_paths(&output)
+    let paths = parse_remote_install_paths(&output)
         .ok_or_else(|| anyhow!("Could not resolve OpenResearch paths on '{host}'."))?;
     let settings = read_remote_settings(target, host, &paths.settings).await?;
+    Ok(apply_remote_settings(paths, &settings))
+}
+
+fn apply_remote_settings(
+    mut paths: RemoteInstallPaths,
+    settings: &serde_json::Value,
+) -> RemoteInstallPaths {
     if let Some(binary) = settings
         .get("orxBinaryPath")
         .and_then(|value| value.as_str())
     {
-        if Path::new(binary).is_absolute() {
+        if is_posix_absolute(binary) {
             paths.binary = binary.to_string();
         }
     }
     if let Some(data) = settings.get("dataDir").and_then(|value| value.as_str()) {
-        if Path::new(data).is_absolute() {
-            paths.database = Path::new(data)
-                .join("orx.db")
-                .to_string_lossy()
-                .into_owned();
+        if is_posix_absolute(data) {
+            paths.database = posix_join(data, "orx.db");
         }
     }
     if let Some(cache) = settings.get("cacheDir").and_then(|value| value.as_str()) {
-        if Path::new(cache).is_absolute() {
-            paths.cache = Path::new(cache)
-                .join("repos")
-                .to_string_lossy()
-                .into_owned();
+        if is_posix_absolute(cache) {
+            paths.cache = posix_join(cache, "repos");
         }
     }
-    Ok(paths)
+    paths
 }
 
 /// Resolve the authenticated remote user's existing binary once, then launch
@@ -2101,7 +2189,7 @@ pub(crate) async fn find_remote_orx(target: &SshTarget, host: &str) -> Result<Op
         "p=$(command -v orx 2>/dev/null || true); \
          p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true);",
     ));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+    let output = crate::jobs::ssh::direct_run(target, &probe, None)
         .await
         .map_err(|e| anyhow!("Can't reach '{host}' over SSH: {e}"))?;
     let discovery_rejection = match classify_probe_output(&output) {
@@ -2138,7 +2226,11 @@ fn remote_orx_probe(resolve_candidate: &str) -> String {
          {resolve_candidate} \
          if [ -n \"$p\" ] && [ -x \"$p\" ]; then \
          owner=$(find \"$p\" -prune \\( -user \"$(id -u)\" -o -user 0 \\) -print 2>/dev/null); \
+         if [ \"$(id -gn 2>/dev/null)\" = \"$(id -un)\" ]; then \
+         unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune \\( -perm -002 -o \\( -perm -020 ! -group \"$(id -g)\" \\) \\) -print 2>/dev/null); \
+         else \
          unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune \\( -perm -020 -o -perm -002 \\) -print 2>/dev/null); \
+         fi; \
          if [ -n \"$owner\" ] && [ -z \"$unsafe\" ]; then \
          v=$(\"$p\" --version 2>/dev/null || true); \
          printf '%s\\n' \"$p\" | orx_probe_emit '{}'; \
@@ -2180,7 +2272,7 @@ async fn probe_remote_orx_path(
     let probe = remote_login_orx_cmd(&remote_orx_probe(&format!(
         "p={path}; p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true);"
     )));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+    let output = crate::jobs::ssh::direct_run(target, &probe, None)
         .await
         .map_err(|error| anyhow!("Can't check OpenResearch on '{host}': {error}"))?;
     Ok(classify_probe_output(&output))
@@ -2196,7 +2288,7 @@ pub(crate) async fn install_remote_orx(
     let version = env!("CARGO_PKG_VERSION");
     let installer = remote_installer(version);
     let command = remote_login_orx_cmd(&format!("export CARGO_HOME={cargo}; {installer}"));
-    crate::jobs::ssh::ssh_run(target, &command, None)
+    crate::jobs::ssh::direct_run(target, &command, None)
         .await
         .map_err(|error| anyhow!("Could not install OpenResearch on '{host}': {error}"))?;
     match probe_remote_orx_path(target, host, &paths.binary).await? {
@@ -2350,7 +2442,7 @@ async fn remote_host_control_status(
         "{} 2>/dev/null || true",
         remote_host_cmd(path, paths, "status")?
     );
-    let output = crate::jobs::ssh::ssh_run(target, &command, None).await?;
+    let output = crate::jobs::ssh::direct_run(target, &command, None).await?;
     Ok(
         parse_control_response(&output).and_then(|response| match response {
             ControlResponse::Status {
@@ -2378,7 +2470,8 @@ async fn ensure_remote_host(
         },
     );
     let output =
-        crate::jobs::ssh::ssh_run(target, &remote_host_cmd(path, paths, &operation)?, None).await?;
+        crate::jobs::ssh::direct_run(target, &remote_host_cmd(path, paths, &operation)?, None)
+            .await?;
     output
         .lines()
         .find_map(|line| line.strip_prefix(HOST_MARKER))
@@ -2402,7 +2495,7 @@ async fn remote_dashboard_protocol(
     let command = remote_orx_cmd(&format!(
         "{path} version --dashboard-protocol 2>/dev/null || true"
     ));
-    let output = crate::jobs::ssh::ssh_run(target, &command, None)
+    let output = crate::jobs::ssh::direct_run(target, &command, None)
         .await
         .map_err(|error| {
             anyhow!("Could not check OpenResearch compatibility on '{host}': {error}")
@@ -2464,7 +2557,7 @@ pub(crate) fn ssh_forward_command(
     forward: &str,
     remote_cmd: &str,
 ) -> Result<Command> {
-    let mut cmd = Command::new("ssh");
+    let mut cmd = crate::process::tokio_command("ssh");
     cmd.env("ORX_SSH_PROBE", "1");
     cmd.args(crate::jobs::ssh::forward_args(target, forward, remote_cmd)?)
         .stdin(Stdio::null())
@@ -2519,6 +2612,79 @@ mod tests {
             generation: AtomicU64::new(0),
             dev_origin: None,
             expected_instance: std::sync::RwLock::new(None),
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_routes_pin_the_session_token_and_rewrite_redirects() {
+        let manager = RemoteSessionManager::new();
+        let mut servers = Vec::new();
+        for id in ["alpha", "beta"] {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = Router::new().fallback(move |request: Request| async move {
+                assert_eq!(request.headers()[header::AUTHORIZATION], format!("Bearer {id}"));
+                if request.uri().path() == "/api/redirect" {
+                    return (StatusCode::FOUND, [(header::LOCATION, "/api/file?path=plot.png")]).into_response();
+                }
+                Json(serde_json::json!({ "machine": id, "path": request.uri().to_string(), "method": request.method().as_str() })).into_response()
+            });
+            servers.push(tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            }));
+            let session = sample_session();
+            session.info.write().await.id = id.into();
+            *session.route.write().await = Some(UpstreamRoute {
+                port,
+                token: id.into(),
+            });
+            manager
+                .registry
+                .lock()
+                .await
+                .by_id
+                .insert(id.into(), Arc::new(session));
+        }
+
+        for id in ["alpha", "beta", "alpha"] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("/_orx/workspaces/{id}/api/same-id?value=1"))
+                .header(header::HOST, "127.0.0.1:4791")
+                .body(Body::empty())
+                .unwrap();
+            let response = manager.serve_workspace(id, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["machine"], id);
+            assert_eq!(value["path"], "/api/same-id?value=1");
+            assert_eq!(value["method"], "POST");
+        }
+        let redirect = manager
+            .serve_workspace(
+                "alpha",
+                Request::builder()
+                    .uri("/_orx/workspaces/alpha/api/redirect")
+                    .header(header::HOST, "127.0.0.1:4791")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            redirect.headers()[header::LOCATION],
+            "/_orx/workspaces/alpha/api/file?path=plot.png"
+        );
+        let missing = manager
+            .serve_workspace("missing", Request::new(Body::empty()))
+            .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        for server in servers {
+            server.abort();
         }
     }
 
@@ -2816,7 +2982,7 @@ mod tests {
                 "p={};",
                 crate::jobs::ssh::sh_quote(binary.to_str().unwrap())
             ));
-            let output = std::process::Command::new("sh")
+            let output = crate::process::command("sh")
                 .arg("-c")
                 .arg(&probe)
                 .output()
@@ -2846,6 +3012,86 @@ mod tests {
         assert!(!flag.exists(), "refused candidate must not run");
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_trusts_group_writable_only_for_a_private_primary_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("orx-probe-group-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let binary = dir.join("orx");
+        std::fs::write(&binary, "#!/bin/sh\necho 'orx 9.9.9'\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let probe = remote_orx_probe(&format!(
+            "p={};",
+            crate::jobs::ssh::sh_quote(binary.to_str().unwrap())
+        ));
+        let output = crate::process::command("sh")
+            .arg("-c")
+            .arg(&probe)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let output = String::from_utf8(output.stdout).unwrap();
+        let group = crate::process::command("id").arg("-gn").output().unwrap();
+        let user = crate::process::command("id").arg("-un").output().unwrap();
+        assert!(group.status.success() && user.status.success());
+        if group.stdout == user.stdout {
+            assert!(output.contains("ORX_REMOTE_VERSION="), "{output}");
+            assert!(!output.contains("ORX_REMOTE_REJECTED="), "{output}");
+        } else {
+            assert!(output.contains("ORX_REMOTE_REJECTED_WRITABLE="), "{output}");
+            assert!(!output.contains("ORX_REMOTE_VERSION="), "{output}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn posix_path_parent_resolves_parents_without_local_os_rules() {
+        assert_eq!(
+            posix_path_parent("/home/user/.config/openresearch/settings.json"),
+            Some("/home/user/.config/openresearch".into())
+        );
+        assert_eq!(posix_path_parent("/settings.json"), Some("/".into()));
+        assert_eq!(posix_path_parent("/"), None);
+        assert_eq!(posix_path_parent("relative/settings.json"), None);
+        assert_eq!(posix_path_parent("/home/../etc"), None);
+    }
+
+    #[test]
+    fn apply_remote_settings_honors_posix_paths_and_joins_cleanly() {
+        let initial = sample_paths();
+        let settings = serde_json::json!({
+            "orxBinaryPath": "/custom/bin/orx",
+            "dataDir": "/custom/data",
+            "cacheDir": "/custom/cache",
+        });
+        let applied = apply_remote_settings(initial.clone(), &settings);
+        assert_eq!(applied.binary, "/custom/bin/orx");
+        assert_eq!(applied.database, "/custom/data/orx.db");
+        assert_eq!(applied.cache, "/custom/cache/repos");
+
+        let settings_slashes = serde_json::json!({
+            "dataDir": "/custom/data/",
+            "cacheDir": "/custom/cache/",
+        });
+        let applied_slashes = apply_remote_settings(initial.clone(), &settings_slashes);
+        assert_eq!(applied_slashes.database, "/custom/data/orx.db");
+        assert_eq!(applied_slashes.cache, "/custom/cache/repos");
+
+        let invalid = serde_json::json!({
+            "orxBinaryPath": "C:\\Program Files\\orx.exe",
+            "dataDir": "relative/data",
+            "cacheDir": "/escape/../cache",
+        });
+        let unapplied = apply_remote_settings(initial.clone(), &invalid);
+        assert_eq!(unapplied.binary, initial.binary);
+        assert_eq!(unapplied.database, initial.database);
+        assert_eq!(unapplied.cache, initial.cache);
     }
 
     #[test]
@@ -3040,6 +3286,10 @@ mod tests {
     fn extra_opts_land_before_the_separator() {
         let target = SshTarget {
             dest: "mybox".into(),
+            managed_generation: None,
+            auth_agent: None,
+            run_id: None,
+            transport: None,
             extra_opts: vec!["-p".into(), "2222".into()],
         };
         let args =

@@ -5,7 +5,7 @@
 // so we draw the geometry directly and emit straight-alpha RGBA — giving clean
 // transparent corners for both the CLI Dock icon and the macOS .app iconset.
 //
-// Usage: node scripts/generate-icon.mjs <out.png> [size]   (default size 1024)
+// Usage: node scripts/generate-icon.mjs <out.png> [size] [#rrggbb]   (default 1024, brand red)
 // Requires Node >= 22.2 (uses the built-in zlib.crc32).
 
 import zlib from 'node:zlib';
@@ -13,7 +13,7 @@ import { writeFileSync } from 'node:fs';
 
 const out = process.argv[2];
 if (!out) {
-  console.error('usage: node scripts/generate-icon.mjs <out.png> [size]');
+  console.error('usage: node scripts/generate-icon.mjs <out.png> [size] [#rrggbb]');
   process.exit(1);
 }
 const N = Number(process.argv[3] ?? 1024);
@@ -24,7 +24,7 @@ const s = N / 1024;
 const X = 88 * s, Y = 88 * s, W = 848 * s, H = 848 * s, R = 188 * s;
 // brand triangle (favicon path, translate 88 + scale 8.48), right angle at B
 const A = [218.38 * s, 230.31 * s], B = [218.38 * s, 805.62 * s], C = [793.69 * s, 805.62 * s];
-const RED = [0x9a, 0x20, 0x36];
+const FILL = (process.argv[4] ?? '#9a2036').match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i).slice(1).map((hex) => parseInt(hex, 16));
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 function inSquircle(px, py) {
@@ -52,7 +52,7 @@ for (let y = 0; y < N; y++) {
       for (let sx = 0; sx < SS; sx++) {
         const px = x + (sx + 0.5) / SS, py = y + (sy + 0.5) / SS;
         if (inTriangle(px, py)) { r += 255; g += 255; b += 255; cov++; }
-        else if (inSquircle(px, py)) { r += RED[0]; g += RED[1]; b += RED[2]; cov++; }
+        else if (inSquircle(px, py)) { r += FILL[0]; g += FILL[1]; b += FILL[2]; cov++; }
       }
     }
     const S = SS * SS;

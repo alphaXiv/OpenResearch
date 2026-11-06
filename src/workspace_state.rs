@@ -19,6 +19,8 @@ pub struct GlobalWorkspaceState {
     pub last_location: Option<String>,
     pub rail_open: bool,
     pub panel_width: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rail_width: Option<f64>,
     pub experiments_view: ExperimentsView,
 }
 
@@ -231,6 +233,9 @@ impl GlobalWorkspaceState {
         if !self.last_location.as_deref().is_none_or(valid_location)
             || !self.panel_width.is_finite()
             || self.panel_width <= 0.0
+            || self
+                .rail_width
+                .is_some_and(|width| !width.is_finite() || width <= 0.0)
         {
             return Err(anyhow!("invalid global workspace state"));
         }
@@ -244,6 +249,18 @@ impl GlobalWorkspaceState {
     }
 }
 
+/// Percent-decodes `part`, rejecting a malformed escape as the UI's decoder does.
+fn decode(part: &str) -> Option<std::borrow::Cow<'_, str>> {
+    let well_formed = part.split('%').skip(1).all(|escape| {
+        escape
+            .get(..2)
+            .is_some_and(|hex| hex.chars().all(|c| c.is_ascii_hexdigit()))
+    });
+    well_formed
+        .then(|| urlencoding::decode(part).ok())
+        .flatten()
+}
+
 fn valid_location(location: &str) -> bool {
     if !location.starts_with('/')
         || location.starts_with("//")
@@ -255,7 +272,7 @@ fn valid_location(location: &str) -> bool {
     let (path, query) = location.split_once('?').unwrap_or((location, ""));
     let parts: Vec<_> = path.split('/').collect();
     let valid_id = |id: &str| {
-        urlencoding::decode(id).is_ok_and(|id| {
+        decode(id).is_some_and(|id| {
             !id.is_empty()
                 && id != "."
                 && id != ".."
@@ -269,13 +286,14 @@ fn valid_location(location: &str) -> bool {
         ["", "projects", project, "tasks", task] => valid_id(project) && valid_id(task),
         ["", "projects", project, "settings", tab] => {
             valid_id(project)
-                && urlencoding::decode(tab).is_ok_and(|tab| {
+                && decode(tab).is_some_and(|tab| {
                     matches!(
                         tab.as_ref(),
                         "settings"
                             | "harnesses"
                             | "projects"
                             | "compute"
+                            | "openresearch"
                             | "instances"
                             | "environment"
                             | "git"
@@ -306,6 +324,21 @@ fn valid_location(location: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The UI's `safeLocation` tests read the same file. Legacy locations are
+    /// ones shipped UIs saved: the server keeps accepting them, the UI no longer
+    /// resumes there.
+    #[test]
+    fn locations_match_the_shared_vectors() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/contracts/locations.json")).unwrap();
+        for (group, accepted) in [("valid", true), ("legacy", true), ("invalid", false)] {
+            for location in vectors[group].as_array().unwrap() {
+                let location = location.as_str().unwrap();
+                assert_eq!(valid_location(location), accepted, "{group}: {location:?}");
+            }
+        }
+    }
 
     #[test]
     fn side_chat_drafts_and_saved_chats_have_valid_workspace_locations() {
@@ -373,29 +406,6 @@ mod tests {
         ] {
             assert!(WorkspaceState::from_stored(&invalid.to_string()).is_none());
         }
-        for path in [
-            "/",
-            "/projects/demo",
-            "//evil.test/projects",
-            "/projects/../tasks/new",
-            "/projects/demo/settings/unknown",
-            "/projects/demo/tasks/new?pane=garbage",
-            "/projects/demo/tasks/new#fragment",
-        ] {
-            assert!(!valid_location(path), "{path}");
-        }
-        let pane = json!({"kind":"file","path":"研究/figure +100%?draft#１.tex","source":"repo","line":9_007_199_254_740_991_u64});
-        let location = format!(
-            "/projects/demo/tasks/new?pane={}",
-            urlencoding::encode(&pane.to_string())
-        );
-        assert!(valid_location(&location));
-        assert!(valid_location("/projects/demo/settings/%67it"));
-        assert!(valid_location(&format!(
-            "/projects/demo/tasks/new?%70ane={}&",
-            urlencoding::encode(&pane.to_string())
-        )));
-        assert!(valid_location("/projects/demo/tasks/new?pane=%7B%22kind%22%3A%22file%22%2C%22path%22%3A%22paper.tex%22%2C%22line%22%3Anull%7D"));
         let invalid_line =
             json!({"kind":"file","path":"paper.tex","line":9_007_199_254_740_992_u64});
         assert!(!serde_json::from_value::<Pane>(invalid_line)

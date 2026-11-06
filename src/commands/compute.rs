@@ -154,6 +154,7 @@ pub enum Backend {
     Modal,
     Tinker,
     K8s,
+    Vercel,
     Openresearch,
 }
 impl Backend {
@@ -167,6 +168,7 @@ impl Backend {
             Self::Modal => "modal",
             Self::Tinker => "tinker",
             Self::K8s => "k8s",
+            Self::Vercel => "vercel",
             Self::Openresearch => "openresearch",
         }
     }
@@ -273,9 +275,6 @@ pub struct ConfigureArgs {
 pub struct ConnectArgs {
     #[command(flatten)]
     check: CheckArgs,
-    /// Idle lifetime for a new SSH master, in seconds (default: 86400; 0 means indefinite).
-    #[arg(long)]
-    persist: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -465,23 +464,22 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
     }
     if let ComputeCommand::Connect(ref args) = command {
         validate_check(&args.check)?;
-        if args.persist.is_some()
-            && (!cfg!(unix) || !matches!(args.check.backend, Backend::Ssh | Backend::Slurm))
-        {
-            return Err(anyhow!("--persist requires SSH or Slurm on Unix."));
-        }
         if json_output {
             return Err(anyhow!(
                 "connect is interactive; use test --json for machine-readable checks."
             ));
         }
-        connect(&args.check, args.persist).await?;
+        if !matches!(args.check.backend, Backend::Ssh | Backend::Slurm) {
+            connect(&args.check).await?;
+        }
     }
     let is_check = matches!(
         command,
         ComputeCommand::Test(_) | ComputeCommand::Connect(_)
     );
     let value = match command {
+        ComputeCommand::Test(args) => check(&args, "test").await?,
+        ComputeCommand::Connect(ConnectArgs { check: args }) => check(&args, "connect").await?,
         ComputeCommand::Catalog(a) => return catalog(a, json_output).await,
         ComputeCommand::Status => settings::status().await?,
         ComputeCommand::Show { backend } => settings::show(backend.name()).await?,
@@ -494,16 +492,6 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
         ComputeCommand::Configure(args) => {
             let backend = args.backend.name();
             settings::configure(backend, (*args).body()?).await?
-        }
-        ComputeCommand::Test(args) | ComputeCommand::Connect(ConnectArgs { check: args, .. }) => {
-            settings::check(
-                args.backend.name(),
-                args.host,
-                args.container,
-                args.no_container,
-                args.address,
-            )
-            .await?
         }
         ComputeCommand::SshConfig { command } => match command {
             SshConfigCommand::Show => settings::read_ssh_config().await?,
@@ -549,6 +537,29 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Checks run in the server, which owns SSH connections and relays their login prompts.
+async fn check(args: &CheckArgs, action: &str) -> Result<Value> {
+    let body = json!({"backend":args.backend.name(), "host":args.host, "container":args.container, "noContainer":args.no_container, "address":args.address});
+    let client = crate::plane::local_plane::ApiClient::discover().await?;
+    if action == "connect" && matches!(args.backend, Backend::Ssh | Backend::Slurm) {
+        use std::io::IsTerminal as _;
+        if !std::io::stdin().is_terminal() {
+            return Err(anyhow!("connect requires a terminal for login/MFA. Use configure with --credentials-file - for unattended credential setup."));
+        }
+        let prompt: crate::engine::transport::Prompt = std::sync::Arc::new(|question| {
+            Box::pin(async move { Ok(Some(secret_prompt(&question).await?)) })
+        });
+        return client.connect(body, prompt).await;
+    }
+    client
+        .json(
+            reqwest::Method::POST,
+            &format!("compute/{action}"),
+            Some(&body),
+        )
+        .await
 }
 
 fn validate_check(args: &CheckArgs) -> Result<()> {
@@ -617,32 +628,12 @@ fn instructions_write(path: &std::path::Path, content: &str, expected: &str) -> 
     instructions_read(path)
 }
 
-async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
+async fn connect(args: &CheckArgs) -> Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         return Err(anyhow!("connect requires a terminal for login/MFA. Use configure with --credentials-file - for unattended credential setup."));
     }
     match args.backend {
-        Backend::Ssh | Backend::Slurm => {
-            let host = match &args.host {
-                Some(host) => Some(host.clone()),
-                None => match args.backend {
-                    Backend::Ssh => crate::config::ssh_settings()?.default_host,
-                    _ => {
-                        crate::jobs::slurm::load_settings()?
-                            .unwrap_or_default()
-                            .host
-                    }
-                },
-            }
-            .ok_or_else(|| anyhow!("Pass --host or configure a default host."))?;
-            let target = crate::jobs::ssh::SshTarget::alias(&host);
-            let connection = crate::jobs::ssh::interactive_args(&target, persist, None).await?;
-            interactive_command("ssh", &connection.args).await?;
-            if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
-                eprintln!("orx: warning: {warning}");
-            }
-        }
         Backend::Hf => {
             interactive_command("hf", &["auth".into(), "login".into()]).await?;
             use crate::jobs::huggingface::{resolve_token_with_source, TokenSource};
@@ -663,19 +654,31 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
             .await?;
         }
         Backend::Openresearch => {
-            super::login::run(crate::LoginArgs { api_url: None }).await?;
+            super::login::run(crate::LoginArgs {
+                alphaxiv: false,
+                api_url: None,
+                non_interactive: false,
+            })
+            .await?;
             super::ssh_key::add(None).await?;
         }
-        Backend::Local | Backend::Ray | Backend::K8s => {}
+        Backend::Vercel => {
+            eprintln!(
+                "Vercel Sandbox reads VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID (or a \
+                 VERCEL_OIDC_TOKEN from `vercel env pull`) from the environment or Settings → \
+                 Environment. Check them with `orx compute test vercel`."
+            );
+        }
+        Backend::Local | Backend::Ray | Backend::K8s | Backend::Ssh | Backend::Slurm => {}
     }
     Ok(())
 }
 
 async fn interactive_command(program: &str, args: &[String]) -> Result<()> {
-    let path = crate::local::shell_env::find_on_path(program).ok_or_else(|| {
+    let path = crate::local::shell_env::find(program).ok_or_else(|| {
         anyhow!("{program} is not installed. Install it, then retry compute connect.")
     })?;
-    let mut command = tokio::process::Command::new(path);
+    let mut command = crate::process::tokio_command(path);
     command.args(args);
     if program == "ssh" {
         command.env("ORX_SSH_PROBE", "1");
@@ -687,20 +690,27 @@ async fn interactive_command(program: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn credential_line(value: &str) -> &str {
+    value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value)
+}
+
 #[cfg(unix)]
 async fn secret_prompt(label: &str) -> Result<String> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     struct RestoreEcho(String);
     impl Drop for RestoreEcho {
         fn drop(&mut self) {
-            let _ = Command::new("stty")
+            let _ = crate::process::command("stty")
                 .arg(&self.0)
                 .stdin(Stdio::inherit())
                 .status();
             eprintln!();
         }
     }
-    let original = Command::new("stty")
+    let original = crate::process::command("stty")
         .arg("-g")
         .stdin(Stdio::inherit())
         .output()?;
@@ -711,7 +721,7 @@ async fn secret_prompt(label: &str) -> Result<String> {
     }
     let original = String::from_utf8(original.stdout)?.trim().to_owned();
     eprint!("{label}: ");
-    if !Command::new("stty")
+    if !crate::process::command("stty")
         .arg("-echo")
         .stdin(Stdio::inherit())
         .status()?
@@ -726,7 +736,7 @@ async fn secret_prompt(label: &str) -> Result<String> {
         value = tokio::task::spawn_blocking(|| -> Result<String> {
             let mut value = String::new();
             std::io::stdin().read_line(&mut value)?;
-            Ok(value.trim().to_owned())
+            Ok(credential_line(&value).to_owned())
         }) => value?,
         _ = tokio::signal::ctrl_c() => Err(anyhow!("Credential entry cancelled.")),
     }
@@ -734,19 +744,31 @@ async fn secret_prompt(label: &str) -> Result<String> {
 #[cfg(windows)]
 async fn secret_prompt(label: &str) -> Result<String> {
     eprintln!("{label}");
-    let output = std::process::Command::new("powershell.exe").args(["-NoProfile", "-Command", "$s = Read-Host 'Credential' -AsSecureString; [System.Net.NetworkCredential]::new('', $s).Password"]).stdin(std::process::Stdio::inherit()).output()?;
+    let output = crate::process::command("powershell.exe").args(["-NoProfile", "-Command", "$s = Read-Host 'Credential' -AsSecureString; [System.Net.NetworkCredential]::new('', $s).Password"]).stdin(std::process::Stdio::inherit()).output()?;
     if !output.status.success() {
         return Err(anyhow!(
             "Credential prompt failed; use --credentials-file instead."
         ));
     }
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    Ok(credential_line(&String::from_utf8(output.stdout)?).to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn credential_entry_preserves_spaces_and_removes_only_the_submitted_newline() {
+        for newline in ["\n", "\r\n", ""] {
+            assert_eq!(
+                credential_line(&format!(" \tsecret \t{newline}")),
+                " \tsecret \t"
+            );
+        }
+        assert_eq!(credential_line("\n"), "");
+        assert_eq!(credential_line("secret\r"), "secret\r");
+    }
 
     #[test]
     fn configuration_rejects_unsupported_and_conflicting_fields() {

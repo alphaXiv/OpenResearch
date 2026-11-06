@@ -41,6 +41,12 @@ for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
     params = request.get("params", {})
+    if mode.startswith("alphaxiv-") and method in ["session/new", "session/load", "session/resume"]:
+        [server] = params["mcpServers"]
+        assert server["name"] == "alphaxiv", server
+        assert os.path.isabs(server["command"]), server
+        assert server["args"] == ["alphaxiv-mcp"], server
+        assert server["env"] == [], server
     if method == "initialize":
         if mode == "environment":
             assert os.environ["ORX_CHAT_SESSION_ID"] == "environment-chat"
@@ -56,7 +62,7 @@ for line in sys.stdin:
         else:
             reply(request, dict(protocolVersion=2 if mode == "incompatible" else 1,
                                 agentInfo=dict(name="Deterministic ACP peer", version="1.0"),
-                                agentCapabilities=dict(loadSession=mode != "no-resume", **({"sessionCapabilities": {"resume": {}}} if mode == "resume" else {}))))
+                                agentCapabilities=dict(loadSession=mode != "no-resume", **({"sessionCapabilities": {"resume": {}}} if mode in ["resume", "alphaxiv-resume"] else {}))))
     elif method == "session/new":
         if mode == "stalled-setup":
             continue

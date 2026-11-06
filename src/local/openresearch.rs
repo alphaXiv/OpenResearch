@@ -1,49 +1,131 @@
-//! Local OpenResearch launch — provision an ephemeral org-billed box for this
-//! one run. Unlike `local/ssh.rs`, submit does NOT launch the payload: the box
-//! takes minutes to provision and has no SSH endpoint yet, so submit records
-//! the run as `starting` and the detached supervisor does the rest (wait for
-//! online, launch over ssh, and collect directly; remote supervision releases the box).
+//! OpenResearch launch intents: an ephemeral org-billed box for one run. The engine
+//! provisions it at launch; the legacy loop waits for it, runs the payload over SSH, collects
+//! the log, and releases the box.
 
 use crate::client::{create_sandbox, list_orgs, CreateSandboxBody};
 use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
-use crate::error::{anyhow, require_credentials, Result};
+use crate::error::{anyhow, Result};
 use crate::jobs::{openresearch, BackendDescriptor};
 use crate::local::ssh_identity;
-use crate::store::{now_ms, Store, StoredRun};
+use crate::store::{now_ms, LaunchSpec, Store, StoredRun};
 
-/// CLI wrapper around `submit_local_openresearch`: submit, then print the
-/// summary (price is best-effort — it needs one extra API read).
-pub async fn launch_local_openresearch(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_openresearch(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    let sandbox_id = backend.job_id.as_deref().unwrap_or("");
-    println!("\u{2713} OpenResearch box requested.");
-    println!("  flavor  {}", backend.flavor.as_deref().unwrap_or(""));
-    println!("  box     {}", sandbox_id);
-    if let Ok(Some(creds)) = crate::config::load_credentials().await {
-        if let Ok(envelope) = crate::client::get_sandbox(&creds, sandbox_id).await {
-            if let Some(price) = envelope.sandbox.price_per_hour {
-                println!(
-                    "  price   ${price:.2}/hr (includes up to 60 seconds of final collection)"
-                );
+/// Requires `--flavor <shape>` (`h100_sxm[:count]` or `cpu5c|cpu5g|cpu5m[:vcpus]`) and
+/// `orx login`. The box is provisioned by the engine at launch.
+pub async fn launch_spec(args: &crate::ExpRunArgs) -> Result<LaunchSpec> {
+    if args.host.is_some() {
+        return Err(anyhow!(
+            "--host doesn't apply to --backend openresearch — the box is provisioned \
+             for you (use --backend ssh to run on your own machine)."
+        ));
+    }
+    if args.manifest.is_some() {
+        return Err(anyhow!("--manifest is k8s-only."));
+    }
+    if args.image.is_some() {
+        return Err(anyhow!(
+            "--image doesn't apply to --backend openresearch — provider base images are fixed \
+             by OpenResearch; install project dependencies from the project's lockfile in the \
+             run command."
+        ));
+    }
+    let flavor = args.flavor.clone().ok_or_else(|| {
+        anyhow!(
+            "--backend openresearch requires --flavor: a GPU id like h100_sxm[:count] \
+             or a CPU flavor like cpu5c[:vcpus]. See `orx compute` for the catalog."
+        )
+    })?;
+    // Parsed now so a typo fails before any billing starts.
+    openresearch::parse_flavor(&flavor, args.disk.unwrap_or(100), args.provider.clone())?;
+    let timeout_seconds = match &args.timeout {
+        Some(t) => crate::jobs::huggingface::parse_timeout(t)?,
+        None => 4 * 3600,
+    };
+
+    let creds = crate::config::load_credentials()
+        .await?
+        .ok_or_else(|| anyhow!("OpenResearch requires `orx login`."))?;
+
+    // Which org pays for the box.
+    let org_id = match &args.org {
+        Some(org) => org.clone(),
+        None => {
+            let orgs = list_orgs(&creds).await?.orgs;
+            match orgs.len() {
+                0 => {
+                    return Err(anyhow!(
+                        "You belong to no organization — create an OpenResearch organization first."
+                    ))
+                }
+                1 => orgs[0].id.clone(),
+                _ => {
+                    let rows = orgs
+                        .iter()
+                        .map(|o| format!("  {}  {}", o.id, o.name))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Err(anyhow!(
+                        "You belong to several orgs — pass --org <id>:\n{rows}"
+                    ));
+                }
             }
         }
+    };
+
+    // Boxes authorize org members' *registered* SSH keys, and orx authenticates
+    // with whatever this machine's ssh offers — so a key registered from another
+    // computer leaves the box online but unreachable.
+    match ssh_identity::check(&creds).await {
+        ssh_identity::KeyStatus::Matched => {}
+        ssh_identity::KeyStatus::Unknown { reason } => {
+            eprintln!("warning: could not check your registered SSH keys: {reason}");
+        }
+        // No keys at all is the api's own answer, so blocking is safe.
+        ssh_identity::KeyStatus::NoneRegistered { local } => {
+            return Err(anyhow!(
+                "{}\n\n{}",
+                ssh_identity::diagnosis(&[]),
+                ssh_identity::remediation(&[], &local)
+            ));
+        }
+        // We only enumerate the agent and ~/.ssh/*.pub, so ssh can still succeed
+        // via an IdentityFile elsewhere or a key whose .pub isn't on disk. Warn
+        // loudly rather than block a launch that would have worked.
+        ssh_identity::KeyStatus::NoLocalMatch { registered, local } => {
+            eprintln!(
+                "warning: {}\n\n{}",
+                ssh_identity::diagnosis(&registered),
+                ssh_identity::remediation(&registered, &local)
+            );
+        }
     }
-    println!("  run     {}", run.id);
-    println!("  The box is provisioning; the supervisor launches the run once it's online.");
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
+
+    Ok(LaunchSpec {
+        kind: "openresearch_job".into(),
+        target: Some(org_id),
+        options: serde_json::json!({
+            "flavor": flavor,
+            "disk_gb": args.disk.unwrap_or(100),
+            "provider": args.provider,
+            "timeout_seconds": timeout_seconds,
+        }),
+    })
 }
 
-/// Provision a fresh box for the local experiment's run and detach a
-/// supervisor. Requires `--backend openresearch` and `--flavor <shape>`
-/// (`h100_sxm[:count]` or `cpu5c|cpu5g|cpu5m[:vcpus]`), plus `orx login`.
-pub async fn submit_local_openresearch(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    crate::compute::submit(args).await
+/// Reword a 402 from `POST /sandboxes` (org has no available compute balance)
+/// into the top-up action, surfacing the checkout URL the API attaches.
+pub(crate) fn billing_friendly(err: crate::error::Error) -> crate::error::Error {
+    let text = err.to_string();
+    if !text.contains("(402 ") {
+        return err;
+    }
+    let url = text
+        .split("checkoutUrl\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .map(|u| format!(" Top up at {u}"))
+        .unwrap_or_default();
+    anyhow!("Your org has no available compute balance, so no box was provisioned.{url}")
 }
 
 pub async fn submit_local_openresearch_with_source(
@@ -82,7 +164,9 @@ pub async fn submit_local_openresearch_with_source(
         None => 4 * 3600,
     };
 
-    let creds = require_credentials().await;
+    let creds = crate::config::load_credentials()
+        .await?
+        .ok_or_else(|| anyhow!("OpenResearch requires `orx login`."))?;
 
     // Which org pays for the box.
     let org_id = match &args.org {
@@ -178,6 +262,7 @@ pub async fn submit_local_openresearch_with_source(
         api_url: creds.api_url.clone(),
         sandbox_id: sandbox.id.clone(),
         token: capability.token,
+        unknown: Default::default(),
     };
 
     let mut descriptor = BackendDescriptor {
@@ -204,6 +289,7 @@ pub async fn submit_local_openresearch_with_source(
         source_path: None,
         source_size: None,
         remote_root: None,
+        unknown: Default::default(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
@@ -250,20 +336,4 @@ pub async fn submit_local_openresearch_with_source(
         return Err(err);
     }
     Ok(run)
-}
-
-/// Reword a 402 from `POST /sandboxes` (org has no available compute balance)
-/// into the top-up action, surfacing the checkout URL the API attaches.
-fn billing_friendly(err: crate::error::Error) -> crate::error::Error {
-    let text = err.to_string();
-    if !text.contains("(402 ") {
-        return err;
-    }
-    let url = text
-        .split("checkoutUrl\":\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .map(|u| format!(" Top up at {u}"))
-        .unwrap_or_default();
-    anyhow!("Your org has no available compute balance, so no box was provisioned.{url}")
 }

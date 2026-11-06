@@ -1,10 +1,18 @@
 [package]
 name = "openresearch-cli"
-version = "0.2.21"
+version = "0.2.24"
 edition = "2021"
 description = "OpenResearch CLI (orx) — Rust port"
 repository = "https://github.com/alphaXiv/OpenResearch"
 license = "MIT"
+
+[workspace]
+members = ["tests/support", "crates/orx-host-proto", "crates/orx-host"]
+exclude = ["windows/launcher"]
+default-members = [".", "tests/support", "crates/orx-host-proto", "crates/orx-host"]
+
+[target.'cfg(unix)'.dev-dependencies]
+orx-test-support = { path = "tests/support" }
 
 [[bin]]
 name = "orx"
@@ -14,9 +22,10 @@ path = "src/main.rs"
 # The Linux desktop app: a glibc build linking WebKitGTK (see linux/). Off by
 # default so the static musl CLI builds stay free of GTK. macOS and Windows
 # always build the app.
-desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:png"]
+desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:webkit2gtk", "dep:png"]
 
 [dependencies]
+tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "fs", "process", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["io", "compat"] }
 agent-client-protocol = "2.2"
@@ -38,12 +47,15 @@ glob = "0.3"
 # (same reasoning as rustls above — no system library dependency).
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 urlencoding = "2"
+# Parses openresearch: links (src/commands/app.rs); already in the tree via reqwest.
+url = "2"
 httpdate = "1"
 uuid = { version = "1", features = ["v4"] }
 semver = "1"
 fd-lock = "4"
 base64 = "0.22"
-# Extract user-uploaded skills shipped as a .zip of a SKILL.md folder. Lean:
+once_cell = "1"
+# Uploaded skills (.zip of a SKILL.md folder) and shared projects (.orx). Lean:
 # deflate only, no bzip2/zstd/time/aes.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # `orx up` dashboard: axum for routing/SSE, rust-embed for the SPA, futures for
@@ -56,7 +68,9 @@ futures = "0.3"
 portable-pty = "0.9"
 # async fns in the Harness trait (object-safe `dyn Harness` in the registry).
 async-trait = "0.1"
+orx-host-proto = { path = "crates/orx-host-proto" }
 sha2 = "0.10"
+hmac = "0.12"
 # Import the Overleaf editor session cookie from a local browser store, so the
 # user need not paste it. Chromium on macOS encrypts cookies with AES-128-CBC
 # under a Keychain-held key (PBKDF2-HMAC-SHA1). Pure-Rust RustCrypto crates, so
@@ -76,17 +90,19 @@ same-file = "1.0"
 roxmltree = "0.21"
 
 [target.'cfg(unix)'.dependencies]
+orx-host = { path = "crates/orx-host" }
 # Free-space pre-check for the data-dir move (statvfs). Already in the tree
 # transitively; taken as a direct dep only on unix, where we call it.
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
 # Win32 calls std lacks: run liveness, console ownership, the error dialog, PE
 # version-resource reads (GetFileVersionInfoW / VerQueryValueW — the spawn-free
 # `--version` fast path in harness detection), total RAM for the agent idle
 # policy, the desktop app's single instance and taskbar identity, and the
 # registry PATH a running orx re-reads. Already in the tree.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 # Desktop app mode (src/commands/app.rs): the dashboard in its own window. tao
@@ -103,20 +119,27 @@ rfd = "0.17"
 tao = { version = "0.37", optional = true }
 wry = { version = "0.57", optional = true }
 gtk = { version = "0.18", optional = true }
+webkit2gtk = { version = "2.0", optional = true }
 png = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # muda builds the menu bar, and objc2-app-kit's NSAlert backs `window.confirm`.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSTextCheckingClient", "NSGraphics", "NSView", "NSVisualEffectView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSAppleEventManager", "NSAppleEventDescriptor"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebViewConfiguration"] }
 muda = "0.20"
 # `window.confirm` panel added to wry's WKUIDelegate (src/commands/app.rs).
 block2 = "0.6"
 
 [build-dependencies]
+sha2 = "0.10"
 # Embeds the Windows icon in orx.exe; a no-op for other targets.
 embed-resource = "3"
+
+[dev-dependencies]
+# A paused clock, so tests reach long timeouts without waiting on them.
+tokio = { version = "1", features = ["test-util"] }
 
 # The profile that 'dist' will build with
 [profile.dist]
@@ -130,3 +153,24 @@ debug = "line-tables-only"
 # Third-party crates need no line info; saves another ~0.2 GiB per build.
 [profile.dev.package."*"]
 debug = false
+
+# Large-page tests need native JSON and SSH proxy throughput.
+[profile.test.package.orx-host]
+opt-level = 3
+
+[profile.test.package.orx-host-proto]
+opt-level = 3
+
+[profile.test.package.serde_json]
+opt-level = 3
+
+[profile.test.package.orx-test-support]
+opt-level = 3
+
+[profile.host]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

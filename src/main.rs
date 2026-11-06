@@ -9,6 +9,7 @@
 //! error's `Display` to stderr and exits 1 — matching the TS
 //! `main().catch(err => { console.error(err.message); process.exit(1) })`.
 
+mod alphaxiv;
 mod browser;
 mod editors;
 // DTOs faithfully mirror every API wire field; not all are read by the CLI yet.
@@ -17,6 +18,7 @@ mod client;
 mod commands;
 mod compute;
 mod config;
+mod engine;
 mod error;
 mod folder_picker;
 mod invocation;
@@ -28,6 +30,7 @@ mod net;
 mod output;
 mod paths;
 mod plane;
+mod process;
 mod remote;
 mod store;
 mod telemetry;
@@ -67,6 +70,9 @@ enum Command {
     /// Remove the stored token.
     Logout,
 
+    /// Read your alphaXiv library.
+    Alphaxiv(AlphaXivArgs),
+
     /// List projects registered in the local orx store.
     Projects(ProjectsArgs),
 
@@ -75,9 +81,6 @@ enum Command {
 
     /// Operate on one local project.
     Project(ProjectArgs),
-
-    /// Create independent project chats.
-    Agent(AgentArgs),
 
     /// List a project's runs.
     Runs(RunsArgs),
@@ -171,12 +174,15 @@ enum Command {
     #[command(name = "invocation-gate", hide = true)]
     InvocationGate,
 
-    /// Internal: the plan-mode permission bridge. A stdio MCP server Claude
-    /// Code spawns (`--mcp-config`) and consults (`--permission-prompt-tool`);
-    /// relays each permission request to the running `orx up`, which surfaces
-    /// an approval card and blocks until answered. Not a user command.
-    #[command(name = "mcp-gate", hide = true)]
-    McpGate,
+    /// Internal: orx's stdio MCP server, which every agent harness spawns:
+    /// Claude's permission bridge and the orchestration tools, relayed to the
+    /// running `orx up`. `mcp-gate`, its old name, stays for configs an older
+    /// `orx up` still writes. Not a user command.
+    #[command(name = "mcp", alias = "mcp-gate", hide = true)]
+    Mcp,
+
+    #[command(name = "alphaxiv-mcp", hide = true)]
+    AlphaxivMcp,
 
     #[command(name = "antigravity-gate", hide = true)]
     AntigravityGate,
@@ -203,6 +209,27 @@ pub struct LoginArgs {
     /// Override the API base URL (or set OPENRESEARCH_API_URL).
     #[arg(long = "api-url")]
     pub api_url: Option<String>,
+    /// The app's sign-in: skips the agent-skills offer.
+    #[arg(long, hide = true)]
+    pub non_interactive: bool,
+    /// Connect alphaXiv to an existing OpenResearch sign-in.
+    #[arg(long)]
+    pub alphaxiv: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AlphaXivArgs {
+    #[command(subcommand)]
+    command: AlphaXivCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum AlphaXivCommand {
+    /// List folders and papers.
+    Library {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -246,6 +273,43 @@ pub enum ProjectCommand {
         #[arg(long = "run-command")]
         run_command: Option<String>,
     },
+
+    /// Save a project as a .orx file a collaborator can open in OpenResearch,
+    /// or publish it as an openresearch.sh link with --publish.
+    /// Every chat is included unless narrowed with --chat or left out with --no-chats.
+    Share {
+        project_id: String,
+        /// File to write (default: ./<project>.orx).
+        #[arg(long, conflicts_with = "publish")]
+        out: Option<String>,
+        /// Upload the file to openresearch.sh and print a link anyone can open
+        /// (needs `orx login`). Publishing again updates the same link.
+        #[arg(long)]
+        publish: bool,
+        /// Include only this chat's transcript (repeatable).
+        #[arg(long = "chat")]
+        chats: Vec<String>,
+        /// Leave every chat out.
+        #[arg(long, conflicts_with = "chats")]
+        no_chats: bool,
+        /// Leave run logs out.
+        #[arg(long)]
+        no_logs: bool,
+        /// Leave the artifacts folder out.
+        #[arg(long)]
+        no_artifacts: bool,
+    },
+
+    /// Delete a project's published openresearch.sh link and its file.
+    Unpublish { project_id: String },
+
+    /// Open a shared .orx file, or an openresearch.sh/p/... link, as a new project.
+    Import {
+        file: String,
+        /// Folder to create the project in (default: ./<file or project name>).
+        #[arg(long)]
+        path: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -259,6 +323,8 @@ pub struct RunsArgs {
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     pub run_id: String,
+    #[arg(short, long, hide = true)]
+    pub follow: bool,
 }
 
 #[derive(Args, Debug)]
@@ -397,33 +463,6 @@ pub struct InstanceDeleteArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct AgentArgs {
-    #[command(subcommand)]
-    pub command: AgentCommand,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum AgentCommand {
-    /// Create an independent chat using your saved New Chat settings.
-    #[command(
-        after_help = "New chats use your saved New Chat settings. --harness, --model, and --no-wake are no longer supported; created chats never wake the creator."
-    )]
-    Spawn {
-        /// Opening message for the new chat; it starts with an empty transcript.
-        task: Option<String>,
-        /// Read the task from stdin instead, for long multi-paragraph briefs.
-        #[arg(long)]
-        stdin: bool,
-        /// Name the session in the sidebar. Defaults to an auto-generated title.
-        #[arg(long)]
-        title: Option<String>,
-        /// Project ID (defaults to the current OpenResearch chat's project).
-        #[arg(long)]
-        project: Option<String>,
-    },
-}
-
-#[derive(Args, Debug)]
 pub struct ExpArgs {
     #[command(subcommand)]
     pub command: ExpCommand,
@@ -497,19 +536,28 @@ pub enum ExpCommand {
         stdin: bool,
     },
 
-    /// Launch a locally initialized experiment through an orx-supervised backend.
+    /// Launch a locally initialized experiment through the run engine.
     Run(Box<ExpRunArgs>),
 
-    /// Cancel the in-flight run.
-    Cancel { exp_id: String },
+    /// Cancel in-flight runs in an experiment, or one run with --run.
+    Cancel {
+        #[arg(required_unless_present = "run")]
+        exp_id: Option<String>,
+        /// Cancel only this run. With an experiment id, the run must belong to it.
+        #[arg(long)]
+        run: Option<String>,
+    },
 
-    /// Resume this agent after the experiment's latest run succeeds or fails.
+    /// Abandon a run whose outcome cannot be recovered; keep its cancel pending.
+    Abandon { run: String },
+
+    /// Send this chat the result of the experiment's latest run when it finishes.
     Wake { exp_id: String },
 
     /// Wait for a run to finish: one experiment (`<expId>`) or the next completion in a project (`--project`).
     Wait {
-        /// Experiment to watch; its latest run is polled until it reaches a
-        /// terminal state. Omit and pass `--project` to watch a whole project.
+        /// Experiment to watch until its latest run reaches a terminal state.
+        /// Omit and pass `--project` to watch a whole project.
         exp_id: Option<String>,
         /// Watch every run in this project and return on the FIRST one to
         /// complete (reach done/failed/cancelled) — a "slot freed" signal. Call
@@ -521,13 +569,13 @@ pub enum ExpCommand {
         /// Give up and exit non-zero after this many seconds (default 1800).
         #[arg(long)]
         timeout: Option<u64>,
-        /// Seconds between polls (default 5).
-        #[arg(long)]
+        /// Seconds between retries while the local database is busy (default 5).
+        #[arg(long, hide = true)]
         interval: Option<u64>,
     },
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExpRunArgs {
     pub exp_id: String,
     /// Disk in GB for a `--backend openresearch` instance (default 100).
@@ -542,13 +590,14 @@ pub struct ExpRunArgs {
     /// account, billed per second), `k8s` (a Job on your own Kubernetes
     /// cluster), `ssh` (a detached process on one of your own boxes), `slurm`
     /// (a batch job on your Slurm cluster, submitted via its login node),
-    /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
+    /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `vercel` (a
+    /// CPU-only Vercel Sandbox microVM on your own Vercel project), `openresearch`
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
     /// `orx login`), `tinker` (a local controller using remote Tinker model
     /// compute), or `local` (a detached process on this machine). k8s,
     /// ssh, slurm, ray, openresearch, tinker, and local are local
-    /// experiments only. orx submits the job and a detached supervisor
-    /// records status and logs locally. Omitted on a local experiment: launches on
+    /// experiments only. The run engine in the OpenResearch server submits
+    /// the job and records its status and logs locally. Omitted on a local experiment: launches on
     /// the configured default compute target, if set.
     #[arg(long)]
     pub backend: Option<String>,
@@ -558,7 +607,9 @@ pub struct ExpRunArgs {
     /// `--backend slurm`: a GPU request as a GRES spec (h100:2 → --gres=gpu:h100:2;
     /// plain `gpu` → one GPU; omit for CPU-only). With `--backend ray`: optional
     /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
-    /// nothing). With `--backend openresearch`: a GPU id from `orx compute`
+    /// nothing). With `--backend vercel`: optional vCPUs (cpu = 2, cpu-<n> or
+    /// <n>: 1 or an even number up to 32; 2 GB memory each; plans cap this at
+    /// 4 on Hobby, 8 on Pro, and 32 on Enterprise). With `--backend openresearch`: a GPU id from `orx compute`
     /// (h100_sxm, or h100_sxm:2 for two) or a CPU flavor (cpu5c/cpu5g/cpu5m, or
     /// cpu5c:32 for the vCPU tier). Not used by k8s (see --manifest) or ssh
     /// (see --host).
@@ -587,11 +638,15 @@ pub struct ExpRunArgs {
     pub manifest: Option<String>,
     /// Docker image for the job (with `--backend hf/modal`). Defaults to
     /// python:3.12 on CPU flavors, a CUDA pytorch image otherwise. With
+    /// `--backend vercel`, a Vercel Container Registry image (default
+    /// vercel/sandbox/python:3.14). With
     /// `--backend k8s`, set the image in the manifest instead.
     #[arg(long)]
     pub image: Option<String>,
-    /// Job timeout (with `--backend hf/modal/k8s/slurm/openresearch`): 90s,
-    /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes). With
+    /// Job timeout (with `--backend hf/modal/vercel/k8s/slurm/openresearch`): 90s,
+    /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes; Vercel
+    /// defaults to 40m on Hobby so a 45-minute session still includes 5 minutes
+    /// to read logs and the exit status, and caps a session at 24h otherwise). With
     /// `--backend k8s` it becomes activeDeadlineSeconds unless the manifest
     /// sets its own. With `--backend slurm` it becomes `#SBATCH --time=` and
     /// has no 4h default — unset falls back to the slurm settings, then the
@@ -612,6 +667,9 @@ pub struct ExpRunArgs {
     /// raises memory with it.
     #[arg(long)]
     pub mem: Option<String>,
+    /// Slurm partition for this run; overrides the saved default. Accepts comma-separated names.
+    #[arg(long)]
+    pub partition: Option<String>,
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
@@ -628,6 +686,10 @@ pub struct ExpRunArgs {
     pub forwarded: bool,
     #[arg(skip)]
     pub telemetry_suppressed: bool,
+    /// The caller's compute settings, which must be the server's.
+    #[arg(skip)]
+    #[serde(default)]
+    pub caller_config_dir: Option<std::path::PathBuf>,
 }
 
 /// Markers the native agent CLIs export to their shells; nested agents are `unknown`.
@@ -712,6 +774,9 @@ pub struct UpArgs {
     /// Don't open the dashboard in the browser on startup.
     #[arg(long)]
     pub no_browser: bool,
+    /// Keep the engine running without opening a window.
+    #[arg(long, hide = true)]
+    pub headless: bool,
     /// Don't spawn the opencode agent on startup (for tests).
     #[arg(long)]
     pub no_agent: bool,
@@ -871,7 +936,8 @@ pub enum DiscoverCommand {
     Keyword(DiscoverySearchArgs),
     /// alphaXiv semantic title/abstract retrieval with similarity/popularity reranking.
     Embedding(DiscoverySearchArgs),
-    /// OpenAlex scholarly-graph search across disciplines.
+    /// OpenAlex scholarly-graph search across disciplines. Set OPENALEX_API_KEY (free:
+    /// help.openalex.org/api/authentication) for a daily budget of its own.
     Openalex(DiscoverySearchArgs),
     /// bioRxiv preprint search through OpenAlex's bioRxiv source index.
     Biorxiv(DiscoverySearchArgs),
@@ -920,6 +986,9 @@ impl DiscoveryPriority {
 
 #[derive(Args, Debug)]
 pub struct VersionArgs {
+    /// Print the desktop build identity.
+    #[arg(long, hide = true, conflicts_with_all = ["check", "json", "build_channel", "dashboard_protocol"])]
+    pub build_id: bool,
     /// Print the embedded telemetry build channel.
     #[arg(long, hide = true, conflicts_with_all = ["check", "json"])]
     pub build_channel: bool,
@@ -987,24 +1056,55 @@ pub struct PaperArgs {
     pub full: bool,
 }
 
-fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
-    use clap::error::{ContextKind, ContextValue, ErrorKind};
-    if error.kind() == ErrorKind::UnknownArgument
-        && error.to_string().contains(" agent spawn")
-        && matches!(error.get(ContextKind::InvalidArg), Some(ContextValue::String(flag)) if ["--harness", "--model", "--no-wake"].contains(&flag.split('=').next().unwrap_or(flag)))
-    {
-        error.insert(ContextKind::Suggested, ContextValue::StyledStrs(vec![
-            "New chats use your saved New Chat settings and never wake the creator. Configure the agent and model in OpenResearch.".into()
-        ]));
+fn main() {
+    if let Err(error) = commands::remote_host::prepare_readiness_pipe() {
+        eprintln!("Could not prepare server readiness: {error}");
+        std::process::exit(1);
     }
-    error
+    run_cli();
 }
 
-// The default multi-thread runtime is load-bearing for desktop app mode: it
-// blocks the main thread in the window's run loop while the dashboard server runs
-// on worker threads. A `current_thread` flavor would deadlock. See commands::app.
+// Desktop app mode blocks the main thread while the dashboard runs on worker threads.
 #[tokio::main]
-async fn main() {
+async fn run_cli() {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::args().nth(1).as_deref() == Some("--dev-desktop") {
+        let port = std::env::args()
+            .nth(2)
+            .and_then(|arg| arg.parse::<u16>().ok());
+        if let Some(port) = port.filter(|port| *port != 0) {
+            commands::app::run_dev(port);
+        } else {
+            eprintln!("--dev-desktop requires a valid UI port");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::var_os("ORX_ENGINE_ASKPASS").is_some() {
+        if engine::transport::askpass::relay().await.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::var_os("ORX_SSH_ASKPASS_ENDPOINT").is_some() {
+        if jobs::ssh::service::askpass().await.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("ssh-service") {
+        let result = if std::env::args().nth(2).as_deref() == Some("stop") {
+            jobs::ssh::service::shutdown_idle().await
+        } else {
+            jobs::ssh::service::run().await
+        };
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     #[cfg(windows)]
     {
         install_panic_reporter();
@@ -1031,7 +1131,7 @@ async fn main() {
         return;
     }
 
-    let cli = Cli::try_parse().unwrap_or_else(|error| explain_removed_spawn_flags(error).exit());
+    let cli = Cli::parse();
     // Double-clicked from Explorer: open the desktop app instead of a console session.
     #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
@@ -1070,20 +1170,27 @@ async fn main() {
         }
         return;
     }
-    // `mcp-gate` is Claude's stdio MCP child for the turn: stdout is the MCP
+    // `orx mcp` is the agent's stdio MCP child for the turn: stdout is the MCP
     // channel (nothing else may write to it) and startup must be instant or
     // Claude times the server out — skip the update check and telemetry.
     if matches!(command, Command::AntigravityGate) {
-        if let Err(error) = commands::mcp_gate::run_antigravity().await {
+        if let Err(error) = commands::mcp::run_antigravity().await {
             eprintln!("orx antigravity-gate: {error}");
             std::process::exit(1);
         }
         return;
     }
-    if matches!(command, Command::McpGate) {
-        if let Err(err) = commands::mcp_gate::run().await {
+    if matches!(command, Command::AlphaxivMcp) {
+        if let Err(error) = commands::alphaxiv_mcp::run().await {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if matches!(command, Command::Mcp) {
+        if let Err(err) = commands::mcp::run().await {
             // stderr only; a failed bridge degrades plan mode, never the CLI.
-            eprintln!("orx mcp-gate: {err}");
+            eprintln!("orx mcp: {err}");
             std::process::exit(1);
         }
         return;
@@ -1139,7 +1246,13 @@ async fn main() {
         // Match the TS: print only the message, exit 1.
         eprintln!("{}", err);
         show_error_dialog(&err.to_string());
-        std::process::exit(1);
+        // sysexits' EX_TEMPFAIL: the app's sign-in dialog says to try again in a moment.
+        let code = if err.is::<client::AlphaXivUnavailable>() {
+            75
+        } else {
+            1
+        };
+        std::process::exit(code);
     }
 }
 
@@ -1163,7 +1276,7 @@ fn relaunch_as_app(no_telemetry: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     let started = std::env::current_exe().and_then(|exe| {
-        let mut app = std::process::Command::new(exe);
+        let mut app = crate::process::command(exe);
         if no_telemetry {
             app.env(commands::app::APP_NO_TELEMETRY_ENV, "1");
         }
@@ -1213,7 +1326,7 @@ fn show_error_dialog(message: &str) {
     if !commands::app::launched_as_app_bundle() || std::env::args_os().len() != 1 {
         return;
     }
-    let _ = std::process::Command::new("osascript")
+    let _ = crate::process::command("osascript")
         .args([
             "-e",
             "on run argv\ndisplay alert \"OpenResearch could not start\" message (item 1 of argv) as critical\nend run",
@@ -1238,7 +1351,7 @@ fn show_error_dialog(message: &str) {
         ),
         ("kdialog", &["--title", "OpenResearch", "--error"][..]),
     ] {
-        let mut dialog = std::process::Command::new(program);
+        let mut dialog = crate::process::command(program);
         dialog.args(args).arg(message);
         local::shell_env::restore_host_gui_env(&mut dialog);
         if dialog.status().is_ok() {
@@ -1280,10 +1393,10 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Login(_) => "login",
         Command::Logout => "logout",
+        Command::Alphaxiv(_) => "alphaxiv",
         Command::Projects(_) => "projects",
         Command::Orgs(_) => "orgs",
         Command::Project(_) => "project",
-        Command::Agent(_) => "agent",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
         Command::Tensorboard(_) => "tensorboard",
@@ -1311,7 +1424,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::Feedback(_) => "feedback",
         Command::PlanGate => "plan-gate",
         Command::InvocationGate => "invocation-gate",
-        Command::McpGate => "mcp-gate",
+        Command::Mcp => "mcp",
+        Command::AlphaxivMcp => "alphaxiv-mcp",
         Command::AntigravityGate => "antigravity-gate",
         Command::PublishBranch(_) => "publish-branch",
         Command::RemoteHost(_) => "remote-host",
@@ -1332,10 +1446,12 @@ async fn dispatch(command: Command) -> error::Result<()> {
     match command {
         Command::Login(args) => commands::login::run(args).await,
         Command::Logout => commands::logout::run().await,
+        Command::Alphaxiv(args) => match args.command {
+            AlphaXivCommand::Library { json } => alphaxiv::print_library(json).await,
+        },
         Command::Projects(args) => commands::projects::run(args).await,
         Command::Orgs(args) => commands::orgs::run(args).await,
         Command::Project(args) => commands::project::run(args).await,
-        Command::Agent(args) => commands::agent::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
         Command::Tensorboard(args) => commands::tensorboard::run(args).await,
@@ -1361,17 +1477,23 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Serve(args) => commands::serve::run(args).await,
         Command::Supervise(args) => commands::supervise::run(args).await,
         Command::RentalSupervise { config } => jobs::rental::supervise(&config).await,
-        Command::Up(args) => match args.remote.clone() {
-            Some(host) => commands::up_remote::run(&host, args).await,
-            None => commands::up::run(args).await,
-        },
+        Command::Up(mut args) => {
+            if args.headless {
+                args.no_browser = true;
+            }
+            match args.remote.clone() {
+                Some(host) => commands::up_remote::run(&host, args).await,
+                None => commands::up::run(args).await,
+            }
+        }
         Command::Telemetry(args) => commands::telemetry::run(args).await,
         Command::Feedback(args) => commands::feedback::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
         Command::InvocationGate => commands::invocation_gate::run().await,
-        Command::McpGate => commands::mcp_gate::run().await,
-        Command::AntigravityGate => commands::mcp_gate::run_antigravity().await,
+        Command::Mcp => commands::mcp::run().await,
+        Command::AntigravityGate => commands::mcp::run_antigravity().await,
+        Command::AlphaxivMcp => unreachable!("handled before dispatch"),
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
         Command::RemoteHost(_) => unreachable!("handled before dispatch"),
     }
@@ -1382,6 +1504,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
         command,
         Command::Login(_)
             | Command::Logout
+            | Command::Alphaxiv(_)
             | Command::InstallSkills(_)
             | Command::Discover(_)
             | Command::Paper(_)
@@ -1391,7 +1514,8 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Feedback(_)
             | Command::PlanGate
             | Command::InvocationGate
-            | Command::McpGate
+            | Command::AlphaxivMcp
+            | Command::Mcp
             | Command::AntigravityGate
             | Command::PublishBranch(_)
             | Command::RemoteHost(_)
@@ -1489,21 +1613,6 @@ mod cli_tests {
     }
 
     #[test]
-    fn agent_spawn_rejects_removed_settings_flags() {
-        for program in ["orx", "orx.exe"] {
-            for flag in ["--harness", "--model", "--model=legacy", "--no-wake"] {
-                let error = Cli::try_parse_from([program, "agent", "spawn", "task", flag])
-                    .expect_err("removed flag");
-                assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-                assert!(explain_removed_spawn_flags(error)
-                    .to_string()
-                    .contains("saved New Chat settings"));
-            }
-        }
-        assert!(Cli::try_parse_from(["orx", "agent", "spawn", "task", "--project", "p1"]).is_ok());
-    }
-
-    #[test]
     fn run_accepts_only_supervised_backend_flags() {
         for flag in ["--gpu", "--cpu", "--sandbox"] {
             let error = Cli::try_parse_from(["orx", "exp", "run", "exp-1", flag, "value"])
@@ -1514,36 +1623,6 @@ mod cli_tests {
                 "{flag}"
             );
         }
-    }
-
-    #[test]
-    fn research_state_commands_are_local_only() {
-        for command in [
-            "explore",
-            "experiments",
-            "env",
-            "search-logs",
-            "artifacts",
-            "artifact",
-            "wandb",
-            "query",
-            "chart",
-            "report",
-        ] {
-            let error = Cli::try_parse_from(["orx", command])
-                .expect_err("removed research command should not parse");
-            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-        }
-
-        let error = Cli::try_parse_from(["orx", "exp", "cmd", "exp-1"])
-            .expect_err("per-experiment run command should not parse");
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-
-        let error = Cli::try_parse_from(["orx", "projects", "--all"])
-            .expect_err("local projects have no archived state");
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-
-        Cli::try_parse_from(["orx", "orgs", "--json"]).expect("orgs should parse");
     }
 
     #[test]

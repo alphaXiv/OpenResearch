@@ -6,6 +6,10 @@ export interface MarkdownTarget {
   hash: string;
 }
 
+export function isNetworkImage(target: string): boolean {
+  return /^(https?:)?\/\//i.test(target.trim());
+}
+
 export function isExternalMarkdownTarget(target: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("//");
 }
@@ -72,7 +76,7 @@ export function citedFilePath(path: string, resolveFilePath?: (path: string) => 
   if (native || /^file:/i.test(path)) return native;
   if (resolveFilePath) return resolveFilePath(path);
   try {
-    const decoded = decodeURI(path);
+    const decoded = decodeURIComponent(path);
     return decoded.includes("\0") ? null : decoded;
   } catch {
     return null;
@@ -158,9 +162,25 @@ export function chatImageTargets(src: string): NonNullable<ReturnType<typeof cha
 }
 
 interface HastNode {
+  type?: string;
   tagName?: string;
+  value?: string;
   children?: HastNode[];
   properties?: Record<string, unknown>;
+}
+
+/** Remote images become links to them, or their text inside a link, so rendering Markdown never fetches from the network. */
+export function rehypeNetworkImages() {
+  return (tree: HastNode) => {
+    const visit = (node: HastNode, insideLink: boolean) => node.children?.forEach((child, index, children) => {
+      const src = child.tagName === "img" ? String(child.properties?.src ?? "") : "";
+      if (!isNetworkImage(src)) return visit(child, insideLink || child.tagName === "a");
+
+      const text = { type: "text", value: String(child.properties?.alt || src) };
+      children[index] = insideLink ? text : { type: "element", tagName: "a", properties: { href: src }, children: [text] };
+    });
+    visit(tree, false);
+  };
 }
 
 export function rehypeSafeUrls() {

@@ -40,20 +40,24 @@ jobs:
       windows: ${{ steps.changes.outputs.windows }}
       linux: ${{ steps.changes.outputs.linux }}
       macos: ${{ steps.changes.outputs.macos }}
-      dev_slot: ${{ steps.changes.outputs.dev_slot }}
+      dev: ${{ steps.changes.outputs.dev }}
       chart: ${{ steps.changes.outputs.chart }}
       release_notes: ${{ steps.changes.outputs.release_notes }}
-      javascript: ${{ steps.changes.outputs.javascript }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
           fetch-depth: 1
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: CI selection and release safety tests
-        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs
+      - name: Script tests
+        run: node --test 'scripts/*.test.mjs'
+      - name: Workflow lint
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
+          pipx run zizmor==1.31.1 --offline --format github .github
       - name: Select checks for changed files
         id: changes
         env:
@@ -68,59 +72,53 @@ jobs:
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Localization catalogs
         run: node ui/scripts/check-i18n.mjs
       - name: Style tokens
         run: node ui/scripts/check-styles.mjs
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/setup@5d160c5bc68a09337ad0d5654e237e03253b5879 # v1.0.0
         with:
-          version: 10
+          package-json-file: ui/package.json
+          install: false
       - name: Install UI dependencies
         working-directory: ui
         run: pnpm install --frozen-lockfile
-      - name: Committed UI bundle matches source
+      - name: Build UI
         working-directory: ui
-        run: |
-          pnpm exec vite build
-          stale=$(git status --porcelain -- dist)
-          if [ -n "$stale" ]; then
-            echo "$stale"
-            echo "::error::ui/dist is stale; run pnpm build in ui/ and commit the result."
-            exit 1
-          fi
+        run: pnpm exec vite build
       - name: UI typecheck
         working-directory: ui
         run: pnpm typecheck
       - name: UI unit tests
-        run: node --test --experimental-strip-types ui/tests/*.test.mjs
+        working-directory: ui
+        run: pnpm test
 
   helpers:
     name: Helper tests
     needs: changes
-    if: needs.changes.outputs.dev_slot == 'true' || needs.changes.outputs.chart == 'true' || needs.changes.outputs.release_notes == 'true' || needs.changes.outputs.javascript == 'true'
+    if: needs.changes.outputs.dev == 'true' || needs.changes.outputs.chart == 'true' || needs.changes.outputs.release_notes == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Dev-slot helper tests
-        if: needs.changes.outputs.dev_slot == 'true'
-        run: node --test scripts/dev-slot.test.mjs
+      - name: Dev script tests
+        if: needs.changes.outputs.dev == 'true'
+        run: node --test --experimental-strip-types scripts/dev.test.ts
       - name: Interactive chart authoring tests
         if: needs.changes.outputs.chart == 'true'
         run: python3 scripts/test_orx_chart.py
-      - name: Embedded JavaScript tests
-        if: needs.changes.outputs.javascript == 'true'
-        run: node --test ui/tests/zcodeOauth.test.mjs ui/tests/macosEscape.test.mjs ui/tests/orxChart.test.mjs
       - name: Release notes composition
         if: needs.changes.outputs.release_notes == 'true'
         run: python3 scripts/test_release_notes.py
@@ -131,14 +129,36 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
+      - name: Install OpenSSH server and zsh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server zsh
+          sudo mkdir -p /run/sshd
+      - name: Shared SSH helper protocol tests
+        run: |
+          python3 scripts/test_ssh_helper.py
+          for image in \
+            python:3.6.15-slim-buster@sha256:e10aa83604948c6d8d9f72a9a20193d84bb2dbe550b725eb5208387117fde065 \
+            python:3.7.17-slim-bullseye@sha256:603879aeff06df23f0d392a19f7ce02aa85e14e6b4d25fd9647b116e0cb93467 \
+            python:3.8.20-slim-bookworm@sha256:1d52838af602b4b5a831beb13a0e4d073280665ea7be7f69ce2382f29c5a613f; do
+            docker run --rm --network none \
+              -v "$GITHUB_WORKSPACE:/work:ro" -w /work \
+              "$image" python scripts/test_ssh_helper.py
+          done
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Embedded JavaScript tests
+        run: node --test 'src/**/*.test.mjs'
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: check # Preserve the former Rust job's cache namespace.
       - name: Format
@@ -148,23 +168,90 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = 'pull_request' ] && [ "${{ inputs.release }}" != 'true' ]; then
-            cargo test --locked -- --skip slurm_supervisor_survives_connection_and_accounting_loss --skip ssh_supervisor_survives_proxy_output_without_skipping_logs
-          else
-            cargo test --locked
-          fi
+        run: cargo test --locked
       - name: Source builds disable production telemetry
         shell: bash
         run: test "$(target/debug/orx --no-telemetry version --build-channel)" = "development"
+      - name: Remove checked-in UI
+        if: inputs.release && github.event_name != 'pull_request'
+        shell: bash
+        run: rm -rf ui/dist
+      - name: Download release UI
+        if: inputs.release && github.event_name != 'pull_request'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ui
+          path: ui/dist
+      - name: Download release hosts
+        if: inputs.release && github.event_name != 'pull_request'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-host
+          path: target/host-binaries
+      - name: Verify embedded host lookup
+        if: inputs.release && github.event_name != 'pull_request'
+        env:
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
+        run: cargo test --locked embedded_hosts_keep_their_digest_and_allow_directory_overrides
       - name: Optimized source builds disable production telemetry
         if: inputs.release && github.event_name != 'pull_request'
+        env:
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
         shell: bash
         run: |
           set -euo pipefail
           cargo build --release --locked
           test "$(target/release/orx --no-telemetry version --build-channel)" = "development"
+      - name: Packaged binary bootstraps SSH host without a binary directory
+        if: inputs.release && github.event_name != 'pull_request'
+        env:
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
+          ORX_PACKAGED_BINARY: ${{ github.workspace }}/target/release/orx
+        run: env -u ORX_HOST_BIN_DIR cargo test --locked --test packaged_host -- --ignored --nocapture
+
+  e2e:
+    name: End-to-end
+    needs: changes
+    # e2e/ is unclassified, so a change there selects every check, these two included.
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: pnpm/setup@5d160c5bc68a09337ad0d5654e237e03253b5879 # v1.0.0
+        with:
+          package-json-file: e2e/package.json
+          install: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: e2e
+      - name: Install dependencies
+        run: |
+          pnpm --dir ui install --frozen-lockfile
+          pnpm --dir e2e install --frozen-lockfile
+          pnpm --dir e2e exec playwright install --with-deps chromium
+      - name: Harness checks
+        run: |
+          pnpm --dir e2e typecheck
+          node --test e2e/lint.test.ts
+      - name: End-to-end tests
+        run: node e2e/run.ts
+      - name: Upload the report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 14
 
   linux-app:
     name: linux app (${{ matrix.arch }}, ${{ matrix.mode }})
@@ -176,18 +263,20 @@ jobs:
         include: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"lint"},{"arch":"aarch64","mode":"build"}]' || '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"all"}]') }}
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
       - name: Install WebKitGTK
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev openssh-server zsh
+          sudo mkdir -p /run/sshd
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: linux-app
           save-if: ${{ matrix.mode == 'all' }}
@@ -208,52 +297,71 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '["lint", "build"]' || '["all"]') }}
+        mode: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '["lint", "test"]' || '["all"]') }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      # Tests create their git repositories under TEMP, so it moves to the Dev Drive too.
+      - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        with:
+          drive-size: 20GB
+          workspace-copy: true
+          trusted-dev-drive: true
+          env-mapping: |
+            CARGO_HOME,{{ DEV_DRIVE }}\.cargo
+            TMP,{{ DEV_DRIVE }}\tmp
+            TEMP,{{ DEV_DRIVE }}\tmp
+      - run: New-Item -ItemType Directory -Force $env:TMP | Out-Null
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows
           save-if: ${{ matrix.mode == 'all' }}
           workspaces: |
-            . -> target
-            windows/launcher -> target
+            ${{ env.DEV_DRIVE_WORKSPACE }} -> target
+            ${{ env.DEV_DRIVE_WORKSPACE }}/windows/launcher -> target
       - name: Clippy
-        if: matrix.mode != 'build'
+        if: matrix.mode != 'test'
         run: cargo clippy --all-targets --locked -- -D warnings
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Format app launcher
-        if: matrix.mode != 'build'
+        if: matrix.mode != 'test'
         run: cargo fmt --manifest-path windows/launcher/Cargo.toml --check
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Clippy (app launcher)
-        if: matrix.mode != 'build'
-        run: cargo clippy --manifest-path windows/launcher/Cargo.toml --locked -- -D warnings
-      - name: Build
-        if: matrix.mode == 'build'
-        run: cargo build --locked
+        if: matrix.mode != 'test'
+        run: cargo clippy --manifest-path windows/launcher/Cargo.toml --all-targets --locked -- -D warnings
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Build app launcher
         if: matrix.mode != 'lint'
         run: cargo build --manifest-path windows/launcher/Cargo.toml --locked
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Test app launcher
+        if: matrix.mode != 'lint'
+        run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Test
-        if: matrix.mode == 'all'
+        if: matrix.mode != 'lint'
         run: cargo test --locked
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
 
   check:
     name: fmt, clippy, test
     if: always()
-    needs: [changes, frontend, helpers, rust, linux-app, windows]
+    needs: [changes, frontend, helpers, rust, e2e, linux-app, windows]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Verify all selected checks passed
@@ -272,8 +380,9 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Version must move forward (with a fresh lockfile)

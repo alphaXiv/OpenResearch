@@ -17,7 +17,7 @@ export function MediaDownloadButton({ url, name }: { url: string; name: string }
       data-tip={m.a11y_download_file({ name: ltr(name) })}
       data-tip-align="end"
     >
-      <Download size={13} />
+      <Download size={14} />
     </IconButtonLink>
   );
 }

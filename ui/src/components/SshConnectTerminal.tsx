@@ -1,3 +1,5 @@
+import { useTerminalSession } from "./useTerminalSession";
+import { useWorkspace } from "../workspace";
 import { useEffect, useRef, useState } from "react";
 import { Check, X } from "lucide-react";
 import type { SlurmPreflight, SshPreflight } from "../api";
@@ -90,24 +92,6 @@ export function SshConnectTerminal({
   />;
 }
 
-export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
-  login: boolean;
-  onComplete: () => void;
-  onError: (error: string) => void;
-}) {
-  return <CommandTerminal
-    path={login ? "/api/settings/openresearch/login" : "/api/settings/openresearch/ssh-key"}
-    label={login ? "orx login" : "orx ssh-key add"}
-    heightClass="h-96"
-    onError={onError}
-    onComplete={(value) => {
-      if (!isComplete(value)) return false;
-      onComplete();
-      return true;
-    }}
-  />;
-}
-
 type CommandStatus = "running" | "done" | "failed" | "closed";
 
 /** Runs a note's command in place (harness setup via `/api/harnesses/setup`,
@@ -134,9 +118,9 @@ export function SettingsCommandTerminal({ path, label, className = "mt-4 overflo
           {status === "running" ? (
             <><Spinner className="border-t-accent-amber" /> {m.settings_command_terminal_running()}</>
           ) : status === "done" ? (
-            <><Check size={13} strokeWidth={2.5} className="text-accent-green" /> {m.settings_command_terminal_done()}</>
+            <><Check size={14} strokeWidth={2.5} className="text-accent-green" /> {m.settings_command_terminal_done()}</>
           ) : status === "failed" ? (
-            <><X size={13} strokeWidth={2.5} className="text-accent-red" /> {m.settings_command_terminal_failed()}</>
+            <><X size={14} strokeWidth={2.5} className="text-accent-red" /> {m.settings_command_terminal_failed()}</>
           ) : (
             m.settings_command_terminal_closed()
           )}
@@ -194,8 +178,8 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
   /** The session ended after the command finished (the follow-up shell exited). */
   onClosed?: () => void;
 }) {
+  const { socketUrl } = useWorkspace();
   const wrapRef = useRef<HTMLDivElement>(null);
-  const terminalRef = useRef<ReturnType<typeof mountTerminal>["terminal"] | null>(null);
   const completeRef = useRef(onComplete);
   const errorRef = useRef(onError);
   const closedRef = useRef(onClosed);
@@ -204,26 +188,19 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
   errorRef.current = onError;
   closedRef.current = onClosed;
 
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    if (!wrap) return;
-    const { terminal, dispose } = mountTerminal(wrap, awaitingApproval, true, palette);
-    terminalRef.current = terminal;
+  const session = useTerminalSession(wrapRef, JSON.stringify([path, command, awaitingApproval, palette, shellAfter]), (wrap) => {
+    const mounted = mountTerminal(wrap, awaitingApproval, true, palette);
+    const { terminal, dispose } = mounted;
     if (awaitingApproval) {
       if (command) terminal.writeln(`$ ${command}`);
-      return () => {
-        terminalRef.current = null;
-        dispose();
-      };
+      return mounted;
     }
     terminal.focus();
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = new URL(path, `${protocol}//${location.host}`);
+    const url = socketUrl(path);
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
     let completed = false;
     let failed = false;
-    let receivedOutput = false;
     const fail = (message: string, sessionEnded: boolean) => {
       if (failed) {
         // A later failure (the follow-up shell not starting) still deserves a line.
@@ -231,7 +208,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
         return;
       }
       failed = true;
-      if (!receivedOutput || shellAfter) terminal.writeln(message);
+      terminal.writeln(`\r\n${message}`);
       errorRef.current?.(message, sessionEnded);
       // A server-reported failure is followed by the shell, which still takes input.
       if (shellAfter && !sessionEnded) return;
@@ -254,7 +231,6 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
     };
     socket.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
-        receivedOutput = true;
         terminal.write(new Uint8Array(event.data));
         return;
       }
@@ -289,7 +265,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
       }
     };
 
-    return () => {
+    return { ...mounted, dispose: () => {
       socket.onopen = null;
       socket.onmessage = null;
       socket.onerror = null;
@@ -297,13 +273,12 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
       input.dispose();
       resize.dispose();
       socket.close();
-      terminalRef.current = null;
       dispose();
-    };
-  }, [path, command, awaitingApproval, palette, shellAfter]);
+    } };
+  });
 
   useEffect(() => {
-    const terminal = terminalRef.current;
+    const terminal = session.current?.mounted.terminal;
     if (!terminal) return;
     terminal.options.disableStdin = awaitingApproval || !active || error !== null;
     if (!awaitingApproval && active && error === null) terminal.focus();

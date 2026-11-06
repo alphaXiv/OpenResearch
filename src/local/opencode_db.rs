@@ -710,7 +710,7 @@ fn ensure_no_external_users(database: &Path) -> Result<()> {
     ];
     #[cfg(unix)]
     {
-        let output = std::process::Command::new("lsof")
+        let output = crate::process::command("lsof")
             .args(["-w", "-nP", "-Fpc", "--"])
             .args(paths.iter().filter(|path| path.exists()))
             .output()
@@ -778,6 +778,19 @@ fn referenced_sessions(database: &Path) -> Result<BTreeSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lease just dropped lingers in any child a parallel test forked meanwhile, until that
+    /// child execs.
+    fn reacquire(path: &Path, major: u64) -> DatabaseLease {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match DatabaseLease::acquire(path, major) {
+                Ok(lease) => return lease,
+                Err(error) => assert!(std::time::Instant::now() < deadline, "{error}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
 
     const V1: &str = "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);
         CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);
@@ -949,7 +962,7 @@ mod tests {
         assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
         connection.execute_batch(V2).unwrap();
         assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
-        let lease = DatabaseLease::acquire(&path, 2).unwrap();
+        let lease = reacquire(&path, 2);
         lease.prepare_with_sessions(ids).unwrap();
         assert!(table_has_session(&connection, "session", "history").unwrap());
     }
@@ -1005,7 +1018,7 @@ mod tests {
         assert!(has_session(&path, "history").unwrap());
         drop(lease);
 
-        let mut resumed = DatabaseLease::acquire(&path, 2).unwrap();
+        let mut resumed = reacquire(&path, 2);
         assert_eq!(
             resumed.prepare_with_sessions(expected).unwrap(),
             Some(backup.clone())
@@ -1075,9 +1088,7 @@ mod tests {
                 std::fs::remove_file(&backup).unwrap();
             }
             drop(lease);
-            assert!(!DatabaseLease::acquire(&path, 2)
-                .unwrap()
-                .requires_migration());
+            assert!(!reacquire(&path, 2).requires_migration());
             for suffix in ["", "-wal", "-shm"] {
                 assert!(!sidecar(&backup, suffix).exists());
             }
@@ -1180,7 +1191,7 @@ mod tests {
         let busy = DatabaseLease::acquire(&path, 2).err().unwrap();
         assert!(busy.downcast_ref::<DatabaseBusy>().is_some());
         drop((first, second));
-        assert!(DatabaseLease::acquire(&path, 2).is_ok());
+        reacquire(&path, 2);
     }
 
     #[test]
@@ -1202,7 +1213,7 @@ mod tests {
             .unwrap();
         let moved = fixture.0.path().join("moved");
         std::fs::rename(&old, &moved).unwrap();
-        let lease = DatabaseLease::acquire(&moved.join("opencode.db"), 2).unwrap();
+        let lease = reacquire(&moved.join("opencode.db"), 2);
         let old_backup = crate::paths::canonicalize(&moved)
             .unwrap()
             .join(backup.file_name().unwrap());

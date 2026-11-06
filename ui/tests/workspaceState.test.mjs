@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -10,6 +11,8 @@ import {
   settingsTabs,
   taskLocation,
 } from "../src/workspaceState.ts";
+
+const locations = JSON.parse(readFileSync(new URL("../../tests/contracts/locations.json", import.meta.url), "utf8"));
 
 const panes = [
   ...["experiments", "files", "artifacts", "terminal"].map((view) => ({ kind: "home", view })),
@@ -69,26 +72,11 @@ test("pane validation rejects malformed identifiers, views, line numbers and ext
 test("only recognized concrete destinations can be saved for automatic resume", () => {
   assert.deepEqual(parseDestination("/projects/demo"), { kind: "resume", projectId: "demo" });
   assert.deepEqual(parseDestination("/projects/demo/tasks/new"), { kind: "task", projectId: "demo" });
-  for (const location of [
-    "/projects", "/projects/demo/tasks/new", "/projects/demo/tasks/archived",
-    "/projects/demo/skills", ...settingsTabs.map((tab) => `/projects/demo/settings/${tab}`),
-    "/projects/demo/settings/%73ettings", `/projects/demo/tasks/new?%70ane=${encodeURIComponent(JSON.stringify(panes[0]))}&`,
-  ]) assert.equal(safeLocation(location), location);
-  for (const location of [
-    "/projects/demo/settings/git", "/projects/demo/settings/%67it",
-    null, undefined, 42, "", "/", "/projects/demo", "/projects/demo/", "/remote-launch",
-    "https://example.com/projects", "javascript:alert(1)", "//example.com/projects",
-    "/\\example.com/projects", "/projects/../tasks/new", "/projects/%2e%2e/tasks/new",
-    "/projects/%2Fexample.com/tasks/new", "/projects/demo/tasks/%5c", "/projects/demo/tasks/%ZZ",
-    "/projects/demo/tasks/%00", "/projects/demo/tasks/%7f", "/projects/demo/tasks/%C2%85",
-    "/projects/demo/tasks/new\n", "/projects/demo/tasks/new#fragment",
-    "/projects/demo/settings/unknown", "/projects/demo/tasks/new/extra",
-    "/projects/demo/tasks/new?next=https://example.com", "/projects/demo/tasks/new?pane=not-json",
-    "/projects/demo/tasks/new?pane=null", "/projects/demo/tasks/new?pane={}",
-    `${taskLocation("demo", null, panes[0])}&pane=${encodeURIComponent(JSON.stringify(panes[1]))}`,
-    `${taskLocation("demo", null, panes[0])}?ignored=payload`,
-    taskLocation("demo", null, { kind: "home", view: "files", content: "extra" }),
-  ]) assert.equal(safeLocation(location), null, String(location));
+  for (const location of locations.valid) assert.equal(safeLocation(location), location);
+  for (const location of [...locations.invalid, ...locations.legacy, null, undefined, 42]) {
+    assert.equal(safeLocation(location), null, String(location));
+  }
+  for (const tab of settingsTabs) assert.ok(locations.valid.includes(`/projects/demo/settings/${tab}`), tab);
   const first = emptyProjectWorkspace();
   first.tasks.new = { tabs: [] };
   assert.deepEqual(emptyProjectWorkspace(), { version: 1, lastTaskId: null, lastLocation: null, tasks: {} });

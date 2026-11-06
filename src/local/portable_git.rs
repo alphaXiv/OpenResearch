@@ -67,7 +67,7 @@ pub async fn install() -> Result<()> {
 /// Runs the unpacked `git.exe` itself: whatever `git` PATH finds first may not be this one.
 #[cfg(windows)]
 async fn verify(staging: &Path) -> Result<()> {
-    let output = tokio::process::Command::new(staging.join(r"cmd\git.exe"))
+    let output = crate::process::tokio_command(staging.join(r"cmd\git.exe"))
         .arg("--version")
         .output()
         .await
@@ -207,7 +207,7 @@ async fn unpack(archive: &Path, staging: &Path) -> Result<()> {
     let mut output = std::ffi::OsString::from("-o\"");
     output.push(staging);
     output.push("\"");
-    let status = tokio::process::Command::new(archive)
+    let status = crate::process::tokio_command(archive)
         .arg("-y")
         .raw_arg(output)
         .status()
@@ -218,7 +218,7 @@ async fn unpack(archive: &Path, staging: &Path) -> Result<()> {
     }
     // The extractor normally runs and deletes it; run it here only if it remains.
     if staging.join("post-install.bat").is_file() {
-        let status = tokio::process::Command::new(staging.join("git-bash.exe"))
+        let status = crate::process::tokio_command(staging.join("git-bash.exe"))
             .args([
                 "--no-needs-console",
                 "--hide",

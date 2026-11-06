@@ -1,8 +1,6 @@
-//! Local launch — the on-this-machine twin of `local/ssh.rs`: run the
-//! experiment as a detached process on the machine running orx. Same snapshot
-//! contract as every backend — the run extracts the recorded revision into
-//! its own run dir, never the agent's worktree. The run row lives in the
-//! local store only; a detached `orx supervise` watches the process.
+//! Launch intents for runs on this machine: `local`, and `tinker` (a local controller using
+//! remote Tinker model compute). Each run extracts the recorded revision into its own run
+//! dir, never the agent's worktree.
 
 use std::collections::HashMap;
 
@@ -10,25 +8,23 @@ use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
 use crate::jobs::{localbox, BackendDescriptor};
-use crate::store::{now_ms, Store, StoredRun};
+use crate::store::{now_ms, LaunchSpec, Store, StoredRun};
 
-/// Submit a local controller and print its run directory.
-pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = crate::compute::submit(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    let label = if backend.kind == "tinker_job" {
-        "Tinker"
-    } else {
-        "Local"
-    };
-    println!("\u{2713} {label} run started.");
-    println!("  dir  {}", backend.job_id.as_deref().unwrap_or(""));
-    println!("  run  {}", run.id);
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
+pub fn launch_spec(args: &crate::ExpRunArgs, kind: &str) -> Result<LaunchSpec> {
+    let backend = kind.trim_end_matches("_job");
+    if args.flavor.is_some() {
+        return Err(anyhow!("--backend {backend} does not take --flavor."));
+    }
+    if args.image.is_some() {
+        return Err(anyhow!(
+            "--image doesn't apply to --backend {backend} — the controller uses this machine's own environment."
+        ));
+    }
+    Ok(LaunchSpec {
+        kind: kind.into(),
+        target: None,
+        options: serde_json::json!({}),
+    })
 }
 
 pub async fn submit_local_run_with_source(
@@ -150,6 +146,7 @@ async fn submit_controller_run(
         source_path: None,
         source_size: None,
         remote_root: None,
+        unknown: Default::default(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

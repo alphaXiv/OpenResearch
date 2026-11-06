@@ -19,7 +19,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::error::{anyhow, Result};
-use crate::local::shell_env::{find_on_path, search_path};
+use crate::local::shell_env::find;
 
 /// The TeX engine a document is written for. Overleaf's default is pdfLaTeX and
 /// so is ours; a document says otherwise with a `% !TeX program` line.
@@ -135,27 +135,11 @@ pub struct Compilation {
     pub log: String,
 }
 
-/// True when a file of that name sits on the shell's PATH — not the process's,
-/// which in app mode is launchd's and has no TeX on it. That it runs is not
-/// checked; `find_engine` probes on every `.tex` tab and spawning five engines
-/// to ask their versions cost more than the case it caught.
+/// True when the tool is installed. That it runs is not checked; `find_engine`
+/// probes on every `.tex` tab and spawning five engines to ask their versions
+/// cost more than the case it caught.
 fn on_path(binary: &str) -> bool {
-    find_on_path(binary).is_some()
-}
-
-/// A TeX tool, with the shell's PATH in its environment: latexmk finds the
-/// engine, biber and bibtex on PATH, so resolving latexmk alone is not enough.
-fn tex_command(binary: &str) -> Command {
-    // biber is never probed — it is chosen from what a pass wrote — so a bare
-    // name here is what makes a machine without it fail as ENOENT at spawn.
-    let mut command = match find_on_path(binary) {
-        Some(path) => Command::new(path),
-        None => Command::new(binary),
-    };
-    if let Some(paths) = search_path() {
-        command.env("PATH", paths);
-    }
-    command
+    find(binary).is_some()
 }
 
 /// Pick how to compile a document written for `program`. Split from the PATH
@@ -318,7 +302,7 @@ fn run_bibliography(
         source_dir.to_string_lossy(),
         crate::local::shell_env::PATH_LIST_SEPARATOR
     );
-    let mut command = tex_command(tool);
+    let mut command = crate::process::command(tool);
     command
         .arg(stem)
         .current_dir(outdir)
@@ -373,7 +357,7 @@ struct Run {
 }
 
 fn run_pass(binary: &str, dir: &Path, args: &[String]) -> Result<Run> {
-    let mut command = tex_command(binary);
+    let mut command = crate::process::command(binary);
     command.args(args).current_dir(dir);
     run_command(command, binary)
 }
@@ -886,19 +870,6 @@ mod tests {
     }
 
     #[test]
-    fn a_tex_tool_is_handed_the_path_its_own_children_need() {
-        // `sh` stands in for a TeX tool; all that matters is that it is on PATH.
-        let command = tex_command("sh");
-        let (_, value) = command
-            .get_envs()
-            .find(|(key, _)| *key == "PATH")
-            .expect("the child is given an explicit PATH");
-        assert_eq!(value, search_path().as_deref());
-        // And the tool itself is resolved, not left to the child's own lookup.
-        assert!(Path::new(command.get_program()).is_absolute());
-    }
-
-    #[test]
     fn tectonic_does_not_treat_recoverable_errors_as_fatal() {
         // microtype under XeTeX errors with "switching it off" and carries on
         // everywhere else; without this flag tectonic produces no PDF at all.
@@ -1003,7 +974,7 @@ mod tests {
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod");
         }
-        let mut command = Command::new(&script);
+        let mut command = crate::process::command(&script);
         command.current_dir(&scratch.0);
         // Borrow the real runner but with a deadline we can wait out.
         let started = Instant::now();

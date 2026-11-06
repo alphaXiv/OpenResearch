@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 struct Sandbox(PathBuf);
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        orx_test_support::stop_server(&self.0.join("data"));
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -78,13 +79,20 @@ fn idle_orx_up_relaunches_into_an_installed_update() {
     std::fs::rename(&next, &orx).unwrap();
     let config = root.join("config/openresearch");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("update-check-unknown.json"),
-        r#"{"checked_at":4102444800,"latest":"99.0.0","installed_version":"99.0.0"}"#,
-    )
-    .unwrap();
+    let mut cache = serde_json::json!({
+        "checked_at": 4102444800u64,
+        "latest": "99.0.0",
+        "installed_version": "99.0.0",
+        "installed_tag": "v99.0.0",
+    });
+    if let Some(sha) = option_env!("ORX_DESKTOP_CANARY_SHA") {
+        cache["compatible_releases"] = serde_json::json!({ "v99.0.0": sha });
+    }
+    std::fs::write(config.join("update-check-unknown.json"), cache.to_string()).unwrap();
 
-    let relaunched = wait_for(Duration::from_secs(45), || marker.exists());
+    // Startup, the 10 s update sample, shutdown and the relaunched process's first instructions
+    // all wait for CPU, which a loaded machine rations.
+    let relaunched = wait_for(Duration::from_secs(120), || marker.exists());
     let _ = up.kill();
     let _ = up.wait();
     assert!(serving, "orx up never started serving");

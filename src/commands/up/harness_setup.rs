@@ -20,7 +20,15 @@ fn unix_bootstrap(harness: &str) -> Option<(&'static str, &'static str)> {
         "opencode" => Some(("https://opencode.ai/install", "bash")),
         "antigravity" => Some(("https://antigravity.google/cli/install.sh", "bash")),
         "cursor" => Some(("https://cursor.com/install", "bash")),
-        _ => None,
+        _ => match acp_executable(harness)?.as_str() {
+            "kimi" => Some(("https://code.kimi.com/kimi-code/install.sh", "bash")),
+            "mcode" => Some(("https://filecdn.minimax.chat/public/install.sh", "bash")),
+            "devin" => Some(("https://cli.devin.ai/install.sh", "bash")),
+            "grok" => Some(("https://x.ai/cli/install.sh", "bash")),
+            "omp" => Some(("https://omp.sh/install", "sh")),
+            "fx" => Some(("https://fx.sh/setup.sh", "bash")),
+            _ => None,
+        },
     }
 }
 
@@ -32,7 +40,14 @@ fn windows_install_command(harness: &str) -> Option<&'static str> {
         "opencode" => Some(include_str!("install_opencode.ps1")),
         "antigravity" => Some("irm https://antigravity.google/cli/install.ps1 | iex"),
         "cursor" => Some("irm 'https://cursor.com/install?win32=true' | iex"),
-        _ => None,
+        _ => match acp_executable(harness)?.as_str() {
+            "kimi" => Some("irm https://code.kimi.com/kimi-code/install.ps1 | iex"),
+            "mcode" => Some("irm https://filecdn.minimax.chat/public/install.ps1 | iex"),
+            "devin" => Some("irm https://static.devin.ai/cli/setup.ps1 | iex"),
+            "grok" => Some("irm https://x.ai/cli/install.ps1 | iex"),
+            "omp" => Some("irm https://omp.sh/install.ps1 | iex"),
+            _ => None,
+        },
     }
 }
 
@@ -41,6 +56,9 @@ fn windows_install_command(harness: &str) -> Option<&'static str> {
 /// relative path could clobber.
 fn install_command(harness: &str, windows: bool) -> Option<String> {
     if let Some(package) = adapter_package(harness) {
+        if package == "pi-acp" && crate::local::acp::executable_path("pi").is_none() {
+            return Some("npm install -g @earendil-works/pi-coding-agent pi-acp".into());
+        }
         return Some(format!("npm install -g {package}"));
     }
     if windows {
@@ -53,21 +71,28 @@ fn install_command(harness: &str, windows: bool) -> Option<String> {
 }
 
 fn adapter_package(harness: &str) -> Option<&'static str> {
+    match acp_executable(harness)?.as_str() {
+        "pi-acp" => Some("pi-acp"),
+        "zcode-acp-server" => Some("zcode-acp-server"),
+        "dsh" => Some("@deepseek-ai/dsh"),
+        _ => None,
+    }
+}
+
+fn acp_executable(harness: &str) -> Option<String> {
     let definition = crate::local::acp::registered_definitions()
         .into_iter()
         .find(|definition| definition.id == harness)?;
     let executable = std::path::Path::new(&definition.executable)
         .file_name()?
         .to_str()?;
-    let executable = executable
-        .strip_suffix(".cmd")
-        .or_else(|| executable.strip_suffix(".exe"))
-        .unwrap_or(executable);
-    match executable {
-        "pi-acp" => Some("pi-acp"),
-        "zcode-acp-server" => Some("zcode-acp-server"),
-        _ => None,
-    }
+    Some(
+        executable
+            .strip_suffix(".cmd")
+            .or_else(|| executable.strip_suffix(".exe"))
+            .unwrap_or(executable)
+            .to_string(),
+    )
 }
 
 /// Fetch the bootstrap to a temp file, then run it with the PTY as stdin.
@@ -89,7 +114,7 @@ fn unix_install_script(url: &str, interpreter: &str) -> String {
 /// Windows install with `CreateProcessW … (os error 2)` before any installer runs.
 #[cfg(windows)]
 fn windows_powershell() -> String {
-    if crate::local::shell_env::find_on_path("powershell.exe").is_some() {
+    if crate::local::shell_env::find("powershell.exe").is_some() {
         return "powershell.exe".into();
     }
     let system_root = crate::local::shell_env::var("SystemRoot")
@@ -170,9 +195,10 @@ pub(super) async fn commands() -> Json<Value> {
     }
     for definition in crate::local::acp::registered_definitions() {
         if let Some(install) = install_command(&definition.id, cfg!(windows)) {
+            let requires_npm = adapter_package(&definition.id).is_some();
             result.insert(
                 definition.id,
-                json!({"install": install, "login": "", "update": "", "requiresNpm": true}),
+                json!({"install": install, "login": "", "update": "", "requiresNpm": requires_npm}),
             );
         }
     }
@@ -230,7 +256,7 @@ pub(super) async fn connect(
     if install_command(&request.harness, cfg!(windows)).is_none() {
         return bad_request("Unknown coding agent").into_response();
     }
-    if adapter_package(&request.harness).is_some() && !matches!(request.action, Action::Install) {
+    if request.harness.starts_with("acp:") && !matches!(request.action, Action::Install) {
         return bad_request("ACP adapters only support installation here").into_response();
     }
     if request.trigger == Trigger::Automatic
@@ -663,12 +689,12 @@ pub(super) fn append_output(output: &mut String, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn acp_adapter_install_commands_are_allowlisted() {
+    fn acp_install_commands_are_allowlisted() {
         for preset in crate::local::acp::presets() {
-            let command = install_command(&preset.launch.id, false);
-            assert_eq!(command.is_some(), preset.needs_connection_adapter);
-            if let Some(command) = command {
-                assert_eq!(Some(command), install_command(&preset.launch.id, true));
+            assert!(install_command(&preset.launch.id, false).is_some());
+            // fx is macOS/Linux only; `presets()` omits it on Windows.
+            if preset.launch.executable != "fx" {
+                assert!(install_command(&preset.launch.id, true).is_some());
             }
         }
         assert!(install_command("acp:unconfigured", false).is_none());
@@ -768,6 +794,7 @@ mod tests {
             auth_observation: None,
             claude_ultracode: false,
             account: None,
+            account_name: None,
             org: None,
             plan: None,
             agent_ready: false,

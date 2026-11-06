@@ -1,5 +1,4 @@
-//! Local Ray Jobs launch — submit via the Ray Jobs / Dashboard API, then
-//! detach `orx supervise` to poll status and mirror logs.
+//! Ray Jobs launch intents, submitted through the Ray Jobs / Dashboard API.
 
 use std::collections::HashMap;
 
@@ -8,30 +7,56 @@ use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
 use crate::jobs::ssh::sh_quote;
 use crate::jobs::{huggingface, ray, BackendDescriptor};
-use crate::store::{now_ms, Store, StoredRun};
+use crate::store::{now_ms, LaunchSpec, Store, StoredRun};
 
-/// CLI wrapper: submit, then print the summary.
-pub async fn launch_local_ray(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_ray(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} Ray job submitted.");
-    println!("  run    {}", run.id);
-    println!(
-        "  job    {} ({})",
-        backend.job_id.as_deref().unwrap_or(""),
-        backend.flavor.as_deref().unwrap_or("default")
-    );
-    println!("  watch  {}", backend.url.as_deref().unwrap_or(""));
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
-}
-
-/// Submit the local experiment's run as a Ray Job and detach a supervisor.
-pub async fn submit_local_ray(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    crate::compute::submit(args).await
+/// Uploads the working_dir package now; it is content-addressed, so a relaunch reuses it.
+pub async fn launch_spec(
+    args: &crate::ExpRunArgs,
+    source: &SourceSnapshot,
+    run_id: &str,
+    command: &str,
+) -> Result<LaunchSpec> {
+    if args.image.is_some() {
+        return Err(anyhow!(
+            "--image doesn't apply to --backend ray — the job runs in the cluster's \
+             runtime environment, not a per-job container."
+        ));
+    }
+    if args.host.is_some() {
+        return Err(anyhow!(
+            "--host only applies with --backend ssh/slurm. Save the Ray Jobs URL in \
+             OpenResearch or set ASTROAI_RAY_JOBS_ADDRESS / RAY_DASHBOARD_URL."
+        ));
+    }
+    if args.manifest.is_some() {
+        return Err(anyhow!("--manifest only applies with --backend k8s."));
+    }
+    if args.timeout.is_some() {
+        return Err(anyhow!(
+            "--timeout isn't supported on --backend ray — Ray Jobs have no time limit; \
+             the job runs until the command exits. Bound the run in the command itself."
+        ));
+    }
+    let resources = ray::parse_flavor(args.flavor.as_deref())?;
+    let address = ray::resolve_address(None);
+    let (package_digest, package_path) = source
+        .ray_package
+        .as_ref()
+        .ok_or_else(|| anyhow!("Ray source package was not created."))?;
+    let working_dir = ray::stage_working_dir(&address, package_digest, package_path).await?;
+    let submission = ray::JobSubmission {
+        entrypoint: format!("bash -c {}", sh_quote(command)),
+        submission_id: run_id.to_string(),
+        resources,
+        env: HashMap::new(),
+        metadata: super::run_labels(&args.exp_id, run_id)?,
+        working_dir: Some(working_dir),
+    };
+    Ok(LaunchSpec {
+        kind: "ray_job".into(),
+        target: Some(address),
+        options: serde_json::to_value(submission)?,
+    })
 }
 
 pub async fn submit_local_ray_with_source(
@@ -120,7 +145,7 @@ pub async fn submit_local_ray_with_source(
     )
     .await?;
 
-    let watch = ray::job_url(&address, &submission_id);
+    let watch = format!("{address}/#/jobs/{submission_id}");
 
     let mut descriptor = BackendDescriptor {
         ssh_container: None,
@@ -146,6 +171,7 @@ pub async fn submit_local_ray_with_source(
         source_path: None,
         source_size: None,
         remote_root: None,
+        unknown: Default::default(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
