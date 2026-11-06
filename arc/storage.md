@@ -179,7 +179,8 @@ traffic:
   reaches that service; no account credentials or research data are sent.
   The result is cached for five minutes and a failed lookup never blocks setup.
 - **Paper search.** Queries go to the public alphaXiv, OpenAlex, bioRxiv and
-  PubMed APIs, without credentials.
+  PubMed APIs, without credentials, except an `OPENALEX_API_KEY` the user sets,
+  which goes to OpenAlex.
 - **alphaXiv.** Sign-in is a browser trip to alphaXiv, whose identity token
   orx hands to openresearch.sh for its own token, or, with
   `orx login --alphaxiv`, to link alphaXiv to the signed-in account. orx keeps
