@@ -408,7 +408,12 @@ impl Actor {
             let base = steps[self.state.failures.min(steps.len() - 1)];
             let noise =
                 u16::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..2].try_into().unwrap()) as i64;
-            let delay = (base * (800 + noise % 401) / 1000).min(900_000);
+            let max_delay = if self.config.alias.starts_with("orx-box-") {
+                60_000
+            } else {
+                900_000
+            };
+            let delay = (base * (800 + noise % 401) / 1000).min(max_delay);
             self.state.failures = self.state.failures.saturating_add(1);
             self.state.next_retry_ms = Some(now.saturating_add(delay));
             self.state.status = Status::Backoff;
