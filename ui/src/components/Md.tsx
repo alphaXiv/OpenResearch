@@ -31,7 +31,7 @@ import { FileChip, FileReference, FileScopeContext, type OpenFile } from "./File
 import { imageWheelZoom } from "../imageZoom";
 import { CITED_ID } from "../agentMessages";
 import { CitedRef } from "./ChatLinks";
-import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
+import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeNetworkImages, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
 
 const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
 
@@ -46,16 +46,15 @@ export function ChatImageScope({ projectId, sessionId, children }: {
     const url = (target: NonNullable<ReturnType<typeof chatImageTarget>>) => (target.source === "absolute" ? absoluteFileUrl(target.path)
       : target.source === "artifact" ? artifactUrl(projectId, target.path)
       : projectFileUrl(projectId, target.path, { sessionId: sessionId ?? undefined })) + target.hash;
-    return (src: string): ImageCandidate[] => /^(https?:)?\/\//i.test(src) ? [{ url: src, resolveAsset: () => null }]
-      : chatImageTargets(src).map(target => ({
-        url: url(target),
-        resolveAsset: (child: string) => {
-          const absolute = chatImageTarget(child);
-          if (absolute?.source === "absolute") return url(absolute);
-          const asset = documentAssetTarget(target.path, child, true);
-          return asset ? url({ ...target, path: asset.path, hash: asset.hash }) : null;
-        },
-      }));
+    return (src: string): ImageCandidate[] => chatImageTargets(src).map(target => ({
+      url: url(target),
+      resolveAsset: (child: string) => {
+        const absolute = chatImageTarget(child);
+        if (absolute?.source === "absolute") return url(absolute);
+        const asset = documentAssetTarget(target.path, child, true);
+        return asset ? url({ ...target, path: asset.path, hash: asset.hash }) : null;
+      },
+    }));
   }, [projectId, sessionId]);
   const files = useMemo(() => ({ projectId, sessionId }), [projectId, sessionId]);
   return <ImageResolverContext value={resolver}><FileScopeContext value={files}>{children}</FileScopeContext></ImageResolverContext>;
@@ -374,6 +373,7 @@ const markdownProcessor = unified()
   .use(remarkFigures)
   .use(remarkMentions)
   .use(remarkRehype)
+  .use(rehypeNetworkImages)
   .use(rehypeSafeUrls)
   .use(rehypeKatexHealing);
 

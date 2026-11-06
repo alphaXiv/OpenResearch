@@ -24,7 +24,7 @@ pub async fn prepare() -> Result<()> {
             // ponytail: O(repository metadata) for marker-free recovery; reuse startup inventory if this grows.
             let _guard = lock.read()?;
             mappings.iter().any(|(from, _)| from.exists())
-                || !references(&target, &mappings)?.is_empty()
+                || !scan(&target, &mappings, &cloud_only)?.is_empty()
         };
         if !needed {
             return Ok(());
@@ -240,6 +240,20 @@ fn repositories(root: &Path, found: &mut BTreeSet<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Reading a dataless File Provider file (iCloud, Dropbox) blocks until it downloads.
+#[cfg(target_os = "macos")]
+fn cloud_only(path: &Path) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    const SF_DATALESS: u32 = 0x4000_0000;
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.st_flags() & SF_DATALESS != 0)
+}
+
+// shortcut: other platforms have no stat-visible placeholder flag; add one if Windows cloud folders hang.
+#[cfg(not(target_os = "macos"))]
+fn cloud_only(_: &Path) -> bool {
+    false
+}
+
 fn config_may_need_repair(repo: &Path, mappings: &[(PathBuf, PathBuf)]) -> std::io::Result<bool> {
     let config = match std::fs::read_to_string(repo.join(".git/config")) {
         Ok(config) => config,
@@ -262,6 +276,15 @@ fn config_may_need_repair(repo: &Path, mappings: &[(PathBuf, PathBuf)]) -> std::
 }
 
 fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References> {
+    scan(data, mappings, &|_| false)
+}
+
+/// The per-command check skips cloud-only files of unrelated repositories; migration reads them.
+fn scan(
+    data: &Path,
+    mappings: &[(PathBuf, PathBuf)],
+    skip: &dyn Fn(&Path) -> bool,
+) -> Result<References> {
     let mut result = References::default();
     let native = data.join("agents/opencode/opencode.db");
     let mut repos = BTreeSet::new();
@@ -313,15 +336,21 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
     }
     // Registrations also find moved worktrees whose project/database was deleted.
     let mut discovered = Vec::new();
+    let external = |repo: &Path| {
+        !mappings
+            .iter()
+            .any(|(from, to)| repo.starts_with(from) || repo.starts_with(to))
+    };
     for repo in &repos {
+        // Hydrating an unrelated repository would block every command; it is rechecked once downloaded.
+        if external(repo) && skip(&repo.join(".git/config")) {
+            continue;
+        }
         let needs_repair = if repo.join(".git").is_dir() {
             match config_may_need_repair(repo, mappings) {
                 Ok(needed) => needed,
                 Err(error)
-                    if error.kind() == std::io::ErrorKind::PermissionDenied
-                        && !mappings
-                            .iter()
-                            .any(|(from, to)| repo.starts_with(from) || repo.starts_with(to)) =>
+                    if error.kind() == std::io::ErrorKind::PermissionDenied && external(repo) =>
                 {
                     eprintln!(
                         "Skipping inaccessible repository {}: {error}",
@@ -357,7 +386,7 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
             for entry in std::fs::read_dir(registrations)? {
                 let entry = entry?;
                 let backlink = entry.path().join("gitdir");
-                if backlink.is_file() {
+                if backlink.is_file() && !(external(repo) && skip(&backlink)) {
                     let old = std::fs::read_to_string(backlink)?;
                     let path = mapped(Path::new(old.trim()), mappings);
                     if let Some(worktree) = path.parent().filter(|_| path.is_file()) {
@@ -370,7 +399,7 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
     repos.extend(discovered);
     for repo in repos {
         let gitfile = repo.join(".git");
-        if !gitfile.is_file() {
+        if !gitfile.is_file() || (external(&repo) && skip(&gitfile)) {
             continue;
         }
         let Ok(contents) = std::fs::read_to_string(&gitfile) else {
@@ -382,6 +411,9 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
         let old = repo.join(old);
         let admin = mapped(&old, mappings);
         let backlink = admin.join("gitdir");
+        if external(&admin) && skip(&backlink) {
+            continue;
+        }
         let actual = match std::fs::read_to_string(&backlink) {
             Ok(actual) => admin.join(actual.trim()),
             Err(_) if admin == old => continue,
@@ -482,6 +514,37 @@ mod tests {
         assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(external.unwrap().is_empty());
         assert!(managed.is_err());
+    }
+
+    #[test]
+    fn cloud_only_external_projects_are_only_skipped_by_storage_checks() {
+        let tmp = git::TemporaryDirectory::new("orx-cloud-only-storage").unwrap();
+        let root = normalize(tmp.path()).unwrap();
+        let data = root.join("data");
+        let source = root.join("cache");
+        let repo = root.join("external");
+        init(&repo);
+        let origin = source.join("repos/origin");
+        std::fs::create_dir_all(data.join("repos/origin")).unwrap();
+        git::git(
+            Some(&repo),
+            &["remote", "add", "origin", &origin.to_string_lossy()],
+        )
+        .unwrap();
+        let store = Store::open_at(data.clone()).unwrap();
+        super::super::projects::create_project(
+            &store,
+            "cloud",
+            &repo.to_string_lossy(),
+            Default::default(),
+        )
+        .unwrap();
+        drop(store);
+        let paths = mappings(&source, &data);
+        assert_eq!(references(&data, &paths).unwrap().remotes.len(), 1);
+        assert!(scan(&data, &paths, &|path| path.starts_with(&repo))
+            .unwrap()
+            .is_empty());
     }
 
     fn init(repo: &Path) {
