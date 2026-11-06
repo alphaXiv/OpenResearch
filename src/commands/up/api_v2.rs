@@ -465,6 +465,7 @@ pub(crate) fn host_view(
             crate::config::run_engine_settings()?.0,
             &store.list_active_runs()?,
             alias,
+            |id| installed().is_ok_and(|api| api.engine.holds(id)),
         );
     Ok(json!({
         "alias": alias, "root": root,

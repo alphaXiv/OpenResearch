@@ -6,11 +6,14 @@ fn stub(bytes: &[u8]) -> Session {
     let mut child = crate::process::tokio_command("python3")
         .args(["-c", "import os,sys; os.write(1,bytes.fromhex(sys.argv[1])); os.close(1); sys.stdin.buffer.read()", &hex])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn().unwrap();
+    let output: Box<dyn AsyncRead + Send + Unpin> = Box::new(child.stdout.take().unwrap());
     Session {
-        input: child.stdin.take().unwrap(),
-        output: Some(BufReader::new(child.stdout.take().unwrap())),
-        child,
-        stderr: tokio::spawn(async {}),
+        input: Box::new(child.stdin.take().unwrap()),
+        output: Some(BufReader::new(output)),
+        child: Some(child),
+        #[cfg(windows)]
+        held: None,
+        stderr: None,
         stderr_tail: Arc::new(Mutex::new(Vec::new())),
         bootstrapped: false,
         authenticated: Arc::new(AtomicBool::new(false)),
@@ -89,6 +92,29 @@ async fn seeded_bootstrap_stub_responses_are_bounded_and_validated() {
             mode <= 1,
             "seed={seed} case={case} mode={mode}: {actual:?}"
         );
+        session.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_held_login_outlives_an_orx_host_update_but_not_a_protocol_change() {
+    for (proto, resumes) in [(PROTOCOL_VERSION, true), (PROTOCOL_VERSION + 1, false)] {
+        let mut hello = Vec::new();
+        let body = Response::Hello {
+            proto,
+            binary_sha: "an older orx-host".into(),
+            boot_id: "boot".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            kernel: "test".into(),
+        };
+        orx_host_proto::write_frame(&mut hello, &Message { id: 0, body }).unwrap();
+        let mut session = stub(&hello);
+        let resumed = session.resume().await;
+        assert_eq!(resumed.is_ok(), resumes, "proto {proto}: {resumed:?}");
+        if let Err(error) = resumed {
+            assert!(error.to_string().contains("press Connect"), "{error}");
+        }
         session.close().await;
     }
 }

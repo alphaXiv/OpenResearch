@@ -9,14 +9,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
 pub(super) struct Session {
-    child: Child,
-    pub(super) input: ChildStdin,
-    pub(super) output: Option<BufReader<ChildStdout>>,
-    stderr: JoinHandle<()>,
+    child: Option<Child>,
+    /// The SSH service's key for the login it holds for this session.
+    #[cfg(windows)]
+    held: Option<String>,
+    pub(super) input: Box<dyn AsyncWrite + Send + Unpin>,
+    pub(super) output: Option<BufReader<Box<dyn AsyncRead + Send + Unpin>>>,
+    stderr: Option<JoinHandle<()>>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     bootstrapped: bool,
     authenticated: Arc<AtomicBool>,
@@ -24,8 +27,12 @@ pub(super) struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
-        self.stderr.abort();
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+        }
+        if let Some(stderr) = &self.stderr {
+            stderr.abort();
+        }
     }
 }
 
@@ -240,12 +247,56 @@ pub(super) async fn stop_master(config: &Config, route: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn spawn(
+fn prefix(route: &str) -> Result<String> {
+    let hostname = route
+        .lines()
+        .find_map(|line| line.strip_prefix("hostname "))
+        .ok_or_else(|| anyhow!("ssh -G did not report a hostname"))?;
+    Ok(format!("Authenticated to {hostname} ("))
+}
+
+/// Keeps the last 16 KiB of `ssh -v` output, and latches once a line starts with `prefix`,
+/// which may since have left that tail.
+pub(crate) fn read_stderr(
+    mut stderr: impl AsyncRead + Send + Unpin + 'static,
+    prefix: String,
+) -> (JoinHandle<()>, Arc<AtomicBool>, Arc<Mutex<Vec<u8>>>) {
+    let authenticated = Arc::new(AtomicBool::new(false));
+    let latched = authenticated.clone();
+    let tail = Arc::new(Mutex::new(Vec::new()));
+    let writer = tail.clone();
+    let reader = tokio::spawn(async move {
+        let prefix = prefix.into_bytes();
+        let mut bytes = [0; 4096];
+        let mut line = Vec::new();
+        while let Ok(len @ 1..) = stderr.read(&mut bytes).await {
+            for &byte in &bytes[..len] {
+                if byte == b'\n' {
+                    line.clear();
+                } else if line.len() < prefix.len() {
+                    line.push(byte);
+                    if line == prefix {
+                        latched.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            let mut tail = writer.lock().unwrap();
+            tail.extend_from_slice(&bytes[..len]);
+            if tail.len() > 16 * 1024 {
+                let excess = tail.len() - 16 * 1024;
+                tail.drain(..excess);
+            }
+        }
+    });
+    (reader, authenticated, tail)
+}
+
+fn session_command(
     config: &Config,
     attach: bool,
-    route: &str,
+    #[cfg_attr(windows, allow(unused_variables))] route: &str,
     askpass: Option<&Askpass>,
-) -> Result<Session> {
+) -> Result<Command> {
     let mut command = command(config);
     isolation(&mut command);
     command.args(["-o", "ControlMaster=no"]);
@@ -280,50 +331,110 @@ pub(super) fn spawn(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let hostname = route
-        .lines()
-        .find_map(|line| line.strip_prefix("hostname "))
-        .ok_or_else(|| anyhow!("ssh -G did not report a hostname"))?;
-    let prefix = format!("Authenticated to {hostname} (").into_bytes();
-    let authenticated = Arc::new(AtomicBool::new(false));
-    let latched = authenticated.clone();
+    Ok(command)
+}
+
+pub(super) fn spawn(
+    config: &Config,
+    attach: bool,
+    route: &str,
+    askpass: Option<&Askpass>,
+) -> Result<Session> {
+    let mut command = session_command(config, attach, route, askpass)?;
+    let prefix = prefix(route)?;
     let mut child = command.spawn().context("start OpenSSH")?;
-    let input = child.stdin.take().unwrap();
-    let output = Some(BufReader::new(child.stdout.take().unwrap()));
-    let mut stderr = child.stderr.take().unwrap();
-    let stderr_tail = Arc::new(Mutex::new(Vec::new()));
-    let tail = stderr_tail.clone();
-    let stderr = tokio::spawn(async move {
-        let mut bytes = [0; 4096];
-        let mut line = Vec::new();
-        while let Ok(len @ 1..) = stderr.read(&mut bytes).await {
-            for &byte in &bytes[..len] {
-                if byte == b'\n' {
-                    line.clear();
-                } else if line.len() < prefix.len() {
-                    line.push(byte);
-                    if line == prefix {
-                        latched.store(true, Ordering::Relaxed);
-                    }
-                }
-            }
-            let mut tail = tail.lock().unwrap();
-            tail.extend_from_slice(&bytes[..len]);
-            if tail.len() > 16 * 1024 {
-                let excess = tail.len() - 16 * 1024;
-                tail.drain(..excess);
-            }
-        }
-    });
+    let input = Box::new(child.stdin.take().unwrap());
+    let output: Box<dyn AsyncRead + Send + Unpin> = Box::new(child.stdout.take().unwrap());
+    let (stderr, authenticated, stderr_tail) = read_stderr(child.stderr.take().unwrap(), prefix);
     Ok(Session {
-        child,
+        child: Some(child),
+        #[cfg(windows)]
+        held: None,
         input,
-        output,
-        stderr,
+        output: Some(BufReader::new(output)),
+        stderr: Some(stderr),
         stderr_tail,
         bootstrapped: false,
         authenticated,
     })
+}
+
+#[cfg(windows)]
+fn held_key(config: &Config, route: &str) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}\0{route}", config.alias, config.root))
+    )
+}
+
+#[cfg(windows)]
+async fn held(operation: serde_json::Value, key: String) -> Result<Session> {
+    let (stream, _) = crate::jobs::ssh::service::hold(operation).await?;
+    let mut session = Session {
+        child: None,
+        held: Some(key),
+        input: Box::new(tokio::io::empty()),
+        output: None,
+        stderr: None,
+        stderr_tail: Arc::default(),
+        bootstrapped: false,
+        authenticated: Arc::default(),
+    };
+    session.connect(stream);
+    Ok(session)
+}
+
+/// Logs in inside the SSH service, which keeps the login across `orx up` restarts.
+#[cfg(windows)]
+pub(super) async fn hold(config: &Config, route: &str, askpass: &Askpass) -> Result<Session> {
+    let command = session_command(config, false, route, Some(askpass))?;
+    let command = command.as_std();
+    let text = |value: &std::ffi::OsStr| {
+        value
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("ssh arguments must be Unicode"))
+    };
+    let args = command.get_args().map(text).collect::<Result<Vec<_>>>()?;
+    let env = command
+        .get_envs()
+        .map(|(name, value)| {
+            Ok(serde_json::json!([
+                text(name)?,
+                value.map(text).transpose()?
+            ]))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let key = held_key(config, route);
+    let operation = serde_json::json!({
+        "op": "hold_start",
+        "key": key,
+        "args": args,
+        "env": env,
+        "prefix": prefix(route)?,
+    });
+    held(operation, key).await
+}
+
+/// Attaches to the login the SSH service holds for this root, if it is still alive.
+#[cfg(windows)]
+pub(super) async fn attach(config: &Config, route: &str) -> Result<Session> {
+    let key = held_key(config, route);
+    let operation = serde_json::json!({"op": "hold_attach", "key": key});
+    let mut session = held(operation, key).await?;
+    session.bootstrapped = true;
+    Ok(session)
+}
+
+#[cfg(windows)]
+pub(super) async fn release(config: &Config, route: &str) {
+    let operation = serde_json::json!({"op": "hold_stop", "key": held_key(config, route)});
+    if let Err(error) = crate::jobs::ssh::service::hold(operation).await {
+        eprintln!(
+            "Host {}: could not end the held SSH login: {error:#}",
+            config.alias
+        );
+    }
 }
 
 const EMBEDDED_HOSTS: &[(&str, &str, &str, &[u8])] =
@@ -437,8 +548,17 @@ pub(super) fn binary(directory: Option<&Path>, os: &str, arch: &str) -> Result<B
 
 impl Session {
     pub async fn close(&mut self) {
-        let _ = self.child.start_kill();
-        let _ = self.child.wait().await;
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+    }
+
+    #[cfg(windows)]
+    fn connect(&mut self, stream: tokio::net::TcpStream) {
+        let (output, input) = stream.into_split();
+        self.input = Box::new(input);
+        self.output = Some(BufReader::new(Box::new(output)));
     }
 
     pub async fn handshake(&mut self) -> Result<(String, String)> {
@@ -500,44 +620,87 @@ impl Session {
         if ready != "ORX1 ready\n" {
             bail!("Invalid bootstrap response: {ready:?}");
         }
-        write(
-            &mut self.input,
-            &Message {
-                id: 0,
-                body: Request::Hello {
-                    proto: PROTOCOL_VERSION,
-                },
-            },
-        )
-        .await?;
-        let message = read(self.output.as_mut().unwrap()).await?;
-        match message {
-            Message {
-                id: 0,
-                body:
-                    Response::Hello {
-                        proto: PROTOCOL_VERSION,
-                        binary_sha,
-                        ..
-                    },
-            } if binary_sha == binary.sha => Ok(()),
-            message => bail!("orx-host Hello mismatch: {message:?}"),
+        // The service relays a held login in whole frames once its unframed bootstrap is over.
+        #[cfg(windows)]
+        if let Some(key) = self.held.clone() {
+            let operation = serde_json::json!({"op": "hold_attach", "key": key});
+            self.connect(crate::jobs::ssh::service::hold(operation).await?.0);
+        }
+        let (_, _, sha) = self.hello().await?;
+        if sha != binary.sha {
+            bail!(
+                "orx-host Hello reported binary {sha}, expected {}",
+                binary.sha
+            );
+        }
+        Ok(())
+    }
+
+    /// Checks that a held login's orx-host speaks this build's control protocol. An older
+    /// binary that does keeps serving, and wrapping new runs, until the login ends.
+    #[cfg(any(windows, test))]
+    pub async fn resume(&mut self) -> Result<()> {
+        self.hello()
+            .await
+            .context("The SSH login's orx-host is gone or incompatible; press Connect")?;
+        Ok(())
+    }
+
+    /// Returns orx-host's OS, architecture and binary hash.
+    async fn hello(&mut self) -> Result<(String, String, String)> {
+        let hello = Request::Hello {
+            proto: PROTOCOL_VERSION,
+        };
+        write(&mut self.input, &Message { id: 0, body: hello }).await?;
+        loop {
+            // A resumed login may first deliver replies meant for a server that went away.
+            match read(self.output.as_mut().unwrap()).await? {
+                Message {
+                    id: 0,
+                    body:
+                        Response::Hello {
+                            proto: PROTOCOL_VERSION,
+                            binary_sha,
+                            os,
+                            arch,
+                            ..
+                        },
+                } => return Ok((os, arch, binary_sha)),
+                Message { id: 0, body } => bail!("orx-host Hello mismatch: {body:?}"),
+                _ => {}
+            }
         }
     }
 
     pub async fn failure(&mut self, error: anyhow::Error, retry_closure: bool) -> Failure {
-        let status = match tokio::time::timeout(Duration::from_millis(200), self.child.wait()).await
-        {
-            Ok(status) => status.ok(),
-            Err(_) => {
-                let _ = self.child.start_kill();
-                self.child.wait().await.ok()
+        let mut code = None;
+        if let Some(child) = &mut self.child {
+            let status = match tokio::time::timeout(Duration::from_millis(200), child.wait()).await
+            {
+                Ok(status) => status.ok(),
+                Err(_) => {
+                    let _ = child.start_kill();
+                    child.wait().await.ok()
+                }
+            };
+            code = status.and_then(|status| status.code());
+        }
+        if let Some(stderr) = &mut self.stderr {
+            let _ = tokio::time::timeout(Duration::from_secs(1), stderr).await;
+        }
+        #[cfg(windows)]
+        if let Some(key) = &self.held {
+            let operation = serde_json::json!({"op": "hold_stop", "key": key});
+            if let Ok((_, ended)) = crate::jobs::ssh::service::hold(operation).await {
+                code = ended["code"].as_i64().map(|code| code as i32);
+                self.authenticated
+                    .store(ended["authenticated"] == true, Ordering::Relaxed);
+                let stderr = ended["stderr"].as_str().unwrap_or_default();
+                *self.stderr_tail.lock().unwrap() = stderr.as_bytes().to_vec();
             }
-        };
-        let _ = tokio::time::timeout(Duration::from_secs(1), &mut self.stderr).await;
+        }
         let tail = self.stderr_tail.lock().unwrap();
         let stderr = String::from_utf8_lossy(&tail);
-        let code = status.and_then(|status| status.code());
         let retry_closure = retry_closure || self.authenticated.load(Ordering::Relaxed);
         let mut failure = failure(&error.to_string(), &stderr, code, retry_closure);
         if self.bootstrapped

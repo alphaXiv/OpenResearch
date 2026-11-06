@@ -1037,14 +1037,18 @@ impl Commands for Runtime {
                     .default_host
                     .ok_or_else(|| anyhow!("Pass --host or configure a default host."))?,
             };
-            let supervised = crate::compute::supervised_ssh_needed(
-                crate::config::run_engine_settings()?.0,
-                &self.store()?.list_active_runs()?,
-                &host,
-            );
+            let supervised = || -> Result<bool> {
+                Ok(crate::compute::supervised_ssh_needed(
+                    crate::config::run_engine_settings()?.0,
+                    &self.store()?.list_active_runs()?,
+                    &host,
+                    |id| self.engine.holds(id),
+                ))
+            };
+            let keep_master = supervised()?;
             let target = SshTarget::alias(&host);
             #[cfg(unix)]
-            if supervised && prompt.is_some() {
+            if keep_master && prompt.is_some() {
                 drop(crate::jobs::ssh::prepare_interactive_connection(&target, None, None).await?);
             }
             self.ssh(&Self::host_key(&host, slurm)?)?;
@@ -1056,7 +1060,7 @@ impl Commands for Runtime {
             let mut worst: Option<(u8, anyhow::Error)> = None;
             for conn in connections {
                 let result = match &prompt {
-                    Some(prompt) => conn.connect_interactive(prompt.clone(), supervised).await,
+                    Some(prompt) => conn.connect_interactive(prompt.clone(), keep_master).await,
                     None => conn.retry().await,
                 };
                 if let Err(error) = result {
@@ -1070,8 +1074,9 @@ impl Commands for Runtime {
                 eprintln!("Host {host}: could not reset supervisor SSH backoff: {error:#}");
             }
             let connected = worst.map_or(Ok(()), |(_, error)| Err(error));
+            // The engine may have adopted the host's last 0.2.x run while the user authenticated.
             #[cfg(windows)]
-            let connected = if supervised {
+            let connected = if supervised()? {
                 connect_supervised(connected, prompt.as_ref(), |operation| {
                     crate::jobs::ssh::service::request(&target, operation)
                 })
