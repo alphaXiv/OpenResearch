@@ -28,7 +28,8 @@ export function resolveMarkdownTarget(
 
   let pathname: string;
   try {
-    pathname = decodeURIComponent(encodedPath);
+    // Markdown keeps a `%` not followed by two alphanumerics literal (`50%off`).
+    pathname = decodeURIComponent(encodedPath.replace(/%(?![0-9a-f]{2})/gi, "%25"));
   } catch {
     return null;
   }
