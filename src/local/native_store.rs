@@ -917,7 +917,9 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
             if source.is_dir() {
                 copy_tree(source, destination)
             } else {
+                // Hard links cannot cross volumes; the marker reconciles a copy just the same.
                 std::fs::hard_link(source, destination)
+                    .or_else(|_| std::fs::copy(source, destination).map(drop))
             }
         })
         .map_err(|error| {
@@ -999,15 +1001,15 @@ fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(source)? {
         let from = entry?.path();
         let to = destination.join(from.file_name().unwrap_or_default());
-        // A nested link the guard refuses is unreadable to the agent anyway.
-        if untrusted_link(&from) {
+        // Links the guard refuses or that dangle are unreadable to the agent anyway.
+        let Ok(new) = std::fs::metadata(&from) else {
             continue;
-        }
-        if from.is_dir() {
+        };
+        if new.is_dir() {
             copy_tree(&from, &to)?;
             continue;
         }
-        let (Ok(old), Ok(new)) = (std::fs::metadata(&to), std::fs::metadata(&from)) else {
+        let Ok(old) = std::fs::metadata(&to) else {
             std::fs::copy(&from, &to)?;
             continue;
         };
@@ -1491,6 +1493,24 @@ mod link_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_directories_skip_dangling_links() {
+        let root = std::env::temp_dir().join(format!("orx-copy-tree-{}", uuid::Uuid::new_v4()));
+        let source = root.join("skills");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "skill").unwrap();
+        std::os::unix::fs::symlink(root.join("gone"), source.join("broken")).unwrap();
+
+        copy_tree(&source, &root.join("copy")).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("copy/SKILL.md")).unwrap(),
+            "skill"
+        );
+        assert!(!root.join("copy/broken").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn native_store_smoke_test() {
