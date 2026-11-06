@@ -19,7 +19,7 @@ it runs it owns the work that needs a resident process:
 - the run engine: watching, cancelling and reporting runs, and launching new
   runs when enabled ([experiments](experiments.md));
 - background passes: agent detection and model catalogs, sweeping remote run
-  directories and orphaned files;
+  directories and orphaned files, indexing older chat messages;
 - remote workspace gateways ([remote](remote.md)).
 
 The jobs themselves are not. Each run's wrapper is its own process on the
@@ -38,6 +38,14 @@ passes one guard:
   `Sec-Fetch-Site` says it is cross-site, and its `Origin`, when present,
   must be the server's own. A websocket must send an `Origin`.
 - Responses carry headers that forbid framing, MIME sniffing and referrers.
+
+`orx up --host 0.0.0.0` opts into a trusted private network, such as a
+headless workstation driven from a laptop. orx's own clients still use
+`127.0.0.1`, so no other address is accepted. The guard then also refuses any
+peer outside the loopback, RFC 1918, link-local and CGNAT IPv4
+ranges, and accepts a Host only when it is `localhost` or a literal address in
+those ranges, so DNS rebinding still fails. Anyone on that network can use the
+dashboard.
 
 A request without an `Origin` is a CLI or another non-browser client on the
 same machine, which already has the user's privileges. The only extra origin
@@ -116,6 +124,17 @@ the server knows.
   desktop app reopen where the user left off. Opening a project or the app
   resumes the last location that still exists, and falls back to the newest
   chat otherwise.
+
+Chat search opens above the transcript with chat, project and workspace scopes.
+Its field stays at the top right until closed. Selecting a result collapses
+the scopes and list; navigation shortcuts keep working while reading the chat.
+It reads this machine's index only while open, cancels superseded reads, and
+pages a virtual result list. A result selects its branch and opens the matching
+work, subagent transcript or plan. Transcript rows retain disclosure choices,
+active text selections and unfinished forms across virtualization; ordinary
+clicks do not keep rows mounted. Search measures its destination before showing
+it and holds the text position through later layout changes until the reader
+scrolls. Streaming follows the bottom only while the reader stays pinned there.
 
 ## Design system and text
 

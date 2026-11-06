@@ -89,13 +89,6 @@ async function assembleDocument(
 ): Promise<string> {
   const doc = new DOMParser().parseFromString(html, "text/html");
 
-  // Project images are inlined below. Prevent automatic network image loads,
-  // including srcset and CSS backgrounds, without disabling report scripts.
-  const imagePolicy = doc.createElement("meta");
-  imagePolicy.setAttribute("http-equiv", "Content-Security-Policy");
-  imagePolicy.setAttribute("content", "img-src data: blob:");
-  doc.head.prepend(imagePolicy);
-
   // One pass over the document so the budget really does spend in document
   // order: grouping by rule would starve the stylesheet behind the figures.
   const assets: Asset[] = [];

@@ -2,6 +2,10 @@
   clip-path: inset(34% 9%);
 }
 
+.chat-thread [role="feed"][aria-busy="true"] .tool-group-disclosure {
+  transition: none;
+}
+
 .mac-titlebar .app > :is(.update-banner, .offline-banner, [role="alert"]) ~ .app-body .mac-titlebar-spacer {
   display: none;
 }
@@ -549,4 +553,12 @@
   --pele-surface-alt: var(--base);
   --pele-border: var(--border);
   --pele-accent: var(--accent-blue);
+  --pele-series-1: var(--accent-blue);
+  --pele-series-2: var(--accent-teal);
+  --pele-series-3: var(--accent-purple);
+  --pele-series-4: var(--accent-amber);
+  --pele-series-5: var(--accent-red);
+  --pele-series-6: var(--accent-green);
+  --pele-series-7: var(--accent-orange);
+  --pele-series-8: var(--lineage);
 }

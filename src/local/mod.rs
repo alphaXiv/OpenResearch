@@ -10,6 +10,8 @@
 pub mod acp;
 pub mod agent_lifecycle;
 pub mod agent_skills;
+#[cfg(test)]
+mod agent_text;
 pub mod autonomy;
 pub mod bash;
 pub mod browser_cookies;
@@ -43,6 +45,7 @@ pub mod projects;
 pub mod ray;
 pub mod remote_cleanup;
 pub mod resolve;
+pub mod share;
 pub mod shell_env;
 pub mod skills;
 pub mod slurm;
@@ -115,35 +118,6 @@ pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "slurm", "ray", "vercel"
 /// The subset whose launches FAIL without a `--flavor` — the playbook warns
 /// about these when they're the default with no saved flavor.
 pub const FLAVOR_REQUIRED_BACKENDS: &[&str] = &["hf", "modal", "openresearch"];
-
-#[cfg(test)]
-pub(crate) fn assert_agent_guidance_is_ui_agnostic(label: &str, guidance: &str) {
-    let guidance = guidance.to_lowercase();
-    for phrase in [
-        "git tab",
-        "settings →",
-        "orx up settings",
-        "hugging face section",
-        "artifacts tab",
-        "dashboard artifacts",
-        "dashboard's",
-        "dashboard injects",
-        "invisible to the dashboard",
-        "visible in the dashboard",
-        "chat ui",
-        "plan card",
-        "file viewer",
-        "web ui",
-        "\"test\" button",
-        "cancel from web",
-        "cancel from the web",
-    ] {
-        assert!(
-            !guidance.contains(phrase),
-            "{label} contains UI navigation: {phrase}"
-        );
-    }
-}
 
 /// The `or_run` / `or_experiment` / `or_project` labels provider jobs carry.
 pub fn run_labels(

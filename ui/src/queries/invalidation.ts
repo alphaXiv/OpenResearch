@@ -35,13 +35,12 @@ const settingsFamilies: Record<string, readonly string[]> = {
   "data-dir": ["getDataDir"],
   ssh: ["getSshSettings", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
   compute: ["getComputeSettings"],
-  openresearch: ["getOpenResearchSettings", "getOpenResearchAccount", "getComputeSettings"],
+  openresearch: ["getOpenResearchSettings", "getOpenResearchAccount", "getComputeSettings", "getProjectLink"],
   git: ["githubAccount", "repoAccess", "getProjectGitStatus"],
-  profile: ["getProfile"],
   "lit-sources": ["getLitSources"],
   projects: ["getProjectDefaults", "getProjectGitStatus"],
   telemetry: ["getTelemetry"],
-  "run-engine": ["getRunEngine"],
+  "run-engine": ["getRunEngine", "listEngineHosts"],
 };
 export function createInvalidation(client: WorkspaceClient) {
   const {
@@ -124,7 +123,7 @@ export function createInvalidation(client: WorkspaceClient) {
     const invalidate = (families: readonly string[], target = scope, predicate?: QueryFilters["predicate"]) => invalidateFamilies(families, target, predicate, true);
     const path = url.split("?")[0];
     if (/^\/api\/(experiments|runs)\//.test(path) || /^\/api\/projects\/[^/]+$/.test(path)) invalidate(["getSessionExperiments"], scope);
-    if (/\/(ui-state|open|reveal|prewarm|validate|preflight|scopes)$/.test(path)) return;
+    if (/\/(ui-state|open|reveal|prewarm|validate|preflight|scopes|share)$/.test(path)) return;
     const setting = /^\/api\/settings\/([^/]+)/.exec(path)?.[1];
     if (setting) { invalidate(settingsFamilies[setting] ?? [], scope); return; }
     if (path.startsWith("/api/local-models") && !/\/(discover|check)$/.test(path)) { invalidate(["getLocalModels", "getHarnesses"], scope); return; }
@@ -150,7 +149,7 @@ export function createInvalidation(client: WorkspaceClient) {
       invalidate(["getProjectGitStatus", "getCodeTree", "getProjectStarterPrompts"], scope, (query) => query.queryKey[3] === projectId);
       return;
     }
-    if (path === "/api/projects" || path === "/api/onboarding/complete") invalidate(["listProjects", "listProjectActivity", "getUiState", "getProfile"], scope);
+    if (path === "/api/projects" || path === "/api/onboarding/complete") invalidate(["listProjects", "listProjectActivity", "getUiState"], scope);
   }
 
   return {

@@ -8,7 +8,7 @@
 use std::io::{Seek as _, Write as _};
 use std::time::Duration;
 
-use crate::config::Credentials;
+use crate::config::{paced, Credentials};
 use crate::error::{anyhow, Result};
 use crate::jobs::huggingface as hf;
 use crate::jobs::kubernetes as k8s;
@@ -22,10 +22,7 @@ use crate::jobs::vercel;
 use crate::jobs::{is_terminal_stage, stage_to_run_status, BackendDescriptor};
 use crate::store::{log_path, now_ms, RunStatus, Store};
 
-pub(crate) trait RunSink {
-    fn transport_error(&self, _run: &str, _target: &ssh::SshTarget, _cause: &str) -> Result<()> {
-        Ok(())
-    }
+trait RunSink {
     fn finish(
         &self,
         run: &str,
@@ -111,9 +108,12 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
+/// How long a finished job's final log pass may take.
+const LOG_DRAIN: Duration = Duration::from_secs(20);
+const LOG_RETRY: Duration = Duration::from_secs(2);
 
 fn should_report_monitoring_error(already_reported: bool, elapsed: Option<Duration>) -> bool {
-    already_reported || elapsed.is_some_and(|elapsed| elapsed >= MONITORING_GRACE)
+    already_reported || elapsed.is_some_and(|elapsed| elapsed >= paced(MONITORING_GRACE))
 }
 
 fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
@@ -298,7 +298,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -309,7 +309,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
         // complete local log.
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -341,7 +341,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
             request_backend_cancel(&token, &namespace, &job_id, &run_id, &mut cancel_sent).await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -433,7 +433,7 @@ async fn tail_logs(
         if draining && result.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -495,7 +495,7 @@ async fn run_k8s(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -504,7 +504,7 @@ async fn run_k8s(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -549,7 +549,7 @@ async fn run_k8s(
             .await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -595,7 +595,7 @@ async fn tail_logs_k8s(
         if draining && streamed.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -648,7 +648,7 @@ async fn run_modal(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -659,7 +659,7 @@ async fn run_modal(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -690,7 +690,7 @@ async fn run_modal(
             cancel_modal(&sandbox_id, &run_id, &mut cancel_sent).await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -731,7 +731,7 @@ async fn tail_logs_modal(
         if draining && result.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -778,7 +778,7 @@ async fn run_vercel(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
@@ -814,7 +814,7 @@ async fn run_vercel(
             cancel_vercel(&name, &run_id, &mut cancel_sent).await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -838,7 +838,7 @@ async fn drain_vercel_logs(
     let size = || std::fs::metadata(path).map(|m| m.len()).ok();
     let mut last = size();
     loop {
-        if tokio::time::timeout(VERCEL_DRAIN_STALL, &mut *log_task)
+        if tokio::time::timeout(paced(VERCEL_DRAIN_STALL), &mut *log_task)
             .await
             .is_ok()
         {
@@ -861,7 +861,7 @@ async fn drain_vercel_logs(
 /// the run is terminal no supervisor comes back for it, so a sandbox left here
 /// keeps billing until its session limit.
 async fn finish_vercel(name: &str, run_id: &str) {
-    let mut delay = Duration::from_secs(2);
+    let mut delay = paced(Duration::from_secs(2));
     for attempt in 1..=VERCEL_FINISH_ATTEMPTS {
         match vercel::finish_job(name).await {
             Ok(()) => return,
@@ -918,7 +918,7 @@ async fn tail_logs_vercel(
         if draining && result.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -964,7 +964,7 @@ async fn run_ssh(
 /// The ssh two-half loop, shared by every backend whose job is a run dir on a
 /// box we ssh into (ssh itself, openresearch). Runs until the job is terminal
 /// and returns the final run status after logs are drained.
-pub(crate) async fn watch_ssh_job(
+async fn watch_ssh_job(
     store: &(dyn RunSink + Sync),
     initial_status: RunStatus,
     target: ssh::SshTarget,
@@ -974,13 +974,11 @@ pub(crate) async fn watch_ssh_job(
     sandbox: Option<(&Credentials, &str)>,
 ) -> Result<RunStatus> {
     let container = descriptor.ssh_container.clone();
-    let path = log_path(&crate::store::data_dir(), run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
     let mut log_task = tokio::spawn(tail_logs_ssh(
         target.clone(),
         dir.clone(),
-        path.clone(),
         run_id.to_string(),
         done_rx,
         Some(log_error_tx),
@@ -1019,9 +1017,6 @@ pub(crate) async fn watch_ssh_job(
             .err()
             .map(ToString::to_string)
             .or_else(|| log_error_rx.borrow().clone());
-        if let Some(error) = &polling_error {
-            store.transport_error(run_id, &target, error)?;
-        }
         let error = polling_error.map(|err| {
             let recovery = if descriptor.kind == "ssh_job" {
                 format!(
@@ -1077,7 +1072,7 @@ pub(crate) async fn watch_ssh_job(
                 },
                 _ => {
                     missing_polls = 0;
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    tokio::time::sleep(paced(POLL_INTERVAL)).await;
                     continue;
                 }
             },
@@ -1086,7 +1081,7 @@ pub(crate) async fn watch_ssh_job(
         if job.message.as_deref() == Some(ssh::RUN_DIR_MISSING) {
             missing_polls += 1;
             if missing_polls < 3 {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         } else {
@@ -1110,7 +1105,7 @@ pub(crate) async fn watch_ssh_job(
                 if openresearch::box_deleted(creds, id).await {
                     job.stage = "LOST".into();
                 } else {
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    tokio::time::sleep(paced(POLL_INTERVAL)).await;
                     continue;
                 }
             }
@@ -1121,7 +1116,7 @@ pub(crate) async fn watch_ssh_job(
         if is_terminal_stage(stage) || stage == "LOST" {
             let _ = done_tx.send(true);
             let collected = matches!(
-                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                tokio::time::timeout(paced(LOG_DRAIN), &mut log_task).await,
                 Ok(Ok(true))
             );
             if !collected {
@@ -1204,7 +1199,7 @@ pub(crate) async fn watch_ssh_job(
             .await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -1213,27 +1208,19 @@ pub(crate) async fn watch_ssh_job(
 async fn tail_logs_ssh(
     target: ssh::SshTarget,
     dir: String,
-    path: std::path::PathBuf,
     run_id: String,
     done: tokio::sync::watch::Receiver<bool>,
     errors: Option<tokio::sync::watch::Sender<Option<String>>>,
 ) -> bool {
-    let _ = path;
     let target = target.for_run(&run_id);
     let mut last_error = None;
     loop {
         let draining = *done.borrow();
-        let result = if let Some(transport) = &target.transport {
-            transport.collect(&run_id, &dir).await
-        } else {
-            ssh::service::request(
-                &target,
-                serde_json::json!({
-                    "op":"collect", "run":run_id, "dir":dir,
-                }),
-            )
-            .await
-        };
+        let result = ssh::service::request(
+            &target,
+            serde_json::json!({ "op":"collect", "run":run_id, "dir":dir }),
+        )
+        .await;
         match result {
             Ok(value) => {
                 last_error = None;
@@ -1258,7 +1245,7 @@ async fn tail_logs_ssh(
         if let Some(errors) = &errors {
             errors.send_replace(last_error.clone());
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -1293,26 +1280,10 @@ async fn cancel_ssh(
 async fn run_openresearch(
     store: Store,
     stored: crate::store::StoredRun,
-    descriptor: BackendDescriptor,
-    run_id: String,
-) -> Result<()> {
-    run_openresearch_loop(
-        &std::sync::Mutex::new(store),
-        stored,
-        descriptor,
-        run_id,
-        None,
-    )
-    .await
-}
-
-pub(crate) async fn run_openresearch_loop(
-    store: &(dyn RunSink + Sync),
-    stored: crate::store::StoredRun,
     mut descriptor: BackendDescriptor,
     run_id: String,
-    transport: Option<crate::engine::adapters::openresearch::TransportFactory>,
 ) -> Result<()> {
+    let store = &std::sync::Mutex::new(store);
     let (_org, sandbox_id) = descriptor.openresearch_ref()?;
     let sandbox_id = sandbox_id.to_string();
 
@@ -1336,15 +1307,10 @@ pub(crate) async fn run_openresearch_loop(
         }
     };
 
-    let mut bootstrap_heartbeat =
-        if transport.is_none() || descriptor.openresearch_ssh_target().is_none() {
-            descriptor
-                .rental_lease
-                .as_ref()
-                .map(crate::jobs::rental::Rental::heartbeat)
-        } else {
-            None
-        };
+    let mut bootstrap_heartbeat = descriptor
+        .rental_lease
+        .as_ref()
+        .map(crate::jobs::rental::Rental::heartbeat);
     let dir = openresearch::run_dir(&run_id);
 
     // Provisioning: wait for the box unless a restarted supervisor already
@@ -1353,7 +1319,7 @@ pub(crate) async fn run_openresearch_loop(
         Some(target) => target,
         None => {
             eprintln!("supervise {run_id}: waiting for box {sandbox_id} to come online");
-            let sandbox = loop {
+            let sandbox = {
                 let outcome = openresearch::wait_online(
                     &lifecycle,
                     &sandbox_id,
@@ -1362,22 +1328,12 @@ pub(crate) async fn run_openresearch_loop(
                 )
                 .await;
                 match outcome {
-                    Ok(openresearch::WaitOutcome::Online(sandbox)) => break sandbox,
+                    Ok(openresearch::WaitOutcome::Online(sandbox)) => sandbox,
                     Ok(openresearch::WaitOutcome::Cancelled) => {
                         eprintln!("supervise {run_id}: cancelled during provisioning");
                         store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
                         teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
                         return Ok(());
-                    }
-                    Ok(openresearch::WaitOutcome::TimedOut(reason)) if transport.is_some() => {
-                        drop(bootstrap_heartbeat.take());
-                        eprintln!("supervise {run_id}: provisioning unresolved: {reason}");
-                        tokio::time::sleep(POLL_INTERVAL).await;
-                    }
-                    Err(error) if transport.is_some() => {
-                        drop(bootstrap_heartbeat.take());
-                        eprintln!("supervise {run_id}: provisioning unavailable: {error}");
-                        tokio::time::sleep(POLL_INTERVAL).await;
                     }
                     Ok(openresearch::WaitOutcome::Failed(reason))
                     | Ok(openresearch::WaitOutcome::TimedOut(reason)) => {
@@ -1411,146 +1367,124 @@ pub(crate) async fn run_openresearch_loop(
         }
     };
 
-    let mut target = target.for_run(&run_id);
-    target.transport = transport
-        .as_ref()
-        .map(|factory| factory(&target))
-        .transpose()?;
+    let target = target.for_run(&run_id);
 
     // Launch, unless a previous supervisor already did (restart mid-run just
     // reattaches to the watch loop). An unreachable box reads as fresh here;
     // the launch retries below absorb that.
-    'bootstrap: loop {
-        let already_launched = loop {
-            match openresearch::launched(&target, &run_id).await {
-                Ok(launched) => break launched,
-                Err(error) if descriptor.rental_lease.is_some() || transport.is_some() => {
-                    drop(bootstrap_heartbeat.take());
-                    store.transport_error(&run_id, &target, &error.to_string())?;
-                    if local_cancel_requested(store, &run_id) {
-                        teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
-                        store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
-                        return Ok(());
-                    }
-                    if openresearch::box_deleted(&lifecycle, &sandbox_id).await {
-                        store.finish(
-                            &run_id,
-                            RunStatus::Lost,
-                            None,
-                            Some(&crate::plane::LABELS["run_notice_rental_outcome_unavailable"]),
-                        )?;
-                        return Ok(());
-                    }
-                    tokio::time::sleep(POLL_INTERVAL).await;
+    let already_launched = loop {
+        match openresearch::launched(&target, &run_id).await {
+            Ok(launched) => break launched,
+            Err(_) if descriptor.rental_lease.is_some() => {
+                drop(bootstrap_heartbeat.take());
+                if local_cancel_requested(store, &run_id) {
+                    teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
+                    store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
+                    return Ok(());
                 }
-                Err(_) => break false,
-            }
-        };
-        if !already_launched {
-            if bootstrap_heartbeat.is_none() {
-                bootstrap_heartbeat = descriptor
-                    .rental_lease
-                    .as_ref()
-                    .map(crate::jobs::rental::Rental::heartbeat);
-            }
-            let source = match crate::compute::SourceSnapshot::from_run(&stored, &descriptor) {
-                Ok(source) => source,
-                Err(error) => {
+                if openresearch::box_deleted(&lifecycle, &sandbox_id).await {
                     store.finish(
                         &run_id,
-                        RunStatus::Failed,
+                        RunStatus::Lost,
                         None,
-                        Some(&format!(
-                            "The recorded source snapshot could not be loaded: {error}"
-                        )),
+                        Some(&crate::plane::LABELS["run_notice_rental_outcome_unavailable"]),
                     )?;
-                    teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
                     return Ok(());
                 }
-            };
-            let script = crate::compute::staged_script(&stored.command);
-            let script = openresearch::wrap_with_timeout(
-                &script,
-                descriptor.timeout_secs.unwrap_or(4 * 3600),
-            );
-            let mut env = crate::config::run_env(&run_id);
-            if let Ok(hf_token) = hf::resolve_token() {
-                env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
             }
-            // sshd and the org key sync can lag a freshly-online box, so the
-            // launch retries for ~2 minutes before giving up.
-            let mut launch_err = None;
-            for backoff_secs in [0u64, 5, 10, 20, 30, 45] {
-                if backoff_secs > 0 {
-                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                }
-                if local_cancel_requested(store, &run_id) {
-                    eprintln!("supervise {run_id}: cancelled before launch");
-                    store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
-                    teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
-                    return Ok(());
-                }
-                let staged =
-                    ssh::stage_source(&target, &run_id, &source.path, &source.digest, None, None)
-                        .await;
-                if let Err(err) = staged {
-                    eprintln!("supervise {run_id}: source staging failed (will retry): {err}");
-                    if transport.is_some() {
-                        drop(bootstrap_heartbeat.take());
-                        store.transport_error(&run_id, &target, &err.to_string())?;
-                        tokio::time::sleep(POLL_INTERVAL).await;
-                        continue 'bootstrap;
-                    }
-                    launch_err = Some(err);
-                    continue;
-                }
-                let launch = if let Some(rental) = &descriptor.rental_lease {
-                    crate::jobs::rental::launch(&target, &run_id, &script, &env, rental).await
-                } else {
-                    ssh::run_job(&ssh::SshJobSpec {
-                        container: None,
-                        target: target.clone(),
-                        run_id: run_id.clone(),
-                        remote_root: None,
-                        script: script.clone(),
-                        env: env.clone(),
-                    })
-                    .await
-                    .map(|_| ())
-                };
-                match launch {
-                    Ok(_) => {
-                        launch_err = None;
-                        break;
-                    }
-                    Err(err) => {
-                        eprintln!("supervise {run_id}: launch failed (will retry): {err}");
-                        if transport.is_some() {
-                            drop(bootstrap_heartbeat.take());
-                            store.transport_error(&run_id, &target, &err.to_string())?;
-                            tokio::time::sleep(POLL_INTERVAL).await;
-                            continue 'bootstrap;
-                        }
-                        launch_err = Some(err);
-                    }
-                }
-            }
-            if let Some(err) = launch_err.filter(|_| descriptor.rental_lease.is_none()) {
+            Err(_) => break false,
+        }
+    };
+    if !already_launched {
+        if bootstrap_heartbeat.is_none() {
+            bootstrap_heartbeat = descriptor
+                .rental_lease
+                .as_ref()
+                .map(crate::jobs::rental::Rental::heartbeat);
+        }
+        let source = match crate::compute::SourceSnapshot::from_run(&stored, &descriptor) {
+            Ok(source) => source,
+            Err(error) => {
                 store.finish(
                     &run_id,
                     RunStatus::Failed,
                     None,
-                    Some(&crate::local::ssh_identity::explain_launch_failure(
-                        &sandbox_id,
-                        &err.to_string(),
+                    Some(&format!(
+                        "The recorded source snapshot could not be loaded: {error}"
                     )),
                 )?;
                 teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
                 return Ok(());
             }
+        };
+        let script = crate::compute::staged_script(&stored.command);
+        let script =
+            openresearch::wrap_with_timeout(&script, descriptor.timeout_secs.unwrap_or(4 * 3600));
+        let mut env = crate::config::run_env(&run_id);
+        if let Ok(hf_token) = hf::resolve_token() {
+            env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
         }
+        // sshd and the org key sync can lag a freshly-online box, so the
+        // launch retries for ~2 minutes before giving up.
+        let mut launch_err = None;
+        for backoff_secs in [0u64, 5, 10, 20, 30, 45] {
+            if backoff_secs > 0 {
+                tokio::time::sleep(paced(Duration::from_secs(backoff_secs))).await;
+            }
+            if local_cancel_requested(store, &run_id) {
+                eprintln!("supervise {run_id}: cancelled before launch");
+                store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
+                teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
+                return Ok(());
+            }
+            let staged =
+                ssh::stage_source(&target, &run_id, &source.path, &source.digest, None, None).await;
+            if let Err(err) = staged {
+                eprintln!("supervise {run_id}: source staging failed (will retry): {err}");
 
-        break;
+                launch_err = Some(err);
+                continue;
+            }
+            let launch = if let Some(rental) = &descriptor.rental_lease {
+                crate::jobs::rental::launch(&target, &run_id, &script, &env, rental).await
+            } else {
+                ssh::run_job(&ssh::SshJobSpec {
+                    container: None,
+                    target: target.clone(),
+                    run_id: run_id.clone(),
+                    remote_root: None,
+                    script: script.clone(),
+                    env: env.clone(),
+                })
+                .await
+                .map(|_| ())
+            };
+            match launch {
+                Ok(_) => {
+                    launch_err = None;
+                    break;
+                }
+                Err(err) => {
+                    eprintln!("supervise {run_id}: launch failed (will retry): {err}");
+
+                    launch_err = Some(err);
+                }
+            }
+        }
+        if let Some(err) = launch_err.filter(|_| descriptor.rental_lease.is_none()) {
+            store.finish(
+                &run_id,
+                RunStatus::Failed,
+                None,
+                Some(&crate::local::ssh_identity::explain_launch_failure(
+                    &sandbox_id,
+                    &err.to_string(),
+                )),
+            )?;
+            teardown_box(store, &lifecycle, &sandbox_id, &run_id).await;
+            return Ok(());
+        }
     }
 
     drop(bootstrap_heartbeat);
@@ -1640,7 +1574,7 @@ async fn run_local(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -1676,7 +1610,7 @@ async fn run_local(
             cancel_local(&dir, &run_id, &mut cancel_sent);
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -1716,7 +1650,7 @@ async fn tail_logs_local(
         if draining && drained {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -1749,13 +1683,11 @@ async fn run_slurm(
 
     eprintln!("supervise {run_id}: watching slurm job {job_id} on {host}");
 
-    let path = log_path(&crate::store::data_dir(), &run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
     let mut log_task = tokio::spawn(tail_logs_ssh(
         ssh::SshTarget::alias(&host).for_run(&run_id),
         dir.clone(),
-        path.clone(),
         run_id.clone(),
         done_rx,
         Some(log_error_tx),
@@ -1814,7 +1746,7 @@ async fn run_slurm(
             }
         }
         if status_error.is_some() {
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::time::sleep(paced(POLL_INTERVAL)).await;
             continue;
         }
         let job = observed?;
@@ -1824,7 +1756,7 @@ async fn run_slurm(
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
             let collected = matches!(
-                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                tokio::time::timeout(paced(LOG_DRAIN), &mut log_task).await,
                 Ok(Ok(true))
             );
             if !collected {
@@ -1852,7 +1784,7 @@ async fn run_slurm(
             last_status = status;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -1911,14 +1843,14 @@ async fn run_ray(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
         };
         if job.stage == "GONE" {
             gone_polls += 1;
             if gone_polls < GONE_POLLS_TO_FAIL {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(paced(POLL_INTERVAL)).await;
                 continue;
             }
             job = ray::JobInfo {
@@ -1937,7 +1869,7 @@ async fn run_ray(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
+            if tokio::time::timeout(paced(LOG_DRAIN), &mut log_task)
                 .await
                 .is_err()
             {
@@ -1973,7 +1905,7 @@ async fn run_ray(
             }
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(paced(POLL_INTERVAL)).await;
     }
 }
 
@@ -2042,7 +1974,7 @@ async fn tail_logs_ray(
         if draining && drained {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(paced(LOG_RETRY)).await;
     }
 }
 
@@ -2166,7 +2098,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn local_tail_keeps_its_log_until_replayed_and_finishes_partial_lines() {
         let temp = crate::local::git::TemporaryDirectory::new("orx-tail-test").unwrap();
         let (source, path) = (temp.path().join("run"), temp.path().join("run.log"));
@@ -2199,7 +2131,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_stalled_stream_pass_yields_to_the_final_drain() {
         let (tx, mut rx) = tokio::sync::watch::channel(false);
         let stalled = std::future::pending::<Result<()>>();

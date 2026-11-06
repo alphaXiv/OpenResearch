@@ -59,6 +59,42 @@ The providers differ in shape, and the interface absorbs three:
 | shared server | OpenCode | one `opencode serve` per dashboard; a turn posts to it and follows its event stream |
 | child per turn | Cursor, Antigravity | a print-mode process per turn, resuming the native session by id |
 
+An idle chat can change its agent from the model picker. The switch is a
+settings change and a transcript row, with no model call. Messages record the
+harness that owns their native session ids. Returning to a harness resumes
+its last session on the active branch and supplies only the conversation
+since its last reply, with that reply's ref and a brief headline as the resume point;
+a new harness gets the active conversation. Queued
+messages must be sent or removed before switching. A chat retains its saved
+ACP launch when switching away and back; changing between two ACP launches
+requires a new chat.
+Recovery after a switch uses the selected agent's settings and starts a new
+turn, preserving the original failure and the harness that owns it. A native
+thread created before delivery does not count as having seen the request.
+Saved context stays available until the native thread confirms receipt.
+The replayable request excludes agent-specific context; each launch rebuilds
+the handoff for the selected agent. An empty branch carries no discarded history.
+Saved compaction context applies only to its branch; rewinding before it keeps
+the inherited parent context and rebuilds the selected conversation.
+
+The handoff is rendered when the next turn starts, so worktree changes made
+while the chat was idle are visible. The byte budget prioritizes user requests
+and their message refs, then the latest answer, and fills remaining space with
+older answers when they fit, or turn headlines and tool counts. Selected
+messages stay in conversation order, with the answering agent, switches and failed
+turns identified. Long requests keep their beginning and end. Tool logs stay
+behind refs: `read {ref: "msg_…"}` reads visible message parts, tool calls and
+attachment paths, excluding reasoning even inside nested agent calls.
+`read {before: "msg_…"}` pages backward on the active branch. The same builder
+supplies native-session recovery, compaction's fallback input, ACP branch
+reseeding and side chats.
+Agents without an exposed MCP tool send the same `read` call through
+`orx mcp` over stdio; the chat's environment supplies its identity.
+The default ceiling is 24,000 UTF-8 bytes, a conservative upper bound on text
+tokens; when the catalog reports the target context window, the ceiling also
+stays within ten percent of it. If even the user-ref index cannot fit, the
+handoff directs the agent to page through the conversation.
+
 A resident child is respawned with its native session resumed when a setting
 it was started with changes, when it is interrupted, or when it crashes.
 Prompts flow back in one of two ways. Some agents end their turn on a
@@ -171,6 +207,9 @@ session; if that session is gone, the agent gets a bounded snapshot of orx's
 transcript instead, with instructions not to repeat completed tool actions.
 Queued messages are persisted before they are acknowledged and run in order
 as each turn ends, so a restart loses none of them; Stop clears the queue. A
+dashboard that is quitting starts no turn, not even the next queued one when
+shutting its agents down ends a turn, and gives up its leases on the way out,
+so the next start recovers its turns at once instead of when they expire. A
 turn silent for long enough is interrupted rather than left holding the chat
 forever.
 

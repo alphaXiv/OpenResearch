@@ -27,3 +27,9 @@ ui/package-lock.json
 # Per-worktree dev data, binaries, and states (dev.ts).
 /.dev/
 /.shots/
+
+# e2e harness dependencies and outputs.
+/e2e/node_modules/
+/e2e/.out/
+/e2e/playwright-report/
+/e2e/test-results/

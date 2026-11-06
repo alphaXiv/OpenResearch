@@ -131,6 +131,8 @@ fn archive(repo: &Path, revision: &str, format: &str, destination: &Path) -> Res
     let file = options.open(destination)?;
     let output = crate::local::git::git_command()
         .current_dir(repo)
+        // Snapshots carry committed blob bytes; Git for Windows' system autocrlf would add CRs.
+        .args(["-c", "core.autocrlf=false", "-c", "core.eol=lf"])
         .args(["archive", &format!("--format={format}"), revision])
         .stdout(Stdio::from(file))
         .stderr(Stdio::piped())
@@ -153,7 +155,8 @@ fn prepare_snapshot_dir(path: &Path) -> Result<()> {
     {
         use std::os::unix::fs::MetadataExt;
 
-        let metadata = std::fs::symlink_metadata(path)?;
+        // Follow symlinks: a user-owned link to a user-owned directory is fine.
+        let metadata = std::fs::metadata(path)?;
         if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
             return Err(anyhow!(
                 "Source snapshot directory {} is not owned by the current user.",
@@ -165,7 +168,7 @@ fn prepare_snapshot_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn digest_file(path: &Path) -> Result<(String, u64)> {
+pub(crate) fn digest_file(path: &Path) -> Result<(String, u64)> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut size = 0u64;
@@ -1027,6 +1030,7 @@ pub async fn submit_supervised(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         source_path: None,
         source_size: None,
         remote_root: None,
+        unknown: Default::default(),
     };
     source.0.apply_to_descriptor(&mut descriptor);
     let now = crate::store::now_ms();
@@ -1261,6 +1265,67 @@ fn not_ready(detail: impl Into<String>) -> Preflight {
 pub(crate) mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_dir_accepts_a_user_owned_symlinked_directory() {
+        let root = std::env::temp_dir().join(format!("orx-snapshot-link-{}", uuid::Uuid::new_v4()));
+        let target = root.join("target");
+        let link = root.join("source-snapshots");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        prepare_snapshot_dir(&link).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn source_archives_keep_committed_lf_bytes_under_autocrlf() {
+        let repo = std::env::temp_dir().join(format!("orx-archive-eol-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = crate::local::git::git_command()
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "core.autocrlf", "true"]);
+        let script = "#!/usr/bin/env bash
+set -euo pipefail
+echo ok
+";
+        std::fs::write(repo.join("run.sh"), script).unwrap();
+        git(&["add", "run.sh"]);
+        git(&[
+            "-c",
+            "user.name=orx-test",
+            "-c",
+            "user.email=orx-test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "script",
+        ]);
+        let tar = repo.join("snapshot.tar");
+        archive(&repo, "HEAD", "tar", &tar).unwrap();
+        let bytes = std::fs::read(&tar).unwrap();
+        assert!(bytes.windows(script.len()).any(|w| w == script.as_bytes()));
+        let zip = repo.join("snapshot.zip");
+        archive(&repo, "HEAD", "zip", &zip).unwrap();
+        let mut entry = String::new();
+        zip::ZipArchive::new(std::fs::File::open(&zip).unwrap())
+            .unwrap()
+            .by_name("run.sh")
+            .unwrap()
+            .read_to_string(&mut entry)
+            .unwrap();
+        assert_eq!(entry, script);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     #[test]
     fn supervisor_transport_is_needed_only_for_opt_out_or_active_runs_on_the_alias() {
         let mut run = StoredRun {
@@ -1412,10 +1477,12 @@ pub(crate) mod tests {
                         container: Some("research".into()),
                         remote_root: Some("/scratch/lab/orx".into()),
                         keep_remote_runs: false,
+                        ..Default::default()
                     },
                 ),
                 ("direct".into(), SshHostSettings::default()),
             ]),
+            ..Default::default()
         };
         let mut args = tinker_args();
         args.backend = Some("ssh".into());

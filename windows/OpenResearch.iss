@@ -44,6 +44,8 @@ AppMutex=Local\OpenResearchApp
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; Tells Explorer the .orx association below changed.
+ChangesAssociations=yes
 
 [Tasks]
 Name: desktopicon; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -62,6 +64,11 @@ Root: HKCU; Subkey: "Software\Classes\openresearch"; ValueType: string; ValueNam
 Root: HKCU; Subkey: "Software\Classes\openresearch"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\openresearch\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"",0"
 Root: HKCU; Subkey: "Software\Classes\openresearch\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"" ""%1"""
+; Shared projects (src/local/share.rs) open in the app, which imports them.
+Root: HKCU; Subkey: "Software\Classes\.orx"; ValueType: string; ValueName: ""; ValueData: "OpenResearch.Project"; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKCU; Subkey: "Software\Classes\OpenResearch.Project"; ValueType: string; ValueName: ""; ValueData: "OpenResearch project"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\OpenResearch.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"",0"
+Root: HKCU; Subkey: "Software\Classes\OpenResearch.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"" ""%1"""
 
 [Run]
 Filename: "{app}\OpenResearch.exe"; Description: "{cm:LaunchProgram,OpenResearch}"; Flags: nowait postinstall skipifsilent

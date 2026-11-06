@@ -41,7 +41,7 @@ use crate::{browser, UpArgs};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub(crate) const DASHBOARD_PROTOCOL: u32 = 4;
+pub(crate) const DASHBOARD_PROTOCOL: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1245,20 +1245,48 @@ async fn gateway_ssh_repair(
     super::up::ssh_run_to_target(headers, ws, host, session.target.clone(), command).await
 }
 
-pub(crate) async fn loopback_guard(request: Request, next: Next) -> Response {
-    loopback_guard_inner(request, next, true).await
+/// Who may reach `orx up`: its own machine, or with `--host 0.0.0.0` its private network too.
+#[derive(Clone, Copy)]
+pub(crate) enum Reach {
+    Loopback,
+    Lan,
+}
+
+pub(crate) async fn dashboard_guard(
+    State(reach): State<Reach>,
+    request: Request,
+    next: Next,
+) -> Response {
+    loopback_guard_inner(request, next, true, reach).await
 }
 
 async fn gateway_loopback_guard(request: Request, next: Next) -> Response {
-    loopback_guard_inner(request, next, false).await
+    loopback_guard_inner(request, next, false, Reach::Loopback).await
 }
 
-async fn loopback_guard_inner(request: Request, next: Next, allow_dev_origin: bool) -> Response {
+async fn loopback_guard_inner(
+    request: Request,
+    next: Next,
+    allow_dev_origin: bool,
+    reach: Reach,
+) -> Response {
+    if let Reach::Lan = reach {
+        let peer = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|info| info.0.ip());
+        if !peer.is_some_and(private_address) {
+            return secure_response(gateway_error(
+                StatusCode::FORBIDDEN,
+                "This dashboard only serves its private network.".into(),
+            ));
+        }
+    }
     let host = request
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok());
-    let Some(host) = host.filter(|value| loopback_host(value)) else {
+    let Some(host) = host.filter(|value| host_allowed(value, reach)) else {
         return secure_response(gateway_error(
             StatusCode::BAD_REQUEST,
             "Invalid Host header.".into(),
@@ -1330,7 +1358,8 @@ fn secure_response(mut response: Response) -> Response {
     response
 }
 
-fn loopback_host(value: &str) -> bool {
+/// A literal address or `localhost`, never another name, which defeats DNS rebinding.
+fn host_allowed(value: &str, reach: Reach) -> bool {
     let host = if value.starts_with('[') {
         value
             .split_once(']')
@@ -1342,7 +1371,22 @@ fn loopback_host(value: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
+            .is_ok_and(|address| match reach {
+                Reach::Loopback => address.is_loopback(),
+                Reach::Lan => private_address(address),
+            })
+}
+
+/// Loopback, RFC 1918, link-local and CGNAT (Tailscale) IPv4; a LAN bind is `0.0.0.0` only.
+fn private_address(address: std::net::IpAddr) -> bool {
+    let std::net::IpAddr::V4(v4) = address else {
+        return false;
+    };
+    let [first, second, ..] = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || (first == 100 && second & 0xc0 == 64)
 }
 
 async fn gateway_runtime(State(session): State<Arc<RemoteSession>>) -> Json<serde_json::Value> {
@@ -1528,7 +1572,12 @@ async fn proxy_request(
         .unwrap_or("/");
     let url = format!("{origin}{path}");
     let method = request.method().clone();
-    let (parts, body) = request.with_limited_body().into_parts();
+    // A shared project upload streams past the JSON request cap; the dashboard bounds it.
+    let (parts, body) = if path.split('?').next() == Some("/api/projects/import") {
+        request.into_parts()
+    } else {
+        request.with_limited_body().into_parts()
+    };
     let mut headers = sanitized_request_headers(parts.headers, origin, bearer);
     if websocket {
         headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
@@ -2801,10 +2850,40 @@ mod tests {
             "127.0.0.1:4791",
             "[::1]:4791",
         ] {
-            assert!(loopback_host(host), "{host}");
+            assert!(host_allowed(host, Reach::Loopback), "{host}");
         }
-        for host in ["example.com", "127.0.0.2.evil.test", "[2001:db8::1]:4791"] {
-            assert!(!loopback_host(host), "{host}");
+        for host in [
+            "example.com",
+            "127.0.0.2.evil.test",
+            "[2001:db8::1]:4791",
+            "192.168.1.5:4791",
+        ] {
+            assert!(!host_allowed(host, Reach::Loopback), "{host}");
+        }
+    }
+
+    #[test]
+    fn lan_hosts_stay_private_and_literal() {
+        for host in [
+            "localhost:4791",
+            "127.0.0.1:4791",
+            "192.168.1.75:4791",
+            "10.0.0.5",
+            "172.16.3.4:4791",
+            "100.92.54.38:4791",
+            "169.254.1.1:4791",
+        ] {
+            assert!(host_allowed(host, Reach::Lan), "{host}");
+        }
+        for host in [
+            "workstation.local:4791",
+            "192.168.1.75.evil.test",
+            "8.8.8.8:4791",
+            "100.128.0.1:4791",
+            "172.32.0.1:4791",
+            "[fd7a:115c::1]:4791",
+        ] {
+            assert!(!host_allowed(host, Reach::Lan), "{host}");
         }
     }
 

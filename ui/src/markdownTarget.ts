@@ -1,4 +1,6 @@
 import { defaultUrlTransform } from "react-markdown";
+import { isWindowsDrivePath } from "./nativePath.ts";
+export { isWindowsDrivePath } from "./nativePath.ts";
 
 export interface MarkdownTarget {
   path: string;
@@ -103,10 +105,6 @@ export function firstCitedLine(lines: string): number | undefined {
   return line > 0 ? line : undefined;
 }
 
-export function isWindowsDrivePath(src: string): boolean {
-  return /^[a-z]:[\\/]/i.test(src);
-}
-
 export function nativeMarkdownPath(target: string): string | null {
   let path = target;
   const fileUrl = /^file:/i.test(target);
@@ -129,6 +127,12 @@ export function nativeMarkdownPath(target: string): string | null {
   if (fileUrl && /^\/[a-z]:[\\/]/i.test(path)) path = path.slice(1);
   if (isWindowsDrivePath(path)) return path.replaceAll("\\", "/");
   return fileUrl && path.startsWith("/") && !path.startsWith("//") ? path : null;
+}
+
+/** Explicit local URI or drive path, including malformed inputs that must not
+ * be mistaken for ordinary artifact-relative paths. */
+export function isExplicitNativeTarget(target: string): boolean {
+  return /^file:/i.test(target) || isWindowsDrivePath(target);
 }
 
 export function chatImageTarget(src: string): (Pick<MarkdownTarget, "path" | "hash"> & { source: "absolute" | "artifact" | "checkout" }) | null {
@@ -167,9 +171,25 @@ export function chatImageTargets(src: string): NonNullable<ReturnType<typeof cha
 }
 
 interface HastNode {
+  type?: string;
   tagName?: string;
+  value?: string;
   children?: HastNode[];
   properties?: Record<string, unknown>;
+}
+
+/** Remote images become links to them, or their text inside a link, so rendering Markdown never fetches from the network. */
+export function rehypeNetworkImages() {
+  return (tree: HastNode) => {
+    const visit = (node: HastNode, insideLink: boolean) => node.children?.forEach((child, index, children) => {
+      const src = child.tagName === "img" ? String(child.properties?.src ?? "") : "";
+      if (!isNetworkImage(src)) return visit(child, insideLink || child.tagName === "a");
+
+      const text = { type: "text", value: String(child.properties?.alt || src) };
+      children[index] = insideLink ? text : { type: "element", tagName: "a", properties: { href: src }, children: [text] };
+    });
+    visit(tree, false);
+  };
 }
 
 export function rehypeSafeUrls() {

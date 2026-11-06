@@ -457,10 +457,11 @@ fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<Mode
             let default = configured_effort
                 .filter(|e| efforts.contains(e))
                 .or(catalog_default);
-            let info = ModelInfo::new(id).with_label(
+            let mut info = ModelInfo::new(id).with_label(
                 m.get("displayName").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
             );
+            info.context_window = m.get("contextWindow").and_then(Value::as_u64);
             let info = info.with_service_tiers(
                 m.get("serviceTiers")
                     .and_then(Value::as_array)
@@ -2743,15 +2744,16 @@ fn error_message(error: Option<&Value>) -> String {
         .unwrap_or_else(|| "codex reported an error".to_string())
 }
 
-fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) {
-    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") else {
-        return;
+fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) -> Result<()> {
+    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? else {
+        return Ok(());
     };
     let instructions = setup
         .get("developerInstructions")
         .and_then(Value::as_str)
         .unwrap_or_default();
     setup["developerInstructions"] = Value::String(format!("{instructions}\n\n{recovery}"));
+    Ok(())
 }
 
 async fn ensure_codex_pre_accept(
@@ -2918,13 +2920,13 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     );
     if ctx.reset_codex_model {
         // Codex keeps the old thread model when a turn omits its model override.
-        append_native_recovery_context(ctx, &mut thread_setup);
+        append_native_recovery_context(ctx, &mut thread_setup)?;
         ctx.native_session_id = None;
     }
     let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
         (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
         (Some(_), None) => {
-            append_native_recovery_context(ctx, &mut thread_setup);
+            append_native_recovery_context(ctx, &mut thread_setup)?;
             start_thread(ctx, &client, thread_setup).await?
         }
         (Some(id), Some(session)) => {
@@ -2954,7 +2956,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         ctx.host.codex.kill_session(&ctx.session_id).await;
                         client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
                     }
-                    append_native_recovery_context(ctx, &mut thread_setup);
+                    append_native_recovery_context(ctx, &mut thread_setup)?;
                     start_thread(ctx, &client, thread_setup).await?
                 }
             }
@@ -3096,6 +3098,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         // `steering` is borrowed out of `ctx` so the borrow ends with the
         // select — the steer arm's handler needs `&mut ctx`.
         let waited = {
+            let flush_due = ctx.flush_due();
             let steering = &mut ctx.steering;
             let event = async {
                 if open_requests.is_empty() {
@@ -3107,9 +3110,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             tokio::select! {
                 event = event => Waited::Event(event),
                 steer = super::next_steer(steering) => Waited::Steer(steer),
+                _ = flush_due => Waited::Flush,
             }
         };
         let event = match waited {
+            Waited::Flush => {
+                let _ = ctx.flush();
+                continue;
+            }
             Waited::Steer(steer) => {
                 steer_turn(ctx, &client, &thread_id, turn_id.as_deref(), steer).await;
                 continue;
@@ -4143,7 +4151,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     cmd.args(["-c", &format!("mcp_servers={servers}")]);
     let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
     if ctx.native_session_id.is_some() && native_session.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? {
             turn_text = format!("{recovery}\n\n{turn_text}");
         }
     }
@@ -4197,7 +4205,17 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     let mut open_text: Option<String> = None;
     let mut open_reasoning: Option<String> = None;
 
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line?,
+            _ = ctx.flush_due() => {
+                let _ = ctx.flush();
+                continue;
+            }
+        };
+        let Some(line) = line else {
+            break;
+        };
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };

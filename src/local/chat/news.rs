@@ -11,7 +11,7 @@ use super::delegation::{
     PendingPrompt,
 };
 use super::{
-    stored_to_wire, ChatHost, OrxDisplay, OrxKind, OrxSource, TurnGuard, TurnSubmission,
+    stored_to_wire, ChatHost, OrxDisplay, OrxKind, OrxSource, TurnGuard, TurnState, TurnSubmission,
     ORX_MESSAGE_PREFIX,
 };
 use crate::error::Result;
@@ -307,7 +307,9 @@ pub(super) async fn deliver_news(
             .push(item);
     }
     for (session_id, items) in by_chat {
-        let Some(mut guard) = TurnGuard::claim_idle(chat, &session_id).await else {
+        let Some(mut guard) =
+            TurnGuard::claim_idle(chat, &session_id, TurnState::Reserved { turn_id: None }).await
+        else {
             continue;
         };
         if moving() {

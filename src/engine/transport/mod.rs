@@ -18,7 +18,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::store::Store;
 pub use askpass::Prompt;
 
-const DEADLINE: Duration = Duration::from_secs(35);
+fn deadline() -> Duration {
+    crate::config::paced(Duration::from_secs(35))
+}
 const CHUNK: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,7 +408,12 @@ impl Actor {
             let base = steps[self.state.failures.min(steps.len() - 1)];
             let noise =
                 u16::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..2].try_into().unwrap()) as i64;
-            let delay = (base * (800 + noise % 401) / 1000).min(900_000);
+            let max_delay = if self.config.alias.starts_with("orx-box-") {
+                60_000
+            } else {
+                900_000
+            };
+            let delay = (base * (800 + noise % 401) / 1000).min(max_delay);
             self.state.failures = self.state.failures.saturating_add(1);
             self.state.next_retry_ms = Some(now.saturating_add(delay));
             self.state.status = Status::Backoff;
@@ -549,10 +556,10 @@ impl Actor {
         let deadline = if askpass.is_some() {
             Duration::from_secs(300)
         } else {
-            DEADLINE
+            deadline()
         };
         #[cfg(unix)]
-        let deadline = DEADLINE;
+        let deadline = deadline();
         let result = tokio::time::timeout(deadline, async {
             let (os, arch) = session.handshake().await?;
             if askpass
@@ -674,15 +681,15 @@ impl Actor {
                     let now = self.clock.monotonic();
                     if jumps.jumped(self.clock.as_ref()) && (session.is_some() || self.auth.state.borrow().class == Some(HostClass::Key) && self.state.status == Status::Backoff) {
                         disconnect = Some("Clock jump exceeded 30 seconds".into());
-                    } else if session.is_some() && now >= last_reply + DEADLINE
+                    } else if session.is_some() && now >= last_reply + deadline()
                         || pending.values().any(|call| now >= call.deadline) {
                         disconnect = Some("Connection timed out".into());
-                    } else if let Some(current) = session.as_mut().filter(|_| now >= last_reply + Duration::from_secs(15) && !pending.values().any(|call| matches!(call.reply, Reply::Probe))) {
+                    } else if let Some(current) = session.as_mut().filter(|_| now >= last_reply + crate::config::paced(Duration::from_secs(15)) && !pending.values().any(|call| matches!(call.reply, Reply::Probe))) {
                         let body = Request::Hello { proto: orx_host_proto::PROTOCOL_VERSION };
-                        let remaining = (last_reply + DEADLINE).saturating_sub(now);
+                        let remaining = (last_reply + deadline()).saturating_sub(now);
                         let result = tokio::time::timeout(remaining, ssh::write(&mut current.input, &Message { id, body })).await;
                         if matches!(result, Ok(Ok(()))) {
-                            pending.insert(id, Pending { reply: Reply::Probe, deadline: now + DEADLINE });
+                            pending.insert(id, Pending { reply: Reply::Probe, deadline: now + deadline() });
                             id += 1;
                         } else { disconnect = Some("Connection closed".into()); }
                     }
@@ -775,19 +782,19 @@ impl Actor {
                     }
                     let timeout = match &call.body {
                         Request::Exec { timeout_ms, .. } => {
-                            Duration::from_millis(u64::from(*timeout_ms)) + DEADLINE
+                            Duration::from_millis(u64::from(*timeout_ms)) + deadline()
                         }
                         Request::Changes { wait_ms, .. } => {
-                            Duration::from_millis(u64::from(*wait_ms)) + DEADLINE
+                            Duration::from_millis(u64::from(*wait_ms)) + deadline()
                         }
-                        _ => DEADLINE,
+                        _ => deadline(),
                     };
                     let remaining = pending
                         .values()
                         .map(|call| call.deadline.saturating_sub(self.clock.monotonic()))
                         .min()
-                        .unwrap_or(DEADLINE)
-                        .min((last_reply + DEADLINE).saturating_sub(self.clock.monotonic()));
+                        .unwrap_or(deadline())
+                        .min((last_reply + deadline()).saturating_sub(self.clock.monotonic()));
                     let result = tokio::time::timeout(
                         remaining,
                         ssh::write(

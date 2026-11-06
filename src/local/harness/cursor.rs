@@ -662,7 +662,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .filter(|_| native_session.is_some());
     let mut prompt = ctx.text.clone();
     if ctx.native_session_id.is_some() && resume.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Cursor") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Cursor")? {
             prompt = format!("{recovery}\n\n{prompt}");
         }
     }
@@ -729,7 +729,14 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let mut state = TurnState::default();
 
     loop {
-        match tokio::time::timeout(TURN_WATCHDOG, lines.next_line()).await {
+        let next = tokio::select! {
+            next = tokio::time::timeout(TURN_WATCHDOG, lines.next_line()) => next,
+            _ = ctx.flush_due() => {
+                let _ = ctx.flush();
+                continue;
+            }
+        };
+        match next {
             Ok(Ok(Some(line))) => {
                 let Ok(event) = serde_json::from_str::<Value>(&line) else {
                     continue;

@@ -1,88 +1,8 @@
-import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import test from "node:test";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import ts from "typescript";
-
-const require = createRequire(import.meta.url);
-const source = readFileSync(new URL("../src/components/SettingsPage.tsx", import.meta.url), "utf8");
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-}).outputText;
-
-// The queries GitTab reads, replaced per test; every other query has no data.
-let queries = {};
-let clicks = new Map();
-let menuOpen = false;
-let state = [];
-let stateIndex = 0;
-let rerender;
-const PopoverContext = React.createContext(null);
-let enableCalls = [];
-const text = (children) => React.Children.toArray(children).filter((child) => typeof child === "string").join("").trim();
-// Every other app module is a stub: its exports render nothing and return nothing.
-const stub = new Proxy({}, { get: (_, name) => (name === "__esModule" ? false : () => null) });
-const queryFactories = new Proxy({}, { get: (_, name) => (...args) => ({ queryKey: [name, ...args] }) });
-const mocks = {
-  react: { ...React, useContext: () => undefined, useState: (initial) => {
-    const index = stateIndex++;
-    if (!(index in state)) state[index] = initial;
-    return [state[index], (value) => {
-      state[index] = typeof value === "function" ? value(state[index]) : value;
-      rerender();
-    }];
-  } },
-  "@base-ui/react/popover": { Popover: {
-    Root: ({ open, onOpenChange, children }) => {
-      menuOpen = open;
-      return React.createElement(PopoverContext.Provider, { value: { open, onOpenChange } }, children);
-    },
-    Trigger: ({ render, children, ...props }) => {
-      const { open, onOpenChange } = React.useContext(PopoverContext);
-      return React.cloneElement(render, { ...props, "aria-haspopup": "dialog", "aria-expanded": open, onClick: () => onOpenChange(!open) }, children);
-    },
-    Portal: ({ children }) => children,
-    Positioner: ({ children }) => children,
-    Popup: ({ children, ...props }) => React.useContext(PopoverContext).open
-      ? React.createElement("div", { ...props, role: "dialog" }, children) : null,
-  } },
-  "@tanstack/react-query": {
-    useQuery: (options) => queries[options?.queryKey?.[0]] ?? { data: undefined },
-    useMutation: () => ({}),
-    useQueries: () => [],
-  },
-  "../queries/settings": queryFactories,
-  "../queries/projects": queryFactories,
-  "../queries/files": queryFactories,
-  "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
-  "../paraglide/runtime.js": { getLocale: () => "en", isLocale: () => true },
-  "../i18n": { ltr: String },
-  "../api": new Proxy({}, { get: (_, name) => name === "enableProjectGithub" ? async (...args) => {
-    enableCalls.push(args);
-    return { project: { id: "project-1" }, git: signedIn };
-  } : stub[name] }),
-  "./ui/cn": { cn: (...names) => names.filter(Boolean).join(" ") },
-  // Plain elements, keeping each button's click handler by its label.
-  "./ui": new Proxy({}, {
-    get: (_, name) => {
-      if (name === "Button" || name === "MenuItem") return ({ children, onClick, disabled }) => {
-        clicks.set(text(children), onClick);
-        return React.createElement("button", { disabled }, children);
-      };
-      if (name === "Badge") return ({ children }) => React.createElement("span", null, children);
-      if (name === "Input") return () => React.createElement("input");
-      return stub[name];
-    },
-  }),
-};
-const exports = {};
-new Function("require", "exports", compiled)(
-  withWorkspaceMocks((name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name))),
-  exports,
-);
+import { act } from "react";
+import { m } from "../src/paraglide/messages.js";
+import { clients, find, renderApp, serveApp, settle } from "./render.mjs";
 
 const gitStatus = (github) => ({
   path: "/work/project",
@@ -93,131 +13,166 @@ const gitStatus = (github) => ({
   clean: true,
   remotes: [],
   identity: { name: null, email: null, nameSource: null, emailSource: null },
-  github: { ghInstalled: true, authenticated: false, enabled: false, owner: "", repo: "", url: null, syncStatus: null, ...github },
+  github: { ghInstalled: true, authenticated: true, enabled: false, owner: "", repo: "", url: null, syncStatus: null, ...github },
 });
-const signedIn = gitStatus({ authenticated: true });
-const signedOut = gitStatus({ authenticated: false });
+const project = { id: "p", name: "Project" };
+const failure = (message) => () => Response.json({ error: message }, { status: 500 });
+const pending = () => new Promise(() => {});
 
-function renderGitTab({ status, statusError = null, account = { data: { login: "example-user" }, isFetching: false }, organizations = { data: { organizations: ["research-org"] }, isFetching: false }, access = { data: { canPush: true } }, open = false }) {
-  const refetches = [];
-  state = [];
-  enableCalls = [];
-  queries = {
-    getProjectGitStatusQuery: { data: status, error: statusError },
-    repoAccessQuery: { ...access, refetch: async () => { refetches.push("access"); } },
-    githubAccountQuery: { ...account, refetch: async () => { refetches.push("account"); } },
-    githubOrganizationsQuery: { ...organizations, refetch: async () => { refetches.push("organizations"); } },
+const click = async (element) => {
+  await act(async () => element.click());
+  await settle();
+};
+
+/** Opens the GitHub settings for one project; each route below answers a request and records it. */
+async function gitSettings({
+  git = () => gitStatus(),
+  access = () => ({ canPush: true }),
+  account = () => ({ login: "example-user" }),
+  organizations = () => ({ organizations: ["research-org"] }),
+  enabling = () => ({ project, git: gitStatus({ enabled: true }) }),
+} = {}) {
+  const requests = [];
+  const route = (name, reply) => (init) => {
+    requests.push(name);
+    return reply(init);
   };
-  clicks = new Map();
-  let html;
-  rerender = () => {
-    stateIndex = 0;
-    html = renderToStaticMarkup(exports.GitTab({
-      project: { id: "project-1", name: "Project" },
-      onProjectUpdate: () => {},
-    }));
+  const enabled = [];
+  serveApp({
+    "GET /api/projects": () => ({ projects: [project] }),
+    "GET /api/settings/projects": () => ({ githubForNewProjects: false, githubDefaultPromptSeen: true, ghInstalled: true, githubAuthenticated: true }),
+    "GET /api/projects/p/git": route("git", git),
+    "GET /api/github/repo-access": route("access", access),
+    "GET /api/github/account": route("account", () => account()),
+    "GET /api/github/organizations": route("organizations", () => organizations()),
+    "POST /api/projects/p/github": (init) => {
+      enabled.push(JSON.parse(init.body));
+      return enabling();
+    },
+  });
+  await renderApp("/projects/p/settings/projects");
+  const projectPicker = document.querySelector(`button[title="${m.settings_github_manage_project()}"]`);
+  await click(projectPicker);
+  await click([...projectPicker.parentElement.querySelectorAll("button")].find((button) => button.textContent === project.name));
+  const enable = () => find("button", m.repository_enable_syncing()) ?? find("button", m.common_checking());
+  return {
+    enabled,
+    requests,
+    enable,
+    picker: () => document.querySelector(`[role="dialog"][aria-label="${m.settings_github_new_repository_destination()}"]`),
+    owner: (name) => find(`[role="dialog"] button`, name),
+    retry: () => find("button", m.app_retry()),
   };
-  rerender();
-  if (open) clicks.get("repository_enable_syncing")();
-  return { html, refetches };
 }
 
-const buttonLabels = (html) => [...html.matchAll(/<button[^>]*>([\s\S]*?)<\/button>/g)].map((match) => match[1].replaceAll(/<[^>]*>/g, "").trim());
-const errors = (html) => [...html.matchAll(/<div class="error">([^<]*)<\/div>/g)].map((match) => match[1]);
-const settle = () => new Promise((resolve) => setImmediate(resolve));
-
-test("signed-out projects cannot enable GitHub syncing", () => {
-  assert.deepEqual(buttonLabels(renderGitTab({ status: signedOut }).html), []);
+test("signed-out projects cannot enable GitHub syncing", async () => {
+  const view = await gitSettings({ git: () => gitStatus({ authenticated: false }) });
+  assert.ok(document.body.textContent.includes(m.settings_page_local_only()));
+  assert.ok(!view.enable());
 });
 
-test("a local-only project opens a destination picker without creating a repository", () => {
-  const { html } = renderGitTab({ status: signedIn });
-  assert.equal(html.includes('role="dialog"'), false);
-  assert.equal(html.includes("settings_github_new_repository_destination"), false);
-  clicks.get("repository_enable_syncing")({ currentTarget: null });
-  assert.equal(menuOpen, true);
-  assert.deepEqual(enableCalls, []);
+test("a local-only project opens a destination picker without creating a repository", async () => {
+  const view = await gitSettings();
+  assert.ok(!view.picker());
+  await click(view.enable());
+  assert.ok(view.picker());
+  assert.deepEqual(view.enabled, []);
 });
 
 test("choosing an organization enables only the selected project under that owner", async () => {
-  const { html } = renderGitTab({ status: signedIn, open: true });
-  assert.equal(html.includes('role="dialog"'), true);
-  assert.deepEqual(buttonLabels(html), ["repository_enable_syncing", "example-user", "research-org"]);
-  clicks.get("research-org")();
-  await settle();
-  assert.deepEqual(enableCalls, [["project-1", "research-org"]]);
-  assert.equal(menuOpen, false);
+  const view = await gitSettings();
+  await click(view.enable());
+  assert.ok(view.owner("example-user"));
+  await click(view.owner("research-org"));
+  assert.deepEqual(view.enabled, [{ organization: "research-org" }]);
+  assert.ok(!view.picker());
 });
 
 test("choosing the personal account uses the authenticated viewer", async () => {
-  renderGitTab({ status: signedIn, open: true });
-  clicks.get("example-user")();
-  await settle();
-  assert.deepEqual(enableCalls, [["project-1", undefined]]);
+  const view = await gitSettings();
+  await click(view.enable());
+  await click(view.owner("example-user"));
+  assert.deepEqual(view.enabled, [{}]);
 });
 
 test("an existing repository resumes syncing without a destination picker", async () => {
-  renderGitTab({ status: gitStatus({ authenticated: true, owner: "existing-org", repo: "paper" }) });
-  clicks.get("repository_enable_syncing")({ currentTarget: null });
-  await settle();
-  assert.deepEqual(enableCalls, [["project-1", undefined]]);
-  assert.equal(menuOpen, false);
+  const view = await gitSettings({ git: () => gitStatus({ owner: "existing-org", repo: "paper" }) });
+  await click(view.enable());
+  assert.deepEqual(view.enabled, [{}]);
+  assert.ok(!view.picker());
 });
 
 test("read-only or archived repositories require choosing the replacement owner", async () => {
-  const status = gitStatus({ authenticated: true, owner: "upstream", repo: "paper" });
-  renderGitTab({ status, access: { data: { canPush: false } } });
-  clicks.get("repository_enable_syncing")({ currentTarget: null });
-  assert.equal(menuOpen, true);
-  assert.deepEqual(enableCalls, []);
-  const { html } = renderGitTab({ status, access: { data: { canPush: false } }, open: true });
-  assert.ok(html.includes("settings_create_private_github_repository"));
-  clicks.get("research-org")();
-  await settle();
-  assert.deepEqual(enableCalls, [["project-1", "research-org"]]);
+  const view = await gitSettings({ git: () => gitStatus({ owner: "upstream", repo: "paper" }), access: () => ({ canPush: false }) });
+  await click(view.enable());
+  assert.deepEqual(view.enabled, []);
+  assert.ok(view.picker().textContent.includes(m.settings_create_private_github_repository()));
+  await click(view.owner("research-org"));
+  assert.deepEqual(view.enabled, [{ organization: "research-org" }]);
 });
 
-test("repository access must finish loading before enabling and failures offer retry", async () => {
-  const status = gitStatus({ authenticated: true, owner: "upstream", repo: "paper" });
-  const pending = renderGitTab({ status, access: { data: undefined } });
-  assert.ok(pending.html.includes('disabled=""'));
-  assert.ok(buttonLabels(pending.html).includes("common_checking"));
-  const failed = renderGitTab({ status, access: { error: new Error("GitHub unavailable") } });
-  assert.ok(failed.html.includes('disabled=""'));
-  assert.ok(failed.html.includes("GitHub unavailable"));
-  clicks.get("app_retry")();
-  await settle();
-  assert.deepEqual(failed.refetches, ["access"]);
+test("repository access must finish loading before enabling", async () => {
+  const view = await gitSettings({ git: () => gitStatus({ owner: "upstream", repo: "paper" }), access: pending });
+  assert.equal(view.enable().textContent.trim(), m.common_checking());
+  assert.equal(view.enable().disabled, true);
 });
 
-test("cached owner choices stay visible without a loading placeholder during refresh", () => {
-  const { html } = renderGitTab({ status: signedIn, open: true,
-    account: { data: { login: "example-user" }, isFetching: true },
-    organizations: { data: { organizations: ["research-org"] }, isFetching: true } });
-  assert.equal(html.includes('aria-busy="true"'), false);
-  assert.ok(buttonLabels(html).includes("research-org"));
+test("a failed repository access check disables enabling and offers retry", async () => {
+  let fail = true;
+  const view = await gitSettings({
+    git: () => gitStatus({ owner: "upstream", repo: "paper" }),
+    access: () => fail ? failure("GitHub unavailable")() : { canPush: true },
+  });
+  assert.equal(view.enable().disabled, true);
+  assert.ok(document.body.textContent.includes("GitHub unavailable"));
+  fail = false;
+  await click(view.retry());
+  assert.equal(view.requests.filter((name) => name === "access").length, 2);
+  assert.equal(view.enable().disabled, false);
+});
+
+test("cached owner choices stay visible without a loading placeholder during refresh", async () => {
+  let refresh = false;
+  const held = (reply) => () => refresh ? pending() : reply();
+  const view = await gitSettings({ account: held(() => ({ login: "example-user" })), organizations: held(() => ({ organizations: ["research-org"] })) });
+  refresh = true;
+  const owners = { predicate: ({ queryKey }) => queryKey[2] === "githubAccount" || queryKey[2] === "githubOrganizations" };
+  await act(async () => { for (const client of clients) void client.invalidateQueries(owners); });
+  await click(view.enable());
+  assert.ok([...clients].some((client) => client.isFetching(owners)));
+  assert.ok(!view.picker().querySelector('[aria-busy="true"]'));
+  assert.ok(view.owner("research-org"));
 });
 
 test("initial discovery reserves space and a failed account lookup offers retry", async () => {
-  const loading = renderGitTab({ status: signedIn, open: true,
-    account: { data: undefined, isFetching: true }, organizations: { data: undefined, isFetching: true } });
-  assert.equal(loading.html.includes('aria-busy="true"'), true);
-  const { refetches } = renderGitTab({ status: signedIn, open: true,
-    account: { data: { login: null }, isFetching: false }, organizations: { data: undefined, isFetching: false } });
-  clicks.get("app_retry")();
+  let release;
+  const discovered = new Promise((resolve) => { release = resolve; });
+  const view = await gitSettings({
+    account: () => discovered.then(() => ({ login: null })),
+    organizations: () => discovered.then(() => ({ organizations: [] })),
+  });
+  await click(view.enable());
+  assert.ok(view.picker().querySelector('[aria-busy="true"]'));
+
+  await act(async () => release());
   await settle();
-  assert.deepEqual(refetches, ["account", "organizations"]);
+  const before = view.requests.length;
+  await click(find('[role="dialog"] button', m.app_retry()));
+  assert.deepEqual(view.requests.slice(before).sort(), ["account", "organizations"]);
 });
 
-test("a repository-creation error keeps its organization and SSO guidance", () => {
+test("a repository-creation error keeps its organization and SSO guidance", async () => {
   const message = "GitHub denied repository creation in 'research-org': HTTP 403: Resource protected by organization SAML enforcement. Authorize GitHub CLI for the organization's SAML SSO, then retry.";
-  const { html } = renderGitTab({ status: signedIn, statusError: new Error(message) });
-
-  assert.deepEqual(errors(html), [message.replaceAll("'", "&#x27;")]);
+  const view = await gitSettings({ enabling: failure(message) });
+  await click(view.enable());
+  await click(view.owner("research-org"));
+  assert.ok(document.body.textContent.includes(message));
 });
 
-test("a push rejected with 403 keeps the write-access explanation", () => {
-  const { html } = renderGitTab({ status: signedIn, statusError: new Error("remote: Permission to owner/repo.git denied. The requested URL returned error: 403") });
-
-  assert.deepEqual(errors(html), ["settings_github_permission_error"]);
+test("a push rejected with 403 keeps the write-access explanation", async () => {
+  const view = await gitSettings({ enabling: failure("remote: Permission to owner/repo.git denied. The requested URL returned error: 403") });
+  await click(view.enable());
+  await click(view.owner("research-org"));
+  assert.ok(document.body.textContent.includes(m.settings_github_permission_error()));
+  assert.ok(!document.body.textContent.includes("requested URL returned error"));
 });

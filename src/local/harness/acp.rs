@@ -225,7 +225,15 @@ pub(crate) fn orx_mcp_servers(
 }
 
 async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
-    let first_session = ctx.native_session_id.is_none();
+    let apply_model = ctx.native_session_id.is_none() || {
+        let store = Store::open()?;
+        let session = store
+            .get_chat_session(&ctx.session_id)?
+            .ok_or_else(|| anyhow!("ACP session no longer exists"))?;
+
+        crate::local::chat::handoff::position_for(&store, &session)?.switched
+    };
+
     ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
     let project = ctx.project.clone();
     let session_id = ctx.session_id.clone();
@@ -277,7 +285,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
             }
             if configuration.is_none() {
                 if let Some(recovery) =
-                    super::native_recovery_context(ctx, definition.name.as_str())
+                    super::native_recovery_context(ctx, definition.name.as_str())?
                 {
                     prompt = format!("{recovery}\n\n{prompt}");
                 }
@@ -326,7 +334,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
     if let Some(model) = ctx
         .model
         .as_deref()
-        .filter(|model| first_session && *model != "default")
+        .filter(|model| apply_model && *model != "default")
     {
         let configuration = Store::open()?
             .acp_session_state(&ctx.session_id)?
@@ -376,6 +384,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
     let mut deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
     loop {
         tokio::select! {
+            _ = ctx.flush_due() => { let _ = ctx.flush(); }
             _ = watchdog.tick() => {
                 if client.awaiting_permission() {
                     deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;

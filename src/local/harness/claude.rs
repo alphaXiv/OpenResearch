@@ -481,6 +481,7 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
                 .get("resolvedModel")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            info.context_window = m.get("contextWindow").and_then(Value::as_u64);
             // Claude reports no default *tier* because its unset default isn't
             // one: with adaptive thinking, the CLI scales effort per request.
             // Name the sentinel row for what actually runs — preselecting a
@@ -2318,14 +2319,20 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         let waited = match queued.take() {
             Some(event) => Waited::Event(Ok(Some(event))),
             None => {
+                let flush_due = ctx.flush_due();
                 let steering = &mut ctx.steering;
                 tokio::select! {
                     event = tokio::time::timeout_at(deadline, rx.recv()) => Waited::Event(event),
                     steer = super::next_steer(steering) => Waited::Steer(steer),
+                    _ = flush_due => Waited::Flush,
                 }
             }
         };
         let event = match waited {
+            Waited::Flush => {
+                let _ = ctx.flush();
+                continue;
+            }
             Waited::Steer(steer) => {
                 // A failed write means the child is gone and this turn is about
                 // to error out — park the text so it survives into the next one.
@@ -2416,6 +2423,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                     if !state.saw_background_task || state.turn_errored {
                         break;
                     }
+                    let _ = ctx.flush();
                     match tokio::time::timeout(BACKGROUND_RESUME_GRACE, rx.recv()).await {
                         Ok(Some(event)) => queued = Some(event),
                         _ => break,
@@ -2490,7 +2498,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .clone()
         .filter(|_| native_session.is_some());
     if ctx.native_session_id.is_some() && resume.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code")? {
             ctx.text = format!("{recovery}\n\n{}", ctx.text);
         }
     }

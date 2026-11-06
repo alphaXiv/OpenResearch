@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { composerStashContent, EMPTY_COMPOSER_STASH, createComposerState } from "../src/composerStash.ts";
+import { citedAttachments, composerStashContent, EMPTY_COMPOSER_STASH, createComposerState } from "../src/composerStash.ts";
 
 test("an empty composer leaves nothing behind", () => {
   const live = { ...EMPTY_COMPOSER_STASH };
@@ -51,8 +51,7 @@ test("machines with cloned project and chat IDs keep their prompt seeds and fail
   assert.equal(beta.composerSeed("same-project"), "Reproduce Beta");
 });
 
-test("a draft sends the attachments it cites, renumbered in order of mention", async () => {
-  const { citedAttachments } = await import("../src/composerStash.ts");
+test("a draft sends the attachments it cites, renumbered in order of mention", () => {
   const image = { id: 7, dataUrl: "data:,a", mediaType: "image/png", size: 1 };
   const pdf = { id: 3, dataUrl: "data:,b", mediaType: "application/pdf", size: 1 };
   const deleted = { id: 9, dataUrl: "data:,c", mediaType: "image/png", size: 1 };

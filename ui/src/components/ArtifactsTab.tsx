@@ -27,9 +27,9 @@ import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
-import { chatImageTarget, isNetworkImage, nativeMarkdownPath } from "../markdownTarget";
+import { chatImageTarget, isExplicitNativeTarget, isNetworkImage, nativeMarkdownPath, rehypeNetworkImages } from "../markdownTarget";
 import { useFileVersion } from "../useFileVersion";
-import { ImageResolverContext, mdCodeComponents, remarkMathOptions } from "./Md";
+import { ImageResolverContext, MermaidBlock, mdCodeComponents, remarkMathOptions } from "./Md";
 import {
   FileContextMenu,
   FileRenameInput,
@@ -131,25 +131,14 @@ export function findArtifactEntry(entries: ArtifactEntry[], path: string): Artif
 
 /** Artifact markdown with relative image/link paths rewritten to the raw
  * artifact endpoint, scoped to the markdown file's parent directory. */
-export function ArtifactMarkdown({
-  projectId,
-  folder,
-  markdown,
-  entries,
-}: {
-  projectId: string;
-  folder: string;
-  markdown: string;
-  entries: ArtifactEntry[];
-}) {
+function useArtifactMermaidImages(projectId: string, folder: string, entries: ArtifactEntry[]) {
   const { absoluteFileUrl, artifactUrl } = useWorkspace().api;
-  // Artifact writes refresh `src` through this ref; a new `img` type would remount images.
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
   const entriesVersion = useMemo(() => JSON.stringify(entries), [entries]);
-  const mermaidImages = useMemo(() => (src: string) => {
+  return useMemo(() => (src: string) => {
     const absolute = chatImageTarget(src);
-    if (absolute?.source === "absolute" && (/^file:/i.test(src) || /^[a-z]:[\\/]/i.test(src))) {
+    if (absolute?.source === "absolute" && isExplicitNativeTarget(src)) {
       return [{ url: absoluteFileUrl(absolute.path) + absolute.hash, resolveAsset: () => null }];
     }
     const target = artifactTarget(projectId, folder, src, artifactUrl);
@@ -161,10 +150,20 @@ export function ArtifactMarkdown({
     const url = entry ? `${base}&v=${entry.modifiedAt}:${entry.size}${hash}` : target.url;
     return [{ url, resolveAsset: () => null }];
   }, [absoluteFileUrl, artifactUrl, projectId, folder, entriesVersion]);
+}
+
+export function ArtifactMarkdown({ projectId, folder, markdown, entries }: {
+  projectId: string; folder: string; markdown: string; entries: ArtifactEntry[];
+}) {
+  const { absoluteFileUrl, artifactUrl } = useWorkspace().api;
+  // Artifact writes refresh `src` through this ref; a new `img` type would remount images.
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
+  const mermaidImages = useArtifactMermaidImages(projectId, folder, entries);
   const components = useMemo((): Components => {
     const resolve = (src: string) => {
       const absolute = chatImageTarget(src);
-      if (absolute?.source === "absolute" && (/^file:/i.test(src) || /^[a-z]:[\\/]/i.test(src))) return absoluteFileUrl(absolute.path) + absolute.hash;
+      if (absolute?.source === "absolute" && isExplicitNativeTarget(src)) return absoluteFileUrl(absolute.path) + absolute.hash;
       if (isExternalSrc(src)) return src;
       const target = artifactTarget(projectId, folder, src, artifactUrl);
       if (!target) return null;
@@ -212,7 +211,7 @@ export function ArtifactMarkdown({
       <ReactMarkdown
         urlTransform={(url, key, node) => key === "src" && node.tagName === "img" && nativeMarkdownPath(url) ? url : defaultUrlTransform(url)}
         remarkPlugins={[remarkGfm, [remarkMath, remarkMathOptions]]}
-        rehypePlugins={[rehypeKatex]}
+        rehypePlugins={[rehypeNetworkImages, rehypeKatex]}
         components={components}
       >
         {normalizeMarkdownForRendering(stripFrontmatter(markdown))}
@@ -281,6 +280,8 @@ function PreviewPane({
   const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const isDoc = kind === "markdown";
   const mdFolder = entry.path.split("/").slice(0, -1).join("/");
+  const isMermaid = kind === "text" && /\.(mmd|mermaid)$/i.test(entry.name);
+  const mermaidImages = useArtifactMermaidImages(projectId, mdFolder, artifactEntries);
   const rawUrl = `${artifactUrl(projectId, entry.path)}&v=${encodeURIComponent(version ?? `${entry.modifiedAt}:${entry.size}`)}`;
 
   let body: ReactNode;
@@ -316,6 +317,8 @@ function PreviewPane({
     );
   } else if (isDoc && !showSource) {
     body = <ArtifactMarkdown projectId={projectId} folder={mdFolder} markdown={text} entries={artifactEntries} />;
+  } else if (isMermaid && !showSource && !truncated) {
+    body = <MermaidBlock code={text} sourceToggle={false} imageResolver={mermaidImages} />;
   } else {
     body = <CodeView text={text} path={entry.path} />;
   }
@@ -339,7 +342,7 @@ function PreviewPane({
         {(kind === "text" || kind === "download") && (
           <span className="fpreview-size text-xs text-muted whitespace-nowrap shrink-0">{fmtBytes(entry.size)}</span>
         )}
-        {isDoc && (
+        {(isDoc || isMermaid) && (
           <IconButton
             size="small"
             active={showSource}

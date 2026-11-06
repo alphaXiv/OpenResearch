@@ -1,282 +1,225 @@
-import { workspaceDom, mockWorkspace } from "./workspaceMocks.mjs";
-import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import ts from "typescript";
+import test from "node:test";
+import { act, createElement } from "react";
+import { SkillsTab } from "../src/components/SkillsTab.tsx";
+import { TARGET_LABELS } from "../src/computeTargets.ts";
+import { m } from "../src/paraglide/messages.js";
+import { assistantMessage, codex, composer, deferred, emit, renderChat, session, userMessage } from "./chat.mjs";
+import { clients, find, press, render, renderApp, serve, serveApp, settle, type } from "./render.mjs";
 
-const source = (file) => ts.createSourceFile(file, readFileSync(new URL(`../src/components/${file}`, import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-function evaluate(code, bindings) {
-  bindings = { useContext: () => workspaceDom, WorkspaceDomContext: {}, ...bindings, useWorkspace: () => mockWorkspace(bindings) };
-  const js = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function(...Object.keys(bindings), "return (() => {" + js + "})();")(...Object.values(bindings));
-}
-function declaration(file, name) {
-  let found;
-  function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(file) === name) found = node;
-    ts.forEachChild(node, visit);
-  }
-  visit(file);
-  const fn = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
-  if (fn) return fn.getText(file).replace(/^export /, "");
-  assert.ok(found, name);
-  return found.initializer.getText(file);
-}
+const click = async (element) => {
+  await act(async () => element.click());
+  await settle();
+};
+const refresh = async () => {
+  await act(async () => { for (const client of clients) void client.invalidateQueries(); });
+  await settle();
+};
+/** The text field labelled `label`. */
+const field = (label) => [...document.querySelectorAll("label")].find((element) => element.textContent.includes(label))?.querySelector("input");
 
-function sendPreparation() {
-  const file = source("ChatPanel.tsx");
-  let send;
-  function visit(node) {
-    if (ts.isFunctionDeclaration(node) && node.name?.text === "send") send = node;
-    ts.forEachChild(node, visit);
-  }
-  visit(file);
-  const turn = send.body.statements.find((node) => ts.isTryStatement(node) && node.tryBlock.getText(file).includes('type: "optimisticUser"'));
-  const statements = turn.tryBlock.statements;
-  const optimisticIndex = statements.findIndex((node) => node.getText(file).includes('type: "optimisticUser"'));
-  const prefix = statements.slice(0, optimisticIndex + 1).map((node) => node.getText(file)).join("\n");
-  return `const retry = null, mode = null, attachmentsAtSend = pending;\nconst composerLiveRef = { current: { draft, attachments: attachmentsAtSend, annotations: pendingAnnotations } };\nconst clearComposer = ${declaration(file, "clearComposer")};\n${prefix}`;
-}
+const targets = {
+  k8s: {
+    fields: { namespace: () => m.settings_page_namespace() },
+    reply: (value) => ({ configured: true, contexts: [], currentContext: null, context: null, namespace: value, preflight: { kubectlFound: true, reachable: true, canCreateJobs: true } }),
+  },
+  slurm: {
+    fields: { partition: () => m.settings_page_partition(), account: () => m.settings_page_account(), timeLimit: () => m.settings_page_time_limit() },
+    reply: (value) => ({ host: null, partition: value, account: value, timeLimit: value, cpusPerTask: null, mem: null, hosts: [] }),
+  },
+  ray: {
+    fields: { address: () => m.settings_page_jobs_dashboard_url() },
+    reply: (value) => ({ address: value, resolvedAddress: value, source: "settings" }),
+  },
+};
 
-function settingsRenderer(name, returns, bindings) {
-  const file = source("SettingsPage.tsx");
-  const component = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name.text === name);
-  const statements = component.body.statements;
-  const prefix = statements.slice(0, statements.findIndex(ts.isReturnStatement)).map((node) => node.getText(file)).join("\n");
-  const state = [];
-  let cursor, effects, changed;
-  const hook = (init) => { const index = cursor++; if (!(index in state)) state[index] = init(); return index; };
-  const hooks = {
-    useState: (initial) => { const i = hook(() => initial); return [state[i], (next) => { const value = typeof next === "function" ? next(state[i]) : next; changed ||= !Object.is(value, state[i]); state[i] = value; }]; },
-    useRef: (initial) => state[hook(() => ({ current: initial }))],
-    useEffect: (effect, deps) => { const i = hook(() => undefined); if (!state[i] || deps.some((value, index) => !Object.is(value, state[i][index]))) { state[i] = deps; effects.push(effect); } },
-  };
-  return () => {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      cursor = 0; effects = []; changed = false;
-      const result = evaluate(`${prefix}\nreturn ${returns};`, { ...hooks, ...bindings });
-      effects.forEach((effect) => effect());
-      if (!changed) return result;
-    }
-    assert.fail(`${name} effects did not settle`);
-  };
-}
-
-for (const [name, fields] of [["K8s", ["context", "namespace"]], ["Slurm", ["host", "partition", "account", "timeLimit"]], ["Ray", ["address"]]]) {
-  test(`${name} settings refresh clean fields while preserving edits`, () => {
-    let snapshot = Object.fromEntries(fields.map((field) => [field, "original"]));
-    const render = settingsRenderer(`${name}Section`, `{ values: {${fields}}, setters: {${fields.map((field) => `${field}: set${field[0].toUpperCase()}${field.slice(1)}`).join(",")}} }`, {
-      useMutation: () => ({}), useQuery: () => ({ data: snapshot }),
-      useSshMasterStatuses: () => [{}, () => {}],
-      [`get${name}SettingsQuery`]: () => ({ queryKey: [] }), [`save${name}Settings`]: () => {},
-      remote: false, onEditState: undefined,
+for (const [id, { fields, reply }] of Object.entries(targets)) {
+  test(`${id} settings refresh clean fields while preserving edits`, async () => {
+    let value = "original";
+    serveApp({
+      "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
+      "GET /api/settings/compute": () => ({ defaultBackend: null, defaultFlavor: null, targets: [{ id, configured: true, enabled: true, summary: "" }] }),
+      [`GET /api/settings/${id}`]: () => reply(value),
     });
-    assert.deepEqual(render().values, snapshot);
-    snapshot = Object.fromEntries(fields.map((field) => [field, "refreshed"]));
-    assert.deepEqual(render().values, snapshot);
-    render().setters[fields[0]]("my edit");
-    const edited = render().values;
-    snapshot = Object.fromEntries(fields.map((field) => [field, "external"]));
-    assert.deepEqual(render().values, edited);
+    await renderApp("/projects/p/settings/compute");
+    await click(document.querySelector(`button[aria-label="${TARGET_LABELS[id]()}"]`));
+    const values = () => Object.values(fields).map((label) => field(label()).value);
+    assert.deepEqual(values(), Object.keys(fields).map(() => "original"));
+
+    value = "refreshed";
+    await refresh();
+    assert.deepEqual(values(), Object.keys(fields).map(() => "refreshed"));
+
+    await type(field(Object.values(fields)[0]()), "my edit");
+    const edited = values();
+    value = "external";
+    await refresh();
+    assert.deepEqual(values(), edited);
   });
 }
 
-test("harness settings list detected installs and saved custom agents", () => {
-  let snapshot = [];
-  let definitions = [];
-  const listAcpHarnesses = () => {};
-  const render = settingsRenderer("HarnessesTab", "{ orderedHarnesses, added }", {
-    useQuery: (options) => ({ data: options.harnesses ? snapshot : options.queryFn === listAcpHarnesses ? definitions : {} }),
-    getHarnessesQuery: () => ({ harnesses: true }),
-    getHarnessSetupCommandsQuery: () => ({}),
-    sortHarnesses: evaluate(`return ${declaration(source("AddHarnessDialog.tsx"), "sortHarnesses")}`, {}),
-    useCommandRun: () => ({}), workspaceKey: () => [], listAcpHarnesses, listAcpPresets: () => {},
+test("harness settings list installed harnesses and saved custom agents, but not presets", async () => {
+  const harness = (id, installed) => ({ ...codex, id, name: id, installed, agentReady: true });
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
+    "GET /api/harnesses": () => ({ harnesses: [harness("opencode", true), { ...harness("codex", false), agentReady: false }, harness("claude-code", true), harness("acp:custom", false), harness("acp:preset", false)] }),
+    "GET /api/harnesses/acp": () => [{ id: "acp:custom", name: "acp:custom", executable: "custom", arguments: [] }],
+    "GET /api/harnesses/acp/presets": () => [],
+    "GET /api/harnesses/setup/commands": () => ({}),
   });
-  snapshot = [{ id: "opencode", installed: true }, { id: "codex", installed: false }, { id: "claude-code", installed: true }, { id: "acp:custom", installed: false }, { id: "acp:preset", installed: false }];
-  definitions = [{ id: "acp:custom" }];
-  assert.deepEqual(render().orderedHarnesses.map((h) => h.id).slice(0, 2), ["claude-code", "codex"]);
-  assert.deepEqual(render().added.map((h) => h.id), ["claude-code", "opencode", "acp:custom"]);
-  snapshot[1].installBroken = true;
-  assert.ok(render().added.some((h) => h.id === "codex"));
+  await renderApp("/projects/p/settings/harnesses");
+  const rows = [...document.querySelectorAll('button[aria-controls*="harness-details-"]')].map((row) => row.getAttribute("aria-controls").split("harness-details-")[1]);
+  assert.deepEqual(rows, ["claude-code", "opencode", "acp:custom"]);
 });
 
 test("queued chat writes stop when their captured workspace retires", async () => {
-  const file = source("ChatPanel.tsx");
-  let generation = 1, release, calls = 0;
-  const queue = evaluate(`return ${declaration(file, "queueSessionMutation")}`, {
-    useCallback: (fn) => fn, sessionsOptions: { queryKey: ["workspace", 1] },
-    settingsMutationTail: { current: Promise.resolve() }, isCurrentScope: (key) => key[1] === generation,
-  });
-  const first = queue(() => new Promise((resolve) => { release = resolve; calls++; }));
-  const second = queue(async () => { calls++; });
-  const rejected = assert.rejects(second, { name: "AbortError" });
-  for (let i = 0; i < 5; i++) await Promise.resolve();
-  generation++;
-  release();
-  await first;
-  await rejected;
-  assert.equal(calls, 1);
+  const reply = deferred();
+  const chat = await renderChat("/projects/p/tasks/s", { remote: true, routes: { "POST /api/chat/sessions/s/message": () => reply.promise } });
+  await composer().type("first");
+  await composer().send();
+  await composer().type("/plan");
+  await press("Escape", composer().field());
+  await composer().send();
+  await chat.reconnect();
+  await reply.resolve({ ok: true });
+  assert.deepEqual(chat.requests.filter(({ request }) => request === "PATCH /api/chat/sessions/s"), []);
 });
 
-test("old prompt responses do not reconcile against the replacement workspace", async () => {
-  const file = source("ChatPanel.tsx");
-  let generation = 1, release, reads = 0;
-  const respond = evaluate(`return ${declaration(file, "respond")}`, {
-    useCallback: (fn) => fn, activeId: "old-session", projectId: "old-project", dispatch: () => {},
-    sessionsOptions: { queryKey: ["workspace", 1] }, isCurrentScope: (key) => key[1] === generation,
-    queueSessionMutation: () => new Promise((resolve) => { release = resolve; }),
-    queryClient: { fetchQuery: async () => { reads++; } },
-    getChatMessagesQuery: () => ({}), listChatSessionsQuery: () => ({}),
-  });
-  const answer = respond({});
-  generation++;
-  release();
-  await answer;
-  assert.equal(reads, 0);
-  generation = 1;
-  const current = respond({});
-  release();
-  await current;
-  assert.equal(reads, 2);
-});
-
-for (const [card, family, field, upload] of [
-  ["SkillsCard", "listUserSkills", "skills", "uploadUserSkill"],
-  ["LatexTemplatesCard", "listLatexTemplates", "templates", "uploadLatexTemplate"],
-]) {
-  test(`${card} retains cached rows when refresh fails`, async (t) => {
-    const { QueryObserver } = await import("@tanstack/react-query");
-    const { queryModules } = await import("./queryModules.mjs");
-    let fail = false, calls = 0;
-    const { client, load } = queryModules({ [family]: async () => { calls++; if (fail) throw new Error("offline"); return family === "listUserSkills" ? { skills: [{ name: "cached" }] } : [{ name: "cached" }]; } }, { nativeClient: true });
-    const options = load("settings")[`${family}Query`]();
-    await client.fetchQuery(options);
-    const observer = new QueryObserver(client, options);
-    const off = observer.subscribe(() => {});
-    t.after(() => { off(); client.clear(); });
-    const file = source("SkillsTab.tsx");
-    const component = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name.text === card);
-    const statements = component.body.statements;
-    const prefix = statements.slice(0, statements.findIndex(ts.isReturnStatement)).map((node) => node.getText(file)).join("\n");
-    const render = () => evaluate(`${prefix}\nreturn { rows: ${field}, loadError, refresh: ${card === "SkillsCard" ? "refresh" : "() => templatesQuery.refetch()"} };`, {
-      useQuery: () => observer.getCurrentResult(), useMutation: () => ({}),
-      useLayoutEffect: () => {}, useState: (value) => [value, () => {}], useCallback: (fn) => fn, useRef: (current) => ({ current }),
-      [`${family}Query`]: () => options, [upload]: () => {},
+for (const retired of [true, false]) {
+  test(`${retired ? "old prompt responses do not reconcile against the replacement workspace" : "a prompt response reconciles its chat"}`, async () => {
+    const answer = deferred();
+    const prompt = { kind: "question", question: "Which one?", options: [{ label: "First" }] };
+    const chat = await renderChat("/projects/p/tasks/s", {
+      remote: true,
+      transcripts: { s: [userMessage("u1", "choose"), assistantMessage("a1", [{ id: "question", type: "prompt", prompt }], "u1")] },
+      routes: { "POST /api/chat/sessions/s/respond": () => answer.promise },
     });
-    assert.equal(render().rows[0].name, "cached");
-    fail = true;
-    render().refresh();
-    for (let i = 0; i < 30; i++) await Promise.resolve();
-    assert.equal(calls, 2);
-    assert.equal(render().rows[0].name, "cached");
-    assert.equal(render().loadError, "offline");
+    await click(find('[role="group"] button', "First"));
+    await act(async () => document.querySelector('[role="group"] form').requestSubmit());
+    if (retired) await chat.reconnect();
+    const before = chat.requests.length;
+    await answer.resolve({ ok: true });
+    const reads = chat.requests.slice(before).filter(({ request }) => request === "GET /api/chat/sessions/s/messages" || request === "GET /api/chat/sessions");
+    assert.equal(reads.length, retired ? 0 : 2);
   });
 }
 
-test("first send waits for cold history so an accepted reply replaces its optimistic branch", async (t) => {
-  const { queryModules } = await import("./queryModules.mjs");
-  let resolveHistory;
-  let snapshot;
-  const cold = new Promise((resolve) => { resolveHistory = resolve; });
-  const { client, load } = queryModules({ getChatMessages: () => snapshot ? Promise.resolve(snapshot) : cold }, { nativeClient: true });
-  t.after(() => client.clear());
-  const options = load("chat").getChatMessagesQuery("s");
-  const read = client.fetchQuery(options);
-  const prefix = sendPreparation();
-  const sending = evaluate(`return (async () => { let sid = "s"; ${prefix} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null,
-    preparingSend: { current: false }, inSourceScope: () => false,
-    queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
-    dispatch: (action) => load("chatStore").dispatchChat("p", action),
-    text: "new turn", draft: "new turn", pending: [], pendingAnnotations: [],
-    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, setImageRefusedFor: () => {},
+for (const [card, path, field, error] of [
+  ["skills", "/api/user-skills", "skills", () => m.skills_tab_could_not_load_skills()],
+  ["LaTeX templates", "/api/latex-templates", "templates", () => m.skills_tab_could_not_load_templates()],
+]) {
+  test(`the ${card} card keeps cached rows when a refresh fails`, async () => {
+    let fail = false, calls = 0;
+    serve((url) => {
+      if (url !== path) return;
+      calls++;
+      if (fail) return Response.json({ error: "offline" }, { status: 503 });
+      return { [field]: [{ name: "cached", description: "", entry: "main.tex", supportFiles: [], bytes: 1, updatedAt: 1 }] };
+    });
+    const { container } = await render(createElement(SkillsTab));
+    await settle();
+    assert.ok(container.textContent.includes("cached"));
+    fail = true;
+    if (card === "skills") await click(find("button", m.settings_page_refresh()));
+    else await act(async () => { for (const client of clients) void client.refetchQueries({ type: "active" }); });
+    await settle();
+    assert.ok(calls >= 2);
+    assert.ok(container.textContent.includes("cached"));
+    assert.ok(container.textContent.includes(`${error()} offline`));
   });
-  assert.equal(client.getQueryData(options.queryKey), undefined);
-  snapshot = { messages: [{ id: "history", role: "user", parts: [], createdAt: 1 }], queued: [], activeLeafId: "history" };
-  resolveHistory(snapshot);
-  await read;
-  await sending;
-  assert.match(client.getQueryData(options.queryKey).activeLeafId, /^local-/);
-  snapshot = { messages: [...snapshot.messages,
-    { id: "accepted", role: "user", parts: [], createdAt: 2, parentId: "history" },
-    { id: "reply", role: "assistant", parts: [], createdAt: 3, parentId: "accepted" },
-  ], queued: [], activeLeafId: "reply" };
-  const reconciled = await client.fetchQuery({ ...options, staleTime: 0 });
-  assert.deepEqual(reconciled.messages.map((message) => message.id), ["history", "accepted", "reply"]);
-  assert.equal(reconciled.activeLeafId, "reply");
+}
+
+test("first send waits for cold history so an accepted reply replaces its optimistic branch", async () => {
+  const history = deferred();
+  let snapshot = null;
+  const chat = await renderChat("/projects/p/tasks/s", { routes: {
+    "GET /api/chat/sessions/s/messages": () => snapshot ?? history.promise,
+    "POST /api/chat/sessions/s/message": () => ({ ok: true }),
+  } });
+  await composer().type("new turn");
+  await composer().send();
+  assert.deepEqual(chat.sent(), []);
+  snapshot = { messages: [userMessage("history", "earlier")] };
+  await history.resolve(snapshot);
+  assert.deepEqual(chat.sent().map(({ text }) => text), ["new turn"]);
+  assert.ok(document.querySelector('[data-message-id^="local-"]'));
+
+  snapshot = { messages: [userMessage("history", "earlier"), userMessage("accepted", "new turn", "history"), assistantMessage("reply", "Done.", "accepted")] };
+  await emit("resync.required", {});
+  assert.deepEqual([...document.querySelectorAll("[data-message-id]")].map((row) => row.dataset.messageId), ["history", "accepted", "reply"]);
 });
 
-test("history preparation clears the composer up front but never sends early", async (t) => {
-  const { QueryObserver } = await import("@tanstack/react-query");
-  const { queryModules } = await import("./queryModules.mjs");
-  const { client, load } = queryModules({ getChatMessages: () => new Promise(() => {}) }, { nativeClient: true });
-  t.after(() => client.clear());
-  const observer = new QueryObserver(client, load("chat").getChatMessagesQuery("s"));
-  const off = observer.subscribe(() => {});
-  const preparingSend = { current: false };
-  const cleared = new Set();
-  const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null, preparingSend,
-    queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
-    inSourceScope: () => true, draft: "unsent", pending: [], pendingAnnotations: [],
-    setDraft: () => cleared.add("draft"), setAttachments: () => cleared.add("attachments"),
-    setAnnotations: () => cleared.add("annotations"), setAttachError: () => cleared.add("attachError"), setImageRefusedFor: () => cleared.add("imageRefused"),
-    dispatch: () => assert.fail("must not send before history"),
-  });
-  const rejected = assert.rejects(sending);
-  off();
-  await rejected;
-  // The composer clears before the first await so a scope change mid-send can
-  // never stash sent text; the caller's catch restores it via restoreComposer().
-  assert.deepEqual([...cleared].sort(), ["annotations", "attachError", "attachments", "draft", "imageRefused"]);
-  assert.equal(preparingSend.current, false);
+test("history preparation clears the composer up front but never sends early", async () => {
+  const chat = await renderChat("/projects/p/tasks/s", { routes: { "GET /api/chat/sessions/s/messages": () => new Promise(() => {}) } });
+  const input = composer();
+  await input.type("unsent");
+  await input.attach();
+  await input.send();
+  assert.equal(input.draft, "");
+  assert.equal(input.attachments, 0);
+  assert.deepEqual(chat.sent(), []);
 });
 
-test("send joins a cold repair despite its intermediate cached history", async (t) => {
-  const { queryModules } = await import("./queryModules.mjs");
-  let first, repair;
-  const initial = new Promise((resolve) => { first = resolve; });
-  const repairing = new Promise((resolve) => { repair = resolve; });
-  let calls = 0;
-  const { client, load } = queryModules({ getChatMessages: () => ++calls === 1 ? initial : repairing }, { nativeClient: true });
-  t.after(() => client.clear());
-  const options = load("chat").getChatMessagesQuery("s");
-  const read = client.fetchQuery(options);
-  load("live").markLiveUpdate(client, options.queryKey);
-  const snapshot = { messages: [{ id: "history", role: "user", parts: [], createdAt: 1 }], queued: [], activeLeafId: "history" };
-  first(snapshot);
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.deepEqual(client.getQueryData(options.queryKey), snapshot);
-  assert.equal(client.getQueryState(options.queryKey).fetchStatus, "fetching");
-  let dispatched = false;
-  const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null,
-    preparingSend: { current: false }, inSourceScope: () => false,
-    queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
-    dispatch: () => { dispatched = true; }, text: "new", draft: "new", pending: [], pendingAnnotations: [],
-    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, setImageRefusedFor: () => {},
-  });
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(dispatched, false);
-  repair(snapshot);
-  await read;
-  await sending;
-  assert.equal(dispatched, true);
-  assert.equal(calls, 2);
+test("send joins a history repair already under way", async () => {
+  const repair = deferred();
+  let reads = 0, readsAtSend;
+  const transcript = { messages: [userMessage("history", "earlier")] };
+  const chat = await renderChat("/projects/p/tasks/s", { routes: {
+    "GET /api/chat/sessions/s/messages": () => ++reads === 1 ? transcript : repair.promise,
+    "POST /api/chat/sessions/s/message": () => { readsAtSend = reads; return { ok: true }; },
+  } });
+  await emit("resync.required", {});
+  assert.equal(reads, 2);
+  await composer().type("new");
+  await composer().send();
+  assert.deepEqual(chat.sent(), []);
+  await repair.resolve(transcript);
+  assert.deepEqual(chat.sent().map(({ text }) => text), ["new"]);
+  assert.equal(readsAtSend, 2);
 });
 
-test("the pre-await draft clear keeps an edit queued since render", async () => {
-  let updater;
-  const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null,
-    preparingSend: { current: false }, inSourceScope: () => true,
-    queryClient: { fetchQuery: async () => ({}), getQueryState: () => undefined },
-    getChatMessagesQuery: () => ({ queryKey: [] }),
-    draft: "rendered", text: "rendered", pending: [], pendingAnnotations: [],
-    setDraft: (update) => { updater = update; },
-    setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, setImageRefusedFor: () => {}, dispatch: () => {},
+test("an edit typed while the send prepares survives the send", async () => {
+  const history = deferred();
+  const chat = await renderChat("/projects/p/tasks/s", { routes: {
+    "GET /api/chat/sessions/s/messages": () => history.promise,
+    "POST /api/chat/sessions/s/message": () => ({ ok: true }),
+  } });
+  const input = composer();
+  await input.type("sent");
+  await input.send();
+  await input.type("typed since");
+  await history.resolve({ messages: [] });
+  assert.deepEqual(chat.sent().map(({ text }) => text), ["sent"]);
+  assert.equal(input.draft, "typed since");
+});
+
+test("a late agent switch cannot replace a newer chat's selection or draft settings", async () => {
+  const claude = {
+    ...codex, id: "claude-code", name: "Claude Code", models: [{ id: "target-model" }, { id: "newer-model" }],
+    options: { ...codex.options, permissionModes: [{ id: "auto", label: "Auto" }, { id: "plan", label: "Plan" }] },
+  };
+  const switched = deferred();
+  const chat = await renderChat("/projects/p/tasks/original", {
+    sessions: [session("original"), session("side", { harness: "claude-code", model: "target-model", sideParentSessionId: "original" })],
+    harnesses: [codex, claude],
+    routes: { "PATCH /api/chat/sessions/original": () => switched.promise },
   });
-  await sending;
-  assert.equal(updater("rendered"), "");
-  assert.equal(updater("typed since render"), "typed since render");
+  const picker = (index = 0) => [...document.querySelectorAll('[data-onboarding="composer"]')[index].querySelectorAll('[data-onboarding="model-picker"] button')]
+    .map((button) => button.getAttribute("aria-label"));
+  await composer().pick("target-model");
+
+  await chat.navigate(`/projects/p/tasks/new?pane=${encodeURIComponent(JSON.stringify({ kind: "side", sessionId: "side" }))}`);
+  await composer().type("/plan");
+  await press("Enter", composer().field());
+  await composer(1).pick("newer-model");
+  const newer = picker();
+  assert.deepEqual(newer, [m.a11y_chat_model({ label: "Newer Model" }), `${m.model_picker_permissions()}: Plan, ${m.model_picker_autonomy_agentic()}`]);
+
+  await switched.resolve({ session: session("original", { harness: "claude-code", model: "target-model" }) });
+  assert.deepEqual(picker(), newer);
+  const preferred = chat.requests.filter(({ request, body }) => request === "POST /api/settings/ui-state" && body.preferredAgent);
+  assert.deepEqual(preferred.map(({ body }) => body.preferredAgent.model), ["target-model", "newer-model"]);
+
+  await chat.navigate("/projects/p/tasks/original");
+  assert.equal(picker()[0], m.a11y_chat_model({ label: "Target Model" }));
 });

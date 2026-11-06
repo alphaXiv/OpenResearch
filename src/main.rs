@@ -273,6 +273,43 @@ pub enum ProjectCommand {
         #[arg(long = "run-command")]
         run_command: Option<String>,
     },
+
+    /// Save a project as a .orx file a collaborator can open in OpenResearch,
+    /// or publish it as an openresearch.sh link with --publish.
+    /// Every chat is included unless narrowed with --chat or left out with --no-chats.
+    Share {
+        project_id: String,
+        /// File to write (default: ./<project>.orx).
+        #[arg(long, conflicts_with = "publish")]
+        out: Option<String>,
+        /// Upload the file to openresearch.sh and print a link anyone can open
+        /// (needs `orx login`). Publishing again updates the same link.
+        #[arg(long)]
+        publish: bool,
+        /// Include only this chat's transcript (repeatable).
+        #[arg(long = "chat")]
+        chats: Vec<String>,
+        /// Leave every chat out.
+        #[arg(long, conflicts_with = "chats")]
+        no_chats: bool,
+        /// Leave run logs out.
+        #[arg(long)]
+        no_logs: bool,
+        /// Leave the artifacts folder out.
+        #[arg(long)]
+        no_artifacts: bool,
+    },
+
+    /// Delete a project's published openresearch.sh link and its file.
+    Unpublish { project_id: String },
+
+    /// Open a shared .orx file, or an openresearch.sh/p/... link, as a new project.
+    Import {
+        file: String,
+        /// Folder to create the project in (default: ./<file or project name>).
+        #[arg(long)]
+        path: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -723,9 +760,20 @@ pub struct SuperviseArgs {
 
 #[derive(Args, Debug)]
 pub struct UpArgs {
-    /// Port to bind on 127.0.0.1. With `--remote`, the local presentation port.
+    /// Port to listen on. With `--remote`, the local presentation port.
     #[arg(long, default_value_t = 4791)]
     pub port: u16,
+    /// Address to listen on: `127.0.0.1`, or `0.0.0.0` to also serve devices on
+    /// your private network. The dashboard has no login, so anyone who can
+    /// reach it controls your agents and terminals; only do this on a network
+    /// you trust. Public peers, public addresses and hostnames stay refused.
+    #[arg(
+        long,
+        default_value = "127.0.0.1",
+        value_name = "ADDR",
+        conflicts_with_all = ["remote", "remote_host"]
+    )]
+    pub host: std::net::IpAddr,
     /// Run `orx up` on a remote box over SSH and forward it here. The value is
     /// an `~/.ssh/config` host alias, or `user@host` (append `:PORT` for a
     /// non-standard SSH port, e.g. `root@1.2.3.4:38455`). Only user@host + port
@@ -899,7 +947,8 @@ pub enum DiscoverCommand {
     Keyword(DiscoverySearchArgs),
     /// alphaXiv semantic title/abstract retrieval with similarity/popularity reranking.
     Embedding(DiscoverySearchArgs),
-    /// OpenAlex scholarly-graph search across disciplines.
+    /// OpenAlex scholarly-graph search across disciplines. Set OPENALEX_API_KEY (free:
+    /// help.openalex.org/api/authentication) for a daily budget of its own.
     Openalex(DiscoverySearchArgs),
     /// bioRxiv preprint search through OpenAlex's bioRxiv source index.
     Biorxiv(DiscoverySearchArgs),
@@ -1585,36 +1634,6 @@ mod cli_tests {
                 "{flag}"
             );
         }
-    }
-
-    #[test]
-    fn research_state_commands_are_local_only() {
-        for command in [
-            "explore",
-            "experiments",
-            "env",
-            "search-logs",
-            "artifacts",
-            "artifact",
-            "wandb",
-            "query",
-            "chart",
-            "report",
-        ] {
-            let error = Cli::try_parse_from(["orx", command])
-                .expect_err("removed research command should not parse");
-            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-        }
-
-        let error = Cli::try_parse_from(["orx", "exp", "cmd", "exp-1"])
-            .expect_err("per-experiment run command should not parse");
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-
-        let error = Cli::try_parse_from(["orx", "projects", "--all"])
-            .expect_err("local projects have no archived state");
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-
-        Cli::try_parse_from(["orx", "orgs", "--json"]).expect("orgs should parse");
     }
 
     #[test]

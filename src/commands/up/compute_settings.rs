@@ -788,6 +788,7 @@ pub(super) async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> Ap
                 None => saved.remote_root,
             },
             keep_remote_runs: req.keep_remote_runs.unwrap_or(saved.keep_remote_runs),
+            ..Default::default()
         };
         crate::jobs::ssh::validate_host_options(&options).map_err(bad_request)?;
         crate::config::set_ssh_host(host, options)?;
@@ -1835,6 +1836,38 @@ mod tests {
 
     fn names(hosts: &[Value]) -> Vec<&str> {
         hosts.iter().map(|h| h["host"].as_str().unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn backend_settings_keep_fields_from_a_newer_orx() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let newer = json!({"kept": [1]});
+        let dir = crate::config::config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in ["k8s.json", "slurm.json", "ray.json"] {
+            std::fs::write(
+                dir.join(file),
+                json!({"fieldFromANewerOrx": newer}).to_string(),
+            )
+            .unwrap();
+        }
+        let empty = || json!({});
+        let _ = set_k8s_settings(Json(serde_json::from_value(empty()).unwrap()))
+            .await
+            .unwrap();
+        let _ = set_slurm_settings(Json(serde_json::from_value(empty()).unwrap()))
+            .await
+            .unwrap();
+        let _ = set_ray_settings(Json(serde_json::from_value(empty()).unwrap()))
+            .await
+            .unwrap();
+        for file in ["k8s.json", "slurm.json", "ray.json"] {
+            let saved: Value =
+                serde_json::from_slice(&std::fs::read(dir.join(file)).unwrap()).unwrap();
+            assert_eq!(saved["fieldFromANewerOrx"], newer, "{file}");
+        }
     }
 
     #[test]

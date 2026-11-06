@@ -44,6 +44,7 @@ import { useOverleafSync } from "../useOverleafSync";
 import {
   documentAssetTarget,
   chatImageTarget,
+  isExplicitNativeTarget,
   citedFilePath,
   isExternalMarkdownTarget,
   markdownTargetUrl,
@@ -289,7 +290,7 @@ export function FileViewer({
   const resolveAssetSrc = useCallback(
     (src: string) => {
       const absolute = chatImageTarget(src);
-      if (absolute?.source === "absolute" && (/^file:/i.test(src) || /^[a-z]:[\\/]/i.test(src))) {
+      if (absolute?.source === "absolute" && isExplicitNativeTarget(src)) {
         return absoluteFileUrl(absolute.path) + absolute.hash;
       }
       if (isExternalMarkdownTarget(src)) return src;
@@ -304,7 +305,7 @@ export function FileViewer({
     (src: string): ImageCandidate[] => {
       const url = resolveAssetSrc(src);
       if (!url) return [];
-      const native = (/^file:/i.test(src) || /^[a-z]:[\\/]/i.test(src)) ? chatImageTarget(src) : null;
+      const native = isExplicitNativeTarget(src) ? chatImageTarget(src) : null;
       const target = native?.source === "absolute" ? native : isExternalMarkdownTarget(src) ? null : resolveMarkdownTarget(parentFolder, src, isAbsolute);
       return [{
         url,
