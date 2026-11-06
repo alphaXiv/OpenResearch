@@ -16,6 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, watch, Mutex};
+use tokio::task::JoinHandle;
 
 use super::{wire, Response};
 use crate::error::{anyhow, Result};
@@ -36,6 +37,7 @@ pub(super) struct Held {
     stderr: Arc<std::sync::Mutex<Vec<u8>>>,
     /// Whether the target, not a jump host, accepted the login.
     authenticated: Arc<AtomicBool>,
+    stderr_reader: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 pub(super) async fn serve(registry: &Registry, operation: &Value, mut stream: TcpStream) {
@@ -142,7 +144,8 @@ async fn start(registry: &Registry, key: &str, operation: &Value) -> Result<Arc<
             .take()
             .ok_or_else(|| anyhow!("Missing ssh stderr"))?;
         let prefix = operation["prefix"].as_str().unwrap_or_default().to_owned();
-        let (_, authenticated, stderr) = crate::engine::transport::read_stderr(stderr, prefix);
+        let (stderr_reader, authenticated, stderr) =
+            crate::engine::transport::read_stderr(stderr, prefix);
         Arc::new(Held {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
@@ -152,6 +155,7 @@ async fn start(registry: &Registry, key: &str, operation: &Value) -> Result<Arc<
             detached: std::sync::Mutex::new(Some(Instant::now())),
             stderr,
             authenticated,
+            stderr_reader: std::sync::Mutex::new(Some(stderr_reader)),
         })
     };
     if let Some(previous) = registry.lock().await.insert(key.to_owned(), held.clone()) {
@@ -184,6 +188,10 @@ async fn stop(registry: &Registry, key: &str) -> Result<Value> {
         .await
         .ok()
         .and_then(|status| status.ok()?.code());
+    let reader = held.stderr_reader.lock().unwrap().take();
+    if let Some(reader) = reader {
+        let _ = tokio::time::timeout(Duration::from_secs(1), reader).await;
+    }
     let stderr = String::from_utf8_lossy(&held.stderr.lock().unwrap()).into_owned();
     let authenticated = held.authenticated.load(Ordering::Relaxed);
     Ok(json!({"code": code, "stderr": stderr, "authenticated": authenticated}))
@@ -289,6 +297,7 @@ mod tests {
             detached: std::sync::Mutex::new(None),
             stderr: Arc::default(),
             authenticated: Arc::default(),
+            stderr_reader: std::sync::Mutex::default(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -357,17 +366,11 @@ mod tests {
              exit 97",
         )
         .await;
-        let drained = async {
-            while !held.stderr.lock().unwrap().ends_with(b"end\n") {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(10), drained)
-            .await
-            .unwrap();
+        held.child.lock().await.wait().await.unwrap();
 
         let ended = stop(&registry, "key").await.unwrap();
-        assert!(!ended["stderr"].as_str().unwrap().contains("Authenticated"));
+        let stderr = ended["stderr"].as_str().unwrap();
+        assert!(stderr.ends_with("end\n") && !stderr.contains("Authenticated"));
         assert_eq!(ended["authenticated"], true);
         std::fs::remove_dir_all(dir).unwrap();
     }
