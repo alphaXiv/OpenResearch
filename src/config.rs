@@ -62,11 +62,19 @@ pub fn ncbi_email() -> String {
     std::env::var("NCBI_EMAIL").unwrap_or_else(|_| "orx@alphaxiv.org".to_string())
 }
 
-/// Contact address sent to OpenAlex as `mailto=` to enter its faster "polite
-/// pool". OpenAlex asks API users to identify themselves this way. Override with
-/// `OPENALEX_MAILTO`.
-pub fn openalex_mailto() -> String {
-    std::env::var("OPENALEX_MAILTO").unwrap_or_else(|_| "orx@alphaxiv.org".to_string())
+/// No default: OpenAlex has pooled keyless requests by `mailto`, so a shared
+/// address would put every orx install on one daily budget.
+pub fn openalex_mailto() -> Option<String> {
+    std::env::var("OPENALEX_MAILTO")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// Without a key, OpenAlex shares one daily budget among everyone on the network's IP.
+pub fn openalex_api_key() -> Option<String> {
+    std::env::var("OPENALEX_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
 }
 
 /// Stored credentials: the API base URL and the bearer token.

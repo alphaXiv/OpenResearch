@@ -1575,7 +1575,7 @@ const OPENALEX_SELECT: &str =
 fn openalex_discovery_url(
     base: &str,
     query: &str,
-    mailto: &str,
+    mailto: Option<&str>,
     options: OpenAlexDiscoveryOptions<'_>,
 ) -> Result<reqwest::Url> {
     // Preserve relevance by reranking a broader page instead of sorting the whole corpus by date.
@@ -1589,7 +1589,9 @@ fn openalex_discovery_url(
         let mut params = url.query_pairs_mut();
         params.append_pair("search", query);
         params.append_pair("per_page", &fetch_limit.clamp(1, 200).to_string());
-        params.append_pair("mailto", mailto);
+        if let Some(mailto) = mailto {
+            params.append_pair("mailto", mailto);
+        }
         params.append_pair("select", OPENALEX_SELECT);
 
         let mut filters = Vec::new();
@@ -1607,6 +1609,14 @@ fn openalex_discovery_url(
         }
     }
     Ok(url)
+}
+
+fn openalex_request(url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+    let request = http().get(url);
+    match crate::config::openalex_api_key() {
+        Some(key) => request.bearer_auth(key),
+        None => request,
+    }
 }
 
 fn rerank_openalex_works(works: &mut [OpenAlexWork], prioritize: &str) {
@@ -1632,9 +1642,10 @@ pub async fn discover_openalex(
     options: OpenAlexDiscoveryOptions<'_>,
 ) -> Result<Vec<LitHit>> {
     let base = crate::config::openalex_api_url();
-    let url = openalex_discovery_url(&base, query, &crate::config::openalex_mailto(), options)?;
+    let mailto = crate::config::openalex_mailto();
+    let url = openalex_discovery_url(&base, query, mailto.as_deref(), options)?;
     let res = public_get(
-        || http().get(url.clone()),
+        || openalex_request(url.clone()),
         "OpenAlex",
         |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
     )
@@ -1680,14 +1691,12 @@ fn openalex_selector(input: &str) -> String {
 /// 404 (unknown id) — a normal "not found" answer.
 pub async fn fetch_openalex_work(id_or_doi: &str) -> Result<Option<OpenAlexWork>> {
     let base = crate::config::openalex_api_url();
-    let url = format!(
-        "{}/works/{}?mailto={}",
-        base,
-        openalex_selector(id_or_doi),
-        urlencoding::encode(&crate::config::openalex_mailto()),
-    );
+    let mut url = format!("{}/works/{}", base, openalex_selector(id_or_doi));
+    if let Some(mailto) = crate::config::openalex_mailto() {
+        url.push_str(&format!("?mailto={}", urlencoding::encode(&mailto)));
+    }
     let res = public_get(
-        || http().get(&url),
+        || openalex_request(&url),
         "OpenAlex",
         |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
     )
@@ -2381,7 +2390,7 @@ mod tests {
         let url = openalex_discovery_url(
             "https://api.openalex.org",
             "protein folding & agents",
-            "dev@example.org",
+            Some("dev@example.org"),
             OpenAlexDiscoveryOptions {
                 limit: 15,
                 published_after: Some("2024-01-01"),
@@ -2899,6 +2908,50 @@ mod tests {
     async fn loopback_public_get(url: &str) -> anyhow::Result<reqwest::Response> {
         let client = crate::net::loopback_client().build().unwrap();
         public_get(|| client.get(url), "Test", |e| anyhow::anyhow!("{e}")).await
+    }
+
+    #[tokio::test]
+    async fn openalex_requests_carry_the_api_key_when_set() {
+        if !crate::config::in_test_child(&[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "OPENALEX_MAILTO",
+        ]) {
+            return;
+        }
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "OPENALEX_API_URL",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let read = stream.read(&mut buf).await.unwrap();
+                requests.push(String::from_utf8_lossy(&buf[..read]).to_lowercase());
+                stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+
+        std::env::set_var("OPENALEX_API_KEY", "k123");
+        assert!(super::fetch_openalex_work("W1").await.unwrap().is_none());
+        std::env::remove_var("OPENALEX_API_KEY");
+        assert!(super::fetch_openalex_work("W1").await.unwrap().is_none());
+
+        let requests = server.await.unwrap();
+        assert!(requests[0].contains("authorization: bearer k123"));
+        assert!(!requests[1].contains("authorization"));
+        assert!(!requests[1].contains("mailto"));
     }
 
     #[tokio::test]

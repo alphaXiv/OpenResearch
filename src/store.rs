@@ -2476,7 +2476,7 @@ impl Store {
             .chain(["source-snapshots"])
         {
             let path = self.data_dir.join(name);
-            match std::fs::symlink_metadata(&path) {
+            match std::fs::metadata(&path) {
                 Ok(metadata) if !metadata.file_type().is_dir() => {
                     return Err(anyhow!(
                         "Refusing artifact cleanup through {}",
@@ -8489,6 +8489,27 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn project_deletion_removes_artifacts_through_linked_roots() {
+        let dir = std::env::temp_dir().join(format!("orx-linked-roots-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "project", "run", &"e".repeat(64));
+        let external = dir.join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        for name in ["local-runs", "submission-handles"] {
+            std::fs::rename(dir.join(name), external.join(name)).unwrap();
+            std::os::unix::fs::symlink(external.join(name), dir.join(name)).unwrap();
+        }
+
+        store.delete_local_project("project").unwrap();
+
+        assert!(!external.join("local-runs/run").exists());
+        assert!(!external.join("submission-handles/run.json").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn refused_project_deletion_never_reaches_the_native_purge() {
         let dir = std::env::temp_dir().join(format!("orx-delete-order-{}", uuid::Uuid::new_v4()));
@@ -8539,14 +8560,11 @@ mod tests {
         drop(native_deletion);
         assert!(dir.join("local-runs/run/repo/output").is_file());
 
-        #[cfg(unix)]
-        {
-            std::fs::rename(dir.join("local-runs"), dir.join("outside")).unwrap();
-            std::os::unix::fs::symlink(dir.join("outside"), dir.join("local-runs")).unwrap();
-            refuse("Refusing artifact cleanup");
-            std::fs::remove_file(dir.join("local-runs")).unwrap();
-            std::fs::rename(dir.join("outside"), dir.join("local-runs")).unwrap();
-        }
+        std::fs::rename(dir.join("local-runs"), dir.join("outside")).unwrap();
+        std::fs::write(dir.join("local-runs"), "").unwrap();
+        refuse("Refusing artifact cleanup");
+        std::fs::remove_file(dir.join("local-runs")).unwrap();
+        std::fs::rename(dir.join("outside"), dir.join("local-runs")).unwrap();
 
         assert!(store
             .delete_local_project_with("project", Some(|| Err(anyhow!("purge failed"))))
@@ -8725,26 +8743,6 @@ mod tests {
         store.delete_local_project("project").unwrap();
         assert!(dir.join("repo-project/keep").is_file());
         assert!(!dir.join("local-runs/run").exists());
-        drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_deletion_does_not_follow_symlinked_artifact_roots() {
-        let dir = std::env::temp_dir().join(format!("orx-delete-symlink-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        project_with_run_artifacts(&store, "project", "run", &"d".repeat(64));
-        std::fs::rename(dir.join("local-runs"), dir.join("outside")).unwrap();
-        std::os::unix::fs::symlink(dir.join("outside"), dir.join("local-runs")).unwrap();
-        assert!(store.delete_local_project("project").is_err());
-        assert!(store.get_run("run").unwrap().is_some());
-        assert!(dir.join("outside/run/repo/output").is_file());
-        assert!(dir.join("run-logs/run.log").is_file());
-        assert!(store.cleanup_orphaned_run_artifacts().is_err());
-        std::fs::remove_file(dir.join("local-runs")).unwrap();
-        std::fs::rename(dir.join("outside"), dir.join("local-runs")).unwrap();
-        store.delete_local_project("project").unwrap();
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

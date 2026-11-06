@@ -202,6 +202,9 @@ Idle ─► Connecting ─► Live ─(EOF, 35 s without a reply, clock jump)─
 Backoff: 5 s, 15 s, 60 s, 5 min, 15 min cap, jittered, persisted per root
 ```
 
+Managed rental hosts cap reconnect delays at 60 seconds, including jitter, so
+an outage leaves repeated collection attempts within the rental's grace.
+
 **After an authentication failure, no automatic login.** Repeated logins lock
 accounts and trip MFA, so the breaker is one per SSH alias, shared by all its
 roots, and only the user's Connect closes it.
