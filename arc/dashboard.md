@@ -1,160 +1,91 @@
 # The dashboard
 
-`orx up` is the long-lived process behind the dashboard: a web server on the
-user's own machine with a React app in front of it. It has no accounts and no
-login, so its safety rests entirely on who can reach it. It is also one of
-many writers: CLI commands, agents and supervisors change the same store
-while it runs, and the page has to show their changes as they happen.
+`orx up` is the long-lived web server behind the dashboard, with a React app in front of it. The app's API has no accounts and no login, so its safety rests on who can reach it. The server is also one writer among many: CLI commands, agents and supervisors change the same store while it runs, and the page has to show their changes as they happen.
 
-## One server on loopback
+## What `orx up` hosts
 
-`orx up` binds `127.0.0.1` on a fixed default port and serves three things:
-the built app, a JSON API under `/api`, and a server-sent event stream. While
-it runs it owns the work that needs a resident process:
+`orx up` (`src/commands/up.rs`, `src/commands/up/`) binds `127.0.0.1` on a fixed default port, one server per data directory ([storage](storage.md)). It serves the built app, a JSON API under `/api` and an event stream, and owns the work that needs a resident process:
 
-- the chat host: agent processes, turns, queues and pending approvals
-  ([agents](agents.md));
-- terminals, each a PTY relayed over a websocket;
-- file serving for the editor, previews and artifacts, with byte ranges;
-- the run engine: watching, cancelling and reporting runs, and launching new
-  runs when enabled ([experiments](experiments.md));
-- background passes: agent detection and model catalogs, sweeping remote run
-  directories and orphaned files, indexing older chat messages;
-- remote workspace gateways ([remote](remote.md)).
+- the chat host: agents, turns, queues, pending approvals ([agents](agents.md));
+- terminals, each a PTY over a websocket;
+- file serving for the editor, previews and artifacts;
+- the run engine ([experiments](experiments.md));
+- remote workspace gateways ([remote](remote.md));
+- background passes: agent detection, model catalogs, cleanup sweeps, indexing older chats.
 
-The jobs themselves are not. Each run's wrapper is its own process on the
-machine that runs it, so a dashboard can stop or restart without losing a
-job; the engine reconnects and catches up from the wrapper's receipts.
+The same server runs inside the desktop app, headless for the CLI, and as a persistent remote host.
+
+**It does not host the jobs.** Each run's wrapper is its own process, so a dashboard can stop or restart without losing a job ([experiments](experiments.md)).
 
 ## The loopback guard
 
-Binding to loopback keeps other machines out, but not web pages. Any site the
-user visits can make the browser send requests to `127.0.0.1`. Every request
-passes one guard:
+Loopback keeps other machines out, but not pages open in the user's browser. **Every request passes one guard** (`src/commands/up_remote.rs`):
 
-- **Host** must name a loopback address or `localhost`, which defeats DNS
-  rebinding.
-- A request that changes state, or opens a websocket, is refused when
-  `Sec-Fetch-Site` says it is cross-site, and its `Origin`, when present,
-  must be the server's own. A websocket must send an `Origin`.
-- Responses carry headers that forbid framing, MIME sniffing and referrers.
+- **Host** must name a loopback address or `localhost`, which defeats DNS rebinding.
+- **Any method but GET, HEAD or OPTIONS, and any websocket,** is refused when `Sec-Fetch-Site` says `cross-site`, and its `Origin`, when present, must be the server's own. A websocket must send an `Origin`.
+- **Responses** forbid MIME sniffing and referrers. HTML also forbids framing; other types stay frameable for same-origin file previews.
 
-A request without an `Origin` is a CLI or another non-browser client on the
-same machine, which already has the user's privileges. The only extra origin
-the guard accepts is the development UI server's, named by an environment
-variable and itself required to be a loopback HTTP origin. Tool approvals
-from an agent's permission bridge also require the token that bridge was
-spawned with. A persistent remote host requires a bearer token on every
-request, and gives its own agent subprocesses a token of their own.
+So GET handlers must not change state. No route sends CORS headers, so a cross-site page can fire a read but never see the answer. A request without an `Origin` is a non-browser client on the same machine, which already has the user's privileges.
+
+`orx up --host 0.0.0.0` opts into a trusted private network, such as a headless workstation driven from a laptop; anyone on that network can use the dashboard. orx's own clients still use `127.0.0.1`. The guard then also refuses any peer outside the loopback, RFC 1918, link-local and CGNAT IPv4 ranges, and accepts a Host only when it is `localhost` or a literal address in those ranges, so DNS rebinding still fails.
+
+The only extra origin accepted is the dev UI server's, `ORX_UI_DEV_ORIGIN`, which must be loopback HTTP; a remote workspace's own gateway port refuses it. Terminal websockets re-check same-origin in the handler with no allowance.
+
+Credentials stack on top: `/api/internal/` needs a token issued to that agent ([agents](agents.md)), `/api/v2/` the server's bearer from its owner-only descriptor, apart from the hello challenge ([experiments](experiments.md)), and every other path on a persistent remote host a live attachment's bearer, apart from its own agents' run callbacks ([remote](remote.md)).
+
+**Project files are untrusted content on the dashboard's origin.** `src/commands/file_serve.rs` gives SVG, HTML and XML a sandboxing CSP, so agent-written markup cannot script the API; new routes serving project bytes go through it.
 
 ## API conventions
 
-Errors are JSON with a message the UI can show. The store is synchronous
-SQLite, so handlers move file walks, Git, archive building and other slow
-work onto blocking threads and keep the async runtime responsive. Work that
-another dashboard or a CLI command could race is coordinated through leases
-and claims in the store, not only in-memory locks, because they may share the
-database.
+Errors are JSON with a message the UI can show. The store is synchronous SQLite, so handlers move file walks, Git, archive building and other slow work onto blocking threads. Work a CLI command could race is coordinated through leases and claims in the store ([storage](storage.md)), because an in-memory lock stops at the process boundary.
 
 ## Live state
 
-```text
-store + run logs ─► per-subscriber diff, every 500 ms ─┐
-                                                       ├─► one SSE stream ─► page
-chat host ─► broadcast as it happens ──────────────────┘
-```
+The visible workspace opens one event stream, `/api/events`, which is also the page's only evidence that the server is up (`ui/src/events.ts`). Three sources feed it:
 
-The visible workspace opens one event stream. Hidden workspaces retain their
-caches; returning paints those caches immediately and repairs missed changes
-when the stream opens again. Two sources feed the stream:
+| Source | Carries | If a subscriber falls behind |
+| --- | --- | --- |
+| per-subscriber diff of the store and run logs, on a short interval | projects, experiments, artifact pings, log bytes, update status | a small channel backpressures the loop; log bytes per tick are capped |
+| engine event bus | run and host changes, engine log growth | re-reads recent runs from the store |
+| chat host broadcast | chat state, harness sign-in and catalogs, data-directory moves, Overleaf sync | the server sends `resync.required` |
 
-- **A diff loop over the store and the run logs.** Other processes write the
-  store, so polling it is the only way to see their changes. Each subscriber
-  keeps a cursor of what it has seen, and the first pass sends everything, so
-  a fresh page needs no separate snapshot. Events carry whole entities:
-  projects, experiments, runs, run-log bytes from the last offset, artifact
-  changes, update status, data-directory move progress. Log bytes per tick
-  are capped, and the channel is small, so a slow page backpressures the loop
-  instead of growing a queue.
-- **Broadcasts from the chat host.** Chat messages, sessions, queues and busy
-  state go out the moment they change. If a subscriber falls behind and the
-  broadcast drops events, the server tells the page to resync.
+**Only the diff sees other processes' writes**, so polling the store stays necessary. Events patch queries already loaded; the baseline comes from the queries themselves, and chat events are edge-only, with no replay on connect.
+
+**A gap is repaired by refetching.** Reopening a stream, after a drop or a hidden workspace, and `resync.required` both invalidate the live query families (`ui/src/queries/invalidation.ts`). A query that renders live data belongs in that list.
 
 ## Serving the app
 
-A release binary embeds the built app, so the binary is the whole product; a
-release build fails if the app was not built first. The HTML entry point is
-always revalidated, and the hashed assets are cached forever. Every non-API
-path falls back to the entry point for client-side routing.
+A release binary embeds the built app, so the binary is the whole product; a release build fails if the app was not built first.
 
-In development, Vite serves the app and proxies the API and websockets to a
-backend. The backend accepts the dev server's origin through the allowance
-above, and the proxy presents same-origin browser requests to the backend as
-coming from the backend's own origin.
+In development, Vite serves the app and proxies to a backend (`ui/vite.config.ts`), presenting same-origin browser requests as the backend's own origin so they pass the guard and the terminal check.
 
 ## The app
 
-The dashboard is a React app with file-based routes (TanStack Router) and
-**TanStack Query as the single store of server state**. Components read
-through queries and change things through mutations; nothing else caches what
-the server knows.
+The dashboard is a React app with file-based routes (TanStack Router, `ui/src/routes/`) and **TanStack Query as the single store of server state** (`ui/src/queries/`). Components read through queries and write through the workspace's API (`ui/src/api.ts`). Only the log viewer's window (`ui/src/logWindow.ts`) and layout's write-behind copy hold server data outside it.
 
-- **Events update the cache.** Entity events are written into the matching
-  queries, keeping whichever copy has the newer `updatedAt`. Other events
-  invalidate families of queries. A query keyed by a commit hash is immutable
-  and never invalidated.
-- **Workspaces scope every key.** Each machine owns a QueryClient,
-  immutable API destination and lifetime-scoped keys. Switching preserves its
-  cache, route, drafts and mounted screen, so returning to a connected machine
-  paints immediately. Reads, mutations, event streams and resource URLs stay
-  bound to their originating machine even after a switch. Replacing the data
-  directory disposes that lifetime and aborts its requests.
-- **Layout is server state too.** Each project remembers its tabs per chat,
-  the active pane, history, scroll and expanded folders; the app remembers
-  the last location, panel sizes and the sidebar. Both are saved to the store
-  in the background and flushed when the page hides, so the browser and the
-  desktop app reopen where the user left off. Opening a project or the app
-  resumes the last location that still exists, and falls back to the newest
-  chat otherwise.
+- **Events update the cache.** Entity events are written into matching queries, keeping the newer `updatedAt`, and a read that overlapped a live event is repaired instead of overwriting it (`ui/src/queries/live.ts`). Other events invalidate query families. A query keyed by a commit hash is immutable and never invalidated.
+- **Writes invalidate by URL.** A successful write invalidates the families mapped to its path in `ui/src/queries/invalidation.ts`; a new write route that changes rendered data needs an entry there or an event.
+- **A workspace is one machine** (`ui/src/workspace.tsx`, `ui/src/Machines.tsx`): its own QueryClient, immutable API base path, lifetime-scoped keys and memory-history router. A remote machine's requests go through `/_orx/workspaces/<session>/` on the same origin ([remote](remote.md)). The visible machine mirrors its location to the browser URL, with `?machine=<session>` naming a remote.
+- **A hidden machine** keeps its cache, route and drafts and closes its stream, so returning paints immediately and then repairs. Reads, writes, streams and resource URLs stay bound to the machine that made them. Replacing the data directory, or a remote session resolving to a different database, disposes the lifetime and aborts its requests.
+- **Layout is server state too.** Per-project tabs and the app's last location and panels live in the store (`ui/src/workspaceState.ts`, `src/workspace_state.rs`), saved in the background and flushed when the page hides, so the browser and the desktop app reopen where the user left off. Resuming checks that the location still exists (`ui/src/routeResume.ts`).
+- **Chat search** reads the index on the workspace's own machine only while open, and pages results ([storage](storage.md)).
 
-Chat search opens above the transcript with chat, project and workspace scopes.
-Its field stays at the top right until closed. Selecting a result collapses
-the scopes and list; navigation shortcuts keep working while reading the chat.
-It reads this machine's index only while open, cancels superseded reads, and
-pages a virtual result list. A result selects its branch and opens the matching
-work, subagent transcript or plan. Transcript rows retain disclosure choices,
-active text selections and unfinished forms across virtualization; ordinary
-clicks do not keep rows mounted. Search measures its destination before showing
-it and holds the text position through later layout changes until the reader
-scrolls. Streaming follows the bottom only while the reader stays pinned there.
+The desktop app's window adds what only it can do ([desktop](desktop.md)).
 
-## Design system and text
+## Design tokens and text
 
-Colors come from theme tokens defined for light and dark themes; the theme
-follows the system unless the user picks one. A lint rejects raw colors and
-arbitrary color or text-size values outside the theme, so a new component
-cannot drift from the palette. All visible text goes through Paraglide
-message catalogs, and a lint requires every locale to carry exactly the base
-locale's keys, each non-empty. Interpolated values are wrapped in Unicode
-isolates so a name or number cannot reorder the sentence around it.
-
-## Inside the desktop app
-
-The page detects the desktop app and adds what only it has: a native menu
-whose structure the page defines and sends to the window, zoom controls,
-custom window controls where the platform draws none, and navigation for
-`openresearch:` links. The window's side belongs to [desktop](desktop.md).
+`ui/scripts/check-styles.mjs` and `ui/scripts/check-i18n.mjs` enforce the token and catalog rules in `AGENTS.md`; every locale carries the base locale's keys with the same placeholders. No lint covers interpolation: call sites wrap values with the isolate helpers in `ui/src/i18n.ts`, so a name or number cannot reorder the sentence around it.
 
 ## Restarting into an update
 
-When an update lands on disk underneath a running `orx up`, the server
-relaunches into the new binary once doing so interrupts nothing. In-flight
-work is every API request whose response is still being sent, every open
-terminal, a data-directory move, a connected remote workspace, and any chat
-turn that is running, queued or waiting on the user. The event stream does not
-count, because a page keeps it open for as long as the page is open.
+**A server relaunches into a new binary only when that interrupts nothing** (`src/commands/up.rs`). Without a restart, a long-lived `orx up` keeps launching runs on old code.
 
-To restart, the server first stops admitting new requests (they wait), then
-checks that nothing is in flight. If something is, admission reopens and it
-tries again later. Once it commits, admission never reopens, and no new turn
-starts, so nothing begins on old code that a new process would have to adopt.
+A terminal or headless `orx up` with automatic updates tries by itself once a deferred update is due or a newer binary is on disk ([desktop](desktop.md)). The desktop app's server restarts only when the page asks through `POST /api/update/restart`, and a busy server refuses. A persistent remote host does neither.
+
+Blocking work is any API request whose response is still being sent, open terminal, data-directory move, remote session not disconnected or awaiting an install, and chat turn running, queued or waiting on the user. Event streams and the CLI's `hello` neither count nor wait, because a page holds its stream for as long as it is open.
+
+1. Stop admitting new requests; they wait.
+2. If blocking work remains, reopen admission and try again later.
+3. Commit. Admission never reopens and no new turn starts, so nothing begins on old code that a new process would have to adopt.
+4. Stop agents and gateways, release the install lock, and install any deferred update. A failed install relaunches on the current version and backs off instead of looping.
+5. Relaunch. The page polls update status until `instance` changes, then reloads.

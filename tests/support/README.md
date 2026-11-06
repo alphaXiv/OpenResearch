@@ -75,4 +75,4 @@ The auth_log format is checked against upstream
 
 `host_binaries()` honors `CARGO_TARGET_DIR` for its nested host build; without it,
 it uses `target`. The nested build lives in its `test-hooks` subdirectory.
-The opt-in seeded chaos tier and sage release gate are documented in [runner-stress](../../docs/runner-stress.md).
+The opt-in seeded chaos tier is documented in [its module](../../src/engine/runtime/chaos.rs).

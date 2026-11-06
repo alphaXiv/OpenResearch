@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::io::IsTerminal as _;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +35,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 
 use crate::commands::remote_host::{DashboardLock, HostDescriptor, RemoteAuth};
-use crate::commands::up_remote::RemoteSessionStatus;
+use crate::commands::up_remote::{self, RemoteSessionStatus};
 use crate::error::{anyhow, Result};
 use crate::local;
 use crate::local::autonomy::Autonomy;
@@ -57,11 +58,27 @@ mod search;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    // orx's own clients reach the server on 127.0.0.1, which both of these binds serve.
+    let reach = match args.host {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) => up_remote::Reach::Loopback,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED) => up_remote::Reach::Lan,
+        _ => {
+            return Err(anyhow!(
+                "orx up: --host takes 127.0.0.1, or 0.0.0.0 to serve your private network"
+            ))
+        }
+    };
     if !args.desktop_app && !args.remote_host && !args.headless {
         let data_dir = crate::commands::remote_host::canonical_data_dir()?;
         if let Some(server) =
             crate::commands::remote_host::ServerDescriptor::live(&data_dir).await?
         {
+            if let up_remote::Reach::Lan = reach {
+                return Err(anyhow!(
+                    "orx up: already running on port {}; stop it to restart with --host",
+                    server.port
+                ));
+            }
             let url = format!("http://127.0.0.1:{}", server.port);
             eprintln!("orx up: dashboard on {url}");
             if !args.no_browser {
@@ -92,9 +109,15 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let err = updates::relaunch(port);
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+    let listener = tokio::net::TcpListener::bind((args.host, port))
         .await
-        .map_err(|error| anyhow!("Could not bind 127.0.0.1:{}: {}", port, error))?;
+        .map_err(|error| {
+            anyhow!(
+                "Could not bind {}: {}",
+                SocketAddr::new(args.host, port),
+                error
+            )
+        })?;
     let actual_port = listener.local_addr()?.port();
     // Open early so the schema exists before any request or agent spawn.
     {
@@ -246,7 +269,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
         live_events.emit_event(name, data)
     }));
 
-    let app = router(state.clone(), remote_auth.clone());
+    let app = router(state.clone(), remote_auth.clone(), reach)
+        .into_make_service_with_connect_info::<SocketAddr>();
     let url = format!("http://127.0.0.1:{actual_port}");
     crate::commands::remote_host::ServerDescriptor {
         instance,
@@ -301,6 +325,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // In an SSH session the loopback URL only works on the remote box and there's
     // no local browser to open — print forwarding guidance instead of the bare
     // URL, and skip the (futile) browser-open. Otherwise, today's local flow.
+    if let up_remote::Reach::Lan = reach {
+        eprintln!(
+            "orx up: serving your private network on port {actual_port}; it has no login, so anyone there can use it"
+        );
+    }
     if let Some(session) = crate::remote::detect_ssh_session() {
         eprint!("{}", session.instructions(actual_port));
     } else {
@@ -615,7 +644,7 @@ fn launch_admission(
     })
 }
 
-fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
+fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Reach) -> Router {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/search", get(search::search))
@@ -985,14 +1014,15 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         // above the client-side per-file limit so a full message still fits.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state);
-    server_router(app.merge(api_v2::router()), remote_auth)
+    server_router(app.merge(api_v2::router()), remote_auth, reach)
 }
 
-fn server_router(app: Router, remote_auth: Option<RemoteAuth>) -> Router {
+fn server_router(app: Router, remote_auth: Option<RemoteAuth>, reach: up_remote::Reach) -> Router {
     let app = app
         .layer(middleware::from_fn(track_active))
-        .layer(middleware::from_fn(
-            crate::commands::up_remote::loopback_guard,
+        .layer(middleware::from_fn_with_state(
+            reach,
+            up_remote::dashboard_guard,
         ));
     match remote_auth {
         Some(auth) => app.layer(middleware::from_fn_with_state(auth, require_remote_auth)),
@@ -11019,7 +11049,13 @@ mod tests {
     async fn serve(app: Router) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await });
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+        });
         address
     }
 
@@ -11045,8 +11081,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_lan_dashboard_answers_private_hosts_and_peers_only() {
+        let app = router(test_state(), None, up_remote::Reach::Lan);
+        let address = serve(app.clone()).await;
+        let cases: &[(&str, &[&str], u16)] = &[
+            ("GET /api/health", &["Host: 192.168.1.5:4791"], 200),
+            ("GET /api/health", &["Host: 100.92.54.38:4791"], 200),
+            ("GET /api/health", &["Host: 8.8.8.8:4791"], 400),
+            ("GET /api/health", &["Host: workstation.local:4791"], 400),
+            (
+                "POST /api/health",
+                &["Host: 192.168.1.5:4791", "Origin: http://192.168.1.5:4791"],
+                405,
+            ),
+            (
+                "POST /api/health",
+                &["Host: 192.168.1.5:4791", "Origin: http://attacker.example"],
+                403,
+            ),
+        ];
+        for (request, headers, expected) in cases {
+            assert_eq!(
+                status(address, request, headers).await,
+                *expected,
+                "{request} {headers:?}"
+            );
+        }
+
+        let mut public_peer = axum::http::Request::get("/api/health")
+            .header(header::HOST, "192.168.1.5:4791")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        public_peer
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [8, 8, 8, 8],
+                50000,
+            ))));
+        let response = tower::ServiceExt::oneshot(app, public_peer).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn the_dashboard_answers_only_its_own_loopback_pages() {
-        let address = serve(router(test_state(), None)).await;
+        let address = serve(router(test_state(), None, up_remote::Reach::Loopback)).await;
         let host = format!("Host: {address}");
         let origin = format!("Origin: http://{address}");
         let websocket = ["Connection: Upgrade", "Upgrade: websocket"];
@@ -11125,7 +11203,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_route_answers_a_rebinding_host_or_a_cross_site_write() {
-        let address = serve(router(test_state(), None)).await;
+        let address = serve(router(test_state(), None, up_remote::Reach::Loopback)).await;
         let host = format!("Host: {address}");
         let routes = [
             "/",
@@ -11172,7 +11250,7 @@ mod tests {
         if !crate::config::in_test_child(&["ORX_UI_DEV_ORIGIN"]) {
             return;
         }
-        let address = serve(router(test_state(), None)).await;
+        let address = serve(router(test_state(), None, up_remote::Reach::Loopback)).await;
         let host = format!("Host: {address}");
         for (dev_origin, expected) in [
             ("http://127.0.0.1:5173", 405),
@@ -11196,7 +11274,12 @@ mod tests {
         const CALLBACK: &str = "abcdefghijklmnopqrstuvwxyz-callback";
         let auth = RemoteAuth::new(CALLBACK);
         auth.register(ATTACHMENT);
-        let address = serve(router(test_state(), Some(auth.clone()))).await;
+        let address = serve(router(
+            test_state(),
+            Some(auth.clone()),
+            up_remote::Reach::Loopback,
+        ))
+        .await;
         let host = format!("Host: {address}");
         let attachment = format!("Authorization: Bearer {ATTACHMENT}");
         let callback = format!("Authorization: Bearer {CALLBACK}");

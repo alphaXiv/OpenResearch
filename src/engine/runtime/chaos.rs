@@ -1,3 +1,18 @@
+//! Seeded chaos over real SSH: the production `Runtime`, transport and `orx-host` run through
+//! network, sshd, engine-kill and clock faults while payloads crash, daemonize and flood logs.
+//! Every second asserts that phases only advance, a run starts once and sends one terminal
+//! notice, an auth failure brings no further login, and kept logs match the remote bytes.
+//!
+//! Opt-in; the ordinary suite compiles it and leaves it ignored:
+//!
+//! ```sh
+//! env -u CLAUDE_CONFIG_DIR -u CODEX_HOME cargo test --locked --bin orx -- --ignored chaos --nocapture
+//! ```
+//!
+//! `CHAOS_DURATION` (seconds of faults) and `CHAOS_RUNS` scale it. `CHAOS_SEED` takes a `u64`,
+//! or the `seed:seconds:runs` value a run prints, which overrides both and replays the launch
+//! scripts, fault order and clock jumps; OS scheduling stays real.
+
 use super::*;
 use crate::commands::up::api_v2::KeptRange;
 use crate::engine::transport::Status;

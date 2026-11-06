@@ -760,9 +760,20 @@ pub struct SuperviseArgs {
 
 #[derive(Args, Debug)]
 pub struct UpArgs {
-    /// Port to bind on 127.0.0.1. With `--remote`, the local presentation port.
+    /// Port to listen on. With `--remote`, the local presentation port.
     #[arg(long, default_value_t = 4791)]
     pub port: u16,
+    /// Address to listen on: `127.0.0.1`, or `0.0.0.0` to also serve devices on
+    /// your private network. The dashboard has no login, so anyone who can
+    /// reach it controls your agents and terminals; only do this on a network
+    /// you trust. Public peers, public addresses and hostnames stay refused.
+    #[arg(
+        long,
+        default_value = "127.0.0.1",
+        value_name = "ADDR",
+        conflicts_with_all = ["remote", "remote_host"]
+    )]
+    pub host: std::net::IpAddr,
     /// Run `orx up` on a remote box over SSH and forward it here. The value is
     /// an `~/.ssh/config` host alias, or `user@host` (append `:PORT` for a
     /// non-standard SSH port, e.g. `root@1.2.3.4:38455`). Only user@host + port
