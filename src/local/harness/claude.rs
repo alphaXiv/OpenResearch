@@ -20,7 +20,7 @@
 //! `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` remain credential fallbacks.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -1047,7 +1047,7 @@ impl Harness for ClaudeCode {
     }
 }
 
-/// The `skills/` dir of every plugin installed in Claude Code, labeled with the
+/// The skill roots of every plugin installed in Claude Code, labeled with the
 /// plugin's own name. Keyed off `installed_plugins.json`, whose `installPath` is
 /// the only thing that knows whether an install resolved to the version cache or
 /// a marketplace checkout — and which of the marketplace's plugins are actually
@@ -1075,19 +1075,91 @@ fn installed_plugin_skills_dirs(config_home: &Path) -> Vec<(String, PathBuf)> {
             let Some(path) = install.get("installPath").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let dir = PathBuf::from(path).join("skills");
+            let root = PathBuf::from(path);
             // Only absolute installs; a relative path would resolve against the
             // server's working dir, which is not what the manifest meant.
-            if dir.is_absolute()
-                && dir.is_dir()
-                && !out.iter().any(|(_, existing)| *existing == dir)
-            {
-                out.push((label.to_string(), dir));
+            if !root.is_absolute() {
+                continue;
+            }
+            for dir in plugin_skill_roots(&root) {
+                if !out.iter().any(|(_, existing)| *existing == dir) {
+                    out.push((label.to_string(), dir));
+                }
             }
         }
     }
     out.sort();
     out
+}
+
+/// Where Claude Code loads one plugin's skills from: `skills/`, plus each
+/// directory the manifest's `skills` field adds (a folder of skills or a single
+/// skill folder), or the root itself when it is a lone skill.
+fn plugin_skill_roots(root: &Path) -> Vec<PathBuf> {
+    let Ok(real_root) = root.canonicalize() else {
+        return Vec::new();
+    };
+    let manifest = root.join(".claude-plugin/plugin.json");
+    let declared = if manifest.exists() {
+        // Claude Code refuses the whole plugin over a manifest it can't parse.
+        let paths = std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|manifest| manifest_skill_paths(&manifest));
+        let Some(paths) = paths else {
+            return Vec::new();
+        };
+        paths
+    } else {
+        Vec::new()
+    };
+    if declared.is_empty() && !root.join("skills").is_dir() && root.join("SKILL.md").is_file() {
+        return vec![root.to_path_buf()];
+    }
+    let mut dirs = Vec::new();
+    // Claude Code confines manifest paths only; it follows a `skills/` symlink anywhere.
+    let skills = root.join("skills");
+    if skills.is_dir() {
+        dirs.push(skills);
+    }
+    for dir in declared.into_iter().map(|path| root.join(path)) {
+        // A missing path, or a symlink out of the plugin, is skipped alone.
+        let inside = dir
+            .canonicalize()
+            .is_ok_and(|real| real.starts_with(&real_root));
+        if inside && dir.is_dir() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// The manifest's `skills` paths, normalized, or `None` when Claude Code would
+/// reject the plugin: an entry that isn't a string, isn't `./`-relative, or
+/// leaves the root.
+fn manifest_skill_paths(manifest: &Value) -> Option<Vec<PathBuf>> {
+    let paths = match manifest.get("skills") {
+        None => return Some(Vec::new()),
+        Some(Value::String(path)) => vec![path.as_str()],
+        Some(Value::Array(paths)) => paths.iter().map(Value::as_str).collect::<Option<_>>()?,
+        Some(_) => return None,
+    };
+    paths
+        .into_iter()
+        .map(|path| {
+            let mut normal = PathBuf::new();
+            let inside = Path::new(path).components().all(|part| match part {
+                Component::CurDir => true,
+                Component::Normal(part) => {
+                    normal.push(part);
+                    true
+                }
+                Component::ParentDir => normal.pop(),
+                _ => false,
+            });
+            ((path == "." || path.starts_with("./")) && inside).then_some(normal)
+        })
+        .collect()
 }
 
 /// Internal policy → Claude Code `--permission-mode` value. Each provider-owned
@@ -2676,6 +2748,94 @@ mod tests {
         );
         // No manifest at all is no plugins, not an error.
         assert!(installed_plugin_skills_dirs(&home.join("nope")).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The manifest's `skills` paths add to `skills/`. Each names a folder of
+    /// skills or one skill folder. A missing path or a symlink out of the plugin
+    /// is skipped, while a manifest Claude Code refuses hides the whole plugin.
+    #[test]
+    fn plugin_skills_dirs_follow_the_plugin_manifest() {
+        let home = std::env::temp_dir().join(format!("orx-plugins-test-{}", uuid::Uuid::new_v4()));
+        let cache = home.join("cache/market");
+        let skill = "---\nname: deep-research\ndescription: d\n---\n";
+        let plugins = [
+            (
+                "research",
+                Some(
+                    r#"{"skills":["./deep-research","./extra/","./missing","./extra/../extra","./linked"]}"#,
+                ),
+            ),
+            ("single", Some(r#"{"skills":"./"}"#)),
+            ("lone", None),
+            (
+                "escaping",
+                Some(r#"{"skills":["./deep-research","../../outside"]}"#),
+            ),
+            ("unprefixed", Some(r#"{"skills":"deep-research"}"#)),
+            ("typed", Some(r#"{"skills":["./deep-research",7]}"#)),
+            ("broken", Some(r#"{"skills":["#)),
+        ];
+        let mut installed = serde_json::Map::new();
+        for (name, manifest) in plugins {
+            let root = cache.join(name).join("1.0.0");
+            std::fs::create_dir_all(root.join("skills/review")).expect("mkdir");
+            std::fs::create_dir_all(root.join("extra/lint")).expect("mkdir");
+            std::fs::create_dir_all(root.join("deep-research")).expect("mkdir");
+            std::fs::write(root.join("deep-research/SKILL.md"), skill).expect("write");
+            if let Some(manifest) = manifest {
+                std::fs::create_dir_all(root.join(".claude-plugin")).expect("mkdir");
+                std::fs::write(root.join(".claude-plugin/plugin.json"), manifest).expect("write");
+            }
+            installed.insert(
+                format!("{name}@market"),
+                serde_json::json!([{"installPath": root.to_string_lossy()}]),
+            );
+        }
+        // A lone skill: no `skills/` and no manifest paths, so the root is the skill.
+        let lone = cache.join("lone/1.0.0");
+        std::fs::remove_dir_all(lone.join("skills")).expect("rm");
+        std::fs::write(lone.join("SKILL.md"), skill).expect("write");
+        let single = cache.join("single/1.0.0");
+        std::fs::write(single.join("SKILL.md"), skill).expect("write");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&home, cache.join("research/1.0.0/linked")).expect("symlink");
+        std::fs::create_dir_all(home.join("plugins")).expect("mkdir");
+        std::fs::write(
+            home.join("plugins/installed_plugins.json"),
+            serde_json::json!({"version": 2, "plugins": installed}).to_string(),
+        )
+        .expect("write");
+
+        let root = |name: &str| cache.join(name).join("1.0.0");
+        assert_eq!(
+            installed_plugin_skills_dirs(&home),
+            vec![
+                ("lone".to_string(), root("lone")),
+                (
+                    "research".to_string(),
+                    root("research").join("deep-research")
+                ),
+                ("research".to_string(), root("research").join("extra")),
+                ("research".to_string(), root("research").join("skills")),
+                ("single".to_string(), root("single")),
+                ("single".to_string(), root("single").join("skills")),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_skills_symlink_may_leave_the_plugin() {
+        let home = std::env::temp_dir().join(format!("orx-plugins-test-{}", uuid::Uuid::new_v4()));
+        let root = home.join("plugin");
+        let shared = home.join("shared");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::create_dir_all(&shared).expect("mkdir");
+        std::os::unix::fs::symlink(&shared, root.join("skills")).expect("symlink");
+
+        assert_eq!(plugin_skill_roots(&root), vec![root.join("skills")]);
         let _ = std::fs::remove_dir_all(&home);
     }
 

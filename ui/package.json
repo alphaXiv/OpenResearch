@@ -12,7 +12,8 @@
     "lint:i18n": "node scripts/check-i18n.mjs",
     "lint:styles": "node scripts/check-styles.mjs",
     "test": "paraglide-js compile --silent --outdir node_modules/.cache/paraglide && node --import ./tests/register.mjs --test tests/*.test.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "node scripts/link-skills.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",

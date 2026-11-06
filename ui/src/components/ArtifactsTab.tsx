@@ -27,7 +27,7 @@ import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
-import { chatImageTarget, isExplicitNativeTarget, isNetworkImage, nativeMarkdownPath, rehypeNetworkImages } from "../markdownTarget";
+import { chatImageTarget, isExplicitNativeTarget, isExternalMarkdownTarget, isNetworkImage, nativeMarkdownPath, rehypeNetworkImages, resolveMarkdownTarget } from "../markdownTarget";
 import { useFileVersion } from "../useFileVersion";
 import { ImageResolverContext, MermaidBlock, mdCodeComponents, remarkMathOptions } from "./Md";
 import {
@@ -39,46 +39,6 @@ import {
   type FileContextMenuTarget,
 } from "./FileTreeActions";
 import { IconButton, IconButtonLink, LoadingRow, showAlert, Spinner } from "./ui";
-
-/** Any href with a URI scheme (https:, mailto:, data:, …) or a
- * protocol-relative // — i.e. not an artifact-relative path to resolve. */
-function isExternalSrc(src: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//");
-}
-
-/** Resolve a Markdown target within the artifacts root. URL suffixes stay
- * outside the encoded filesystem path, and upward escapes are rejected. */
-function artifactTarget(projectId: string, folder: string, src: string, artifactUrl: (projectId: string, path: string) => string) {
-  const hashAt = src.indexOf("#");
-  const beforeHash = hashAt === -1 ? src : src.slice(0, hashAt);
-  const hash = hashAt === -1 ? "" : src.slice(hashAt);
-  const queryAt = beforeHash.indexOf("?");
-  const pathname = queryAt === -1 ? beforeHash : beforeHash.slice(0, queryAt);
-  const query = queryAt === -1 ? "" : beforeHash.slice(queryAt + 1);
-  const parts = pathname.startsWith("/")
-    ? []
-    : folder.split("/").filter((part) => part.length > 0);
-
-  for (const part of pathname.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (parts.length === 0) return null;
-      parts.pop();
-    } else {
-      parts.push(part);
-    }
-  }
-
-  const path = parts.join("/");
-  if (!path) return null;
-  const queryParams = new URLSearchParams(query);
-  queryParams.delete("path");
-  const querySuffix = queryParams.toString();
-  return {
-    path,
-    url: `${artifactUrl(projectId, path)}${querySuffix ? `&${querySuffix}` : ""}${hash}`,
-  };
-}
 
 /** Drop a leading YAML frontmatter block so it doesn't render as markdown. */
 function stripFrontmatter(md: string): string {
@@ -141,13 +101,14 @@ function useArtifactMermaidImages(projectId: string, folder: string, entries: Ar
     if (absolute?.source === "absolute" && isExplicitNativeTarget(src)) {
       return [{ url: absoluteFileUrl(absolute.path) + absolute.hash, resolveAsset: () => null }];
     }
-    const target = artifactTarget(projectId, folder, src, artifactUrl);
+    const target = resolveMarkdownTarget(folder, src);
     if (!target) return [];
     const entry = findArtifactEntry(entriesRef.current, target.path);
-    const hashAt = target.url.indexOf("#");
-    const base = hashAt === -1 ? target.url : target.url.slice(0, hashAt);
-    const hash = hashAt === -1 ? "" : target.url.slice(hashAt);
-    const url = entry ? `${base}&v=${entry.modifiedAt}:${entry.size}${hash}` : target.url;
+    const query = new URLSearchParams(target.query);
+    query.delete("path");
+    const suffix = query.toString();
+    const version = entry ? `&v=${entry.modifiedAt}:${entry.size}` : "";
+    const url = `${artifactUrl(projectId, target.path)}${suffix ? `&${suffix}` : ""}${version}${target.hash}`;
     return [{ url, resolveAsset: () => null }];
   }, [absoluteFileUrl, artifactUrl, projectId, folder, entriesVersion]);
 }
@@ -164,15 +125,15 @@ export function ArtifactMarkdown({ projectId, folder, markdown, entries }: {
     const resolve = (src: string) => {
       const absolute = chatImageTarget(src);
       if (absolute?.source === "absolute" && isExplicitNativeTarget(src)) return absoluteFileUrl(absolute.path) + absolute.hash;
-      if (isExternalSrc(src)) return src;
-      const target = artifactTarget(projectId, folder, src, artifactUrl);
+      if (isExternalMarkdownTarget(src)) return src;
+      const target = resolveMarkdownTarget(folder, src);
       if (!target) return null;
+      const query = new URLSearchParams(target.query);
+      query.delete("path");
+      const querySuffix = query.toString();
       const entry = findArtifactEntry(entriesRef.current, target.path);
-      if (!entry) return target.url;
-      const hashAt = target.url.indexOf("#");
-      const base = hashAt === -1 ? target.url : target.url.slice(0, hashAt);
-      const hash = hashAt === -1 ? "" : target.url.slice(hashAt);
-      return `${base}&v=${entry.modifiedAt}:${entry.size}${hash}`;
+      const version = entry ? `&v=${entry.modifiedAt}:${entry.size}` : "";
+      return `${artifactUrl(projectId, target.path)}${querySuffix ? `&${querySuffix}` : ""}${version}${target.hash}`;
     };
     return {
       // In-page anchors (headings, GFM footnotes) keep their hash href

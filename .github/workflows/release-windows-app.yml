@@ -5,7 +5,7 @@
 #
 # Triggers mirror release-macos-app.yml: the automatic workflow_run after a
 # successful dispatched "Release", or a manual dispatch naming the tag. Gated on
-# the repo variable WINDOWS_APP_ENABLED. See docs/windows.md.
+# the repo variable WINDOWS_APP_ENABLED.
 
 name: Attach Windows app to release
 
