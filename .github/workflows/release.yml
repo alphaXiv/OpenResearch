@@ -332,6 +332,7 @@ jobs:
   custom-telemetry-contract:
     needs:
       - plan
+      - build-host
       - build-local-artifacts
       - custom-sign-macos-cli
       - custom-sign-windows-cli
