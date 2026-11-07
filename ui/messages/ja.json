@@ -1604,6 +1604,7 @@
   "settings_openresearch_sign_out_title": "OpenResearchからサインアウトしますか？",
   "settings_openresearch_sign_out_description": "再度ログインするまで、このコンピューターからOpenResearchの計算を開始、再起動、停止できません。実行中の計算と課金は続きます。",
   "account_finish_browser": "ブラウザーでログインを完了してください…",
+  "account_remote_callback_hint": "ブラウザーが 127.0.0.1 にリダイレクトされて接続できない場合は、アドレスまたはコードをここに貼り付けてください。",
   "library_title": "ライブラリ",
   "library_connect": "alphaXivに接続",
   "library_connected": "alphaXivに接続済み",

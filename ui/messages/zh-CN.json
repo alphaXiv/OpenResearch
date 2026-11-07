@@ -1604,6 +1604,7 @@
   "settings_openresearch_sign_out_title": "退出 OpenResearch 登录？",
   "settings_openresearch_sign_out_description": "再次登录前，此电脑无法启动、重启或停止 OpenResearch 计算。正在运行的计算和计费将继续。",
   "account_finish_browser": "请在浏览器中完成登录…",
+  "account_remote_callback_hint": "如果浏览器重定向到 127.0.0.1 且无法连接，请在此粘贴重定向网址或代码：",
   "library_title": "文库",
   "library_connect": "连接 alphaXiv",
   "library_connected": "已连接 alphaXiv",

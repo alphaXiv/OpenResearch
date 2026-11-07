@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { act, createElement, Fragment } from "react";
-import { AccountChip, LoginSession, useSignIn } from "../src/components/AccountChip.tsx";
+import { AccountChip, isRemoteSession, LoginSession, useSignIn } from "../src/components/AccountChip.tsx";
 import { Toaster } from "../src/components/ui/Toast.tsx";
 import { m } from "../src/paraglide/messages.js";
-import { find, render, serve, settle } from "./render.mjs";
+import { find, render, serve, settle, type } from "./render.mjs";
 
 const user = { id: "u", firstName: "Clover", lastName: null, email: "c@example.org", alphaxivUrl: "https://www.alphaxiv.org" };
 const signedIn = (overrides = {}) => ({ loggedIn: true, apiUrl: "https://api.example.org", user: { ...user, ...overrides } });
@@ -194,4 +194,62 @@ test("sign-in opens a placeholder tab in browser when remote and closes it on ca
   assert.deepEqual(opened.mock.calls.map(({ arguments: args }) => args), [["/remote-launch", "_blank"]]);
   await click(find('[role="dialog"] button', m.settings_page_cancel()));
   assert.equal(placeholder.closed, true);
+});
+
+test("isRemoteSession detects loopback vs remote network hostnames", () => {
+  const original = window.location.href;
+  try {
+    for (const host of ["127.0.0.1", "localhost", "[::1]", "0.0.0.0"]) {
+      window.location.href = `http://${host}:4791/`;
+      assert.equal(isRemoteSession({ kind: "local" }), false, host);
+    }
+    for (const host of ["100.65.92.55", "workstation.tailscale.net", "192.168.1.100"]) {
+      window.location.href = `http://${host}:4791/`;
+      assert.equal(isRemoteSession({ kind: "local" }), true, host);
+    }
+    window.location.href = "http://127.0.0.1:4791/";
+    assert.equal(isRemoteSession({ kind: "ssh" }), true);
+  } finally {
+    window.location.href = original;
+  }
+});
+
+test("remote sign-in retains placeholder tab on connection failure so retry can reuse it", async (t) => {
+  const placeholder = { closed: false, close() { this.closed = true; }, location: { replace() {} } };
+  t.mock.method(window, "open", () => placeholder);
+  await chip(signedOut, { runtime: { kind: "ssh", version: "test", buildChannel: "stable", session: { id: "r", host: "gpu", status: "connected" } } });
+  await click(find("button", "Start sign-in"));
+  const socket = await waitForSocket();
+  await control(socket, { type: "error", exitCode: 1 });
+  assert.equal(placeholder.closed, false);
+  await click(find('[role="dialog"] button', m.settings_page_cancel()));
+  assert.equal(placeholder.closed, true);
+});
+
+test("remote LoginSession renders callback fallback and relays callback URL", async () => {
+  const requests = [];
+  serve((path, init) => {
+    requests.push({ path, body: JSON.parse(init.body) });
+    return { ok: true };
+  });
+  const { container } = await render(
+    createElement(LoginSession, { connectOnly: true, remote: true, placeholderWindow: null, onComplete() {}, onError() {} })
+  );
+  const socket = await waitForSocket();
+  const remotePrompt = `Opening your browser to sign in with alphaXiv…\nIf it doesn't open, visit:\n  https://api.alphaxiv.org/auth/oauth2/authorize?client_id=123&state=abc&redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fcallback\n`;
+  await output(socket, remotePrompt);
+  await settle();
+
+  const input = container.querySelector("#callback-input");
+  assert.ok(input);
+  await type(input, "my-auth-code");
+  const submit = find("button", m.common_submit());
+  await click(submit);
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/api/settings/alphaxiv/callback");
+  assert.equal(
+    requests[0].body.url,
+    "http://127.0.0.1:54321/callback?code=my-auth-code&state=abc"
+  );
 });

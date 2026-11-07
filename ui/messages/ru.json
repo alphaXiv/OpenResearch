@@ -1604,6 +1604,7 @@
   "settings_openresearch_sign_out_title": "Выйти из OpenResearch?",
   "settings_openresearch_sign_out_description": "Этот компьютер не сможет запускать, перезапускать и останавливать вычисления OpenResearch, пока вы снова не войдёте. Запущенные вычисления продолжат работать и оплачиваться.",
   "account_finish_browser": "Завершите вход в браузере…",
+  "account_remote_callback_hint": "Если браузер перенаправил на 127.0.0.1 и не смог подключиться, вставьте адрес или код сюда:",
   "library_title": "Библиотека",
   "library_connect": "Подключить alphaXiv",
   "library_connected": "alphaXiv подключён",

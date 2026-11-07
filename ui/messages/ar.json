@@ -1604,6 +1604,7 @@
   "settings_openresearch_sign_out_title": "تسجيل الخروج من OpenResearch؟",
   "settings_openresearch_sign_out_description": "لا يمكن لهذا الكمبيوتر بدء موارد OpenResearch أو إعادة تشغيلها أو إيقافها حتى تسجل الدخول مجددًا. ستستمر الموارد قيد التشغيل والفوترة.",
   "account_finish_browser": "أكمل تسجيل الدخول في المتصفح…",
+  "account_remote_callback_hint": "إذا أعاد متصفحك التوجيه إلى 127.0.0.1 ولم يتمكن من الاتصال، فانسخ العنوان أو الرمز هنا:",
   "library_title": "المكتبة",
   "library_connect": "ربط alphaXiv",
   "library_connected": "متصل بـ alphaXiv",

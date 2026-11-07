@@ -1604,6 +1604,7 @@
   "settings_openresearch_sign_out_title": "OpenResearch से साइन आउट करें?",
   "settings_openresearch_sign_out_description": "दोबारा साइन इन करने तक यह कंप्यूटर OpenResearch कंप्यूट शुरू, पुनः शुरू या बंद नहीं कर सकता। चालू कंप्यूट और उसका बिल जारी रहेगा।",
   "account_finish_browser": "ब्राउज़र में साइन इन पूरा करें…",
+  "account_remote_callback_hint": "यदि आपका ब्राउज़र 127.0.0.1 पर पुनर्निर्देशित हुआ और कनेक्ट नहीं हो सका, तो पता या कोड यहाँ पेस्ट करें:",
   "library_title": "लाइब्रेरी",
   "library_connect": "alphaXiv कनेक्ट करें",
   "library_connected": "alphaXiv से कनेक्ट है",

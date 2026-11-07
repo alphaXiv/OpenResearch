@@ -1604,6 +1604,7 @@
   "settings_openresearch_sign_out_title": "Sign out of OpenResearch?",
   "settings_openresearch_sign_out_description": "This computer cannot start, restart or stop OpenResearch compute until you sign in again. Running compute keeps running and billing.",
   "account_finish_browser": "Finish signing in in your browser…",
+  "account_remote_callback_hint": "If your browser redirected to 127.0.0.1 and couldn't connect, paste the address or code here:",
   "library_title": "Library",
   "library_connect": "Connect alphaXiv",
   "library_connected": "Connected to alphaXiv",

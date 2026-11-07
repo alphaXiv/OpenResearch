@@ -1193,6 +1193,10 @@ fn workspace_router(session: Arc<RemoteSession>) -> Router {
             "/api/settings/alphaxiv/login",
             get(super::up::alphaxiv_login),
         )
+        .route(
+            "/api/settings/alphaxiv/callback",
+            post(super::up::alphaxiv_callback),
+        )
         .route("/api/alphaxiv/folders", get(super::up::alphaxiv_folders))
         .route("/api/alphaxiv/papers", get(super::up::alphaxiv_papers))
         .route("/_orx/ssh/connect", get(gateway_ssh_connect))

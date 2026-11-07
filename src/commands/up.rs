@@ -894,6 +894,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/alphaxiv/login", get(alphaxiv_login))
+        .route("/api/settings/alphaxiv/callback", post(alphaxiv_callback))
         .route("/api/alphaxiv/me", get(alphaxiv_me))
         .route("/api/alphaxiv/folders", get(alphaxiv_folders))
         .route("/api/alphaxiv/papers", get(alphaxiv_papers))
@@ -1088,12 +1089,7 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/data-dir"
             | "/api/settings/data-dir/move"
             | "/api/settings/openresearch/ssh-key"
-            | "/api/settings/openresearch/login"
             | "/api/settings/openresearch/logout"
-            | "/api/settings/alphaxiv/login"
-            | "/api/alphaxiv/me"
-            | "/api/alphaxiv/folders"
-            | "/api/alphaxiv/papers"
             | "/api/settings/commands/run"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/")
@@ -7090,6 +7086,74 @@ pub(crate) async fn alphaxiv_login(headers: HeaderMap, ws: WebSocketUpgrade) -> 
     openresearch_terminal(headers, ws, vec!["login".into(), "--alphaxiv".into()]).await
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AlphaXivCallbackReq {
+    pub(crate) url: String,
+}
+
+pub(crate) async fn alphaxiv_callback(Json(req): Json<AlphaXivCallbackReq>) -> ApiResult {
+    let target = url::Url::parse(&req.url).map_err(bad_request)?;
+    let host = target.host_str().unwrap_or_default();
+    if host != "127.0.0.1" && host != "localhost" {
+        return Err(bad_request(
+            "Callback URL must target 127.0.0.1 or localhost.",
+        ));
+    }
+    let port = target
+        .port()
+        .ok_or_else(|| bad_request("Missing callback port."))?;
+    if target.path() != "/callback" {
+        return Err(bad_request("Callback path must be /callback."));
+    }
+    let query = target.query().unwrap_or_default();
+    if query.is_empty() {
+        return Err(bad_request("Missing callback query parameters."));
+    }
+
+    let callback_addr = format!("127.0.0.1:{port}");
+    let mut stream = tokio::net::TcpStream::connect(&callback_addr)
+        .await
+        .map_err(|e| {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("Could not connect to sign-in listener: {e}"),
+            )
+        })?;
+
+    let request = format!(
+        "GET /callback?{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
+        .await
+        .map_err(|e| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to send callback: {e}"),
+            )
+        })?;
+
+    let mut response = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response)
+        .await
+        .map_err(|e| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read callback response: {e}"),
+            )
+        })?;
+
+    let response_str = String::from_utf8_lossy(&response);
+    if response_str.starts_with("HTTP/1.1 200") || response_str.starts_with("HTTP/1.0 200") {
+        Ok(Json(json!({ "success": true })))
+    } else {
+        Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Sign-in listener rejected the callback.".into(),
+        ))
+    }
+}
+
 fn alphaxiv_error(error: crate::error::Error) -> ApiError {
     let status = if error.is::<crate::alphaxiv::NotConnected>() {
         StatusCode::UNAUTHORIZED
@@ -10399,7 +10463,6 @@ mod tests {
             "/api/update/restart",
             "/api/settings/data-dir",
             "/api/settings/data-dir/move",
-            "/api/settings/openresearch/login",
             "/api/settings/openresearch/logout",
             "/api/settings/openresearch/ssh-key",
             "/api/settings/commands/run",
@@ -10410,6 +10473,11 @@ mod tests {
         ] {
             assert!(remote_route_forbidden(path), "{path}");
         }
+        assert!(!remote_route_forbidden("/api/settings/openresearch/login"));
+        assert!(!remote_route_forbidden("/api/settings/alphaxiv/login"));
+        assert!(!remote_route_forbidden("/api/alphaxiv/me"));
+        assert!(!remote_route_forbidden("/api/alphaxiv/folders"));
+        assert!(!remote_route_forbidden("/api/alphaxiv/papers"));
         assert!(!remote_route_forbidden("/api/settings/ssh/config"));
         assert!(!remote_route_forbidden("/api/settings/ssh/master"));
         assert!(!remote_route_forbidden("/api/settings/ssh/preflight"));
@@ -10417,6 +10485,45 @@ mod tests {
         assert!(!remote_route_forbidden("/api/harnesses/setup"));
         assert!(!remote_route_forbidden("/api/settings/network"));
         assert!(!remote_route_forbidden("/api/projects/p1/file"));
+    }
+
+    #[tokio::test]
+    async fn alphaxiv_callback_relays_to_loopback_listener() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
+                .await
+                .unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]);
+            assert!(req.starts_with("GET /callback?code=c123&state=s456 HTTP/1.1"));
+            tokio::io::AsyncWriteExt::write_all(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
+            )
+            .await
+            .unwrap();
+        });
+
+        let result = alphaxiv_callback(Json(AlphaXivCallbackReq {
+            url: format!("http://127.0.0.1:{port}/callback?code=c123&state=s456"),
+        }))
+        .await;
+        assert!(result.is_ok());
+
+        let result = alphaxiv_callback(Json(AlphaXivCallbackReq {
+            url: "https://example.com/callback?code=c123&state=s456".into(),
+        }))
+        .await;
+        assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+
+        let result = alphaxiv_callback(Json(AlphaXivCallbackReq {
+            url: format!("http://127.0.0.1:{port}/other?code=c123&state=s456"),
+        }))
+        .await;
+        assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
     }
 
     #[test]

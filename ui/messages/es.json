@@ -1604,6 +1604,7 @@
   "settings_openresearch_sign_out_title": "¿Cerrar sesión en OpenResearch?",
   "settings_openresearch_sign_out_description": "Este equipo no podrá iniciar, reiniciar ni detener recursos de OpenResearch hasta que vuelvas a iniciar sesión. Los recursos activos seguirán ejecutándose y generando cargos.",
   "account_finish_browser": "Termina de iniciar sesión en el navegador…",
+  "account_remote_callback_hint": "Si tu navegador redirigió a 127.0.0.1 y no pudo conectarse, pega la dirección o el código aquí:",
   "library_title": "Biblioteca",
   "library_connect": "Conectar alphaXiv",
   "library_connected": "Conectado a alphaXiv",

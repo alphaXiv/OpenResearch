@@ -13,9 +13,11 @@ import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount"
 
 import { Button, DialogContent, DialogTitle, MenuItem, showAlert, Spinner } from "./ui";
 
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]);
+
 export function isRemoteSession(runtime?: RuntimeInfo | null): boolean {
   if (runtime?.kind === "ssh") return true;
-  if (typeof location !== "undefined" && location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
+  if (typeof location !== "undefined" && !LOOPBACK_HOSTS.has(location.hostname)) {
     return true;
   }
   return false;
@@ -115,19 +117,19 @@ function SignInDialog({ connectOnly, returnFocus, initialPlaceholder, remote, co
   const placeholderRef = useRef<Window | null>(initialPlaceholder);
 
   const fail = (exitCode?: number) => {
-    placeholderRef.current?.close();
-    placeholderRef.current = null;
     if (exitCode === TRY_AGAIN_LATER) setError(m.account_alphaxiv_unavailable());
     else setError(connectOnly ? m.account_alphaxiv_not_connected() : m.account_sign_in_failed());
   };
 
   const retry = () => {
     const inDesktopApp = typeof window !== "undefined" && "__ORX_DESKTOP__" in window;
-    const nextPlaceholder = remote && !inDesktopApp ? window?.open?.("/remote-launch", "_blank") ?? null : null;
-    if (remote && !inDesktopApp && !nextPlaceholder) {
-      showAlert(m.remote_popup_blocked(), "error");
+    if (remote && !inDesktopApp && (!placeholderRef.current || placeholderRef.current.closed)) {
+      const nextPlaceholder = window?.open?.("/remote-launch", "_blank") ?? null;
+      if (!nextPlaceholder) {
+        showAlert(m.remote_popup_blocked(), "error");
+      }
+      placeholderRef.current = nextPlaceholder;
     }
-    placeholderRef.current = nextPlaceholder;
     setError(null);
     setAttempt((value) => value + 1);
   };
@@ -146,7 +148,11 @@ function SignInDialog({ connectOnly, returnFocus, initialPlaceholder, remote, co
       connectOnly={connectOnly}
       remote={remote}
       placeholderWindow={placeholderRef.current}
-      onComplete={() => confirm()}
+      onComplete={() => {
+        placeholderRef.current?.close();
+        placeholderRef.current = null;
+        confirm();
+      }}
       onError={fail}
     />
     <div className="mt-4 flex justify-end gap-2">
@@ -171,6 +177,9 @@ export function LoginSession({
 }) {
   const { socketUrl } = useMachines().owner;
   const [url, setUrl] = useState<string | null>(null);
+  const [manualCode, setManualCode] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [callbackError, setCallbackError] = useState<string | null>(null);
   const callbacks = useRef({ onComplete, onError });
   callbacks.current = { onComplete, onError };
   const opened = useRef(false);
@@ -211,5 +220,58 @@ export function LoginSession({
     }, 0);
     return () => { clearTimeout(timer); if (socket) { socket.onclose = null; socket.close(); } };
   }, [connectOnly, remote, placeholderWindow, socketUrl]);
-  return url && <a href={url} target="_blank" rel="noreferrer" className="break-all text-sm text-text underline">{url}</a>;
+
+  const handleManualSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const input = manualCode.trim();
+    if (!input) return;
+    setSubmitting(true);
+    setCallbackError(null);
+    try {
+      let targetUrl = input;
+      if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
+        if (url) {
+          const parsed = new URL(url);
+          const redirectUri = parsed.searchParams.get("redirect_uri");
+          const state = parsed.searchParams.get("state") || "";
+          if (redirectUri) {
+            const code = input.replace(/^code=/, "");
+            targetUrl = `${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
+          }
+        }
+      }
+      const response = await fetch("/api/settings/alphaxiv/callback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: targetUrl }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.error || `HTTP ${response.status}`);
+      }
+    } catch (err: unknown) {
+      setCallbackError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return <div className="flex flex-col gap-3">
+    {url && <a href={url} target="_blank" rel="noreferrer" className="break-all text-sm text-text underline">{url}</a>}
+    {remote && url && <form onSubmit={handleManualSubmit} className="flex flex-col gap-1.5 pt-2 border-t border-border">
+      <label htmlFor="callback-input" className="text-xs text-subtext">{m.account_remote_callback_hint()}</label>
+      <div className="flex gap-2">
+        <input
+          id="callback-input"
+          type="text"
+          value={manualCode}
+          onChange={(e) => setManualCode(e.target.value)}
+          placeholder="http://127.0.0.1:.../callback?code=..."
+          className="flex-1 rounded border border-border bg-surface px-2.5 py-1 text-xs text-text placeholder:text-subtext focus:outline-none focus:border-border-focus"
+        />
+        <Button type="submit" disabled={submitting || !manualCode.trim()}>{m.common_submit()}</Button>
+      </div>
+      {callbackError && <p role="alert" className="text-xs text-accent-red">{callbackError}</p>}
+    </form>}
+  </div>;
 }

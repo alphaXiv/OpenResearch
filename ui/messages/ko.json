@@ -1604,6 +1604,7 @@
   "settings_openresearch_sign_out_title": "OpenResearch에서 로그아웃할까요?",
   "settings_openresearch_sign_out_description": "다시 로그인할 때까지 이 컴퓨터에서 OpenResearch 컴퓨팅을 시작, 재시작 또는 중지할 수 없습니다. 실행 중인 컴퓨팅과 요금 청구는 계속됩니다.",
   "account_finish_browser": "브라우저에서 로그인을 완료하세요…",
+  "account_remote_callback_hint": "브라우저가 127.0.0.1로 리디렉션되었으나 연결할 수 없는 경우 여기에 주소 또는 코드를 붙여넣으세요:",
   "library_title": "라이브러리",
   "library_connect": "alphaXiv 연결",
   "library_connected": "alphaXiv에 연결됨",
