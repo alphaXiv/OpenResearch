@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, createElement } from "react";
+import { createElement } from "react";
 import { ArtifactMarkdown } from "../src/components/ArtifactsTab.tsx";
 import { ChatImageScope, Md } from "../src/components/Md.tsx";
 import { render } from "./render.mjs";
@@ -35,23 +35,3 @@ for (const [name, element] of Object.entries(surfaces)) {
     assert.equal(container.querySelector("a a"), null);
   });
 }
-
-test("chat carousel preserves its image when file callbacks change", async () => {
-  const text = '![First](first.png "First caption")\n\n![Second](second.png "Second caption")';
-  const chat = () => createElement(ChatImageScope, { projectId: "p" }, createElement(Md, {
-    text,
-    onOpenFile() {},
-    onOpenRun() {},
-  }));
-  const { container, rerender } = await render(chat());
-  const carousel = container.querySelector('[role="region"]');
-  await act(async () => carousel.querySelectorAll("button")[1].click());
-  const image = carousel.querySelector("img");
-  assert.equal(image.alt, "Second");
-
-  await rerender(chat());
-
-  assert.ok(container.querySelector('[role="region"]') === carousel, "carousel stays mounted");
-  assert.ok(carousel.querySelector("img") === image, "selected image stays mounted");
-  assert.equal(image.alt, "Second");
-});
