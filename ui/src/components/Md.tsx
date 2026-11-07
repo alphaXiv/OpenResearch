@@ -443,6 +443,7 @@ function PaperFigure({ children }: { children: ReactNode }) {
 }
 
 const stableComponents: Record<string, (props: any) => ReactNode> = {
+  "image-carousel": ({ children }) => <ImageCarousel>{children}</ImageCarousel>,
   figure: ({ children }) => <PaperFigure>{children}</PaperFigure>,
   figcaption: ({ children }) => <figcaption className="mt-3 text-sm italic leading-relaxed text-text">{children}</figcaption>,
   th: ({ node: _node, ...rest }) => <th dir="auto" {...rest} />,
@@ -494,7 +495,6 @@ export const Md = memo(function Md({
     );
   }, [imageSrc]);
   const components: Record<string, (props: any) => ReactNode> = useMemo(() => ({
-    "image-carousel": ({ children }) => <ImageCarousel>{children}</ImageCarousel>,
     "katex-math": KatexMath,
     "file-mention": (props) => {
       const cited = splitLineSuffix(props.path);
