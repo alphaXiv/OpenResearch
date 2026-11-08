@@ -270,15 +270,14 @@ function chips(source: () => ChipSource): Extension {
   return [pointerSelection, Prec.high(field), Prec.high(keymap.of([{ key: "Backspace", run: deleteChipBehindSpace }]))];
 }
 
-/** Natural height stops at eight lines, then the editor scrolls. */
 const composerTheme = EditorView.theme({
-  "&": { color: "var(--text)", maxHeight: "calc(12em + 2 * var(--editor-pad-y))" },
+  "&": { color: "var(--text)", maxHeight: "40vh", padding: "var(--editor-pad-y) 0" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.5", overflow: "auto" },
   // WebKit can retain an empty horizontal scrollbar gutter after the draft shrinks.
   ".cm-scroller::-webkit-scrollbar": { height: "0" },
   // `minWidth` lets WebKit shrink the content below the placeholder's one-line width.
-  ".cm-content": { padding: "var(--editor-pad-y) 0", caretColor: "var(--text)", minWidth: "0" },
+  ".cm-content": { padding: "0", caretColor: "var(--text)", minWidth: "0" },
   ".cm-line": { padding: "0 var(--editor-pad-x)" },
   // One line however narrow the box, so an empty draft keeps the one-line height.
   ".cm-placeholder": { color: "var(--muted)", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
@@ -319,7 +318,9 @@ function storedHeight(key: string): number | null {
 /** Dragged heights stop short of crowding out the transcript. */
 function maxHeight(dom: HTMLElement): number {
   const pane = dom.closest<HTMLElement>(".chat-pane");
-  return Math.max(MIN_HEIGHT, Math.min(window.innerHeight * 0.6, (pane?.clientHeight ?? window.innerHeight) - 220));
+  const composer = dom.closest<HTMLElement>(".composer");
+  const chrome = composer ? composer.offsetHeight - dom.offsetHeight : 0;
+  return Math.max(MIN_HEIGHT, ((pane?.clientHeight ?? window.innerHeight) - chrome) * 0.6);
 }
 
 export interface ComposerEditorHandle {
@@ -496,8 +497,8 @@ export function ComposerEditor({
     const dom = viewRef.current?.dom;
     if (!dom) return;
     const clamped = height === null ? null : Math.min(height, heightLimit);
-    dom.style.height = clamped === null ? "" : `${clamped}px`;
-    dom.style.maxHeight = clamped === null ? "" : "none";
+    dom.style.minHeight = clamped === null ? "" : `${clamped}px`;
+    dom.style.maxHeight = `min(${heightLimit}px, max(40vh, ${clamped ?? MIN_HEIGHT}px))`;
   }, [height, heightLimit]);
 
   useEffect(() => {
@@ -509,14 +510,16 @@ export function ComposerEditor({
     }
   }, [resizeKey, height]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const dom = viewRef.current?.dom;
     if (!dom) return;
     const measure = () => setHeightLimit(maxHeight(dom));
     measure();
     const pane = dom.closest(".chat-pane");
+    const composer = dom.closest(".composer");
     const observer = new ResizeObserver(measure);
     if (pane) observer.observe(pane);
+    if (composer) observer.observe(composer);
     window.addEventListener("resize", measure);
     return () => {
       observer.disconnect();
@@ -650,7 +653,8 @@ export function ComposerEditor({
         onKeyDown={(event) => {
           if (event.key === "ArrowUp" || event.key === "ArrowDown") {
             event.preventDefault();
-            resizeBy(height ?? currentHeight(), event.key === "ArrowUp" ? KEYBOARD_STEP : -KEYBOARD_STEP);
+            const current = currentHeight();
+            resizeBy(event.key === "ArrowUp" ? current : Math.min(height ?? MIN_HEIGHT, current), event.key === "ArrowUp" ? KEYBOARD_STEP : -KEYBOARD_STEP);
           } else if (event.key === "Home") {
             event.preventDefault();
             setHeight(null);
