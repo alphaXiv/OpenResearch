@@ -14,6 +14,11 @@ APPIMAGE="$(realpath "$1")"
 SANDBOX="$(mktemp -d)"
 LOG="$SANDBOX/app.log"
 export ORX_DATA_DIR="$SANDBOX/data" XDG_CONFIG_HOME="$SANDBOX/config" XDG_DATA_HOME="$SANDBOX/share"
+export HOME="$SANDBOX/home" XDG_CACHE_HOME="$SANDBOX/cache" XDG_RUNTIME_DIR="$SANDBOX/runtime"
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+# GTK must use Xvfb, not the caller's Wayland display or app-instance socket.
+unset WAYLAND_DISPLAY WAYLAND_SOCKET
 export ORX_NO_UPDATE_CHECK=1 ORX_TELEMETRY_ENV=off
 # No FUSE on CI runners; the AppImage runs from a temporary extraction instead.
 export APPIMAGE_EXTRACT_AND_RUN=1
