@@ -6355,11 +6355,10 @@ export function ChatPanel({
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
-  // The newest unresolved plan prompt, if any — it drives the docked strip
-  // above the composer. Resolution re-emits the message over SSE, so this
-  // recomputes to null and the strip disappears on its own.
+  // Only the latest user turn's plans can still await approval in the composer.
   const pendingPlan = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") break;
       for (const part of messages[i].parts) {
         if (part.type === "prompt" && part.prompt?.kind === "plan" && !part.prompt.resolved) {
           return {
