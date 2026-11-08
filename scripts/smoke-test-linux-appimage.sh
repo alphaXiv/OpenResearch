@@ -20,6 +20,12 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 # Cleanup kills the runtime before it removes its extraction, so extract here.
 export TMPDIR="$SANDBOX"
 
+# The hook changes the theme and data directories and forces X11. AppRun must
+# save their original values before sourcing it, and leave backend choice to GTK.
+unset GDK_BACKEND
+export GTK_THEME=Adwaita:dark APPIMAGE_GTK_THEME=Adwaita:light
+export XDG_DATA_DIRS=/usr/local/share:/usr/share
+
 # Its own process group, so cleanup reaches orx and WebKit, not just xvfb-run.
 setsid xvfb-run -a "$APPIMAGE" >"$LOG" 2>&1 &
 APP=$!
@@ -59,6 +65,14 @@ pgrep -f WebKitWebProcess >/dev/null || fail "No WebKit web process is running."
 # The app shows its window when the page finishes loading, or says it gave up.
 ORX_PID="$(pgrep -o -f 'usr/bin/orx app' || true)"
 [ -n "$ORX_PID" ] || fail "orx app is not running."
+APP_ENV="$(tr '\0' '\n' <"/proc/$ORX_PID/environ")"
+for entry in 'ORX_HOST_GDK_BACKEND=-' 'ORX_HOST_GTK_THEME==Adwaita:dark' \
+  'ORX_HOST_XDG_DATA_DIRS==/usr/local/share:/usr/share' 'GTK_THEME=Adwaita:light'; do
+  grep -qxF "$entry" <<<"$APP_ENV" || fail "AppRun did not preserve the host environment: $entry"
+done
+if grep -q '^GDK_BACKEND=' <<<"$APP_ENV"; then
+  fail "AppRun forced a display backend instead of letting GTK select it."
+fi
 X_ENV="$(tr '\0' '\n' <"/proc/$ORX_PID/environ" | grep -E '^(DISPLAY|XAUTHORITY)=' || true)"
 visible=
 for _ in $(seq 1 30); do
