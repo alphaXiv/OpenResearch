@@ -162,6 +162,32 @@ function SignInDialog({ connectOnly, returnFocus, initialPlaceholder, remote, co
   </DialogContent>;
 }
 
+export function extractAuthUrl(rawOutput: string): string | null {
+  const stripped = rawOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b/g, "");
+
+  const lines = stripped.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  let buildingUrl = "";
+  for (const line of lines) {
+    if (line.startsWith("http://") || line.startsWith("https://")) {
+      buildingUrl = line;
+    } else if (buildingUrl && (line.startsWith("&") || line.includes("=") || /^[a-zA-Z0-9_\-.~%+=&]+$/.test(line))) {
+      buildingUrl += line;
+    } else {
+      if (buildingUrl.startsWith("http")) break;
+    }
+    if (buildingUrl.includes("prompt=select_account")) {
+      break;
+    }
+  }
+
+  if (buildingUrl.startsWith("http") && (buildingUrl.includes("prompt=") || buildingUrl.includes("code_challenge") || buildingUrl.length > 100)) {
+    return buildingUrl;
+  }
+
+  const match = stripped.match(/https?:\/\/[^\s'"<>]+/);
+  return match ? match[0] : null;
+}
+
 export function LoginSession({
   connectOnly,
   remote,
@@ -193,17 +219,30 @@ export function LoginSession({
       socket.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
           output += new TextDecoder().decode(event.data);
-          const match = output.match(/https?:\/\/[^\s\x1b]+(?=\s)/);
-          if (match) {
-            const authUrl = match[0];
+          const authUrl = extractAuthUrl(output);
+          if (authUrl) {
             setUrl(authUrl);
             if (!opened.current) {
               opened.current = true;
               if (remote) {
-                if (placeholderWindow && !placeholderWindow.closed) {
-                  placeholderWindow.location.replace(authUrl);
-                } else {
-                  window?.open?.(authUrl, "_blank");
+                try {
+                  const channel = new BroadcastChannel("orx_remote_launch");
+                  channel.postMessage({ url: authUrl });
+                  channel.close();
+                } catch { /* BroadcastChannel optional */ }
+
+                try {
+                  if (placeholderWindow && !placeholderWindow.closed) {
+                    if (typeof placeholderWindow.location?.replace === "function") {
+                      placeholderWindow.location.replace(authUrl);
+                    } else {
+                      placeholderWindow.location.href = authUrl;
+                    }
+                  } else {
+                    window?.open?.(authUrl, "_blank");
+                  }
+                } catch (e) {
+                  console.warn("Could not navigate placeholder window:", e);
                 }
               }
             }
@@ -257,7 +296,12 @@ export function LoginSession({
   };
 
   return <div className="flex flex-col gap-3">
-    {url && <a href={url} target="_blank" rel="noreferrer" className="break-all text-sm text-text underline">{url}</a>}
+    {url && <div className="flex flex-col gap-1.5 rounded-md border border-border bg-surface p-3 text-sm">
+      <p className="font-medium text-text">{m.account_finish_browser()}</p>
+      <a href={url} target="_blank" rel="noreferrer" className="break-all text-xs text-text underline">
+        {url}
+      </a>
+    </div>}
     {remote && url && <form onSubmit={handleManualSubmit} className="flex flex-col gap-1.5 pt-2 border-t border-border">
       <label htmlFor="callback-input" className="text-xs text-subtext">{m.account_remote_callback_hint()}</label>
       <div className="flex gap-2">

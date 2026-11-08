@@ -7197,6 +7197,13 @@ pub(crate) async fn alphaxiv_papers(Query(query): Query<AlphaXivPapersQuery>) ->
     .map_err(alphaxiv_error)
 }
 
+const LOGIN_PTY_SIZE: PtySize = PtySize {
+    rows: 24,
+    cols: 4096,
+    pixel_width: 0,
+    pixel_height: 0,
+};
+
 async fn openresearch_terminal(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -7205,7 +7212,16 @@ async fn openresearch_terminal(
     let program = crate::paths::spawnable_exe()
         .map(|exe| exe.to_string_lossy().into_owned())
         .map_err(anyhow::Error::from);
-    command_terminal(&headers, ws, program, args, Vec::new(), false).await
+    command_terminal(
+        &headers,
+        ws,
+        program,
+        args,
+        Vec::new(),
+        false,
+        Some(LOGIN_PTY_SIZE),
+    )
+    .await
 }
 
 /// Commands the settings page may run, keyed by the exact note text. The
@@ -7291,7 +7307,7 @@ async fn run_settings_command(
             .map(|path| path.to_string_lossy().into_owned())
             .ok_or_else(|| anyhow!("{} is not installed", argv[0]))
     };
-    command_terminal(&headers, ws, program, args, env, true).await
+    command_terminal(&headers, ws, program, args, env, true, None).await
 }
 
 fn zcode_provider_env(
@@ -7350,6 +7366,7 @@ async fn command_terminal(
     args: Vec<String>,
     env: Vec<(&'static str, std::ffi::OsString)>,
     shell_after: bool,
+    initial_size: Option<PtySize>,
 ) -> Response {
     if let Some(rejected) = reject_cross_origin(headers) {
         return rejected;
@@ -7357,7 +7374,7 @@ async fn command_terminal(
     let active = Active::new();
     ws.on_upgrade(move |mut socket| async move {
         let _active = active;
-        let mut size = DEFAULT_PTY_SIZE;
+        let mut size = initial_size.unwrap_or(DEFAULT_PTY_SIZE);
         let started = match program {
             Ok(program) => spawn_pty(program, args, env, size).await,
             Err(error) => Err(error),

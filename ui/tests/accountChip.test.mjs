@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { act, createElement, Fragment } from "react";
-import { AccountChip, isRemoteSession, LoginSession, useSignIn } from "../src/components/AccountChip.tsx";
+import { AccountChip, extractAuthUrl, isRemoteSession, LoginSession, useSignIn } from "../src/components/AccountChip.tsx";
 import { Toaster } from "../src/components/ui/Toast.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { find, render, serve, settle, type } from "./render.mjs";
@@ -252,4 +252,16 @@ test("remote LoginSession renders callback fallback and relays callback URL", as
     requests[0].body.url,
     "http://127.0.0.1:54321/callback?code=my-auth-code&state=abc"
   );
+});
+
+test("extractAuthUrl unwraps URLs split across terminal columns and strips ANSI sequences", () => {
+  const fullUrl = "https://api.alphaxiv.org/auth/oauth2/authorize?response_type=code&client_id=openresearch-desktop&redirect_uri=http%3A%2F%2F127.0.0.1%3A33389%2Fcallback&scope=openid+email+profile&state=19cff120-9792-4d49-809e-b133c3035533&nonce=36be531f-fd1e-4d95-a3dc-2287b83207cc&code_challenge=TLutnIosZuXSZQTh8bdhPmSTP5hBqZ_vrnpbR2c59zo&code_challenge_method=S256&prompt=select_account";
+
+  // Wrapped every 78 characters with CRLF
+  let wrapped = "";
+  for (let i = 0; i < fullUrl.length; i += 78) {
+    wrapped += fullUrl.slice(i, i + 78) + "\r\n";
+  }
+  const terminalOutput = `\x1b[32mOpening your browser to sign in with alphaXiv…\x1b[0m\r\nIf it doesn't open, visit:\r\n  ${wrapped}\r\n`;
+  assert.equal(extractAuthUrl(terminalOutput), fullUrl);
 });
