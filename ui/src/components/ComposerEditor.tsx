@@ -318,7 +318,9 @@ function storedHeight(key: string): number | null {
 /** Dragged heights stop short of crowding out the transcript. */
 function maxHeight(dom: HTMLElement): number {
   const pane = dom.closest<HTMLElement>(".chat-pane");
-  return Math.max(MIN_HEIGHT, Math.min(window.innerHeight * 0.6, (pane?.clientHeight ?? window.innerHeight) - 220));
+  const composer = dom.closest<HTMLElement>(".composer");
+  const chrome = composer ? composer.offsetHeight - dom.offsetHeight : 0;
+  return Math.max(MIN_HEIGHT, ((pane?.clientHeight ?? window.innerHeight) - chrome) * 0.6);
 }
 
 export interface ComposerEditorHandle {
@@ -496,7 +498,7 @@ export function ComposerEditor({
     if (!dom) return;
     const clamped = height === null ? null : Math.min(height, heightLimit);
     dom.style.minHeight = clamped === null ? "" : `${clamped}px`;
-    dom.style.maxHeight = `${Math.max(clamped ?? MIN_HEIGHT, Math.min(heightLimit, window.innerHeight * 0.4))}px`;
+    dom.style.maxHeight = `min(${heightLimit}px, max(40vh, ${clamped ?? MIN_HEIGHT}px))`;
   }, [height, heightLimit]);
 
   useEffect(() => {
@@ -508,14 +510,16 @@ export function ComposerEditor({
     }
   }, [resizeKey, height]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const dom = viewRef.current?.dom;
     if (!dom) return;
     const measure = () => setHeightLimit(maxHeight(dom));
     measure();
     const pane = dom.closest(".chat-pane");
+    const composer = dom.closest(".composer");
     const observer = new ResizeObserver(measure);
     if (pane) observer.observe(pane);
+    if (composer) observer.observe(composer);
     window.addEventListener("resize", measure);
     return () => {
       observer.disconnect();
@@ -649,7 +653,7 @@ export function ComposerEditor({
         onKeyDown={(event) => {
           if (event.key === "ArrowUp" || event.key === "ArrowDown") {
             event.preventDefault();
-            resizeBy(height ?? currentHeight(), event.key === "ArrowUp" ? KEYBOARD_STEP : -KEYBOARD_STEP);
+            resizeBy(currentHeight(), event.key === "ArrowUp" ? KEYBOARD_STEP : -KEYBOARD_STEP);
           } else if (event.key === "Home") {
             event.preventDefault();
             setHeight(null);
