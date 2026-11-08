@@ -270,15 +270,14 @@ function chips(source: () => ChipSource): Extension {
   return [pointerSelection, Prec.high(field), Prec.high(keymap.of([{ key: "Backspace", run: deleteChipBehindSpace }]))];
 }
 
-/** Natural height stops at eight lines, then the editor scrolls. */
 const composerTheme = EditorView.theme({
-  "&": { color: "var(--text)", maxHeight: "calc(12em + 2 * var(--editor-pad-y))" },
+  "&": { color: "var(--text)", maxHeight: "40vh", padding: "var(--editor-pad-y) 0" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.5", overflow: "auto" },
   // WebKit can retain an empty horizontal scrollbar gutter after the draft shrinks.
   ".cm-scroller::-webkit-scrollbar": { height: "0" },
   // `minWidth` lets WebKit shrink the content below the placeholder's one-line width.
-  ".cm-content": { padding: "var(--editor-pad-y) 0", caretColor: "var(--text)", minWidth: "0" },
+  ".cm-content": { padding: "0", caretColor: "var(--text)", minWidth: "0" },
   ".cm-line": { padding: "0 var(--editor-pad-x)" },
   // One line however narrow the box, so an empty draft keeps the one-line height.
   ".cm-placeholder": { color: "var(--muted)", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
@@ -496,8 +495,8 @@ export function ComposerEditor({
     const dom = viewRef.current?.dom;
     if (!dom) return;
     const clamped = height === null ? null : Math.min(height, heightLimit);
-    dom.style.height = clamped === null ? "" : `${clamped}px`;
-    dom.style.maxHeight = clamped === null ? "" : "none";
+    dom.style.minHeight = clamped === null ? "" : `${clamped}px`;
+    dom.style.maxHeight = `${Math.max(clamped ?? MIN_HEIGHT, Math.min(heightLimit, window.innerHeight * 0.4))}px`;
   }, [height, heightLimit]);
 
   useEffect(() => {

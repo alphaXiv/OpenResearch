@@ -1,5 +1,33 @@
 import { composer, expect, send, test } from '../src/test.ts'
 
+test('the composer grows past a saved size and keeps its inset when capped', async ({ page, project }) => {
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await project.open(page)
+  await page.getByRole('separator', { name: 'Resize message box' }).press('ArrowDown')
+  const editor = page.locator('.composer-editor .cm-editor')
+  const shortHeight = await editor.evaluate((element) => element.getBoundingClientRect().height)
+  await composer(page).fill('A longer draft should stay easy to read.\n'.repeat(40))
+  await expect.poll(() => editor.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThan(shortHeight * 2)
+
+  await page.setViewportSize({ width: 1280, height: 500 })
+  await expect.poll(() => editor.evaluate((element) => element.getBoundingClientRect().height)).toBeLessThanOrEqual(200)
+  const scroller = editor.locator('.cm-scroller')
+  await scroller.evaluate((element) => { element.scrollTop = element.scrollHeight })
+  const inset = await scroller.evaluate((element) => {
+    const parent = element.parentElement
+    if (!parent) throw new Error('The composer scroller must be inside the editor')
+    const outer = parent.getBoundingClientRect()
+    const inner = element.getBoundingClientRect()
+    return { top: inner.top - outer.top, bottom: outer.bottom - inner.bottom, overflow: element.scrollHeight > element.clientHeight }
+  })
+  expect(inset.top).toBeGreaterThanOrEqual(10)
+  expect(inset.bottom).toBeGreaterThanOrEqual(10)
+  expect(inset.overflow).toBe(true)
+
+  await composer(page).fill('Short again.')
+  await expect.poll(() => editor.evaluate((element) => element.getBoundingClientRect().height)).toBeLessThanOrEqual(shortHeight)
+})
+
 test('a reply streams in as the agent writes it and is still there after a reload', async ({ page, project, agent }) => {
   agent.script('Which optimizer should the baseline use?', [
     { think: 'Comparing optimizers.' },
