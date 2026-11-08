@@ -203,7 +203,7 @@ test("isRemoteSession detects loopback vs remote network hostnames", () => {
       window.location.href = `http://${host}:4791/`;
       assert.equal(isRemoteSession({ kind: "local" }), false, host);
     }
-    for (const host of ["100.65.92.55", "workstation.tailscale.net", "192.168.1.100"]) {
+    for (const host of ["198.51.100.1", "host.example.org", "192.168.1.100"]) {
       window.location.href = `http://${host}:4791/`;
       assert.equal(isRemoteSession({ kind: "local" }), true, host);
     }
