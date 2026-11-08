@@ -3,7 +3,7 @@ import { composer, expect, send, test } from '../src/test.ts'
 test('the composer grows past a saved size and keeps its inset when capped', async ({ page, project }) => {
   await page.setViewportSize({ width: 1280, height: 900 })
   await project.open(page)
-  await page.getByRole('separator', { name: 'Resize message box' }).press('ArrowDown')
+  await page.getByRole('separator', { name: 'Resize message box' }).press('ArrowUp')
   const editor = page.locator('.composer-editor .cm-editor')
   const shortHeight = await editor.evaluate((element) => element.getBoundingClientRect().height)
   await composer(page).fill('A longer draft should stay easy to read.\n'.repeat(40))
@@ -25,7 +25,7 @@ test('the composer grows past a saved size and keeps its inset when capped', asy
   expect(inset.overflow).toBe(true)
 
   await composer(page).fill('Short again.')
-  await expect.poll(() => editor.evaluate((element) => element.getBoundingClientRect().height)).toBeLessThanOrEqual(shortHeight)
+  await expect.poll(() => editor.evaluate((element) => element.getBoundingClientRect().height)).toBe(shortHeight)
 })
 
 test('a reply streams in as the agent writes it and is still there after a reload', async ({ page, project, agent }) => {
