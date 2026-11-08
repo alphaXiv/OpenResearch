@@ -7363,7 +7363,7 @@ export function ChatPanel({
 
   function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
-    if (playgroundProjectIds.has(session.projectId)) {
+    if (playgroundProjectIds.has(session.projectId) && !session.sideParentSessionId) {
       showConfirmDialog({
         title: m.playground_discard_title(),
         description: m.playground_discard_confirm({ title: autoDir(title) }),
@@ -7371,8 +7371,10 @@ export function ChatPanel({
         destructive: true,
         onCancel: "close",
         onConfirm: async () => {
-          await discardPlaygroundChat(session.id);
+          const result = await discardPlaygroundChat(session.id, session.projectId);
           forgetSession(session.id);
+          if (session.projectId === projectId) void navigate({ to: "/projects" });
+          if (result.artifactsError) showAlert(result.artifactsError, "error");
         },
       });
       return;
@@ -7534,7 +7536,7 @@ export function ChatPanel({
     sidebarRows.push({ kind: "section", section: "all", open: true, count: flat.length });
     const selected = sessions.find((session) => session.id === activeId);
     if (selected && !flat.some((session) => session.id === selected.id)) flat.push(selected);
-    flat.filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).forEach((session) => {
+    flat.filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => Number(pinnedChats.includes(b.id)) - Number(pinnedChats.includes(a.id)) || b.updatedAt - a.updatedAt).forEach((session) => {
       const project = sidebarProjects.find((project) => project.id === session.projectId);
       if (project) sidebarRows.push({ kind: "chat", project, session });
     });

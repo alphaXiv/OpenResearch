@@ -2586,9 +2586,12 @@ export function createApi(
   const createPlaygroundChat = (opts: TurnOptions & { autonomy?: Autonomy } = {}) =>
     post<{ project: Project; session: ChatSession }>("/api/playground/chats", opts);
 
-  const discardPlaygroundChat = (sessionId: string) =>
+  const discardPlaygroundChat = (sessionId: string, projectId: string) =>
     writeResponse(`/api/playground/chats/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).then((r) =>
-      json<{ ok: boolean }>(r).then((result) => { removeSession(sessionId); return result; }),
+      json<{ ok: boolean; artifactsError?: string }>(r).then((result) => {
+        removeProject(projectId);
+        return result;
+      }),
     );
 
   const getChatSession = (sessionId: string) =>

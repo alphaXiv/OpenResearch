@@ -303,6 +303,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const destination = parseDestination(location.pathname);
   const mainView = destination?.kind === "skills" ? "agents" : destination?.kind === "settings" ? destination.section ?? "settings" : "chat";
   const rememberedSessionRef = useRef<string | null>(null);
+  const playgroundCreationRef = useRef<Promise<Project> | null>(null);
   const rememberedProjectRef = useRef(projectId);
   if (rememberedProjectRef.current !== projectId) {
     rememberedProjectRef.current = projectId;
@@ -806,7 +807,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       return;
     }
     try {
-      const project = await createPlaygroundProject();
+      let pending = playgroundCreationRef.current;
+      if (!pending) {
+        pending = createPlaygroundProject().finally(() => {
+          if (playgroundCreationRef.current === pending) playgroundCreationRef.current = null;
+        });
+        playgroundCreationRef.current = pending;
+      }
+      const project = await pending;
       setPlaygroundDraftProject(project.id);
       setProjects((current) => (current ? upsert(current, project) : [project]));
       setMobileRailOpen(false);

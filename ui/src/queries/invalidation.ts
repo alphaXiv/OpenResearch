@@ -1,6 +1,6 @@
 import type { WorkspaceClient } from "./client";
 import type { Query, QueryFilters } from "@tanstack/react-query";
-import type { ChatSession, Experiment, Run } from "../api";
+import type { ChatSession, Experiment, Project, Run } from "../api";
 
 import { markLiveUpdate } from "./live";
 
@@ -113,6 +113,7 @@ export function createInvalidation(client: WorkspaceClient) {
 
   function removeProject(projectId: string) {
     const scope = workspaceScope();
+    queryClient.setQueriesData<Project[]>({ queryKey: [...scope, "listProjects"] }, (rows) => rows?.filter((project) => project.id !== projectId));
     const sessions = queryClient.getQueryData<ChatSession[]>([...scope, "listChatSessions", projectId]);
     for (const session of sessions ?? []) removeSession(session.id);
     void cancelAndRemove({ queryKey: scope, predicate: (query) => query.queryKey.slice(3).includes(projectId) });
@@ -139,6 +140,10 @@ export function createInvalidation(client: WorkspaceClient) {
     if (path.startsWith("/api/chat/")) {
       invalidate(["listSidebarChatSessions"], scope);
       if (path === "/api/chat/sessions") invalidate(["getProjectStarterPrompts", "listProjectActivity"], scope);
+      return;
+    }
+    if (path === "/api/playground/projects" || path.startsWith("/api/playground/chats")) {
+      invalidate(["listProjects", "listProjectActivity", "listSidebarChatSessions"], scope);
       return;
     }
     const project = /^\/api\/projects\/([^/]+)(.*)$/.exec(path);

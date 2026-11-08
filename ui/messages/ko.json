@@ -1767,9 +1767,9 @@
   "share_post_text": "{name}: OpenResearch에서 전체 연구 프로젝트 열기",
   "open_shared_link_body": "openresearch.sh에 게시된 “{name}”을(를) 새 프로젝트로 엽니다.",
   "open_shared_link_publisher": "{name} 님이 공유함",
-  "playground_title": "Playground",
-  "playground_new_chat": "New playground chat",
-  "playground_discard_title": "Discard chat",
-  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
-  "playground_discard_action": "Discard"
+  "playground_title": "플레이그라운드",
+  "playground_new_chat": "새 플레이그라운드 채팅",
+  "playground_discard_title": "채팅 버리기",
+  "playground_discard_confirm": "“{title}”을(를) 버리시겠습니까? 파일과 기록이 영구적으로 삭제됩니다.",
+  "playground_discard_action": "버리기"
 }

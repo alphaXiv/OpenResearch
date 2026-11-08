@@ -23,7 +23,8 @@ export async function globalResumeLocation(workspace: Workspace): Promise<string
   if (!location) return fallback();
   const destination = parseDestination(location.split("?")[0]);
   if (!destination?.projectId) return fallback();
-  if (!projects.some((project) => project.id === destination.projectId)) return fallback();
+  const project = projects.find((project) => project.id === destination.projectId);
+  if (!project || project.kind === "playground") return fallback();
   if (destination.sessionId && !validSessionLocation(location, await client.fetchQuery(listChatSessionsQuery(destination.projectId))))
     return fallback();
   return location;

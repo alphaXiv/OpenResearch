@@ -1767,9 +1767,9 @@
   "share_post_text": "{name}: پروژهٔ پژوهشی کامل را در OpenResearch باز کنید",
   "open_shared_link_body": "«{name}» منتشرشده در openresearch.sh را به‌عنوان پروژهٔ جدید باز کنید.",
   "open_shared_link_publisher": "به اشتراک گذاشته‌شده توسط {name}",
-  "playground_title": "Playground",
-  "playground_new_chat": "New playground chat",
-  "playground_discard_title": "Discard chat",
-  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
-  "playground_discard_action": "Discard"
+  "playground_title": "محیط آزمایش",
+  "playground_new_chat": "گفتگوی جدید محیط آزمایش",
+  "playground_discard_title": "دور انداختن گفتگو",
+  "playground_discard_confirm": "«{title}» دور انداخته شود؟ فایل‌ها و تاریخچهٔ آن برای همیشه حذف می‌شوند.",
+  "playground_discard_action": "دور انداختن"
 }

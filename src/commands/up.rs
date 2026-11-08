@@ -8672,6 +8672,44 @@ struct PlaygroundWorkspace {
     admission: ProjectAdmissionLease,
 }
 
+fn remove_playground_root(root: &std::path::Path) -> Option<String> {
+    match std::fs::remove_dir_all(root) {
+        Ok(()) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(format!(
+            "Playground files remain at {}: {error}",
+            root.display()
+        )),
+    }
+}
+
+fn playground_cleanup_warnings(
+    store: Option<&Store>,
+    project_id: Option<&str>,
+    root: &std::path::Path,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let (Some(store), Some(project_id)) = (store, project_id) {
+        if let Err(error) = store.delete_local_project_with(project_id, None::<fn() -> Result<()>>)
+        {
+            warnings.push(format!(
+                "The playground project could not be removed: {error}"
+            ));
+        }
+    }
+    if let Some(warning) = remove_playground_root(root) {
+        warnings.push(warning);
+    }
+    warnings
+}
+
+fn append_playground_cleanup(message: &mut String, warnings: Vec<String>) {
+    for warning in warnings {
+        message.push(' ');
+        message.push_str(&warning);
+    }
+}
+
 /// A playground chat is a chat plus a hidden per-chat project. The project
 /// exists only to give the chat its own repo, worktree, artifacts directory
 /// and run namespace — everything Project-keyed already works unchanged.
@@ -8713,21 +8751,36 @@ async fn create_playground_workspace(state: &AppState) -> Result<PlaygroundWorks
     {
         Ok(Ok(project)) => project,
         Ok(Err(error)) => {
-            let _ = std::fs::remove_dir_all(&root);
-            return Err(bad_request(error));
+            let mut message = error.to_string();
+            append_playground_cleanup(&mut message, playground_cleanup_warnings(None, None, &root));
+            return Err(bad_request(message));
         }
         Err(error) => {
-            let _ = std::fs::remove_dir_all(&root);
-            return Err(anyhow!("playground task failed: {error}").into());
+            let mut message = format!("playground task failed: {error}");
+            append_playground_cleanup(&mut message, playground_cleanup_warnings(None, None, &root));
+            return Err(bad_request(message));
         }
     };
     let admission = match state.project_lifecycle.admit(&project.id) {
         Some(admission) => admission,
         None => {
-            let store = Store::open()?;
-            let _ = store.delete_local_project_with(&project.id, None::<fn() -> Result<()>>);
-            let _ = std::fs::remove_dir_all(&root);
-            return Err(bad_request("project deletion is in progress"));
+            let mut message = "project deletion is in progress".to_string();
+            match Store::open() {
+                Ok(store) => append_playground_cleanup(
+                    &mut message,
+                    playground_cleanup_warnings(Some(&store), Some(&project.id), &root),
+                ),
+                Err(error) => {
+                    append_playground_cleanup(
+                        &mut message,
+                        playground_cleanup_warnings(None, None, &root),
+                    );
+                    message.push_str(&format!(
+                        " The playground project could not be cleaned up because the store could not be opened: {error}"
+                    ));
+                }
+            }
+            return Err(bad_request(message));
         }
     };
     drop(create_admission);
@@ -8756,22 +8809,41 @@ async fn create_playground_chat(
         admission: _project_admission,
     } = created;
     let store = Store::open()?;
-    let (store, session) =
-        match resolve_chat_session(&state, store, req.into_session_req(project.id.clone())).await {
-            Ok(found) => found,
-            Err(error) => {
-                if let Ok(cleanup) = Store::open() {
-                    let _ =
-                        cleanup.delete_local_project_with(&project.id, None::<fn() -> Result<()>>);
+    let (store, session) = match resolve_chat_session(
+        &state,
+        store,
+        req.into_session_req(project.id.clone()),
+    )
+    .await
+    {
+        Ok(found) => found,
+        Err(error) => {
+            let ApiError(status, mut message) = error;
+            match Store::open() {
+                Ok(cleanup) => append_playground_cleanup(
+                    &mut message,
+                    playground_cleanup_warnings(Some(&cleanup), Some(&project.id), &root),
+                ),
+                Err(cleanup_error) => {
+                    append_playground_cleanup(
+                        &mut message,
+                        playground_cleanup_warnings(None, None, &root),
+                    );
+                    message.push_str(&format!(
+                            " The playground project could not be cleaned up because the store could not be opened: {cleanup_error}"
+                        ));
                 }
-                let _ = std::fs::remove_dir_all(&root);
-                return Err(error);
             }
-        };
+            return Err(ApiError(status, message));
+        }
+    };
     if let Err(error) = store.create_chat_session(&session) {
-        let _ = store.delete_local_project_with(&project.id, None::<fn() -> Result<()>>);
-        let _ = std::fs::remove_dir_all(&root);
-        return Err(error.into());
+        let mut message = error.to_string();
+        append_playground_cleanup(
+            &mut message,
+            playground_cleanup_warnings(Some(&store), Some(&project.id), &root),
+        );
+        return Err(bad_request(message));
     }
     state.chat.emit_session(Some(session.clone())).await;
     Ok(Json(json!({
@@ -8799,7 +8871,7 @@ async fn discard_playground_chat(
     let root = std::path::Path::new(&project.repo_path)
         .parent()
         .map(std::path::Path::to_path_buf);
-    let response = delete_project_inner(
+    let Json(mut response) = delete_project_inner(
         state,
         project.id.clone(),
         DeleteProjectQuery {
@@ -8807,10 +8879,21 @@ async fn discard_playground_chat(
         },
     )
     .await?;
+    let mut warnings = response
+        .get("artifactsError")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<Vec<_>>();
     if let Some(root) = root {
-        let _ = std::fs::remove_dir_all(root);
+        if let Some(warning) = remove_playground_root(&root) {
+            warnings.push(warning);
+        }
     }
-    Ok(response)
+    if !warnings.is_empty() {
+        response["artifactsError"] = Value::String(warnings.join(" "));
+    }
+    Ok(Json(response))
 }
 
 /// Chats the user had in an agent's own CLI, for the composer's `/resume`
@@ -8908,9 +8991,10 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
     reject_if_moving(&state)?;
     let store = Store::open()?;
     if let Some(session) = store.get_chat_session(&id)? {
-        if store
-            .get_local_project(&session.project_id)?
-            .is_some_and(|project| project.is_playground())
+        if session.side_parent_session_id.is_none()
+            && store
+                .get_local_project(&session.project_id)?
+                .is_some_and(|project| project.is_playground())
         {
             return Err(bad_request("playground chats are discarded, not deleted"));
         }

@@ -1767,9 +1767,9 @@
   "share_post_text": "{name}: откройте весь исследовательский проект в OpenResearch",
   "open_shared_link_body": "Откройте «{name}», опубликованный на openresearch.sh, как новый проект.",
   "open_shared_link_publisher": "Поделился(-ась): {name}",
-  "playground_title": "Playground",
-  "playground_new_chat": "New playground chat",
-  "playground_discard_title": "Discard chat",
-  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
-  "playground_discard_action": "Discard"
+  "playground_title": "Песочница",
+  "playground_new_chat": "Новый чат в песочнице",
+  "playground_discard_title": "Удалить чат",
+  "playground_discard_confirm": "Удалить «{title}»? Файлы и история будут удалены безвозвратно.",
+  "playground_discard_action": "Удалить"
 }

@@ -1767,9 +1767,9 @@
   "share_post_text": "{name}：在 OpenResearch 中打开完整的研究项目",
   "open_shared_link_body": "将发布在 openresearch.sh 上的“{name}”作为新项目打开。",
   "open_shared_link_publisher": "由 {name} 分享",
-  "playground_title": "Playground",
-  "playground_new_chat": "New playground chat",
-  "playground_discard_title": "Discard chat",
-  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
-  "playground_discard_action": "Discard"
+  "playground_title": "试验场",
+  "playground_new_chat": "新建试验场聊天",
+  "playground_discard_title": "丢弃聊天",
+  "playground_discard_confirm": "丢弃“{title}”？其文件和历史记录将被永久删除。",
+  "playground_discard_action": "丢弃"
 }

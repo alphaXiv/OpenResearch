@@ -27,6 +27,7 @@ import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarne
 import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
 
 import { worstPerAlias } from "../engineHosts";
+import { navigateKeyboardRow } from "../keyboardNavigation";
 import { runActive, runDisplay } from "../runDisplay";
 
 import {
@@ -4428,6 +4429,7 @@ export function SettingsTabBar({
       role="tablist"
       aria-label={m.settings_page_settings()}
       className="flex shrink-0 items-center justify-center gap-1.5 overflow-x-auto border-b border-b-border px-4 h-14 [scrollbar-width:none]"
+      onKeyDown={navigateKeyboardRow}
     >
       {SETTINGS_TABS.map((item) => {
         const selected = item.activeTabs.includes(active);
@@ -4437,9 +4439,11 @@ export function SettingsTabBar({
             role="tab"
             aria-selected={selected}
             tabIndex={selected ? 0 : -1}
+            data-keyboard-horizontal-item
             data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
             className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 py-2 text-base transition-colors ${selected ? "bg-panel font-semibold text-text shadow-sm" : "text-subtext hover:bg-surface hover:text-text"}`}
             onClick={() => onSelect(item.id)}
+            onFocus={() => onSelect(item.id)}
           >
             {item.icon}
             {item.label()}

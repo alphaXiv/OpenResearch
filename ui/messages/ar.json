@@ -1767,9 +1767,9 @@
   "share_post_text": "{name}: افتح مشروع البحث الكامل في OpenResearch",
   "open_shared_link_body": "افتح “{name}” المنشور على openresearch.sh كمشروع جديد.",
   "open_shared_link_publisher": "شاركه {name}",
-  "playground_title": "Playground",
-  "playground_new_chat": "New playground chat",
-  "playground_discard_title": "Discard chat",
-  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
-  "playground_discard_action": "Discard"
+  "playground_title": "ساحة التجارب",
+  "playground_new_chat": "محادثة جديدة في ساحة التجارب",
+  "playground_discard_title": "تجاهل المحادثة",
+  "playground_discard_confirm": "هل تريد تجاهل «{title}»؟ ستُحذف ملفاتها وسجلها نهائيًا.",
+  "playground_discard_action": "تجاهل"
 }

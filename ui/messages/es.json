@@ -1767,9 +1767,9 @@
   "share_post_text": "{name}: abre el proyecto de investigación completo en OpenResearch",
   "open_shared_link_body": "Abre “{name}”, publicado en openresearch.sh, como un proyecto nuevo.",
   "open_shared_link_publisher": "Compartido por {name}",
-  "playground_title": "Playground",
-  "playground_new_chat": "New playground chat",
-  "playground_discard_title": "Discard chat",
-  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
-  "playground_discard_action": "Discard"
+  "playground_title": "Zona de pruebas",
+  "playground_new_chat": "Nuevo chat de zona de pruebas",
+  "playground_discard_title": "Descartar chat",
+  "playground_discard_confirm": "¿Descartar «{title}»? Sus archivos y el historial se eliminarán de forma permanente.",
+  "playground_discard_action": "Descartar"
 }
