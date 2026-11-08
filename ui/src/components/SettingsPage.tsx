@@ -4443,7 +4443,7 @@ export function SettingsTabBar({
             data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
             className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 py-2 text-base transition-colors ${selected ? "bg-panel font-semibold text-text shadow-sm" : "text-subtext hover:bg-surface hover:text-text"}`}
             onClick={() => onSelect(item.id)}
-            onFocus={() => onSelect(item.id)}
+            onFocus={() => { if (!selected) onSelect(item.id); }}
           >
             {item.icon}
             {item.label()}

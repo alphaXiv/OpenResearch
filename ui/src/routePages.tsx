@@ -2,7 +2,7 @@ import { useWorkspace } from "./workspace";
 import { isCancelledError, useQuery } from "@tanstack/react-query";
 
 import { useRouteContext, Link, useNavigate, type ErrorComponentProps } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useRuntime } from "./RemoteRuntime";
 
@@ -93,6 +93,7 @@ export function ProjectsPage() {
     document.title = "OpenResearch";
   }, []);
   const openProject = (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } });
+  const playgroundCreationRef = useRef<ReturnType<typeof createPlaygroundProject> | null>(null);
   const openPlayground = async () => {
     const existing = [...playgrounds].sort((a, b) => b.updatedAt - a.updatedAt)[0];
     if (existing) {
@@ -100,8 +101,18 @@ export function ProjectsPage() {
       return;
     }
     try {
-      const project = await createPlaygroundProject();
-      queryClient.setQueryData(projectsOptions.queryKey, (current) => [...(current ?? []), project]);
+      let pending = playgroundCreationRef.current;
+      if (!pending) {
+        pending = createPlaygroundProject().finally(() => {
+          if (playgroundCreationRef.current === pending) playgroundCreationRef.current = null;
+        });
+        playgroundCreationRef.current = pending;
+      }
+      const project = await pending;
+      queryClient.setQueryData(projectsOptions.queryKey, (current) => {
+        const rest = (current ?? []).filter((candidate) => candidate.id !== project.id);
+        return [...rest, project];
+      });
       openProject(project.id);
     } catch (cause) {
       showAlert(cause instanceof Error ? cause.message : String(cause), "error");
