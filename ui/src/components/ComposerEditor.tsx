@@ -653,7 +653,8 @@ export function ComposerEditor({
         onKeyDown={(event) => {
           if (event.key === "ArrowUp" || event.key === "ArrowDown") {
             event.preventDefault();
-            resizeBy(currentHeight(), event.key === "ArrowUp" ? KEYBOARD_STEP : -KEYBOARD_STEP);
+            const current = currentHeight();
+            resizeBy(event.key === "ArrowUp" ? current : Math.min(height ?? MIN_HEIGHT, current), event.key === "ArrowUp" ? KEYBOARD_STEP : -KEYBOARD_STEP);
           } else if (event.key === "Home") {
             event.preventDefault();
             setHeight(null);
