@@ -74,7 +74,7 @@ export function ProjectsPage() {
   const projectsOptions = listProjectsQuery();
   const projectsQuery = useQuery(projectsOptions);
   const stateQuery = useQuery(getUiStateQuery());
-  const projects = projectsQuery.data;
+  const projects = projectsQuery.data?.filter((project) => project.kind !== "playground");
   const state = stateQuery.data;
   const noProjects = projects?.length === 0;
   const onboarded = state?.onboardingCompleted ?? false;
@@ -116,7 +116,7 @@ export function ProjectsPage() {
               onCreated={(project, publicationError) => {
                 queryClient.setQueryData(projectsOptions.queryKey, (cur) => [...(cur ?? []).filter((p) => p.id !== project.id), project]);
                 void navigate({
-                  href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}`,
+                  href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/integrations" : ""}`,
                 });
                 if (publicationError) showAlert(publicationError, "error");
               }}

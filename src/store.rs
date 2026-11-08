@@ -1026,7 +1026,8 @@ impl Store {
                 run_command     TEXT,
                 paper_id        TEXT,
                 created_at      INTEGER NOT NULL,
-                updated_at      INTEGER NOT NULL
+                updated_at      INTEGER NOT NULL,
+                kind            TEXT NOT NULL DEFAULT 'research'
             );
             CREATE TABLE IF NOT EXISTS local_experiments (
                 id                   TEXT PRIMARY KEY,
@@ -1239,6 +1240,7 @@ impl Store {
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN github_sync_enabled INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE local_projects ADD COLUMN workspace_state_json TEXT",
+            "ALTER TABLE local_projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'research'",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE local_experiments ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ssh_host_tests ADD COLUMN tools_found INTEGER NOT NULL DEFAULT 0",
@@ -2293,7 +2295,7 @@ impl Store {
     ) -> Result<bool> {
         let tx = self.begin()?;
         let inserted = tx.execute(
-            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
             params![
                 project.id,
                 project.name,
@@ -2307,6 +2309,7 @@ impl Store {
                 project.paper_id,
                 project.created_at,
                 project.updated_at,
+                project.kind,
             ],
         )?;
         if inserted == 0 {
@@ -2418,11 +2421,11 @@ impl Store {
 
     pub fn create_local_project(&self, p: &LocalProject) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
             params![
                 p.id, p.name, p.slug, p.github_owner, p.github_repo,
                 p.github_sync_enabled, p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
-                p.created_at, p.updated_at,
+                p.created_at, p.updated_at, p.kind,
             ],
         )?;
         Ok(())
@@ -3183,6 +3186,16 @@ impl Store {
                 p.paper_id,
                 now_ms(),
             ],
+        )?;
+        Ok(())
+    }
+
+    /// `kind` is set once at creation and never rewritten by
+    /// `update_local_project`.
+    pub fn set_local_project_kind(&self, id: &str, kind: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE local_projects SET kind = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, kind, now_ms()],
         )?;
         Ok(())
     }
@@ -5979,7 +5992,7 @@ const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_
                                  chat_session_id, cancel_reason FROM runs";
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, github_sync_enabled, \
-                            baseline_branch, repo_path, run_command, paper_id, created_at, updated_at";
+                            baseline_branch, repo_path, run_command, paper_id, created_at, updated_at, kind";
 
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
                                title, description, run_command, agent_status, created_at, \
@@ -8841,6 +8854,7 @@ mod tests {
                     paper_id: None,
                     created_at: 1,
                     updated_at: 2,
+                    kind: "research".into(),
                 })
                 .unwrap();
         }
@@ -8993,6 +9007,7 @@ mod tests {
                 paper_id: None,
                 created_at: 1,
                 updated_at: 1,
+                kind: "research".into(),
             })
             .unwrap();
         let mut older = chat_session_fixture("older");
@@ -11232,6 +11247,7 @@ mod tests {
                     paper_id: None,
                     created_at: 1,
                     updated_at: 1,
+                    kind: "research".into(),
                 })
                 .unwrap();
         }
@@ -11349,6 +11365,7 @@ mod tests {
                 paper_id: None,
                 created_at: 1,
                 updated_at: 1,
+                kind: "research".into(),
             })
             .unwrap();
 

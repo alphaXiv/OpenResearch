@@ -956,6 +956,18 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             get(list_chat_sessions).post(create_chat_session),
         )
         .route(
+            "/api/playground/projects",
+            axum::routing::post(create_playground_project),
+        )
+        .route(
+            "/api/playground/chats",
+            axum::routing::post(create_playground_chat),
+        )
+        .route(
+            "/api/playground/chats/{id}",
+            axum::routing::delete(discard_playground_chat),
+        )
+        .route(
             "/api/chat/sessions/{id}",
             get(get_chat_session)
                 .delete(delete_chat_session)
@@ -1659,9 +1671,16 @@ async fn list_project_activity(State(state): State<AppState>) -> ApiResult {
                 *active_agents.entry(project_id).or_default() += 1;
             }
         }
+        let playgrounds: std::collections::HashSet<String> = store
+            .list_local_projects()?
+            .into_iter()
+            .filter(|project| project.is_playground())
+            .map(|project| project.id)
+            .collect();
         let activity = store
             .list_project_activity_summaries()?
             .into_iter()
+            .filter(|summary| !playgrounds.contains(&summary.project_id))
             .map(|summary| {
                 let active_agents = active_agents.get(&summary.project_id).copied().unwrap_or(0);
                 json!({
@@ -8527,7 +8546,7 @@ async fn chat_session_experiments(Path(id): Path<String>) -> ApiResult {
 
 async fn create_chat_session(
     State(state): State<AppState>,
-    Json(mut req): Json<CreateChatSessionReq>,
+    Json(req): Json<CreateChatSessionReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
     let _admission = state
@@ -8538,10 +8557,25 @@ async fn create_chat_session(
     store
         .get_local_project(&req.project_id)?
         .ok_or_else(|| not_found("project"))?;
+    let (store, session) = resolve_chat_session(&state, store, req).await?;
+    store.create_chat_session(&session)?;
+    state.chat.emit_session(Some(session.clone())).await;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, false) }),
+    ))
+}
+
+/// Fill in New Chat defaults and validate the request against the harness
+/// catalog. Shared by project chats and playground chats.
+async fn resolve_chat_session(
+    state: &AppState,
+    store: Store,
+    mut req: CreateChatSessionReq,
+) -> std::result::Result<(Store, StoredChatSession), ApiError> {
     if req.harness.is_none() {
         let preferences = store.ui_state()?;
         let catalog = harnesses_payload(
-            &state,
+            state,
             &HarnessQuery {
                 refresh: None,
                 retry: None,
@@ -8601,11 +8635,182 @@ async fn create_chat_session(
         created_at: now_ms(),
         updated_at: now_ms(),
     };
-    store.create_chat_session(&session)?;
+    Ok((store, session))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CreatePlaygroundChatReq {
+    harness: Option<String>,
+    model: Option<String>,
+    service_tier: Option<String>,
+    permission_mode: Option<String>,
+    #[serde(default)]
+    plan_mode: bool,
+    reasoning_level: Option<String>,
+    autonomy: Option<Autonomy>,
+}
+
+impl CreatePlaygroundChatReq {
+    fn into_session_req(self, project_id: String) -> CreateChatSessionReq {
+        CreateChatSessionReq {
+            project_id,
+            harness: self.harness,
+            model: self.model,
+            service_tier: self.service_tier,
+            permission_mode: self.permission_mode,
+            plan_mode: self.plan_mode,
+            reasoning_level: self.reasoning_level,
+            autonomy: self.autonomy,
+        }
+    }
+}
+
+struct PlaygroundWorkspace {
+    project: local::model::LocalProject,
+    root: std::path::PathBuf,
+    admission: ProjectAdmissionLease,
+}
+
+/// A playground chat is a chat plus a hidden per-chat project. The project
+/// exists only to give the chat its own repo, worktree, artifacts directory
+/// and run namespace — everything Project-keyed already works unchanged.
+/// Creating the project is separate from creating the session so the sidebar
+/// shows no row until the first prompt is sent.
+async fn create_playground_workspace(state: &AppState) -> Result<PlaygroundWorkspace, ApiError> {
+    reject_if_moving(state)?;
+    let create_admission = state
+        .project_lifecycle
+        .admit("__project_create__")
+        .ok_or_else(|| bad_request("playground creation is unavailable"))?;
+    reject_if_moving(state)?;
+    let chat_id = format!("chat_{}", uuid::Uuid::new_v4());
+    let root = crate::store::data_dir().join("playgrounds").join(&chat_id);
+    std::fs::create_dir_all(&root)
+        .map_err(|e| anyhow!("Could not create playground workspace: {e}"))?;
+    let repo_path = root.join("repo");
+    let repo_arg = repo_path.to_string_lossy().into_owned();
+    let creation_guard = state.project_creation_lock.clone().lock_owned().await;
+    let project = match tokio::task::spawn_blocking(move || -> Result<_> {
+        let _creation_guard = creation_guard;
+        let store = Store::open()?;
+        let mut project = local::projects::create_project(
+            &store,
+            "Playground",
+            &repo_arg,
+            local::projects::CreateProjectOptions {
+                create_folder: true,
+                require_new_folder: true,
+                initialize_git: true,
+                ..Default::default()
+            },
+        )?;
+        store.set_local_project_kind(&project.id, "playground")?;
+        project.kind = "playground".into();
+        Ok(project)
+    })
+    .await
+    {
+        Ok(Ok(project)) => project,
+        Ok(Err(error)) => {
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(bad_request(error));
+        }
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(anyhow!("playground task failed: {error}").into());
+        }
+    };
+    let admission = match state.project_lifecycle.admit(&project.id) {
+        Some(admission) => admission,
+        None => {
+            let store = Store::open()?;
+            let _ = store.delete_local_project_with(&project.id, None::<fn() -> Result<()>>);
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(bad_request("project deletion is in progress"));
+        }
+    };
+    drop(create_admission);
+    Ok(PlaygroundWorkspace {
+        project,
+        root,
+        admission,
+    })
+}
+
+/// Create only the hidden project behind a playground chat; the chat session
+/// is created when the first message is sent.
+async fn create_playground_project(State(state): State<AppState>) -> ApiResult {
+    let created = create_playground_workspace(&state).await?;
+    Ok(Json(json!({ "project": project_json(&created.project) })))
+}
+
+async fn create_playground_chat(
+    State(state): State<AppState>,
+    Json(req): Json<CreatePlaygroundChatReq>,
+) -> ApiResult {
+    let created = create_playground_workspace(&state).await?;
+    let PlaygroundWorkspace {
+        project,
+        root,
+        admission: _project_admission,
+    } = created;
+    let store = Store::open()?;
+    let (store, session) =
+        match resolve_chat_session(&state, store, req.into_session_req(project.id.clone())).await {
+            Ok(found) => found,
+            Err(error) => {
+                if let Ok(cleanup) = Store::open() {
+                    let _ =
+                        cleanup.delete_local_project_with(&project.id, None::<fn() -> Result<()>>);
+                }
+                let _ = std::fs::remove_dir_all(&root);
+                return Err(error);
+            }
+        };
+    if let Err(error) = store.create_chat_session(&session) {
+        let _ = store.delete_local_project_with(&project.id, None::<fn() -> Result<()>>);
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error.into());
+    }
     state.chat.emit_session(Some(session.clone())).await;
-    Ok(Json(
-        json!({ "session": local::chat::session_json(&session, false) }),
-    ))
+    Ok(Json(json!({
+        "project": project_json(&project),
+        "session": local::chat::session_json(&session, false),
+    })))
+}
+
+/// Discard is permanent: the chat, its hidden project, repo, worktree and
+/// artifacts all go. Playground chats have no GitHub copy and no promotion.
+async fn discard_playground_chat(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> ApiResult {
+    let store = Store::open()?;
+    let session = store
+        .get_chat_session(&session_id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    let project = store
+        .get_local_project(&session.project_id)?
+        .ok_or_else(|| not_found("project"))?;
+    if !project.is_playground() {
+        return Err(bad_request("not a playground chat"));
+    }
+    let root = std::path::Path::new(&project.repo_path)
+        .parent()
+        .map(std::path::Path::to_path_buf);
+    let response = delete_project_inner(
+        state,
+        project.id.clone(),
+        DeleteProjectQuery {
+            delete_artifacts: true,
+        },
+    )
+    .await?;
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    Ok(response)
 }
 
 /// Chats the user had in an agent's own CLI, for the composer's `/resume`
@@ -8701,6 +8906,15 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
 
 async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
+    let store = Store::open()?;
+    if let Some(session) = store.get_chat_session(&id)? {
+        if store
+            .get_local_project(&session.project_id)?
+            .is_some_and(|project| project.is_playground())
+        {
+            return Err(bad_request("playground chats are discarded, not deleted"));
+        }
+    }
     // Detached so a canceled request cannot stop between the native purge and the row delete.
     let chat = state.chat.clone();
     tokio::spawn(async move { chat.delete_session(&id).await })
@@ -10978,6 +11192,7 @@ mod tests {
             paper_id: None,
             created_at: 0,
             updated_at: 0,
+            kind: "research".into(),
         };
         let json = project_json_with_artifacts_dir(
             &project,

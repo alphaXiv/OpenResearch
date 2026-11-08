@@ -152,6 +152,10 @@ fn opencode_config_json(
 /// placeholders are substituted (project facts, state, skills, and the compute default).
 const SYSTEM_PROMPT: &str = include_str!("../../SYSTEM_PROMPT.md");
 
+/// Playground chats get a smaller playbook: no project state, no experiment
+/// tree, no run history. Same `{token}` substitution as [`SYSTEM_PROMPT`].
+const PLAYGROUND_PROMPT: &str = include_str!("../../PLAYGROUND_PROMPT.md");
+
 #[derive(Default)]
 pub(super) struct ProjectState {
     experiments: usize,
@@ -216,7 +220,24 @@ fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
     )
 }
 
+fn playground_playbook_md(project: &LocalProject) -> String {
+    let artifacts = super::files::files_dir(project)
+        .to_string_lossy()
+        .into_owned();
+    let template = PLAYGROUND_PROMPT
+        .split_once("-->\n\n")
+        .map(|(_, rest)| rest)
+        .unwrap_or(PLAYGROUND_PROMPT);
+    template
+        .replace("{name}", &project.name)
+        .replace("{id}", &project.id)
+        .replace("{artifacts}", &artifacts)
+}
+
 pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
+    if project.is_playground() {
+        return playground_playbook_md(project);
+    }
     let id = &project.id;
     let name = &project.name;
     let publication_line = if project.github_enabled() {
@@ -1416,6 +1437,11 @@ mod tests {
         assert!(host.stopping.load(std::sync::atomic::Ordering::SeqCst));
     }
 
+    fn sample_playbook() -> String {
+        playbook_md(&sample_project(), &ProjectState::default())
+    }
+
+    /// The playbook's runtime placeholders must all resolve.
     #[test]
     fn project_state_summarizes_counts_and_the_run_command() {
         let mut project = sample_project();
@@ -1423,6 +1449,58 @@ mod tests {
         assert!(fresh.contains("**0 experiments and 0 runs**"));
         assert!(fresh.contains("no fixed run command"));
 
+        project.run_command = Some("python train.py".into());
+        let state = ProjectState {
+            experiments: 12,
+            runs: 18,
+            active_runs: 1,
+        };
+        let existing = project_state_md(&project, &state);
+        assert!(existing.contains("**12 experiments**"));
+        assert!(existing.contains("**18 runs** (1 run active)"));
+        assert!(existing.contains("fixed run command is configured"));
+    }
+
+    #[test]
+    fn playbook_short_circuits_orientation_for_a_fresh_project() {
+        let md = sample_playbook();
+        assert!(md.contains("## Project state"));
+        assert!(md.contains("fresh project: **0 experiments and 0 runs**"));
+        assert!(md.contains("experiment tree is empty and no fixed run command is configured"));
+        assert!(!md.contains("Do not inspect the tree"));
+
+        let mut project = sample_project();
+        project.run_command = Some("python train.py".into());
+        let configured = playbook_md(&project, &ProjectState::default());
+        assert!(
+            configured.contains("experiment tree is empty and the fixed run command is configured")
+        );
+    }
+
+    #[test]
+    fn playground_playbook_drops_project_state_and_experiment_guidance() {
+        let mut project = sample_project();
+        project.kind = "playground".into();
+        project.name = "Playground".into();
+        let md = playbook_md(
+            &project,
+            &ProjectState {
+                experiments: 3,
+                runs: 4,
+                active_runs: 1,
+            },
+        );
+        assert!(md.contains("# OpenResearch playground"));
+        assert!(md.contains("**no project state**"));
+        assert!(md.contains("files/test-project") || md.contains("artifacts"));
+        assert!(!md.contains("## Project state"));
+        assert!(!md.contains("orientation snapshot"));
+        assert!(!md.contains("{"));
+    }
+
+    #[test]
+    fn playbook_summarizes_existing_project_state_without_inlining_the_tree() {
+        let mut project = sample_project();
         project.run_command = Some("python train.py".into());
         let state = ProjectState {
             experiments: 12,

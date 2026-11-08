@@ -1062,6 +1062,7 @@ mod tests {
             paper_id: None,
             created_at: 0,
             updated_at: 0,
+            kind: "research".into(),
         };
         assert_eq!(file_name(&project), "Tiny LM- v2-ablations.orx");
         project.name = " .. ".into();

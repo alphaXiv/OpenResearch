@@ -388,6 +388,10 @@
   "settings_page_general": "常规",
   "settings_page_git_hub_publishing": "GitHub 发布",
   "settings_page_git_token": "Git 令牌",
+  "settings_page_agents": "智能体",
+  "settings_page_integrations": "集成",
+  "settings_agents_intro": "选择 OpenResearch 可以运行的智能体及其可使用的技能。",
+  "settings_integrations_intro": "连接 OpenResearch 用于发布和文件同步的外部服务。",
   "settings_page_harnesses": "智能体工具",
   "settings_page_hf": "hf_…",
   "settings_page_hf_token_is_set_in_the_environment_and": "环境中已设置 HF_TOKEN，它会覆盖此处保存的令牌。",
@@ -1762,5 +1766,10 @@
   "share_post_x": "发布到 X",
   "share_post_text": "{name}：在 OpenResearch 中打开完整的研究项目",
   "open_shared_link_body": "将发布在 openresearch.sh 上的“{name}”作为新项目打开。",
-  "open_shared_link_publisher": "由 {name} 分享"
+  "open_shared_link_publisher": "由 {name} 分享",
+  "playground_title": "Playground",
+  "playground_new_chat": "New playground chat",
+  "playground_discard_title": "Discard chat",
+  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
+  "playground_discard_action": "Discard"
 }

@@ -222,6 +222,7 @@ pub fn create_project(
         paper_id: paper_id.filter(|p| !p.trim().is_empty()),
         created_at: now,
         updated_at: now,
+        kind: "research".into(),
     };
     store.create_local_project(&project)?;
     Ok(project)

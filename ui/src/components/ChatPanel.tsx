@@ -17,6 +17,7 @@ import {
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 
+import { clearPlaygroundDraftProject } from "../playgroundDraft";
 import { Dialog } from "@base-ui/react/dialog";
 import { EscapeScope } from "./EscapeScope";
 import { commandRegion, subscribeCommandRegion } from "../keyboardRegion";
@@ -30,7 +31,7 @@ import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
 import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
-import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { fitSidebarRows, isPlaygroundProject, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 
@@ -76,6 +77,7 @@ import {
   Link,
   FileText,
   FlaskConical,
+  Folder,
   FolderPlus,
   Globe,
   Gauge,
@@ -88,8 +90,10 @@ import {
   MoreHorizontal,
   Paperclip,
   Pencil,
+  Pin,
   Plus,
   Search,
+  Settings,
   SlidersHorizontal,
   SquareTerminal,
   TriangleAlert,
@@ -193,7 +197,7 @@ import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
 import { ExperimentRunBanner } from "./ExperimentRunBanner";
-import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
+import { SettingsTabBar, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { MentionMenu, type MentionMatch } from "./MentionMenu";
 import { useDebouncedValue } from "./NewProjectForm";
@@ -4711,6 +4715,8 @@ function SessionRow({
   onSetArchived,
   onDelete,
   onOpenExperiment,
+  pinned,
+  onTogglePin,
   modelName,
   projectName,
   harnessLogo,
@@ -4732,6 +4738,8 @@ function SessionRow({
   onSetArchived: (archived: boolean) => void;
   onDelete: () => void;
   onOpenExperiment: (projectId: string, experimentId: string) => void;
+  pinned?: boolean;
+  onTogglePin?: () => void;
   modelName: string | null;
   projectName?: string;
   harnessLogo?: string;
@@ -4905,6 +4913,9 @@ function SessionRow({
           />
         </span>
       )}
+      {pinned && !editing && (
+        <Pin size={12} className="shrink-0 text-muted" aria-label={m.sidebar_pin_project()} />
+      )}
       {experimentRunning && !editing && (
         <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
           <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
@@ -4972,6 +4983,17 @@ function SessionRow({
           >
             <span>{session.archived ? m.chat_unarchive() : m.chat_archive()}</span>
           </MenuItem>
+          {onTogglePin && (
+            <MenuItem
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen(false);
+                onTogglePin();
+              }}
+            >
+              <span>{pinned ? m.sidebar_unpin_project() : m.sidebar_pin_project()}</span>
+            </MenuItem>
+          )}
           <MenuItem danger
             onClick={(e) => {
               e.stopPropagation();
@@ -5025,6 +5047,7 @@ export function ChatPanel({
   contentInert = false,
   onShowRail,
   onNewProject,
+  onNewPlaygroundChat,
   mainView,
   onSelectMainView,
   onOpenFile,
@@ -5072,11 +5095,13 @@ export function ChatPanel({
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
   onNewProject?: () => void;
+  /** Create a hidden per-chat workspace and open it (sidebar Playground). */
+  onNewPlaygroundChat?: () => void;
   /** Run a harness setup command (`path` is its setup route) in the right panel's terminal tab. */
   onRunSetup?: (command: string, path: string) => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
-  mainView: "chat" | "skills" | SettingsTab;
-  onSelectMainView: (view: "chat" | "skills" | SettingsTab) => void;
+  mainView: "chat" | SettingsTab;
+  onSelectMainView: (view: "chat" | SettingsTab) => void;
   /** Open a project file in the right pane (chat tool rows are clickable).
    * `sessionId` is the chat session the click came from, so relative paths
    * can resolve against that session's worktree. */
@@ -5145,7 +5170,7 @@ export function ChatPanel({
 }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
 
-  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+  const { showCustomDialog, showConfirmDialog, showFormDialog } = useWorkspace().dialogs;
 
   const {
     setChatSessionPermissionMode,
@@ -5155,6 +5180,7 @@ export function ChatPanel({
     setChatSessionGoal,
     importNativeChat,
     openSideChat,
+    discardPlaygroundChat,
     createChatSession,
     setChatSessionArchived,
     releaseDelegate,
@@ -5233,7 +5259,18 @@ export function ChatPanel({
       return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
     } catch { return []; }
   });
+  const [pinnedChats, setPinnedChats] = useState<string[]>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-pinned-chats") ?? "[]");
+      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+    } catch { return []; }
+  });
+  const [sidebarSection, setSidebarSection] = useState<"projects" | "playground">(() => {
+    try { return localStorage.getItem("sidebar-section") === "playground" ? "playground" : "projects"; }
+    catch { return "projects"; }
+  });
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
+  const [playgroundFilter, setPlaygroundFilter] = useState<SessionFilter>("active");
   const [sidebarExpandedAll, setSidebarExpandedAll] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
   const cardWarmUntil = useRef(0);
@@ -5251,15 +5288,31 @@ export function ChatPanel({
     return () => { observer.disconnect(); railBodyRef.current = null; };
   }, [embedded]);
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
-  const sortedProjects = [...sidebarProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
+  const researchProjects = sidebarProjects.filter((project) => !isPlaygroundProject(project));
+  const playgroundProjects = sidebarProjects
+    .filter(isPlaygroundProject)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const sortedProjects = [...researchProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
   const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
   let shownProjects = sortedProjects.slice(0, candidateLimit);
   const currentProject = sidebarProjects.find((project) => project.id === projectId);
-  if (currentProject && !shownProjects.some((project) => project.id === projectId)) {
+  const activeIsPlayground = Boolean(currentProject && isPlaygroundProject(currentProject));
+  useEffect(() => {
+    if (!activeIsPlayground) return;
+    setSidebarSection("playground");
+    try { localStorage.setItem("sidebar-section", "playground"); } catch {}
+  }, [activeIsPlayground, projectId]);
+  if (currentProject && !isPlaygroundProject(currentProject) && !shownProjects.some((project) => project.id === projectId)) {
     shownProjects = [...shownProjects.slice(0, candidateLimit - 1), currentProject];
   }
   const projectSessionsQueries = useQueries({
     queries: (sidebarGrouping === "projects" ? shownProjects : []).map((project) => ({
+      ...listChatSessionsQuery(project.id),
+      enabled: !embedded,
+    })),
+  });
+  const playgroundSessionsQueries = useQueries({
+    queries: (sidebarGrouping === "projects" ? playgroundProjects : []).map((project) => ({
       ...listChatSessionsQuery(project.id),
       enabled: !embedded,
     })),
@@ -5304,6 +5357,38 @@ export function ChatPanel({
     if (changed) delegatesRef.current = next;
     return delegatesRef.current;
   }, [sessions, activeId]);
+  const activeFilter = sidebarGrouping !== "list" && sidebarSection === "playground" ? playgroundFilter : sessionFilter;
+  const setActiveFilter = (next: SessionFilter) => {
+    if (sidebarGrouping !== "list" && sidebarSection === "playground") setPlaygroundFilter(next);
+    else setSessionFilter(next);
+  };
+  const playgroundChats = sidebarGrouping === "projects"
+    ? playgroundProjects.flatMap((project, index) => {
+        const query = playgroundSessionsQueries[index];
+        const projectSessions = project.id === projectId ? sessions : query?.data ?? EMPTY_SESSIONS;
+        return projectSessions
+          .filter((session) => !session.sideParentSessionId && (matchesFilter(activeFilter, session.archived) || session.id === activeId))
+          .map((session) => ({ project, session }));
+      }).sort((a, b) => Number(pinnedChats.includes(b.session.id)) - Number(pinnedChats.includes(a.session.id)) || b.session.updatedAt - a.session.updatedAt)
+    : [];
+  const changeSidebarGrouping = (grouping: "projects" | "list") => {
+    setSidebarGrouping(grouping);
+    try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
+    setSidebarExpandedAll(false);
+    setChatLimits({});
+    if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
+  };
+  const selectSidebarSection = (next: "projects" | "playground") => {
+    if (sidebarGrouping === "list") changeSidebarGrouping("projects");
+    if (next !== sidebarSection) {
+      setSidebarSection(next);
+      try { localStorage.setItem("sidebar-section", next); } catch {}
+      setFocusedSidebarRow(null);
+      setSidebarExpandedAll(false);
+      setChatLimits({});
+      if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
+    }
+  };
   const onActiveSessionChangeRef = useRef(onActiveSessionChange);
   onActiveSessionChangeRef.current = onActiveSessionChange;
   const projectVisitRef = useRef({ projectId });
@@ -6965,6 +7050,7 @@ export function ChatPanel({
     if (sideParentSessionId && sideDraftAutonomy !== null && session.autonomy !== sideDraftAutonomy) {
       session = await setChatSessionAutonomyMutation.mutateAsync([session.id, sideDraftAutonomy]);
     }
+    if (activeIsPlayground) clearPlaygroundDraftProject();
     if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit) {
       setSessions((cur) => [session, ...cur.filter((row) => row.id !== session.id)]);
       if (!queryClient.getQueryData(sessionsOptions.queryKey)) void syncSessionList(true);
@@ -7227,6 +7313,12 @@ export function ChatPanel({
       next.delete(sessionId);
       return next;
     });
+    setPinnedChats((current) => {
+      if (!current.includes(sessionId)) return current;
+      const next = current.filter((id) => id !== sessionId);
+      try { localStorage.setItem("sidebar-pinned-chats", JSON.stringify(next)); } catch {}
+      return next;
+    });
     seenTitles.current.delete(sessionId);
   }
 
@@ -7271,6 +7363,20 @@ export function ChatPanel({
 
   function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
+    if (playgroundProjectIds.has(session.projectId)) {
+      showConfirmDialog({
+        title: m.playground_discard_title(),
+        description: m.playground_discard_confirm({ title: autoDir(title) }),
+        confirmLabel: m.playground_discard_action(),
+        destructive: true,
+        onCancel: "close",
+        onConfirm: async () => {
+          await discardPlaygroundChat(session.id);
+          forgetSession(session.id);
+        },
+      });
+      return;
+    }
     showConfirmDialog({
       title: m.chat_panel_delete(),
       description: m.chat_delete_session_confirm({ title: autoDir(title) }),
@@ -7320,23 +7426,57 @@ export function ChatPanel({
   const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
   const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
+    if (activeIsPlayground && onNewPlaygroundChat) {
+      onNewPlaygroundChat();
+      return;
+    }
     setSessionFilter("active");
     requestNewChatFocus(projectId);
     onActiveSessionChange(null);
-  }, [onActiveSessionChange, projectId]);
-  const startNewTask = useCallback(async () => {
-    try {
-      const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
-      const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
-        !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
-      setSessionFilter("active");
-      const targetProject = latest?.projectId ?? projectId;
-      requestNewChatFocus(targetProject);
-      onActiveSessionChange(null, { projectId: targetProject });
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
+  }, [activeIsPlayground, onActiveSessionChange, onNewPlaygroundChat, projectId]);
+  /** New chat in the Projects section: the open project, else the most recent one. */
+  const startNewProjectChat = useCallback(() => {
+    const target = currentProject && !isPlaygroundProject(currentProject) ? currentProject : sortedProjects[0];
+    if (!target) {
+      if (onNewPlaygroundChat) onNewPlaygroundChat();
+      return;
     }
-  }, [projectId, onActiveSessionChange]);
+    setSessionFilter("active");
+    requestNewChatFocus(target.id);
+    onActiveSessionChange(null, { projectId: target.id });
+  }, [currentProject, onActiveSessionChange, onNewPlaygroundChat, sortedProjects]);
+  /** One-list mode has no active section; let the user pick where the chat goes. */
+  const chooseNewChatTarget = useCallback(() => {
+    if (!onNewPlaygroundChat || !sortedProjects.length) {
+      startNewProjectChat();
+      return;
+    }
+    showFormDialog(m.chat_panel_new_chat(), (close) => (
+      <div className="mt-4 flex flex-col gap-2">
+        <Button variant="default" className="justify-start" onClick={() => { close(); startNewProjectChat(); }}>
+          <Folder size={16} />
+          {m.projects_home_projects()}
+        </Button>
+        <Button variant="default" className="justify-start" onClick={() => { close(); onNewPlaygroundChat(); }}>
+          <MessagesSquare size={16} />
+          {m.playground_title()}
+        </Button>
+      </div>
+    ));
+  }, [onNewPlaygroundChat, sortedProjects.length, startNewProjectChat]);
+  const startNewTask = useCallback(async () => {
+    if (sidebarGrouping === "projects") {
+      if (sidebarSection === "playground" && onNewPlaygroundChat) {
+        onNewPlaygroundChat();
+        return;
+      }
+      if (sidebarSection === "projects") {
+        startNewProjectChat();
+        return;
+      }
+    }
+    chooseNewChatTarget();
+  }, [chooseNewChatTarget, onNewPlaygroundChat, sidebarGrouping, sidebarSection, startNewProjectChat]);
 
   const openSpawnedSession = useCallback(
     async (sessionId: string) => {
@@ -7367,11 +7507,12 @@ export function ChatPanel({
     ? waitingSessions.has(session.id) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
   const sidebarRows: SidebarRow[] = [];
-  if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {
+  const showPlayground = sidebarSection === "playground" && !embedded;
+  if (sidebarGrouping === "projects" && !showPlayground) shownProjects.forEach((project, index) => {
     const query = projectSessionsQueries[index];
     const projectSessions = project.id === projectId ? sessions : query.data ?? EMPTY_SESSIONS;
     const matching = projectSessions
-      .filter((session) => !session.sideParentSessionId && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
+      .filter((session) => !session.sideParentSessionId && (matchesFilter(activeFilter, session.archived) || session.id === activeId))
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const chatLimit = chatLimits[project.id] ?? 6;
     let visible = matching.slice(0, chatLimit);
@@ -7384,8 +7525,13 @@ export function ChatPanel({
     if (matching.length > 6) sidebarRows.push({ kind: "more", project });
     if (!visible.length && (sidebarGrouping === "projects" || query.isPending || query.error)) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => { void query.refetch(); } });
   });
+  const playgroundProjectIds = new Set(playgroundProjects.map((project) => project.id));
+  if (sidebarGrouping === "projects" && showPlayground) {
+    playgroundChats.forEach(({ project, session }) => sidebarRows.push({ kind: "chat", project, session }));
+  }
   if (sidebarGrouping === "list") {
     const flat = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? [];
+    sidebarRows.push({ kind: "section", section: "all", open: true, count: flat.length });
     const selected = sessions.find((session) => session.id === activeId);
     if (selected && !flat.some((session) => session.id === selected.id)) flat.push(selected);
     flat.filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).forEach((session) => {
@@ -7405,7 +7551,9 @@ export function ChatPanel({
     ? fitSidebarRows(sidebarRows, Math.max(0, railHeight - 38), activeId) : initialRows;
   const showProjectMore = sidebarGrouping === "projects" && !sidebarExpanded && hasHiddenProjects;
   const defaultRowsHeight = defaultRows.reduce((height, row) => height + sidebarRowHeight(row), 0);
-  const sidebarRowKey = (row: SidebarRow) => row.kind === "chat" ? row.session.id : `${row.kind}:${row.project.id}`;
+  const sidebarRowKey = (row: SidebarRow) => row.kind === "chat"
+    ? row.session.id
+    : row.kind === "section" ? `section:${row.section}` : `${row.kind}:${row.project.id}`;
   const sidebarVirtualizer = useVirtualizer({
     useFlushSync: false,
     count: sidebarRows.length,
@@ -7422,6 +7570,7 @@ export function ChatPanel({
   });
 
   const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
+  const playgroundTopGap = showPlayground && sidebarGrouping === "projects" ? 4 : 0;
   const pendingSidebarFocus = useRef<number | null>(null);
   useLayoutEffect(() => {
     if (pendingSidebarFocus.current === null) return;
@@ -7459,55 +7608,52 @@ export function ChatPanel({
           <Plus size={16} />
           {m.chat_panel_new_chat()}
         </button>
-        <button
-          data-keyboard-item
-          className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
-          aria-current={mainView === "skills" ? "page" : undefined}
-          onClick={() => onSelectMainView("skills")}
-        >
-          <Blocks size={16} />
-          {m.chat_panel_customize()}
-        </button>
-        {SETTINGS_NAV.map((item) => {
-          const active = mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView);
-          const shortcut = item.id === "settings" ? appHotkeys["settings.open"].hotkey : item.id === "compute" ? appHotkeys["compute.open"].hotkey : null;
-          return (
-            <button
-              key={item.id}
-              data-keyboard-item
-              className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${active ? "active" : ""}`}
-              aria-current={active ? "page" : undefined}
-              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-              data-tip={shortcut ? formatForDisplay(shortcut) : undefined}
-              aria-label={item.label()}
-              aria-keyshortcuts={item.id === "settings" ? "Meta+, Control+," : item.id === "compute" ? "Meta+Alt+C Control+Alt+C" : undefined}
-              onClick={() => onSelectMainView(item.id)}
-            >
-              {item.icon}
-              {item.label()}
-            </button>
-          );
-        })}
       </nav>
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-3.5 pb-0 ps-4.5">
-        <div className="rail-section-label p-0 text-sm font-medium text-subtext">
-          {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
-        </div>
-        <div className="rail-section-actions flex items-center gap-1">
-          {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
-            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
-              <FolderPlus size={16} className="text-subtext" />
-            </IconButton>
-          </Tooltip>}
-          <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
-            setSidebarGrouping(grouping);
-            try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
-            setSidebarExpandedAll(false);
-            setChatLimits({});
-            if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
-          }} />
-        </div>
-      </div>
+      {!embedded && (
+        <>
+          <div className="flex shrink-0 flex-col gap-0.5 px-2">
+            {(["projects", "playground"] as const).map((section) => {
+              const active = sidebarGrouping === "projects" && sidebarSection === section;
+              return (
+                <div key={section} className={`flex items-center gap-1 rounded-md ${active ? "bg-panel" : ""}`}>
+                  <button
+                    data-keyboard-item
+                    aria-current={active ? "true" : undefined}
+                    onClick={() => selectSidebarSection(section)}
+                    className={`flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-2.5 py-2 text-base text-text text-start ${active ? "font-medium" : "hover:bg-surface"}`}
+                  >
+                    {section === "projects" ? <Folder size={16} /> : <MessagesSquare size={16} />}
+                    <span className="truncate">{section === "projects" ? m.projects_home_projects() : m.playground_title()}</span>
+                    <span className="text-xs tabular-nums text-muted">{section === "projects" ? researchProjects.length : playgroundChats.length}</span>
+                  </button>
+                  {active && section === "projects" && onNewProject && (
+                    <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+                      <IconButton size="small" className="me-1 text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
+                        <FolderPlus size={15} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                  {active && section === "playground" && (
+                    <Tooltip content={m.playground_new_chat()}>
+                      <IconButton size="small" className="me-1 text-subtext" aria-label={m.playground_new_chat()} onClick={onNewPlaygroundChat} disabled={!onNewPlaygroundChat}>
+                        <Plus size={14} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div className="mx-2 mt-1 flex shrink-0 items-center justify-end gap-1 border-t border-border pt-1">
+            <SessionFilterMenu
+              value={activeFilter}
+              onChange={setActiveFilter}
+              grouping={sidebarGrouping}
+              onGroupingChange={changeSidebarGrouping}
+            />
+          </div>
+        </>
+      )}
       <div className="relative flex-1 min-h-0">
       <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}
         onKeyDown={(event) => {
@@ -7515,7 +7661,7 @@ export function ChatPanel({
           const target = event.target;
           if (!(target instanceof HTMLElement) || (target !== event.currentTarget && !target.hasAttribute("data-sidebar-keyboard-row"))) return;
           const rows = sidebarScrollable ? sidebarRows : defaultRows;
-          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "chat" ? [index] : []);
+          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "section" || row.kind === "chat" ? [index] : []);
           if (indexes.length === 0) return;
           const rowIndex = Number(target.closest("[data-index]")?.getAttribute("data-index") ?? -1);
           const position = indexes.indexOf(rowIndex);
@@ -7540,12 +7686,13 @@ export function ChatPanel({
           setFocusedSidebarRow(sidebarRowKey(rows[index]));
           if (sidebarScrollable) sidebarVirtualizer.scrollToIndex(index, { align: "auto" });
         }}>
-        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) }}>
+        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) + playgroundTopGap }}>
+          {playgroundTopGap > 0 && !sidebarScrollable && <div aria-hidden="true" className="h-1" />}
           {(sidebarScrollable
             ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
             : defaultRows.map((row, index) => ({ row, top: 0, index }))
           ).map(({ row, top, index }) => {
-            const project = row.project;
+            const project = row.kind === "section" ? (null as unknown as Project) : row.project;
             const s = row.kind === "chat" ? row.session : null;
             const sessionHarness = s ? sessionAcpHarness(s, harnesses.find((h) => h.id === s.harness)) : undefined;
             const sessionModel = sessionHarness?.models.find((model) => model.id === s?.model);
@@ -7558,9 +7705,17 @@ export function ChatPanel({
                   if (!event.currentTarget.contains(event.relatedTarget) && !(event.relatedTarget instanceof Element && event.relatedTarget.closest(`[data-session-hover-card="${sidebarRowKey(row)}"]`))) setFocusedSidebarRow(null);
                 }}
                 className={sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"}
-                style={{ height: sidebarRowHeight(row), top: sidebarScrollable ? top : undefined }}
+                style={{ height: sidebarRowHeight(row), top: sidebarScrollable ? top + playgroundTopGap : undefined }}
               >
-                {row.kind === "project" ? (
+                {row.kind === "section" ? (
+                  <div className="group flex h-9 items-center gap-1 rounded-md px-2 text-sm font-medium text-subtext">
+                    <div data-sidebar-keyboard-row className="flex min-w-0 flex-1 items-center gap-1.5">
+                      <MessagesSquare size={15} className="shrink-0" />
+                      <span className="truncate">{m.chat_all_sessions()}</span>
+                      <span className="text-xs tabular-nums text-muted">{row.count}</span>
+                    </div>
+                  </div>
+                ) : row.kind === "project" ? (
                   <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
                     <ProjectInfoCard
                       project={project}
@@ -7625,6 +7780,12 @@ export function ChatPanel({
                       onRename={(title) => rename(s, title)}
                       onSetArchived={(archived) => setArchived(s, archived)}
                       onDelete={() => void removeSession(s)}
+                      pinned={pinnedChats.includes(s.id)}
+                      onTogglePin={isPlaygroundProject(project) ? () => {
+                        const next = pinnedChats.includes(s.id) ? pinnedChats.filter((id) => id !== s.id) : [...pinnedChats, s.id];
+                        setPinnedChats(next);
+                        try { localStorage.setItem("sidebar-pinned-chats", JSON.stringify(next)); } catch {}
+                      } : undefined}
                     />
                   </div>
                 ) : row.kind === "more" ? (
@@ -7642,14 +7803,14 @@ export function ChatPanel({
                   <div className={`flex h-full items-center px-2.5 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
                     {row.error ? <Button size="small" onClick={row.retry}>{m.app_retry()}</Button>
                       : row.pending ? <Spinner />
-                        : sessionFilter === "archived" ? m.chat_no_archived_sessions() : m.chat_no_sessions_yet()}
+                        : activeFilter === "archived" ? m.chat_no_archived_sessions() : m.chat_no_sessions_yet()}
                   </div>
                 )}
               </div>
             );
           })}
           {(showProjectMore || sidebarExpandedAll) && (
-            <div className="absolute start-0 flex h-9.5 w-full items-center pt-1" style={{ top: sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight }}>
+            <div className="absolute start-0 flex h-9.5 w-full items-center pt-1" style={{ top: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + playgroundTopGap }}>
               <Button variant="ghost" size="small" className="text-subtext" aria-expanded={sidebarExpandedAll} onClick={() => {
                 if (sidebarExpandedAll) {
                   setChatLimits({});
@@ -7669,6 +7830,21 @@ export function ChatPanel({
         {(sidebarVirtualizer.scrollOffset ?? 0) > 0 && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-5 h-3 bg-linear-to-b from-background to-transparent" />}
         <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
       </>}
+      </div>
+      <div className="shrink-0 px-2 pb-1">
+        <button
+          data-keyboard-item
+          className={`rail-nav-item flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-base text-text text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" ? "active" : ""}`}
+          aria-current={mainView !== "chat" ? "page" : undefined}
+          data-onboarding="nav-settings"
+          data-tip={appHotkeys["settings.open"].hotkey ? formatForDisplay(appHotkeys["settings.open"].hotkey) : undefined}
+          aria-label={m.settings_page_settings()}
+          aria-keyshortcuts="Meta+, Control+,"
+          onClick={() => onSelectMainView("settings")}
+        >
+          <Settings size={16} />
+          {m.settings_page_settings()}
+        </button>
       </div>
       <div className="flex shrink-0 items-center gap-1 border-t border-border px-1 py-1"><AccountChip onDetails={() => onSelectMainView("openresearch")} /><WorkspaceConnection runtime={runtime} /></div>
     </aside>
@@ -7695,6 +7871,7 @@ export function ChatPanel({
         {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
         <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
           {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          <SettingsTabBar active={mainView} onSelect={(tab) => onSelectMainView(tab)} />
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -8081,7 +8258,7 @@ export function ChatPanel({
           )}
           {!embedded && !activeId && onNewProject && (
             <ComposerProjectPicker
-              projects={sidebarProjects}
+              projects={researchProjects}
               activity={projectActivity}
               projectId={projectId}
               projectName={projectName}
@@ -8428,7 +8605,7 @@ export function ChatPanel({
                   value={composerSelection}
                   onSelect={selectModel}
                   onStartHarness={startHarness}
-                  onOpenSettings={() => onSelectMainView("harnesses")}
+                  onOpenSettings={() => onSelectMainView("agents")}
                   permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
                   onSelectPermission={setPermissionMode}

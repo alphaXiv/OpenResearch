@@ -16,7 +16,10 @@ export async function globalResumeLocation(workspace: Workspace): Promise<string
   const { getRememberedGlobalWorkspace } = workspace.persistence;
   const [state, projects] = await Promise.all([client.fetchQuery(getUiStateQuery()), client.fetchQuery(listProjectsQuery())]);
   const location = safeLocation((getRememberedGlobalWorkspace() ?? state.workspace)?.lastLocation);
-  const fallback = () => projects[0] ? projectResumeLocation(projects[0].id, workspace) : Promise.resolve("/projects");
+  const fallback = () => {
+    const first = projects.find((project) => project.kind !== "playground");
+    return first ? projectResumeLocation(first.id, workspace) : Promise.resolve("/projects");
+  };
   if (!location) return fallback();
   const destination = parseDestination(location.split("?")[0]);
   if (!destination?.projectId) return fallback();

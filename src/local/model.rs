@@ -24,9 +24,16 @@ pub struct LocalProject {
     pub paper_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// `research` (normal project) or `playground` (hidden per-chat project).
+    /// Immutable after creation.
+    pub kind: String,
 }
 
 impl LocalProject {
+    pub fn is_playground(&self) -> bool {
+        self.kind == "playground"
+    }
+
     pub fn github_enabled(&self) -> bool {
         self.github_sync_enabled && self.has_github_repository()
     }
@@ -59,6 +66,7 @@ impl LocalProject {
             paper_id: row.get(9)?,
             created_at: row.get(10)?,
             updated_at: row.get(11)?,
+            kind: row.get(12)?,
         })
     }
 }

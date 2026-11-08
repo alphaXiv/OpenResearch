@@ -4,7 +4,11 @@ use crate::error::Result;
 use crate::store::Store;
 
 pub async fn run(args: crate::ProjectsArgs) -> Result<()> {
-    let projects = Store::open()?.list_local_projects()?;
+    let projects: Vec<_> = Store::open()?
+        .list_local_projects()?
+        .into_iter()
+        .filter(|project| !project.is_playground())
+        .collect();
 
     if args.json {
         let rows = projects

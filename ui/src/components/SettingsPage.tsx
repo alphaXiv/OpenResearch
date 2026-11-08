@@ -32,12 +32,14 @@ import { runActive, runDisplay } from "../runDisplay";
 import {
   ArrowLeft,
   ArrowRight,
+  Bot,
   ChevronDown,
   Cpu,
   ExternalLink,
   Info,
   Monitor,
   Moon,
+  Plug,
   Plus,
   RefreshCw,
   Settings,
@@ -103,6 +105,7 @@ import { useDebouncedValue } from "./NewProjectForm";
 import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { HarnessLogo } from "./HarnessLogo";
+import { SkillsTab } from "./SkillsTab";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
 import { SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
@@ -3602,23 +3605,15 @@ function InstallCliRow({
 
 // --- project defaults ----------------------------------------------------------
 
-function GithubSettings({ remote, onProjectUpdate }: {
-  remote: boolean;
-  onProjectUpdate: (project: Project) => void;
-}) {
+function GithubSettings({ remote }: { remote: boolean }) {
   const {
-    listProjectsQuery,
     getProjectDefaultsQuery,
     githubAccountQuery,
     githubOrganizationsQuery,
-    getProjectGitStatusQuery,
   } = useWorkspace().queries;
   const { setProjectDefaults } = useWorkspace().api;
   const { setScopedQueryData, queryClient } = useWorkspace();
 
-  const projectsQuery = useQuery(listProjectsQuery());
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const selectedProject = projectsQuery.data?.find((project) => project.id === selectedProjectId);
   const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
 
   const settingsOptions = getProjectDefaultsQuery();
@@ -3635,7 +3630,6 @@ function GithubSettings({ remote, onProjectUpdate }: {
 
   const load = async () => {
     await settingsQuery.refetch({ cancelRefetch: false });
-    if (selectedProjectId) await queryClient.invalidateQueries(getProjectGitStatusQuery(selectedProjectId));
     await Promise.all([
       queryClient.invalidateQueries(githubAccountQuery()),
       queryClient.invalidateQueries(githubOrganizationsQuery()),
@@ -3704,27 +3698,6 @@ function GithubSettings({ remote, onProjectUpdate }: {
           )}
           <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
           {error && <div className="error">{error}</div>}
-          <div className="mt-6">
-            <div className="mb-2 text-sm font-medium">{m.settings_github_manage_project()}</div>
-            <OptionPicker
-              variant="field"
-              dropDown
-              title={m.settings_github_manage_project()}
-              value={selectedProjectId}
-              choices={[
-                { id: "", label: m.settings_github_choose_project() },
-                ...(projectsQuery.data ?? []).map((project) => ({ id: project.id, label: project.name })),
-              ]}
-              onSelect={setSelectedProjectId}
-            />
-            {projectsQuery.error && (
-              <div className="mt-2 text-sm text-text">
-                <p className="m-0">{projectsQuery.error.message}</p>
-                <Button size="small" onClick={() => void projectsQuery.refetch()}>{m.app_retry()}</Button>
-              </div>
-            )}
-            {selectedProject && <GitTab key={selectedProject.id} project={selectedProject} onProjectUpdate={onProjectUpdate} />}
-          </div>
         </div>
       )}
     </>
@@ -4415,51 +4388,81 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
 
 // --- embedded view -----------------------------------------------------------
 
-type SettingsNavItem = {
-  id: Tab;
+export type SettingsPrimaryTab = Tab;
+
+type SettingsTabItem = {
+  id: SettingsPrimaryTab;
   label: () => string;
   icon: React.ReactNode;
-  activeTabs: Tab[];
+  activeTabs: SettingsPrimaryTab[];
 };
 
-const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
-
-/** Primary rail entries. Configuration sections share the Settings entry. */
-export const SETTINGS_NAV: SettingsNavItem[] = [
-  {
-    id: "compute",
-    label: m.settings_page_compute,
-    icon: <Cpu size={16} />,
-    activeTabs: ["compute", "openresearch", "instances"],
-  },
-  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={16} />, activeTabs: ["environment"] },
+/** Tabs across the top of the Settings view. */
+const SETTINGS_TABS: SettingsTabItem[] = [
   {
     id: "settings",
     label: m.settings_page_settings,
-    icon: <Settings size={16} />,
-    activeTabs: ["settings", ...SETTINGS_SECTIONS],
+    icon: <Settings size={17} />,
+    activeTabs: ["settings", "storage"],
   },
+  { id: "agents", label: m.settings_page_agents, icon: <Bot size={17} />, activeTabs: ["agents"] },
+  {
+    id: "compute",
+    label: m.settings_page_compute,
+    icon: <Cpu size={17} />,
+    activeTabs: ["compute", "openresearch", "instances"],
+  },
+  { id: "integrations", label: m.settings_page_integrations, icon: <Plug size={17} />, activeTabs: ["integrations"] },
+  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={17} />, activeTabs: ["environment"] },
 ];
 
-function isSettingsSection(tab: Tab): boolean {
-  return SETTINGS_SECTIONS.includes(tab);
+export function SettingsTabBar({
+  active,
+  onSelect,
+}: {
+  active: SettingsPrimaryTab;
+  onSelect: (tab: SettingsPrimaryTab) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label={m.settings_page_settings()}
+      className="flex shrink-0 items-center justify-center gap-1.5 overflow-x-auto border-b border-b-border px-4 h-14 [scrollbar-width:none]"
+    >
+      {SETTINGS_TABS.map((item) => {
+        const selected = item.activeTabs.includes(active);
+        return (
+          <button
+            key={item.id}
+            role="tab"
+            aria-selected={selected}
+            tabIndex={selected ? 0 : -1}
+            data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
+            className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 py-2 text-base transition-colors ${selected ? "bg-panel font-semibold text-text shadow-sm" : "text-subtext hover:bg-surface hover:text-text"}`}
+            onClick={() => onSelect(item.id)}
+          >
+            {item.icon}
+            {item.label()}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 /** One settings section's content, shown in the middle pane in place of chat. */
 export function SettingsView({
   tab,
   project,
-  onProjectUpdate,
   onSelectTab,
   remote = false,
 }: {
   tab: Tab;
   project: Project | null;
-  onProjectUpdate: (project: Project) => void;
   onSelectTab: (tab: Tab) => void;
   remote?: boolean;
 }) {
-  const showsSettings = tab === "settings" || isSettingsSection(tab);
+  const showsSettings = tab === "settings" || tab === "storage";
   const sectionRef = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
     const section = sectionRef.current;
@@ -4491,18 +4494,6 @@ export function SettingsView({
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
             </section>
-            <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <GithubSettings
-                remote={remote}
-                onProjectUpdate={onProjectUpdate}
-              />
-            </section>
-            <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <HarnessesTab remote={remote} />
-            </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <OverleafCard />
-            </section>
             {!remote && (
               <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
                 <StorageTab />
@@ -4516,6 +4507,36 @@ export function SettingsView({
                 <UpdatesTab />
               </section>
             )}
+          </div>
+        </>
+      )}
+      {tab === "agents" && (
+        <>
+          <h1>{m.settings_page_agents()}</h1>
+          <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.settings_agents_intro()}</p>
+          <div className="settings-stack mt-4.5">
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <HarnessesTab remote={remote} />
+            </section>
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <h2>{m.skills_tab_customize()}</h2>
+              <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.skills_overview_description()}</p>
+              <SkillsTab embedded />
+            </section>
+          </div>
+        </>
+      )}
+      {tab === "integrations" && (
+        <>
+          <h1>{m.settings_page_integrations()}</h1>
+          <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.settings_integrations_intro()}</p>
+          <div className="settings-stack mt-4.5">
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <GithubSettings remote={remote} />
+            </section>
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <OverleafCard />
+            </section>
           </div>
         </>
       )}

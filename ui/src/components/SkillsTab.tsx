@@ -556,7 +556,8 @@ function LatexTemplatesCard() {
  * skills it can invoke (uploaded here or mirrored from the user's coding
  * agents) and the LaTeX templates it writes papers into. Everything applies to
  * every project. */
-export function SkillsTab() {
+export function SkillsTab({ embedded = false }: { embedded?: boolean }) {
+  if (embedded) return <><SkillsCard /><LatexTemplatesCard /></>;
   return (
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl">
       <h1>{m.skills_tab_customize()}</h1>

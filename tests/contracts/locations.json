@@ -5,6 +5,8 @@
     "/projects/demo/tasks/archived",
     "/projects/demo/skills",
     "/projects/demo/settings/settings",
+    "/projects/demo/settings/agents",
+    "/projects/demo/settings/integrations",
     "/projects/demo/settings/harnesses",
     "/projects/demo/settings/projects",
     "/projects/demo/settings/compute",

@@ -387,6 +387,10 @@
   "settings_page_general": "عام",
   "settings_page_git_hub_publishing": "النشر على GitHub",
   "settings_page_git_token": "رمز Git",
+  "settings_page_agents": "الوكلاء",
+  "settings_page_integrations": "التكاملات",
+  "settings_agents_intro": "اختر الوكلاء الذين يمكن لـ OpenResearch تشغيلهم والمهارات التي يمكنهم استخدامها.",
+  "settings_integrations_intro": "اربط الخدمات الخارجية التي يستخدمها OpenResearch للنشر ومزامنة الملفات.",
   "settings_page_harnesses": "أدوات البرمجة",
   "settings_page_hf": "hf_…",
   "settings_page_hf_token_is_set_in_the_environment_and": "‏HF_TOKEN مضبوط في البيئة ويتجاوز أي رمز محفوظ هنا.",
@@ -1762,5 +1766,10 @@
   "share_post_x": "انشر على X",
   "share_post_text": "{name}: افتح مشروع البحث الكامل في OpenResearch",
   "open_shared_link_body": "افتح “{name}” المنشور على openresearch.sh كمشروع جديد.",
-  "open_shared_link_publisher": "شاركه {name}"
+  "open_shared_link_publisher": "شاركه {name}",
+  "playground_title": "Playground",
+  "playground_new_chat": "New playground chat",
+  "playground_discard_title": "Discard chat",
+  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
+  "playground_discard_action": "Discard"
 }

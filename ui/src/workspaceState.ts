@@ -41,7 +41,11 @@ export interface GlobalWorkspace {
   experimentsView: "tree" | "table";
 }
 
-export const settingsTabs = ["settings", "harnesses", "projects", "compute", "openresearch", "instances", "environment", "storage"] as const;
+export const settingsTabs = ["settings", "agents", "integrations", "compute", "openresearch", "instances", "environment", "storage"] as const;
+const legacySettingsSections: Record<string, SettingsSection> = {
+  harnesses: "agents",
+  projects: "integrations",
+};
 export type SettingsSection = typeof settingsTabs[number];
 export const isSettingsSection = (value: unknown): value is SettingsSection =>
   settingsTabs.some((tab) => tab === value);
@@ -105,7 +109,10 @@ export function parseDestination(pathname: string): Destination | null {
   if (parts.length === 3 || (parts.length === 4 && parts[3] === "")) return { kind: "resume", projectId };
   if (parts.length === 4 && parts[3] === "skills") return { kind: "skills", projectId };
   if (parts.length === 5 && parts[3] === "tasks" && validId(leaf)) return { kind: "task", projectId, ...(leaf === "new" ? {} : { sessionId: leaf }) };
-  if (parts.length === 5 && parts[3] === "settings" && isSettingsSection(leaf)) return { kind: "settings", projectId, section: leaf };
+  if (parts.length === 5 && parts[3] === "settings") {
+    const section = legacySettingsSections[leaf] ?? leaf;
+    if (isSettingsSection(section)) return { kind: "settings", projectId, section };
+  }
   return null;
 }
 

@@ -388,6 +388,10 @@
   "settings_page_general": "General",
   "settings_page_git_hub_publishing": "Publicación en GitHub",
   "settings_page_git_token": "Token de Git",
+  "settings_page_agents": "Agentes",
+  "settings_page_integrations": "Integraciones",
+  "settings_agents_intro": "Elige los agentes que OpenResearch puede ejecutar y las habilidades que pueden usar.",
+  "settings_integrations_intro": "Conecta los servicios externos que OpenResearch usa para publicar y sincronizar archivos.",
   "settings_page_harnesses": "Agentes",
   "settings_page_hf": "hf_…",
   "settings_page_hf_token_is_set_in_the_environment_and": "HF_TOKEN está definido en el entorno y tiene prioridad sobre cualquier token guardado aquí.",
@@ -1762,5 +1766,10 @@
   "share_post_x": "Publicar en X",
   "share_post_text": "{name}: abre el proyecto de investigación completo en OpenResearch",
   "open_shared_link_body": "Abre “{name}”, publicado en openresearch.sh, como un proyecto nuevo.",
-  "open_shared_link_publisher": "Compartido por {name}"
+  "open_shared_link_publisher": "Compartido por {name}",
+  "playground_title": "Playground",
+  "playground_new_chat": "New playground chat",
+  "playground_discard_title": "Discard chat",
+  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
+  "playground_discard_action": "Discard"
 }

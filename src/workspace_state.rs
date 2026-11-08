@@ -290,6 +290,8 @@ fn valid_location(location: &str) -> bool {
                     matches!(
                         tab.as_ref(),
                         "settings"
+                            | "agents"
+                            | "integrations"
                             | "harnesses"
                             | "projects"
                             | "compute"
@@ -338,6 +340,12 @@ mod tests {
                 assert_eq!(valid_location(location), accepted, "{group}: {location:?}");
             }
         }
+    }
+
+    #[test]
+    fn agents_and_integrations_locations_are_valid() {
+        assert!(valid_location("/projects/demo/settings/agents"));
+        assert!(valid_location("/projects/demo/settings/integrations"));
     }
 
     #[test]

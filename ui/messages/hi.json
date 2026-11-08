@@ -388,6 +388,10 @@
   "settings_page_general": "सामान्य",
   "settings_page_git_hub_publishing": "GitHub प्रकाशन",
   "settings_page_git_token": "Git टोकन",
+  "settings_page_agents": "एजेंट",
+  "settings_page_integrations": "एकीकरण",
+  "settings_agents_intro": "वे एजेंट चुनें जिन्हें OpenResearch चला सकता है और वे कौशल जिनका वे उपयोग कर सकते हैं।",
+  "settings_integrations_intro": "OpenResearch द्वारा प्रकाशन और फ़ाइल सिंक के लिए उपयोग की जाने वाली बाहरी सेवाओं को कनेक्ट करें।",
   "settings_page_harnesses": "हार्नेस",
   "settings_page_hf": "hf_…",
   "settings_page_hf_token_is_set_in_the_environment_and": "HF_TOKEN एनवायरनमेंट में सेट है और यहाँ सेव किसी भी टोकन को ओवरराइड करता है।",
@@ -1762,5 +1766,10 @@
   "share_post_x": "X पर पोस्ट करें",
   "share_post_text": "{name}: OpenResearch में पूरा शोध प्रोजेक्ट खोलें",
   "open_shared_link_body": "openresearch.sh पर प्रकाशित “{name}” को नए प्रोजेक्ट के रूप में खोलें।",
-  "open_shared_link_publisher": "{name} द्वारा साझा किया गया"
+  "open_shared_link_publisher": "{name} द्वारा साझा किया गया",
+  "playground_title": "Playground",
+  "playground_new_chat": "New playground chat",
+  "playground_discard_title": "Discard chat",
+  "playground_discard_confirm": "Discard “{title}”? Its files and history are deleted permanently.",
+  "playground_discard_action": "Discard"
 }
