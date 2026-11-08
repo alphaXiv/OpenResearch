@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assistantMessage, codex, composer, emit, renderChat, session, userMessage } from "./chat.mjs";
+import { act } from "react";
+import { m } from "../src/paraglide/messages.js";
+import { assistantMessage, codex, composer, emit, refused, renderChat, session, settle, userMessage } from "./chat.mjs";
+import { find } from "./render.mjs";
 
 const plan = (id, synthesized = false) => assistantMessage(id, [{
   id: `${id}-plan`, type: "prompt",
@@ -54,6 +57,62 @@ test("a plan on the latest idle reply remains actionable", async () => {
     transcripts: { s: [userMessage("u1", "Make a plan"), plan("current")] },
   });
   assert.ok(document.querySelector(".plan-strip"));
+});
+
+for (const synthesized of [false, true]) {
+  test(`accepting a ${synthesized ? "synthesized" : "native"} plan cannot uncover an older approval box`, async () => {
+    let current = { ...plan("current", synthesized), parentId: "u2" };
+    let messages = [userMessage("u1", "Make a plan"), plan("old"), userMessage("u2", "Refine the plan", "old"), current];
+    const sessions = [session("s", { planMode: true })];
+    const chat = await renderChat("/projects/p/tasks/s", {
+      sessions, harnesses: [{ ...codex, supportsSteering: true }],
+      routes: {
+        "GET /api/chat/sessions/s/messages": () => ({ messages, queued: [], activeLeafId: messages.at(-1).id }),
+        "POST /api/chat/sessions/s/respond": (init) => {
+          const answer = JSON.parse(init.body);
+          assert.equal(answer.promptId, "current-plan");
+          assert.equal(answer.approve, true);
+          current = { ...current, parts: current.parts.map((part) => ({ ...part, prompt: { ...part.prompt, resolved: true, approved: true } })) };
+          messages = [...messages.slice(0, -1), current];
+          sessions[0] = { ...sessions[0], planMode: false, busy: true };
+          return { ok: true };
+        },
+        "POST /api/chat/sessions/s/message": () => ({ ok: true }),
+      },
+    });
+    await act(async () => find("button", m.plan_strip_accept_plan()).click());
+    await settle();
+    assert.equal(chat.requests.filter(({ request }) => request.endsWith("/respond")).length, 1);
+    assert.equal(Boolean(document.querySelector(".plan-strip")), false);
+    assert.equal(messages[1].parts[0].prompt.resolved, false);
+    await emit("chat.message", { sessionId: "s", message: current });
+    assert.equal(Boolean(document.querySelector(".plan-strip")), false);
+
+    const implementation = userMessage("u3", "Implement the plan.", "current");
+    const working = activeReply("u3");
+    messages = [...messages, implementation, working];
+    await emit("chat.session", { session: sessions[0] });
+    await emit("chat.message", { sessionId: "s", message: implementation });
+    await emit("chat.message", { sessionId: "s", message: working });
+    await chat.navigate("/projects/p/tasks/new");
+    await chat.navigate("/projects/p/tasks/s");
+    assert.equal(Boolean(document.querySelector(".plan-strip")), false);
+    await composer().type("Also inspect the metadata");
+    await composer().send();
+    assert.equal(chat.sent()[0].mode, "steer");
+  });
+}
+
+test("a failed plan acceptance keeps the current approval box available", async () => {
+  const chat = await renderChat("/projects/p/tasks/s", {
+    transcripts: { s: [userMessage("u1", "Make a plan"), plan("current")] },
+    routes: { "POST /api/chat/sessions/s/respond": () => refused("Plan acceptance failed") },
+  });
+  await act(async () => find("button", m.plan_strip_accept_plan()).click());
+  await settle();
+  assert.equal(chat.requests.filter(({ request }) => request.endsWith("/respond")).length, 1);
+  assert.ok(document.querySelector(".plan-strip"));
+  assert.ok(document.body.textContent.includes("Plan acceptance failed"));
 });
 
 test("an obsolete plan cannot block steering in a side chat", async () => {
