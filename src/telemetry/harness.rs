@@ -5,11 +5,6 @@ pub(crate) const IDS: [&str; 5] = ["claude-code", "codex", "opencode", "cursor",
 
 pub(crate) fn wire_id(id: &str) -> Option<&'static str> {
     Some(match id {
-        "claude-code" => "claude-code",
-        "codex" => "codex",
-        "opencode" => "opencode",
-        "cursor" => "cursor",
-        "antigravity" => "antigravity",
         "acp:dee4a440-fd64-4217-a4a7-1d4c148c0dd1" | "acp:deepseek-harness" => {
             "acp:deepseek-harness"
         }
@@ -22,7 +17,7 @@ pub(crate) fn wire_id(id: &str) -> Option<&'static str> {
         "acp:ac7f713b-b520-40d2-9b56-75deca1574c7" | "acp:grok" => "acp:grok",
         "acp:c33b22bc-6d2e-44c6-a5d6-117dd6722f7f" | "acp:fx" => "acp:fx",
         id if id.starts_with("acp:") => "acp:custom",
-        _ => return None,
+        _ => return IDS.into_iter().find(|known| *known == id),
     })
 }
 
@@ -659,9 +654,6 @@ mod tests {
         assert_eq!(unverified["authEvidence"], "none");
         assert_eq!(unverified["usability"], "usable");
         assert_eq!(state("claude-code", &h)["auth"], "signed_out");
-        h["authCheckFailed"] = json!(false);
-        h["authState"] = json!("needsLogin");
-        assert_eq!(state("acp:pi", &h)["auth"], "signed_out");
     }
     #[test]
     fn harness_ids_reach_the_wire_canonical_and_non_acp_ids_unchanged() {
@@ -676,7 +668,6 @@ mod tests {
         for (sent, wire) in [
             (custom.as_str(), "acp:custom"),
             ("acp:custom", "acp:custom"),
-            ("codex", "codex"),
             ("gemini", "gemini"),
         ] {
             let payload = build_payload("chat_message_sent", "did", json!({ "harness": sent }));

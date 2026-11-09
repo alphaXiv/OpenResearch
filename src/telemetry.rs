@@ -704,11 +704,7 @@ fn build_payload_with_id(
     event_id: uuid::Uuid,
     mut properties: serde_json::Value,
 ) -> serde_json::Value {
-    if let Some(id) = properties
-        .get("harness")
-        .and_then(serde_json::Value::as_str)
-        .and_then(harness::wire_id)
-    {
+    if let Some(id) = properties["harness"].as_str().and_then(harness::wire_id) {
         properties["harness"] = json!(id);
     }
     let mut payload = json!({

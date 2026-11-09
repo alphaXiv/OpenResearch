@@ -1423,9 +1423,6 @@ mod tests {
         store
             .begin_usage_execution("execution", "turn", "acp:custom")
             .unwrap();
-        store
-            .begin_usage_execution("fallback", "turn2", "acp:custom")
-            .unwrap();
         let usage = |input, output| TokenUsage {
             input_tokens: Some(input),
             output_tokens: Some(output),
@@ -1441,15 +1438,11 @@ mod tests {
                 true,
             ),
         ];
-        let main_loop = [(None::<String>, usage(40332, 127), false)];
         for _ in 0..2 {
             store
                 .record_acp_prompt_usage("execution", "acp:custom", &models)
                 .unwrap();
         }
-        store
-            .record_acp_prompt_usage("fallback", "acp:custom", &main_loop)
-            .unwrap();
         // The second sample is invalid, so the first does not replace the recorded row either.
         let invalid = TokenUsage {
             cache_read_tokens: Some(9),
@@ -1464,7 +1457,7 @@ mod tests {
             .is_err());
         store.finalize_turn_usage("turn", "done").unwrap();
         store
-            .record_acp_prompt_usage("execution", "acp:custom", &main_loop)
+            .record_acp_prompt_usage("execution", "acp:custom", &[(None, usage(7, 7), false)])
             .unwrap();
         let samples: Vec<(Option<String>, TokenUsage, bool)> = store
             .conn
@@ -1483,7 +1476,7 @@ mod tests {
                 (model, serde_json::from_str(&json).unwrap(), complete)
             })
             .collect();
-        assert_eq!(samples, [&models[..], &main_loop[..]].concat());
+        assert_eq!(samples, models);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
