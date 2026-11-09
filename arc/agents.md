@@ -104,7 +104,7 @@ When a dashboard starts or a lease expires, every turn still marked running has 
 | not sent, rejected | retry | replays the prompt; the agent never saw it |
 | accepted, unknown | continue | asks the agent to carry on; replaying could repeat work |
 
-**Nothing is replayed without the user.** An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone, the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions.
+**Nothing is replayed without the user.** An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone (for an ACP agent, it says so or no longer lists it), the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions.
 
 Queued messages are persisted before they are acknowledged and run in order as each turn ends, so a restart loses none; Stop clears the queue. A quitting dashboard starts no turn, queued ones included, and gives up its leases on the way out, so the next start recovers its turns at once. Adapters that read a child's output interrupt a turn silent past a generous watchdog; OpenCode's adapters have none.
 
