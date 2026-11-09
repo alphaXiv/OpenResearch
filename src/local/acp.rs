@@ -85,90 +85,120 @@ pub struct Preset {
     pub needs_connection_adapter: bool,
 }
 
+struct Builtin {
+    /// Stored with every session that uses the agent, so it never changes.
+    id: &'static str,
+    /// The label telemetry sends in place of `id`; ingestion knows it, so it never changes.
+    telemetry: &'static str,
+    name: &'static str,
+    executable: &'static str,
+    arguments: &'static [&'static str],
+    setup_url: &'static str,
+}
+
+const BUILTINS: &[Builtin] = &[
+    Builtin {
+        id: "acp:dee4a440-fd64-4217-a4a7-1d4c148c0dd1",
+        telemetry: "acp:deepseek-harness",
+        name: "DeepSeek Harness",
+        executable: "dsh",
+        arguments: &["--profile", "acp"],
+        setup_url: "https://github.com/deepseek-ai/deepseek-harness",
+    },
+    Builtin {
+        id: "acp:a8b48911-e95c-42cb-bc35-bab3aa83e5e2",
+        telemetry: "acp:kimi",
+        name: "Kimi Code",
+        executable: "kimi",
+        arguments: &["acp"],
+        setup_url: "https://www.kimi.com/code/docs/en/kimi-code-cli/",
+    },
+    Builtin {
+        id: "acp:1dba9897-707b-4cd8-b595-c8c26115f563",
+        telemetry: "acp:minimax",
+        name: "MiniMax Code",
+        executable: "mcode",
+        arguments: &["acp"],
+        setup_url: "https://github.com/MiniMax-AI/minimax-code",
+    },
+    Builtin {
+        id: "acp:2f1639e0-3f0f-4594-bb5b-a4078c36d5a4",
+        telemetry: "acp:zcode",
+        name: "ZCode",
+        executable: "zcode-acp-server",
+        arguments: &[],
+        setup_url: "https://github.com/william0wang/zcode-acp#install",
+    },
+    Builtin {
+        id: "acp:467b1900-c3c3-47c1-8b87-09389e1c44b5",
+        telemetry: "acp:pi",
+        name: "Pi",
+        executable: "pi-acp",
+        arguments: &[],
+        setup_url: "https://github.com/svkozak/pi-acp#install",
+    },
+    Builtin {
+        id: "acp:3d392186-692e-4b90-93b4-bb398f40007a",
+        telemetry: "acp:oh-my-pi",
+        name: "oh-my-pi",
+        executable: "omp",
+        arguments: &["acp"],
+        setup_url: "https://github.com/can1357/oh-my-pi#install",
+    },
+    Builtin {
+        id: "acp:565e351e-62c7-488f-a58a-914d30cc5776",
+        telemetry: "acp:devin",
+        name: "Devin CLI",
+        executable: "devin",
+        arguments: &["acp"],
+        setup_url: "https://docs.devin.ai/cli",
+    },
+    Builtin {
+        id: "acp:ac7f713b-b520-40d2-9b56-75deca1574c7",
+        telemetry: "acp:grok",
+        name: "Grok Build",
+        executable: "grok",
+        arguments: &["agent", "stdio"],
+        setup_url: "https://github.com/xai-org/grok-build",
+    },
+    Builtin {
+        id: "acp:c33b22bc-6d2e-44c6-a5d6-117dd6722f7f",
+        telemetry: "acp:fx",
+        name: "fx",
+        executable: "fx",
+        arguments: &["acp"],
+        setup_url: "https://fx.sh/docs/using-fx/acp",
+    },
+];
+
+pub(crate) fn telemetry_id(id: &str) -> Option<&'static str> {
+    BUILTINS
+        .iter()
+        .find(|builtin| id == builtin.id || id == builtin.telemetry)
+        .map(|builtin| builtin.telemetry)
+}
+
 pub fn presets() -> Vec<Preset> {
-    [
-        (
-            "dee4a440-fd64-4217-a4a7-1d4c148c0dd1",
-            "DeepSeek Harness",
-            "dsh",
-            &["--profile", "acp"][..],
-            "https://github.com/deepseek-ai/deepseek-harness",
-        ),
-        (
-            "a8b48911-e95c-42cb-bc35-bab3aa83e5e2",
-            "Kimi Code",
-            "kimi",
-            &["acp"][..],
-            "https://www.kimi.com/code/docs/en/kimi-code-cli/",
-        ),
-        (
-            "1dba9897-707b-4cd8-b595-c8c26115f563",
-            "MiniMax Code",
-            "mcode",
-            &["acp"][..],
-            "https://github.com/MiniMax-AI/minimax-code",
-        ),
-        (
-            "2f1639e0-3f0f-4594-bb5b-a4078c36d5a4",
-            "ZCode",
-            "zcode-acp-server",
-            &[][..],
-            "https://github.com/william0wang/zcode-acp#install",
-        ),
-        (
-            "467b1900-c3c3-47c1-8b87-09389e1c44b5",
-            "Pi",
-            "pi-acp",
-            &[][..],
-            "https://github.com/svkozak/pi-acp#install",
-        ),
-        (
-            "3d392186-692e-4b90-93b4-bb398f40007a",
-            "oh-my-pi",
-            "omp",
-            &["acp"][..],
-            "https://github.com/can1357/oh-my-pi#install",
-        ),
-        (
-            "565e351e-62c7-488f-a58a-914d30cc5776",
-            "Devin CLI",
-            "devin",
-            &["acp"][..],
-            "https://docs.devin.ai/cli",
-        ),
-        (
-            "ac7f713b-b520-40d2-9b56-75deca1574c7",
-            "Grok Build",
-            "grok",
-            &["agent", "stdio"][..],
-            "https://github.com/xai-org/grok-build",
-        ),
-        (
-            "c33b22bc-6d2e-44c6-a5d6-117dd6722f7f",
-            "fx",
-            "fx",
-            &["acp"][..],
-            "https://fx.sh/docs/using-fx/acp",
-        ),
-    ]
-    .into_iter()
-    // fx ships for macOS and Linux only, so Windows has no installer to offer.
-    .filter(|(_, _, executable, _, _)| !(cfg!(windows) && *executable == "fx"))
-    .map(|(id, name, executable, arguments, setup_url)| Preset {
-        needs_connection_adapter: matches!(executable, "pi-acp" | "zcode-acp-server"),
-        launch: Definition {
-            id: format!("acp:{id}"),
-            name: name.into(),
-            executable: executable.into(),
-            arguments: arguments
-                .iter()
-                .map(|argument| (*argument).into())
-                .collect(),
-            unknown: Default::default(),
-        },
-        setup_url,
-    })
-    .collect()
+    BUILTINS
+        .iter()
+        // fx ships for macOS and Linux only, so Windows has no installer to offer.
+        .filter(|builtin| !(cfg!(windows) && builtin.executable == "fx"))
+        .map(|builtin| Preset {
+            needs_connection_adapter: matches!(builtin.executable, "pi-acp" | "zcode-acp-server"),
+            launch: Definition {
+                id: builtin.id.into(),
+                name: builtin.name.into(),
+                executable: builtin.executable.into(),
+                arguments: builtin
+                    .arguments
+                    .iter()
+                    .map(|argument| (*argument).into())
+                    .collect(),
+                unknown: Default::default(),
+            },
+            setup_url: builtin.setup_url,
+        })
+        .collect()
 }
 
 pub fn registered_definitions() -> Vec<Definition> {

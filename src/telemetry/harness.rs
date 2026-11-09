@@ -4,21 +4,10 @@ use serde_json::Value;
 pub(crate) const IDS: [&str; 5] = ["claude-code", "codex", "opencode", "cursor", "antigravity"];
 
 pub(crate) fn wire_id(id: &str) -> Option<&'static str> {
-    Some(match id {
-        "acp:dee4a440-fd64-4217-a4a7-1d4c148c0dd1" | "acp:deepseek-harness" => {
-            "acp:deepseek-harness"
-        }
-        "acp:a8b48911-e95c-42cb-bc35-bab3aa83e5e2" | "acp:kimi" => "acp:kimi",
-        "acp:1dba9897-707b-4cd8-b595-c8c26115f563" | "acp:minimax" => "acp:minimax",
-        "acp:2f1639e0-3f0f-4594-bb5b-a4078c36d5a4" | "acp:zcode" => "acp:zcode",
-        "acp:467b1900-c3c3-47c1-8b87-09389e1c44b5" | "acp:pi" => "acp:pi",
-        "acp:3d392186-692e-4b90-93b4-bb398f40007a" | "acp:oh-my-pi" => "acp:oh-my-pi",
-        "acp:565e351e-62c7-488f-a58a-914d30cc5776" | "acp:devin" => "acp:devin",
-        "acp:ac7f713b-b520-40d2-9b56-75deca1574c7" | "acp:grok" => "acp:grok",
-        "acp:c33b22bc-6d2e-44c6-a5d6-117dd6722f7f" | "acp:fx" => "acp:fx",
-        id if id.starts_with("acp:") => "acp:custom",
-        _ => return IDS.into_iter().find(|known| *known == id),
-    })
+    if id.starts_with("acp:") {
+        return Some(crate::local::acp::telemetry_id(id).unwrap_or("acp:custom"));
+    }
+    IDS.into_iter().find(|known| *known == id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,10 +301,11 @@ impl SetupAttempt {
 #[cfg(test)]
 pub(super) async fn assert_production_contract() {
     let mut settings = Settings::default();
+    let preset = &crate::local::acp::presets()[0].launch;
     ensure_initial(
         &mut settings,
         "cli-release-contract-test",
-        &json!({"harnesses": [{"id": "acp:dee4a440-fd64-4217-a4a7-1d4c148c0dd1"}]}),
+        &json!({"harnesses": [{"id": preset.id}]}),
     );
     for snapshot in [
         settings.harness_snapshot.unwrap(),
@@ -661,6 +651,11 @@ mod tests {
         for preset in crate::local::acp::presets() {
             let id = wire_id(&preset.launch.id).unwrap();
             assert_ne!(id, "acp:custom", "{}", preset.launch.name);
+            let slug = id.strip_prefix("acp:").unwrap();
+            assert!(slug.len() <= 31 && slug.starts_with(|c: char| c.is_ascii_alphanumeric()));
+            assert!(slug
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'));
             assert_eq!(wire_id(id), Some(id));
             assert!(seen.insert(id), "{id}");
         }
