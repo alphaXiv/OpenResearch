@@ -49,6 +49,12 @@ impl Definition {
             bail!("ACP harness IDs must start with acp:");
         };
         uuid::Uuid::parse_str(id)?;
+        self.validate_launch()
+    }
+
+    /// The launch alone, which built-in harnesses running over ACP share with
+    /// user definitions while keeping their own harness IDs.
+    pub fn validate_launch(&self) -> Result<()> {
         if self.name.trim().is_empty() || self.name.contains('\0') {
             bail!("Enter a name for the ACP harness");
         }

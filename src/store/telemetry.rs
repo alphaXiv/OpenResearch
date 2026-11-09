@@ -123,6 +123,24 @@ impl Store {
             .transpose()
     }
 
+    /// The distinct native models a chat's own invocations recorded since `since`
+    /// (ms); sub-agents' invocations belong to their own conversations.
+    pub(crate) fn chat_invocation_models(
+        &self,
+        harness: &str,
+        session_id: &str,
+        since: i64,
+    ) -> Result<Vec<String>> {
+        let mut rows = self.conn.prepare("SELECT identity_json FROM native_invocation_identities WHERE harness = ?1 AND session_id = ?2 AND created_at >= ?3")?;
+        let mut models = std::collections::BTreeSet::new();
+        for json in rows.query_map(params![harness, session_id, since], |row| {
+            row.get::<_, String>(0)
+        })? {
+            models.insert(serde_json::from_str::<InvocationIdentity>(&json?)?.model);
+        }
+        Ok(models.into_iter().collect())
+    }
+
     pub(crate) fn record_native_invocation(
         &self,
         call_id: &str,
@@ -909,6 +927,56 @@ mod tests {
             .native_invocation_identity("antigravity", "antigravity:c:invocation:5")
             .unwrap()
             .is_some());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A resident Antigravity turn's usage takes the model its own invocations ran.
+    #[test]
+    fn chat_invocation_models_cover_only_the_chats_own_recent_invocations() {
+        let dir = std::env::temp_dir().join(format!("orx-agy-models-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.conn.execute("INSERT INTO chat_sessions (id, project_id, harness, native_session_id, created_at, updated_at) VALUES ('chat', 'project', 'antigravity', 'conv', 1, 1)", []).unwrap();
+        let identity = |model: &str| InvocationIdentity {
+            harness: "antigravity".into(),
+            model: model.into(),
+            provider: None,
+        };
+        let models = |since| {
+            store
+                .chat_invocation_models("antigravity", "chat", since)
+                .unwrap()
+        };
+        let before = now_ms();
+        assert!(models(before).is_empty());
+        store
+            .record_native_invocation(
+                "antigravity:conv:step:4",
+                &identity("gemini-3.8-flash-low"),
+                Some("conv"),
+            )
+            .unwrap();
+        // A sub-agent's invocation names its own conversation.
+        store
+            .record_native_invocation(
+                "antigravity:child:step:1",
+                &identity("claude-opus-5-5-high"),
+                Some("child"),
+            )
+            .unwrap();
+        assert_eq!(models(before), ["gemini-3.8-flash-low"]);
+        store
+            .record_native_invocation(
+                "antigravity:conv:step:9",
+                &identity("gemini-4-argon-medium"),
+                Some("conv"),
+            )
+            .unwrap();
+        assert_eq!(
+            models(before),
+            ["gemini-3.8-flash-low", "gemini-4-argon-medium"]
+        );
+        assert!(models(now_ms() + 1).is_empty());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

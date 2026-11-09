@@ -62,7 +62,7 @@ for line in sys.stdin:
         else:
             reply(request, dict(protocolVersion=2 if mode == "incompatible" else 1,
                                 agentInfo=dict(name="Deterministic ACP peer", version="1.0"),
-                                agentCapabilities=dict(loadSession=mode != "no-resume", **({"sessionCapabilities": {"resume": {}}} if mode in ["resume", "alphaxiv-resume"] else {}))))
+                                agentCapabilities=dict(loadSession=mode != "no-resume", **({"sessionCapabilities": {"resume": {}}} if mode in ["resume", "alphaxiv-resume"] else {"sessionCapabilities": {"resume": {}, "list": {}}} if mode == "unlisted" else {}))))
     elif method == "session/new":
         if mode == "stalled-setup":
             continue
@@ -70,6 +70,8 @@ for line in sys.stdin:
     elif method in ["session/load", "session/resume"]:
         if mode == "missing":
             send(dict(id=request["id"], error=dict(code=-32002, message="Session not found")))
+        elif mode == "unlisted":
+            send(dict(id=request["id"], error=dict(code=-32603, message="Failed to read session")))
         elif mode == "auth-load":
             send(dict(id=request["id"], error=dict(code=-32000, message="Authentication required")))
         else:
@@ -118,6 +120,11 @@ for line in sys.stdin:
             reverse("terminal/release", dict(terminalId=terminal))
             assert "error" in reverse("terminal/output", dict(terminalId=terminal))
         reply(request, dict(stopReason="end_turn"))
+    elif method == "session/list":
+        if params.get("cursor") is None:
+            reply(request, dict(sessions=[dict(sessionId="first-page", cwd="/")], nextCursor="page-2"))
+        else:
+            reply(request, dict(sessions=[dict(sessionId="kept", cwd="/")]))
     elif method == "session/cancel":
         sys.exit(0)
     else:
