@@ -277,41 +277,50 @@ pub async fn run_antigravity() -> Result<()> {
     Ok(())
 }
 
-/// The longest one `Stop` waits for commands; the agent then decides whether to
-/// keep waiting by ending its turn again.
-#[cfg(unix)]
-const BACKGROUND_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(50 * 60);
+/// The longest one `Stop` holds a turn without news, under the turn's silence watchdog; the agent
+/// then decides whether to keep waiting by ending its turn again.
+const STOP_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
-#[derive(Debug, PartialEq)]
-#[cfg_attr(not(unix), allow(dead_code))]
-enum BackgroundWait {
-    /// Commands were running and have all exited.
-    Finished,
-    /// Commands still run, or none could be seen.
-    Unknown,
-}
-
-/// agy finishes background work in turns of its own, which never reach its ACP
-/// client, so a `Stop` that leaves work running continues the same turn instead:
-/// once agy's commands exit or, where they cannot be seen, after a pause that
-/// grows with each stop of the turn.
+/// agy finishes background work in turns of its own, which never reach its ACP client, so a `Stop`
+/// that leaves work pending continues the same turn instead, once that work reports back. agy
+/// reports each finished command, timer and subagent to the conversation's inbox; a daemon never
+/// does, so one cannot hold the turn.
 async fn background_stop(payload: &Value) -> Value {
     save_stop_error(payload);
     if payload.get("fullyIdle").and_then(Value::as_bool) != Some(false) {
         return json!({});
     }
-    let wait = wait_for_background_commands().await;
-    if wait == BackgroundWait::Unknown {
-        let stops = payload
-            .get("executionNum")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        tokio::time::sleep(crate::config::paced(stop_backoff(stops))).await;
+    let inbox = payload["artifactDirectoryPath"]
+        .as_str()
+        .map(|dir| std::path::Path::new(dir).join(".system_generated/messages"));
+    let reported = inbox.as_deref().map(read_inbox);
+    if let Some(Err(error)) = &reported {
+        eprintln!("orx antigravity-gate: could not read agy's inbox: {error}");
     }
-    json!({"decision": "continue", "reason": match wait {
-        BackgroundWait::Finished => "[orx] A command you ran in the background has finished. Check its result and continue the request; end your turn once the request is complete.",
-        BackgroundWait::Unknown => "[orx] Work you started in the background may still be running. Continue with anything else the request needs, or end your turn to keep waiting for it.",
-    }})
+    // agy fires no timer while `Stop` holds its turn.
+    let timer_due = match (&reported, payload["transcriptPath"].as_str()) {
+        (Some(Ok(inbox)), Some(path)) => match std::fs::read_to_string(path) {
+            Ok(transcript) => timer_due(&transcript, &inbox.senders),
+            Err(error) => {
+                eprintln!("orx antigravity-gate: could not read agy's transcript {path}: {error}");
+                None
+            }
+        },
+        _ => None,
+    };
+    let started = std::time::Instant::now();
+    loop {
+        let news = inbox
+            .as_deref()
+            .is_some_and(|dir| read_inbox(dir).is_ok_and(|inbox| inbox.unread));
+        if news || timer_due.is_some_and(|due| crate::store::now_ms() >= due) {
+            return json!({"decision": "continue", "reason": "[orx] Background work you started has reported back. Continue the request; end your turn once it is complete."});
+        }
+        if started.elapsed() >= crate::config::paced(STOP_HOLD_LIMIT) {
+            return json!({"decision": "continue", "reason": "[orx] Work you started in the background is still running. Continue with anything else the request needs, or end your turn to keep waiting for it."});
+        }
+        tokio::time::sleep(crate::config::paced(std::time::Duration::from_secs(1))).await;
+    }
 }
 
 /// agy answers a turn it gave up on as a normal end of turn, so its error
@@ -336,74 +345,93 @@ fn save_stop_error(payload: &Value) {
     }
 }
 
-fn stop_backoff(stops: u64) -> std::time::Duration {
-    std::time::Duration::from_secs(15u64 << stops.min(5)).min(std::time::Duration::from_secs(300))
+/// agy's inbox for a conversation: one JSON file per message, and `read.json` naming those already
+/// delivered to the model.
+struct Inbox {
+    unread: bool,
+    senders: std::collections::HashSet<String>,
 }
 
-#[cfg(unix)]
-async fn wait_for_background_commands() -> BackgroundWait {
-    let started = std::time::Instant::now();
-    let mut seen = false;
-    loop {
-        match background_commands() {
-            Ok(commands) if !commands.is_empty() => seen = true,
-            Ok(_) if seen => return BackgroundWait::Finished,
-            Ok(_) => return BackgroundWait::Unknown,
-            Err(error) => {
-                eprintln!("orx antigravity-gate: could not list agy's commands: {error}");
-                return BackgroundWait::Unknown;
+fn read_inbox(dir: &std::path::Path) -> Result<Inbox> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Inbox {
+                unread: false,
+                senders: Default::default(),
+            })
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let delivered: serde_json::Map<String, Value> = match std::fs::read(dir.join("read.json")) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut inbox = Inbox {
+        unread: false,
+        senders: Default::default(),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        let Some(id) = path
+            .file_name()
+            .and_then(|name| name.to_str()?.strip_suffix(".json"))
+            .filter(|id| *id != "read")
+        else {
+            continue;
+        };
+        inbox.unread |= !delivered.contains_key(id);
+        // A message agy is still writing parses on a later read.
+        if let Some(sender) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|message| message["sender"].as_str().map(str::to_owned))
+        {
+            inbox.senders.insert(sender);
+        }
+    }
+    Ok(inbox)
+}
+
+/// When the earliest of agy's timers that has not yet reported is due, from its transcript: each
+/// `schedule` call starts a task stamped with its start and named by the messages it sends.
+fn timer_due(transcript: &str, reported: &std::collections::HashSet<String>) -> Option<i64> {
+    let mut durations = std::collections::VecDeque::new();
+    let mut due: Option<i64> = None;
+    for row in transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+    {
+        for call in row["tool_calls"].as_array().into_iter().flatten() {
+            if call["name"] == "schedule" {
+                let seconds = &call["args"]["DurationSeconds"];
+                durations.push_back(
+                    seconds
+                        .as_i64()
+                        .or_else(|| seconds.as_str()?.trim_matches('"').parse().ok()),
+                );
             }
         }
-        if started.elapsed() >= BACKGROUND_WAIT_LIMIT {
-            return BackgroundWait::Unknown;
+        let content = row["content"].as_str().unwrap_or_default();
+        if !content.contains("Task Description: Timer:") {
+            continue;
         }
-        tokio::time::sleep(crate::config::paced(std::time::Duration::from_secs(1))).await;
+        let seconds = durations.pop_front().flatten();
+        let task = content
+            .split_once("task id: ")
+            .and_then(|(_, rest)| rest.split_whitespace().next());
+        let started = row["created_at"]
+            .as_str()
+            .and_then(crate::local::native_chats::parse_iso_ms);
+        if let (Some(seconds), Some(task), Some(started)) = (seconds, task, started) {
+            if !reported.contains(task) {
+                let at = started + seconds * 1000;
+                due = Some(due.map_or(at, |due| due.min(at)));
+            }
+        }
     }
-}
-
-#[cfg(not(unix))]
-async fn wait_for_background_commands() -> BackgroundWait {
-    BackgroundWait::Unknown
-}
-
-/// agy's running commands. orx starts agy as the leader of its process group,
-/// which its hooks share, while agy starts each command as the leader of a group
-/// of its own.
-#[cfg(unix)]
-fn background_commands() -> Result<Vec<u32>> {
-    // SAFETY: plain process-identity syscalls.
-    let (agy, me) = (unsafe { libc::getpgrp() }, unsafe { libc::getpid() });
-    let output = crate::process::command("ps")
-        .args(["-ww", "-axo", "pid=,ppid=,pgid=,args="])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!("ps exited with {}", output.status));
-    }
-    let supervisor = crate::paths::spawnable_exe().ok();
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| background_command(line, agy, me, supervisor.as_deref()))
-        .collect())
-}
-
-#[cfg(unix)]
-fn background_command(
-    line: &str,
-    agy: libc::pid_t,
-    me: libc::pid_t,
-    supervisor: Option<&std::path::Path>,
-) -> Option<u32> {
-    let mut fields = line.split_whitespace();
-    let pid: libc::pid_t = fields.next()?.parse().ok()?;
-    let ppid: libc::pid_t = fields.next()?.parse().ok()?;
-    let pgid: libc::pid_t = fields.next()?.parse().ok()?;
-    let command = fields.collect::<Vec<_>>().join(" ");
-    (ppid == agy
-        && pid == pgid
-        && pid != me
-        && !crate::local::chat::is_experiment_supervisor(&command, supervisor))
-    .then(|| u32::try_from(pid).ok())
-    .flatten()
+    due
 }
 
 /// A shell command runs with its invocation's native `modelName` exported, so `orx exp run` knows
@@ -519,27 +547,115 @@ mod antigravity_tests {
         assert_eq!(saved, json!({"conversationId": "c", "error": "quota"}));
     }
 
-    #[test]
-    fn stops_back_off_where_commands_cannot_be_seen() {
-        let waits: Vec<u64> = (0..8).map(|stops| stop_backoff(stops).as_secs()).collect();
-        assert_eq!(waits, [15, 30, 60, 120, 240, 300, 300, 300]);
+    /// An agy conversation's artifact directory with `delivered` messages already read and a
+    /// transcript of `rows`.
+    fn agy_conversation(delivered: &[(&str, &str)], rows: &[Value]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("orx-agy-{}", uuid::Uuid::new_v4()));
+        let inbox = dir.join(".system_generated/messages");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let mut read = serde_json::Map::new();
+        for (id, sender) in delivered {
+            std::fs::write(
+                inbox.join(format!("{id}.json")),
+                json!({"id": id, "sender": sender}).to_string(),
+            )
+            .unwrap();
+            read.insert(id.to_string(), json!(true));
+        }
+        std::fs::write(inbox.join("read.json"), Value::Object(read).to_string()).unwrap();
+        let transcript: Vec<String> = rows.iter().map(Value::to_string).collect();
+        std::fs::write(dir.join("transcript.jsonl"), transcript.join("\n")).unwrap();
+        dir
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn only_agys_own_command_groups_are_background_work() {
-        let supervisor = Some(std::path::Path::new("/opt/orx"));
-        let command = |line| background_command(line, 100, 150, supervisor);
-        assert_eq!(
-            command(" 120   100   120 zsh -c sleep 60; echo done"),
-            Some(120)
+    fn pending_stop(dir: &std::path::Path) -> Value {
+        json!({
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": false,
+            "artifactDirectoryPath": dir,
+            "transcriptPath": dir.join("transcript.jsonl"),
+        })
+    }
+
+    /// agy's transcript rows for a `schedule` call and the timer task it started.
+    fn timer(step: u64, started: &str, seconds: Value) -> [Value; 2] {
+        [
+            json!({"step_index": step, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "schedule", "args": {"DurationSeconds": seconds, "Prompt": "\"check\""}}]}),
+            json!({"step_index": step + 1, "type": "GENERIC", "status": "RUNNING", "created_at": started, "content": format!("Created At: {started}\nTool is running as a background task with task id: conv/task-{}\nTask Description: Timer: 1m, Prompt: check", step + 1)}),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_stop_holds_the_turn_until_agys_inbox_has_news() {
+        // A daemon from an earlier turn never reports, and its run_command started a task too.
+        let dir = agy_conversation(
+            &[("earlier", "conv/task-2")],
+            &[
+                json!({"step_index": 1, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "\"python3 -m http.server\"", "IsDaemon": "true"}}]}),
+                json!({"step_index": 2, "type": "GENERIC", "status": "RUNNING", "created_at": "2026-11-09T20:33:53Z", "content": "Tool is running as a background task with task id: conv/task-2\nTask Description: python3 -m http.server"}),
+            ],
         );
-        // agy's MCP servers, helpers and hooks share its group.
-        assert_eq!(command(" 130   100   100 python3 mcp_server.py"), None);
-        assert_eq!(command(" 150   100   100 /opt/orx antigravity-gate"), None);
-        assert_eq!(command(" 140   120   140 sleep 60"), None);
-        assert_eq!(command(" 160   100   160 /opt/orx supervise run-id"), None);
-        assert_eq!(command("garbage"), None);
+        let payload = pending_stop(&dir);
+        let hook = tokio::spawn(async move { background_stop(&payload).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!hook.is_finished());
+        std::fs::write(
+            dir.join(".system_generated/messages/report.json"),
+            json!({"id": "report", "sender": "conv/task-6", "content": "Command exited with code 0."}).to_string(),
+        )
+        .unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), hook)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(output["decision"], "continue");
+        assert!(output["reason"].as_str().unwrap().contains("reported back"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_due_timer_ends_the_hold_it_would_otherwise_defer() {
+        let dir = agy_conversation(&[], &timer(3, "2026-11-09T20:34:20Z", json!("60")));
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            background_stop(&pending_stop(&dir)),
+        )
+        .await
+        .unwrap();
+        assert!(output["reason"].as_str().unwrap().contains("reported back"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_timers_that_have_not_reported_are_due() {
+        let rows: Vec<String> = [
+            timer(13, "2026-11-09T20:34:20Z", json!("60")),
+            timer(20, "2026-11-09T20:40:00Z", json!(300)),
+            timer(30, "2026-11-09T20:50:00Z", json!("90")),
+        ]
+        .iter()
+        .flatten()
+        .map(Value::to_string)
+        .collect();
+        let reported = ["conv/task-14".to_string()].into_iter().collect();
+        assert_eq!(
+            timer_due(&rows.join("\n"), &reported),
+            crate::local::native_chats::parse_iso_ms("2026-11-09T20:45:00Z")
+        );
+        assert_eq!(timer_due("not agy's transcript", &reported), None);
+    }
+
+    #[test]
+    fn a_stop_without_news_lets_the_agent_decide_after_the_hold_limit() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "2400");
+        let dir = agy_conversation(&[("earlier", "conv/task-2")], &[]);
+        let output = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(background_stop(&pending_stop(&dir)));
+        assert!(output["reason"].as_str().unwrap().contains("still running"));
     }
 
     #[test]

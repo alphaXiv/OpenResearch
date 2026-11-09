@@ -26,7 +26,7 @@ A resident agent restarts with its native session resumed when a setting it star
 
 An agent either ends its turn on a question and takes the answer as the next message, or pauses and takes the answer over the live connection. Agents that accept input mid-turn take steering directly; otherwise a message sent during a turn waits in the chat's queue.
 
-**A turn ends when the agent's work does.** Antigravity moves a long command to the background and finishes it in a turn of its own that no ACP client sees, so its `Stop` hook holds the turn open until the command exits and then has it continue. When agy gives up on a turn it still answers with a normal end of turn, so the turn fails with the error its `Stop` hook saw or, when agy never reached Google, the network failure in agy's log.
+**A turn ends when the agent's work does.** Antigravity moves a long command to the background and finishes it in a turn of its own that no ACP client sees, so its `Stop` hook holds the turn open until agy's inbox reports the command, a timer or a subagent back and then has it continue. A daemon never reports, so it cannot hold a turn. When agy gives up on a turn it still answers with a normal end of turn, so the turn fails with the error its `Stop` hook saw or, when agy never reached Google, the network failure in agy's log.
 
 Compaction is native where the harness supports it; otherwise a one-shot summary of the conversation reseeds a fresh native session.
 

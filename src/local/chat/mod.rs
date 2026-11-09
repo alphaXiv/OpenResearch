@@ -1694,10 +1694,7 @@ fn tree_child(
 /// True for a process command line that is a detached experiment supervisor
 /// (`orx supervise`), which outlives the agent that started its run.
 #[cfg(unix)]
-pub(crate) fn is_experiment_supervisor(
-    command: &str,
-    supervisor_exe: Option<&std::path::Path>,
-) -> bool {
+fn is_experiment_supervisor(command: &str, supervisor_exe: Option<&std::path::Path>) -> bool {
     use std::path::Path;
     command.split_once(" supervise ").is_some_and(|(exe, _)| {
         supervisor_exe.is_some_and(|expected| Path::new(exe) == expected)
