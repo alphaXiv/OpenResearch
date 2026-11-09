@@ -6355,10 +6355,10 @@ export function ChatPanel({
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
-  // Only the latest user turn's plans can still await approval in the composer.
+  // Shell exchanges don't start a new agent turn or resolve its pending plan.
   const pendingPlan = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "user") break;
+      if (messages[i].role === "user" && !shellExchangePart(messages[i])) break;
       for (const part of messages[i].parts) {
         if (part.type === "prompt" && part.prompt?.kind === "plan" && !part.prompt.resolved) {
           return {

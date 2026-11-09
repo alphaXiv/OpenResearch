@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
 import { m } from "../src/paraglide/messages.js";
-import { assistantMessage, codex, composer, emit, refused, renderChat, session, settle, userMessage } from "./chat.mjs";
+import { SHELL_TOOL } from "../src/queries/chatState.ts";
+import { assistantMessage, codex, composer, deferred, emit, refused, renderChat, session, settle, userMessage } from "./chat.mjs";
 import { find } from "./render.mjs";
 
 const plan = (id, synthesized = false) => assistantMessage(id, [{
@@ -58,6 +59,60 @@ test("a plan on the latest idle reply remains actionable", async () => {
   });
   assert.ok(document.querySelector(".plan-strip"));
 });
+
+for (const synthesized of [false, true]) {
+  for (const outcome of ["success", "exit failure", "request failure"]) {
+    test(`a ${synthesized ? "synthesized" : "native"} plan stays actionable through shell ${outcome}`, async () => {
+      const pending = deferred();
+      const current = plan("current", synthesized);
+      const messages = [userMessage("u1", "Make a plan"), current];
+      const shell = {
+        id: "shell", role: "user", parentId: "current", createdAt: 4,
+        parts: [{ id: "p0", type: "tool", tool: SHELL_TOOL, state: {
+          status: outcome === "success" ? "completed" : "error",
+          input: { command: "git status", exitCode: outcome === "success" ? 0 : 1 },
+          output: "Shell command finished.",
+        } }],
+      };
+      const chat = await renderChat("/projects/p/tasks/s", {
+        transcripts: { s: messages },
+        routes: {
+          "POST /api/chat/sessions/s/shell": () => pending.promise,
+          "POST /api/chat/sessions/s/respond": (init) => {
+            const answer = JSON.parse(init.body);
+            assert.equal(answer.promptId, "current-plan");
+            assert.equal(answer.approve, true);
+            current.parts[0].prompt = { ...current.parts[0].prompt, resolved: true, approved: true };
+            return { ok: true };
+          },
+        },
+      });
+      const assertApproval = () => {
+        assert.ok(find("button", m.plan_strip_accept_plan()));
+        assert.ok(find("button", m.plan_strip_reject()));
+      };
+      await composer().type("!git status");
+      await composer().send();
+      assert.deepEqual(chat.requests.filter(({ request }) => request.endsWith("/shell")).map(({ body }) => body), [{ command: "git status" }]);
+      assertApproval();
+      if (outcome === "request failure") {
+        await pending.resolve(refused("Shell unavailable"));
+        assert.ok(document.body.textContent.includes("Shell unavailable"));
+      } else {
+        messages.push(shell);
+        await pending.resolve({ message: shell });
+        assertApproval();
+        await chat.navigate("/projects/p/tasks/new");
+        await chat.navigate("/projects/p/tasks/s");
+      }
+      assertApproval();
+      await act(async () => find("button", m.plan_strip_accept_plan()).click());
+      await settle();
+      assert.equal(chat.requests.filter(({ request }) => request.endsWith("/respond")).length, 1);
+      assert.equal(Boolean(document.querySelector(".plan-strip")), false);
+    });
+  }
+}
 
 for (const synthesized of [false, true]) {
   test(`accepting a ${synthesized ? "synthesized" : "native"} plan cannot uncover an older approval box`, async () => {
