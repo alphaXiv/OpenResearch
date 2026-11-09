@@ -234,24 +234,82 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
         crate::local::chat::handoff::position_for(&store, &session)?.switched
     };
 
-    ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
     let project = ctx.project.clone();
     let session_id = ctx.session_id.clone();
     let (cwd, _) = tokio::task::spawn_blocking(move || {
         crate::local::opencode::ensure_playbook(&project, &session_id, Some(SESSION_SKILLS_DIR))
     })
     .await??;
+    let session = open_session(ctx, definition, &cwd, true).await?;
+    if let Some(model) = ctx
+        .model
+        .as_deref()
+        .filter(|model| apply_model && *model != "default")
+    {
+        let configuration = Store::open()?
+            .acp_session_state(&ctx.session_id)?
+            .ok_or_else(|| anyhow!("ACP session no longer exists"))?
+            .configuration;
+        let option = configuration["configOptions"]
+            .as_array()
+            .and_then(|options| {
+                options
+                    .iter()
+                    .find(|option| option["category"] == "model" && option["type"] == "select")
+            });
+        let (id, current) = match option {
+            Some(option) => (option["id"].as_str(), option["currentValue"].as_str()),
+            None if !configuration["configOptions"].is_array() => (
+                Some("model"),
+                configuration["models"]["currentModelId"].as_str(),
+            ),
+            None => (None, None),
+        };
+        let id =
+            id.ok_or_else(|| anyhow!("The selected model is no longer advertised by this agent"))?;
+        if current != Some(model) {
+            session.client.configure(&ctx.session_id, id, model).await?;
+            ctx.host
+                .emit_session(Store::open()?.get_chat_session(&ctx.session_id)?)
+                .await;
+        }
+    }
+    prompt_session(ctx, &session).await?;
+    Ok(())
+}
+
+/// The chat's agent with its native session open, and the prompt to send it.
+pub(crate) struct OpenSession {
+    pub client: Arc<Client>,
+    pub native_id: String,
+    pub prompt: String,
+}
+
+/// Starts or reuses the chat's agent in `cwd` and restores or creates its native
+/// session. `persist_configuration` keeps the agent's advertised options with the
+/// chat, which user-defined ACP harnesses expose in the composer.
+pub(crate) async fn open_session(
+    ctx: &mut TurnCtx,
+    definition: &Definition,
+    cwd: &std::path::Path,
+    persist_configuration: bool,
+) -> Result<OpenSession> {
+    ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
     let host = ctx.host.acp.clone();
-    let mut client = host.get(&ctx.session_id, definition, &cwd).await?;
+    let mut client = host.get(&ctx.session_id, definition, cwd).await?;
     if client.native_id().is_some() && client.native_id() != ctx.native_session_id {
         host.stop(&ctx.session_id).await;
-        client = host.get(&ctx.session_id, definition, &cwd).await?;
+        client = host.get(&ctx.session_id, definition, cwd).await?;
     }
     let mut prompt = ctx.text.clone();
     if client.native_id().is_none() {
-        let saved_configuration = Store::open()?
-            .acp_session_state(&ctx.session_id)?
-            .map(|state| state.configuration);
+        let saved_configuration = if persist_configuration {
+            Store::open()?
+                .acp_session_state(&ctx.session_id)?
+                .map(|state| state.configuration)
+        } else {
+            None
+        };
         let mut created = false;
         let mut configuration = None;
         if let Some(native_id) = ctx.native_session_id.clone() {
@@ -268,7 +326,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
                 match client
                     .restore(
                         &native_id,
-                        &cwd,
+                        cwd,
                         orx_mcp_servers(&ctx.session_id, ctx.host.up_port())?,
                     )
                     .await
@@ -298,7 +356,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
             let response = client
                 .request(
                     "session/new",
-                    NewSessionRequest::new(&cwd)
+                    NewSessionRequest::new(cwd)
                         .mcp_servers(orx_mcp_servers(&ctx.session_id, ctx.host.up_port())?),
                 )
                 .await?;
@@ -313,7 +371,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
                 crate::local::opencode::PLAYBOOK_REL
             );
         }
-        if let Some(configuration) = configuration {
+        if let Some(configuration) = configuration.filter(|_| persist_configuration) {
             Store::open()?.set_acp_configuration(&ctx.session_id, &configuration)?;
             if created {
                 if let Some(saved) = saved_configuration {
@@ -331,39 +389,17 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
         .native_id()
         .ok_or_else(|| anyhow!("ACP session was not initialized"))?;
     ctx.persist_native_session_id(&native_id)?;
-    if let Some(model) = ctx
-        .model
-        .as_deref()
-        .filter(|model| apply_model && *model != "default")
-    {
-        let configuration = Store::open()?
-            .acp_session_state(&ctx.session_id)?
-            .ok_or_else(|| anyhow!("ACP session no longer exists"))?
-            .configuration;
-        let option = configuration["configOptions"]
-            .as_array()
-            .and_then(|options| {
-                options
-                    .iter()
-                    .find(|option| option["category"] == "model" && option["type"] == "select")
-            });
-        let (id, current) = match option {
-            Some(option) => (option["id"].as_str(), option["currentValue"].as_str()),
-            None if !configuration["configOptions"].is_array() => (
-                Some("model"),
-                configuration["models"]["currentModelId"].as_str(),
-            ),
-            None => (None, None),
-        };
-        let id =
-            id.ok_or_else(|| anyhow!("The selected model is no longer advertised by this agent"))?;
-        if current != Some(model) {
-            client.configure(&ctx.session_id, id, model).await?;
-            ctx.host
-                .emit_session(Store::open()?.get_chat_session(&ctx.session_id)?)
-                .await;
-        }
-    }
+    Ok(OpenSession {
+        client,
+        native_id,
+        prompt,
+    })
+}
+
+/// Sends the session's prompt and folds the agent's updates into the turn until
+/// it answers; returns the prompt response.
+pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> Result<Value> {
+    let client = &session.client;
     let mut events = client.begin_turn();
     let _active = ActiveTurn {
         client: client.clone(),
@@ -374,19 +410,20 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
     let response = client.request(
         "session/prompt",
         PromptRequest::new(
-            native_id,
-            vec![ContentBlock::Text(TextContent::new(prompt))],
+            session.native_id.clone(),
+            vec![ContentBlock::Text(TextContent::new(session.prompt.clone()))],
         ),
     );
     tokio::pin!(response);
     let mut tools = ToolUpdates::default();
     let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(5));
     let mut deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
-    loop {
+    let result = loop {
         tokio::select! {
             _ = ctx.flush_due() => { let _ = ctx.flush(); }
             _ = watchdog.tick() => {
-                if client.awaiting_permission() {
+                // A command the agent runs reports nothing until it exits, however long it takes.
+                if client.awaiting_permission() || tools.command_running() {
                     deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
                 } else if tokio::time::Instant::now() >= deadline {
                     return Err(anyhow!("ACP turn exceeded the response timeout"));
@@ -397,7 +434,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
                 while let Ok(event) = events.try_recv() { apply_event(ctx, event, &mut tools)?; }
                 ctx.persist_delivery(DeliveryState::Accepted)?;
                 if result["stopReason"] == "cancelled" { return Err(anyhow!("Agent turn was cancelled")); }
-                break;
+                break result;
             }
             event = events.recv() => {
                 let event = event.ok_or_else(|| anyhow!("ACP process exited during the turn; the prompt was not replayed"))?;
@@ -406,15 +443,26 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
                 apply_event(ctx, event, &mut tools)?;
             }
         }
-    }
+    };
     ctx.flush()?;
-    Ok(())
+    Ok(result)
 }
 
 #[derive(Default)]
 struct ToolUpdates {
     calls: HashMap<String, Value>,
     terminals: HashMap<String, String>,
+    /// Tool activity since the last text, which the next text follows as a new part.
+    text_break: bool,
+}
+
+impl ToolUpdates {
+    fn command_running(&self) -> bool {
+        // A call left `pending` never started; an approval it waits on holds the watchdog itself.
+        self.calls
+            .values()
+            .any(|tool| tool["kind"] == "execute" && tool["status"] == "in_progress")
+    }
 }
 
 fn apply_event(ctx: &mut TurnCtx, event: Event, tools: &mut ToolUpdates) -> Result<()> {
@@ -475,8 +523,13 @@ fn apply_event(ctx: &mut TurnCtx, event: Event, tools: &mut ToolUpdates) -> Resu
                         .assistant
                         .parts
                         .last()
-                        .filter(|part| part.kind == part_kind && part.id.starts_with("acp-chunk-"))
+                        .filter(|part| {
+                            !tools.text_break
+                                && part.kind == part_kind
+                                && part.id.starts_with("acp-chunk-")
+                        })
                         .map(|part| part.id.clone());
+                    tools.text_break = false;
                     let id = id.unwrap_or_else(|| format!("acp-chunk-{}", uuid::Uuid::new_v4()));
                     if !ctx.assistant.parts.iter().any(|part| part.id == id) {
                         ctx.upsert_part(if kind == "agent_thought_chunk" {
@@ -489,6 +542,7 @@ fn apply_event(ctx: &mut TurnCtx, event: Event, tools: &mut ToolUpdates) -> Resu
                 }
             }
             Some("tool_call" | "tool_call_update") => {
+                tools.text_break = true;
                 if let Some(id) = update["toolCallId"].as_str() {
                     let tool = tools
                         .calls
@@ -636,6 +690,62 @@ mod tests {
             &json!({"configOptions":[], "models":{"availableModels":[{"modelId":"legacy"}]}})
         )
         .is_empty());
+    }
+
+    #[test]
+    fn text_after_tool_activity_starts_a_new_part() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut tools = ToolUpdates::default();
+        let chunk = |text: &str| {
+            Event::Update(
+                json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}),
+            )
+        };
+        for event in [
+            chunk("Started it "),
+            chunk("in the background."),
+            Event::Update(
+                json!({"sessionUpdate": "tool_call_update", "toolCallId": "c", "kind": "execute", "status": "completed"}),
+            ),
+            chunk("DONE"),
+        ] {
+            apply_event(&mut ctx, event, &mut tools).unwrap();
+        }
+        let texts: Vec<_> = ctx
+            .assistant
+            .parts
+            .iter()
+            .filter(|part| part.kind == "text")
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(texts, ["Started it in the background.", "DONE"]);
+    }
+
+    #[test]
+    fn a_running_command_holds_off_the_silence_watchdog() {
+        let mut tools = ToolUpdates::default();
+        tools.calls.insert(
+            "read".into(),
+            json!({"kind": "read", "status": "in_progress"}),
+        );
+        assert!(!tools.command_running());
+        tools.calls.insert(
+            "cmd".into(),
+            json!({"kind": "execute", "status": "in_progress"}),
+        );
+        assert!(tools.command_running());
+        tools.calls.insert(
+            "cmd".into(),
+            json!({"kind": "execute", "status": "completed"}),
+        );
+        assert!(!tools.command_running());
+        tools.calls.insert(
+            "cmd".into(),
+            json!({"kind": "execute", "status": "pending"}),
+        );
+        assert!(!tools.command_running());
+        tools.calls.insert("cmd".into(), json!({"kind": "execute"}));
+        assert!(!tools.command_running());
     }
 
     #[test]

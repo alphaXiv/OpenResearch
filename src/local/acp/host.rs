@@ -58,6 +58,7 @@ impl SessionIo {
 
 pub struct Client {
     alphaxiv_signed_in: bool,
+    launch: Definition,
     configuration_lock: tokio::sync::Mutex<()>,
     pub connection: ConnectionTo<Agent>,
     pub initialized: Value,
@@ -242,7 +243,51 @@ impl Client {
                 LoadSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(mcp_servers),
             )?
         };
-        self.request(method, params).await
+        let error = match self.request(method, params).await {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        let not_found = error
+            .downcast_ref::<agent_client_protocol::Error>()
+            .is_some_and(|error| error.code == agent_client_protocol::ErrorCode::ResourceNotFound);
+        if not_found || !self.lists_without(native_id).await {
+            return Err(error);
+        }
+        let mut missing = agent_client_protocol::Error::resource_not_found(None);
+        missing.message = format!("The agent no longer has session {native_id}: {error}");
+        Err(missing.into())
+    }
+
+    /// Whether the agent's own session list leaves out `native_id`. Some agents answer restoring a
+    /// session they no longer have with a generic error instead of `ResourceNotFound`.
+    async fn lists_without(&self, native_id: &str) -> bool {
+        if !self.initialized["agentCapabilities"]["sessionCapabilities"]["list"].is_object() {
+            return false;
+        }
+        let mut cursor: Option<String> = None;
+        for _ in 0..100 {
+            let params = match &cursor {
+                Some(cursor) => json!({"cursor": cursor}),
+                None => json!({}),
+            };
+            let Ok(page) = self.request("session/list", params).await else {
+                return false;
+            };
+            let Some(sessions) = page["sessions"].as_array() else {
+                return false;
+            };
+            if sessions
+                .iter()
+                .any(|session| session["sessionId"] == native_id)
+            {
+                return false;
+            }
+            match page["nextCursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => return true,
+            }
+        }
+        false
     }
 
     pub fn awaiting_permission(&self) -> bool {
@@ -402,7 +447,9 @@ impl Host {
             .clone();
         let mut saved = slot.lock().await;
         if let Some(client) = saved.as_ref().filter(|client| {
-            !*client.closed.borrow() && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+            !*client.closed.borrow()
+                && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+                && client.launch == *definition
         }) {
             *client.idle_since.lock().unwrap() = None;
             return Ok(client.clone());
@@ -533,7 +580,7 @@ pub(super) async fn spawn(
     events: Option<tokio::sync::broadcast::Sender<(&'static str, Value)>>,
     up_port: Option<u16>,
 ) -> Result<Arc<Client>> {
-    definition.validate()?;
+    definition.validate_launch()?;
     let executable = super::executable_path(&definition.executable).ok_or_else(|| {
         anyhow!("Executable not found. Install the agent or check its launch command.")
     })?;
@@ -740,7 +787,7 @@ pub(super) async fn spawn(
         task_io.cancel_permissions();
         task_io.events.lock().unwrap().take();
         delegated.shutdown().await;
-        crate::local::chat::kill_shell_group(process.id.take());
+        crate::local::chat::kill_agent_tree(process.id.take());
         let _ = process.child.kill().await;
         let _ = process.child.wait().await;
         let _ = closed_sender.send(true);
@@ -750,6 +797,7 @@ pub(super) async fn spawn(
     match initialized {
         Ok(Ok(Ok((connection, initialized)))) => Ok(Arc::new(Client {
             alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+            launch: definition.clone(),
             configuration_lock: tokio::sync::Mutex::new(()),
             connection,
             initialized,
@@ -832,6 +880,49 @@ mod tests {
                 .unwrap();
             host.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn restoring_a_session_the_agent_no_longer_lists_is_not_found() {
+        let host = Arc::new(Host::default());
+        let cwd = std::env::temp_dir();
+        let client = host
+            .get("unlisted", &definition("unlisted"), &cwd)
+            .await
+            .unwrap();
+        let code = |error: crate::error::Error| {
+            error
+                .downcast_ref::<agent_client_protocol::Error>()
+                .map(|error| error.code)
+        };
+        let gone = client.restore("gone", &cwd, vec![]).await.unwrap_err();
+        assert_eq!(
+            code(gone),
+            Some(agent_client_protocol::ErrorCode::ResourceNotFound)
+        );
+        // Listed on the second page: the agent still has it, so its own error stands.
+        let kept = client.restore("kept", &cwd, vec![]).await.unwrap_err();
+        assert_eq!(
+            code(kept),
+            Some(agent_client_protocol::ErrorCode::InternalError)
+        );
+        host.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_changed_launch_restarts_the_resident_process() {
+        let host = Arc::new(Host::default());
+        let cwd = std::env::temp_dir();
+        let launch = definition("normal");
+        let first = host.get("relaunch", &launch, &cwd).await.unwrap();
+        let again = host.get("relaunch", &launch, &cwd).await.unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        let mut changed = launch.clone();
+        changed.arguments.push("--changed".into());
+        let restarted = host.get("relaunch", &changed, &cwd).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &restarted));
+        assert!(*first.closed.borrow());
+        host.shutdown().await;
     }
 
     #[tokio::test]

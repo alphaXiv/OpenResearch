@@ -41,7 +41,7 @@ pub(super) async fn agent_tools(
         .get_chat_session(&request.session_id)?
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "unknown agent token".into()))?;
     match request.method.as_str() {
-        "tools/list" => Ok(Json(json!({ "tools": tools() }))),
+        "tools/list" => Ok(Json(json!({ "tools": tools(&caller.harness) }))),
         "tools/call" => {
             let name = request
                 .params
@@ -70,7 +70,12 @@ pub(super) async fn agent_tools(
     }
 }
 
-fn tools() -> Value {
+fn tools(harness: &str) -> Value {
+    let longest = longest_wait(harness);
+    let wait_timeout = format!(
+        "Default {}, at most {longest}. Chats still working when it expires keep working.",
+        WAIT_DEFAULT_SECONDS.min(longest)
+    );
     let chat_id = json!({ "type": "string", "description": "A chat's id, such as `chat_…`." });
     let chat_ids = json!({ "type": "array", "items": { "type": "string" }, "description": "Chat ids, such as `chat_…`." });
     let request_id = json!({ "type": "string", "description": "Optional key you keep across retries of this call: a retry with the same key returns what the first call did instead of doing it again." });
@@ -117,7 +122,7 @@ fn tools() -> Value {
                 "properties": {
                     "chatIds": chat_ids,
                     "until": { "type": "string", "enum": ["any", "all"], "description": "`any` (the default) returns at the first news; `all` waits for an answer from every chat. A question returns at once either way." },
-                    "timeoutSeconds": { "type": "integer", "description": "Default 600, at most 1800. Chats still working when it expires keep working." },
+                    "timeoutSeconds": { "type": "integer", "description": wait_timeout },
                 },
             },
         },
@@ -172,6 +177,16 @@ fn tools() -> Value {
 
 /// How long `wait` blocks unless told otherwise.
 const WAIT_DEFAULT_SECONDS: u64 = 600;
+
+/// The longest `wait` under `harness`. Antigravity ends every MCP call after three minutes and
+/// takes no longer timeout.
+fn longest_wait(harness: &str) -> u64 {
+    if harness == "antigravity" {
+        170
+    } else {
+        delegation::WAIT_MAX_SECONDS
+    }
+}
 
 async fn call(
     state: &AppState,
@@ -520,7 +535,7 @@ async fn wait(state: &AppState, caller: &StoredChatSession, args: &Value) -> Res
         .get("timeoutSeconds")
         .and_then(Value::as_u64)
         .unwrap_or(WAIT_DEFAULT_SECONDS)
-        .clamp(1, delegation::WAIT_MAX_SECONDS);
+        .clamp(1, longest_wait(&caller.harness));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
     let named = args
         .get("chatIds")
