@@ -248,31 +248,162 @@ async fn relay(http: &reqwest::Client, url: &str, body: Value) -> Result<Value> 
     Ok(body)
 }
 
+/// agy's workspace hooks (see `crate::local::harness::antigravity`), told apart by
+/// their payloads: `PostInvocation` records the invocation, `Stop` holds a turn
+/// open for background work, and `PreToolUse` stamps shell commands. Approvals
+/// stay with agy, which asks over ACP.
 pub async fn run_antigravity() -> Result<()> {
     use tokio::io::AsyncReadExt;
     let mut input = String::new();
     tokio::io::stdin().read_to_string(&mut input).await?;
-    if let Ok(payload) = serde_json::from_str::<Value>(&input) {
-        if payload.get("initialNumSteps").is_some() {
-            record_post_invocation(
-                &crate::store::Store::open()?,
-                &payload,
-                std::env::var("ORX_USAGE_EXECUTION_ID").ok().as_deref(),
-            )?;
-            println!("{{}}");
-            return Ok(());
-        }
-    }
-    let mut decision = antigravity_decision(&input).await.unwrap_or_else(|error| {
-        json!({"decision": "deny", "reason": format!("OpenResearch approval bridge unavailable: {error}")})
-    });
-    if decision["decision"] == "allow" {
+    let payload = serde_json::from_str::<Value>(&input).unwrap_or(Value::Null);
+    let output = if payload.get("initialNumSteps").is_some() {
+        record_post_invocation(
+            &crate::store::Store::open()?,
+            &payload,
+            std::env::var("ORX_USAGE_EXECUTION_ID").ok().as_deref(),
+        )?;
+        json!({})
+    } else if payload.get("terminationReason").is_some() {
+        background_stop(&payload).await
+    } else {
+        let mut decision = json!({"decision": "allow"});
         if let Some(overwrite) = invocation_overwrite(&input) {
             decision["overwrite"] = overwrite;
         }
-    }
-    println!("{decision}");
+        decision
+    };
+    println!("{output}");
     Ok(())
+}
+
+/// The longest one `Stop` waits for commands; the agent then decides whether to
+/// keep waiting by ending its turn again.
+#[cfg(unix)]
+const BACKGROUND_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(50 * 60);
+
+#[derive(Debug, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+enum BackgroundWait {
+    /// Commands were running and have all exited.
+    Finished,
+    /// Commands still run, or none could be seen.
+    Unknown,
+}
+
+/// agy finishes background work in turns of its own, which never reach its ACP
+/// client, so a `Stop` that leaves work running continues the same turn instead:
+/// once agy's commands exit or, where they cannot be seen, after a pause that
+/// grows with each stop of the turn.
+async fn background_stop(payload: &Value) -> Value {
+    save_stop_error(payload);
+    if payload.get("fullyIdle").and_then(Value::as_bool) != Some(false) {
+        return json!({});
+    }
+    let wait = wait_for_background_commands().await;
+    if wait == BackgroundWait::Unknown {
+        let stops = payload
+            .get("executionNum")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        tokio::time::sleep(crate::config::paced(stop_backoff(stops))).await;
+    }
+    json!({"decision": "continue", "reason": match wait {
+        BackgroundWait::Finished => "[orx] A command you ran in the background has finished. Check its result and continue the request; end your turn once the request is complete.",
+        BackgroundWait::Unknown => "[orx] Work you started in the background may still be running. Continue with anything else the request needs, or end your turn to keep waiting for it.",
+    }})
+}
+
+/// agy answers a turn it gave up on as a normal end of turn, so its error
+/// reaches the turn through a file of the chat's.
+fn save_stop_error(payload: &Value) {
+    let Some(error) = payload
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|error| payload["terminationReason"] == "ERROR" && !error.trim().is_empty())
+    else {
+        return;
+    };
+    let Ok(session) = std::env::var("ORX_SESSION_ID") else {
+        return;
+    };
+    let saved = json!({"conversationId": payload["conversationId"], "error": error});
+    if let Err(failure) = std::fs::write(
+        crate::local::harness::antigravity::stop_error_path(&session),
+        saved.to_string(),
+    ) {
+        eprintln!("orx antigravity-gate: could not save agy's turn error: {failure}");
+    }
+}
+
+fn stop_backoff(stops: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(15u64 << stops.min(5)).min(std::time::Duration::from_secs(300))
+}
+
+#[cfg(unix)]
+async fn wait_for_background_commands() -> BackgroundWait {
+    let started = std::time::Instant::now();
+    let mut seen = false;
+    loop {
+        match background_commands() {
+            Ok(commands) if !commands.is_empty() => seen = true,
+            Ok(_) if seen => return BackgroundWait::Finished,
+            Ok(_) => return BackgroundWait::Unknown,
+            Err(error) => {
+                eprintln!("orx antigravity-gate: could not list agy's commands: {error}");
+                return BackgroundWait::Unknown;
+            }
+        }
+        if started.elapsed() >= BACKGROUND_WAIT_LIMIT {
+            return BackgroundWait::Unknown;
+        }
+        tokio::time::sleep(crate::config::paced(std::time::Duration::from_secs(1))).await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_background_commands() -> BackgroundWait {
+    BackgroundWait::Unknown
+}
+
+/// agy's running commands. orx starts agy as the leader of its process group,
+/// which its hooks share, while agy starts each command as the leader of a group
+/// of its own.
+#[cfg(unix)]
+fn background_commands() -> Result<Vec<u32>> {
+    // SAFETY: plain process-identity syscalls.
+    let (agy, me) = (unsafe { libc::getpgrp() }, unsafe { libc::getpid() });
+    let output = crate::process::command("ps")
+        .args(["-ww", "-axo", "pid=,ppid=,pgid=,args="])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!("ps exited with {}", output.status));
+    }
+    let supervisor = crate::paths::spawnable_exe().ok();
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| background_command(line, agy, me, supervisor.as_deref()))
+        .collect())
+}
+
+#[cfg(unix)]
+fn background_command(
+    line: &str,
+    agy: libc::pid_t,
+    me: libc::pid_t,
+    supervisor: Option<&std::path::Path>,
+) -> Option<u32> {
+    let mut fields = line.split_whitespace();
+    let pid: libc::pid_t = fields.next()?.parse().ok()?;
+    let ppid: libc::pid_t = fields.next()?.parse().ok()?;
+    let pgid: libc::pid_t = fields.next()?.parse().ok()?;
+    let command = fields.collect::<Vec<_>>().join(" ");
+    (ppid == agy
+        && pid == pgid
+        && pid != me
+        && !crate::local::chat::is_experiment_supervisor(&command, supervisor))
+    .then(|| u32::try_from(pid).ok())
+    .flatten()
 }
 
 /// A shell command runs with its invocation's native `modelName` exported, so `orx exp run` knows
@@ -357,105 +488,58 @@ fn invocation_key(payload: &Value, conversation: &str, step: i64) -> Option<Stri
     })
 }
 
-async fn antigravity_decision(input: &str) -> Result<Value> {
-    if std::env::var("ORX_AGY_GATE").as_deref() == Ok("bypass") {
-        return Ok(json!({"decision": "allow"}));
-    }
-    let payload: Value = serde_json::from_str(input)?;
-    let name = payload
-        .pointer("/toolCall/name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| anyhow!("missing tool name"))?;
-    let args = payload
-        .pointer("/toolCall/args")
-        .ok_or_else(|| anyhow!("missing tool arguments"))?;
-    let env = GateEnv::from_env()?;
-    let token = env.token.ok_or_else(|| anyhow!("ORX_GATE_TOKEN missing"))?;
-    if workspace_read(name, args, &payload) {
-        return Ok(json!({"decision": "allow"}));
-    }
-    let (tool, input) = crate::local::harness::antigravity::normalize_tool(name, Some(args));
-    let http = crate::net::loopback_client()
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .build()?;
-    let decision = relay(
-        &http,
-        &format!("http://127.0.0.1:{}/api/internal/permissions", env.up_port),
-        json!({"sessionId":env.session_id,"token":token,"toolName":tool,"toolInput":input}),
-    )
-    .await?;
-    Ok(match decision.get("behavior").and_then(Value::as_str) {
-        Some("allow") => json!({"decision":"allow"}),
-        _ => {
-            json!({"decision":"deny", "reason":decision.get("message").and_then(Value::as_str).unwrap_or("Action denied")})
-        }
-    })
-}
-
-fn workspace_read(name: &str, args: &Value, payload: &Value) -> bool {
-    let key = match name {
-        "view_file" => "AbsolutePath",
-        "list_dir" => "DirectoryPath",
-        "grep_search" => "SearchPath",
-        "find_by_name" => "SearchDirectory",
-        _ => return false,
-    };
-    let Some(path) = args
-        .get(key)
-        .and_then(Value::as_str)
-        .and_then(|path| std::fs::canonicalize(path).ok())
-    else {
-        return false;
-    };
-    payload
-        .get("workspacePaths")
-        .and_then(Value::as_array)
-        .is_some_and(|roots| {
-            roots
-                .iter()
-                .filter_map(Value::as_str)
-                .filter_map(|root| std::fs::canonicalize(root).ok())
-                .any(|root| path.starts_with(root))
-        })
-}
-
 #[cfg(test)]
 mod antigravity_tests {
     use super::*;
 
-    #[test]
-    fn only_known_reads_inside_the_workspace_skip_approval() {
-        let root = crate::local::git::TemporaryDirectory::new("orx-agy-workspace").unwrap();
-        let root = root.path();
-        std::fs::write(root.join("notes.md"), "").unwrap();
-        let payload = json!({"workspacePaths":[root]});
-        assert!(workspace_read(
-            "view_file",
-            &json!({"AbsolutePath":root.join("notes.md")}),
-            &payload
-        ));
-        assert!(!workspace_read(
-            "view_file",
-            &json!({"AbsolutePath":"/etc/passwd"}),
-            &payload
-        ));
-        assert!(!workspace_read(
-            "run_command",
-            &json!({"AbsolutePath":root}),
-            &payload
-        ));
-        assert!(!workspace_read("view_file", &json!({}), &payload));
+    #[tokio::test]
+    async fn a_stop_with_nothing_in_the_background_ends_the_turn() {
+        for payload in [
+            json!({"terminationReason": "NO_TOOL_CALL", "fullyIdle": true}),
+            json!({"terminationReason": "ERROR", "error": "quota"}),
+        ] {
+            assert_eq!(background_stop(&payload).await, json!({}));
+        }
     }
 
-    #[tokio::test]
-    async fn bypass_env_var_allows_immediately() {
+    #[test]
+    fn a_stop_on_an_error_saves_it_for_the_chats_turn() {
         if !crate::config::in_test_child(&[]) {
             return;
         }
-        std::env::set_var("ORX_AGY_GATE", "bypass");
-        let res = antigravity_decision("invalid-json").await.unwrap();
-        assert_eq!(res["decision"], "allow");
+        std::fs::create_dir_all(crate::store::data_dir()).unwrap();
+        std::env::set_var("ORX_SESSION_ID", "chat-error");
+        let path = crate::local::harness::antigravity::stop_error_path("chat-error");
+        save_stop_error(&json!({"terminationReason": "NO_TOOL_CALL", "error": ""}));
+        assert!(!path.exists());
+        save_stop_error(
+            &json!({"terminationReason": "ERROR", "error": "quota", "conversationId": "c"}),
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, json!({"conversationId": "c", "error": "quota"}));
+    }
+
+    #[test]
+    fn stops_back_off_where_commands_cannot_be_seen() {
+        let waits: Vec<u64> = (0..8).map(|stops| stop_backoff(stops).as_secs()).collect();
+        assert_eq!(waits, [15, 30, 60, 120, 240, 300, 300, 300]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_agys_own_command_groups_are_background_work() {
+        let supervisor = Some(std::path::Path::new("/opt/orx"));
+        let command = |line| background_command(line, 100, 150, supervisor);
+        assert_eq!(
+            command(" 120   100   120 zsh -c sleep 60; echo done"),
+            Some(120)
+        );
+        // agy's MCP servers, helpers and hooks share its group.
+        assert_eq!(command(" 130   100   100 python3 mcp_server.py"), None);
+        assert_eq!(command(" 150   100   100 /opt/orx antigravity-gate"), None);
+        assert_eq!(command(" 140   120   140 sleep 60"), None);
+        assert_eq!(command(" 160   100   160 /opt/orx supervise run-id"), None);
+        assert_eq!(command("garbage"), None);
     }
 
     #[test]

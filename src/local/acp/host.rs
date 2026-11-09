@@ -58,6 +58,7 @@ impl SessionIo {
 
 pub struct Client {
     alphaxiv_signed_in: bool,
+    launch: Definition,
     configuration_lock: tokio::sync::Mutex<()>,
     pub connection: ConnectionTo<Agent>,
     pub initialized: Value,
@@ -402,7 +403,9 @@ impl Host {
             .clone();
         let mut saved = slot.lock().await;
         if let Some(client) = saved.as_ref().filter(|client| {
-            !*client.closed.borrow() && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+            !*client.closed.borrow()
+                && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+                && client.launch == *definition
         }) {
             *client.idle_since.lock().unwrap() = None;
             return Ok(client.clone());
@@ -533,7 +536,7 @@ pub(super) async fn spawn(
     events: Option<tokio::sync::broadcast::Sender<(&'static str, Value)>>,
     up_port: Option<u16>,
 ) -> Result<Arc<Client>> {
-    definition.validate()?;
+    definition.validate_launch()?;
     let executable = super::executable_path(&definition.executable).ok_or_else(|| {
         anyhow!("Executable not found. Install the agent or check its launch command.")
     })?;
@@ -740,7 +743,7 @@ pub(super) async fn spawn(
         task_io.cancel_permissions();
         task_io.events.lock().unwrap().take();
         delegated.shutdown().await;
-        crate::local::chat::kill_shell_group(process.id.take());
+        crate::local::chat::kill_agent_tree(process.id.take());
         let _ = process.child.kill().await;
         let _ = process.child.wait().await;
         let _ = closed_sender.send(true);
@@ -750,6 +753,7 @@ pub(super) async fn spawn(
     match initialized {
         Ok(Ok(Ok((connection, initialized)))) => Ok(Arc::new(Client {
             alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+            launch: definition.clone(),
             configuration_lock: tokio::sync::Mutex::new(()),
             connection,
             initialized,
@@ -832,6 +836,22 @@ mod tests {
                 .unwrap();
             host.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn a_changed_launch_restarts_the_resident_process() {
+        let host = Arc::new(Host::default());
+        let cwd = std::env::temp_dir();
+        let launch = definition("normal");
+        let first = host.get("relaunch", &launch, &cwd).await.unwrap();
+        let again = host.get("relaunch", &launch, &cwd).await.unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        let mut changed = launch.clone();
+        changed.arguments.push("--changed".into());
+        let restarted = host.get("relaunch", &changed, &cwd).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &restarted));
+        assert!(*first.closed.borrow());
+        host.shutdown().await;
     }
 
     #[tokio::test]
