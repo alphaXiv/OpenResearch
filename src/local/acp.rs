@@ -88,7 +88,7 @@ pub struct Preset {
 struct Builtin {
     /// Stored with every session that uses the agent, so it never changes.
     id: &'static str,
-    /// The label telemetry sends in place of `id`; ingestion knows it, so it never changes.
+    /// The label telemetry sends in place of `id`; analytics rows group by it, so it never changes.
     telemetry: &'static str,
     name: &'static str,
     executable: &'static str,
