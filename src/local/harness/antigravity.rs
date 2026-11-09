@@ -439,10 +439,12 @@ async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
         )
         .await?;
     let _ = std::fs::remove_file(stop_error_path(&ctx.session_id));
+    let started = crate::store::now_ms();
     let result = super::acp::prompt_session(ctx, &session).await?;
     if let Some(usage) = turn_usage(&result) {
+        let model = turn_model(&ctx.session_id, started);
         let sample = format!("antigravity-acp-{}", ctx.attempt_count_for_usage());
-        ctx.record_native_usage(&sample, None, None, usage);
+        ctx.record_native_usage(&sample, model.as_deref(), None, usage);
     }
     if take_error_marker(ctx) {
         let cause = take_stop_error(&ctx.session_id, &native_id)
@@ -550,6 +552,22 @@ fn logged_error(line: &str) -> Option<&str> {
     }
     let (_, message) = rest.split_once("] ")?;
     (!message.trim().is_empty()).then_some(message)
+}
+
+/// The native model that ran the turn, from what agy's `PostInvocation` hook
+/// recorded for the chat while it ran (the hook finishes before agy answers the
+/// prompt). Several models leave the turn's single total unattributed.
+fn turn_model(session_id: &str, started: i64) -> Option<String> {
+    let models = crate::store::Store::open()
+        .and_then(|store| store.chat_invocation_models("antigravity", session_id, started))
+        .inspect_err(|error| {
+            eprintln!("orx up: could not read Antigravity's invocation models: {error}")
+        })
+        .ok()?;
+    match models.as_slice() {
+        [model] => Some(model.clone()),
+        _ => None,
+    }
 }
 
 /// The turn's counters from the prompt response; agy reports each prompt alone.
