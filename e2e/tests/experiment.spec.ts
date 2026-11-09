@@ -23,6 +23,8 @@ test('an agent runs its baseline on this machine, the run shows in Experiments, 
   await test.step('the run ends and wakes the chat with its result', async () => {
     // The supervisor polls the job.
     await expect(page.getByText('The baseline finished at loss 0.125.')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByRole('button', { name: /^Worked for/ })).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.getByText('Launched the baseline.', { exact: true })).toBeVisible()
   })
 
   await test.step('Experiments lists the baseline as done, with its log', async () => {
