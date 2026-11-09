@@ -458,10 +458,10 @@ struct ToolUpdates {
 
 impl ToolUpdates {
     fn command_running(&self) -> bool {
-        self.calls.values().any(|tool| {
-            tool["kind"] == "execute"
-                && !matches!(tool["status"].as_str(), Some("completed" | "failed"))
-        })
+        // A call left `pending` never started; an approval it waits on holds the watchdog itself.
+        self.calls
+            .values()
+            .any(|tool| tool["kind"] == "execute" && tool["status"] == "in_progress")
     }
 }
 
@@ -743,7 +743,9 @@ mod tests {
             "cmd".into(),
             json!({"kind": "execute", "status": "pending"}),
         );
-        assert!(tools.command_running());
+        assert!(!tools.command_running());
+        tools.calls.insert("cmd".into(), json!({"kind": "execute"}));
+        assert!(!tools.command_running());
     }
 
     #[test]
