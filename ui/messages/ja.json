@@ -1762,5 +1762,20 @@
   "share_post_x": "X に投稿",
   "share_post_text": "{name}：OpenResearch で研究プロジェクト全体を開く",
   "open_shared_link_body": "openresearch.sh で公開された「{name}」を新しいプロジェクトとして開きます。",
-  "open_shared_link_publisher": "{name} が共有"
+  "open_shared_link_publisher": "{name} が共有",
+  "close_pending_title": "作業がまだ実行中です",
+  "close_pending_background": "バックグラウンドで実行",
+  "close_pending_minimize": "代わりに最小化",
+  "close_pending_quit": "終了",
+  "close_pending_force_quit": "強制終了",
+  "close_pending_blocked": "強制終了すると、OpenResearch を開いておく必要がある実験は停止します。",
+  "close_pending_uncounted": "OpenResearch は実行中のエージェントと実験を確認できませんでした。終了すると、作業中のエージェントはすべて停止します。",
+  "close_pending_agents": "終了するとエージェントは停止します",
+  "close_pending_needs_open": "完了するまで OpenResearch を開いておく必要がある実験",
+  "close_pending_continues": "実行を続け、次回 OpenResearch を開いたときに報告する実験",
+  "close_pending_unsent": "結果がまだチャットに送られていない完了済みの実験",
+  "close_pending_reason_local": "このコンピュータで実行中",
+  "close_pending_reason_tinker": "このコンピュータで実行し、Tinker で学習中",
+  "close_pending_reason_vercel": "OpenResearch がないと、サンドボックスは制限時間まで課金され、ログは失われます",
+  "close_pending_reason_box": "OpenResearch がないと、ボックスの停止時に結果が失われます"
 }

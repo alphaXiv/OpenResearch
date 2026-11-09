@@ -832,6 +832,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
         )
+        .route("/api/pending-work", get(pending_work))
         .route("/api/update", get(update_status))
         .route("/api/update/notes", get(update_notes))
         .route("/api/update/apply", post(apply_update))
@@ -6101,6 +6102,13 @@ async fn set_dashboard_locale(Json(SetLocaleReq { locale }): Json<SetLocaleReq>)
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("locale task failed: {e}")))?
+}
+
+/// What a quit would interrupt, for the page's close dialog.
+async fn pending_work() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(json!(Store::open()?.pending_work()?))))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("pending work task failed: {e}")))?
 }
 
 // --- updates -----------------------------------------------------------------

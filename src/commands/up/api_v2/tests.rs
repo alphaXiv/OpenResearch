@@ -18,6 +18,8 @@ struct Fake {
     scripted_pages: Mutex<VecDeque<LogPage>>,
     identities: Mutex<Vec<Option<FileIdent>>>,
     launch_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    /// A stop the backend never answers.
+    cancel_hangs: AtomicBool,
     reads: AtomicUsize,
     follows: Arc<AtomicUsize>,
     /// Launch admissions currently held.
@@ -46,6 +48,9 @@ impl Backend for Fake {
         vec![]
     }
     async fn cancel(&self, _: &WatchedRun) -> CancelOutcome {
+        if self.cancel_hangs.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         CancelOutcome::Pending
     }
     async fn read_log(
@@ -699,7 +704,7 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
     assert!(!idle.check(&f.api, Duration::ZERO).unwrap());
     assert!(idle.check(&f.api, Duration::from_secs(600)).unwrap());
     f.insert("run", "exp", "project", "running");
-    assert!(f.api.store().engine_runs_block_idle().unwrap());
+    assert_eq!(f.api.store().pending_work().unwrap().runs.len(), 1);
     assert!(!idle.check(&f.api, Duration::from_secs(601)).unwrap());
     f.api
         .store()
@@ -715,7 +720,7 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
             },
         )
         .unwrap();
-    assert!(!f.api.store().engine_runs_block_idle().unwrap());
+    assert_eq!(f.api.store().pending_work().unwrap().runs.len(), 0);
     assert!(!idle.check(&f.api, Duration::from_secs(1201)).unwrap());
     f.api.store().queue_log_collection("run").unwrap();
     assert!(idle.check(&f.api, Duration::from_secs(1801)).unwrap());
@@ -725,13 +730,15 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
         .unwrap();
     let connection = rusqlite::Connection::open(f.api.data_dir.join("orx.db")).unwrap();
     connection.execute("INSERT INTO run_notices(run_id, chat_session_id, kind, dedupe, body, created_at) VALUES ('run','chat','attention','one','body',1)", []).unwrap();
-    assert!(!f.api.store().engine_runs_block_idle().unwrap());
+    assert_eq!(f.api.store().pending_work().unwrap().runs.len(), 1);
     assert!(!idle.check(&f.api, Duration::from_secs(1801)).unwrap());
     connection
         .execute("UPDATE run_notices SET delivered_at=1", [])
         .unwrap();
+    connection.execute("INSERT INTO chat_sessions(id,project_id,harness,created_at,updated_at) VALUES ('chat','project','codex',1,1)", []).unwrap();
     connection.execute("INSERT INTO chat_turns(id,session_id,assistant_message_id,client_turn_id,request_hash,prepared_input,settings_json,state,delivery_state,created_at,updated_at) VALUES ('turn','chat','assistant','client','hash','input','{}','running','pending',1,1)", []).unwrap();
-    assert!(!f.api.store().engine_runs_block_idle().unwrap());
+    let pending = f.api.store().pending_work().unwrap();
+    assert_eq!((pending.agents.len(), pending.runs.len()), (1, 0));
     assert!(!idle.check(&f.api, Duration::from_secs(2401)).unwrap());
     connection.execute("DELETE FROM chat_turns", []).unwrap();
     let events = f
@@ -744,13 +751,42 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
         .await
         .unwrap();
     assert_eq!(f.backend.follows.load(Ordering::SeqCst), 1);
-    assert!(!f.api.store().engine_runs_block_idle().unwrap());
+    assert!(f.api.store().pending_work().unwrap().is_empty());
     assert!(!idle.check(&f.api, Duration::from_secs(3001)).unwrap());
     drop(events);
     f.task.abort();
     tokio::task::yield_now().await;
     assert!(!idle.should_exit(Duration::from_secs(3002), false));
     assert!(idle.should_exit(Duration::from_secs(3602), false));
+}
+
+#[tokio::test]
+async fn a_force_quit_stops_only_runs_that_need_the_app_and_does_not_wait_on_a_silent_backend() {
+    let _serial = crate::commands::up::ACTIVE_TEST_LOCK.lock().await;
+    let f = Fixture::new().await;
+    f.insert("local", "exp", "project", "running");
+    f.insert("remote", "exp", "project", "running");
+    let connection = rusqlite::Connection::open(f.api.data_dir.join("orx.db")).unwrap();
+    connection
+        .execute(
+            r#"UPDATE runs SET backend_json='{"kind":"engine","handle":{"type":"Legacy","descriptor":{"kind":"local_job"}}}' WHERE id='local'"#,
+            [],
+        )
+        .unwrap();
+    let cancelling = |run: &str| {
+        f.api
+            .store()
+            .engine_run_state(run)
+            .unwrap()
+            .is_some_and(|state| state.cancel_accepted_at.is_some())
+    };
+
+    f.backend.cancel_hangs.store(true, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    f.api.force_stop_runs(Duration::from_millis(200)).await;
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(cancelling("local"));
+    assert!(!cancelling("remote"));
 }
 
 #[tokio::test]

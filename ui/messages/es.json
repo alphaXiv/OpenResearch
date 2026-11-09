@@ -1762,5 +1762,20 @@
   "share_post_x": "Publicar en X",
   "share_post_text": "{name}: abre el proyecto de investigación completo en OpenResearch",
   "open_shared_link_body": "Abre “{name}”, publicado en openresearch.sh, como un proyecto nuevo.",
-  "open_shared_link_publisher": "Compartido por {name}"
+  "open_shared_link_publisher": "Compartido por {name}",
+  "close_pending_title": "Aún hay trabajo en curso",
+  "close_pending_background": "Ejecutar en segundo plano",
+  "close_pending_minimize": "Minimizar en su lugar",
+  "close_pending_quit": "Salir",
+  "close_pending_force_quit": "Forzar salida",
+  "close_pending_blocked": "Forzar salida detiene los experimentos que necesitan OpenResearch abierto.",
+  "close_pending_uncounted": "OpenResearch no pudo comprobar si hay agentes o experimentos en curso. Al salir se detiene cualquier agente que esté trabajando.",
+  "close_pending_agents": "Los agentes se detienen al salir",
+  "close_pending_needs_open": "Experimentos que necesitan OpenResearch abierto hasta terminar",
+  "close_pending_continues": "Experimentos que siguen ejecutándose e informan cuando OpenResearch se vuelva a abrir",
+  "close_pending_unsent": "Experimentos terminados cuyos resultados aún no se han enviado a su chat",
+  "close_pending_reason_local": "Se ejecuta en este equipo",
+  "close_pending_reason_tinker": "Se ejecuta en este equipo y entrena en Tinker",
+  "close_pending_reason_vercel": "Sin OpenResearch, el sandbox factura hasta su límite de tiempo y el registro se pierde",
+  "close_pending_reason_box": "Sin OpenResearch, el resultado se pierde cuando la máquina se apaga"
 }

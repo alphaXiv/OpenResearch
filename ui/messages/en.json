@@ -1762,5 +1762,20 @@
   "share_post_x": "Post on X",
   "share_post_text": "{name}: open the full research project in OpenResearch",
   "open_shared_link_body": "Open “{name}”, published on openresearch.sh, as a new project.",
-  "open_shared_link_publisher": "Shared by {name}"
+  "open_shared_link_publisher": "Shared by {name}",
+  "close_pending_title": "Work is still running",
+  "close_pending_background": "Run in background",
+  "close_pending_minimize": "Minimize instead",
+  "close_pending_quit": "Quit",
+  "close_pending_force_quit": "Force Quit",
+  "close_pending_blocked": "Force Quit stops the experiments that need OpenResearch open.",
+  "close_pending_uncounted": "OpenResearch couldn't check for running agents and experiments. Quitting stops any agent that is working.",
+  "close_pending_agents": "Agents stop when you quit",
+  "close_pending_needs_open": "Experiments that need OpenResearch open until they finish",
+  "close_pending_continues": "Experiments that keep running and report when OpenResearch next opens",
+  "close_pending_unsent": "Finished experiments whose results haven't been sent to their chat yet",
+  "close_pending_reason_local": "Runs on this computer",
+  "close_pending_reason_tinker": "Runs on this computer and trains on Tinker",
+  "close_pending_reason_vercel": "Without OpenResearch, the sandbox bills until its time limit and the log is lost",
+  "close_pending_reason_box": "Without OpenResearch, the result is lost when the box shuts down"
 }

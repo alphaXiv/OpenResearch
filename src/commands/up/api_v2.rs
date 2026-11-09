@@ -142,8 +142,43 @@ impl Api {
         Ok(value)
     }
 
+    /// Asks each run that needs the app open to stop, waiting at most `wait` for the answers.
+    #[cfg_attr(not(desktop_app), allow(dead_code))]
+    pub(crate) async fn force_stop_runs(&self, wait: Duration) {
+        let runs = match self.store().pending_work() {
+            Ok(work) => work.runs,
+            Err(error) => {
+                eprintln!("openresearch app: could not check which runs to stop: {error:#}");
+                return;
+            }
+        };
+        let stops = runs
+            .into_iter()
+            .filter(|run| run.after_quit == crate::store::AfterQuit::NeedsApp)
+            .map(|run| async move {
+                let stopped = async {
+                    let stored = self.run(&run.run_id)?;
+                    self.commands
+                        .cancel(&stored, "Stopped when OpenResearch was force quit.")
+                        .await
+                };
+                if let Err(error) = stopped.await {
+                    eprintln!(
+                        "openresearch app: could not stop run {}: {error:#}",
+                        run.run_id
+                    );
+                }
+            });
+        if tokio::time::timeout(wait, futures::future::join_all(stops))
+            .await
+            .is_err()
+        {
+            eprintln!("openresearch app: quitting before every run answered its stop");
+        }
+    }
+
     pub(super) fn busy(&self) -> Result<bool> {
-        Ok(self.store().engine_idle_blocked()? || self.sse_clients() != 0)
+        Ok(!self.store().pending_work()?.is_empty() || self.sse_clients() != 0)
     }
 
     pub fn sse_clients(&self) -> usize {
@@ -203,8 +238,17 @@ pub(crate) fn busy() -> Result<bool> {
 }
 
 #[cfg(desktop_app)]
-pub(crate) fn runs_busy() -> Result<bool> {
-    installed()?.store().engine_runs_block_idle()
+pub(crate) fn pending_work() -> Result<crate::store::PendingWork> {
+    installed()?.store().pending_work()
+}
+
+/// A force quit's stops; the quit goes ahead once all have answered or ten seconds have passed.
+#[cfg(desktop_app)]
+pub(crate) async fn force_stop_runs() {
+    match installed() {
+        Ok(api) => api.force_stop_runs(Duration::from_secs(10)).await,
+        Err(error) => eprintln!("openresearch app: could not stop runs before quitting: {error:#}"),
+    }
 }
 
 /// For the dashboard's `/api/runs`: the same launch as `POST /api/v2/runs`.

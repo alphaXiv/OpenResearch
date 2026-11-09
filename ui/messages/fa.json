@@ -1762,5 +1762,20 @@
   "share_post_x": "ارسال در X",
   "share_post_text": "{name}: پروژهٔ پژوهشی کامل را در OpenResearch باز کنید",
   "open_shared_link_body": "«{name}» منتشرشده در openresearch.sh را به‌عنوان پروژهٔ جدید باز کنید.",
-  "open_shared_link_publisher": "به اشتراک گذاشته‌شده توسط {name}"
+  "open_shared_link_publisher": "به اشتراک گذاشته‌شده توسط {name}",
+  "close_pending_title": "هنوز کاری در حال انجام است",
+  "close_pending_background": "اجرا در پس‌زمینه",
+  "close_pending_minimize": "به‌جای آن کوچک شود",
+  "close_pending_quit": "خروج",
+  "close_pending_force_quit": "خروج اجباری",
+  "close_pending_blocked": "«خروج اجباری» آزمایش‌هایی را که به باز بودن OpenResearch نیاز دارند متوقف می‌کند.",
+  "close_pending_uncounted": "OpenResearch نتوانست وجود عامل‌ها و آزمایش‌های در حال اجرا را بررسی کند. خروج همه عامل‌های در حال کار را متوقف می‌کند.",
+  "close_pending_agents": "عامل‌ها با خروج متوقف می‌شوند",
+  "close_pending_needs_open": "آزمایش‌هایی که تا پایان به باز بودن OpenResearch نیاز دارند",
+  "close_pending_continues": "آزمایش‌هایی که ادامه می‌یابند و دفعه بعد که OpenResearch باز شود گزارش می‌دهند",
+  "close_pending_unsent": "آزمایش‌های تمام‌شده‌ای که نتایجشان هنوز به گفتگویشان فرستاده نشده است",
+  "close_pending_reason_local": "روی این رایانه اجرا می‌شود",
+  "close_pending_reason_tinker": "روی این رایانه اجرا می‌شود و روی Tinker آموزش می‌بیند",
+  "close_pending_reason_vercel": "بدون OpenResearch، هزینه سندباکس تا پایان مهلت زمانی‌اش محاسبه می‌شود و گزارش از بین می‌رود",
+  "close_pending_reason_box": "بدون OpenResearch، با خاموش شدن دستگاه نتیجه از بین می‌رود"
 }

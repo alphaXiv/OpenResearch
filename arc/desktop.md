@@ -30,13 +30,16 @@ The main thread owns the window's run loop, as every desktop toolkit requires, w
 
 ## Closing and quitting
 
-**Closing the window never stops the engine's work.** When the app runs its own server:
+**Work never stops without the user choosing it.** When the app runs its own server, a close and a quit take the same path:
 
-- **Close while busy:** the window hides, the page unloads and the engine runs windowless. Busy means an unfinished run, an undelivered notice, a running chat turn or an open dashboard event stream. The window's own page holds such a stream until it unloads, so a close with a local workspace open goes windowless even with no work.
-- **Close while not busy:** the app quits.
+- **Nothing pending:** the app quits. Pending work is a running chat turn, an unfinished run, or a run whose result no chat has received.
+- **Work pending:** the page lists each running chat and pending run under what quitting does to it, following them as they finish and dropping the close once none is left, and opening one cancels the close and shows it. The user chooses between quitting, keeping the work running and going back. Only the page is themed and translated and can open what it lists, so a windowless close brings the window back to ask there; when the page cannot ask or does not show the dialog within a second, a native alert names the same work. Work that could not be counted is asked about as if agents were running.
+- **Some runs keep the app from quitting.** Most backends finish a run and keep its outcome without the app, and a run under a 0.2.x supervisor is finished by it. A run on this machine, Tinker included, would outlive the app on a machine the user believes is free to shut down; a Vercel sandbox bills until its session ends and loses its log unless the engine stops it; an OpenResearch box releases itself, with any uncollected outcome, a bounded grace after the run ([experiments](experiments.md)). While one of these is pending, Quit becomes Force Quit: the window goes, each such run is asked to stop, and the app quits once all have answered or ten seconds have passed.
+- **Keeping it running:** on macOS the window hides, the page unloads and the engine runs windowless, with the Dock icon to bring it back; a fullscreen window leaves fullscreen first, because hiding it in place strands its Space. Windows and Linux have nothing that shows a hidden app, so the window minimizes instead.
+- **Quit:** agents stop.
 - **Windowless and idle:** the app quits after the idle wait of a headless `orx up` ([experiments](experiments.md)).
 - **Windowless, then a second launch, a link or a macOS Dock reopen:** the window returns on a fresh page load.
-- **Explicit quit, which only macOS has:** with unfinished runs it asks first, and they continue on their hosts for the next start to collect. System logout and shutdown never ask.
+- **System logout and shutdown never ask.**
 
 A window opened on another process's server just closes.
 

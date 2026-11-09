@@ -506,6 +506,35 @@ export interface BuildNotes {
   commits: string[];
 }
 
+/** What quitting does to a pending experiment. */
+export type AfterQuit = "reports" | "continues" | "needsApp";
+
+export interface PendingAgent {
+  projectId: string;
+  project: string | null;
+  sessionId: string;
+  sideParentId: string | null;
+  harness: HarnessId;
+  title: string | null;
+}
+
+export interface PendingRun {
+  projectId: string;
+  project: string | null;
+  experimentId: string;
+  runId: string;
+  sessionId: string | null;
+  name: string;
+  backend: string | null;
+  afterQuit: AfterQuit;
+}
+
+/** What a quit would interrupt on this machine. */
+export interface PendingWork {
+  agents: PendingAgent[];
+  runs: PendingRun[];
+}
+
 export interface UpdateStatus {
   current: string;
   /** Latest published release on the selected channel. */
@@ -2122,6 +2151,8 @@ export function createApi(
 
   const getUpdateStatus = (signal?: AbortSignal) => get<UpdateStatus>("/api/update", signal);
 
+  const getPendingWork = (signal?: AbortSignal) => get<PendingWork>("/api/pending-work", signal);
+
   const getBuildNotes = (signal?: AbortSignal) => get<BuildNotes | null>("/api/update/notes", signal);
 
   const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
@@ -2811,6 +2842,7 @@ export function createApi(
     getTinkerSettings,
     saveTinkerKey,
     getUpdateStatus,
+    getPendingWork,
     getBuildNotes,
     applyUpdate,
     restartApp,

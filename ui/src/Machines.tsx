@@ -6,6 +6,7 @@ import type { RemoteSessionInfo } from "./api";
 import { createWorkspace, WorkspaceContext } from "./workspace";
 import { createWorkspaceRouter } from "./router";
 import { MachineSelectionContext } from "./machineSelection";
+import { askBeforeClosing } from "./closeDialog";
 import { QueryDevtools } from "./components/QueryDevtools";
 import { Button, Spinner } from "./components/ui";
 import { m } from "./paraglide/messages.js";
@@ -192,6 +193,23 @@ function MachineWorkspaces({
     window.addEventListener("orx:open-path", openShared);
     return () => window.removeEventListener("orx:open-path", openShared);
   }, [local]);
+
+  useEffect(() => {
+    // The window's pending work is the local machine's, whichever machine is showing.
+    const closeRequest = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      const showing = workspaces.get(activeId) ?? local;
+      askBeforeClosing(showing.workspace.dialogs, event.detail, {
+        machine: local.workspace,
+        open: (href) => {
+          setActiveId("local");
+          void local.router.navigate({ href });
+        },
+      });
+    };
+    window.addEventListener("orx:close-request", closeRequest);
+    return () => window.removeEventListener("orx:close-request", closeRequest);
+  }, [activeId, workspaces, local]);
 
   useEffect(() => {
     setWorkspaces((current) =>
