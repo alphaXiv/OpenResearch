@@ -1751,9 +1751,13 @@ mod agent_tree_tests {
 
     #[tokio::test]
     async fn stopping_an_agent_kills_commands_in_their_own_sessions() {
-        // `setsid`-like: the command leads its own process group, as agy's do.
+        // The command leads its own process group, as agy's do; dash's `set -m` leaves jobs in the
+        // shell's group, so the command makes its own.
         let mut child = crate::process::tokio_command("sh")
-            .args(["-c", "set -m; sleep 60 & echo $!; wait"])
+            .args([
+                "-c",
+                r#"python3 -c 'import os, time; os.setpgid(0, 0); print(os.getpid(), flush=True); time.sleep(60)' & wait"#,
+            ])
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()

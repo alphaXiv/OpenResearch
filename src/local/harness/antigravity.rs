@@ -870,9 +870,9 @@ mod tests {
 
     #[test]
     fn launch_skips_permissions_only_when_asked() {
-        let bin = Path::new("/opt/agy");
-        let ask = launch(bin, "chat", false);
-        let bypass = launch(bin, "chat", true);
+        let bin = std::env::temp_dir().join("agy");
+        let ask = launch(&bin, "chat", false);
+        let bypass = launch(&bin, "chat", true);
         assert_eq!(ask.id, "antigravity");
         assert_eq!(ask.arguments[0], "acp");
         assert!(!ask
