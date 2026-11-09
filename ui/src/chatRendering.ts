@@ -202,12 +202,8 @@ export function unreadAfterBusyChange(
   return next;
 }
 
-export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: ChatPart[]; answer: ChatPart[] } {
-  // Keep unanswered prompts in the visible conversation.
-  if (parts.some((part) => part.type === "prompt" && !part.prompt?.resolved)) {
-    return { work: [], answer: parts };
-  }
-  let finalIndex = parts.findIndex((part) => part.type === "text" && part.phase === "final_answer");
+function finalAnswerIndex(parts: ChatPart[], streaming: boolean): number {
+  let finalIndex = parts.findIndex((part) => part.type === "text" && part.phase === "final_answer" && (streaming || partIsVisible(part)));
   if (finalIndex < 0 && !streaming && !parts.some((part) => part.phase)) {
     // Older transcripts have no phase: only the trailing text can be the answer.
     for (let index = parts.length - 1; index >= 0; index--) {
@@ -217,6 +213,15 @@ export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: C
       if (part.text) finalIndex = index;
     }
   }
+  return finalIndex;
+}
+
+export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: ChatPart[]; answer: ChatPart[] } {
+  // Keep unanswered prompts in the visible conversation.
+  if (parts.some((part) => part.type === "prompt" && !part.prompt?.resolved)) {
+    return { work: [], answer: parts };
+  }
+  const finalIndex = finalAnswerIndex(parts, streaming);
   return finalIndex < 0 || (!streaming && !parts.slice(finalIndex).some((part) => partIsVisible(part))) || !parts.slice(0, finalIndex).some((part) => partIsVisible(part))
     ? { work: [], answer: parts }
     : { work: parts.slice(0, finalIndex), answer: parts.slice(finalIndex) };
@@ -228,7 +233,9 @@ export function groupResponseMessages(messages: ChatMessage[], previousGroups: C
     const previous = groups.at(-1);
     const providerChanged = message.parts.some((part) => part.tool === "provider_switch")
       || previous?.[0].parts.some((part) => part.tool === "provider_switch");
-    if (message.role === "assistant" && previous?.[0].role === "assistant" && !providerChanged && message.parts[0]?.id !== LOCAL_ERROR_PART_ID) {
+    if (message.role === "assistant" && previous?.[0].role === "assistant" && !providerChanged
+      && message.parts[0]?.id !== LOCAL_ERROR_PART_ID
+      && finalAnswerIndex(previous[previous.length - 1].parts, false) < 0) {
       previous.push(message);
     } else {
       groups.push([message]);
