@@ -17,7 +17,7 @@ use crate::local::acp::{
 use crate::local::chat::{
     DeliveryState, NativePermissionChoice, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
 };
-use crate::store::Store;
+use crate::store::{Store, TokenUsage};
 
 mod auth;
 
@@ -248,6 +248,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
         client = host.get(&ctx.session_id, definition, &cwd).await?;
     }
     let mut prompt = ctx.text.clone();
+    let mut restored = false;
     if client.native_id().is_none() {
         let saved_configuration = Store::open()?
             .acp_session_state(&ctx.session_id)?
@@ -313,6 +314,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
                 crate::local::opencode::PLAYBOOK_REL
             );
         }
+        restored = !created;
         if let Some(configuration) = configuration {
             Store::open()?.set_acp_configuration(&ctx.session_id, &configuration)?;
             if created {
@@ -396,6 +398,16 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
                 let result = result?;
                 while let Ok(event) = events.try_recv() { apply_event(ctx, event, &mut tools)?; }
                 ctx.persist_delivery(DeliveryState::Accepted)?;
+                if let (Some(execution), Some(samples)) = (
+                    ctx.usage_execution_id(),
+                    prompt_token_usage(&client.initialized["agentInfo"], &result, restored),
+                ) {
+                    if let Err(error) = Store::open().and_then(|store| {
+                        store.record_acp_prompt_usage(execution, &ctx.harness, &samples)
+                    }) {
+                        eprintln!("orx up: could not persist ACP token usage: {error}");
+                    }
+                }
                 if result["stopReason"] == "cancelled" { return Err(anyhow!("Agent turn was cancelled")); }
                 break;
             }
@@ -409,6 +421,81 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
     }
     ctx.flush()?;
     Ok(())
+}
+
+/// Native counters with input made inclusive of cache; `None` unless they add up to `totalTokens`.
+fn native_counters(usage: &Value, cache_read: &str, reasoning: Option<u64>) -> Option<TokenUsage> {
+    let cache_read = usage[cache_read].as_u64();
+    let cache_write = usage["cachedWriteTokens"].as_u64();
+    let tokens = TokenUsage {
+        input_tokens: Some(
+            usage["inputTokens"]
+                .as_u64()?
+                .checked_add(cache_read.unwrap_or(0))?
+                .checked_add(cache_write.unwrap_or(0))?,
+        ),
+        output_tokens: Some(usage["outputTokens"].as_u64()?),
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
+        reasoning_tokens: reasoning,
+    };
+    (tokens.total()? == usage["totalTokens"].as_u64()? && tokens.validate().is_ok())
+        .then_some(tokens)
+}
+
+/// A prompt response's samples: the native model label, its counters, and whether they cover
+/// every request the turn made.
+fn prompt_token_usage(
+    agent: &Value,
+    result: &Value,
+    restored: bool,
+) -> Option<Vec<(Option<String>, TokenUsage, bool)>> {
+    // ACP agents disagree about whether prompt counters describe a turn or the session.
+    let claude = match (agent["name"].as_str()?, agent["version"].as_str()?) {
+        ("@agentclientprotocol/codex-acp", "2.6.0") => false,
+        ("@agentclientprotocol/claude-agent-acp", "0.101.0") => true,
+        _ => return None,
+    };
+    let usage = &result["usage"];
+    let main = native_counters(usage, "cachedReadTokens", usage["thoughtTokens"].as_u64())?;
+    if !claude {
+        return Some(vec![(None, main, true)]);
+    }
+    // Claude counts its main loop in `usage`; its per-model rows also count sub-agents and
+    // compaction, so they replace it. Their reasoning counter is a constant zero, not a measure.
+    let native = result["_meta"]["quota"]["model_usage"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let rows: Vec<_> = native
+        .iter()
+        .filter_map(|row| {
+            let tokens = native_counters(&row["token_count"], "cachedInputTokens", None)?;
+            Some((row["model"].as_str().map(str::to_owned), tokens))
+        })
+        .collect();
+    let counters: [fn(&TokenUsage) -> Option<u64>; 4] = [
+        |tokens: &TokenUsage| tokens.input_tokens,
+        |tokens: &TokenUsage| tokens.output_tokens,
+        |tokens: &TokenUsage| tokens.cache_read_tokens,
+        |tokens: &TokenUsage| tokens.cache_write_tokens,
+    ];
+    let cover_main = !rows.is_empty()
+        && counters.into_iter().all(|counter| {
+            rows.iter()
+                .try_fold(0u64, |sum, (_, row)| sum.checked_add(counter(row)?))
+                >= counter(&main)
+        });
+    if !cover_main {
+        return Some(vec![(None, main, false)]);
+    }
+    // A restored session's first rows are its main loop alone.
+    let complete = !restored && rows.len() == native.len();
+    Some(
+        rows.into_iter()
+            .map(|(model, tokens)| (model, tokens, complete))
+            .collect(),
+    )
 }
 
 #[derive(Default)]
@@ -611,6 +698,96 @@ fn tool_output(tool: &Value, terminals: &HashMap<String, String>) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_acp_counts_each_prompt_with_inclusive_input() {
+        let agent = json!({"name": "@agentclientprotocol/codex-acp", "version": "2.6.0"});
+        let result = json!({"usage": {
+            "totalTokens": 29958, "inputTokens": 210, "outputTokens": 308,
+            "cachedReadTokens": 29440, "cachedWriteTokens": 0, "thoughtTokens": 201,
+        }});
+        let samples = prompt_token_usage(&agent, &result, true).unwrap();
+        let [(None, tokens, true)] = samples.as_slice() else {
+            panic!("expected one complete unattributed sample: {samples:?}");
+        };
+        assert_eq!(tokens.input_tokens, Some(29650));
+        assert_eq!(tokens.total(), Some(29958));
+        assert_eq!(tokens.reasoning_tokens, Some(201));
+        assert!(prompt_token_usage(&agent, &Value::Null, false).is_none());
+        assert!(prompt_token_usage(
+            &json!({"name": "other", "version": "2.6.0"}),
+            &result,
+            false
+        )
+        .is_none());
+        let mut inconsistent = result;
+        inconsistent["usage"]["totalTokens"] = json!(308);
+        assert!(prompt_token_usage(&agent, &inconsistent, false).is_none());
+    }
+
+    /// Claude's per-model rows count more than its main-loop `usage` (here a second model), so
+    /// they are the samples; the main loop stands in, unattributed and partial, without them.
+    #[test]
+    fn claude_acp_counts_each_executed_model_or_falls_back_to_its_main_loop() {
+        let agent = json!({"name": "@agentclientprotocol/claude-agent-acp", "version": "0.101.0"});
+        let row = |model: &str, input: u64, read: u64, write: u64, output: u64| {
+            json!({"model": model, "token_count": {
+                "totalTokens": input + read + write + output, "inputTokens": input,
+                "cachedInputTokens": read, "cachedWriteTokens": write, "outputTokens": output,
+                "reasoningOutputTokens": 0,
+            }})
+        };
+        let fable = row("claude-fable-5-1", 2, 11384, 28946, 127);
+        let mut result = json!({
+            "usage": {
+                "totalTokens": 40459, "inputTokens": 2, "outputTokens": 127,
+                "cachedReadTokens": 11384, "cachedWriteTokens": 28946,
+            },
+            "_meta": {"quota": {"model_usage": [row("claude-haiku-5-5", 1215, 0, 0, 20), fable]}},
+        });
+        let summary =
+            |result: &Value, restored: bool| -> Vec<(Option<String>, Option<u64>, bool)> {
+                prompt_token_usage(&agent, result, restored)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(model, tokens, complete)| {
+                        assert_eq!(tokens.reasoning_tokens, None);
+                        (model, tokens.total(), complete)
+                    })
+                    .collect()
+            };
+        let models = |complete: bool| {
+            [
+                (Some("claude-haiku-5-5".to_string()), Some(1235), complete),
+                (Some("claude-fable-5-1".to_string()), Some(40459), complete),
+            ]
+        };
+        assert_eq!(summary(&result, false), models(true));
+        assert_eq!(
+            prompt_token_usage(&agent, &result, false).unwrap()[1]
+                .1
+                .input_tokens,
+            Some(40332)
+        );
+        assert_eq!(summary(&result, true), models(false));
+        // A row that does not add up is dropped; the rest still cover the main loop, in part.
+        result["_meta"]["quota"]["model_usage"][0]["token_count"]["totalTokens"] = json!(1);
+        assert_eq!(summary(&result, false), [models(false)[1].clone()]);
+        let main_loop = [(None::<String>, Some(40459u64), false)];
+        for rows in [
+            json!([row("claude-haiku-5-5", 1215, 0, 0, 20)]),
+            json!([{"model": "claude-fable-5-1"}]),
+            json!([]),
+            Value::Null,
+        ] {
+            result["_meta"]["quota"]["model_usage"] = rows;
+            assert_eq!(summary(&result, false), main_loop);
+        }
+        let newer = json!({"name": "@agentclientprotocol/claude-agent-acp", "version": "0.102.0"});
+        assert!(prompt_token_usage(&newer, &result, false).is_none());
+        result["usage"]["totalTokens"] = json!(1);
+        assert!(prompt_token_usage(&agent, &result, false).is_none());
+    }
 
     #[test]
     fn model_catalog_preserves_native_ids_labels_and_order() {
