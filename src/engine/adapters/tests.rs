@@ -3010,7 +3010,7 @@ async fn legacy_survivors_settle_on_group_absence_without_reconnect() {
         row.backend_json =
             json!({"kind":kind,"namespace":f.server.alias(),"jobId":dir}).to_string();
         f.store().upsert_run(&row).unwrap();
-        assert_eq!(f.engine.scan_legacy(true).unwrap().len(), 1);
+        assert_eq!(f.engine.scan_legacy().unwrap().len(), 1);
         f.engine
             .apply_cancel(&row, CancelOutcome::Survivors { count: 1 })
             .unwrap();

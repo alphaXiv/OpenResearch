@@ -197,24 +197,6 @@ async fn completion(events: &mut (impl Stream<Item = Result<Value>> + Unpin)) ->
     panic!("event stream ended before completion")
 }
 
-fn run_with_engine(test: &str) -> bool {
-    if std::env::var("ORX_RUN_ENGINE").as_deref() == Ok("1") {
-        return false;
-    }
-    let output = crate::process::command(std::env::current_exe().unwrap())
-        .env("ORX_RUN_ENGINE", "1")
-        .args(["--exact", test, "--nocapture"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    true
-}
-
 struct Fixture {
     api: Arc<Api>,
     backend: Arc<Fake>,
@@ -755,12 +737,6 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
 
 #[tokio::test]
 async fn cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundaries() {
-    if run_with_engine(concat!(
-        module_path!(),
-        "::cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundaries"
-    )) {
-        return;
-    }
     use clap::Parser;
     let f = Fixture::new().await;
     let cli =
@@ -889,12 +865,6 @@ async fn log_feed_is_refcounted_and_pushes_without_a_cli_poll() {
 
 #[tokio::test]
 async fn v2_launches_are_host_checked_admitted_and_keep_a_run_submission_active() {
-    if run_with_engine(concat!(
-        module_path!(),
-        "::v2_launches_are_host_checked_admitted_and_keep_a_run_submission_active"
-    )) {
-        return;
-    }
     use clap::Parser;
     let _guard = crate::commands::up::ACTIVE_TEST_LOCK.lock().await;
     let f = Fixture::new().await;
@@ -1710,10 +1680,9 @@ async fn dashboard_host_routes_report_states_and_retry_only_key_hosts() {
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
-    let connect_required = cfg!(windows) && !crate::config::run_engine_settings().unwrap().0;
     assert_eq!(
         serde_json::from_slice::<Value>(&bytes).unwrap(),
-        json!([{"alias":"lab","status":"backoff","class":"key","connectRequired":connect_required,"sinceMs":100,"nextRetryMs":200,"cause":"offline","root":"/engine"}])
+        json!([{"alias":"lab","status":"backoff","class":"key","connectRequired":false,"sinceMs":100,"nextRetryMs":200,"cause":"offline","root":"/engine"}])
     );
     let request = || {
         Request::builder()

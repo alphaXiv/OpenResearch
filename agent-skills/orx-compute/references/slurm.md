@@ -2,9 +2,8 @@
 
 Use this backend only when the user explicitly requests their Slurm cluster or
 it is the configured default. `orx` reaches the login node over SSH, stages the
-committed snapshot, and submits the fixed command with `sbatch`. The login node
-needs Python 3.6 or newer for supervised runs; engine runs use `orx-host`.
-No Python packages or administrator installation are required.
+committed snapshot, and submits the fixed command with `sbatch` through its `orx-host` helper.
+No Python or administrator installation is required.
 All runs on the same connection share one monitoring channel and batched scheduler
 queries. Transport failures back off together, and fresh authentication requires
 explicit Connect. Reconnect with `orx compute connect slurm --host login-node`.
@@ -30,7 +29,7 @@ orx exp run <expId> --backend slurm
   profile—is used as-is.
 - `--timeout` covers the batch job. Unset falls back to the Slurm time-limit
   setting, then the cluster's limit.
-- With the new engine enabled, runs and cached source archives live under
+- Runs and cached source archives live under
   `~/.orx/engine` on the cluster unless `orx compute configure slurm --remote-root /scratch/alice/orx` names
   another absolute directory (runs then live in its `engine/` subdirectory),
   such as scratch space when home quota is small. It must be on a filesystem
@@ -39,10 +38,10 @@ orx exp run <expId> --backend slurm
 - Run dirs stay on the cluster after the run; OpenResearch keeps each run's
   log on this computer. Remove old dirs under `<root>/engine/runs/` when space
   runs short.
-- Supervised runs (the stable/dev default) use `<root>/runs/`. Each project's three newest
+- Runs from orx 0.2 live in `<root>/runs/`. Each project's three newest
   SSH and Slurm runs stay whole, older finished ones lose their remote run dir
   except `tensorboard/`, and idle cached source archives are removed.
   `orx compute configure slurm --keep-remote-runs true` keeps them all; deleting
   a project removes them regardless.
 
-See [run monitoring](../SKILL.md#run-engine-setting).
+See [run monitoring](../SKILL.md#who-watches-a-run).

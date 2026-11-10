@@ -44,7 +44,6 @@ pub mod runs;
 pub mod serve;
 pub mod skill;
 pub mod ssh_key;
-pub mod supervise;
 pub mod telemetry;
 pub mod tensorboard;
 pub mod up;

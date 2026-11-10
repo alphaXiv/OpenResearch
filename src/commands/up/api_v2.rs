@@ -99,12 +99,7 @@ impl Api {
         args.forwarded = true;
         crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
         args.backend.get_or_insert_with(|| "local".into());
-        if crate::config::run_engine_settings()?.0 {
-            self.commands.run(args, admission).await
-        } else {
-            let run = crate::compute::submit_supervised(&args).await?;
-            Ok(run.id)
-        }
+        self.commands.run(args, admission).await
     }
 
     fn run(&self, id: &str) -> Result<StoredRun> {
@@ -461,12 +456,9 @@ pub(crate) fn host_view(
     use crate::engine::transport::{HostClass, Status};
     let class = store.engine_host_auth(alias)?.class;
     let connect_required = cfg!(windows)
-        && crate::compute::supervised_ssh_needed(
-            crate::config::run_engine_settings()?.0,
-            &store.list_active_runs()?,
-            alias,
-            |id| installed().is_ok_and(|api| api.engine.holds(id)),
-        );
+        && crate::compute::supervised_ssh_needed(&store.list_active_runs()?, alias, |id| {
+            installed().is_ok_and(|api| api.engine.holds(id))
+        });
     Ok(json!({
         "alias": alias, "root": root,
         "status": match state.status { Status::Idle => "idle", Status::Connecting => "connecting", Status::Live => "live", Status::Backoff => "backoff", Status::NeedsAuth => "needs_auth" },

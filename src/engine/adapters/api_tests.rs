@@ -1173,16 +1173,6 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
     };
     std::fs::write(&archive, &source).unwrap();
     let digest = format!("{:x}", Sha256::digest(&source));
-    if watching {
-        transport
-            .upload("cat > \"$HOME/uploaded\"", &archive)
-            .await
-            .unwrap();
-        assert_eq!(
-            std::fs::read(server.home().join("uploaded")).unwrap(),
-            source
-        );
-    }
     let descriptor = BackendDescriptor::parse(
         &json!({
             "kind":"openresearch_job", "namespace":"org", "jobId":"box",
@@ -2220,7 +2210,7 @@ esac
     })
     .to_string();
     engine.store().upsert_run(&legacy_row).unwrap();
-    let adopted = engine.scan_legacy(true).unwrap();
+    let adopted = engine.scan_legacy().unwrap();
     assert!(adopted.iter().any(|(id, adoption)| {
         id == "legacy"
             && matches!(adoption,

@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use orx_host_proto::{LogTarget, Request, Response};
-use sha2::{Digest, Sha256};
 
 use super::ssh::Ssh;
 use crate::engine::*;
@@ -55,26 +54,6 @@ impl LegacyTransport {
             )),
             _ => Err(anyhow!("Unexpected Exec response")),
         }
-    }
-
-    pub async fn upload(&self, command: &str, source: &Path) -> Result<String> {
-        let mut hash = Sha256::new();
-        let mut file = std::fs::File::open(source)?;
-        std::io::copy(&mut file, &mut hash)?;
-        let sha = format!("{:x}", hash.finalize());
-        self.ssh
-            .stage_blob(&sha, source, file.metadata()?.len())
-            .await
-            .map_err(|error| anyhow!("Source upload failed: {error:?}"))?;
-        let blob = format!("{}/sources/{sha}", self.ssh.root);
-        self.execute(
-            &format!(
-                "{{ {command}; }} < {}",
-                ssh::shell_path(blob.strip_prefix("~/").unwrap_or(&blob))
-            ),
-            &[],
-        )
-        .await
     }
 }
 

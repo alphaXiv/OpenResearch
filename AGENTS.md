@@ -44,7 +44,7 @@ OpenResearch turns the coding agents a researcher already has (Claude Code, Code
 
 ## A run in one breath
 
-A message reaches `orx up`, which starts or reuses the chat's agent in the chat's own worktree, with orx's playbook, skills and the `orx` CLI on its `PATH`. The agent commits and runs `orx exp run`: the dashboard archives the experiment's commit and submits it to a backend. A supervisor or the engine watches it and delivers results to the chat that asked. The page follows it through one event stream. See [the run engine setting](arc/experiments.md#choosing-the-run-engine).
+A message reaches `orx up`, which starts or reuses the chat's agent in the chat's own worktree, with orx's playbook, skills and the `orx` CLI on its `PATH`. The agent commits and runs `orx exp run`: the dashboard archives the experiment's commit and submits it to a backend. The engine watches it and delivers results to the chat that asked. The page follows it through one event stream. See [the engine](arc/experiments.md#the-engine).
 
 ## Architecture
 

@@ -1049,11 +1049,10 @@ async fn runs_an_old_supervisor_holds_are_watched_and_never_written() {
         r#"{"kind":"openresearch_job","namespace":"org","jobId":"sb"}"#,
     );
     f.legacy_run("hf", r#"{"kind":"hf_job","namespace":"lab","jobId":"j"}"#);
-    f.legacy_run("submitting", r#"{"kind":"modal_job"}"#);
     f.legacy_run("mystery", r#"{"kind":"future_job","jobId":"x"}"#);
     f.running("engine").await;
 
-    let mut decisions = f.engine.scan_legacy(true).unwrap();
+    let mut decisions = f.engine.scan_legacy().unwrap();
     decisions.sort_by(|a, b| a.0.cmp(&b.0));
     let container = match &decisions[3].1 {
         Adoption::Inspect { container, .. } => container.clone(),
@@ -1087,7 +1086,7 @@ async fn runs_an_old_supervisor_holds_are_watched_and_never_written() {
     assert!(f.locked("ssh") && f.locked("box") && f.locked("hf"));
     assert!(f
         .engine
-        .scan_legacy(true)
+        .scan_legacy()
         .unwrap()
         .iter()
         .all(|(id, _)| id == "held"));
@@ -1123,14 +1122,14 @@ async fn runs_an_old_supervisor_holds_are_watched_and_never_written() {
         .unwrap();
     drop(old_supervisor);
     f.released("held");
-    f.engine.scan_legacy(true).unwrap();
+    f.engine.scan_legacy().unwrap();
     let notices = f.deliver();
     assert_eq!(notices.len(), 1);
     assert_eq!(
         (notices[0].run_id.as_str(), notices[0].kind.as_str()),
         ("held", TERMINAL)
     );
-    f.engine.scan_legacy(true).unwrap();
+    f.engine.scan_legacy().unwrap();
     assert!(f.deliver().is_empty());
     f.released("held");
 }
@@ -1144,7 +1143,7 @@ async fn an_old_cli_cancel_is_accepted_once_under_its_lock_and_survives_withdraw
             &format!(r#"{{"kind":"ssh_job","jobId":"/orx/runs/{id}"}}"#),
         );
     }
-    f.engine.scan_legacy(true).unwrap();
+    f.engine.scan_legacy().unwrap();
     let old_cli = |id: &str, act: &dyn Fn(&Store)| {
         let path = f.dir.join(format!("run-logs/{id}.cancel.lock"));
         let mut lock = crate::store::open_lifecycle_lock_at(&path).unwrap();
@@ -1467,34 +1466,28 @@ async fn a_dropped_launch_leaves_the_run_recoverable() {
 }
 
 #[test]
-fn legacy_adoption_waits_for_the_launch_to_settle_and_respects_the_current_mode() {
+fn legacy_adoption_waits_for_the_launch_to_settle() {
     let f = Fixture::new();
     f.legacy_run("recent", r#"{"kind":"local_job","jobId":"job"}"#);
     let mut run = f.store().get_run("recent").unwrap().unwrap();
     run.updated_at = f.clock.wall_ms();
     f.store().upsert_run(&run).unwrap();
-    for enabled in [false, true] {
-        assert_eq!(
-            f.engine.scan_legacy(enabled).unwrap(),
-            [("recent".into(), Adoption::Watch)]
-        );
-        assert!(!f.engine.holds("recent"));
-    }
+    assert_eq!(
+        f.engine.scan_legacy().unwrap(),
+        [("recent".into(), Adoption::Watch)]
+    );
+    assert!(!f.engine.holds("recent"));
     f.clock.advance(Duration::from_millis(
         u64::try_from(ORPHANED_RUN_SETTLE_MS).unwrap() - 1,
     ));
     assert_eq!(
-        f.engine.scan_legacy(true).unwrap(),
-        [("recent".into(), Adoption::Watch)]
-    );
-    f.clock.advance(Duration::from_millis(1));
-    assert_eq!(
-        f.engine.scan_legacy(false).unwrap(),
+        f.engine.scan_legacy().unwrap(),
         [("recent".into(), Adoption::Watch)]
     );
     assert!(!f.engine.holds("recent"));
+    f.clock.advance(Duration::from_millis(1));
     assert_eq!(
-        f.engine.scan_legacy(true).unwrap(),
+        f.engine.scan_legacy().unwrap(),
         [(
             "recent".into(),
             Adoption::Native {
@@ -1503,8 +1496,55 @@ fn legacy_adoption_waits_for_the_launch_to_settle_and_respects_the_current_mode(
         )]
     );
     assert!(f.engine.holds("recent"));
-    assert!(f.engine.scan_legacy(false).unwrap().is_empty());
+    assert!(f.engine.scan_legacy().unwrap().is_empty());
     assert!(f.engine.holds("recent"));
+}
+
+#[test]
+fn a_legacy_launch_without_a_handle_takes_its_recovery_file_or_fails_once_settled() {
+    let f = Fixture::new();
+    f.legacy_run("lost", r#"{"kind":"modal_job"}"#);
+    f.legacy_run("kept", r#"{"kind":"local_job"}"#);
+    f.legacy_run("recent", r#"{"kind":"hf_job"}"#);
+    let handles = f.dir.join("submission-handles");
+    std::fs::create_dir_all(&handles).unwrap();
+    std::fs::write(
+        handles.join("kept.json"),
+        r#"{"kind":"local_job","jobId":"/runs/kept"}"#,
+    )
+    .unwrap();
+    let mut recent = f.store().get_run("recent").unwrap().unwrap();
+    recent.updated_at = f.clock.wall_ms();
+    f.store().upsert_run(&recent).unwrap();
+
+    f.engine.scan_legacy().unwrap();
+    let lost = f.store().get_run("lost").unwrap().unwrap();
+    assert_eq!(lost.status, "failed");
+    assert!(lost
+        .result_markdown
+        .unwrap()
+        .contains("Inspect the provider for resources labelled or_run=lost"));
+    let kept = f.store().get_run("kept").unwrap().unwrap();
+    assert_eq!(kept.status, "running");
+    assert_eq!(
+        BackendDescriptor::parse(&kept.backend_json)
+            .unwrap()
+            .job_id
+            .as_deref(),
+        Some("/runs/kept")
+    );
+    assert_eq!(f.status("recent"), "running");
+    assert!(!f.engine.holds("lost") && !f.engine.holds("kept"));
+    let notices = f.deliver();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        (notices[0].run_id.as_str(), notices[0].kind.as_str()),
+        ("lost", TERMINAL)
+    );
+
+    f.engine.scan_legacy().unwrap();
+    assert!(f.deliver().is_empty());
+    assert_eq!(f.status("recent"), "running");
 }
 
 #[tokio::test]
@@ -1521,7 +1561,7 @@ async fn an_old_supervisor_finishing_while_the_engine_is_down_still_reaches_the_
             file
         });
     assert_eq!(
-        f.engine.scan_legacy(true).unwrap(),
+        f.engine.scan_legacy().unwrap(),
         [("held".to_string(), Adoption::Watch)]
     );
 
@@ -1531,12 +1571,12 @@ async fn an_old_supervisor_finishing_while_the_engine_is_down_still_reaches_the_
         .unwrap();
     drop(old_supervisor);
     f.released("held");
-    assert!(f.engine.scan_legacy(true).unwrap().is_empty());
+    assert!(f.engine.scan_legacy().unwrap().is_empty());
     let notices = f.deliver();
     assert_eq!(notices.len(), 1);
     assert!(notices[0].body.contains("**failed**"));
     f.restart();
-    f.engine.scan_legacy(true).unwrap();
+    f.engine.scan_legacy().unwrap();
     assert!(f.deliver().is_empty());
 }
 
@@ -1554,7 +1594,7 @@ async fn a_supervisor_finishing_between_snapshot_and_adoption_still_reaches_the_
             file
         });
     assert_eq!(
-        f.engine.scan_legacy(true).unwrap(),
+        f.engine.scan_legacy().unwrap(),
         [("held".to_string(), Adoption::Watch)]
     );
 
@@ -1568,13 +1608,13 @@ async fn a_supervisor_finishing_between_snapshot_and_adoption_still_reaches_the_
         drop(old_supervisor);
         released(&paths);
     }));
-    assert!(f.engine.scan_legacy(true).unwrap().is_empty());
+    assert!(f.engine.scan_legacy().unwrap().is_empty());
     let notices = f.deliver();
     assert_eq!(notices.len(), 1);
     assert!(notices[0].body.contains("**done**"));
     assert!(f.store().legacy_watches().unwrap().is_empty());
     f.released("held");
-    f.engine.scan_legacy(true).unwrap();
+    f.engine.scan_legacy().unwrap();
     assert!(f.deliver().is_empty());
 }
 
@@ -2174,7 +2214,12 @@ async fn emptied_survivors_without_proof_do_not_claim_a_verified_stop_in_the_fol
 async fn supervised_monitoring_outages_and_recoveries_are_delivered_once() {
     let mut f = Fixture::new();
     f.legacy_run("run", r#"{"kind":"ssh_job","jobId":"/orx/run"}"#);
-    f.engine.scan_legacy(false).unwrap();
+    let _old_supervisor = f.store().supervisor_lock_paths("run").unwrap().map(|path| {
+        let file = lock_file(&path);
+        file.try_lock().unwrap();
+        file
+    });
+    f.engine.scan_legacy().unwrap();
     assert!(f.deliver().is_empty());
     for _ in 0..2 {
         let mut run = f.store().get_run("run").unwrap().unwrap();
@@ -2182,23 +2227,23 @@ async fn supervised_monitoring_outages_and_recoveries_are_delivered_once() {
         descriptor.monitoring_error = Some("Host unreachable".into());
         run.backend_json = descriptor.to_json();
         f.store().upsert_run(&run).unwrap();
-        f.engine.scan_legacy(false).unwrap();
-        f.engine.scan_legacy(false).unwrap();
+        f.engine.scan_legacy().unwrap();
+        f.engine.scan_legacy().unwrap();
         let notices = f.deliver();
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].kind, ATTENTION);
         assert!(notices[0].body.contains("orx can no longer monitor"));
         f.restart();
-        f.engine.scan_legacy(false).unwrap();
+        f.engine.scan_legacy().unwrap();
         assert!(f.deliver().is_empty());
         descriptor.monitoring_error = None;
         run.backend_json = descriptor.to_json();
         f.store().upsert_run(&run).unwrap();
-        f.engine.scan_legacy(false).unwrap();
-        f.engine.scan_legacy(false).unwrap();
+        f.engine.scan_legacy().unwrap();
+        f.engine.scan_legacy().unwrap();
         assert_eq!(f.kinds(), [RECOVERED]);
         f.restart();
-        f.engine.scan_legacy(false).unwrap();
+        f.engine.scan_legacy().unwrap();
         assert!(f.deliver().is_empty());
     }
 }

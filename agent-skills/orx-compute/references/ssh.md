@@ -4,14 +4,15 @@ Use this backend when the user asks to run on their own server, or when SSH is
 the configured compute default. Authentication uses SSH config, keys and the
 agent; `orx` never reads private keys.
 
-With the new experiment engine enabled, the OpenResearch server keeps one SSH
+The OpenResearch server keeps one SSH
 connection per host for all of its runs, logs, and checks. Its first contact with a host is a single key-only attempt: a
 host that accepts your keys or agent never needs Connect. If that attempt needs
 a password, passphrase, or MFA, nothing retries until you run
 `orx compute connect ssh --host lab` (or press Connect), which asks the questions
 and keeps an orx-owned connection. On Unix, its shared master survives
-OpenResearch restarts; on Windows, engine and supervised runs need separate
-connections, so Connect may ask for MFA twice. A changed host route also waits
+OpenResearch restarts; on Windows, a run from orx 0.2 still
+watched by its own supervisor needs a separate connection, so Connect may ask
+for MFA twice. A changed host route also waits
 for Connect. Network failures back off from 5 seconds up to 15 minutes without
 declaring any run stopped; the chat hears once
 when a host has been unreachable for 10 minutes and again when it returns.
@@ -28,8 +29,8 @@ orx exp run <expId> --backend ssh --host lab --no-container
 Machine-local SSH settings can save a container name or ID for each host, and
 an absolute remote storage root (`--remote-root /data/alice/orx`). Runs and
 cached source archives live under `<root>/engine/` (`~/.orx/engine/` by
-default) with the new engine, or directly under `<root>` (`~/.orx`) with
-supervisors. Each run keeps the root it was launched with.
+default); runs from orx 0.2 live directly under `<root>`. Each run keeps the
+root it was launched with.
 A saved default SSH host lets launches omit `--host`.
 These defaults apply only to SSH experiments; dashboards, terminals and coding
 agents still connect directly to the host.
@@ -47,7 +48,7 @@ example, a committed `run.sh` can source Conda, activate the environment, and
 then run the experiment. Those paths must exist in the selected execution
 environment (host or container). There is no separate SSH setup command.
 
-With the new engine, the SSH host needs Linux (x86_64 or aarch64, kernel 3.2
+The SSH host needs Linux (x86_64 or aarch64, kernel 3.2
 or newer) or macOS,
 with Bash and tar. OpenResearch installs its small `orx-host` helper under the
 storage root on first use. Container execution also requires host Docker
@@ -58,8 +59,8 @@ creation or lifecycle management. `--image` and `--flavor` are unsupported.
 
 The committed source archive is cached on the host, then streamed into the
 container's `$HOME/.orx/runs/<runId>/repo`. Host logs and exit status stay in the
-host's run directory (`<root>/engine/runs/<runId>/` with the new engine,
-`<root>/runs/<runId>/` with supervisors), so container removal does not erase them.
+host's run directory (`<root>/engine/runs/<runId>/`; `<root>/runs/<runId>/` for runs from orx 0.2),
+so container removal does not erase them.
 A run is bound to the container ID and start time it launched with; later
 settings changes cannot redirect it.
 
@@ -75,10 +76,3 @@ containment the host could not inspect.
 Host authentication and container readiness are separate checks. Preflight must
 check the explicitly selected container; host readiness does not imply container
 readiness.
-
-With the engine setting off, a detached `orx supervise` watches each run through
-the shared SSH service. Background monitoring reuses an authenticated connection
-and never starts a fresh login. The host also needs Python 3.6 or newer.
-Monitoring outages appear in run status after 60 seconds; reconnect to resume
-monitoring.
-The new engine’s surviving-process and contact states above do not apply.

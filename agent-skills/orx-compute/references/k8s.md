@@ -50,4 +50,4 @@ The submit-time contract is:
   They must reference the `orx-env` Secret themselves when needed.
 - The run log follows the primary Job's sole pod.
 
-See [run monitoring](../SKILL.md#run-engine-setting).
+See [run monitoring](../SKILL.md#who-watches-a-run).
