@@ -90,7 +90,7 @@ export async function renderChat(path, { sessions = [session("s")], transcripts 
   const view = await renderApp(path);
   const reconnect = async () => {
     remoteSession = "two";
-    await act(async () => { for (const client of clients) void client.invalidateQueries({ queryKey: ["gateway", "runtime"] }); });
+    await act(async () => { for (const client of clients) void client.invalidateQueries({ predicate: (query) => query.queryKey[2] === "getRuntime" }); });
     await settle();
   };
   return { ...view, navigate, reconnect, requests, sent: () => requests.filter(({ request }) => /^POST \/api\/chat\/sessions\/[^/]+\/message$/.test(request)).map(({ body }) => body) };

@@ -132,8 +132,7 @@ export function createInvalidation(client: WorkspaceClient) {
     if (path === "/api/overleaf/token") { invalidate(["getOverleafSettings", "getOverleafState", "getOverleafStatus"], scope); return; }
     if (path.startsWith("/api/update/")) { invalidate(["getUpdateStatus", "getLocalMachine"], scope); return; }
     if (path.startsWith("/api/remote/") || path.startsWith("/_orx/")) {
-      invalidate(["listRemoteSessions"], scope);
-      void queryClient.invalidateQueries({ queryKey: ["gateway", "runtime"] });
+      invalidate(["listRemoteSessions", "getRuntime"], scope);
       return;
     }
     if (path.startsWith("/api/chat/")) {

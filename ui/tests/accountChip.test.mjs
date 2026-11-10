@@ -42,7 +42,7 @@ async function chip(account, { alphaxiv = true, runtime = { kind: "local", versi
   const requests = [];
   serve((path, init) => {
     requests.push(`${init.method ?? "GET"} ${path}`);
-    if (path === "/api/account/openresearch") return typeof account === "function" ? account() : account;
+    if (path === "/api/account/openresearch") return requests.includes("POST /api/settings/openresearch/logout") ? signedOut : typeof account === "function" ? account() : account;
     if (path === "/api/alphaxiv/folders") return alphaxiv ? [] : new Response("", { status: 401 });
     if (path === "/api/settings/openresearch/logout") return { ok: true };
     if (path === "/_orx/runtime") return runtime;

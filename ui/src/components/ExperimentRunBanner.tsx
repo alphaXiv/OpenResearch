@@ -1,4 +1,6 @@
+import { useMutate } from "@clo/react-mutation";
 import { useWorkspace } from "../workspace";
+import { mutCancelRun } from "../queries/projects";
 import { ChevronRight, CircleStop, FlaskConical, Plug, ScrollText } from "lucide-react";
 import { useEffect, useState } from "react";
 import { fmtDuration, type ChatActiveRun } from "../api";
@@ -12,15 +14,15 @@ type OpenTarget = (id: string, intent: TabOpenIntent) => void;
 const BANNER_CLASS = "mb-2.5 rounded-lg border border-border bg-accent-green-subtle px-3 py-2 text-sm text-text";
 
 function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; onOpenRun?: OpenTarget; onOpenExperiment?: OpenTarget }) {
-  const { cancelRun } = useWorkspace().api;
-  const { requestHostConnect } = useWorkspace().events;
+  const workspace = useWorkspace();
+  const { requestHostConnect } = workspace.events;
+  const cancel = useMutate(mutCancelRun);
 
   const { run, experimentName } = item;
   const [now, setNow] = useState(Date.now);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const display = runDisplay(pending ? { ...run, cancelling: true } : run);
-  const cancelling = pending || run.cancelling;
+  const display = runDisplay(run);
+  const cancelling = run.cancelling;
+  const error = cancel.error === undefined ? null : cancel.error instanceof Error ? cancel.error.message : String(cancel.error);
   const label = display.stale || cancelling
     ? statusLabel(display.status, display.stopping)
     : run.status === "running" ? m.chat_experiment_running() : m.chat_experiment_starting();
@@ -30,17 +32,6 @@ function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; on
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-
-  async function stop() {
-    setPending(true);
-    setError(null);
-    try {
-      await cancelRun(run.id);
-    } catch (err) {
-      setPending(false);
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -58,7 +49,7 @@ function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; on
         {connectHost ? (
           <Button size="small" variant="ghost" onClick={() => requestHostConnect(connectHost)}><Plug size={14} />{m.settings_connect()}</Button>
         ) : (
-          <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
+          <Button size="small" variant="ghost" disabled={cancelling} onClick={() => cancel.run(workspace, run)}>
             <CircleStop size={14} />{!cancelling ? m.common_stop() : statusLabel(display.status, display.stopping)}
           </Button>
         )}

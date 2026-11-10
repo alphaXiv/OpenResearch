@@ -1,4 +1,5 @@
 import { useContext, useRef, useState } from "react";
+import { useMutate } from "@clo/react-mutation";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 import { useMachines } from "../machineSelection";
@@ -10,6 +11,7 @@ import { Check, Info } from "lucide-react";
 import { type RuntimeInfo } from "../api";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
+import { mutDisconnectRemote, mutStopRemoteHost } from "../queries/settings";
 import { Menu } from "@base-ui/react/menu";
 import { RemoteIcon } from "./RemoteIcon";
 
@@ -41,13 +43,9 @@ export function WorkspaceConnection({
   const label =
     runtime.kind === "local" ? m.projects_local() : runtime.session.host;
 
-  const {
-    disconnectCurrentRemote,
-    getRemoteStopPreview,
-    stopCurrentRemoteHost,
-  } = useWorkspace().api;
+  const { getRemoteStopPreview } = workspace.api;
 
-  const [disconnecting, setDisconnecting] = useState(false);
+  const disconnect = useMutate(mutDisconnectRemote);
   const [loadingStopPreview, setLoadingStopPreview] = useState(false);
   const [open, setOpen] = useState(false);
   const switching = useRef(false);
@@ -178,26 +176,15 @@ export function WorkspaceConnection({
                             <MenuItem className="hover:bg-transparent data-highlighted:bg-surface data-disabled:opacity-45 data-disabled:cursor-default" />
                           }
                           closeOnClick={false}
-                          disabled={disconnecting}
-                          onClick={async () => {
-                            setDisconnecting(true);
-                            try {
-                              await disconnectCurrentRemote();
+                          disabled={disconnect.isMutating}
+                          onClick={() => disconnect.runWithOptions(workspace, {
+                            onSuccessUi: () => {
                               setOpen(false);
                               if (machines.canSwitch) machines.selectLocal();
-                            } catch (error) {
-                              showAlert(
-                                error instanceof Error
-                                  ? error.message
-                                  : String(error),
-                                "error",
-                              );
-                            } finally {
-                              setDisconnecting(false);
-                            }
-                          }}
+                            },
+                          })}
                         >
-                          {disconnecting
+                          {disconnect.isMutating
                             ? m.remote_closing()
                             : m.remote_disconnect()}
                         </Menu.Item>
@@ -230,9 +217,7 @@ export function WorkspaceConnection({
                                 currentClientAttached:
                                   runtime.session.status === "connected",
                               },
-                              onConfirm: async () => {
-                                await stopCurrentRemoteHost(preview);
-                              },
+                              onConfirm: () => mutStopRemoteHost.runAsHeadlessPromise(workspace, preview, {}),
                               onCancel: "close",
                             });
                             setOpen(false);

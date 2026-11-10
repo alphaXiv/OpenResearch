@@ -1,13 +1,14 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { type Workspace, useWorkspace } from "../workspace";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import { X } from "lucide-react";
 
 import { type createDialogs, type DialogContentProps } from "../dialog";
 import { type SshConfigFile } from "../api";
 import { m } from "../paraglide/messages.js";
+import { mutSaveSshConfig } from "../queries/settings";
 import { CodeEditor } from "./CodeEditor";
 import { Button, DialogContent, DialogTitle, IconButton, showAlert, Spinner } from "./ui";
 
@@ -42,16 +43,10 @@ export function SshConfigDialog({
   const workspace = dataWorkspace ?? currentWorkspace;
   const { showConfirmDialog } = currentWorkspace.dialogs;
 
-  const { getSshConfigQuery } = workspace.queries;
-  const { saveSshConfig } = workspace.api;
-  const { isCurrentScope, setScopedQueryData } = workspace;
-
-  const options = getSshConfigQuery();
-  const fileQuery = useQuery(options, workspace.queryClient);
+  const fileQuery = useQuery(workspace.queries.getSshConfigQuery(), workspace.queryClient);
   const [file, setFile] = useState<SshConfigFile | null>(() => fileQuery.data ?? null);
   const [draft, setDraft] = useState(() => fileQuery.data?.content ?? "");
   const loadError = !file && fileQuery.error ? fileQuery.error.message : null;
-  const saveMutation = useMutation({ mutationFn: ({ content, previous }: { content: string; previous: string }) => saveSshConfig(content, previous) }, workspace.queryClient);
   const [saving, setSaving] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const dirty = file !== null && draft !== file.content;
@@ -85,9 +80,7 @@ export function SshConfigDialog({
     if (!file || !dirty || saving || isDisabled) return;
     setSaving(true);
     try {
-      await saveMutation.mutateAsync({ content: draft, previous: file.content });
-      if (!isCurrentScope(options.queryKey)) return;
-      setScopedQueryData(options.queryKey, { ...file, content: draft });
+      await mutSaveSshConfig.runAsHeadlessPromise(workspace, draft, file.content, {});
       setFile({ ...file, content: draft });
       onSaved?.();
       showAlert(m.ssh_config_saved(), "success");

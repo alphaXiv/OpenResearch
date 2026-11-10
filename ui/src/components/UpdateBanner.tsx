@@ -7,6 +7,7 @@ import { RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { type Changes, type UpdateStatus } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
+import { mutRestartApp } from "../queries/settings";
 
 import { Button, IconButton, Spinner } from "./ui";
 
@@ -14,23 +15,17 @@ export interface UpdateState {
   status: UpdateStatus | null;
   /** The initial fetch failed — distinct from "still loading". */
   error: string | null;
-  /** Adopt a status returned by a mutating call, so the card reflects the write
-   *  immediately instead of waiting for the next SSE sample. */
-  apply: (status: UpdateStatus) => void;
 }
 
 /** Live update status: the initial fetch plus every `update.status` SSE frame.
  *  Exported because the Updates settings card renders the same state. */
 export function useUpdateStatus(enabled = true): UpdateState {
   const { getUpdateStatusQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
 
-  const options = getUpdateStatusQuery();
-  const query = useQuery({ ...options, enabled });
+  const query = useQuery({ ...getUpdateStatusQuery(), enabled });
   return {
     status: query.data ?? null,
     error: query.error?.message ?? null,
-    apply: (status) => setScopedQueryData(options.queryKey, status),
   };
 }
 
@@ -66,9 +61,9 @@ export const releaseNotesUrl = (tag: string) =>
  *  answers — the page itself is the old build until it reloads. The old server answers the POST and then drops every connection,
  *  so the polling errors in between are expected and swallowed. */
 export function useRestartApp(status: UpdateStatus | null): RestartState {
-  const { getUpdateStatusQuery } = useWorkspace().queries;
-  const { isCurrentScope, queryClient } = useWorkspace();
-  const { restartApp } = useWorkspace().api;
+  const workspace = useWorkspace();
+  const { getUpdateStatusQuery } = workspace.queries;
+  const { isCurrentScope, queryClient } = workspace;
 
   const [restarting, setRestarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -89,7 +84,7 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
     setError(null);
     void (async () => {
       try {
-        await restartApp();
+        await mutRestartApp.runAsHeadlessPromise(workspace, {});
         if (retired()) return;
         const deadline = Date.now() + RESTART_TIMEOUT_MS;
         while (Date.now() < deadline) {

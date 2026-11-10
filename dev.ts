@@ -804,7 +804,7 @@ async function serve(seed: Seed | null) {
 
   // A server killed outright leaves its window running; the ports below reclaim everything else.
   if (!WINDOWS) {
-    for (const line of execFileSync('ps', ['-Ao', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n')) {
+    for (const line of execFileSync('ps', ['-Ao', 'pid=,ppid=,command='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\n')) {
       const [pid, ppid, ...command] = line.trim().split(/\s+/)
       if (ppid === '1' && command.join(' ').startsWith(path.join(APP, 'MacOS') + path.sep)) process.kill(Number(pid), 'SIGTERM')
     }
