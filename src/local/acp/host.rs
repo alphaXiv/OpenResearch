@@ -63,7 +63,7 @@ pub struct Client {
     pub connection: ConnectionTo<Agent>,
     pub initialized: Value,
     io: Arc<SessionIo>,
-    stop: Mutex<Option<oneshot::Sender<()>>>,
+    stop: Mutex<Option<oneshot::Sender<bool>>>,
     closed: tokio::sync::watch::Receiver<bool>,
     idle_since: Mutex<Option<Instant>>,
 }
@@ -366,6 +366,11 @@ impl Client {
     }
 
     pub async fn shutdown(&self) {
+        self.end(false).await;
+    }
+
+    /// Stops the agent; `spare_detached` leaves the commands it started in their own sessions running.
+    async fn end(&self, spare_detached: bool) {
         self.io.cancel_permissions();
         if let Some(native_id) = self.native_id() {
             if let Ok(notification) =
@@ -375,7 +380,7 @@ impl Client {
             }
         }
         if let Some(stop) = self.stop.lock().unwrap().take() {
-            let _ = stop.send(());
+            let _ = stop.send(spare_detached);
         }
         let mut closed = self.closed.clone();
         let _ = tokio::time::timeout(
@@ -563,7 +568,8 @@ impl Host {
                         });
                         if idle {
                             if let Some(client) = saved.take() {
-                                client.shutdown().await;
+                                // A dev server the agent started stays the user's.
+                                client.end(true).await;
                             }
                         }
                     }
@@ -773,21 +779,28 @@ pub(super) async fn spawn(
                 Ok(())
             });
         tokio::pin!(run);
-        tokio::select! {
-            _ = stop_receiver => {
+        let spare_detached = tokio::select! {
+            stopped = stop_receiver => {
                 let _ = tokio::time::timeout(std::time::Duration::from_millis(500), &mut run).await;
+                stopped.unwrap_or(false)
             }
             result = &mut run => {
                 if let Some(sender) = ready_sender.lock().unwrap().take() {
                     let message = result.err().map(|error| error.to_string()).unwrap_or_else(|| "Agent exited before initialization".into());
                     let _ = sender.send(Err(message));
                 }
+                false
             }
-        }
+        };
         task_io.cancel_permissions();
         task_io.events.lock().unwrap().take();
         delegated.shutdown().await;
-        crate::local::chat::kill_agent_tree(process.id.take());
+        // Windows has no sessions to tell detached commands apart.
+        if spare_detached && cfg!(unix) {
+            crate::local::chat::kill_shell_group(process.id.take());
+        } else {
+            crate::local::chat::kill_agent_tree(process.id.take());
+        }
         let _ = process.child.kill().await;
         let _ = process.child.wait().await;
         let _ = closed_sender.send(true);
@@ -907,6 +920,66 @@ mod tests {
             Some(agent_client_protocol::ErrorCode::InternalError)
         );
         host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_idle_stop_spares_only_commands_in_their_own_sessions() {
+        // A killed command can linger as a zombie until init reaps it.
+        async fn exits(pid: libc::pid_t) -> bool {
+            for _ in 0..200 {
+                if unsafe { libc::kill(pid, 0) } != 0 {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            false
+        }
+        for idle in [true, false] {
+            let pids = std::env::temp_dir().join(format!("orx-acp-pids-{}", uuid::Uuid::new_v4()));
+            let peer = definition("normal");
+            let mut launch = peer.clone();
+            launch.executable = "sh".into();
+            launch.arguments = [
+                "-c".into(),
+                r#"python3 -c 'import os, time; os.setsid(); time.sleep(60)' & echo $! > "$0"
+sleep 60 & echo $! >> "$0"
+exec "$@""#
+                    .into(),
+                pids.to_string_lossy().into_owned(),
+                peer.executable,
+            ]
+            .into_iter()
+            .chain(peer.arguments)
+            .collect();
+            let host = Arc::new(Host::default());
+            let client = host
+                .get("detached", &launch, &std::env::temp_dir())
+                .await
+                .unwrap();
+            let started = std::fs::read_to_string(&pids).unwrap();
+            std::fs::remove_file(&pids).unwrap();
+            let started: Vec<libc::pid_t> =
+                started.lines().map(|pid| pid.parse().unwrap()).collect();
+            let [detached, attached] = started[..] else {
+                panic!("expected two commands: {started:?}");
+            };
+            client.end(idle).await;
+            assert!(
+                exits(attached).await,
+                "a command in the agent's group outlived it"
+            );
+            if idle {
+                assert_eq!(
+                    unsafe { libc::kill(detached, 0) },
+                    0,
+                    "an idle stop killed a detached command"
+                );
+                unsafe { libc::kill(detached, libc::SIGKILL) };
+            } else {
+                assert!(exits(detached).await, "a detached command outlived a stop");
+            }
+        }
     }
 
     #[tokio::test]
