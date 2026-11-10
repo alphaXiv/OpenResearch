@@ -266,6 +266,8 @@ pub async fn run_antigravity() -> Result<()> {
         json!({})
     } else if payload.get("terminationReason").is_some() {
         background_stop(&payload).await
+    } else if payload.pointer("/toolCall/name") == Some(&json!("invoke_subagent")) {
+        json!({"decision": "deny", "reason": "[orx] This chat asks before running tools, and your subagents cannot ask. Use orx's `delegate` tool to hand the task to another chat, or do it yourself."})
     } else {
         let mut decision = json!({"decision": "allow"});
         if let Some(overwrite) = invocation_overwrite(&input) {

@@ -377,6 +377,7 @@ fn launch(bin: &Path, session_id: &str, skip_permissions: bool) -> Definition {
 async fn prepare_worktree(
     project: &crate::local::model::LocalProject,
     session_id: &str,
+    skip_permissions: bool,
 ) -> Result<PathBuf> {
     let project = project.clone();
     let session_id = session_id.to_owned();
@@ -385,7 +386,7 @@ async fn prepare_worktree(
     })
     .await
     .map_err(|e| anyhow!("playbook task failed: {e}"))??;
-    write_hooks(&repo)?;
+    write_hooks(&repo, skip_permissions)?;
     Ok(repo)
 }
 
@@ -412,9 +413,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 
 async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
     let bin = find_agy_or_error()?;
-    let repo = prepare_worktree(&ctx.project, &ctx.session_id).await?;
     let bypass = ctx.permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass;
-    let definition = launch(&bin, &ctx.session_id, bypass && !ctx.plan_mode);
+    let skip_permissions = bypass && !ctx.plan_mode;
+    let repo = prepare_worktree(&ctx.project, &ctx.session_id, skip_permissions).await?;
+    let definition = launch(&bin, &ctx.session_id, skip_permissions);
     let session = super::acp::open_session(ctx, &definition, &repo, false).await?;
     let native_id = session.native_id.clone();
     if let Some(model) = ctx
@@ -595,8 +597,8 @@ fn turn_usage(result: &Value) -> Option<crate::store::TokenUsage> {
 /// conversation.
 async fn compact(ctx: &CompactCtx, native_id: &str) -> Result<()> {
     let bin = find_agy_or_error()?;
-    let repo = prepare_worktree(&ctx.project, &ctx.session_id).await?;
     let bypass = ctx.permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass;
+    let repo = prepare_worktree(&ctx.project, &ctx.session_id, bypass).await?;
     let definition = launch(&bin, &ctx.session_id, bypass);
     let host = ctx.host.acp.clone();
     let mut client = host.get(&ctx.session_id, &definition, &repo).await?;
@@ -672,7 +674,7 @@ fn compaction_outcome(result: &Value, answer: &str, cause: impl FnOnce() -> Stri
 
 /// agy's workspace hooks for this chat, merged into the worktree's untracked
 /// `.agents/hooks.json` (a tracked one is the project's and stays untouched).
-fn write_hooks(repo: &Path) -> Result<()> {
+fn write_hooks(repo: &Path, skip_permissions: bool) -> Result<()> {
     std::fs::create_dir_all(repo)?;
     let tracked = crate::local::git::git_command()
         .args(["ls-files", "--error-unmatch", ".agents/hooks.json"])
@@ -720,6 +722,14 @@ fn write_hooks(repo: &Path) -> Result<()> {
             "PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": command, "timeout": 60}]}]
         }),
     );
+    // agy asks about a subagent's tools only in its own terminal, never over ACP.
+    object.insert(
+        "openresearch-subagents".into(),
+        json!({
+            "enabled": !skip_permissions,
+            "PreToolUse": [{"matcher": "invoke_subagent", "hooks": [{"type": "command", "command": command, "timeout": 60}]}]
+        }),
+    );
     object.insert(
         "openresearch-accounting".into(),
         json!({"enabled": true, "PostInvocation": [{"type": "command", "command": command}]}),
@@ -744,6 +754,16 @@ pub(crate) fn normalize_tool<'a>(
         "invoke_subagent" => ("task", &[("Role", "description")]),
         "run_command" => ("Bash", &[("CommandLine", "command"), ("Cwd", "cwd")]),
         "view_file" => ("Read", &[("AbsolutePath", "file_path")]),
+        "read_file" => ("Read", &[("Path", "file_path")]),
+        "write_file" => ("Write", &[("Path", "file_path"), ("Content", "content")]),
+        "edit_file" => (
+            "Edit",
+            &[
+                ("Path", "file_path"),
+                ("Target", "old_string"),
+                ("Replacement", "new_string"),
+            ],
+        ),
         "write_to_file" => (
             "Write",
             &[("TargetFile", "file_path"), ("CodeContent", "content")],
@@ -830,7 +850,7 @@ mod tests {
                 .unwrap()
                 .success());
         }
-        assert!(write_hooks(&repo)
+        assert!(write_hooks(&repo, true)
             .unwrap_err()
             .to_string()
             .contains("tracks .agents/hooks.json"));
@@ -849,8 +869,16 @@ mod tests {
             r#"{"openresearch-approval":{"enabled":true},"mine":{"enabled":true}}"#,
         )
         .unwrap();
-        write_hooks(&repo).unwrap();
+        write_hooks(&repo, true).unwrap();
         let hooks: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(hooks["openresearch-subagents"]["enabled"], false);
+        write_hooks(&repo, false).unwrap();
+        let hooks: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(hooks["openresearch-subagents"]["enabled"], true);
+        assert_eq!(
+            hooks["openresearch-subagents"]["PreToolUse"][0]["matcher"],
+            "invoke_subagent"
+        );
         assert!(hooks.get("openresearch-approval").is_none());
         assert_eq!(hooks["mine"]["enabled"], true);
         assert_eq!(hooks["openresearch-invocation"]["enabled"], !cfg!(windows));
