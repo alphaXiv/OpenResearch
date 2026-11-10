@@ -142,8 +142,78 @@ impl Api {
         Ok(value)
     }
 
+    /// Asks each run that needs the app open to stop, including runs launched meanwhile, for at most `wait`.
+    #[cfg_attr(not(desktop_app), allow(dead_code))]
+    pub(crate) async fn force_stop_runs(&self, wait: Duration) {
+        use futures::StreamExt;
+
+        let mut asked = std::collections::HashSet::new();
+        let mut stops = futures::stream::FuturesUnordered::new();
+        let stopping = async {
+            loop {
+                let runs = match self.store().pending_work() {
+                    Ok(work) => work.runs,
+                    Err(error) => {
+                        eprintln!(
+                            "openresearch app: could not check which runs to stop: {error:#}"
+                        );
+                        return;
+                    }
+                };
+                let mut unsettled = false;
+                for run in runs {
+                    if run.after_quit != crate::store::AfterQuit::NeedsApp {
+                        continue;
+                    }
+                    let stored = match self.run(&run.run_id) {
+                        Ok(stored) => stored,
+                        Err(error) => {
+                            eprintln!(
+                                "openresearch app: could not stop run {}: {error:#}",
+                                run.run_id
+                            );
+                            continue;
+                        }
+                    };
+                    // A run still launching takes its stop only once it has a handle, so it is asked again then;
+                    // the stop its launch delivers, or one already on its way, is waited for here.
+                    let launched = crate::engine::handle_of(&stored).is_some();
+                    unsettled |= !launched || self.engine.delivering_cancel(&stored.id);
+                    if !asked.insert((run.run_id, launched)) {
+                        continue;
+                    }
+                    stops.push(async move {
+                        if let Err(error) = self
+                            .commands
+                            .cancel(&stored, "Stopped when OpenResearch was force quit.")
+                            .await
+                        {
+                            eprintln!(
+                                "openresearch app: could not stop run {}: {error:#}",
+                                stored.id
+                            );
+                        }
+                    });
+                }
+                if stops.is_empty() && !unsettled {
+                    return;
+                }
+
+                // Agents keep working until the quit, so a run can start while others stop.
+                let poll = tokio::time::sleep(crate::config::paced(Duration::from_millis(250)));
+                tokio::select! {
+                    Some(()) = stops.next() => {}
+                    () = poll => {}
+                }
+            }
+        };
+        if tokio::time::timeout(wait, stopping).await.is_err() {
+            eprintln!("openresearch app: quitting before every run answered its stop");
+        }
+    }
+
     pub(super) fn busy(&self) -> Result<bool> {
-        Ok(self.store().engine_idle_blocked()? || self.sse_clients() != 0)
+        Ok(!self.store().pending_work()?.is_empty() || self.sse_clients() != 0)
     }
 
     pub fn sse_clients(&self) -> usize {
@@ -203,8 +273,17 @@ pub(crate) fn busy() -> Result<bool> {
 }
 
 #[cfg(desktop_app)]
-pub(crate) fn runs_busy() -> Result<bool> {
-    installed()?.store().engine_runs_block_idle()
+pub(crate) fn pending_work() -> Result<crate::store::PendingWork> {
+    installed()?.store().pending_work()
+}
+
+/// A force quit's stops; the quit goes ahead once all have answered or ten seconds have passed.
+#[cfg(desktop_app)]
+pub(crate) async fn force_stop_runs() {
+    match installed() {
+        Ok(api) => api.force_stop_runs(Duration::from_secs(10)).await,
+        Err(error) => eprintln!("openresearch app: could not stop runs before quitting: {error:#}"),
+    }
 }
 
 /// For the dashboard's `/api/runs`: the same launch as `POST /api/v2/runs`.

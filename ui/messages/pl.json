@@ -1762,5 +1762,22 @@
   "share_post_x": "Opublikuj na X",
   "share_post_text": "{name}: otwórz cały projekt badawczy w OpenResearch",
   "open_shared_link_body": "Otwórz „{name}”, opublikowany na openresearch.sh, jako nowy projekt.",
-  "open_shared_link_publisher": "Udostępnia: {name}"
+  "open_shared_link_publisher": "Udostępnia: {name}",
+  "close_pending_title": "Praca nadal trwa",
+  "close_pending_background": "Uruchom w tle",
+  "close_pending_minimize": "Zminimalizuj zamiast tego",
+  "close_pending_quit": "Zakończ",
+  "close_pending_force_quit": "Wymuś zakończenie",
+  "close_pending_blocked": "Wymuszenie zakończenia zatrzymuje eksperymenty, które wymagają otwartego OpenResearch.",
+  "close_pending_uncounted": "OpenResearch nie mógł sprawdzić, czy działają agenci lub eksperymenty. Zakończenie zatrzyma każdego pracującego agenta.",
+  "close_pending_agents": "Agenci zatrzymają się po zakończeniu",
+  "close_pending_needs_open": "Eksperymenty, które wymagają otwartego OpenResearch do końca",
+  "close_pending_continues": "Eksperymenty, które działają dalej i zgłoszą się przy następnym otwarciu OpenResearch",
+  "close_pending_unsent": "Zakończone eksperymenty, których wyniki nie trafiły jeszcze do ich czatu",
+  "close_pending_reason_local": "Działa na tym komputerze",
+  "close_pending_reason_tinker": "Działa na tym komputerze i trenuje na Tinker",
+  "close_pending_reason_vercel": "Bez OpenResearch sandbox jest rozliczany do końca limitu czasu, a log przepada",
+  "close_pending_reason_box": "Bez OpenResearch wynik przepada, gdy maszyna się wyłączy",
+  "restart_pending_title": "Agenci nadal pracują",
+  "restart_pending_description": "Ponowne uruchomienie ich zatrzyma. Po ponownym uruchomieniu możesz kontynuować każdy czat."
 }
