@@ -609,6 +609,20 @@ latest AS (
 
 pub(crate) const CHAT_TURN_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Delete turn leases not renewed within the TTL, except `held`, the claim tokens of this
+/// process's running turns: a stall or sleep leaves them stale but their turns alive.
+fn expire_turn_leases(conn: &Connection, held: &[String]) -> Result<()> {
+    conn.execute(
+        "DELETE FROM chat_turn_leases
+         WHERE heartbeat_at < ?1 AND claim_token NOT IN (SELECT value FROM json_each(?2))",
+        params![
+            expired_before(CHAT_TURN_LEASE_TTL),
+            serde_json::to_string(held)?
+        ],
+    )?;
+    Ok(())
+}
+
 /// Heartbeats and claims older than this belong to an owner that is gone.
 fn expired_before(ttl: std::time::Duration) -> i64 {
     now_ms() - crate::config::paced(ttl).as_millis() as i64
@@ -2148,16 +2162,21 @@ impl Store {
         )?)
     }
 
-    pub fn claim_chat_turn(&self, chat_session_id: &str, token: &str) -> Result<bool> {
+    pub fn claim_chat_turn(
+        &self,
+        chat_session_id: &str,
+        token: &str,
+        held: &[String],
+    ) -> Result<bool> {
         self.clear_stale_data_dir_move_lease()?;
+        expire_turn_leases(&self.conn, held)?;
         self.conn.execute(
             "DELETE FROM chat_turn_leases
-             WHERE heartbeat_at < ?1
-                OR NOT EXISTS (
-                    SELECT 1 FROM chat_sessions
-                    WHERE chat_sessions.id = chat_turn_leases.chat_session_id
-                )",
-            params![expired_before(CHAT_TURN_LEASE_TTL)],
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM chat_sessions
+                 WHERE chat_sessions.id = chat_turn_leases.chat_session_id
+             )",
+            [],
         )?;
         let claimed = self.conn.execute(
             "INSERT OR IGNORE INTO chat_turn_leases
@@ -2187,11 +2206,8 @@ impl Store {
         Ok(())
     }
 
-    pub fn claim_data_dir_move(&self, token: &str) -> Result<bool> {
-        self.conn.execute(
-            "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![expired_before(CHAT_TURN_LEASE_TTL)],
-        )?;
+    pub fn claim_data_dir_move(&self, token: &str, held: &[String]) -> Result<bool> {
+        expire_turn_leases(&self.conn, held)?;
         self.clear_stale_data_dir_move_lease()?;
         let claimed = self.conn.execute(
             "INSERT OR IGNORE INTO data_dir_move_lease (id, claim_token, heartbeat_at)
@@ -4607,23 +4623,24 @@ impl Store {
     pub fn reconcile_unfinished_chat_turns(&self) -> Result<Vec<StoredChatTurn>> {
         // Sub-agent usage outliving its parent turn: its native connection died with the server.
         self.finalize_usage_turns("codex-late:", "cancelled")?;
-        self.reconcile_unfinished_chat_turns_inner(true)
+        self.reconcile_unfinished_chat_turns_inner(true, &[])
     }
 
-    pub fn reconcile_expired_unfinished_chat_turns(&self) -> Result<Vec<StoredChatTurn>> {
-        self.reconcile_unfinished_chat_turns_inner(false)
+    pub fn reconcile_expired_unfinished_chat_turns(
+        &self,
+        held: &[String],
+    ) -> Result<Vec<StoredChatTurn>> {
+        self.reconcile_unfinished_chat_turns_inner(false, held)
     }
 
     fn reconcile_unfinished_chat_turns_inner(
         &self,
         include_existing_failures: bool,
+        held: &[String],
     ) -> Result<Vec<StoredChatTurn>> {
         let now = now_ms();
         let transaction = self.conn.unchecked_transaction()?;
-        transaction.execute(
-            "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![expired_before(CHAT_TURN_LEASE_TTL)],
-        )?;
+        expire_turn_leases(&transaction, held)?;
         let newly_reconciled = {
             let mut statement = transaction.prepare(
                 "SELECT id FROM chat_turns
@@ -8550,7 +8567,7 @@ mod tests {
         drop(staging);
 
         let moving = store.acquire_data_dir_move_lock().unwrap();
-        assert!(store.claim_data_dir_move("move").unwrap());
+        assert!(store.claim_data_dir_move("move", &[]).unwrap());
         refuse("being moved");
         store.release_data_dir_move("move").unwrap();
         drop(moving);
@@ -8683,7 +8700,7 @@ mod tests {
         std::fs::write(attachments.join("att-3__unsent.png"), "bytes").unwrap();
 
         let moving = store.acquire_data_dir_move_lock().unwrap();
-        assert!(store.claim_data_dir_move("move").unwrap());
+        assert!(store.claim_data_dir_move("move", &[]).unwrap());
         store.cleanup_orphaned_chat_attachments().unwrap();
         assert!(attachments.join("att-2__orphan.png").exists());
         store.release_data_dir_move("move").unwrap();
@@ -9290,7 +9307,7 @@ mod tests {
         let mut turn = chat_turn_fixture("running", "client-running");
         turn.state = "running".into();
         store.admit_chat_turn(None, &turn).unwrap();
-        assert!(store.claim_chat_turn("chat_1", "owner").unwrap());
+        assert!(store.claim_chat_turn("chat_1", "owner", &[]).unwrap());
 
         assert!(store.reconcile_unfinished_chat_turns().unwrap().is_empty());
         assert_eq!(
@@ -9311,13 +9328,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .reconcile_expired_unfinished_chat_turns()
+                .reconcile_expired_unfinished_chat_turns(&[])
                 .unwrap()
                 .len(),
             1
         );
         assert!(store
-            .reconcile_expired_unfinished_chat_turns()
+            .reconcile_expired_unfinished_chat_turns(&[])
             .unwrap()
             .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -11112,23 +11129,23 @@ mod tests {
             .unwrap();
         let second = Store::open_at(dir.clone()).unwrap();
 
-        assert!(first.claim_chat_turn("chat_A", "token_A").unwrap());
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(first.claim_chat_turn("chat_A", "token_A", &[]).unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         assert!(!second.renew_chat_turn("chat_A", "token_B").unwrap());
-        assert!(!second.claim_data_dir_move("move_A").unwrap());
+        assert!(!second.claim_data_dir_move("move_A", &[]).unwrap());
         second.release_chat_turn("chat_A", "token_B").unwrap();
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         first.release_chat_turn("chat_A", "token_A").unwrap();
         let move_lock = first.acquire_data_dir_move_lock().unwrap();
-        assert!(first.claim_data_dir_move("move_A").unwrap());
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(first.claim_data_dir_move("move_A", &[]).unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         second.release_data_dir_move("move_B").unwrap();
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         drop(move_lock);
         let service_lock =
             acquire_data_dir_lock(first.data_dir_move_lock_path.clone(), false).unwrap();
         assert!(first.acquire_data_dir_move_lock().is_err());
-        assert!(second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
 
         drop(service_lock);
         drop(second);

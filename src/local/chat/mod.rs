@@ -4133,7 +4133,8 @@ impl ChatHost {
         let Ok(store) = Store::open() else {
             return false;
         };
-        if !matches!(store.claim_chat_turn(session_id, &token), Ok(true)) {
+        let held: Vec<String> = claims.values().cloned().collect();
+        if !matches!(store.claim_chat_turn(session_id, &token, &held), Ok(true)) {
             return false;
         }
         claims.insert(session_id.to_string(), token);
@@ -4316,9 +4317,20 @@ impl ChatHost {
         }
     }
 
+    /// Claim tokens of this process's running turns, whose leases its own expiry must spare.
+    pub(crate) fn held_turn_leases(&self) -> Vec<String> {
+        self.durable_turns
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
     pub fn reconcile_expired_turn_leases(self: &Arc<Self>) -> Result<()> {
         let store = Store::open()?;
-        for (session_id, message) in materialize_unfinished_turns(&store, false)? {
+        let turns = store.reconcile_expired_unfinished_chat_turns(&self.held_turn_leases())?;
+        for (session_id, message) in materialize_unfinished_turns(&store, turns)? {
             self.emit("chat.message", message_json(&message, &session_id));
         }
         self.resume_persisted_queues();
@@ -8972,19 +8984,14 @@ pub fn list_messages(session_id: &str) -> Result<Vec<WireMessage>> {
 /// Materialize restart recovery on the assistant message linked to every turn
 /// the store just converted from in-flight to failed. Nothing is replayed.
 pub fn reconcile_unfinished_turns(store: &Store) -> Result<()> {
-    materialize_unfinished_turns(store, true).map(|_| ())
+    materialize_unfinished_turns(store, store.reconcile_unfinished_chat_turns()?).map(|_| ())
 }
 
 fn materialize_unfinished_turns(
     store: &Store,
-    include_existing_failures: bool,
+    turns: Vec<StoredChatTurn>,
 ) -> Result<Vec<(String, WireMessage)>> {
     let mut messages = Vec::new();
-    let turns = if include_existing_failures {
-        store.reconcile_unfinished_chat_turns()?
-    } else {
-        store.reconcile_expired_unfinished_chat_turns()?
-    };
     for turn in turns {
         let action = turn.recovery_action.as_deref().unwrap_or({
             if matches!(turn.delivery_state.as_str(), "not_sent" | "rejected") {
@@ -12791,6 +12798,47 @@ for line in sys.stdin:
                 .await
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_stalled_process_keeps_its_own_turns_when_it_expires_stale_leases() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            session(&store, "working");
+            session(&store, "other");
+            let host = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let _working = TurnGuard::claim(&host, "working", None).await.unwrap();
+            let stall = || {
+                let tx = store.begin().unwrap();
+                tx.execute(
+                    "UPDATE chat_turn_leases SET heartbeat_at = ?1",
+                    [now_ms() - crate::store::CHAT_TURN_LEASE_TTL.as_millis() as i64 - 1],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            };
+
+            stall();
+            let _other = TurnGuard::claim(&host, "other", None).await.unwrap();
+            assert!(host.renew_turn_leases().is_empty());
+
+            stall();
+            host.reconcile_expired_turn_leases().unwrap();
+            assert!(host.renew_turn_leases().is_empty());
+
+            stall();
+            assert!(!store
+                .claim_data_dir_move("move", &host.held_turn_leases())
+                .unwrap());
+            assert!(host.renew_turn_leases().is_empty());
+        });
     }
 
     #[test]
