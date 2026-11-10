@@ -216,6 +216,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     staleTime: 30_000,
   });
 
+  const getPendingWorkQuery = () => queryOptions({
+    queryKey: workspaceKey("getPendingWork"),
+    queryFn: ({ signal }) => api.getPendingWork(signal),
+    refetchInterval: 1_000,
+  });
+
   const getBuildNotesQuery = () => queryOptions({
     queryKey: workspaceKey("getBuildNotes"),
     queryFn: ({ signal }) => api.getBuildNotes(signal),
@@ -354,6 +360,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     getRuntimeQuery,
     listRemoteSessionsQuery,
     getUpdateStatusQuery,
+    getPendingWorkQuery,
     getBuildNotesQuery,
     getLitSourcesQuery,
     getProjectDefaultsQuery,

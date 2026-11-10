@@ -165,19 +165,24 @@ impl SshSession {
         // `<user@host>` placeholder and point at the reader's own `ssh` line.
         let prompt = dim("$", ansi);
         let server_ip = self.server_ip_hint();
-        // The connection target both commands share. `[:PORT]` is a cyan optional
-        // slot: the client-dialed port can't be recovered from `SSH_CONNECTION`
+        // The client-dialed port can't be recovered from `SSH_CONNECTION`
         // (its port field is sshd's own listen port, e.g. :22, not RunPod's
         // :38455), so the reader supplies it from the ssh command they ran.
         let host_part = server_ip.unwrap_or("<user@host>");
-        let target = format!("{}{}", cyan(host_part, ansi), cyan("[:PORT]", ansi));
 
         // Each command: bold command-text + cyan target + dim trailing comment,
         // so within a line the part you type stays bright and asides recede.
-        let primary = format!("{} {target}", bold("orx up --remote", ansi));
+        let primary = format!(
+            "{} {}{}",
+            bold("orx up --remote", ansi),
+            cyan(host_part, ansi),
+            cyan("[:PORT]", ansi),
+        );
         let manual = format!(
-            "{} {target}   {}",
+            "{} {} {}   {}",
             bold(&format!("ssh -N -L {port}:localhost:{port}"), ansi),
+            cyan("[-p PORT]", ansi),
+            cyan(host_part, ansi),
             dim(&format!("# then open http://localhost:{port}"), ansi),
         );
 
@@ -188,11 +193,13 @@ impl SshSession {
         let target_note = match server_ip {
             Some(ip) => format!(
                 "{ip} is this box's address. If it doesn't connect, use the \
-                 user@host and port from the ssh command you ran to get here."
+                 user@host and port from the ssh command you ran to get here. \
+                 For option 2, put a custom port before the host as -p PORT."
             ),
             None => "<user@host>[:PORT] = the user, host, and -p port from the ssh \
                      command you ran to get here (e.g. root@203.0.113.5:2222). \
-                     No ~/.ssh/config alias needed."
+                     No ~/.ssh/config alias needed. \
+                     For option 2, put a custom port before the host as -p PORT."
                 .to_string(),
         };
         // Only surfaced with option 1, since option 2 is a plain ssh you can add
@@ -303,9 +310,6 @@ mod tests {
 
     #[test]
     fn both_commands_carry_the_optional_port_slot() {
-        // `orx up --remote` now accepts a trailing `:PORT`, so the `[:PORT]` slot
-        // rides on the shared target and appears on BOTH commands — option 1 is a
-        // real one-command path even on a non-standard SSH port.
         let msg = detect_from(Some("203.0.113.7 51344 10.0.0.5 22"), false)
             .unwrap()
             .render_instructions(4791, false);
@@ -318,7 +322,8 @@ mod tests {
             .lines()
             .find(|l| l.contains("$ ssh -N -L"))
             .expect("option-2 command line present");
-        assert!(manual_line.contains("<user@host>[:PORT]"));
+        assert!(manual_line.contains("ssh -N -L 4791:localhost:4791 [-p PORT] <user@host>"));
+        assert!(!manual_line.contains("<user@host>[:PORT]"));
     }
 
     #[test]
@@ -329,13 +334,12 @@ mod tests {
             .unwrap()
             .render_instructions(4791, false);
         assert!(msg.contains("orx up --remote 198.51.100.5[:PORT]"));
-        // The manual command carries the same target; assert the two facts
-        // separately rather than pinning the whitespace/comment glue between them.
         let manual_line = msg
             .lines()
             .find(|l| l.contains("$ ssh -N -L"))
             .expect("manual command line present");
-        assert!(manual_line.contains("198.51.100.5[:PORT]"));
+        assert!(manual_line.contains("ssh -N -L 4791:localhost:4791 [-p PORT] 198.51.100.5"));
+        assert!(!manual_line.contains("198.51.100.5[:PORT]"));
         assert!(manual_line.contains("http://localhost:4791"));
         // The accompanying note names the IP (its dedicated branch).
         assert!(msg.contains("198.51.100.5 is this box's address"));
