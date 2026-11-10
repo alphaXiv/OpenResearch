@@ -691,23 +691,27 @@ fn render_tool(ctx: &mut TurnCtx, id: &str, tool: &Value, terminals: &HashMap<St
         Some("failed") => "error",
         _ => "running",
     };
-    let mut part = WirePart::tool(
-        format!("acp-tool-{id}"),
-        match tool["title"].as_str() {
-            Some("subagent" | "task" | "Agent" | "Task") => "task",
-            Some("SubagentHandback") => "SubagentHandback",
-            _ => match tool["kind"].as_str() {
+    let raw_input = tool.get("rawInput");
+    let (name, input) = match (tool["title"].as_str(), tool["name"].as_str()) {
+        (Some("subagent" | "task" | "Agent" | "Task"), _) => ("task", raw_input.cloned()),
+        (Some("SubagentHandback"), _) => ("SubagentHandback", raw_input.cloned()),
+        // agy sends its own tool name and argument names, as in its transcripts.
+        (_, Some(native)) if ctx.harness == "antigravity" => {
+            super::antigravity::normalize_tool(native, raw_input)
+        }
+        _ => (
+            match tool["kind"].as_str() {
                 Some("execute") => "bash",
                 Some(kind) => kind,
                 None => "tool",
             },
-        },
-        status,
-        None,
-    );
+            raw_input.cloned(),
+        ),
+    };
+    let mut part = WirePart::tool(format!("acp-tool-{id}"), name, status, None);
     if let Some(state) = part.state.as_mut() {
         state.title = tool["title"].as_str().map(str::to_owned);
-        state.input = tool.get("rawInput").cloned();
+        state.input = input;
         state.output = tool_output(tool, terminals);
     }
     ctx.upsert_part(part);
@@ -943,6 +947,59 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn antigravity_tools_render_as_in_its_transcripts() {
+        let call = |id: &str, name: &str, kind: &str, input: Value| {
+            Event::Update(json!({
+                "sessionUpdate": "tool_call", "toolCallId": id, "name": name, "kind": kind,
+                "title": "agy's title", "status": "completed", "rawInput": input,
+            }))
+        };
+        let events = || {
+            [
+                call(
+                    "c",
+                    "run_command",
+                    "execute",
+                    json!({"CommandLine": "orx exp run"}),
+                ),
+                call(
+                    "e",
+                    "edit_file",
+                    "edit",
+                    json!({"Path": "/w/a.py", "Target": "x", "Replacement": "y"}),
+                ),
+                call("s", "search_web", "search", json!({"query": "acp"})),
+                call("t", "invoke_subagent", "other", json!({"Role": "Tester"})),
+            ]
+        };
+        let render = |harness: &str| {
+            let mut ctx = TurnCtx::test_stub();
+            ctx.harness = harness.into();
+            let mut tools = ToolUpdates::default();
+            for event in events() {
+                apply_event(&mut ctx, event, &mut tools).unwrap();
+            }
+            ctx.assistant.parts
+        };
+        let parts = render("antigravity");
+        let tools: Vec<_> = parts
+            .iter()
+            .filter_map(|part| part.tool.as_deref())
+            .collect();
+        assert_eq!(tools, ["Bash", "Edit", "WebSearch", "task"]);
+        let input = |index: usize| parts[index].state.as_ref().unwrap().input.clone().unwrap();
+        assert_eq!(input(0)["command"], "orx exp run");
+        assert_eq!(input(1)["file_path"], "/w/a.py");
+        assert_eq!(input(1)["old_string"], "x");
+        assert_eq!(input(3)["description"], "Tester");
+        let other: Vec<_> = render("gemini")
+            .into_iter()
+            .filter_map(|part| part.tool)
+            .collect();
+        assert_eq!(other, ["bash", "edit", "search", "other"]);
+    }
+
     #[test]
     fn native_tool_content_and_diffs_are_readable() {
         assert_eq!(tool_output(&json!({"content": [{"type":"content", "content":{"type":"text", "text":"result"}}, {"type":"diff", "path":"file", "oldText":"old\n", "newText":"new\n"}]}), &HashMap::new()).unwrap(), "result\n--- file\n+++ file\n-old\n+new\n");
