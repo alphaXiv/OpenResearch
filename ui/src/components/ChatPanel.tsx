@@ -3448,7 +3448,7 @@ export const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div dir="auto" className={`msg-user max-w-full ${USER_MESSAGE_BUBBLE_CLASS_NAME} [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border}`}>
+        <div dir="auto" className={`msg-user max-w-full ${USER_MESSAGE_BUBBLE_CLASS_NAME} [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border`}>
           {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
