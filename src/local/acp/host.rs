@@ -28,6 +28,7 @@ struct SessionIo {
     native_id: Mutex<Option<String>>,
     events: Mutex<Option<mpsc::UnboundedSender<Event>>>,
     permissions: Mutex<HashMap<String, Permission>>,
+    one_shot: std::sync::atomic::AtomicBool,
 }
 
 impl SessionIo {
@@ -302,6 +303,17 @@ impl Client {
         *self.io.native_id.lock().unwrap() = Some(id.to_owned());
     }
 
+    /// A throwaway one-shot session: no delegated tools, and no stored chat session to update.
+    pub fn mark_one_shot(&self) {
+        self.io
+            .one_shot
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn cancel_permissions(&self) {
+        self.io.cancel_permissions();
+    }
+
     pub fn begin_turn(&self) -> mpsc::UnboundedReceiver<Event> {
         let (sender, receiver) = mpsc::unbounded_channel();
         *self.io.events.lock().unwrap() = Some(sender);
@@ -365,7 +377,8 @@ impl Client {
         Ok(())
     }
 
-    pub async fn shutdown(&self) {
+    /// Asks the agent to stop the session's running prompt.
+    pub fn cancel(&self) {
         self.io.cancel_permissions();
         if let Some(native_id) = self.native_id() {
             if let Ok(notification) =
@@ -374,6 +387,10 @@ impl Client {
                 let _ = self.connection.send_notification(notification);
             }
         }
+    }
+
+    pub async fn shutdown(&self) {
+        self.cancel();
         if let Some(stop) = self.stop.lock().unwrap().take() {
             let _ = stop.send(());
         }
@@ -393,7 +410,7 @@ impl Drop for Client {
     }
 }
 
-fn select_has_value(option: &Value, value: &str) -> bool {
+pub(super) fn select_has_value(option: &Value, value: &str) -> bool {
     option["type"] == "select"
         && option["options"]
             .as_array()
@@ -521,6 +538,7 @@ impl Host {
                 client.shutdown().await;
             }
         }
+        super::stop_one_shots().await;
     }
 
     fn start_reaper(self: &Arc<Self>) {
@@ -666,7 +684,9 @@ pub(super) async fn spawn(
                         && notifications.owns(&notification.params)
                     {
                         let update = &notification.params["update"];
-                        if matches!(update["sessionUpdate"].as_str(), Some("config_option_update" | "current_mode_update")) {
+                        // A one-shot session has no stored chat session to update.
+                        let one_shot = notifications.one_shot.load(std::sync::atomic::Ordering::Relaxed);
+                        if !one_shot && matches!(update["sessionUpdate"].as_str(), Some("config_option_update" | "current_mode_update")) {
                             let store = crate::store::Store::open().map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
                             store.apply_acp_configuration_update(&chat_id, update).map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
                             if let (Some(events), Ok(Some(session))) = (&events, store.get_chat_session(&chat_id)) {
@@ -700,6 +720,12 @@ pub(super) async fn spawn(
                         );
                     }
                     if request.method != "session/request_permission" {
+                        if requests.one_shot.load(std::sync::atomic::Ordering::Relaxed) {
+                            return responder.respond_with_error(
+                                agent_client_protocol::Error::invalid_params()
+                                    .data("Tools are disabled for one-shot requests"),
+                            );
+                        }
                         let delegated = request_tools.clone();
                         let terminal_io = requests.clone();
                         connection.spawn(async move {
@@ -794,27 +820,32 @@ pub(super) async fn spawn(
     });
     let initialized =
         tokio::time::timeout(std::time::Duration::from_secs(15), ready_receiver).await;
-    match initialized {
-        Ok(Ok(Ok((connection, initialized)))) => Ok(Arc::new(Client {
-            alphaxiv_signed_in: crate::alphaxiv::signed_in(),
-            launch: definition.clone(),
-            configuration_lock: tokio::sync::Mutex::new(()),
-            connection,
-            initialized,
-            io,
-            stop: Mutex::new(Some(stop_sender)),
-            closed: closed_receiver,
-            idle_since: Mutex::new(Some(Instant::now())),
-        })),
-        Ok(Ok(Err(message))) => {
-            drop(stop_sender);
-            bail!("ACP initialization failed: {message}")
+    let message = match initialized {
+        Ok(Ok(Ok((connection, initialized)))) => {
+            return Ok(Arc::new(Client {
+                alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+                launch: definition.clone(),
+                configuration_lock: tokio::sync::Mutex::new(()),
+                connection,
+                initialized,
+                io,
+                stop: Mutex::new(Some(stop_sender)),
+                closed: closed_receiver,
+                idle_since: Mutex::new(Some(Instant::now())),
+            }))
         }
-        _ => {
-            drop(stop_sender);
-            bail!("ACP initialization failed or timed out. Check the executable, arguments, and supported protocol version.")
-        }
-    }
+        Ok(Ok(Err(message))) => format!("ACP initialization failed: {message}"),
+        _ => "ACP initialization failed or timed out. Check the executable, arguments, and supported protocol version.".to_owned(),
+    };
+    drop(stop_sender);
+    // Windows keeps `cwd` in use until the child exits, and callers remove it next.
+    let mut closed = closed_receiver;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        closed.wait_for(|closed| *closed),
+    )
+    .await;
+    bail!("{message}")
 }
 
 #[cfg(test)]
@@ -1083,6 +1114,80 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(client.answer(&id, "opaque-once").is_err());
+        host.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn one_shot_configuration_updates_reach_the_turn_without_a_stored_chat() {
+        let host = Arc::new(Host::default());
+        let client = new_client(&host, "acp-oneshot-configuration").await;
+        client.mark_one_shot();
+        let mut events = client.begin_turn();
+        client
+            .request(
+                "session/set_config_option",
+                json!({"sessionId": client.native_id(), "configId": "opaque-model", "value": "second"}),
+            )
+            .await
+            .unwrap();
+        // No chat session has this ID, so a store write would fail and drop the update.
+        assert!(
+            matches!(events.try_recv(), Ok(Event::Update(update)) if update["sessionUpdate"] == "current_mode_update")
+        );
+        client.end_turn();
+        host.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn chat_configuration_updates_from_the_agent_are_stored() {
+        let store = crate::store::Store::open().unwrap();
+        let id = format!("chat_{}", uuid::Uuid::new_v4());
+        store
+            .create_chat_session(&crate::store::StoredChatSession {
+                id: id.clone(),
+                project_id: "proj_1".into(),
+                harness: super::super::presets().remove(0).launch.id,
+                native_session_id: None,
+                title: None,
+                title_source: None,
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived: false,
+                context_usage_json: None,
+                bootstrap_context: None,
+                goal: None,
+                autonomy: None,
+                active_leaf_id: None,
+                side_parent_session_id: None,
+                side_parent_leaf_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        store
+            .set_acp_configuration(&id, &json!({"modes": {"currentModeId": "initial"}}))
+            .unwrap();
+        let host = Arc::new(Host::default());
+        let client = new_client(&host, &id).await;
+        let mut events = client.begin_turn();
+        client
+            .request(
+                "session/set_config_option",
+                json!({"sessionId": client.native_id(), "configId": "opaque-model", "value": "second"}),
+            )
+            .await
+            .unwrap();
+        // The update reaches the turn only after the store write.
+        assert!(
+            matches!(events.try_recv(), Ok(Event::Update(update)) if update["sessionUpdate"] == "current_mode_update")
+        );
+        let configuration = store.acp_session_state(&id).unwrap().unwrap().configuration;
+        assert_eq!(configuration["modes"]["currentModeId"], "agent-changed");
+        client.end_turn();
         host.shutdown().await;
     }
 

@@ -146,6 +146,10 @@ impl Harness for Acp {
         ctx.host.acp.answer(&ctx.session_id, id, selected).await?;
         Ok(ResumeAction::Handled { plan_mode: None })
     }
+
+    async fn one_shot(&self, request: super::OneShot<'_>) -> Result<String> {
+        crate::local::acp::one_shot(&self.0, request).await
+    }
 }
 
 fn advertised_models(configuration: &Value) -> Vec<super::ModelInfo> {
