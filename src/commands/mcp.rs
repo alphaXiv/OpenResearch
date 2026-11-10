@@ -266,6 +266,10 @@ pub async fn run_antigravity() -> Result<()> {
         json!({})
     } else if payload.get("terminationReason").is_some() {
         background_stop(&payload).await
+    } else if payload.pointer("/toolCall/name") == Some(&json!("invoke_subagent"))
+        && chat_asks_before_tools()
+    {
+        json!({"decision": "deny", "reason": "[orx] This chat asks before running tools, and your subagents cannot ask. Use orx's `delegate` tool to hand the task to another chat, or do it yourself."})
     } else {
         let mut decision = json!({"decision": "allow"});
         if let Some(overwrite) = invocation_overwrite(&input) {
@@ -275,6 +279,20 @@ pub async fn run_antigravity() -> Result<()> {
     };
     println!("{output}");
     Ok(())
+}
+
+fn chat_asks_before_tools() -> bool {
+    let Ok(session) = std::env::var("ORX_SESSION_ID") else {
+        return false;
+    };
+    let path = crate::local::harness::antigravity::approvals_path(&session);
+    path.try_exists().unwrap_or_else(|error| {
+        eprintln!(
+            "orx antigravity-gate: could not read {}: {error}",
+            path.display()
+        );
+        false
+    })
 }
 
 /// The longest one `Stop` holds a turn without news, under the turn's silence watchdog; the agent
