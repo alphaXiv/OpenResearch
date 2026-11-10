@@ -2131,6 +2131,9 @@ impl UpdateWarning {
         if opted_out() {
             return UpdateWarning { refresh: None };
         }
+        // In an `orx up` chat, the server checks and updates; a send cut off at
+        // exit can fail the agent's command in its sandbox.
+        let in_chat = crate::local::chat::in_local_session();
 
         let current = current_version();
         let cache = read_cache();
@@ -2171,7 +2174,7 @@ impl UpdateWarning {
             );
         }
 
-        if may_update && automatic && attempt_due(cache.as_ref()) {
+        if may_update && automatic && !in_chat && attempt_due(cache.as_ref()) {
             spawn_background_update();
         }
 
@@ -2182,7 +2185,7 @@ impl UpdateWarning {
             .as_ref()
             .map(|c| now_unix().saturating_sub(c.checked_at) >= CHECK_TTL.as_secs())
             .unwrap_or(true);
-        if !stale {
+        if !stale || in_chat {
             return UpdateWarning { refresh: None };
         }
 
@@ -2258,6 +2261,22 @@ mod tests {
     use std::ffi::OsString;
     use std::path::Path;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn chat_commands_leave_update_checks_to_orx_up() {
+        let cleared = [
+            crate::local::chat::LOCAL_SESSION_ENV,
+            "ORX_NO_UPDATE_CHECK",
+            "NO_UPDATE_NOTIFIER",
+            "OPENRESEARCH_CLI_DISABLE_UPDATE",
+        ];
+        if !crate::config::in_test_child(&cleared) {
+            return;
+        }
+        std::env::set_var(crate::local::chat::LOCAL_SESSION_ENV, "1");
+
+        assert!(super::UpdateWarning::start(true).refresh.is_none());
+    }
 
     #[test]
     fn changes_are_the_difference_of_cumulative_totals() {
