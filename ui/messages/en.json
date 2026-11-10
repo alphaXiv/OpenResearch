@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "Runs on this computer",
   "close_pending_reason_tinker": "Runs on this computer and trains on Tinker",
   "close_pending_reason_vercel": "Without OpenResearch, the sandbox bills until its time limit and the log is lost",
-  "close_pending_reason_box": "Without OpenResearch, the result is lost when the box shuts down"
+  "close_pending_reason_box": "Without OpenResearch, the result is lost when the box shuts down",
+  "restart_pending_title": "Agents are still working",
+  "restart_pending_description": "Restarting stops them. You can continue each chat after the restart."
 }

@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "Bu bilgisayarda çalışıyor",
   "close_pending_reason_tinker": "Bu bilgisayarda çalışıyor ve Tinker'da eğitiliyor",
   "close_pending_reason_vercel": "OpenResearch olmadan korumalı alan süre sınırına kadar faturalandırılır ve günlük kaybolur",
-  "close_pending_reason_box": "OpenResearch olmadan makine kapandığında sonuç kaybolur"
+  "close_pending_reason_box": "OpenResearch olmadan makine kapandığında sonuç kaybolur",
+  "restart_pending_title": "Ajanlar hâlâ çalışıyor",
+  "restart_pending_description": "Yeniden başlatmak onları durdurur. Yeniden başlattıktan sonra her sohbete devam edebilirsiniz."
 }

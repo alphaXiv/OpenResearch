@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "روی این رایانه اجرا می‌شود",
   "close_pending_reason_tinker": "روی این رایانه اجرا می‌شود و روی Tinker آموزش می‌بیند",
   "close_pending_reason_vercel": "بدون OpenResearch، هزینه سندباکس تا پایان مهلت زمانی‌اش محاسبه می‌شود و گزارش از بین می‌رود",
-  "close_pending_reason_box": "بدون OpenResearch، با خاموش شدن دستگاه نتیجه از بین می‌رود"
+  "close_pending_reason_box": "بدون OpenResearch، با خاموش شدن دستگاه نتیجه از بین می‌رود",
+  "restart_pending_title": "عامل‌ها هنوز در حال کارند",
+  "restart_pending_description": "راه‌اندازی دوباره آن‌ها را متوقف می‌کند. پس از راه‌اندازی دوباره می‌توانید هر گفتگو را ادامه دهید."
 }

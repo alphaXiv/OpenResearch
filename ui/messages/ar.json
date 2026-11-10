@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "تعمل على هذا الحاسوب",
   "close_pending_reason_tinker": "تعمل على هذا الحاسوب وتتدرّب على Tinker",
   "close_pending_reason_vercel": "من دون OpenResearch، تستمر تكلفة البيئة المعزولة حتى انتهاء مهلتها ويُفقد السجل",
-  "close_pending_reason_box": "من دون OpenResearch، تُفقد النتيجة عند توقف الجهاز"
+  "close_pending_reason_box": "من دون OpenResearch، تُفقد النتيجة عند توقف الجهاز",
+  "restart_pending_title": "لا يزال الوكلاء يعملون",
+  "restart_pending_description": "إعادة التشغيل توقفهم. يمكنك متابعة كل محادثة بعد إعادة التشغيل."
 }

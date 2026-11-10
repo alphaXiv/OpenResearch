@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "在本机上运行",
   "close_pending_reason_tinker": "在本机上运行，并在 Tinker 上训练",
   "close_pending_reason_vercel": "没有 OpenResearch，沙盒会计费直到时间上限，日志也会丢失",
-  "close_pending_reason_box": "没有 OpenResearch，机器关闭时结果会丢失"
+  "close_pending_reason_box": "没有 OpenResearch，机器关闭时结果会丢失",
+  "restart_pending_title": "智能体仍在工作",
+  "restart_pending_description": "重新启动会停止它们。重新启动后可以继续每个对话。"
 }

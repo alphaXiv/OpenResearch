@@ -395,6 +395,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
         drop(backend_lock);
+        if let Err(error) = crate::commands::remote_host::ServerDescriptor::withdraw(&data_dir) {
+            eprintln!(
+                "orx up: could not withdraw the server descriptor before restarting: {error:#}"
+            );
+        }
         if !state.reopen.load(Ordering::SeqCst) && !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
             let failures = updates::failure_count();
@@ -5278,7 +5283,7 @@ fn spawn_restart_when_idle(state: AppState) {
             {
                 continue;
             }
-            if begin_restart(&state, 0).await {
+            if begin_restart(&state, 0, false).await {
                 state.restart.notify_one();
                 return;
             }
@@ -5290,8 +5295,8 @@ fn spawn_restart_when_idle(state: AppState) {
 static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
 
 /// Stop admitting work and commit to a restart if nothing is in flight beyond
-/// `own_requests` (the caller's). Returns false, and admits again, otherwise.
-async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
+/// `own_requests` (the caller's), save for chat turns when `stop_agents`. Returns false, and admits again, otherwise.
+async fn begin_restart(state: &AppState, own_requests: usize, stop_agents: bool) -> bool {
     let mut committed = RESTART_COMMITTED.lock().await;
     if *committed {
         return true;
@@ -5307,8 +5312,9 @@ async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
                     | RemoteSessionStatus::NeedsUpdate
             )
         })
-        && state.chat.stop_admitting_if_idle().await
+        && (stop_agents || state.chat.stop_admitting_if_idle().await)
     {
+        state.chat.stop_admitting();
         *committed = true;
         return true;
     }
@@ -6198,7 +6204,18 @@ async fn apply_update() -> ApiResult {
 /// Relaunch into the copy the updater already installed. Answers first, then
 /// restarts, so the dashboard learns the request landed before the connection
 /// drops; it reloads once the new server is up.
-async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
+/// Sent by the dashboard once the user agreed to stop the agents that are working; older pages post no body.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestartReq {
+    stop_agents: bool,
+}
+
+async fn restart_after_update(
+    State(state): State<AppState>,
+    req: Option<Json<RestartReq>>,
+) -> ApiResult {
+    let stop_agents = req.is_some_and(|Json(req)| req.stop_agents);
     let status = tokio::task::spawn_blocking(updates::status)
         .await
         .map_err(|e| ApiError::from(anyhow!("update status task failed: {e}")))?;
@@ -6211,7 +6228,7 @@ async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
     // A dashboard poll landing alongside the click is not work worth refusing over.
     let mut began = false;
     for _ in 0..10 {
-        began = begin_restart(&state, 1).await;
+        began = begin_restart(&state, 1, stop_agents).await;
         if began {
             break;
         }

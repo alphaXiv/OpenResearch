@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "इस कंप्यूटर पर चल रहा है",
   "close_pending_reason_tinker": "इस कंप्यूटर पर चल रहा है और Tinker पर ट्रेन हो रहा है",
   "close_pending_reason_vercel": "OpenResearch के बिना, सैंडबॉक्स की बिलिंग उसकी समय-सीमा तक चलती है और लॉग खो जाता है",
-  "close_pending_reason_box": "OpenResearch के बिना, बॉक्स बंद होने पर नतीजा खो जाता है"
+  "close_pending_reason_box": "OpenResearch के बिना, बॉक्स बंद होने पर नतीजा खो जाता है",
+  "restart_pending_title": "एजेंट अभी भी काम कर रहे हैं",
+  "restart_pending_description": "फिर से शुरू करने पर वे रुक जाएँगे। फिर से शुरू होने के बाद आप हर चैट जारी रख सकते हैं।"
 }

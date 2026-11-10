@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, type ReactNode } from "react";
-import type { AfterQuit, PendingRun, PendingWork } from "./api";
+import type { AfterQuit, PendingAgent, PendingRun, PendingWork } from "./api";
 import { BackendLogo } from "./components/BackendLogos";
 import { HarnessLogo } from "./components/HarnessLogo";
 import { Button, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, MenuItem } from "./components/ui";
@@ -47,14 +47,33 @@ function PendingRow({ icon, name, project, detail, disabled, onOpen }: {
   );
 }
 
+function agentRows(agents: PendingAgent[], disabled: boolean, go: (href: string) => void) {
+  return agents.map((agent) => {
+    const href = agent.sideParentId
+      ? taskLocation(agent.projectId, agent.sideParentId, { kind: "side", sessionId: agent.sessionId })
+      : taskLocation(agent.projectId, agent.sessionId);
+    const untitled = agent.sideParentId ? m.side_chat_untitled() : m.chat_untitled();
+    return (
+      <PendingRow
+        key={agent.sessionId}
+        icon={<HarnessLogo harness={agent.harness} />}
+        name={agent.title ?? untitled}
+        project={agent.project}
+        disabled={disabled}
+        onOpen={() => go(href)}
+      />
+    );
+  });
+}
+
 interface Machine {
-  /** The machine whose work the window would interrupt. */
+  /** The machine whose work would be interrupted. */
   machine: Workspace;
   open: (href: string) => void;
 }
 
-function CloseDialogContent({ work: found, minimizes, machine, open, confirm, cancel, isDisabled }: DialogContentProps<CloseAnswer> & CloseRequest & Machine) {
-  const live = useQuery({ ...machine.queries.getPendingWorkQuery(), initialData: found ?? undefined, gcTime: 0 }, machine.queryClient);
+function CloseDialogContent({ minimizes, machine, open, confirm, cancel, isDisabled }: DialogContentProps<CloseAnswer> & Omit<CloseRequest, "work"> & Machine) {
+  const live = useQuery({ ...machine.queries.getPendingWorkQuery(), gcTime: 0 }, machine.queryClient);
   const work = live.data ?? null;
   const quitRef = useRef<HTMLButtonElement>(null);
   const backgroundRef = useRef<HTMLButtonElement>(null);
@@ -77,22 +96,6 @@ function CloseDialogContent({ work: found, minimizes, machine, open, confirm, ca
     open(href);
   };
 
-  const agentRows = (work?.agents ?? []).map((agent) => {
-    const href = agent.sideParentId
-      ? taskLocation(agent.projectId, agent.sideParentId, { kind: "side", sessionId: agent.sessionId })
-      : taskLocation(agent.projectId, agent.sessionId);
-    const untitled = agent.sideParentId ? m.side_chat_untitled() : m.chat_untitled();
-    return (
-      <PendingRow
-        key={agent.sessionId}
-        icon={<HarnessLogo harness={agent.harness} />}
-        name={agent.title ?? untitled}
-        project={agent.project}
-        disabled={isDisabled}
-        onOpen={() => go(href)}
-      />
-    );
-  });
   const runRow = (run: PendingRun) => {
     const pane = { kind: "experiment", experimentId: run.experimentId, view: "overview", runId: run.runId } as const;
     const reason = run.afterQuit === "needsApp" ? needsAppReasons[run.backend ?? ""]?.() : undefined;
@@ -109,7 +112,7 @@ function CloseDialogContent({ work: found, minimizes, machine, open, confirm, ca
     );
   };
   const groups = [
-    { heading: m.close_pending_agents(), rows: agentRows },
+    { heading: m.close_pending_agents(), rows: agentRows(work?.agents ?? [], isDisabled, go) },
     { heading: m.close_pending_needs_open(), rows: runs("needsApp").map(runRow) },
     { heading: m.close_pending_continues(), rows: runs("continues").map(runRow) },
     { heading: m.close_pending_unsent(), rows: runs("reports").map(runRow) },
@@ -160,10 +163,60 @@ export function askBeforeClosing({ showCustomDialog }: ReturnType<typeof createD
     return;
   }
   asking = true;
+  const { work, minimizes } = detail as CloseRequest;
+  // The window's count is newer than any poll still cached.
+  const { queryKey } = machine.queries.getPendingWorkQuery();
+  if (work) machine.setScopedQueryData(queryKey, work);
+  else machine.queryClient.removeQueries({ queryKey, exact: true });
   showCustomDialog({
     component: CloseDialogContent,
-    props: { ...(detail as CloseRequest), machine, open },
+    props: { minimizes, machine, open },
     onConfirm: (choice) => window.ipc?.postMessage(`close:${choice}`),
     onCancel: () => window.ipc?.postMessage("close:cancel"),
+  });
+}
+
+/** Experiments carry on through a restart, so only the agents it stops are listed. */
+function RestartDialogContent({ agents: found, machine, open, confirm, cancel, isDisabled }: DialogContentProps<void> & { agents: PendingAgent[] } & Machine) {
+  const live = useQuery({ ...machine.queries.getPendingWorkQuery(), gcTime: 0 }, machine.queryClient);
+  const agents = live.data?.agents ?? found;
+  useEffect(() => {
+    if (agents.length === 0) cancel();
+  }, [agents.length, cancel]);
+  const go = (href: string) => {
+    cancel();
+    open(href);
+  };
+
+  return (
+    <DialogContent className="flex max-h-[calc(100vh-2.5rem)] flex-col">
+      <DialogHeader>
+        <DialogTitle>{m.restart_pending_title()}</DialogTitle>
+        <DialogDescription>{m.restart_pending_description()}</DialogDescription>
+      </DialogHeader>
+      <ul className="-mx-3 mt-4 flex min-h-0 list-none flex-col overflow-y-auto p-0 px-1 pb-1">
+        {agentRows(agents, isDisabled, go)}
+      </ul>
+      <DialogFooter>
+        <Button onClick={cancel} disabled={isDisabled}>
+          {m.common_cancel()}
+        </Button>
+        <Button variant="primary" disabled={isDisabled} onClick={() => confirm()}>
+          {m.update_banner_restart()}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  );
+}
+
+/** Resolves whether the user agreed to stop `agents` for a restart; opening a listed chat cancels it. */
+export function askBeforeRestarting({ showCustomDialog }: ReturnType<typeof createDialogs>, agents: PendingAgent[], { machine, open }: Machine) {
+  return new Promise<boolean>((resolve) => {
+    showCustomDialog({
+      component: RestartDialogContent,
+      props: { agents, machine, open },
+      onConfirm: () => resolve(true),
+      onCancel: () => resolve(false),
+    });
   });
 }

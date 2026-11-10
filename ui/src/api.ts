@@ -2157,10 +2157,10 @@ export function createApi(
 
   const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
 
-  /** Relaunch the server into the copy the updater installed. The old server
-   *  answers and then goes away; poll `getUpdateStatus` for the new one. */
-  const restartApp = () =>
-    post<{ restarting: boolean; version: string }>("/api/update/restart");
+  /** Relaunch the server into the copy the updater installed, stopping any agent at work when `stopAgents`.
+   *  The old server answers and then goes away; poll `getUpdateStatus` for the new one. */
+  const restartApp = (stopAgents = false) =>
+    post<{ restarting: boolean; version: string }>("/api/update/restart", { stopAgents });
 
   const setAutoUpdate = (enabled: boolean) =>
     post<UpdateStatus>("/api/update/auto", { enabled });

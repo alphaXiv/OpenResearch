@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "Se ejecuta en este equipo",
   "close_pending_reason_tinker": "Se ejecuta en este equipo y entrena en Tinker",
   "close_pending_reason_vercel": "Sin OpenResearch, el sandbox factura hasta su límite de tiempo y el registro se pierde",
-  "close_pending_reason_box": "Sin OpenResearch, el resultado se pierde cuando la máquina se apaga"
+  "close_pending_reason_box": "Sin OpenResearch, el resultado se pierde cuando la máquina se apaga",
+  "restart_pending_title": "Los agentes siguen trabajando",
+  "restart_pending_description": "Al reiniciar se detienen. Puedes continuar cada chat después del reinicio."
 }

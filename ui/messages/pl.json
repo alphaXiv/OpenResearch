@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "Działa na tym komputerze",
   "close_pending_reason_tinker": "Działa na tym komputerze i trenuje na Tinker",
   "close_pending_reason_vercel": "Bez OpenResearch sandbox jest rozliczany do końca limitu czasu, a log przepada",
-  "close_pending_reason_box": "Bez OpenResearch wynik przepada, gdy maszyna się wyłączy"
+  "close_pending_reason_box": "Bez OpenResearch wynik przepada, gdy maszyna się wyłączy",
+  "restart_pending_title": "Agenci nadal pracują",
+  "restart_pending_description": "Ponowne uruchomienie ich zatrzyma. Po ponownym uruchomieniu możesz kontynuować każdy czat."
 }

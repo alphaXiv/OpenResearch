@@ -1019,9 +1019,10 @@ mod imp {
         /// Until the page says it is asking; after the deadline a native alert asks instead.
         Sent(Instant),
         Page,
-        /// A windowless close brought the window back, so the page can list the work once it loads.
+        /// A windowless close brought the window back, so the page can list the work once it loads;
+        /// past the deadline a native alert asks instead.
         #[cfg(target_os = "macos")]
-        OnLoad,
+        OnLoad(Instant),
     }
 
     pub(super) fn run_event_loop(
@@ -1461,7 +1462,13 @@ mod imp {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => match quit {
                 Quit::StoppingRuns => {}
                 Quit::No => {
-                    if matches!(ask, Ask::Sent(deadline) if deadline <= Instant::now()) {
+                    let deadline = match ask {
+                        Ask::Sent(deadline) => Some(deadline),
+                        #[cfg(target_os = "macos")]
+                        Ask::OnLoad(deadline) => Some(deadline),
+                        _ => None,
+                    };
+                    if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
                         ask = Ask::No;
                         *control_flow = ControlFlow::Wait;
                         close_window(external_server, false, &mut quit, &mut ask, &window, &webview, control_flow);
@@ -1651,7 +1658,7 @@ mod imp {
             Event::UserEvent(UserEvent::PageReady) if matches!(quit, Quit::No) && !super::windowless() => {
                 links.on_page_ready(&webview);
                 #[cfg(target_os = "macos")]
-                if matches!(ask, Ask::OnLoad) {
+                if matches!(ask, Ask::OnLoad(_)) {
                     ask = Ask::No;
                     close_window(external_server, true, &mut quit, &mut ask, &window, &webview, control_flow);
                 }
@@ -1841,7 +1848,9 @@ mod imp {
         // Only the page can list the work, so a hidden window comes back to ask once it loads.
         #[cfg(target_os = "macos")]
         if super::windowless() && send_later(UserEvent::Focus(None)) {
-            *ask = Ask::OnLoad;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            *ask = Ask::OnLoad(deadline);
+            *control_flow = ControlFlow::WaitUntil(deadline);
             return;
         }
         if !page_ready {

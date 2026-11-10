@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "Работает на этом компьютере",
   "close_pending_reason_tinker": "Работает на этом компьютере и обучается на Tinker",
   "close_pending_reason_vercel": "Без OpenResearch песочница оплачивается до истечения лимита времени, а журнал теряется",
-  "close_pending_reason_box": "Без OpenResearch результат теряется, когда машина выключается"
+  "close_pending_reason_box": "Без OpenResearch результат теряется, когда машина выключается",
+  "restart_pending_title": "Агенты ещё работают",
+  "restart_pending_description": "Перезапуск остановит их. После перезапуска вы сможете продолжить каждый чат."
 }

@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "이 컴퓨터에서 실행",
   "close_pending_reason_tinker": "이 컴퓨터에서 실행되고 Tinker에서 학습",
   "close_pending_reason_vercel": "OpenResearch가 없으면 샌드박스가 제한 시간까지 과금되고 로그가 사라집니다",
-  "close_pending_reason_box": "OpenResearch가 없으면 박스가 종료될 때 결과가 사라집니다"
+  "close_pending_reason_box": "OpenResearch가 없으면 박스가 종료될 때 결과가 사라집니다",
+  "restart_pending_title": "에이전트가 아직 작업 중입니다",
+  "restart_pending_description": "다시 시작하면 에이전트가 중지됩니다. 다시 시작한 후 각 채팅을 계속할 수 있습니다."
 }

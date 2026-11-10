@@ -158,3 +158,77 @@ test("a repeated close while the dialog is open acknowledges without opening a s
   assert.equal(document.querySelectorAll('[role="dialog"], [role="alertdialog"]').length, 1);
   assert.deepEqual(sent, ["close:asking", "close:asking"]);
 });
+
+/** The app with an update waiting for a restart; returns the bodies of the restarts it asked for. */
+async function restartable(work) {
+  const restarts = [];
+  pending = work;
+  serveApp({
+    "GET /api/pending-work": () => pending ?? undefined,
+    "GET /api/update": () => ({
+      current: "0.2.21", latest: "0.3.0", latestTag: "v0.3.0", channel: "app-bundle", releaseChannel: "stable", releaseChannelsAvailable: true,
+      waitingForStable: false, waitingForCanary: false, selfUpdates: true, autoUpdate: true, envDisabled: false, updateAvailable: false,
+      installedVersion: "0.3.0", installedTag: "v0.3.0", restartRequired: true, canRestart: true, instance: "old", changes: null,
+    }),
+    "POST /api/update/restart": (init) => {
+      restarts.push(JSON.parse(init.body));
+      return Response.json({ error: "held for the test" }, { status: 409 });
+    },
+  });
+  await renderApp("/");
+  return restarts;
+}
+
+const restart = async () => {
+  await act(async () => find("button", m.update_banner_restart()).click());
+  await settle();
+};
+
+test("restarting for an update first asks to stop the agents at work, and only then stops them", async () => {
+  const restarts = await restartable({ agents: [agent("Tune the schedule")], runs: [run("lr-sweep", "needsApp", "local_job")] });
+
+  await restart();
+  assert.ok(dialog().textContent.includes(m.restart_pending_title()));
+  assert.deepEqual([...dialog().querySelectorAll("li button")].map((row) => row.textContent), ["Tune the scheduleScaling laws"]);
+  await click(m.common_cancel());
+  assert.ok(!dialog());
+  assert.deepEqual(restarts, []);
+
+  await restart();
+  await act(async () => button(m.update_banner_restart()).click());
+  await settle();
+  assert.ok(!dialog());
+  assert.deepEqual(restarts, [{ stopAgents: true }]);
+});
+
+test("experiments carry on through a restart, so they alone never ask", async () => {
+  const restarts = await restartable({ agents: [], runs: [run("lr-sweep", "needsApp", "local_job"), run("baseline", "continues")] });
+  await restart();
+  assert.ok(!dialog());
+  assert.deepEqual(restarts, [{ stopAgents: false }]);
+});
+
+test("a restart asked about while its agents finish is dropped", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const restarts = await restartable({ agents: [agent("Tune the schedule")], runs: [] });
+  await restart();
+  assert.ok(dialog());
+
+  pending = { agents: [], runs: [] };
+  await act(async () => t.mock.timers.tick(1_000));
+  await settle();
+  assert.ok(!dialog());
+  assert.deepEqual(restarts, []);
+});
+
+test("a close asks about what the window just counted, not an older count", async () => {
+  await restartable({ agents: [], runs: [] });
+  await restart();
+  const sent = [];
+  window.ipc = { postMessage: (message) => sent.push(message) };
+
+  pending = { agents: [agent("Tune the schedule")], runs: [] };
+  await ask(pending);
+  assert.deepEqual(listed(m.close_pending_agents()), ["Tune the scheduleScaling laws"]);
+  assert.deepEqual(sent, ["close:asking"]);
+});

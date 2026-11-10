@@ -1777,5 +1777,7 @@
   "close_pending_reason_local": "このコンピュータで実行中",
   "close_pending_reason_tinker": "このコンピュータで実行し、Tinker で学習中",
   "close_pending_reason_vercel": "OpenResearch がないと、サンドボックスは制限時間まで課金され、ログは失われます",
-  "close_pending_reason_box": "OpenResearch がないと、ボックスの停止時に結果が失われます"
+  "close_pending_reason_box": "OpenResearch がないと、ボックスの停止時に結果が失われます",
+  "restart_pending_title": "エージェントがまだ作業中です",
+  "restart_pending_description": "再起動するとエージェントは停止します。再起動後に各チャットを続行できます。"
 }
