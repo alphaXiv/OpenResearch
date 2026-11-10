@@ -117,6 +117,15 @@ test("global resume preserves settings and archived task links, and falls back t
   }
 });
 
+test("global resume never reopens a saved playground location", async () => {
+  fresh();
+  resumeBackend("/projects/pg/tasks/pg", [], [{ id: "p" }, { id: "pg", kind: "playground" }]);
+  assert.equal(await globalResumeLocation(local), "/projects/p/tasks/new");
+  fresh();
+  resumeBackend("/projects/pg/tasks/pg", [], [{ id: "pg", kind: "playground" }]);
+  assert.equal(await globalResumeLocation(local), "/projects");
+});
+
 test("project resume uses API order, keeps remembered pane, and falls back to new when all tasks are archived", async () => {
   const pane = { kind: "file", path: "notes.md" };
   const sessions = [{ id: "archived", archived: true }, { id: "latest", archived: false }, { id: "older", archived: false }];

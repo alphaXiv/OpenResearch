@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { m } from "../paraglide/messages.js";
 import { useRef, useState } from "react";
-import { FileArchive, FolderOpen, Plus } from "lucide-react";
+import { FileArchive, FolderOpen, Plus, Sparkles } from "lucide-react";
 import { type AgentSelection, type Project, type SharedSource } from "../api";
 
 import { type DialogContentProps } from "../dialog";
@@ -16,10 +16,12 @@ export function ProjectsEmptyState({
   remote = false,
   preferredAgent,
   onCreated,
+  onOpenPlayground,
 }: {
   remote?: boolean;
   preferredAgent: AgentSelection | null;
   onCreated: (project: Project, githubPublicationError: string | null) => void;
+  onOpenPlayground?: () => void;
 }) {
   const { showCustomDialog } = useWorkspace().dialogs;
 
@@ -29,14 +31,21 @@ export function ProjectsEmptyState({
       <p className="m-0 w-full max-w-105 text-lg leading-normal text-subtext">
         {m.projects_home_no_projects_yet_create_one_to_get_started()}
       </p>
-      <Button variant="primary" className="mt-1" onClick={() => showCustomDialog({
-        component: NewProjectDialog,
-        props: { remote, preferredAgent, onCreated },
-        onConfirm: () => {},
-        onCancel: "close",
-      })}>
-        <Plus size={14} /> {m.projects_home_new_project()}
-      </Button>
+      <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+        <Button variant="primary" onClick={() => showCustomDialog({
+          component: NewProjectDialog,
+          props: { remote, preferredAgent, onCreated },
+          onConfirm: () => {},
+          onCancel: "close",
+        })}>
+          <Plus size={14} /> {m.projects_home_new_project()}
+        </Button>
+        {onOpenPlayground && (
+          <Button onClick={onOpenPlayground}>
+            <Sparkles size={14} /> {m.playground_title()}
+          </Button>
+        )}
+      </div>
     </div>
   );
 }

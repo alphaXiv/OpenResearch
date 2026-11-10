@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act } from "react";
+import { act, createElement } from "react";
 import { m } from "../src/paraglide/messages.js";
-import { clients, find, renderApp, serveApp, settle } from "./render.mjs";
+import { clients, find, render, serveApp, settle } from "./render.mjs";
+import { GitTab } from "../src/components/SettingsPage.tsx";
+import { WorkspaceDomContext } from "../src/WorkspaceDom.ts";
 
 const gitStatus = (github) => ({
   path: "/work/project",
@@ -32,6 +34,7 @@ async function gitSettings({
   organizations = () => ({ organizations: ["research-org"] }),
   enabling = () => ({ project, git: gitStatus({ enabled: true }) }),
 } = {}) {
+  document.querySelectorAll("[data-test-git-portal]").forEach((element) => element.remove());
   const requests = [];
   const route = (name, reply) => (init) => {
     requests.push(name);
@@ -50,17 +53,18 @@ async function gitSettings({
       return enabling();
     },
   });
-  await renderApp("/projects/p/settings/projects");
-  const projectPicker = document.querySelector(`button[title="${m.settings_github_manage_project()}"]`);
-  await click(projectPicker);
-  await click([...projectPicker.parentElement.querySelectorAll("button")].find((button) => button.textContent === project.name));
+  const portal = document.body.appendChild(document.createElement("div"));
+  portal.dataset.testGitPortal = "";
+  const view = await render(createElement(WorkspaceDomContext.Provider, { value: { portalContainer: portal, id: (name) => name } }, createElement(GitTab, { project, onProjectUpdate: () => {} })));
+  await settle();
   const enable = () => find("button", m.repository_enable_syncing()) ?? find("button", m.common_checking());
   return {
     enabled,
     requests,
+    workspace: view.workspace,
     enable,
-    picker: () => document.querySelector(`[role="dialog"][aria-label="${m.settings_github_new_repository_destination()}"]`),
-    owner: (name) => find(`[role="dialog"] button`, name),
+    picker: () => document.querySelector(`[aria-label="${m.settings_github_new_repository_destination()}"]`),
+    owner: (name) => find("button", name) ?? find('[role="menuitem"]', name),
     retry: () => find("button", m.app_retry()),
   };
 }
@@ -135,6 +139,12 @@ test("cached owner choices stay visible without a loading placeholder during ref
   let refresh = false;
   const held = (reply) => () => refresh ? pending() : reply();
   const view = await gitSettings({ account: held(() => ({ login: "example-user" })), organizations: held(() => ({ organizations: ["research-org"] })) });
+  await act(async () => {
+    await Promise.all([
+      view.workspace.queryClient.prefetchQuery(view.workspace.queries.githubAccountQuery()),
+      view.workspace.queryClient.prefetchQuery(view.workspace.queries.githubOrganizationsQuery()),
+    ]);
+  });
   refresh = true;
   const owners = { predicate: ({ queryKey }) => queryKey[2] === "githubAccount" || queryKey[2] === "githubOrganizations" };
   await act(async () => { for (const client of clients) void client.invalidateQueries(owners); });

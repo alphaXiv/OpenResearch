@@ -3331,6 +3331,7 @@ mod slash_skill_tests {
             paper_id: None,
             created_at: 0,
             updated_at: 0,
+            kind: "research".into(),
         }
     }
 
@@ -8344,6 +8345,7 @@ impl TurnCtx {
                 paper_id: None,
                 created_at: 0,
                 updated_at: 0,
+                kind: "research".into(),
             },
             text: String::new(),
             assistant: WireMessage {
@@ -9994,6 +9996,7 @@ mod cap_tests {
                 paper_id: None,
                 created_at: 1,
                 updated_at: 1,
+                kind: "research".into(),
             })
             .unwrap();
 
@@ -12001,6 +12004,7 @@ mod run_wakeup_tests {
                     paper_id: None,
                     created_at: 1,
                     updated_at: 1,
+                    kind: "research".into(),
                 })
                 .unwrap();
             session(&store, "owner");
@@ -12227,6 +12231,7 @@ mod run_wakeup_tests {
                 paper_id: None,
                 created_at: 1,
                 updated_at: 1,
+                kind: "research".into(),
             })
             .unwrap();
         store.upsert_run(&run("done")).unwrap();

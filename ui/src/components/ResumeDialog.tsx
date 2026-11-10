@@ -74,19 +74,28 @@ export function ResumeDialog({
   const activeRef = useRef<HTMLButtonElement>(null);
   const { data: sessions, isPending, error } = useQuery(listAllChatSessionsQuery());
   const { data: projects = [] } = useQuery(listProjectsQuery());
+  const researchProjects = useMemo(
+    () => projects.filter((project) => project.kind !== "playground"),
+    [projects],
+  );
+  const researchProjectIds = useMemo(
+    () => new Set(researchProjects.map((project) => project.id)),
+    [researchProjects],
+  );
   const { data: nativeChats = [] } = useQuery(listNativeChatsQuery());
   const [filter, setFilter] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
 
   const projectNames = useMemo(
-    () => new Map(projects.map((project) => [project.id, project.name])),
-    [projects],
+    () => new Map(researchProjects.map((project) => [project.id, project.name])),
+    [researchProjects],
   );
   const matches = useMemo<ResumeEntry[]>(() => {
     const query = filter.trim().toLowerCase();
     const hit = (haystack: string) => !query || haystack.toLowerCase().includes(query);
     const own: ResumeEntry[] = (sessions ?? [])
       .filter((session) => session.id !== activeSessionId)
+      .filter((session) => researchProjectIds.has(session.projectId))
       .filter((session) =>
         hit(`${session.title ?? ""} ${projectNames.get(session.projectId) ?? ""} ${harnessLabel(session.harness, session.harnessName)}`))
       .map((session) => ({ kind: "session", key: session.id, session }));
@@ -94,7 +103,7 @@ export function ResumeDialog({
       .filter((chat) => hit(`${chat.title ?? ""} ${chat.cwd ?? ""} ${harnessLabel(chat.harness)}`))
       .map((chat) => ({ kind: "native", key: `${chat.harness}:${chat.nativeId}`, chat }));
     return [...own, ...native];
-  }, [sessions, nativeChats, filter, activeSessionId, projectNames]);
+  }, [sessions, nativeChats, filter, activeSessionId, projectNames, researchProjectIds]);
   const firstNative = useMemo(() => matches.findIndex((entry) => entry.kind === "native"), [matches]);
   const selected = Math.min(activeIndex, Math.max(0, matches.length - 1));
 

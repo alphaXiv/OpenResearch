@@ -388,6 +388,10 @@
   "settings_page_general": "一般",
   "settings_page_git_hub_publishing": "GitHub への公開",
   "settings_page_git_token": "Git トークン",
+  "settings_page_agents": "エージェント",
+  "settings_page_integrations": "連携",
+  "settings_agents_intro": "OpenResearch が実行できるエージェントと、それらが使用できるスキルを選択します。",
+  "settings_integrations_intro": "OpenResearch が公開とファイル同期に使用する外部サービスを接続します。",
   "settings_page_harnesses": "エージェント環境",
   "settings_page_hf": "hf_…",
   "settings_page_hf_token_is_set_in_the_environment_and": "環境に設定されている HF_TOKEN が、ここに保存したトークンより優先されます。",
@@ -1762,5 +1766,10 @@
   "share_post_x": "X に投稿",
   "share_post_text": "{name}：OpenResearch で研究プロジェクト全体を開く",
   "open_shared_link_body": "openresearch.sh で公開された「{name}」を新しいプロジェクトとして開きます。",
-  "open_shared_link_publisher": "{name} が共有"
+  "open_shared_link_publisher": "{name} が共有",
+  "playground_title": "プレイグラウンド",
+  "playground_new_chat": "新しいプレイグラウンドチャット",
+  "playground_discard_title": "チャットを破棄",
+  "playground_discard_confirm": "「{title}」を破棄しますか？ファイルと履歴は完全に削除されます。",
+  "playground_discard_action": "破棄"
 }

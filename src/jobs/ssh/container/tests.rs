@@ -467,6 +467,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
             paper_id: None,
             created_at: 1,
             updated_at: 1,
+            kind: "research".into(),
         })
         .unwrap();
     store

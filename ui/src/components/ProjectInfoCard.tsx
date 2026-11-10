@@ -7,12 +7,13 @@ import { useFileManagerLabel } from "./useFileManagerLabel";
 
 import { Menu } from "@base-ui/react/menu";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
-import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Share2, Trash2, X } from "lucide-react";
+import { Folder, FolderOpen, GitBranch, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Share2, Trash2, X } from "lucide-react";
 import { type Project } from "../api";
 import { downloadFile } from "../download";
 import { m } from "../paraglide/messages.js";
 import { ShareProjectDialog } from "./ShareProjectDialog";
 import { Button, DialogContent, DialogTitle, Spinner, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
+import { GitTab } from "./SettingsPage";
 
 function deleteExplanation(project: Project) {
   const synced = project.githubEnabled && (project.githubUrl || (project.githubOwner && project.githubRepo));
@@ -100,6 +101,17 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
               <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
                 void revealFileInManager(project.id, ".").catch((err: unknown) => showAlert(err instanceof Error ? err.message : String(err), "error"));
               }}><span className="flex items-center gap-2"><FolderOpen size={16} />{revealLabel}</span></Menu.Item>
+              {project.kind !== "playground" && (
+                <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
+                  setMenuOpen(false);
+                  showCustomDialog({
+                    component: ProjectGitHubDialog,
+                    props: { project, returnFocus: triggerRef },
+                    onCancel: "close",
+                    onConfirm: () => {},
+                  });
+                }}><span className="flex items-center gap-2"><GitBranch size={16} />{m.settings_page_git_hub_publishing()}</span></Menu.Item>
+              )}
               <Menu.Separator className="my-1 border-t border-border" />
               <Menu.Item nativeButton render={<MenuItem danger className="data-highlighted:bg-surface" />} onClick={remove}><span className="flex items-center gap-2"><Trash2 size={16} />{m.projects_home_delete_project_action()}</span></Menu.Item>
             </Menu.Popup>
@@ -113,6 +125,19 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
         onClick={onNewChat}><Plus size={16} /></IconButton>
     </Tooltip>
   </>;
+}
+
+function ProjectGitHubDialog({ project: initialProject, returnFocus, cancel }: DialogContentProps<void> & { project: Project; returnFocus: RefObject<HTMLButtonElement | null> }) {
+  const { queries: { listProjectsQuery }, queryClient } = useWorkspace();
+  const [project, setProject] = useState(initialProject);
+  return <DialogContent finalFocus={returnFocus} className="max-h-[calc(100vh-2.5rem)] w-[min(42rem,calc(100vw-2rem))] overflow-y-auto text-text">
+    <DialogTitle>{m.settings_page_git_hub_publishing()}</DialogTitle>
+    <div className="mt-4"><GitTab project={project} onProjectUpdate={(next) => {
+      setProject(next);
+      void queryClient.invalidateQueries(listProjectsQuery());
+    }} /></div>
+    <div className="mt-6 flex justify-end"><Button type="button" variant="ghost" onClick={cancel}>{m.common_cancel()}</Button></div>
+  </DialogContent>;
 }
 
 function DeleteProjectDialog({ project, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage: error }: DialogContentProps<boolean> & { project: Project; returnFocus: RefObject<HTMLButtonElement | null> }) {

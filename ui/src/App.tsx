@@ -19,6 +19,7 @@ import { chatSearchRanges } from "./chatSearch";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Viewport } from "@xyflow/react";
 
+import { getPlaygroundDraftProject, setPlaygroundDraftProject } from "./playgroundDraft";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   getTaskWorkspace,
@@ -106,7 +107,6 @@ import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab, type CodeView } from "./components/CodeTab";
 import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
 import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
-import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { TabStrip } from "./components/TabStrip";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
@@ -266,6 +266,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const {
     updateUiState,
+    createPlaygroundProject,
     setExperimentArchived,
     deleteExperiment,
     captureUiEvent,
@@ -300,8 +301,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const router = useRouter();
   const location = useRouterState({ select: (state) => state.location });
   const destination = parseDestination(location.pathname);
-  const mainView = destination?.kind === "skills" ? "skills" : destination?.kind === "settings" ? destination.section ?? "settings" : "chat";
+  const mainView = destination?.kind === "skills" ? "agents" : destination?.kind === "settings" ? destination.section ?? "settings" : "chat";
   const rememberedSessionRef = useRef<string | null>(null);
+  const playgroundCreationRef = useRef<Promise<Project> | null>(null);
   const rememberedProjectRef = useRef(projectId);
   if (rememberedProjectRef.current !== projectId) {
     rememberedProjectRef.current = projectId;
@@ -346,12 +348,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const setProjectId = useCallback((id: string | null) => {
     void router.navigate({ href: id ? `/projects/${encodeURIComponent(id)}` : "/projects" });
   }, [router]);
-  const setMainView = useCallback((view: "chat" | "skills" | SettingsTab) => {
+  const setMainView = useCallback((view: "chat" | SettingsTab) => {
     if (!projectId) return;
     if (view === "chat") {
       const id = rememberedSessionRef.current;
       void router.navigate({ href: taskLocation(projectId, id, getTaskWorkspace(workspaceRef.current, id ?? "new")?.active) });
-    } else void router.navigate({ href: `/projects/${encodeURIComponent(projectId)}/${view === "skills" ? "skills" : `settings/${view}`}` });
+    } else void router.navigate({ href: `/projects/${encodeURIComponent(projectId)}/settings/${view}` });
   }, [router, projectId]);
 
   const locale = useLocale();
@@ -788,6 +790,39 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     const nextPane = sameProject && options?.replace && sessionId && activeSessionId === null ? navigationRef.current.pane : remembered;
     void router.navigate({ href: taskLocation(target, sessionId, nextPane), replace: sameProject && options?.replace });
   }, [router, projectId, activeSessionId, captureWorkspace]);
+  const onNewPlaygroundChat = useCallback(async () => {
+    const current = projects?.find((project) => project.id === projectId);
+    if (current?.kind === "playground" && !activeSessionId) {
+      return;
+    }
+    const draftId = getPlaygroundDraftProject();
+    let draft = draftId ? projects?.find((project) => project.id === draftId && project.kind === "playground") : undefined;
+    if (draftId && !draft) {
+      const fresh = await queryClient.fetchQuery({ ...listProjectsQuery(), staleTime: 0 }).catch(() => null);
+      draft = fresh?.find((project) => project.id === draftId && project.kind === "playground");
+    }
+    if (draft) {
+      setMobileRailOpen(false);
+      onActiveSessionChange(null, { projectId: draft.id });
+      return;
+    }
+    try {
+      let pending = playgroundCreationRef.current;
+      if (!pending) {
+        pending = createPlaygroundProject().finally(() => {
+          if (playgroundCreationRef.current === pending) playgroundCreationRef.current = null;
+        });
+        playgroundCreationRef.current = pending;
+      }
+      const project = await pending;
+      setPlaygroundDraftProject(project.id);
+      setProjects((current) => (current ? upsert(current, project) : [project]));
+      setMobileRailOpen(false);
+      onActiveSessionChange(null, { projectId: project.id });
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [activeSessionId, onActiveSessionChange, projectId, projects, setProjects]);
   useEffect(() => {
     if (workspaceReady && destination?.kind !== "task" && !rememberedSessionRef.current && workspaceRef.current.lastTaskId && sessions?.includes(workspaceRef.current.lastTaskId)) {
       rememberedSessionRef.current = workspaceRef.current.lastTaskId;
@@ -876,7 +911,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [projectId],
   );
   useEffect(() => {
-    if (mainView !== "chat" && mainView !== "skills") reportFirstAction("open_settings");
+    if (mainView !== "chat") reportFirstAction("open_settings");
   }, [mainView, reportFirstAction]);
 
   const openExperimentsTab = useCallback((replace = false) => {
@@ -1829,7 +1864,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   function onProjectCreated(project: Project, publicationError: string | null) {
     setProjects((cur) => (cur ? upsert(cur, project) : [project]));
-    void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}` });
+    void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/integrations" : ""}` });
     if (publicationError) {
       showAlert(publicationError, "error");
     }
@@ -2136,6 +2171,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               }
             }}
             onNewProject={() => { setMobileRailOpen(false); openNewProject(); }}
+            onNewPlaygroundChat={() => void onNewPlaygroundChat()}
             mainView={mainView}
             onSelectMainView={(view) => { setMobileRailOpen(false); selectMainView(view); }}
             onOpenFile={openChatFile}
@@ -2162,16 +2198,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             preferredAutonomy={uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
             onPreferredAutonomyChange={persistPreferredAutonomy}
           >
-            {mainView === "skills" ? (
-              <SkillsTab />
-            ) : mainView !== "chat" ? (
+            {mainView !== "chat" ? (
               <SettingsView
                 remote={runtime.kind === "ssh"}
                 tab={mainView}
                 project={activeProject}
-                onProjectUpdate={(project) => {
-                  setProjects((current) => (current ? upsert(current, project) : [project]));
-                }}
                 onSelectTab={selectMainView}
               />
             ) : null}

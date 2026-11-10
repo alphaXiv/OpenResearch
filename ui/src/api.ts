@@ -71,6 +71,8 @@ export interface Project {
   paperId?: string | null;
   createdAt: number;
   updatedAt: number;
+  /** `playground` projects are hidden per-chat workspaces; treat as research. */
+  kind?: "research" | "playground";
 }
 
 export interface Experiment {
@@ -2578,6 +2580,20 @@ export function createApi(
       (r) => r.session,
     );
 
+  const createPlaygroundProject = () =>
+    post<{ project: Project }>("/api/playground/projects", {}).then((r) => r.project);
+
+  const createPlaygroundChat = (opts: TurnOptions & { autonomy?: Autonomy } = {}) =>
+    post<{ project: Project; session: ChatSession }>("/api/playground/chats", opts);
+
+  const discardPlaygroundChat = (sessionId: string, projectId: string) =>
+    writeResponse(`/api/playground/chats/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).then((r) =>
+      json<{ ok: boolean; artifactsError?: string }>(r).then((result) => {
+        removeProject(projectId);
+        return result;
+      }),
+    );
+
   const getChatSession = (sessionId: string) =>
     get<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`).then((r) => r.session);
 
@@ -2920,6 +2936,9 @@ export function createApi(
     searchChatMessages,
     listSidebarChatSessions,
     createChatSession,
+    createPlaygroundProject,
+    createPlaygroundChat,
+    discardPlaygroundChat,
     getChatSession,
     deleteChatSession,
     setChatSessionArchived,

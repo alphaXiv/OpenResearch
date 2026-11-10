@@ -388,6 +388,10 @@
   "settings_page_general": "일반",
   "settings_page_git_hub_publishing": "GitHub 게시",
   "settings_page_git_token": "Git 토큰",
+  "settings_page_agents": "에이전트",
+  "settings_page_integrations": "연동",
+  "settings_agents_intro": "OpenResearch가 실행할 수 있는 에이전트와 사용할 수 있는 스킬을 선택하세요.",
+  "settings_integrations_intro": "OpenResearch가 게시 및 파일 동기화에 사용하는 외부 서비스를 연결하세요.",
   "settings_page_harnesses": "에이전트 환경",
   "settings_page_hf": "hf_…",
   "settings_page_hf_token_is_set_in_the_environment_and": "환경에 설정된 HF_TOKEN이 여기에 저장한 토큰보다 우선합니다.",
@@ -1762,5 +1766,10 @@
   "share_post_x": "X에 게시",
   "share_post_text": "{name}: OpenResearch에서 전체 연구 프로젝트 열기",
   "open_shared_link_body": "openresearch.sh에 게시된 “{name}”을(를) 새 프로젝트로 엽니다.",
-  "open_shared_link_publisher": "{name} 님이 공유함"
+  "open_shared_link_publisher": "{name} 님이 공유함",
+  "playground_title": "플레이그라운드",
+  "playground_new_chat": "새 플레이그라운드 채팅",
+  "playground_discard_title": "채팅 버리기",
+  "playground_discard_confirm": "“{title}”을(를) 버리시겠습니까? 파일과 기록이 영구적으로 삭제됩니다.",
+  "playground_discard_action": "버리기"
 }

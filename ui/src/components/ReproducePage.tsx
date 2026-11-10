@@ -30,7 +30,7 @@ export function ReproducePage({ paperId }: { paperId: string | null }) {
   const stateQuery = useQuery(getUiStateQuery());
   useQuery({ ...resolvePaperQuery(paperId ?? ""), enabled: Boolean(paperId) });
   const shownPaper = useRef<string | null>(null);
-  const projects = projectsQuery.data;
+  const projects = projectsQuery.data?.filter((project) => project.kind !== "playground");
   const state = stateQuery.data;
   // A first launch walks through onboarding instead; the link can be opened again after.
   const onboarding = projects?.length === 0 && state?.onboardingCompleted === false;
@@ -57,7 +57,7 @@ export function ReproducePage({ paperId }: { paperId: string | null }) {
           }
           queryClient.setQueryData(projectsOptions.queryKey, (cur) => [...(cur ?? []).filter((p) => p.id !== project.id), project]);
           void navigate({
-            href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}`,
+            href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/integrations" : ""}`,
             replace: true,
           });
           if (publicationError) showAlert(publicationError, "error");

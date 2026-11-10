@@ -2,7 +2,7 @@ import { useWorkspace } from "./workspace";
 import { isCancelledError, useQuery } from "@tanstack/react-query";
 
 import { useRouteContext, Link, useNavigate, type ErrorComponentProps } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useRuntime } from "./RemoteRuntime";
 
@@ -67,6 +67,7 @@ export function ResumeProject({ projectId }: { projectId: string }) { return <Re
 
 export function ProjectsPage() {
   const { listProjectsQuery, getUiStateQuery } = useWorkspace().queries;
+  const { createPlaygroundProject } = useWorkspace().api;
 
   const runtime = useRuntime();
   const navigate = useNavigate();
@@ -74,15 +75,17 @@ export function ProjectsPage() {
   const projectsOptions = listProjectsQuery();
   const projectsQuery = useQuery(projectsOptions);
   const stateQuery = useQuery(getUiStateQuery());
-  const projects = projectsQuery.data;
+  const allProjects = projectsQuery.data;
+  const projects = allProjects?.filter((project) => project.kind !== "playground");
+  const playgrounds = allProjects?.filter((project) => project.kind === "playground") ?? [];
   const state = stateQuery.data;
   const noProjects = projects?.length === 0;
   const onboarded = state?.onboardingCompleted ?? false;
   // The walkthrough is a one-time setup, so the persisted flag gates it and not
   // the project count: onboarding installs a demo project, and counting projects
   // replayed the whole walkthrough the moment that demo was deleted.
-  const onboarding = runtime.kind === "local" && noProjects && !onboarded;
-  const agentSetup = runtime.kind === "ssh" && noProjects && !state?.preferredAgent;
+  const onboarding = runtime.kind === "local" && noProjects && playgrounds.length === 0 && !onboarded;
+  const agentSetup = runtime.kind === "ssh" && noProjects && playgrounds.length === 0 && !state?.preferredAgent;
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
   const { status } = useUpdateStatus(runtime.kind === "local");
@@ -90,6 +93,31 @@ export function ProjectsPage() {
     document.title = "OpenResearch";
   }, []);
   const openProject = (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } });
+  const playgroundCreationRef = useRef<ReturnType<typeof createPlaygroundProject> | null>(null);
+  const openPlayground = async () => {
+    const existing = [...playgrounds].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (existing) {
+      openProject(existing.id);
+      return;
+    }
+    try {
+      let pending = playgroundCreationRef.current;
+      if (!pending) {
+        pending = createPlaygroundProject().finally(() => {
+          if (playgroundCreationRef.current === pending) playgroundCreationRef.current = null;
+        });
+        playgroundCreationRef.current = pending;
+      }
+      const project = await pending;
+      queryClient.setQueryData(projectsOptions.queryKey, (current) => {
+        const rest = (current ?? []).filter((candidate) => candidate.id !== project.id);
+        return [...rest, project];
+      });
+      openProject(project.id);
+    } catch (cause) {
+      showAlert(cause instanceof Error ? cause.message : String(cause), "error");
+    }
+  };
 
   return (
     <div className="app flex flex-col h-full">
@@ -116,10 +144,11 @@ export function ProjectsPage() {
               onCreated={(project, publicationError) => {
                 queryClient.setQueryData(projectsOptions.queryKey, (cur) => [...(cur ?? []).filter((p) => p.id !== project.id), project]);
                 void navigate({
-                  href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}`,
+                  href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/integrations" : ""}`,
                 });
                 if (publicationError) showAlert(publicationError, "error");
               }}
+              onOpenPlayground={() => void openPlayground()}
             />
           ) : (
             <ResumeGlobal />

@@ -388,6 +388,10 @@
   "settings_page_general": "Общие",
   "settings_page_git_hub_publishing": "Публикация на GitHub",
   "settings_page_git_token": "Токен Git",
+  "settings_page_agents": "Агенты",
+  "settings_page_integrations": "Интеграции",
+  "settings_agents_intro": "Выберите агентов, которых может запускать OpenResearch, и навыки, которые они могут использовать.",
+  "settings_integrations_intro": "Подключите внешние сервисы, которые OpenResearch использует для публикации и синхронизации файлов.",
   "settings_page_harnesses": "Агенты",
   "settings_page_hf": "hf_…",
   "settings_page_hf_token_is_set_in_the_environment_and": "HF_TOKEN задан в окружении и имеет приоритет над токеном, сохранённым здесь.",
@@ -1762,5 +1766,10 @@
   "share_post_x": "Опубликовать в X",
   "share_post_text": "{name}: откройте весь исследовательский проект в OpenResearch",
   "open_shared_link_body": "Откройте «{name}», опубликованный на openresearch.sh, как новый проект.",
-  "open_shared_link_publisher": "Поделился(-ась): {name}"
+  "open_shared_link_publisher": "Поделился(-ась): {name}",
+  "playground_title": "Песочница",
+  "playground_new_chat": "Новый чат в песочнице",
+  "playground_discard_title": "Удалить чат",
+  "playground_discard_confirm": "Удалить «{title}»? Файлы и история будут удалены безвозвратно.",
+  "playground_discard_action": "Удалить"
 }

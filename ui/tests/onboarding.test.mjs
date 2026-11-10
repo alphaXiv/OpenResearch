@@ -52,7 +52,7 @@ test("creating a project from the empty state opens it", async () => {
   await act(() => document.querySelector('[role="dialog"] form').requestSubmit());
   await settle();
 
-  assert.equal(location.pathname, "/projects/new%20id/settings/projects");
+  assert.equal(location.pathname, "/projects/new%20id/settings/integrations");
   assert.match(document.body.textContent, /publish failed/);
 });
 

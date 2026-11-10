@@ -388,6 +388,10 @@
   "settings_page_general": "عمومی",
   "settings_page_git_hub_publishing": "انتشار در GitHub",
   "settings_page_git_token": "توکن Git",
+  "settings_page_agents": "عامل‌ها",
+  "settings_page_integrations": "یکپارچه‌سازی‌ها",
+  "settings_agents_intro": "عامل‌هایی را انتخاب کنید که OpenResearch می‌تواند اجرا کند و مهارت‌هایی را که می‌توانند استفاده کنند.",
+  "settings_integrations_intro": "سرویس‌های خارجی را که OpenResearch برای انتشار و همگام‌سازی فایل استفاده می‌کند متصل کنید.",
   "settings_page_harnesses": "ابزارهای عامل",
   "settings_page_hf": "hf_…",
   "settings_page_hf_token_is_set_in_the_environment_and": "مقدار HF_TOKEN در محیط تنظیم شده و هر توکن ذخیره‌شده در اینجا را بازنویسی می‌کند.",
@@ -1762,5 +1766,10 @@
   "share_post_x": "ارسال در X",
   "share_post_text": "{name}: پروژهٔ پژوهشی کامل را در OpenResearch باز کنید",
   "open_shared_link_body": "«{name}» منتشرشده در openresearch.sh را به‌عنوان پروژهٔ جدید باز کنید.",
-  "open_shared_link_publisher": "به اشتراک گذاشته‌شده توسط {name}"
+  "open_shared_link_publisher": "به اشتراک گذاشته‌شده توسط {name}",
+  "playground_title": "محیط آزمایش",
+  "playground_new_chat": "گفتگوی جدید محیط آزمایش",
+  "playground_discard_title": "دور انداختن گفتگو",
+  "playground_discard_confirm": "«{title}» دور انداخته شود؟ فایل‌ها و تاریخچهٔ آن برای همیشه حذف می‌شوند.",
+  "playground_discard_action": "دور انداختن"
 }
