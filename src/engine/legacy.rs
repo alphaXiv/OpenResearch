@@ -135,16 +135,17 @@ impl Engine {
                 return Ok(());
             }
             let backend = descriptor.kind.trim_end_matches("_job");
-            let recovered = store
-                .submission_handle(id)?
-                .map(|json| BackendDescriptor::parse(&json).map(|parsed| (json, parsed)));
+            let recovered = store.submission_handle(id).and_then(|json| {
+                json.map(|json| BackendDescriptor::parse(&json).map(|parsed| (json, parsed)))
+                    .transpose()
+            });
             let reason = match recovered {
-                Some(Ok((json, parsed))) if parsed.job_id.is_some() => {
+                Ok(Some((json, parsed))) if parsed.job_id.is_some() => {
                     store.set_backend_json(id, &json)?;
                     tx.commit()?;
                     return Ok(());
                 }
-                Some(Err(error)) => format!(
+                Err(error) => format!(
                     "orx 0.2 kept this run's {backend} handle in a recovery file that could not be read ({error})."
                 ),
                 _ => format!("Submission was interrupted before the {backend} handle was recorded."),

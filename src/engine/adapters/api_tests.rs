@@ -1226,6 +1226,12 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
         .observe_runs(&adapter, &watched, Duration::from_secs(1))
         .await
         .unwrap();
+    if !watching {
+        assert!(matches!(
+            engine.load(&id).unwrap().1.contact,
+            crate::store::Contact::Unreconciled { .. }
+        ));
+    }
     if initial_stage == "done" {
         crate::engine::runtime::Runtime::collect_log(
             &root.join("store"),

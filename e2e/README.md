@@ -1,7 +1,7 @@
 # End-to-end tests
 
 Playwright drives the real dashboard against the real `orx up`: the Rust server, its SQLite
-store, Git worktrees, the chat host, `orx exp run` and its detached supervisor. Only what orx
+store, Git worktrees, the chat host, `orx exp run` and the run engine. Only what orx
 does not own is faked.
 
 ```text

@@ -1506,8 +1506,9 @@ fn a_legacy_launch_without_a_handle_takes_its_recovery_file_or_fails_once_settle
     f.legacy_run("lost", r#"{"kind":"modal_job"}"#);
     f.legacy_run("kept", r#"{"kind":"local_job"}"#);
     f.legacy_run("recent", r#"{"kind":"hf_job"}"#);
+    f.legacy_run("unreadable", r#"{"kind":"modal_job"}"#);
     let handles = f.dir.join("submission-handles");
-    std::fs::create_dir_all(&handles).unwrap();
+    std::fs::create_dir_all(handles.join("unreadable.json")).unwrap();
     std::fs::write(
         handles.join("kept.json"),
         r#"{"kind":"local_job","jobId":"/runs/kept"}"#,
@@ -1534,12 +1535,25 @@ fn a_legacy_launch_without_a_handle_takes_its_recovery_file_or_fails_once_settle
         Some("/runs/kept")
     );
     assert_eq!(f.status("recent"), "running");
+    let unreadable = f.store().get_run("unreadable").unwrap().unwrap();
+    assert_eq!(unreadable.status, "failed");
+    assert!(unreadable
+        .result_markdown
+        .unwrap()
+        .contains("recovery file that could not be read"));
     assert!(!f.engine.holds("lost") && !f.engine.holds("kept"));
-    let notices = f.deliver();
-    assert_eq!(notices.len(), 1);
+    let mut notices: Vec<_> = f
+        .deliver()
+        .into_iter()
+        .map(|notice| (notice.run_id, notice.kind))
+        .collect();
+    notices.sort();
     assert_eq!(
-        (notices[0].run_id.as_str(), notices[0].kind.as_str()),
-        ("lost", TERMINAL)
+        notices,
+        [
+            ("lost".to_string(), TERMINAL.to_string()),
+            ("unreadable".to_string(), TERMINAL.to_string())
+        ]
     );
 
     f.engine.scan_legacy().unwrap();
