@@ -571,15 +571,7 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
     // The per-harness wall clock joins the fill's probe timings as the
     // `"total"` row — the snapshot pass is covered by its own pass event.
     if !snapshot {
-        let telemetry_id = match harness.id() {
-            "claude-code" => Some("claude-code"),
-            "codex" => Some("codex"),
-            "opencode" => Some("opencode"),
-            "cursor" => Some("cursor"),
-            "antigravity" => Some("antigravity"),
-            _ => None,
-        };
-        if let Some(telemetry_id) = telemetry_id {
+        if let Some(telemetry_id) = crate::telemetry::harness::wire_id(harness.id()) {
             detect::record_probe_timing(telemetry_id, "total", start.elapsed().as_millis() as u64);
         }
     }

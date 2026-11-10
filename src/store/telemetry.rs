@@ -675,6 +675,36 @@ impl Store {
         Ok(())
     }
 
+    /// One prompt response's samples `(model, counters, complete)`, all or none; a replay of the
+    /// response rewrites the same rows.
+    pub(crate) fn record_acp_prompt_usage(
+        &self,
+        execution_id: &str,
+        harness: &str,
+        samples: &[(Option<String>, TokenUsage, bool)],
+    ) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        for (index, (model, usage, complete)) in samples.iter().enumerate() {
+            let sample_id = format!("acp:prompt:{index}");
+            self.record_usage_sample(
+                execution_id,
+                &sample_id,
+                harness,
+                model.as_deref(),
+                None,
+                usage,
+            )?;
+            tx.execute(
+                "UPDATE chat_usage_samples SET complete = ?3
+                 WHERE execution_id = ?1 AND sample_id = ?2
+                   AND EXISTS (SELECT 1 FROM chat_usage_executions WHERE execution_id = ?1 AND outcome IS NULL)",
+                params![execution_id, sample_id, complete],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn record_usage_sample(
         &self,
         execution_id: &str,
@@ -1450,6 +1480,71 @@ mod tests {
             .query_row("SELECT model FROM chat_usage_samples", [], |row| row.get(0))
             .unwrap();
         assert_eq!(model, "claude-opus-5-5");
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn acp_prompt_usage_records_each_model_once_and_all_or_none() {
+        let dir = std::env::temp_dir().join(format!("orx-acp-usage-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .begin_usage_execution("execution", "turn", "acp:custom")
+            .unwrap();
+        let usage = |input, output| TokenUsage {
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            reasoning_tokens: None,
+        };
+        let models = [
+            (Some("claude-haiku-5-5".to_string()), usage(1215, 20), true),
+            (
+                Some("claude-fable-5-1".to_string()),
+                usage(40332, 127),
+                true,
+            ),
+        ];
+        for _ in 0..2 {
+            store
+                .record_acp_prompt_usage("execution", "acp:custom", &models)
+                .unwrap();
+        }
+        // The second sample is invalid, so the first does not replace the recorded row either.
+        let invalid = TokenUsage {
+            cache_read_tokens: Some(9),
+            ..usage(1, 1)
+        };
+        assert!(store
+            .record_acp_prompt_usage(
+                "execution",
+                "acp:custom",
+                &[(None, usage(7, 7), false), (None, invalid, false)]
+            )
+            .is_err());
+        store.finalize_turn_usage("turn", "done").unwrap();
+        store
+            .record_acp_prompt_usage("execution", "acp:custom", &[(None, usage(7, 7), false)])
+            .unwrap();
+        let samples: Vec<(Option<String>, TokenUsage, bool)> = store
+            .conn
+            .prepare("SELECT model, usage_json, complete FROM chat_usage_samples ORDER BY execution_id, sample_id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .unwrap()
+            .map(|row| {
+                let (model, json, complete) = row.unwrap();
+                (model, serde_json::from_str(&json).unwrap(), complete)
+            })
+            .collect();
+        assert_eq!(samples, models);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
