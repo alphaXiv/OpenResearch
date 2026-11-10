@@ -925,10 +925,21 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_idle_stop_spares_only_commands_in_their_own_sessions() {
-        // A killed command can linger as a zombie until init reaps it.
+        // An orphan stays a zombie under an init that never reaps it, as in some containers.
+        fn running(pid: libc::pid_t) -> bool {
+            let state = crate::process::command("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&state.stdout)
+                .trim()
+                .chars()
+                .next()
+                .is_some_and(|state| state != 'Z')
+        }
         async fn exits(pid: libc::pid_t) -> bool {
             for _ in 0..200 {
-                if unsafe { libc::kill(pid, 0) } != 0 {
+                if !running(pid) {
                     return true;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -970,11 +981,7 @@ exec "$@""#
                 "a command in the agent's group outlived it"
             );
             if idle {
-                assert_eq!(
-                    unsafe { libc::kill(detached, 0) },
-                    0,
-                    "an idle stop killed a detached command"
-                );
+                assert!(running(detached), "an idle stop killed a detached command");
                 unsafe { libc::kill(detached, libc::SIGKILL) };
             } else {
                 assert!(exits(detached).await, "a detached command outlived a stop");
