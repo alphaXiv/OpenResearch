@@ -100,7 +100,7 @@ impl TurnSlot {
         now: Instant,
         idle_timeout: Duration,
     ) -> Option<LifecycleStopReason> {
-        if self.sender.is_some() || !self.unclaimed.is_empty() {
+        if self.busy() {
             return None;
         }
         if now.duration_since(started_at) >= STALE_AFTER {
@@ -114,6 +114,11 @@ impl TurnSlot {
 
     /// Registers the turn and hands it the held lines; returns whether there
     /// were any, from a segment Claude Code began or is about to begin.
+    /// A turn is listening, or held output waits for one.
+    fn busy(&self) -> bool {
+        self.sender.is_some() || !self.unclaimed.is_empty()
+    }
+
     fn register(&mut self, sender: mpsc::UnboundedSender<TurnEvent>) -> bool {
         let adopted = !self.unclaimed.is_empty();
         for line in self.unclaimed.drain(..) {
@@ -993,7 +998,7 @@ impl ClaudeHost {
             }
             let exited = !matches!(client.child.lock().await.try_wait(), Ok(None));
             let turn = client.turn.lock().unwrap();
-            if turn.sender.is_some() {
+            if turn.busy() {
                 continue;
             }
             let idle_since = turn.idle_since;
@@ -1039,7 +1044,7 @@ impl ClaudeHost {
                     .is_some_and(|current| Arc::ptr_eq(current, &client))
                     && {
                         let turn = client.turn.lock().unwrap();
-                        turn.sender.is_none() && turn.idle_since == idle_since
+                        !turn.busy() && turn.idle_since == idle_since
                     };
                 if !untouched {
                     continue;
@@ -1293,7 +1298,14 @@ impl ClaudeHost {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "authentication-changed").await;
             } else {
-                match child_action(&live.config(), &spec.config) {
+                // Held output can only be read from the worker that wrote it;
+                // the next turn applies the new settings.
+                let action = if live.turn.lock().unwrap().unclaimed.is_empty() {
+                    child_action(&live.config(), &spec.config)
+                } else {
+                    ChildAction::Reuse
+                };
+                match action {
                     ChildAction::Reuse => {
                         let latest = self.auth_snapshot();
                         if latest.state == HarnessAuthState::Ready
@@ -2048,6 +2060,51 @@ mod tests {
         assert!(!clients.contains_key("older"));
         drop(clients);
         assert!(older.terminated.load(Ordering::Acquire));
+        host.shutdown().await;
+    }
+
+    /// Held output can only be read from the worker that wrote it, so neither
+    /// the idle limit nor a settings change replaces that worker first.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worker_holding_output_survives_the_reaper_and_new_settings() {
+        let now = Instant::now();
+        let host = Arc::new(ClaudeHost::new());
+        host.auth.write().unwrap().state = HarnessAuthState::Ready;
+        let recent = test_client("recent", now, now - Duration::from_secs(40), "sleep 600").await;
+        let held = test_client("held", now, now - Duration::from_secs(60), "sleep 600").await;
+        install_test_client(&host, recent.clone()).await;
+        install_test_client(&host, held.clone()).await;
+        let init = json!({"type": "system", "subtype": "init"});
+        held.route_line(init.clone());
+
+        host.reap_expired_at(now, IdlePolicy::LOW_MEMORY).await;
+        assert!(host.inner.lock().await.contains_key("held"));
+
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let route = host
+            .acquire_turn(
+                SpawnSpec {
+                    chat,
+                    session_id: "held".into(),
+                    repo: PathBuf::new(),
+                    playbook: PathBuf::new(),
+                    resume: None,
+                    config: cfg(Some(PermissionMode::Plan), None, None, false),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(route.client(), &held));
+        assert!(route.adopted());
+        assert_eq!(lines(&mut rx), [init]);
+        drop(route);
         host.shutdown().await;
     }
 
