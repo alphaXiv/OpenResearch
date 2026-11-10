@@ -58,6 +58,10 @@ const TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 const STALE_AFTER: Duration = Duration::from_secs(90 * 60);
 
+/// How long a child is kept after a background task finishes for the segment
+/// reporting it to begin; the CLI starts it at once.
+const TASK_REPORT_GRACE: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleStopReason {
     IdleExpired,
@@ -80,6 +84,19 @@ impl LifecycleStopReason {
 struct TurnSlot {
     sender: Option<mpsc::UnboundedSender<TurnEvent>>,
     idle_since: Instant,
+    /// A turn has ended on this child, so a segment it starts with no turn
+    /// listening is its own continuation rather than startup output.
+    served: bool,
+    /// Background tasks the child reported started and not yet finished. It
+    /// resumes on its own when one finishes, so it must outlive them, even one
+    /// that never ends.
+    background: HashSet<String>,
+    /// A segment the child began on its own after a turn ended, held until a
+    /// turn claims it.
+    unclaimed: Option<Vec<Value>>,
+    /// When a background task last finished. The child resumes to report it a
+    /// moment later, so it is kept until then.
+    task_finished_at: Option<Instant>,
 }
 
 impl TurnSlot {
@@ -87,6 +104,10 @@ impl TurnSlot {
         Self {
             sender: None,
             idle_since: now,
+            served: false,
+            background: HashSet::new(),
+            unclaimed: None,
+            task_finished_at: None,
         }
     }
 
@@ -96,7 +117,7 @@ impl TurnSlot {
         now: Instant,
         idle_timeout: Duration,
     ) -> Option<LifecycleStopReason> {
-        if self.sender.is_some() {
+        if !self.idle(now) {
             return None;
         }
         if now.duration_since(started_at) >= STALE_AFTER {
@@ -108,8 +129,21 @@ impl TurnSlot {
         None
     }
 
-    fn register(&mut self, sender: mpsc::UnboundedSender<TurnEvent>) {
+    fn idle(&self, now: Instant) -> bool {
+        let resuming = self
+            .task_finished_at
+            .is_some_and(|at| now.saturating_duration_since(at) < TASK_REPORT_GRACE);
+        self.sender.is_none() && self.background.is_empty() && self.unclaimed.is_none() && !resuming
+    }
+
+    /// Hands any held continuation to the new turn first; returns whether the
+    /// child has served a turn before.
+    fn register(&mut self, sender: mpsc::UnboundedSender<TurnEvent>) -> bool {
+        for line in self.unclaimed.take().into_iter().flatten() {
+            let _ = sender.send(TurnEvent::Line(line));
+        }
         self.sender = Some(sender);
+        self.served
     }
 
     fn release(&mut self, sender: &mpsc::UnboundedSender<TurnEvent>, now: Instant) -> bool {
@@ -122,6 +156,48 @@ impl TurnSlot {
         }
         self.sender = None;
         self.idle_since = now;
+        self.served = true;
+        true
+    }
+
+    fn track_background(&mut self, event: &Value, now: Instant) {
+        if event.get("type").and_then(Value::as_str) != Some("system") {
+            return;
+        }
+        let task_id = || {
+            event
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        match event.get("subtype").and_then(Value::as_str) {
+            Some("task_started") => self.background.extend(task_id()),
+            Some("task_notification") => {
+                if let Some(id) = task_id() {
+                    self.background.remove(&id);
+                }
+                self.task_finished_at = Some(now);
+            }
+            Some("background_tasks_changed") => {
+                if let Some(tasks) = event.get("tasks").and_then(Value::as_array) {
+                    self.background = tasks
+                        .iter()
+                        .filter_map(|task| task.get("task_id").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a line no turn is listening for starts a segment the child
+    /// began on its own; if so it is held for a turn to record.
+    fn starts_continuation(&mut self, event: &Value) -> bool {
+        if !self.served || !starts_segment(event) {
+            return false;
+        }
+        self.unclaimed = Some(vec![event.clone()]);
         true
     }
 }
@@ -156,6 +232,9 @@ pub struct SpawnSpec {
     pub resume: Option<String>,
     pub config: SpawnConfig,
 }
+
+/// A segment a child started on its own, routed to the turn that records it.
+pub type ClaudeContinuation = (TurnRoute, mpsc::UnboundedReceiver<TurnEvent>);
 
 /// One event delivered to the session's in-flight turn.
 #[derive(Debug)]
@@ -424,11 +503,16 @@ impl ClaudeClient {
         tx: mpsc::UnboundedSender<TurnEvent>,
         reaper_notify: Arc<Notify>,
     ) -> TurnRoute {
-        self.turn.lock().unwrap().register(tx.clone());
+        let served = self.turn.lock().unwrap().register(tx.clone());
+        // The reader may have already sent its last `Closed` to no one.
+        if self.terminated.load(Ordering::Acquire) {
+            let _ = tx.send(TurnEvent::Closed);
+        }
         TurnRoute {
             client: self.clone(),
             tx,
             reaper_notify,
+            served,
         }
     }
 
@@ -459,11 +543,33 @@ pub struct TurnRoute {
     client: Arc<ClaudeClient>,
     tx: mpsc::UnboundedSender<TurnEvent>,
     reaper_notify: Arc<Notify>,
+    served: bool,
 }
 
 impl TurnRoute {
     pub fn client(&self) -> &Arc<ClaudeClient> {
         &self.client
+    }
+
+    /// The child ended a turn before this one, so a segment it writes before
+    /// the prompt's echo is one it started on its own, not startup replay.
+    pub fn served(&self) -> bool {
+        self.served
+    }
+
+    /// Detaches the turn from the child unless the reader has already routed
+    /// it another event, which is returned instead. Atomic with the reader, so
+    /// whatever the child writes next reaches this turn or is held for another.
+    pub fn end(&self, rx: &mut mpsc::UnboundedReceiver<TurnEvent>) -> Option<TurnEvent> {
+        let mut turn = self.client.turn.lock().unwrap();
+        if let Ok(event) = rx.try_recv() {
+            return Some(event);
+        }
+        if turn.release(&self.tx, Instant::now()) {
+            drop(turn);
+            self.reaper_notify.notify_one();
+        }
+        None
     }
 }
 
@@ -475,6 +581,12 @@ impl Drop for TurnRoute {
             self.reaper_notify.notify_one();
         }
     }
+}
+
+/// The `system/init` that opens each segment the CLI writes, prompted or not.
+pub(crate) fn starts_segment(event: &Value) -> bool {
+    event.get("type").and_then(Value::as_str) == Some("system")
+        && event.get("subtype").and_then(Value::as_str) == Some("init")
 }
 
 fn reported_permission_mode(event: &Value) -> Option<PermissionMode> {
@@ -526,11 +638,22 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                         }
                     }
                 }
-                // Route to the live turn; dropped if none is listening (a
-                // between-turns line, or an aborted turn's tail) once its tool identities are recorded.
-                let turn = client.turn.lock().unwrap();
+                // Route to the live turn. With none listening, a segment the
+                // child starts itself is held for a turn to record; any other
+                // line (an aborted turn's tail) is dropped once its tool
+                // identities are recorded.
+                let mut turn = client.turn.lock().unwrap();
+                turn.track_background(&value, Instant::now());
                 if let Some(tx) = turn.sender.as_ref() {
                     let _ = tx.send(TurnEvent::Line(value));
+                } else if let Some(lines) = turn.unclaimed.as_mut() {
+                    lines.push(value);
+                } else if turn.starts_continuation(&value) {
+                    drop(turn);
+                    if let Some(chat) = client.chat.upgrade() {
+                        let session_id = client.session_id.clone();
+                        tokio::spawn(async move { chat.record_continuation(&session_id).await });
+                    }
                 } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
                     drop(turn);
                     if let Some(message) = value.get("message").cloned() {
@@ -561,7 +684,7 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
     }
 }
 
-async fn terminate_client(client: &ClaudeClient) {
+pub(crate) async fn terminate_client(client: &ClaudeClient) {
     if client.terminated.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -909,7 +1032,7 @@ impl ClaudeHost {
             }
             let exited = !matches!(client.child.lock().await.try_wait(), Ok(None));
             let turn = client.turn.lock().unwrap();
-            if turn.sender.is_some() {
+            if turn.sender.is_some() || (!exited && !turn.idle(now)) {
                 continue;
             }
             let idle_since = turn.idle_since;
@@ -955,7 +1078,8 @@ impl ClaudeHost {
                     .is_some_and(|current| Arc::ptr_eq(current, &client))
                     && {
                         let turn = client.turn.lock().unwrap();
-                        turn.sender.is_none() && turn.idle_since == idle_since
+                        let releasable = reason == LifecycleStopReason::Exited || turn.idle(now);
+                        turn.sender.is_none() && releasable && turn.idle_since == idle_since
                     };
                 if !untouched {
                     continue;
@@ -1292,6 +1416,27 @@ impl ClaudeHost {
         Ok(client.register_turn(tx, self.reaper_notify.clone()))
     }
 
+    /// Whether the session's child holds a segment it started on its own.
+    pub async fn has_continuation(&self, session_id: &str) -> bool {
+        let live = self.inner.lock().await.get(session_id).cloned();
+        live.is_some_and(|client| client.turn.lock().unwrap().unclaimed.is_some())
+    }
+
+    /// Route the held segment, and what the child writes after it, to a new
+    /// turn. The live child is taken as it is: respawning it would lose the segment.
+    pub async fn claim_continuation(&self, session_id: &str) -> Option<ClaudeContinuation> {
+        let live = self.inner.lock().await.get(session_id).cloned()?;
+        let held = {
+            let turn = live.turn.lock().unwrap();
+            turn.sender.is_none() && turn.unclaimed.is_some()
+        };
+        if !held {
+            return None;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        Some((live.register_turn(tx, self.reaper_notify.clone()), rx))
+    }
+
     /// Kill and reap one session's child. The load-bearing interrupt/delete
     /// path: a resident child survives task-abort/`kill_on_drop`, so it must be
     /// killed explicitly; the next turn respawns with `--resume`.
@@ -1370,7 +1515,7 @@ impl ClaudeHost {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const IDLE_TIMEOUT: Duration = IdlePolicy::DEFAULT.idle_timeout;
@@ -1381,6 +1526,17 @@ mod tests {
         started_at: Instant,
         idle_since: Instant,
         shell: &str,
+    ) -> Arc<ClaudeClient> {
+        chat_test_client(session_id, started_at, idle_since, shell, Weak::new())
+    }
+
+    #[cfg(unix)]
+    fn chat_test_client(
+        session_id: &str,
+        started_at: Instant,
+        idle_since: Instant,
+        shell: &str,
+        chat: Weak<crate::local::chat::ChatHost>,
     ) -> Arc<ClaudeClient> {
         let mut command = crate::process::tokio_command("sh");
         command
@@ -1393,17 +1549,14 @@ mod tests {
         let process_group_id = child.id().unwrap();
         let stdin = child.stdin.take().unwrap();
         Arc::new(ClaudeClient {
-            chat: Weak::new(),
+            chat,
             session_id: session_id.to_string(),
             child: Mutex::new(child),
             process_group_id,
             stdin: Mutex::new(stdin),
             next_id: AtomicI64::new(1),
             pending: std::sync::Mutex::new(HashMap::new()),
-            turn: std::sync::Mutex::new(TurnSlot {
-                sender: None,
-                idle_since,
-            }),
+            turn: std::sync::Mutex::new(TurnSlot::new(idle_since)),
             config: std::sync::Mutex::new(cfg(None, None, None, false)),
             auth_generation: 0,
             started_at,
@@ -1421,6 +1574,88 @@ mod tests {
             .lock()
             .await
             .insert(client.session_id.clone(), client);
+    }
+
+    /// A fake CLI, read by the real read loop, that writes back each line it is
+    /// sent and answers a user message with `REPLY`. A prompt containing
+    /// `RESUMES_FIRST` finds it resuming on its own with `TASK_DONE` before the echo.
+    #[cfg(unix)]
+    pub(crate) async fn echo_worker(session_id: &str) -> (Arc<ClaudeHost>, Arc<ClaudeClient>) {
+        let host = ready_host();
+        let client = chat_echo_worker(&host, session_id, Weak::new()).await;
+        (host, client)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn ready_host() -> Arc<ClaudeHost> {
+        let host = Arc::new(ClaudeHost::new());
+        host.auth.write().unwrap().state = HarnessAuthState::Ready;
+        host
+    }
+
+    /// [`echo_worker`] on `host`, recording what the child starts on its own in `chat`.
+    #[cfg(unix)]
+    pub(crate) async fn chat_echo_worker(
+        host: &ClaudeHost,
+        session_id: &str,
+        chat: Weak<crate::local::chat::ChatHost>,
+    ) -> Arc<ClaudeClient> {
+        let now = Instant::now();
+        let shell = r#"while IFS= read -r line; do
+            case "$line" in *RESUMES_FIRST*)
+                printf '%s\n' '{"type":"system","subtype":"init"}' '{"type":"assistant","message":{"id":"resumed","content":[{"type":"text","text":"TASK_DONE"}]}}' '{"type":"result","subtype":"success"}' ;;
+            esac
+            printf '%s\n' "$line"
+            case "$line" in *'"type":"user"'*)
+                printf '%s\n' '{"type":"assistant","message":{"id":"reply","content":[{"type":"text","text":"REPLY"}]}}' '{"type":"result","subtype":"success"}' ;;
+            esac
+        done"#;
+        let client = chat_test_client(session_id, now, now, shell, chat);
+        let stdout = client.child.lock().await.stdout.take().unwrap();
+        tokio::spawn(read_loop(client.clone(), stdout));
+        install_test_client(host, client.clone()).await;
+        client
+    }
+
+    /// Runs one prompted turn on the worker to its result.
+    #[cfg(unix)]
+    pub(crate) async fn serve_turn(host: &ClaudeHost, client: &Arc<ClaudeClient>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let route = client.register_turn(tx, host.reaper_notify.clone());
+        assert!(!route.served());
+        client.send_user_message("first").await.unwrap();
+        while let Some(TurnEvent::Line(line)) = rx.recv().await {
+            if line["type"] == "result" {
+                break;
+            }
+        }
+    }
+
+    /// Makes the fake CLI write `lines`, and returns once the read loop has handled them.
+    #[cfg(unix)]
+    pub(crate) async fn emit(client: &ClaudeClient, lines: &[Value]) {
+        let request_id = format!("sync-{}", client.next_id.fetch_add(1, Ordering::Relaxed));
+        let (tx, rx) = oneshot::channel();
+        client
+            .pending
+            .lock()
+            .unwrap()
+            .insert(request_id.clone(), tx);
+        let sync = json!({"type": "control_response",
+            "response": {"subtype": "success", "request_id": request_id}});
+        let mut input = String::new();
+        for line in lines.iter().chain([&sync]) {
+            input.push_str(&line.to_string());
+            input.push('\n');
+        }
+        client
+            .stdin
+            .lock()
+            .await
+            .write_all(input.as_bytes())
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
     }
 
     fn cfg(
@@ -1801,6 +2036,126 @@ mod tests {
 
         assert!(!slot.release(&old_tx, now + Duration::from_secs(1)));
         assert!(slot.sender.is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_the_child_starts_after_a_turn_waits_for_the_next_turn() {
+        let (host, client) = echo_worker("resumes").await;
+        let init = json!({"type": "system", "subtype": "init"});
+        let reply = json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "TASK_DONE"}]}});
+        let result = json!({"type": "result", "subtype": "success"});
+
+        emit(&client, std::slice::from_ref(&init)).await;
+        assert!(!host.has_continuation("resumes").await);
+
+        serve_turn(&host, &client).await;
+        emit(&client, &[init.clone(), reply.clone(), result.clone()]).await;
+        assert!(host.has_continuation("resumes").await);
+        host.reap_expired_at(Instant::now() + STALE_AFTER, IdlePolicy::DEFAULT)
+            .await;
+        assert!(host.inner.lock().await.contains_key("resumes"));
+
+        let (route, mut rx) = host.claim_continuation("resumes").await.unwrap();
+        assert!(route.served());
+        for expected in [init, reply, result] {
+            assert!(matches!(rx.recv().await, Some(TurnEvent::Line(line)) if line == expected));
+        }
+        assert!(!host.has_continuation("resumes").await);
+        assert!(host.claim_continuation("resumes").await.is_none());
+        drop(route);
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_held_segment_from_an_exited_child_ends_its_turn() {
+        let (host, client) = echo_worker("exits").await;
+        serve_turn(&host, &client).await;
+        let init = json!({"type": "system", "subtype": "init"});
+        emit(&client, std::slice::from_ref(&init)).await;
+        terminate_client(&client).await;
+
+        let (_route, mut rx) = host.claim_continuation("exits").await.unwrap();
+        assert!(matches!(rx.recv().await, Some(TurnEvent::Line(line)) if line == init));
+        assert!(matches!(rx.recv().await, Some(TurnEvent::Closed)));
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ending_turn_takes_what_was_routed_to_it_and_later_output_is_held() {
+        let (host, client) = echo_worker("ending").await;
+        serve_turn(&host, &client).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let route = client.register_turn(tx, host.reaper_notify.clone());
+        let init = json!({"type": "system", "subtype": "init"});
+
+        emit(&client, std::slice::from_ref(&init)).await;
+        assert!(matches!(route.end(&mut rx), Some(TurnEvent::Line(line)) if line == init));
+        assert!(route.end(&mut rx).is_none());
+
+        emit(&client, std::slice::from_ref(&init)).await;
+        assert!(host.has_continuation("ending").await);
+        drop(route);
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reaper_keeps_a_worker_whose_task_just_finished_until_it_reports() {
+        let host = ready_host();
+        let reporting = chat_echo_worker(&host, "reporting", Weak::new()).await;
+        let newer = chat_echo_worker(&host, "newer", Weak::new()).await;
+        serve_turn(&host, &reporting).await;
+        serve_turn(&host, &newer).await;
+        let finished = json!({"type": "system", "subtype": "task_notification", "task_id": "t"});
+        emit(&reporting, &[finished]).await;
+
+        let evictable = Instant::now() + crate::local::agent_lifecycle::MIN_IDLE_BEFORE_LIMIT;
+        host.reap_expired_at(evictable, IdlePolicy::LOW_MEMORY)
+            .await;
+        assert!(host.inner.lock().await.contains_key("reporting"));
+        host.reap_expired_at(Instant::now() + TASK_REPORT_GRACE, IdlePolicy::LOW_MEMORY)
+            .await;
+        assert!(!host.inner.lock().await.contains_key("reporting"));
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reaper_keeps_a_worker_until_its_background_tasks_finish() {
+        let (host, client) = echo_worker("background").await;
+        let started =
+            |id: &str| json!({"type": "system", "subtype": "task_started", "task_id": id});
+        emit(&client, &[started("shell"), started("agent")]).await;
+
+        let later = Instant::now() + STALE_AFTER;
+        for policy in [IdlePolicy::DEFAULT, IdlePolicy::LOW_MEMORY] {
+            host.reap_expired_at(later, policy).await;
+            assert!(host.inner.lock().await.contains_key("background"));
+        }
+
+        emit(
+            &client,
+            &[
+                json!({"type": "system", "subtype": "background_tasks_changed",
+                "tasks": [{"task_id": "agent"}]}),
+            ],
+        )
+        .await;
+        host.reap_expired_at(later, IdlePolicy::DEFAULT).await;
+        assert!(host.inner.lock().await.contains_key("background"));
+
+        emit(
+            &client,
+            &[json!({"type": "system", "subtype": "task_notification",
+                "task_id": "agent", "status": "completed"})],
+        )
+        .await;
+        host.reap_expired_at(later, IdlePolicy::DEFAULT).await;
+        assert!(!host.inner.lock().await.contains_key("background"));
+        assert!(client.terminated.load(Ordering::Acquire));
     }
 
     #[cfg(unix)]

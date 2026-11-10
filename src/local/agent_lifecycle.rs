@@ -10,7 +10,7 @@ pub(crate) const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 const LOW_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// Never evict for the idle limit sooner than this, so switching between two
 /// chats does not respawn one on every message.
-const MIN_IDLE_BEFORE_LIMIT: Duration = Duration::from_secs(30);
+pub(crate) const MIN_IDLE_BEFORE_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct IdlePolicy {
