@@ -34,7 +34,7 @@ use super::options::{
 use super::{
     CompactCtx, CompactOutcome, Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
 };
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::acp::{host::Event, Definition};
 use crate::local::chat::{prepare_env, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt};
 use crate::local::opencode::ensure_playbook;
@@ -343,6 +343,11 @@ pub(crate) fn stop_error_path(session_id: &str) -> PathBuf {
     crate::store::data_dir().join(format!("agent-antigravity-{session_id}.error.json"))
 }
 
+/// Present while the chat's agy asks before running tools, which its subagents cannot do over ACP.
+pub(crate) fn approvals_path(session_id: &str) -> PathBuf {
+    crate::store::data_dir().join(format!("agent-antigravity-{session_id}.approvals"))
+}
+
 /// The error the `Stop` hook saved for this conversation's turn, consumed.
 fn take_stop_error(session_id: &str, conversation: &str) -> Option<String> {
     let path = stop_error_path(session_id);
@@ -379,6 +384,22 @@ async fn prepare_worktree(
     session_id: &str,
     skip_permissions: bool,
 ) -> Result<PathBuf> {
+    // Side chats can share the worktree, so its hook file cannot hold a chat's mode.
+    let approvals = approvals_path(session_id);
+    let recorded = if skip_permissions {
+        match std::fs::remove_file(&approvals) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    } else {
+        std::fs::write(&approvals, "")
+    };
+    recorded.with_context(|| {
+        format!(
+            "could not record this chat's approval mode at {}",
+            approvals.display()
+        )
+    })?;
     let project = project.clone();
     let session_id = session_id.to_owned();
     let (repo, _playbook) = tokio::task::spawn_blocking(move || {
@@ -386,7 +407,7 @@ async fn prepare_worktree(
     })
     .await
     .map_err(|e| anyhow!("playbook task failed: {e}"))??;
-    write_hooks(&repo, skip_permissions)?;
+    write_hooks(&repo)?;
     Ok(repo)
 }
 
@@ -674,7 +695,7 @@ fn compaction_outcome(result: &Value, answer: &str, cause: impl FnOnce() -> Stri
 
 /// agy's workspace hooks for this chat, merged into the worktree's untracked
 /// `.agents/hooks.json` (a tracked one is the project's and stays untouched).
-fn write_hooks(repo: &Path, skip_permissions: bool) -> Result<()> {
+fn write_hooks(repo: &Path) -> Result<()> {
     std::fs::create_dir_all(repo)?;
     let tracked = crate::local::git::git_command()
         .args(["ls-files", "--error-unmatch", ".agents/hooks.json"])
@@ -726,7 +747,7 @@ fn write_hooks(repo: &Path, skip_permissions: bool) -> Result<()> {
     object.insert(
         "openresearch-subagents".into(),
         json!({
-            "enabled": !skip_permissions,
+            "enabled": true,
             "PreToolUse": [{"matcher": "invoke_subagent", "hooks": [{"type": "command", "command": command, "timeout": 60}]}]
         }),
     );
@@ -850,7 +871,7 @@ mod tests {
                 .unwrap()
                 .success());
         }
-        assert!(write_hooks(&repo, true)
+        assert!(write_hooks(&repo)
             .unwrap_err()
             .to_string()
             .contains("tracks .agents/hooks.json"));
@@ -869,10 +890,7 @@ mod tests {
             r#"{"openresearch-approval":{"enabled":true},"mine":{"enabled":true}}"#,
         )
         .unwrap();
-        write_hooks(&repo, true).unwrap();
-        let hooks: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(hooks["openresearch-subagents"]["enabled"], false);
-        write_hooks(&repo, false).unwrap();
+        write_hooks(&repo).unwrap();
         let hooks: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(hooks["openresearch-subagents"]["enabled"], true);
         assert_eq!(
