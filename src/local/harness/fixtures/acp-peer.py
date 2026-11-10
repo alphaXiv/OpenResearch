@@ -1,13 +1,21 @@
 import json
 import os
+import socket
 import sys
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
 
-mode = sys.argv[1] if len(sys.argv) > 1 else "normal"
+# A mode may carry a port, such as "slow-delete:4000" for the test's connection that holds the delete.
+mode, _, port = (sys.argv[1] if len(sys.argv) > 1 else "normal").partition(":")
+record = sys.argv[2] if len(sys.argv) > 2 else None
 session = "peer-session"
 count = 0
+hanging = None
+startup = "pi v1.5.0\n---\nSkills: none\n"
+# Like pi-acp, the startup modes send a chunk after session/new, before the agent's turn.
+# It goes out when the prompt arrives, so it always reaches the client inside its turn.
+pending = None
 
 
 def send(value):
@@ -29,6 +37,12 @@ def reverse(method, params):
     return response
 
 
+def note(method, params):
+    if record:
+        with open(record, "a", encoding="utf-8") as file:
+            file.write(json.dumps(dict(method=method, params=params, cwd=os.getcwd())) + "\n")
+
+
 def config(model="first"):
     return [dict(id="opaque-model", name="Model", category="model", type="select", currentValue=model,
                  options=[dict(value="first", name="First"), dict(value="second", name="Second"), dict(value="reject", name="Rejected model")]),
@@ -41,6 +55,8 @@ for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
     params = request.get("params", {})
+    if method:
+        note(method, params)
     if mode.startswith("alphaxiv-") and method in ["session/new", "session/load", "session/resume"]:
         [server] = params["mcpServers"]
         assert server["name"] == "alphaxiv", server
@@ -57,19 +73,31 @@ for line in sys.stdin:
         assert params["clientCapabilities"]["terminal"] is True
         if mode == "crash-init":
             sys.exit(3)
+        if mode == "stalled-init":
+            continue
         if mode == "auth-init":
             send(dict(id=request["id"], error=dict(code=-32000, message="Authentication required")))
         else:
             reply(request, dict(protocolVersion=2 if mode == "incompatible" else 1,
                                 agentInfo=dict(name="Deterministic ACP peer", version="1.0"),
-                                agentCapabilities=dict(loadSession=mode != "no-resume", **({"sessionCapabilities": {"resume": {}}} if mode in ["resume", "alphaxiv-resume"] else {}))))
+                                agentCapabilities=dict(loadSession=mode != "no-resume", **({"sessionCapabilities": {"resume": {}}} if mode in ["resume", "alphaxiv-resume"] else {"sessionCapabilities": {"resume": {}, "list": {}}} if mode == "unlisted" else {}),
+                                                       **({"sessionCapabilities": {"delete": {}}} if mode in ["delete", "slow-delete"] else {}))))
     elif method == "session/new":
         if mode == "stalled-setup":
             continue
-        reply(request, dict(sessionId=session, configOptions=config()))
+        if mode == "legacy-models":
+            reply(request, dict(sessionId=session, models=dict(currentModelId="first", availableModels=[
+                dict(modelId="first", name="First"), dict(modelId="second", name="Second")])))
+        elif mode in ["startup", "startup-other"]:
+            reply(request, dict(sessionId=session, configOptions=config(), _meta=dict(piAcp=dict(startupInfo=startup))))
+            pending = startup if mode == "startup" else "Update available\n"
+        else:
+            reply(request, dict(sessionId=session, configOptions=config()))
     elif method in ["session/load", "session/resume"]:
         if mode == "missing":
             send(dict(id=request["id"], error=dict(code=-32002, message="Session not found")))
+        elif mode == "unlisted":
+            send(dict(id=request["id"], error=dict(code=-32603, message="Failed to read session")))
         elif mode == "auth-load":
             send(dict(id=request["id"], error=dict(code=-32000, message="Authentication required")))
         else:
@@ -81,10 +109,29 @@ for line in sys.stdin:
         else:
             update(dict(sessionUpdate="current_mode_update", currentModeId="agent-changed"))
             reply(request, dict(configOptions=config(params["value"])))
+    elif method == "session/set_model" and mode == "legacy-models":
+        reply(request, {})
+    elif method == "session/delete" and mode in ["delete", "slow-delete"]:
+        if mode == "slow-delete":
+            # The test answers the delete by closing this connection.
+            with socket.create_connection(("127.0.0.1", int(port))) as hold:
+                hold.recv(1)
+            note("answered session/delete", params)
+        reply(request, {})
     elif method == "session/prompt":
-        text = params["prompt"][0]["text"].split("ACP_TEST:", 1)[-1]
+        if pending:
+            update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=pending)))
+            pending = None
+        full = params["prompt"][0]["text"]
+        text = full.split("ACP_TEST:", 1)[-1]
         if text == "crash":
             sys.exit(4)
+        if text == "error":
+            send(dict(id=request["id"], error=dict(code=-32603, message="Model overloaded")))
+            continue
+        if text == "empty":
+            reply(request, dict(stopReason="end_turn"))
+            continue
         count += 1
         update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=f"turn {count}")))
         update(dict(sessionUpdate="tool_call_update", toolCallId="tool-one", status="in_progress", rawOutput="partial"))
@@ -99,6 +146,15 @@ for line in sys.stdin:
             answer = json.loads(sys.stdin.readline())
             assert answer["id"] == "permission", answer
             update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=json.dumps(answer["result"]))))
+        if text == "echo":
+            update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=full[:len(full) // 2])))
+            update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=full[len(full) // 2:])))
+        if text.startswith("denied-write:"):
+            response = reverse("fs/write_text_file", dict(path=text[13:], content="written"))
+            update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=json.dumps(response.get("error")))))
+        if text == "hang":
+            hanging = request
+            continue
         if text.startswith("files:"):
             path = text[6:]
             response = reverse("fs/write_text_file", dict(path=path, content="one\ntwo\nthree\n"))
@@ -117,8 +173,17 @@ for line in sys.stdin:
             assert len(response["result"]["output"].encode()) <= 100
             reverse("terminal/release", dict(terminalId=terminal))
             assert "error" in reverse("terminal/output", dict(terminalId=terminal))
-        reply(request, dict(stopReason="end_turn"))
+        reply(request, dict(stopReason="refusal" if text == "refuse" else "end_turn"))
+    elif method == "session/list":
+        if params.get("cursor") is None:
+            reply(request, dict(sessions=[dict(sessionId="first-page", cwd="/")], nextCursor="page-2"))
+        else:
+            reply(request, dict(sessions=[dict(sessionId="kept", cwd="/")]))
     elif method == "session/cancel":
-        sys.exit(0)
-    else:
+        if hanging:
+            reply(hanging, dict(stopReason="cancelled"))
+            hanging = None
+        else:
+            sys.exit(0)
+    elif "id" in request:
         send(dict(id=request["id"], error=dict(code=-32601, message="Unknown method")))

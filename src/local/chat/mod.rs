@@ -1631,6 +1631,156 @@ pub(crate) fn kill_shell_group(pid: Option<u32>) {
         .status();
 }
 
+/// Kill an agent and every command it started. Agents such as `agy` start each
+/// command in its own session, out of reach of [`kill_shell_group`]; detached
+/// experiment supervisors (`orx supervise`) are spared so their runs continue.
+pub(crate) fn kill_agent_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    stop_process_tree(pid);
+    #[cfg(unix)]
+    kill_shell_group(Some(pid));
+}
+
+#[cfg(unix)]
+fn stop_process_tree(pid: u32) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    // Freeze each parent before discovering children so none escapes by forking.
+    // SAFETY: the owned child or a descendant observed while its parent was stopped.
+    if unsafe { libc::kill(pid, libc::SIGSTOP) } != 0 {
+        return;
+    }
+    let snapshot = crate::process::command("ps")
+        .args(["-ww", "-axo", "pid=,ppid=,args="])
+        .output();
+    let supervisor_exe = crate::paths::spawnable_exe().ok();
+    match snapshot {
+        Ok(output) if output.status.success() => {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if let Some(child) = tree_child(line, pid, supervisor_exe.as_deref()) {
+                    stop_process_tree(child);
+                }
+            }
+        }
+        _ => eprintln!("orx up: could not inspect agent descendants of {pid} while stopping it"),
+    }
+    // SAFETY: as above.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+/// The child of `parent` on one `ps -o pid=,ppid=,args=` line, unless it is an
+/// experiment supervisor.
+#[cfg(unix)]
+fn tree_child(
+    line: &str,
+    parent: libc::pid_t,
+    supervisor_exe: Option<&std::path::Path>,
+) -> Option<u32> {
+    let mut fields = line.trim().splitn(2, char::is_whitespace);
+    let pid = fields.next()?.parse().ok()?;
+    let mut fields = fields.next()?.trim_start().splitn(2, char::is_whitespace);
+    if fields.next()?.parse::<libc::pid_t>().ok()? != parent {
+        return None;
+    }
+    let command = fields.next()?.trim_start();
+    (!is_experiment_supervisor(command, supervisor_exe)).then_some(pid)
+}
+
+/// True for a process command line that is a detached experiment supervisor
+/// (`orx supervise`), which outlives the agent that started its run.
+#[cfg(unix)]
+fn is_experiment_supervisor(command: &str, supervisor_exe: Option<&std::path::Path>) -> bool {
+    use std::path::Path;
+    command.split_once(" supervise ").is_some_and(|(exe, _)| {
+        supervisor_exe.is_some_and(|expected| Path::new(exe) == expected)
+            || (Path::new(exe).file_name().is_some_and(|name| name == "orx")
+                && Path::new(exe).is_file())
+    })
+}
+
+#[cfg(not(unix))]
+fn stop_process_tree(pid: u32) {
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$processes = @(Get-CimInstance Win32_Process)
+function Stop-TurnProcess([uint32] $processId) {
+    $children = @($processes | Where-Object { $_.ParentProcessId -eq $processId })
+    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    foreach ($child in $children) {
+        if ($child.Name -eq 'orx.exe' -and $child.CommandLine -match '^(?:"[^"\r\n]+"|\S+)\s+supervise\s') { continue }
+        Stop-TurnProcess $child.ProcessId
+    }
+}
+Stop-TurnProcess ([uint32] $env:ORX_STOP_PID)
+"#;
+    let result = crate::process::command("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("ORX_STOP_PID", pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .status();
+    if !result.is_ok_and(|status| status.success()) {
+        eprintln!("orx up: could not inspect agent descendants of {pid} while stopping it");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod agent_tree_tests {
+    use std::path::Path;
+    use std::time::Duration;
+    use tokio::io::AsyncBufReadExt as _;
+
+    #[test]
+    fn stopping_an_agent_spares_detached_experiment_supervisors() {
+        let supervisor = Some(Path::new("/path with spaces/orx"));
+        let child = |line| super::tree_child(line, 10, supervisor);
+        assert_eq!(child(" 12 10 /bin/sh -c sleep 60"), Some(12));
+        assert_eq!(child(" 13 12 sleep 60"), None);
+        assert_eq!(child(" 14 10 /path with spaces/orx supervise run-id"), None);
+        assert_eq!(
+            child(" 17 10 /bin/sh -c /path with spaces/orx supervise run-id"),
+            Some(17)
+        );
+        assert_eq!(child(" 15 10 /path/orx exp run experiment-id"), Some(15));
+        assert_eq!(child(" 16 10 python -c print('supervise')"), Some(16));
+    }
+
+    #[tokio::test]
+    async fn stopping_an_agent_kills_commands_in_their_own_sessions() {
+        // The command leads its own process group, as agy's do; dash's `set -m` leaves jobs in the
+        // shell's group, so the command makes its own.
+        let mut child = crate::process::tokio_command("sh")
+            .args([
+                "-c",
+                r#"python3 -c 'import os, time; os.setpgid(0, 0); print(os.getpid(), flush=True); time.sleep(60)' & wait"#,
+            ])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let pid: libc::pid_t = lines.next_line().await.unwrap().unwrap().parse().unwrap();
+        assert_eq!(
+            unsafe { libc::getpgid(pid) },
+            pid,
+            "command must lead its group"
+        );
+        super::kill_agent_tree(child.id());
+        child.wait().await.unwrap();
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("command survived its agent: {pid}");
+    }
+}
+
 /// Drain one stream on its own task from the moment the child starts, so a
 /// chatty command never blocks on a full pipe while we wait for it.
 fn drain_shell_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
@@ -3983,7 +4133,8 @@ impl ChatHost {
         let Ok(store) = Store::open() else {
             return false;
         };
-        if !matches!(store.claim_chat_turn(session_id, &token), Ok(true)) {
+        let held: Vec<String> = claims.values().cloned().collect();
+        if !matches!(store.claim_chat_turn(session_id, &token, &held), Ok(true)) {
             return false;
         }
         claims.insert(session_id.to_string(), token);
@@ -4166,9 +4317,20 @@ impl ChatHost {
         }
     }
 
+    /// Claim tokens of this process's running turns, whose leases its own expiry must spare.
+    pub(crate) fn held_turn_leases(&self) -> Vec<String> {
+        self.durable_turns
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
     pub fn reconcile_expired_turn_leases(self: &Arc<Self>) -> Result<()> {
         let store = Store::open()?;
-        for (session_id, message) in materialize_unfinished_turns(&store, false)? {
+        let turns = store.reconcile_expired_unfinished_chat_turns(&self.held_turn_leases())?;
+        for (session_id, message) in materialize_unfinished_turns(&store, turns)? {
             self.emit("chat.message", message_json(&message, &session_id));
         }
         self.resume_persisted_queues();
@@ -6458,7 +6620,7 @@ impl ChatHost {
                             return host.codex.interrupt_session(&session_id).await;
                         } else if session.harness == "claude-code" {
                             host.claude.kill_session(&session_id).await;
-                        } else if session.harness.starts_with("acp:") {
+                        } else if crate::local::harness::runs_on_acp_host(&session.harness) {
                             host.acp.stop(&session_id).await;
                         }
                     }
@@ -8822,19 +8984,14 @@ pub fn list_messages(session_id: &str) -> Result<Vec<WireMessage>> {
 /// Materialize restart recovery on the assistant message linked to every turn
 /// the store just converted from in-flight to failed. Nothing is replayed.
 pub fn reconcile_unfinished_turns(store: &Store) -> Result<()> {
-    materialize_unfinished_turns(store, true).map(|_| ())
+    materialize_unfinished_turns(store, store.reconcile_unfinished_chat_turns()?).map(|_| ())
 }
 
 fn materialize_unfinished_turns(
     store: &Store,
-    include_existing_failures: bool,
+    turns: Vec<StoredChatTurn>,
 ) -> Result<Vec<(String, WireMessage)>> {
     let mut messages = Vec::new();
-    let turns = if include_existing_failures {
-        store.reconcile_unfinished_chat_turns()?
-    } else {
-        store.reconcile_expired_unfinished_chat_turns()?
-    };
     for turn in turns {
         let action = turn.recovery_action.as_deref().unwrap_or({
             if matches!(turn.delivery_state.as_str(), "not_sent" | "rejected") {
@@ -12641,6 +12798,47 @@ for line in sys.stdin:
                 .await
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_stalled_process_keeps_its_own_turns_when_it_expires_stale_leases() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            session(&store, "working");
+            session(&store, "other");
+            let host = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let _working = TurnGuard::claim(&host, "working", None).await.unwrap();
+            let stall = || {
+                let tx = store.begin().unwrap();
+                tx.execute(
+                    "UPDATE chat_turn_leases SET heartbeat_at = ?1",
+                    [now_ms() - crate::store::CHAT_TURN_LEASE_TTL.as_millis() as i64 - 1],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            };
+
+            stall();
+            let _other = TurnGuard::claim(&host, "other", None).await.unwrap();
+            assert!(host.renew_turn_leases().is_empty());
+
+            stall();
+            host.reconcile_expired_turn_leases().unwrap();
+            assert!(host.renew_turn_leases().is_empty());
+
+            stall();
+            assert!(!store
+                .claim_data_dir_move("move", &host.held_turn_leases())
+                .unwrap());
+            assert!(host.renew_turn_leases().is_empty());
+        });
     }
 
     #[test]

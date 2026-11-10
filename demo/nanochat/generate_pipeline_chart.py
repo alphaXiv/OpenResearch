@@ -30,6 +30,6 @@ views.append(dict(key="accuracy", label="CORE benchmark accuracy", type="bar",
                       dict(step=i, label=labels[row["task"]], accuracy=100 * row["accuracy"])
                       for i, row in enumerate(evaluation["core"])])]))
 render_chart(ROOT / "figures/nanochat-pipeline-results.html",
-             title="Nanochat · CPU / Apple Silicon pipeline",
+             title="Nanochat · local pipeline",
              subtitle="Recorded demo run · 73.5M parameters · base training + SFT",
              metrics=views)

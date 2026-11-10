@@ -3,6 +3,13 @@ use serde_json::Value;
 
 pub(crate) const IDS: [&str; 5] = ["claude-code", "codex", "opencode", "cursor", "antigravity"];
 
+pub(crate) fn wire_id(id: &str) -> Option<&'static str> {
+    if id.starts_with("acp:") {
+        return Some(crate::local::acp::telemetry_id(id).unwrap_or("acp:custom"));
+    }
+    IDS.into_iter().find(|known| *known == id)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct InitialSnapshot {
     event_id: String,
@@ -18,11 +25,14 @@ fn state(id: &str, h: &Value) -> Value {
     let broken = h["installBroken"] == true;
     let checked = installed == Some(true) && !broken;
     let auth = h["authState"].as_str();
-    let signed_in =
-        h["authenticated"] == true || (id == "claude-code" && auth == Some("unsupported"));
+    // ACP detection never sets `authenticated`; a ready agent's failed check still reads `ready`.
+    let acp = id.starts_with("acp:");
+    let signed_in = h["authenticated"] == true
+        || (id == "claude-code" && auth == Some("unsupported"))
+        || (acp && auth == Some("ready"));
     let auth_state = if !checked {
         "not_checked"
-    } else if auth == Some("unknown") {
+    } else if auth == Some("unknown") || (acp && h["authCheckFailed"] == true) {
         "unverifiable"
     } else if auth == Some("needsLogin") {
         "signed_out"
@@ -48,10 +58,11 @@ pub(crate) fn capture_initial(harnesses: &Value) {
     if !is_enabled(flag()) {
         return;
     }
-    if load_settings()
-        .and_then(|s| s.harness_snapshot)
-        .is_some_and(|s| s.queued)
-    {
+    if load_settings().is_some_and(|settings| {
+        [settings.harness_snapshot, settings.acp_harness_snapshot]
+            .into_iter()
+            .all(|snapshot| snapshot.is_some_and(|snapshot| snapshot.queued))
+    }) {
         return;
     }
     if !crate::store::Store::open()
@@ -64,53 +75,94 @@ pub(crate) fn capture_initial(harnesses: &Value) {
     if mutate_settings(|settings| ensure_initial(settings, &install, harnesses)).is_err() {
         return;
     }
-    let mut queued = None;
+    let mut queued = Vec::new();
     let saved = mutate_settings(|settings| {
-        let Some(snapshot) = settings.harness_snapshot.as_mut().filter(|s| !s.queued) else {
-            return;
-        };
-        if let Some(path) = uuid::Uuid::parse_str(&snapshot.event_id)
-            .ok()
-            .and_then(|id| persist_payload(id, &snapshot.payload))
+        for snapshot in [
+            &mut settings.harness_snapshot,
+            &mut settings.acp_harness_snapshot,
+        ]
+        .into_iter()
+        .filter_map(Option::as_mut)
+        .filter(|snapshot| !snapshot.queued)
         {
-            snapshot.queued = true;
-            queued = Some((path, snapshot.payload.clone()));
+            if let Some(path) = uuid::Uuid::parse_str(&snapshot.event_id)
+                .ok()
+                .and_then(|id| persist_payload(id, &snapshot.payload))
+            {
+                snapshot.queued = true;
+                queued.push((path, snapshot.payload.clone()));
+            }
         }
     });
     if saved.is_ok() {
-        if let Some((path, payload)) = queued {
+        for (path, payload) in queued {
             register_pending(tokio::spawn(deliver_payload(Some(path), payload)));
         }
     }
 }
 
 fn ensure_initial(settings: &mut Settings, install: &str, harnesses: &Value) {
-    if settings.harness_snapshot.is_some() {
-        return;
+    let items = harnesses["harnesses"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if settings.harness_snapshot.is_none() {
+        settings.harness_snapshot = Some(initial_snapshot(
+            install,
+            IDS.iter().map(|id| {
+                let info = items
+                    .iter()
+                    .find(|h| h["id"] == *id)
+                    .unwrap_or(&Value::Null);
+                state(id, info)
+            }),
+        ));
     }
+    if settings.acp_harness_snapshot.is_none() {
+        let mut acp = std::collections::BTreeMap::new();
+        let readiness = |info: &Value| (info["agentReady"] == true, info["installed"] == true);
+        for info in items {
+            let Some(id) = info["id"]
+                .as_str()
+                .filter(|id| id.starts_with("acp:"))
+                .and_then(wire_id)
+            else {
+                continue;
+            };
+            let previous = acp.entry(id).or_insert(info);
+            if readiness(info) > readiness(previous) {
+                *previous = info;
+            }
+        }
+        if !acp.is_empty() {
+            settings.acp_harness_snapshot = Some(initial_snapshot(
+                install,
+                acp.into_iter().map(|(id, info)| state(id, info)),
+            ));
+        }
+    }
+}
+
+fn initial_snapshot(install: &str, states: impl Iterator<Item = Value>) -> InitialSnapshot {
     let event_id = uuid::Uuid::new_v4();
     let mut payload = build_payload_with_id("harness_initial_state", install, event_id, json!({}));
     let template = payload["events"][0].clone();
     payload["events"] = Value::Array(
-        IDS.iter()
-            .map(|id| {
-                let h = harnesses["harnesses"]
-                    .as_array()
-                    .and_then(|items| items.iter().find(|h| h["id"] == *id))
-                    .unwrap_or(&Value::Null);
+        states
+            .map(|properties| {
                 let mut event = template.clone();
                 event["eventId"] = json!(uuid::Uuid::new_v4().to_string());
-                event["properties"] = state(id, h);
+                event["properties"] = properties;
                 event
             })
             .collect(),
     );
-    settings.harness_snapshot = Some(InitialSnapshot {
+    InitialSnapshot {
         event_id: event_id.to_string(),
         payload,
         queued: false,
         unknown: Default::default(),
-    });
+    }
 }
 
 /// One detection pass — the boot snapshot or a catalog fill — sent as a
@@ -158,7 +210,7 @@ fn detect_payload(
     first_ready_ms: Option<u64>,
     installed: usize,
     ready: usize,
-    probes: Vec<crate::local::harness::ProbeTiming>,
+    mut probes: Vec<crate::local::harness::ProbeTiming>,
 ) -> Value {
     let mut payload = build_payload_with_id(
         "harness_detect",
@@ -169,15 +221,18 @@ fn detect_payload(
             "pass": pass,
             "durationMs": duration_ms.min(9_007_199_254_740_991),
             "firstReadyMs": first_ready_ms.map(|ms| ms.min(9_007_199_254_740_991)),
-            "installed": installed,
-            "ready": ready,
+            "installed": installed.min(64),
+            "ready": ready.min(64),
         }),
     );
     let template = payload["events"][0].clone();
     if let Some(events) = payload["events"].as_array_mut() {
-        // Ingestion caps a batch at 25 events; the pass row always survives.
+        // Keep per-agent totals ahead of detailed timings under the 25-event cap.
+        if probes.len() > 24 {
+            probes.sort_by_key(|probe| probe.probe != "total");
+        }
         for probe in probes.into_iter().take(24) {
-            debug_assert!(IDS.contains(&probe.harness), "{}", probe.harness);
+            debug_assert_eq!(wire_id(probe.harness), Some(probe.harness));
             debug_assert!(probe.probe.len() <= 64, "{}", probe.probe);
             let mut event = template.clone();
             event["eventId"] = json!(uuid::Uuid::new_v4().to_string());
@@ -223,9 +278,6 @@ impl SetupAttempt {
         exit_code: Option<u32>,
         output: Option<&str>,
     ) {
-        if self.harness.starts_with("acp:") {
-            return;
-        }
         // Ingestion rejects the whole event on a value outside the companion
         // schema, so a new call site fails here in any debug run that hits it.
         debug_assert!(contract::OUTCOMES.contains(&outcome), "{outcome}");
@@ -249,21 +301,26 @@ impl SetupAttempt {
 #[cfg(test)]
 pub(super) async fn assert_production_contract() {
     let mut settings = Settings::default();
+    let preset = &crate::local::acp::presets()[0].launch;
     ensure_initial(
         &mut settings,
         "cli-release-contract-test",
-        &json!({"harnesses": []}),
+        &json!({"harnesses": [{"id": preset.id}]}),
     );
-    let snapshot = settings.harness_snapshot.unwrap();
-    assert_eq!(
-        post_payload(&snapshot.payload).await,
-        DeliveryOutcome::Acknowledged
-    );
-    for harness in IDS {
+    for snapshot in [
+        settings.harness_snapshot.unwrap(),
+        settings.acp_harness_snapshot.unwrap(),
+    ] {
+        assert_eq!(
+            post_payload(&snapshot.payload).await,
+            DeliveryOutcome::Acknowledged
+        );
+    }
+    for harness in IDS.into_iter().chain(["acp:custom"]) {
         let payload = build_payload(
             "harness_setup",
             "cli-release-contract-test",
-            json!({"attemptId":uuid::Uuid::new_v4().to_string(),"harness":harness,"action":"login","trigger":"manual","outcome":"failed","stage":"verify","reason":"not_ready","exitCode":null,"durationMs":100,"errorExcerpt":null}),
+            json!({"attemptId":uuid::Uuid::new_v4().to_string(),"harness":harness,"action":"install","trigger":"manual","outcome":"failed","stage":"verify","reason":"not_ready","exitCode":null,"durationMs":100,"errorExcerpt":null}),
         );
         assert_eq!(
             post_payload(&payload).await,
@@ -488,9 +545,15 @@ mod tests {
                     probe: "spec",
                     ms: 1,
                 })
+                .chain([crate::local::harness::ProbeTiming {
+                    harness: "acp:pi",
+                    probe: "total",
+                    ms: 2,
+                }])
                 .collect(),
         );
         assert_eq!(payload["events"].as_array().unwrap().len(), 25);
+        assert_eq!(payload["events"][1]["properties"]["harness"], "acp:pi");
     }
     #[test]
     fn snapshot_survives_restart_and_does_not_change() {
@@ -502,9 +565,20 @@ mod tests {
         ensure_initial(
             &mut restarted,
             "installation",
-            &json!({"harnesses":[{"id":"opencode","installed":true}]}),
+            &json!({"harnesses":[
+                {"id":"opencode","installed":true},
+                {"id":"acp:467b1900-c3c3-47c1-8b87-09389e1c44b5","installed":true},
+                {"id":"acp:97e2c73d-18f0-4933-90b4-57da9d880a62","installed":false},
+                {"id":"acp:5df69eb9-06a5-4741-8fe6-2cc47b0f2176","installed":true,"agentReady":true}
+            ]}),
         );
         assert_eq!(first, restarted.harness_snapshot.unwrap().payload);
+        let acp = restarted.acp_harness_snapshot.unwrap().payload;
+        let events = acp["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["properties"]["harness"], "acp:custom");
+        assert_eq!(events[0]["properties"]["usability"], "usable");
+        assert_eq!(events[1]["properties"]["harness"], "acp:pi");
         assert_eq!(first["events"].as_array().unwrap().len(), IDS.len());
     }
     #[test]
@@ -558,6 +632,42 @@ mod tests {
         h["installed"] = json!(false);
         h["authenticated"] = json!(true);
         assert_eq!(state("codex", &h)["auth"], "not_checked");
+    }
+    #[test]
+    fn acp_auth_follows_the_credential_check() {
+        let mut h = json!({"installed":true,"authenticated":false,"agentReady":true,"authState":"ready","version":"1"});
+        assert_eq!(state("acp:pi", &h)["auth"], "signed_in");
+        assert_eq!(state("acp:pi", &h)["authEvidence"], "configuration");
+        h["authCheckFailed"] = json!(true);
+        let unverified = state("acp:custom", &h);
+        assert_eq!(unverified["auth"], "unverifiable");
+        assert_eq!(unverified["authEvidence"], "none");
+        assert_eq!(unverified["usability"], "usable");
+        assert_eq!(state("claude-code", &h)["auth"], "signed_out");
+    }
+    #[test]
+    fn harness_ids_reach_the_wire_canonical_and_non_acp_ids_unchanged() {
+        let mut seen = std::collections::BTreeSet::new();
+        for preset in crate::local::acp::presets() {
+            let id = wire_id(&preset.launch.id).unwrap();
+            assert_ne!(id, "acp:custom", "{}", preset.launch.name);
+            let slug = id.strip_prefix("acp:").unwrap();
+            assert!(slug.len() <= 31 && slug.starts_with(|c: char| c.is_ascii_alphanumeric()));
+            assert!(slug
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'));
+            assert_eq!(wire_id(id), Some(id));
+            assert!(seen.insert(id), "{id}");
+        }
+        let custom = format!("acp:{}", uuid::Uuid::new_v4());
+        for (sent, wire) in [
+            (custom.as_str(), "acp:custom"),
+            ("acp:custom", "acp:custom"),
+            ("gemini", "gemini"),
+        ] {
+            let payload = build_payload("chat_message_sent", "did", json!({ "harness": sent }));
+            assert_eq!(payload["events"][0]["properties"]["harness"], wire);
+        }
     }
     #[test]
     fn excerpts_never_include_dynamic_output() {

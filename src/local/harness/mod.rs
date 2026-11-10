@@ -537,6 +537,12 @@ pub fn chat_harness(id: &str) -> Option<Box<dyn Harness>> {
         .find(|h| h.id() == id && h.supports_chat())
 }
 
+/// True when the harness's agent is a resident child of the ACP host: user ACP
+/// agents and Antigravity (`agy acp`).
+pub fn runs_on_acp_host(id: &str) -> bool {
+    id.starts_with("acp:") || id == "antigravity"
+}
+
 pub fn session_harness(id: &str, session_id: &str) -> Option<Box<dyn Harness>> {
     if id.starts_with("acp:") {
         let state = Store::open()
@@ -565,15 +571,7 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
     // The per-harness wall clock joins the fill's probe timings as the
     // `"total"` row — the snapshot pass is covered by its own pass event.
     if !snapshot {
-        let telemetry_id = match harness.id() {
-            "claude-code" => Some("claude-code"),
-            "codex" => Some("codex"),
-            "opencode" => Some("opencode"),
-            "cursor" => Some("cursor"),
-            "antigravity" => Some("antigravity"),
-            _ => None,
-        };
-        if let Some(telemetry_id) = telemetry_id {
+        if let Some(telemetry_id) = crate::telemetry::harness::wire_id(harness.id()) {
             detect::record_probe_timing(telemetry_id, "total", start.elapsed().as_millis() as u64);
         }
     }

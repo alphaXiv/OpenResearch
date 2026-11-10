@@ -1,13 +1,21 @@
 //! Google Antigravity harness.
 //!
-//! Chat: one `agy --output-format stream-json` child per turn. Multi-turn continues
-//! via `--conversation <conversation_id>` from the init/result `conversation_id`. Isolated
-//! ORX worktrees are the child's current working directory.
+//! Chat: one resident `agy acp` child per chat, driven over the Agent Client
+//! Protocol like any ACP agent ([`super::acp`]). Its native session is agy's
+//! conversation, so chats begun in print mode resume where they left off. Bypass
+//! starts agy with `--dangerously-skip-permissions`; otherwise its permission
+//! requests wait on the live connection. Plan mode is agy's own `plan` mode.
+//!
+//! agy's workspace hooks ([`write_hooks`], handled by `orx antigravity-gate`)
+//! stamp shell commands with the invoking model, record each invocation, and
+//! hold a turn open while commands it moved to the background still run: agy
+//! finishes those in turns of its own that never reach an ACP client.
+//!
+//! A turn that agy ends on its own error reads the cause from agy's log, since
+//! the prompt response reports it as a normal end of turn.
 //!
 //! The playbook is pointed at on the first turn (the file is already in the
 //! worktree via [`ensure_playbook`]); session skills land in `.agents/skills`.
-//!
-//! Headless tools use the OpenResearch approval hook; explicit bypass skips its cards.
 //!
 //! Detection: `agy` on PATH or in `~/.local/bin`, `~/.gemini/bin`, or `~/.gemini/antigravity-cli/bin`;
 //! `agy models` for catalog and authentication verification.
@@ -17,9 +25,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use serde_json::{json, Value};
 
 use super::detect::{resolve_symlinks, HarnessAuthState, HarnessInfo, ModelInfo};
 use super::options::{
@@ -27,15 +33,17 @@ use super::options::{
 };
 use super::{
     CompactCtx, CompactOutcome, Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
-    TURN_WATCHDOG,
 };
-use crate::error::{anyhow, Result};
-use crate::local::chat::{
-    find_part_mut, harness_log, prepare_env, set_chat_session_env, DeliveryState, PromptAnswer,
-    ResumeCtx, TurnCtx, WirePart, WirePrompt, WireToolState,
-};
-use crate::local::opencode::{ensure_playbook, PLAYBOOK_REL};
+use crate::error::{anyhow, Context, Result};
+use crate::local::acp::{host::Event, Definition};
+use crate::local::chat::{prepare_env, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt};
+use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::installs;
+
+/// What agy prints as the answer when it gives up on a turn.
+const ERROR_MARKER: &str = "Agent execution terminated due to error.";
+/// The Stop hook's own bound; it returns well before this.
+const STOP_HOOK_TIMEOUT_SECS: u64 = 3600;
 
 const AGY_REINSTALL: &str =
     "Reinstall Antigravity CLI via curl -fsSL https://antigravity.google/cli/install.sh | bash";
@@ -133,52 +141,25 @@ impl Harness for Antigravity {
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
-        run_turn(ctx)
-            .await
-            .map(|()| TurnOutcome::Completed)
-            .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
+        match run_turn(ctx).await {
+            Ok(()) => Ok(TurnOutcome::Completed),
+            Err(error) => {
+                ctx.host.acp.stop(&ctx.session_id).await;
+                Err(TurnFailure::adapter(error, ctx.delivery_state()))
+            }
+        }
     }
 
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
         let native_id = ctx
             .native_session_id
-            .as_deref()
+            .clone()
             .ok_or_else(|| anyhow!("This Antigravity chat has no saved conversation to compact"))?;
-        let bin = find_agy().ok_or_else(|| {
-            anyhow!("agy not found on PATH — install Antigravity CLI and sign in first")
-        })?;
-        let project = ctx.project.clone();
-        let session_id = ctx.session_id.clone();
-        let (repo, _) = tokio::task::spawn_blocking(move || {
-            ensure_playbook(&project, &session_id, Antigravity.session_skills_dir())
-        })
-        .await??;
-        let mut cmd = crate::process::tokio_command(bin);
-        cmd.args([
-            "--conversation",
-            native_id,
-            "--print",
-            "/compact",
-            "--output-format",
-            "stream-json",
-            "--print-timeout",
-            "5m",
-        ]);
-        if let Some(model) = ctx.model.as_deref().filter(|model| !model.is_empty()) {
-            cmd.args(["--model", model]);
+        let result = compact(ctx, &native_id).await;
+        if result.is_err() {
+            ctx.host.acp.stop(&ctx.session_id).await;
         }
-        cmd.current_dir(&repo).arg("--add-dir").arg(&repo);
-        prepare_env(&mut cmd);
-        cmd.env("NO_COLOR", "1");
-        set_chat_session_env(&mut cmd, &ctx.session_id, "antigravity", ctx.host.up_port());
-        let log_name = format!("antigravity-compact-{}", uuid::Uuid::new_v4());
-        cmd.stderr(Stdio::from(harness_log(&log_name)?));
-        let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
-        compact_native(cmd, COMPACT_TIMEOUT)
-            .await
-            .map_err(|error| anyhow!("{error}; see {}", log_path.display()))?;
-        let _ = std::fs::remove_file(log_path);
-        Ok(CompactOutcome::Native)
+        result.map(|()| CompactOutcome::Native)
     }
 
     fn options(&self) -> HarnessOptions {
@@ -207,27 +188,17 @@ impl Harness for Antigravity {
         answer: &PromptAnswer,
     ) -> Result<ResumeAction> {
         if prompt.kind == "permission" {
-            if let Some(native_id) = &prompt.native_id {
-                if !ctx.is_busy().await {
-                    ctx.host
-                        .resolve_zombie_prompt(&ctx.session_id, &answer.prompt_id);
-                    return Err(anyhow!("this approval is no longer pending"));
-                }
-                let decision = if answer.approve {
-                    crate::local::chat::PermissionDecision::Allow {
-                        updated_input: prompt.tool_input.clone(),
-                    }
-                } else {
-                    crate::local::chat::PermissionDecision::Deny {
-                        message: format!(
-                            "The user denied this action. Do not retry it. {}",
-                            answer.note.as_deref().unwrap_or("")
-                        ),
-                    }
-                };
-                ctx.host.settle_permission(native_id, decision)?;
-                return Ok(ResumeAction::Handled { plan_mode: None });
-            }
+            let id = prompt
+                .native_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("This approval is no longer pending"))?;
+            let selected = match answer.answers.as_slice() {
+                [selected] => selected.clone(),
+                _ => permission_choice(prompt, answer.approve)
+                    .ok_or_else(|| anyhow!("Select an agent permission option"))?,
+            };
+            ctx.host.acp.answer(&ctx.session_id, id, &selected).await?;
+            return Ok(ResumeAction::Handled { plan_mode: None });
         }
         if prompt.kind != "plan" {
             return Ok(ResumeAction::Nothing);
@@ -257,8 +228,19 @@ impl Harness for Antigravity {
     }
 
     fn session_skills_dir(&self) -> Option<&'static str> {
-        Some(".agents/skills")
+        Some(super::acp::SESSION_SKILLS_DIR)
     }
+}
+
+/// The agent's option for an approve or deny answer that names none, as older
+/// clients send.
+fn permission_choice(prompt: &WirePrompt, approve: bool) -> Option<String> {
+    let kind = if approve { "allow_once" } else { "reject_once" };
+    prompt
+        .native_choices
+        .iter()
+        .find(|choice| choice.kind == kind)
+        .map(|choice| choice.id.clone())
 }
 
 /// Every `agy` install, in preference order: Antigravity's own locations are
@@ -350,301 +332,370 @@ fn parse_agy_model_list(text: &str) -> Vec<ModelInfo> {
         .collect()
 }
 
-fn first_turn_prompt(text: &str) -> String {
-    format!(
-        "Read and follow `{PLAYBOOK_REL}` before acting. It is the OpenResearch session playbook for this worktree.\n\n{text}"
-    )
+/// agy's log for the chat's resident process.
+fn log_path(session_id: &str) -> PathBuf {
+    crate::store::data_dir().join(format!("agent-antigravity-{session_id}.log"))
+}
+
+/// Where agy's `Stop` hook leaves the error a turn ended on, which the prompt
+/// response itself never carries.
+pub(crate) fn stop_error_path(session_id: &str) -> PathBuf {
+    crate::store::data_dir().join(format!("agent-antigravity-{session_id}.error.json"))
+}
+
+/// Present while the chat's agy asks before running tools, which its subagents cannot do over ACP.
+pub(crate) fn approvals_path(session_id: &str) -> PathBuf {
+    crate::store::data_dir().join(format!("agent-antigravity-{session_id}.approvals"))
+}
+
+/// The error the `Stop` hook saved for this conversation's turn, consumed.
+fn take_stop_error(session_id: &str, conversation: &str) -> Option<String> {
+    let path = stop_error_path(session_id);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let _ = std::fs::remove_file(path);
+    (saved["conversationId"] == conversation)
+        .then(|| saved["error"].as_str().map(str::to_owned))
+        .flatten()
+}
+
+/// The resident `agy acp` launch for a chat. A change restarts the process with
+/// its conversation resumed.
+fn launch(bin: &Path, session_id: &str, skip_permissions: bool) -> Definition {
+    let mut arguments = vec![
+        "acp".to_string(),
+        "--log-file".to_string(),
+        log_path(session_id).to_string_lossy().into_owned(),
+    ];
+    if skip_permissions {
+        arguments.push("--dangerously-skip-permissions".into());
+    }
+    Definition {
+        id: "antigravity".into(),
+        name: Antigravity.name().into(),
+        executable: bin.to_string_lossy().into_owned(),
+        arguments,
+        unknown: Default::default(),
+    }
+}
+
+/// The chat's worktree with the playbook, skills and agy's hooks in place.
+async fn prepare_worktree(
+    project: &crate::local::model::LocalProject,
+    session_id: &str,
+    skip_permissions: bool,
+) -> Result<PathBuf> {
+    // Side chats can share the worktree, so its hook file cannot hold a chat's mode.
+    let approvals = approvals_path(session_id);
+    let recorded = if skip_permissions {
+        match std::fs::remove_file(&approvals) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    } else {
+        std::fs::write(&approvals, "")
+    };
+    recorded.with_context(|| {
+        format!(
+            "could not record this chat's approval mode at {}",
+            approvals.display()
+        )
+    })?;
+    let project = project.clone();
+    let session_id = session_id.to_owned();
+    let (repo, _playbook) = tokio::task::spawn_blocking(move || {
+        ensure_playbook(&project, &session_id, Some(super::acp::SESSION_SKILLS_DIR))
+    })
+    .await
+    .map_err(|e| anyhow!("playbook task failed: {e}"))??;
+    write_hooks(&repo)?;
+    Ok(repo)
+}
+
+fn find_agy_or_error() -> Result<PathBuf> {
+    find_agy()
+        .ok_or_else(|| anyhow!("agy not found on PATH — install Antigravity CLI and sign in first"))
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
-    let bin = find_agy().ok_or_else(|| {
-        anyhow!("agy not found on PATH — install Antigravity CLI and sign in first")
-    })?;
-    let project = ctx.project.clone();
-    let session_id = ctx.session_id.clone();
-    let skills_dir = Antigravity.session_skills_dir();
-    let (repo, _playbook) =
-        tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
-            .await
-            .map_err(|e| anyhow!("playbook task failed: {e}"))??;
+    let log = log_path(&ctx.session_id);
+    if ctx.host.acp.connected(&ctx.session_id).await.is_err() {
+        // No process writes it: each one starts its own.
+        let _ = std::fs::remove_file(&log);
+    }
+    let logged = std::fs::metadata(&log).map_or(0, |metadata| metadata.len());
+    // Offline, agy blames a consequence (an empty catalog has no such model).
+    turn(ctx, &log, logged)
+        .await
+        .map_err(|error| match logged_network_failure(&log, logged) {
+            Some(cause) => anyhow!("{error}. Antigravity logged: {cause}"),
+            None => error,
+        })
+}
 
-    let up_port = ctx
-        .host
-        .up_port()
-        .ok_or_else(|| anyhow!("Antigravity requires the OpenResearch approval bridge"))?;
+async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
+    let bin = find_agy_or_error()?;
     let bypass = ctx.permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass;
-    let hook_enabled = !bypass || ctx.plan_mode;
-    write_approval_hook(&repo, hook_enabled)?;
-    let resume = ctx.native_session_id.clone();
-    let mut prompt = ctx.text.clone();
-    if resume.is_none() {
-        prompt = first_turn_prompt(&prompt);
+    let skip_permissions = bypass && !ctx.plan_mode;
+    let repo = prepare_worktree(&ctx.project, &ctx.session_id, skip_permissions).await?;
+    let definition = launch(&bin, &ctx.session_id, skip_permissions);
+    let session = super::acp::open_session(ctx, &definition, &repo, false).await?;
+    let native_id = session.native_id.clone();
+    if let Some(model) = ctx
+        .model
+        .as_deref()
+        .filter(|model| !model.is_empty() && *model != REASONING_DEFAULT_ID)
+    {
+        session
+            .client
+            .request(
+                "session/set_model",
+                json!({"sessionId": native_id, "modelId": model}),
+            )
+            .await
+            .map_err(|error| anyhow!("Antigravity could not select model {model}: {error}"))?;
     }
-
-    let mut cmd = crate::process::tokio_command(&bin);
-    cmd.args([
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-    ]);
-
-    if let Some(model) = ctx.model.as_deref().filter(|model| !model.is_empty()) {
-        cmd.args(["--model", model]);
+    session
+        .client
+        .request(
+            "session/set_mode",
+            json!({"sessionId": native_id, "modeId": if ctx.plan_mode { "plan" } else { "default" }}),
+        )
+        .await?;
+    let _ = std::fs::remove_file(stop_error_path(&ctx.session_id));
+    let started = crate::store::now_ms();
+    let result = super::acp::prompt_session(ctx, &session).await?;
+    if let Some(usage) = turn_usage(&result) {
+        let model = turn_model(&ctx.session_id, started);
+        let sample = format!("antigravity-acp-{}", ctx.attempt_count_for_usage());
+        ctx.record_native_usage(&sample, model.as_deref(), None, usage);
     }
-
-    // Native headless permission checks deny even after a hook allows the action.
-    cmd.arg("--dangerously-skip-permissions");
-    if ctx.plan_mode {
-        cmd.arg("--mode=plan");
-    }
-    cmd.args(["--print-timeout", "60m"]);
-
-    if let Some(native_id) = &resume {
-        cmd.args(["--conversation", native_id]);
-    }
-
-    cmd.current_dir(&repo);
-    cmd.arg("--add-dir").arg(&repo);
-
-    let log_name = format!("antigravity-{}", uuid::Uuid::new_v4());
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(harness_log(&log_name)?))
-        .kill_on_drop(true);
-
-    prepare_env(&mut cmd);
-    cmd.env("NO_COLOR", "1");
-    set_chat_session_env(&mut cmd, &ctx.session_id, "antigravity", Some(up_port));
-    if let Some(execution) = ctx.usage_execution_id() {
-        cmd.env("ORX_USAGE_EXECUTION_ID", execution);
-    }
-    cmd.env(
-        "ORX_GATE_TOKEN",
-        ctx.host
-            .mint_gate_token(&ctx.session_id, ctx.plan_mode, bypass),
-    );
-    cmd.env(
-        "ORX_AGY_GATE",
-        if bypass && !ctx.plan_mode {
-            "bypass"
-        } else {
-            "ask"
-        },
-    );
-
-    ctx.persist_delivery(DeliveryState::Unknown)?;
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            ctx.mark_delivery(DeliveryState::NotSent);
-            return Err(anyhow!("Could not spawn {}: {}", bin.display(), error));
-        }
-    };
-    let mut cancellation = TurnProcesses(child.id());
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-    let message =
-        serde_json::json!({"event":"user","message":{"content":prompt}}).to_string() + "\n";
-    tokio::time::timeout(TURN_WATCHDOG, stdin.write_all(message.as_bytes()))
-        .await
-        .map_err(|_| anyhow!("Antigravity did not read the prompt"))??;
-    drop(stdin);
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut state = TurnState::default();
-
-    loop {
-        let next = tokio::select! {
-            next = tokio::time::timeout(TURN_WATCHDOG, lines.next_line()) => next,
-            _ = ctx.flush_due() => {
-                let _ = ctx.flush();
-                continue;
-            }
+    if take_error_marker(ctx) {
+        let cause = take_stop_error(&ctx.session_id, &native_id)
+            .or_else(|| logged_network_failure(log, logged));
+        let message = match cause {
+            Some(cause) => format!("Antigravity stopped with an error: {cause}"),
+            None => format!("Antigravity stopped with an error; see {}", log.display()),
         };
-        match next {
-            Ok(Ok(Some(line))) => {
-                let Ok(event) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                if matches!(
-                    event.get("event").and_then(Value::as_str),
-                    Some("step_update")
-                ) {
-                    ctx.mark_delivery(DeliveryState::Accepted);
-                }
-                let terminal = apply_event(ctx, &mut state, &event);
-                if let Some(sid) = state.conversation_id.as_deref() {
-                    ctx.set_native_session_id(sid);
-                }
-                ctx.maybe_flush();
-                if terminal {
-                    break;
-                }
-            }
-            Ok(Ok(None)) => break,
-            Ok(Err(error)) => {
-                return Err(anyhow!("antigravity stdout: {error}"));
-            }
-            Err(_) if ctx.host.has_pending_permission(&ctx.session_id) => continue,
-            Err(_) => {
-                return Err(anyhow!(
-                    "Antigravity went silent for {} minutes and was interrupted.",
-                    TURN_WATCHDOG.as_secs() / 60
-                ));
-            }
-        }
+        ctx.mark_terminal_failure("antigravity_terminal", message);
+        ctx.flush()?;
+        return Ok(());
     }
-
-    let status = tokio::time::timeout(TURN_WATCHDOG, child.wait())
-        .await
-        .map_err(|_| anyhow!("Antigravity did not exit after its response"))??;
-    cancellation.0 = None;
-    let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
-    if !state.saw_result {
-        return Err(anyhow!(
-            "Antigravity ended without a result ({status}); see {}",
-            log_path.display()
-        ));
-    }
-    if !status.success() && !state.turn_errored {
-        return Err(anyhow!("Antigravity ended with error ({status})"));
-    }
-    if ctx.plan_mode && !state.turn_errored {
+    if ctx.plan_mode {
         if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
             ctx.upsert_part(card);
+            ctx.flush()?;
         }
-    }
-    if !state.turn_errored {
-        let _ = std::fs::remove_file(log_path);
     }
     Ok(())
 }
 
-async fn compact_native(mut cmd: Command, timeout: Duration) -> Result<()> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = cmd.spawn()?;
-    let mut cancellation = TurnProcesses(child.id());
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    tokio::time::timeout(timeout, async {
-        let mut lines = BufReader::new(stdout).lines();
-        let mut saw_result = false;
-        while let Some(line) = lines.next_line().await? {
-            let Ok(event) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if event.get("event").and_then(Value::as_str) == Some("result") {
-                if let Some((_, error)) = result_failure(&event["result"]) {
-                    return Err(anyhow!("Antigravity compaction failed: {error}"));
-                }
-                saw_result = true;
+/// Removes agy's give-up line from the answer; true when it ended the turn.
+fn take_error_marker(ctx: &mut TurnCtx) -> bool {
+    let Some(part) = ctx
+        .assistant
+        .parts
+        .iter()
+        .rev()
+        .find(|part| part.kind == "text")
+        .filter(|part| {
+            part.text
+                .as_deref()
+                .is_some_and(|text| text.contains(ERROR_MARKER))
+        })
+        .cloned()
+    else {
+        return false;
+    };
+    let text = part.text.as_deref().unwrap_or_default();
+    let kept = text
+        .replace(&format!("⚠ {ERROR_MARKER}"), "")
+        .replace(ERROR_MARKER, "");
+    if kept.trim().is_empty() {
+        ctx.assistant
+            .parts
+            .retain(|existing| existing.id != part.id);
+    } else {
+        ctx.upsert_part(WirePart::text(&part.id, kept.trim_end().to_string()));
+    }
+    true
+}
+
+/// The first network failure agy logged after `offset`. agy fails before its
+/// hooks run when it cannot reach Google, and first reports that as a missing
+/// sign-in or an unknown model; its other errors include startup noise.
+fn logged_network_failure(log: &Path, offset: u64) -> Option<String> {
+    use std::io::{Read as _, Seek as _};
+    let mut file = std::fs::File::open(log).ok()?;
+    // A restarted agy writes the log afresh.
+    let offset = if file.metadata().ok()?.len() < offset {
+        0
+    } else {
+        offset
+    };
+    file.seek(std::io::SeekFrom::Start(offset)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(4 * 1024 * 1024).read_to_end(&mut bytes).ok()?;
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter_map(logged_error)
+        .find(|message| {
+            NETWORK_FAILURES
+                .iter()
+                .any(|failure| message.contains(failure))
+        })
+        .map(|message| {
+            let mut message = message.trim().to_string();
+            if message.len() > 600 {
+                let end = (0..=600)
+                    .rev()
+                    .find(|end| message.is_char_boundary(*end))
+                    .unwrap_or(0);
+                message.truncate(end);
+                message.push('…');
             }
+            message
+        })
+}
+
+/// Go's wording for a connection that never reached Google.
+const NETWORK_FAILURES: &[&str] = &[
+    "dial tcp",
+    "connection refused",
+    "no such host",
+    "network is unreachable",
+    "i/o timeout",
+    "TLS handshake timeout",
+];
+
+/// The message of a glog error line (`E1109 14:48:42.864 314 file.go:273] message`).
+fn logged_error(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('E').or_else(|| line.strip_prefix('F'))?;
+    if !rest.get(..4)?.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let (_, message) = rest.split_once("] ")?;
+    (!message.trim().is_empty()).then_some(message)
+}
+
+/// The native model that ran the turn, from what agy's `PostInvocation` hook
+/// recorded for the chat while it ran (the hook finishes before agy answers the
+/// prompt). Several models leave the turn's single total unattributed.
+fn turn_model(session_id: &str, started: i64) -> Option<String> {
+    let models = crate::store::Store::open()
+        .and_then(|store| store.chat_invocation_models("antigravity", session_id, started))
+        .inspect_err(|error| {
+            eprintln!("orx up: could not read Antigravity's invocation models: {error}")
+        })
+        .ok()?;
+    match models.as_slice() {
+        [model] => Some(model.clone()),
+        _ => None,
+    }
+}
+
+/// The turn's counters from the prompt response; agy reports each prompt alone.
+fn turn_usage(result: &Value) -> Option<crate::store::TokenUsage> {
+    let usage = &result["usage"];
+    let cache_read = usage["cachedReadTokens"].as_u64();
+    let cache_write = usage["cachedWriteTokens"].as_u64();
+    let tokens = crate::store::TokenUsage {
+        input_tokens: Some(
+            usage["inputTokens"]
+                .as_u64()?
+                .checked_add(cache_read.unwrap_or(0))?
+                .checked_add(cache_write.unwrap_or(0))?,
+        ),
+        output_tokens: Some(usage["outputTokens"].as_u64()?),
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
+        reasoning_tokens: usage["thoughtTokens"].as_u64(),
+    };
+    (tokens.total()? == usage["totalTokens"].as_u64()? && tokens.validate().is_ok())
+        .then_some(tokens)
+}
+
+/// agy's `/compact`, sent to the chat's resident process, which holds the
+/// conversation.
+async fn compact(ctx: &CompactCtx, native_id: &str) -> Result<()> {
+    let bin = find_agy_or_error()?;
+    let bypass = ctx.permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass;
+    let repo = prepare_worktree(&ctx.project, &ctx.session_id, bypass).await?;
+    let definition = launch(&bin, &ctx.session_id, bypass);
+    let host = ctx.host.acp.clone();
+    let mut client = host.get(&ctx.session_id, &definition, &repo).await?;
+    if client.native_id().is_some_and(|id| id != native_id) {
+        host.stop(&ctx.session_id).await;
+        client = host.get(&ctx.session_id, &definition, &repo).await?;
+    }
+    if client.native_id().is_none() {
+        client
+            .restore(
+                native_id,
+                &repo,
+                super::acp::orx_mcp_servers(&ctx.session_id, ctx.host.up_port())?,
+            )
+            .await
+            .map_err(|error| {
+                anyhow!("Antigravity could not reopen this conversation to compact it: {error}")
+            })?;
+    }
+    struct Idle<'a>(&'a crate::local::acp::host::Client);
+    impl Drop for Idle<'_> {
+        fn drop(&mut self) {
+            self.0.end_turn();
         }
-        let status = child.wait().await?;
-        cancellation.0 = None;
-        if !status.success() {
-            return Err(anyhow!("Antigravity compaction exited with {status}"));
-        }
-        if !saw_result {
-            return Err(anyhow!("Antigravity compaction ended without a result"));
-        }
-        Ok(())
-    })
+    }
+    let log = log_path(&ctx.session_id);
+    let logged = std::fs::metadata(&log).map_or(0, |metadata| metadata.len());
+    let _ = std::fs::remove_file(stop_error_path(&ctx.session_id));
+    let mut events = client.begin_turn();
+    let _idle = Idle(&client);
+    let result = tokio::time::timeout(
+        COMPACT_TIMEOUT,
+        client.request(
+            "session/prompt",
+            json!({"sessionId": native_id, "prompt": [{"type": "text", "text": "/compact"}]}),
+        ),
+    )
     .await
     .map_err(|_| {
         anyhow!(
             "Antigravity did not finish compacting within {}s",
-            timeout.as_secs()
+            COMPACT_TIMEOUT.as_secs()
         )
-    })?
-}
-
-struct TurnProcesses(Option<u32>);
-
-impl Drop for TurnProcesses {
-    fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            stop_turn_process(pid);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn stop_turn_process(pid: u32) {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return;
-    };
-    // Freeze each parent before discovering children: agy commands create their own sessions.
-    if unsafe { libc::kill(pid, libc::SIGSTOP) } != 0 {
-        return;
-    }
-    let snapshot = crate::process::command("ps")
-        .args(["-ww", "-axo", "pid=,ppid=,args="])
-        .output();
-    let supervisor_exe = crate::paths::spawnable_exe().ok();
-    match snapshot {
-        Ok(output) if output.status.success() => {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                if let Some(child) = turn_child(line, pid, supervisor_exe.as_deref()) {
-                    stop_turn_process(child);
-                }
+    })??;
+    let mut answer = String::new();
+    while let Ok(event) = events.try_recv() {
+        if let Event::Update(update) = event {
+            if update["sessionUpdate"] == "agent_message_chunk" {
+                answer.push_str(update["content"]["text"].as_str().unwrap_or_default());
             }
         }
-        _ => eprintln!("Could not inspect Antigravity descendants during cancellation"),
     }
-    // SAFETY: this is the owned child or a descendant observed while its parent was stopped.
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
+    compaction_outcome(&result, &answer, || {
+        take_stop_error(&ctx.session_id, native_id)
+            .or_else(|| logged_network_failure(&log, logged))
+            .unwrap_or_else(|| format!("see {}", log.display()))
+    })
+}
+
+fn compaction_outcome(result: &Value, answer: &str, cause: impl FnOnce() -> String) -> Result<()> {
+    match result["stopReason"].as_str() {
+        Some("end_turn") if !answer.contains(ERROR_MARKER) => Ok(()),
+        Some("end_turn") => Err(anyhow!(
+            "Antigravity could not compact this conversation: {}",
+            cause()
+        )),
+        Some(reason) => Err(anyhow!("Antigravity stopped compacting: {reason}")),
+        None => Err(anyhow!(
+            "Antigravity answered the compaction without a stop reason"
+        )),
     }
 }
 
-#[cfg(unix)]
-fn turn_child(line: &str, parent: libc::pid_t, supervisor_exe: Option<&Path>) -> Option<u32> {
-    let mut fields = line.trim().splitn(2, char::is_whitespace);
-    let pid = fields.next()?.parse().ok()?;
-    let mut fields = fields.next()?.trim_start().splitn(2, char::is_whitespace);
-    if fields.next()?.parse::<libc::pid_t>().ok()? != parent {
-        return None;
-    }
-    let command = fields.next()?.trim_start();
-    if let Some((exe, _)) = command.split_once(" supervise ") {
-        if supervisor_exe.is_some_and(|expected| Path::new(exe) == expected)
-            || (Path::new(exe).file_name().is_some_and(|name| name == "orx")
-                && Path::new(exe).is_file())
-        {
-            return None;
-        }
-    }
-    Some(pid)
-}
-
-#[cfg(not(unix))]
-fn stop_turn_process(pid: u32) {
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$processes = @(Get-CimInstance Win32_Process)
-function Stop-TurnProcess([uint32] $processId) {
-    $children = @($processes | Where-Object { $_.ParentProcessId -eq $processId })
-    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-    foreach ($child in $children) {
-        if ($child.Name -eq 'orx.exe' -and $child.CommandLine -match '^(?:"[^"\r\n]+"|\S+)\s+supervise\s') { continue }
-        Stop-TurnProcess $child.ProcessId
-    }
-}
-Stop-TurnProcess ([uint32] $env:ORX_STOP_PID)
-"#;
-    let result = crate::process::command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .env("ORX_STOP_PID", pid.to_string())
-        .stdout(Stdio::null())
-        .status();
-    if !result.is_ok_and(|status| status.success()) {
-        eprintln!("Could not inspect Antigravity descendants during cancellation");
-    }
-}
-
-fn write_approval_hook(repo: &Path, enabled: bool) -> Result<()> {
+/// agy's workspace hooks for this chat, merged into the worktree's untracked
+/// `.agents/hooks.json` (a tracked one is the project's and stays untouched).
+fn write_hooks(repo: &Path) -> Result<()> {
     std::fs::create_dir_all(repo)?;
     let tracked = crate::local::git::git_command()
         .args(["ls-files", "--error-unmatch", ".agents/hooks.json"])
@@ -653,12 +704,12 @@ fn write_approval_hook(repo: &Path, enabled: bool) -> Result<()> {
         .stderr(Stdio::null())
         .status()?;
     if tracked.success() {
-        return Err(anyhow!("This project tracks .agents/hooks.json. Antigravity approval setup requires an untracked hook file and will not modify the tracked file."));
+        return Err(anyhow!("This project tracks .agents/hooks.json. Antigravity needs OpenResearch's hooks in an untracked hook file and will not modify the tracked file."));
     }
     let path = repo.join(".agents/hooks.json");
     let mut hooks = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Value>(&text)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
         Err(error) => return Err(error.into()),
     };
     let object = hooks
@@ -677,23 +728,38 @@ fn write_approval_hook(repo: &Path, enabled: bool) -> Result<()> {
                 || exe
                     .file_name()
                     .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("orx.exe")),
-            "The Antigravity approval bridge requires the executable name orx.exe"
+            "Antigravity's OpenResearch hooks require the executable name orx.exe"
         );
         // prepare_env puts this executable's directory first on PATH.
         "orx antigravity-gate".to_string()
     };
-    // Without approval the gate still sees shell commands, to export their invoking model.
+    // Print-mode chats relayed approvals through this hook; ACP holds them on the connection.
+    object.remove("openresearch-approval");
     object.insert(
-        "openresearch-approval".into(),
-        serde_json::json!({
-            "enabled": enabled || !cfg!(windows),
-            "PreToolUse": [{"matcher": if enabled { "*" } else { "run_command" },"hooks":[{"type":"command","command":command,"timeout":3600}]}]
+        "openresearch-invocation".into(),
+        json!({
+            // The stamp is a POSIX shell export.
+            "enabled": !cfg!(windows),
+            "PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": command, "timeout": 60}]}]
+        }),
+    );
+    // agy asks about a subagent's tools only in its own terminal, never over ACP.
+    object.insert(
+        "openresearch-subagents".into(),
+        json!({
+            "enabled": true,
+            "PreToolUse": [{"matcher": "invoke_subagent", "hooks": [{"type": "command", "command": command, "timeout": 60}]}]
         }),
     );
     object.insert(
         "openresearch-accounting".into(),
-        serde_json::json!({
-            "enabled": true, "PostInvocation": [{"type":"command","command":command}]
+        json!({"enabled": true, "PostInvocation": [{"type": "command", "command": command}]}),
+    );
+    object.insert(
+        "openresearch-background".into(),
+        json!({
+            "enabled": true,
+            "Stop": [{"type": "command", "command": command, "timeout": STOP_HOOK_TIMEOUT_SECS}]
         }),
     );
     std::fs::create_dir_all(path.parent().unwrap())?;
@@ -709,6 +775,16 @@ pub(crate) fn normalize_tool<'a>(
         "invoke_subagent" => ("task", &[("Role", "description")]),
         "run_command" => ("Bash", &[("CommandLine", "command"), ("Cwd", "cwd")]),
         "view_file" => ("Read", &[("AbsolutePath", "file_path")]),
+        "read_file" => ("Read", &[("Path", "file_path")]),
+        "write_file" => ("Write", &[("Path", "file_path"), ("Content", "content")]),
+        "edit_file" => (
+            "Edit",
+            &[
+                ("Path", "file_path"),
+                ("Target", "old_string"),
+                ("Replacement", "new_string"),
+            ],
+        ),
         "write_to_file" => (
             "Write",
             &[("TargetFile", "file_path"), ("CodeContent", "content")],
@@ -737,284 +813,40 @@ pub(crate) fn normalize_tool<'a>(
     (tool, input)
 }
 
-fn error_text(value: &Value) -> Option<&str> {
-    value.as_str().or_else(|| value.get("message")?.as_str())
-}
-
-fn step_is_terminal(state: &str) -> bool {
-    matches!(state, "DONE" | "ERROR" | "CANCELED")
-}
-
-fn denied_actions_error(result: &Value) -> Option<String> {
-    if result
-        .get("response")
-        .and_then(Value::as_str)
-        .is_some_and(|response| !response.trim().is_empty())
-    {
-        return None;
-    }
-    let actions = result.get("denied_actions")?.as_array()?;
-    if actions.is_empty() {
-        return None;
-    }
-    let names = actions
-        .iter()
-        .filter_map(|action| {
-            action
-                .get("display_name")
-                .or_else(|| action.get("action"))
-                .and_then(Value::as_str)
-        })
-        .collect::<Vec<_>>();
-    Some(if names.is_empty() {
-        "Antigravity denied one or more required actions".into()
-    } else {
-        format!(
-            "Antigravity denied required action(s): {}",
-            names.join(", ")
-        )
-    })
-}
-
-fn result_failure(result: &Value) -> Option<(&'static str, String)> {
-    let status = result
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("INVALID");
-    if status != "SUCCESS" {
-        let error = result.get("error").and_then(error_text).unwrap_or(status);
-        Some(("antigravity_terminal", format!("Antigravity: {error}")))
-    } else {
-        denied_actions_error(result).map(|error| ("antigravity_permission_denied", error))
-    }
-}
-
-#[derive(Default)]
-struct TurnState {
-    conversation_id: Option<String>,
-    text_part_id: Option<String>,
-    text_seq: usize,
-    saw_result: bool,
-    turn_errored: bool,
-}
-
 pub(crate) fn invocation_sample_id(conversation: &str, step: i64) -> String {
     format!("antigravity:{conversation}:step:{step}")
 }
 
-fn antigravity_step_usage(step: &Value) -> Option<crate::store::TokenUsage> {
-    let usage = step.get("usage")?;
-    let field = |key| usage.get(key).and_then(Value::as_u64);
-    Some(crate::store::TokenUsage {
-        input_tokens: field("input_tokens"),
-        output_tokens: field("output_tokens"),
-        cache_read_tokens: field("cache_read_tokens"),
-        cache_write_tokens: None,
-        reasoning_tokens: field("thinking_tokens"),
-    })
-}
-
-fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool {
-    let event_type = event.get("event").and_then(Value::as_str).unwrap_or("");
-    match event_type {
-        "init" => {
-            if let Some(cid) = event
-                .get("conversation_id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-            {
-                state.conversation_id = Some(cid.to_string());
-            }
-            false
-        }
-        "step_update" => {
-            if let Some(step) = event.get("step_update") {
-                // A forwarded sub-agent step names its own conversation; only the first is the root.
-                let own = step
-                    .get("conversation_id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty());
-                if state.conversation_id.is_none() {
-                    state.conversation_id = own.map(str::to_string);
-                }
-                if let (Some(index), Some(usage)) = (
-                    step.get("step_index").and_then(Value::as_i64),
-                    antigravity_step_usage(step),
-                ) {
-                    let sample_id = own
-                        .or(state.conversation_id.as_deref())
-                        .map(|conversation| invocation_sample_id(conversation, index))
-                        .unwrap_or_else(|| {
-                            format!("antigravity-{}:{index}", ctx.attempt_count_for_usage())
-                        });
-                    ctx.record_native_usage(&sample_id, None, None, usage);
-                }
-                let step_type = step.get("step_type").and_then(Value::as_str).unwrap_or("");
-                let step_state = step.get("state").and_then(Value::as_str).unwrap_or("");
-
-                if own.is_some() && own != state.conversation_id.as_deref() {
-                    return false;
-                }
-                if step_type == "subagent" {
-                    let index = step["step_index"].as_i64().unwrap_or(0);
-                    if let Some(agents) = step
-                        .pointer("/subagent_info/subagents")
-                        .and_then(Value::as_array)
-                    {
-                        for (offset, agent) in agents.iter().enumerate() {
-                            let Some(child) = agent["conversation_id"].as_str() else {
-                                continue;
-                            };
-                            let id = if offset == 0 {
-                                format!("tool-{index}-invoke_subagent")
-                            } else {
-                                format!("tool-{index}-invoke_subagent:{child}")
-                            };
-                            let mut part = WirePart::tool(id, "task", "completed", None);
-                            if let Some(tool) = part.state.as_mut() {
-                                tool.input = Some(serde_json::json!({
-                                    "description": agent["role"],
-                                    "prompt": agent["initial_prompt"],
-                                    "nativeTranscript": {"antigravityConversationId": child}
-                                }));
-                            }
-                            ctx.upsert_part_preserving_children(part);
-                        }
-                    }
-                    return false;
-                }
-                match step_type {
-                    "agent_response" => {
-                        if let Some(delta) = step.get("text_delta").and_then(Value::as_str) {
-                            if !delta.is_empty() {
-                                let id = match &state.text_part_id {
-                                    Some(id) => id.clone(),
-                                    None => {
-                                        state.text_seq += 1;
-                                        let id = format!("text-{}", state.text_seq);
-                                        ctx.upsert_part(WirePart::text(id.clone(), ""));
-                                        state.text_part_id = Some(id.clone());
-                                        id
-                                    }
-                                };
-                                ctx.append_part_text(&id, delta);
-                            }
-                        }
-                        if step_is_terminal(step_state) {
-                            state.text_part_id = None;
-                        }
-                    }
-                    "tool" => {
-                        state.text_part_id = None;
-                        let tool_name = step
-                            .get("tool_name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("tool");
-                        let tool_info = step.get("tool_info").unwrap_or(&Value::Null);
-                        let step_index =
-                            step.get("step_index").and_then(Value::as_i64).unwrap_or(0);
-                        let call_id = format!("tool-{step_index}-{tool_name}");
-
-                        let (tool, params) = normalize_tool(tool_name, tool_info.get("parameters"));
-                        let output = tool_info.get("output").and_then(Value::as_str);
-                        let error =
-                            tool_info
-                                .get("error")
-                                .and_then(error_text)
-                                .or(match step_state {
-                                    "ERROR" => Some("Antigravity tool failed"),
-                                    "CANCELED" => Some("Antigravity tool was canceled"),
-                                    _ => None,
-                                });
-                        let is_done = step_is_terminal(step_state) || error.is_some();
-
-                        let status = if !is_done {
-                            "running"
-                        } else if error.is_some() {
-                            "error"
-                        } else {
-                            "completed"
-                        };
-                        if let Some(part) = find_part_mut(&mut ctx.assistant.parts, &call_id) {
-                            if let Some(part_state) = part.state.as_mut() {
-                                if params.is_some() {
-                                    part_state.input = params;
-                                }
-                                if is_done {
-                                    part_state.status = status.into();
-                                    if let Some(out) = output {
-                                        part_state.output = Some(out.to_string());
-                                    }
-                                    if let Some(err) = error {
-                                        part_state.error = Some(err.to_string());
-                                    }
-                                }
-                            }
-                        } else {
-                            ctx.upsert_part(WirePart {
-                                id: call_id,
-                                kind: "tool".into(),
-                                text: None,
-                                tool: Some(tool.to_string()),
-                                state: Some(WireToolState {
-                                    status: status.into(),
-                                    input: params,
-                                    output: output.map(str::to_string),
-                                    error: error.map(str::to_string),
-                                    title: None,
-                                }),
-                                prompt: None,
-                                phase: None,
-                                children: Vec::new(),
-                                orx: None,
-                            });
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            false
-        }
-        "result" => {
-            state.saw_result = true;
-            let res = event.get("result").unwrap_or(&Value::Null);
-            if let Some(cid) = res
-                .get("conversation_id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-            {
-                state.conversation_id = Some(cid.to_string());
-            }
-            if res.get("status").and_then(Value::as_str) == Some("SUCCESS") {
-                ctx.mark_delivery(DeliveryState::Accepted);
-            }
-            if let Some((kind, error)) = result_failure(res) {
-                state.turn_errored = true;
-                ctx.mark_terminal_failure(kind, error);
-            } else {
-                ctx.mark_final_text_tail();
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
+/// The plan card for a plan-mode turn: agy's plan artifact (the file it asks
+/// feedback on), else the turn's last text.
 fn plan_card(parts: &[WirePart], assistant_id: &str) -> Option<WirePart> {
-    let last_text = parts.iter().rev().find_map(|part| {
-        (part.kind == "text")
-            .then_some(part.text.as_deref())
+    let artifact = parts.iter().rev().find_map(|part| {
+        let input = part.state.as_ref()?.input.as_ref()?;
+        (input.pointer("/ArtifactMetadata/RequestFeedback") == Some(&Value::Bool(true)))
+            .then(|| input["Content"].as_str())
             .flatten()
-            .filter(|text| !text.trim().is_empty())
-    })?;
-    if !super::should_synthesize_plan(true, false, false, last_text) {
-        return None;
-    }
+            .filter(|plan| !plan.trim().is_empty())
+    });
+    let plan = match artifact {
+        Some(plan) => plan,
+        None => {
+            let last_text = parts.iter().rev().find_map(|part| {
+                (part.kind == "text")
+                    .then_some(part.text.as_deref())
+                    .flatten()
+                    .filter(|text| !text.trim().is_empty())
+            })?;
+            if !super::should_synthesize_plan(true, false, false, last_text) {
+                return None;
+            }
+            last_text
+        }
+    };
     Some(WirePart::prompt(
         format!("plan-synth-{assistant_id}"),
         WirePrompt {
             kind: "plan".into(),
-            plan: Some(last_text.to_string()),
+            plan: Some(plan.to_string()),
             synthesized: true,
             ..Default::default()
         },
@@ -1023,372 +855,23 @@ fn plan_card(parts: &[WirePart], assistant_id: &str) -> Option<WirePart> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn native_step_usage_includes_reasoning_without_double_counting() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("fixtures/antigravity-usage.json")).unwrap();
-        let usage = super::antigravity_step_usage(&fixture[0]["step_update"]).unwrap();
-        usage.validate().unwrap();
-        assert_eq!(usage.total(), Some(13155));
-        assert_eq!(usage.reasoning_tokens, Some(138));
-        assert_eq!(usage.cache_write_tokens, None);
-        assert!(super::antigravity_step_usage(&serde_json::json!({})).is_none());
-    }
-
     use super::*;
-    use serde_json::json;
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn compaction_requires_a_successful_result_and_exit() {
-        for (output, code, expected) in [
-            (
-                json!({"event":"result","result":{"status":"SUCCESS"}}),
-                "0",
-                None,
-            ),
-            (
-                json!({"event":"result","result":{"status":"ERROR","error":"quota exhausted"}}),
-                "0",
-                Some("quota exhausted"),
-            ),
-            (
-                json!({"event":"result","result":{"status":"SUCCESS"}}),
-                "7",
-                Some("exited with"),
-            ),
-            (
-                json!({"event":"init","conversation_id":"saved"}),
-                "0",
-                Some("without a result"),
-            ),
-            (json!({"event":"result","result":{}}), "0", Some("INVALID")),
-        ] {
-            let mut cmd = crate::process::tokio_command("sh");
-            cmd.args([
-                "-c",
-                "printf '%s\\n' \"$ORX_TEST_EVENT\"; exit \"$ORX_TEST_EXIT\"",
-            ])
-            .env("ORX_TEST_EVENT", output.to_string())
-            .env("ORX_TEST_EXIT", code);
-            let result = compact_native(cmd, Duration::from_secs(5)).await;
-            match expected {
-                None => result.unwrap(),
-                Some(message) => assert!(result.unwrap_err().to_string().contains(message)),
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn compaction_timeout_and_cancellation_stop_the_child() {
-        for cancel in [false, true] {
-            let dir = crate::local::git::TemporaryDirectory::new("orx-agy-compact-stop").unwrap();
-            let pid_file = dir.path().join("pid");
-            let mut cmd = crate::process::tokio_command("sh");
-            cmd.args(["-c", "echo $$ > \"$ORX_TEST_PID\"; sleep 60"])
-                .env("ORX_TEST_PID", &pid_file);
-            let task = tokio::spawn(compact_native(
-                cmd,
-                if cancel {
-                    Duration::from_secs(60)
-                } else {
-                    Duration::from_millis(200)
-                },
-            ));
-            let pid: libc::pid_t = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
-                        if let Ok(pid) = text.trim().parse() {
-                            break pid;
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-            if cancel {
-                task.abort();
-                assert!(task.await.unwrap_err().is_cancelled());
-            } else {
-                assert!(task
-                    .await
-                    .unwrap()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("did not finish compacting"));
-            }
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while unsafe { libc::kill(pid, 0) } == 0 {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("compaction child survived cancellation");
-        }
-    }
-
-    fn fold(events: &[Value]) -> (TurnCtx, TurnState) {
-        let mut ctx = TurnCtx::test_stub();
-        let mut state = TurnState::default();
-        for event in events {
-            apply_event(&mut ctx, &mut state, event);
-        }
-        (ctx, state)
-    }
 
     #[test]
-    fn stream_folds_init_text_tools_and_result() {
-        let (mut ctx, mut state) = fold(&[
-            json!({
-                "event": "init",
-                "conversation_id": "test-conv-123",
-                "init": {"tools": ["run_command", "view_file"]}
-            }),
-            json!({
-                "event": "step_update",
-                "step_update": {
-                    "step_index": 0,
-                    "state": "DONE",
-                    "step_type": "user_input"
-                }
-            }),
-            json!({
-                "event": "step_update",
-                "step_update": {
-                    "step_index": 1,
-                    "state": "ACTIVE",
-                    "step_type": "agent_response",
-                    "text_delta": "Checking directory "
-                }
-            }),
-            json!({
-                "event": "step_update",
-                "step_update": {
-                    "step_index": 1,
-                    "state": "DONE",
-                    "step_type": "agent_response",
-                    "text_delta": "contents..."
-                }
-            }),
-            json!({
-                "event": "step_update",
-                "step_update": {
-                    "step_index": 2,
-                    "state": "ACTIVE",
-                    "step_type": "tool",
-                    "tool_name": "run_command",
-                    "tool_info": {
-                        "name": "run_command",
-                        "parameters": {"CommandLine": "ls -la"}
-                    }
-                }
-            }),
-            json!({
-                "event": "step_update",
-                "step_update": {
-                    "step_index": 2,
-                    "state": "DONE",
-                    "step_type": "tool",
-                    "tool_name": "run_command",
-                    "tool_info": {
-                        "name": "run_command",
-                        "parameters": {"CommandLine": "ls -la"},
-                        "output": "file.txt\n"
-                    }
-                }
-            }),
-            json!({
-                "event": "step_update",
-                "step_update": {
-                    "step_index": 3,
-                    "state": "ACTIVE",
-                    "step_type": "agent_response",
-                    "text_delta": "Found file.txt"
-                }
-            }),
-            json!({
-                "event": "step_update",
-                "step_update": {
-                    "step_index": 3,
-                    "state": "DONE",
-                    "step_type": "agent_response",
-                    "text_delta": "."
-                }
-            }),
-        ]);
-
-        assert_eq!(state.conversation_id.as_deref(), Some("test-conv-123"));
-        assert_eq!(ctx.assistant.parts.len(), 3);
-        assert_eq!(ctx.assistant.parts[0].kind, "text");
-        assert_eq!(
-            ctx.assistant.parts[0].text.as_deref(),
-            Some("Checking directory contents...")
-        );
-
-        assert_eq!(ctx.assistant.parts[1].kind, "tool");
-        let tool_state = ctx.assistant.parts[1].state.as_ref().unwrap();
-        assert_eq!(tool_state.status, "completed");
-        assert_eq!(ctx.assistant.parts[1].tool.as_deref(), Some("Bash"));
-        assert_eq!(tool_state.input.as_ref().unwrap()["command"], "ls -la");
-        assert_eq!(tool_state.output.as_deref(), Some("file.txt\n"));
-
-        assert_eq!(ctx.assistant.parts[2].kind, "text");
-        assert_eq!(
-            ctx.assistant.parts[2].text.as_deref(),
-            Some("Found file.txt.")
-        );
-
-        let done = apply_event(
-            &mut ctx,
-            &mut state,
-            &json!({
-                "event": "result",
-                "result": {
-                    "conversation_id": "test-conv-123",
-                    "status": "SUCCESS",
-                    "response": "Done"
-                }
-            }),
-        );
-        assert!(done);
-        assert!(state.saw_result);
-        assert!(!state.turn_errored);
-    }
-
-    #[test]
-    fn non_success_results_never_finish_the_answer() {
-        for status in [
-            "ERROR",
-            "CANCELED",
-            "INTERRUPTED",
-            "INVALID",
-            "WAITING",
-            "RUNNING",
-        ] {
-            let (ctx, state) = fold(&[json!({
-                "event": "result",
-                "result": {"conversation_id": "", "status": status, "error": "Quota limit exceeded"}
-            })]);
-            assert!(state.saw_result);
-            assert!(state.turn_errored, "{status}");
-            assert!(state.conversation_id.is_none());
-            assert!(ctx.assistant.parts.is_empty());
-        }
-    }
-
-    #[test]
-    fn tool_updates_preserve_inputs_and_surface_object_errors() {
-        let (ctx, _) = fold(&[
-            json!({"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"view_file","tool_info":{"parameters":{"AbsolutePath":"/repo/file.rs"}}}}),
-            json!({"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"tool","tool_name":"view_file","tool_info":{"error":{"type":"permission","message":"Denied"}}}}),
-        ]);
-        let part = &ctx.assistant.parts[0];
-        assert_eq!(part.tool.as_deref(), Some("Read"));
-        let state = part.state.as_ref().unwrap();
-        assert_eq!(state.status, "error");
-        assert_eq!(state.error.as_deref(), Some("Denied"));
-        assert_eq!(state.input.as_ref().unwrap()["file_path"], "/repo/file.rs");
-        for name in [
-            "write_to_file",
-            "replace_file_content",
-            "multi_replace_file_content",
-        ] {
-            let (_, input) = normalize_tool(name, Some(&json!({"TargetFile":"/repo/file.rs"})));
-            assert_eq!(input.unwrap()["file_path"], "/repo/file.rs");
-        }
-    }
-
-    #[test]
-    fn permission_denial_is_not_a_successful_turn() {
-        let (ctx, state) = fold(&[
-            json!({"event":"step_update","step_update":{"step_index":2,"state":"ERROR","step_type":"tool","tool_name":"view_file","tool_info":{"error":{"type":"TOOL_ERROR","message":"Permission denied"}}}}),
-            json!({"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"read_file","display_name":"ViewFile"}]}}),
-        ]);
-        assert!(state.turn_errored);
-        let tool = ctx.assistant.parts[0].state.as_ref().unwrap();
-        assert_eq!(tool.status, "error");
-        assert_eq!(tool.error.as_deref(), Some("Permission denied"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cancellation_preserves_detached_experiment_supervisors() {
-        let supervisor = Some(Path::new("/path with spaces/orx"));
-        assert_eq!(
-            turn_child(" 12 10 /bin/sh -c sleep 60", 10, supervisor),
-            Some(12)
-        );
-        assert_eq!(turn_child(" 13 12 sleep 60", 10, supervisor), None);
-        assert_eq!(
-            turn_child(
-                " 14 10 /path with spaces/orx supervise run-id",
-                10,
-                supervisor
-            ),
-            None
-        );
-        assert_eq!(
-            turn_child(
-                " 17 10 /bin/sh -c /path with spaces/orx supervise run-id",
-                10,
-                supervisor
-            ),
-            Some(17)
-        );
-        assert_eq!(
-            turn_child(" 15 10 /path/orx exp run experiment-id", 10, supervisor),
-            Some(15)
-        );
-        assert_eq!(
-            turn_child(" 16 10 python -c print('supervise')", 10, supervisor),
-            Some(16)
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn cancellation_kills_command_descendants() {
-        let mut child = crate::process::tokio_command("sh")
-            .args(["-c", "sleep 60 & echo $!; wait"])
-            .stdout(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let cancellation = TurnProcesses(child.id());
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        let pid: libc::pid_t = lines.next_line().await.unwrap().unwrap().parse().unwrap();
-        drop(cancellation);
-        child.wait().await.unwrap();
-        for _ in 0..100 {
-            if unsafe { libc::kill(pid, 0) } != 0 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("command descendant survived cancellation: {pid}");
-    }
-
-    #[test]
-    fn approval_setup_leaves_tracked_hooks_untouched() {
+    fn hooks_leave_a_tracked_hook_file_untouched() {
         let repo = std::env::temp_dir().join(format!("orx-agy-hooks-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(repo.join(".agents")).unwrap();
         let path = repo.join(".agents/hooks.json");
         std::fs::write(&path, "{}").unwrap();
-        assert!(crate::process::command("git")
-            .args(["init", "--quiet"])
-            .current_dir(&repo)
-            .status()
-            .unwrap()
-            .success());
-        assert!(crate::process::command("git")
-            .args(["add", ".agents/hooks.json"])
-            .current_dir(&repo)
-            .status()
-            .unwrap()
-            .success());
-        assert!(write_approval_hook(&repo, true)
+        for args in [&["init", "--quiet"][..], &["add", ".agents/hooks.json"]] {
+            assert!(crate::process::command("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+        assert!(write_hooks(&repo)
             .unwrap_err()
             .to_string()
             .contains("tracks .agents/hooks.json"));
@@ -1397,114 +880,213 @@ mod tests {
     }
 
     #[test]
-    fn approval_hook_respects_enabled_flag() {
-        let repo =
-            std::env::temp_dir().join(format!("orx-agy-hooks-flag-{}", uuid::Uuid::new_v4()));
-        write_approval_hook(&repo, false).unwrap();
+    fn hooks_stamp_commands_account_invocations_and_wait_for_background_work() {
+        let repo = std::env::temp_dir().join(format!("orx-agy-hooks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(repo.join(".agents")).unwrap();
         let path = repo.join(".agents/hooks.json");
-        let content: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["openresearch-approval"]["enabled"], !cfg!(windows));
+        // A print-mode chat's relay, and the user's own hook, from before.
+        std::fs::write(
+            &path,
+            r#"{"openresearch-approval":{"enabled":true},"mine":{"enabled":true}}"#,
+        )
+        .unwrap();
+        write_hooks(&repo).unwrap();
+        let hooks: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(hooks["openresearch-subagents"]["enabled"], true);
         assert_eq!(
-            content["openresearch-approval"]["PreToolUse"][0]["matcher"],
+            hooks["openresearch-subagents"]["PreToolUse"][0]["matcher"],
+            "invoke_subagent"
+        );
+        assert!(hooks.get("openresearch-approval").is_none());
+        assert_eq!(hooks["mine"]["enabled"], true);
+        assert_eq!(hooks["openresearch-invocation"]["enabled"], !cfg!(windows));
+        assert_eq!(
+            hooks["openresearch-invocation"]["PreToolUse"][0]["matcher"],
             "run_command"
         );
-        assert_eq!(content["openresearch-accounting"]["enabled"], true);
-        assert_eq!(
-            content["openresearch-accounting"]["PostInvocation"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-
-        write_approval_hook(&repo, true).unwrap();
-        let content: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["openresearch-approval"]["enabled"], true);
+        assert_eq!(hooks["openresearch-accounting"]["enabled"], true);
+        let stop = &hooks["openresearch-background"];
+        assert_eq!(stop["enabled"], true);
+        assert!(stop["Stop"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("antigravity-gate"));
         std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]
-    fn failed_tool_states_are_terminal_even_without_error_payloads() {
-        for (step_state, expected_error) in [
-            ("ERROR", "Antigravity tool failed"),
-            ("CANCELED", "Antigravity tool was canceled"),
-        ] {
-            let (ctx, _) = fold(&[json!({
-                "event": "step_update",
-                "step_update": {
-                    "step_index": 1,
-                    "state": step_state,
-                    "step_type": "tool",
-                    "tool_name": "run_command",
-                    "tool_info": {"parameters": {"CommandLine": "false"}}
-                }
-            })]);
-            let tool = ctx.assistant.parts[0].state.as_ref().unwrap();
-            assert_eq!(tool.status, "error", "{step_state}");
-            assert_eq!(tool.error.as_deref(), Some(expected_error), "{step_state}");
-        }
+    fn launch_skips_permissions_only_when_asked() {
+        let bin = std::env::temp_dir().join("agy");
+        let ask = launch(&bin, "chat", false);
+        let bypass = launch(&bin, "chat", true);
+        assert_eq!(ask.id, "antigravity");
+        assert_eq!(ask.arguments[0], "acp");
+        assert!(!ask
+            .arguments
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(bypass
+            .arguments
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"));
+        assert_ne!(ask, bypass, "a mode change restarts the resident agent");
+        ask.validate_launch().unwrap();
     }
 
     #[test]
-    fn an_error_payload_terminates_an_active_tool() {
-        let (ctx, _) = fold(&[json!({
-            "event": "step_update",
-            "step_update": {
-                "step_index": 1,
-                "state": "ACTIVE",
-                "step_type": "tool",
-                "tool_name": "view_file",
-                "tool_info": {"error": {"message": "Denied"}}
-            }
-        })]);
-        let tool = ctx.assistant.parts[0].state.as_ref().unwrap();
-        assert_eq!(tool.status, "error");
-        assert_eq!(tool.error.as_deref(), Some("Denied"));
-    }
+    fn a_turn_agy_gave_up_on_fails_with_the_logged_network_failure() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.upsert_part(WirePart::text(
+            "t",
+            "\n⚠ Agent execution terminated due to error.\n",
+        ));
+        assert!(take_error_marker(&mut ctx));
+        assert!(ctx.assistant.parts.is_empty());
 
-    #[test]
-    fn terminal_agent_response_clears_the_streamed_text_part() {
-        for step_state in ["ERROR", "CANCELED"] {
-            let (_, state) = fold(&[
-                json!({"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"partial"}}),
-                json!({"event":"step_update","step_update":{"step_index":1,"state":step_state,"step_type":"agent_response"}}),
-            ]);
-            assert!(state.text_part_id.is_none(), "{step_state}");
-        }
-    }
-
-    #[test]
-    fn empty_success_with_denied_actions_is_a_failed_turn() {
-        let (ctx, state) = fold(&[json!({
-            "event": "result",
-            "result": {
-                "status": "SUCCESS",
-                "response": "",
-                "denied_actions": [{"action": "command", "display_name": "RunCommand"}]
-            }
-        })]);
-        assert!(state.saw_result);
-        assert!(state.turn_errored);
-        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
+        let mut ctx = TurnCtx::test_stub();
+        ctx.upsert_part(WirePart::text(
+            "t",
+            "Partial answer.\n⚠ Agent execution terminated due to error.\n",
+        ));
+        assert!(take_error_marker(&mut ctx));
         assert_eq!(
-            denied_actions_error(&json!({
-                "response": "",
-                "denied_actions": [{"display_name": "RunCommand"}]
-            }))
-            .as_deref(),
-            Some("Antigravity denied required action(s): RunCommand")
+            ctx.assistant.parts[0].text.as_deref(),
+            Some("Partial answer.")
         );
+
+        let mut ctx = TurnCtx::test_stub();
+        ctx.upsert_part(WirePart::text("t", "PONG"));
+        assert!(!take_error_marker(&mut ctx));
+
+        let log = std::env::temp_dir().join(format!("orx-agy-log-{}", uuid::Uuid::new_v4()));
+        // An earlier turn's failure, and startup noise that is no cause.
+        let earlier = "E1109 14:40:00.000000     1 errorreport.go:273] dial tcp: no such host\n\
+                       E1109 14:48:41.000000    54 launcher.go:249] Failed to resolve GeminiDir\n";
+        std::fs::write(
+            &log,
+            format!("{earlier}I1109 14:48:42.000000   314 server.go:1] starting\n\
+                     W1109 14:48:42.864603   314 cache.go:157] refresh failed\n\
+                     E1109 14:48:42.539824    86 errorreport.go:273] error getting token source: You are not logged into Antigravity.\n\
+                     E1109 14:48:42.864613   314 errorreport.go:273] failed to get load code assist response: dial tcp 127.0.0.1:9: connect: connection refused\n\
+                     E1109 14:48:42.868674   315 errorreport.go:273] plan model not specified\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            logged_network_failure(&log, earlier.len() as u64).as_deref(),
+            Some("failed to get load code assist response: dial tcp 127.0.0.1:9: connect: connection refused")
+        );
+        assert_eq!(
+            logged_network_failure(&log, std::fs::metadata(&log).unwrap().len()),
+            None
+        );
+        assert_eq!(
+            logged_network_failure(&log.with_extension("missing"), 0),
+            None
+        );
+        std::fs::write(&log, &earlier[earlier.find('\n').unwrap() + 1..]).unwrap();
+        assert_eq!(logged_network_failure(&log, 0), None);
+        std::fs::remove_file(log).unwrap();
     }
 
     #[test]
-    fn denied_actions_do_not_discard_a_nonempty_response() {
-        assert!(denied_actions_error(&json!({
-            "response": "I could not run it, but here is an explanation.",
-            "denied_actions": [{"display_name": "RunCommand"}]
-        }))
-        .is_none());
+    fn the_stop_hooks_error_belongs_to_its_own_conversation_once() {
+        let session = format!("chat-{}", uuid::Uuid::new_v4());
+        std::fs::create_dir_all(crate::store::data_dir()).unwrap();
+        let save = |conversation: &str| {
+            std::fs::write(
+                stop_error_path(&session),
+                json!({"conversationId": conversation, "error": "RESOURCE_EXHAUSTED: quota"})
+                    .to_string(),
+            )
+            .unwrap()
+        };
+        save("other");
+        assert_eq!(take_stop_error(&session, "mine"), None);
+        assert!(!stop_error_path(&session).exists());
+        save("mine");
+        assert_eq!(
+            take_stop_error(&session, "mine").as_deref(),
+            Some("RESOURCE_EXHAUSTED: quota")
+        );
+        assert_eq!(take_stop_error(&session, "mine"), None);
+    }
+
+    #[test]
+    fn turn_usage_counts_cache_as_input_and_rejects_inconsistent_counters() {
+        let result = json!({"stopReason": "end_turn", "usage": {
+            "inputTokens": 4599, "outputTokens": 245, "cachedReadTokens": 11398,
+            "cachedWriteTokens": 0, "thoughtTokens": 86, "totalTokens": 16242
+        }});
+        let usage = turn_usage(&result).unwrap();
+        assert_eq!(usage.input_tokens, Some(15997));
+        assert_eq!(usage.reasoning_tokens, Some(86));
+        assert_eq!(usage.total(), Some(16242));
+        let mut inconsistent = result.clone();
+        inconsistent["usage"]["totalTokens"] = json!(1);
+        assert!(turn_usage(&inconsistent).is_none());
+        assert!(turn_usage(&json!({"stopReason": "end_turn"})).is_none());
+    }
+
+    #[test]
+    fn compaction_succeeds_only_on_a_clean_end_of_turn() {
+        let done = json!({"stopReason": "end_turn"});
+        compaction_outcome(&done, "", || unreachable!()).unwrap();
+        let error = compaction_outcome(
+            &done,
+            "⚠ Agent execution terminated due to error.",
+            || "quota".into(),
+        );
+        assert!(error.unwrap_err().to_string().contains("quota"));
+        assert!(compaction_outcome(&json!({"stopReason": "cancelled"}), "", String::new).is_err());
+        assert!(compaction_outcome(&json!({}), "", String::new).is_err());
+    }
+
+    #[test]
+    fn the_plan_card_shows_agys_plan_artifact() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut edit = WirePart::tool("plan", "edit", "completed", None);
+        edit.state.as_mut().unwrap().input = Some(json!({
+            "ArtifactMetadata": {"RequestFeedback": true},
+            "Content": "# Plan\n1. Add planned.txt",
+            "Path": "/home/u/.gemini/antigravity-cli/brain/c/plan.md"
+        }));
+        ctx.upsert_part(edit);
+        ctx.upsert_part(WirePart::text("t", "Please review and approve the plan."));
+        let card = plan_card(&ctx.assistant.parts, "msg").unwrap();
+        assert_eq!(
+            card.prompt.unwrap().plan.as_deref(),
+            Some("# Plan\n1. Add planned.txt")
+        );
+
+        let mut ctx = TurnCtx::test_stub();
+        ctx.upsert_part(WirePart::text(
+            "t",
+            "Plan:\n1. Add planned.txt\n2. Commit it",
+        ));
+        let card = plan_card(&ctx.assistant.parts, "msg").unwrap();
+        assert!(card.prompt.unwrap().plan.unwrap().contains("Commit it"));
+    }
+
+    #[test]
+    fn unnamed_answers_pick_the_matching_permission_option() {
+        let prompt = WirePrompt {
+            native_choices: vec![
+                crate::local::chat::NativePermissionChoice {
+                    id: "allow".into(),
+                    label: "Allow".into(),
+                    kind: "allow_once".into(),
+                },
+                crate::local::chat::NativePermissionChoice {
+                    id: "deny".into(),
+                    label: "Deny".into(),
+                    kind: "reject_once".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(permission_choice(&prompt, true).as_deref(), Some("allow"));
+        assert_eq!(permission_choice(&prompt, false).as_deref(), Some("deny"));
+        assert_eq!(permission_choice(&WirePrompt::default(), true), None);
     }
 
     #[test]

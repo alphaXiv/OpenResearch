@@ -789,6 +789,8 @@ const PLAN_RESOLVED_CLASS_NAME = [
   "[&_summary_.plan-chevron]:ease-standard [&[open]_summary_.plan-chevron]:rotate-90",
 ].join(" ");
 
+const USER_MESSAGE_BUBBLE_CLASS_NAME = "bg-panel rounded-2xl py-2.5 px-4 text-base leading-normal whitespace-pre-wrap wrap-anywhere";
+
 const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 // --- chat state --------------------------------------------------------------
@@ -3446,7 +3448,7 @@ export const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div dir="auto" className="msg-user max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border">
+        <div dir="auto" className={`msg-user max-w-full ${USER_MESSAGE_BUBBLE_CLASS_NAME} [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border`}>
           {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
@@ -3785,7 +3787,7 @@ function renderParts(
           dir="auto"
           role="note"
           aria-label={m.chat_panel_you_mid_task()}
-          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere"
+          className={`msg-steer my-4 first:mt-0 last:mb-0 ms-auto w-fit max-w-[88%] ${USER_MESSAGE_BUBBLE_CLASS_NAME}`}
         >
           {replies?.questionById.has(part.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(part.id)}</div>}
           {replies?.textById.get(part.id) ?? part.text}
@@ -6355,11 +6357,10 @@ export function ChatPanel({
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
-  // The newest unresolved plan prompt, if any — it drives the docked strip
-  // above the composer. Resolution re-emits the message over SSE, so this
-  // recomputes to null and the strip disappears on its own.
+  // Shell exchanges don't start a new agent turn or resolve its pending plan.
   const pendingPlan = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user" && !shellExchangePart(messages[i])) break;
       for (const part of messages[i].parts) {
         if (part.type === "prompt" && part.prompt?.kind === "plan" && !part.prompt.resolved) {
           return {

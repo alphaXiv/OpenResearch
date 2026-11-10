@@ -28,6 +28,7 @@ struct SessionIo {
     native_id: Mutex<Option<String>>,
     events: Mutex<Option<mpsc::UnboundedSender<Event>>>,
     permissions: Mutex<HashMap<String, Permission>>,
+    one_shot: std::sync::atomic::AtomicBool,
 }
 
 impl SessionIo {
@@ -58,11 +59,12 @@ impl SessionIo {
 
 pub struct Client {
     alphaxiv_signed_in: bool,
+    launch: Definition,
     configuration_lock: tokio::sync::Mutex<()>,
     pub connection: ConnectionTo<Agent>,
     pub initialized: Value,
     io: Arc<SessionIo>,
-    stop: Mutex<Option<oneshot::Sender<()>>>,
+    stop: Mutex<Option<oneshot::Sender<bool>>>,
     closed: tokio::sync::watch::Receiver<bool>,
     idle_since: Mutex<Option<Instant>>,
 }
@@ -242,7 +244,51 @@ impl Client {
                 LoadSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(mcp_servers),
             )?
         };
-        self.request(method, params).await
+        let error = match self.request(method, params).await {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        let not_found = error
+            .downcast_ref::<agent_client_protocol::Error>()
+            .is_some_and(|error| error.code == agent_client_protocol::ErrorCode::ResourceNotFound);
+        if not_found || !self.lists_without(native_id).await {
+            return Err(error);
+        }
+        let mut missing = agent_client_protocol::Error::resource_not_found(None);
+        missing.message = format!("The agent no longer has session {native_id}: {error}");
+        Err(missing.into())
+    }
+
+    /// Whether the agent's own session list leaves out `native_id`. Some agents answer restoring a
+    /// session they no longer have with a generic error instead of `ResourceNotFound`.
+    async fn lists_without(&self, native_id: &str) -> bool {
+        if !self.initialized["agentCapabilities"]["sessionCapabilities"]["list"].is_object() {
+            return false;
+        }
+        let mut cursor: Option<String> = None;
+        for _ in 0..100 {
+            let params = match &cursor {
+                Some(cursor) => json!({"cursor": cursor}),
+                None => json!({}),
+            };
+            let Ok(page) = self.request("session/list", params).await else {
+                return false;
+            };
+            let Some(sessions) = page["sessions"].as_array() else {
+                return false;
+            };
+            if sessions
+                .iter()
+                .any(|session| session["sessionId"] == native_id)
+            {
+                return false;
+            }
+            match page["nextCursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => return true,
+            }
+        }
+        false
     }
 
     pub fn awaiting_permission(&self) -> bool {
@@ -255,6 +301,17 @@ impl Client {
 
     pub fn set_native_id(&self, id: &str) {
         *self.io.native_id.lock().unwrap() = Some(id.to_owned());
+    }
+
+    /// A throwaway one-shot session: no delegated tools, and no stored chat session to update.
+    pub fn mark_one_shot(&self) {
+        self.io
+            .one_shot
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn cancel_permissions(&self) {
+        self.io.cancel_permissions();
     }
 
     pub fn begin_turn(&self) -> mpsc::UnboundedReceiver<Event> {
@@ -320,7 +377,8 @@ impl Client {
         Ok(())
     }
 
-    pub async fn shutdown(&self) {
+    /// Asks the agent to stop the session's running prompt.
+    pub fn cancel(&self) {
         self.io.cancel_permissions();
         if let Some(native_id) = self.native_id() {
             if let Ok(notification) =
@@ -329,8 +387,17 @@ impl Client {
                 let _ = self.connection.send_notification(notification);
             }
         }
+    }
+
+    pub async fn shutdown(&self) {
+        self.end(false).await;
+    }
+
+    /// Stops the agent; `spare_detached` leaves the commands it started in their own sessions running.
+    async fn end(&self, spare_detached: bool) {
+        self.cancel();
         if let Some(stop) = self.stop.lock().unwrap().take() {
-            let _ = stop.send(());
+            let _ = stop.send(spare_detached);
         }
         let mut closed = self.closed.clone();
         let _ = tokio::time::timeout(
@@ -348,7 +415,7 @@ impl Drop for Client {
     }
 }
 
-fn select_has_value(option: &Value, value: &str) -> bool {
+pub(super) fn select_has_value(option: &Value, value: &str) -> bool {
     option["type"] == "select"
         && option["options"]
             .as_array()
@@ -402,7 +469,9 @@ impl Host {
             .clone();
         let mut saved = slot.lock().await;
         if let Some(client) = saved.as_ref().filter(|client| {
-            !*client.closed.borrow() && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+            !*client.closed.borrow()
+                && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+                && client.launch == *definition
         }) {
             *client.idle_since.lock().unwrap() = None;
             return Ok(client.clone());
@@ -474,6 +543,7 @@ impl Host {
                 client.shutdown().await;
             }
         }
+        super::stop_one_shots().await;
     }
 
     fn start_reaper(self: &Arc<Self>) {
@@ -516,7 +586,8 @@ impl Host {
                         });
                         if idle {
                             if let Some(client) = saved.take() {
-                                client.shutdown().await;
+                                // A dev server the agent started stays the user's.
+                                client.end(true).await;
                             }
                         }
                     }
@@ -533,7 +604,7 @@ pub(super) async fn spawn(
     events: Option<tokio::sync::broadcast::Sender<(&'static str, Value)>>,
     up_port: Option<u16>,
 ) -> Result<Arc<Client>> {
-    definition.validate()?;
+    definition.validate_launch()?;
     let executable = super::executable_path(&definition.executable).ok_or_else(|| {
         anyhow!("Executable not found. Install the agent or check its launch command.")
     })?;
@@ -619,7 +690,9 @@ pub(super) async fn spawn(
                         && notifications.owns(&notification.params)
                     {
                         let update = &notification.params["update"];
-                        if matches!(update["sessionUpdate"].as_str(), Some("config_option_update" | "current_mode_update")) {
+                        // A one-shot session has no stored chat session to update.
+                        let one_shot = notifications.one_shot.load(std::sync::atomic::Ordering::Relaxed);
+                        if !one_shot && matches!(update["sessionUpdate"].as_str(), Some("config_option_update" | "current_mode_update")) {
                             let store = crate::store::Store::open().map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
                             store.apply_acp_configuration_update(&chat_id, update).map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
                             if let (Some(events), Ok(Some(session))) = (&events, store.get_chat_session(&chat_id)) {
@@ -653,6 +726,12 @@ pub(super) async fn spawn(
                         );
                     }
                     if request.method != "session/request_permission" {
+                        if requests.one_shot.load(std::sync::atomic::Ordering::Relaxed) {
+                            return responder.respond_with_error(
+                                agent_client_protocol::Error::invalid_params()
+                                    .data("Tools are disabled for one-shot requests"),
+                            );
+                        }
                         let delegated = request_tools.clone();
                         let terminal_io = requests.clone();
                         connection.spawn(async move {
@@ -726,47 +805,60 @@ pub(super) async fn spawn(
                 Ok(())
             });
         tokio::pin!(run);
-        tokio::select! {
-            _ = stop_receiver => {
+        let spare_detached = tokio::select! {
+            stopped = stop_receiver => {
                 let _ = tokio::time::timeout(std::time::Duration::from_millis(500), &mut run).await;
+                stopped.unwrap_or(false)
             }
             result = &mut run => {
                 if let Some(sender) = ready_sender.lock().unwrap().take() {
                     let message = result.err().map(|error| error.to_string()).unwrap_or_else(|| "Agent exited before initialization".into());
                     let _ = sender.send(Err(message));
                 }
+                false
             }
-        }
+        };
         task_io.cancel_permissions();
         task_io.events.lock().unwrap().take();
         delegated.shutdown().await;
-        crate::local::chat::kill_shell_group(process.id.take());
+        // Windows has no sessions to tell detached commands apart.
+        if spare_detached && cfg!(unix) {
+            crate::local::chat::kill_shell_group(process.id.take());
+        } else {
+            crate::local::chat::kill_agent_tree(process.id.take());
+        }
         let _ = process.child.kill().await;
         let _ = process.child.wait().await;
         let _ = closed_sender.send(true);
     });
     let initialized =
         tokio::time::timeout(std::time::Duration::from_secs(15), ready_receiver).await;
-    match initialized {
-        Ok(Ok(Ok((connection, initialized)))) => Ok(Arc::new(Client {
-            alphaxiv_signed_in: crate::alphaxiv::signed_in(),
-            configuration_lock: tokio::sync::Mutex::new(()),
-            connection,
-            initialized,
-            io,
-            stop: Mutex::new(Some(stop_sender)),
-            closed: closed_receiver,
-            idle_since: Mutex::new(Some(Instant::now())),
-        })),
-        Ok(Ok(Err(message))) => {
-            drop(stop_sender);
-            bail!("ACP initialization failed: {message}")
+    let message = match initialized {
+        Ok(Ok(Ok((connection, initialized)))) => {
+            return Ok(Arc::new(Client {
+                alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+                launch: definition.clone(),
+                configuration_lock: tokio::sync::Mutex::new(()),
+                connection,
+                initialized,
+                io,
+                stop: Mutex::new(Some(stop_sender)),
+                closed: closed_receiver,
+                idle_since: Mutex::new(Some(Instant::now())),
+            }))
         }
-        _ => {
-            drop(stop_sender);
-            bail!("ACP initialization failed or timed out. Check the executable, arguments, and supported protocol version.")
-        }
-    }
+        Ok(Ok(Err(message))) => format!("ACP initialization failed: {message}"),
+        _ => "ACP initialization failed or timed out. Check the executable, arguments, and supported protocol version.".to_owned(),
+    };
+    drop(stop_sender);
+    // Windows keeps `cwd` in use until the child exits, and callers remove it next.
+    let mut closed = closed_receiver;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        closed.wait_for(|closed| *closed),
+    )
+    .await;
+    bail!("{message}")
 }
 
 #[cfg(test)]
@@ -832,6 +924,116 @@ mod tests {
                 .unwrap();
             host.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn restoring_a_session_the_agent_no_longer_lists_is_not_found() {
+        let host = Arc::new(Host::default());
+        let cwd = std::env::temp_dir();
+        let client = host
+            .get("unlisted", &definition("unlisted"), &cwd)
+            .await
+            .unwrap();
+        let code = |error: crate::error::Error| {
+            error
+                .downcast_ref::<agent_client_protocol::Error>()
+                .map(|error| error.code)
+        };
+        let gone = client.restore("gone", &cwd, vec![]).await.unwrap_err();
+        assert_eq!(
+            code(gone),
+            Some(agent_client_protocol::ErrorCode::ResourceNotFound)
+        );
+        // Listed on the second page: the agent still has it, so its own error stands.
+        let kept = client.restore("kept", &cwd, vec![]).await.unwrap_err();
+        assert_eq!(
+            code(kept),
+            Some(agent_client_protocol::ErrorCode::InternalError)
+        );
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_idle_stop_spares_only_commands_in_their_own_sessions() {
+        // An orphan stays a zombie under an init that never reaps it, as in some containers.
+        fn running(pid: libc::pid_t) -> bool {
+            let state = crate::process::command("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&state.stdout)
+                .trim()
+                .chars()
+                .next()
+                .is_some_and(|state| state != 'Z')
+        }
+        async fn exits(pid: libc::pid_t) -> bool {
+            for _ in 0..200 {
+                if !running(pid) {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            false
+        }
+        for idle in [true, false] {
+            let pids = std::env::temp_dir().join(format!("orx-acp-pids-{}", uuid::Uuid::new_v4()));
+            let peer = definition("normal");
+            let mut launch = peer.clone();
+            launch.executable = "sh".into();
+            launch.arguments = [
+                "-c".into(),
+                r#"python3 -c 'import os, time; os.setsid(); time.sleep(60)' & echo $! > "$0"
+sleep 60 & echo $! >> "$0"
+exec "$@""#
+                    .into(),
+                pids.to_string_lossy().into_owned(),
+                peer.executable,
+            ]
+            .into_iter()
+            .chain(peer.arguments)
+            .collect();
+            let host = Arc::new(Host::default());
+            let client = host
+                .get("detached", &launch, &std::env::temp_dir())
+                .await
+                .unwrap();
+            let started = std::fs::read_to_string(&pids).unwrap();
+            std::fs::remove_file(&pids).unwrap();
+            let started: Vec<libc::pid_t> =
+                started.lines().map(|pid| pid.parse().unwrap()).collect();
+            let [detached, attached] = started[..] else {
+                panic!("expected two commands: {started:?}");
+            };
+            client.end(idle).await;
+            assert!(
+                exits(attached).await,
+                "a command in the agent's group outlived it"
+            );
+            if idle {
+                assert!(running(detached), "an idle stop killed a detached command");
+                unsafe { libc::kill(detached, libc::SIGKILL) };
+            } else {
+                assert!(exits(detached).await, "a detached command outlived a stop");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_changed_launch_restarts_the_resident_process() {
+        let host = Arc::new(Host::default());
+        let cwd = std::env::temp_dir();
+        let launch = definition("normal");
+        let first = host.get("relaunch", &launch, &cwd).await.unwrap();
+        let again = host.get("relaunch", &launch, &cwd).await.unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        let mut changed = launch.clone();
+        changed.arguments.push("--changed".into());
+        let restarted = host.get("relaunch", &changed, &cwd).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &restarted));
+        assert!(*first.closed.borrow());
+        host.shutdown().await;
     }
 
     #[tokio::test]
@@ -992,6 +1194,80 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(client.answer(&id, "opaque-once").is_err());
+        host.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn one_shot_configuration_updates_reach_the_turn_without_a_stored_chat() {
+        let host = Arc::new(Host::default());
+        let client = new_client(&host, "acp-oneshot-configuration").await;
+        client.mark_one_shot();
+        let mut events = client.begin_turn();
+        client
+            .request(
+                "session/set_config_option",
+                json!({"sessionId": client.native_id(), "configId": "opaque-model", "value": "second"}),
+            )
+            .await
+            .unwrap();
+        // No chat session has this ID, so a store write would fail and drop the update.
+        assert!(
+            matches!(events.try_recv(), Ok(Event::Update(update)) if update["sessionUpdate"] == "current_mode_update")
+        );
+        client.end_turn();
+        host.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn chat_configuration_updates_from_the_agent_are_stored() {
+        let store = crate::store::Store::open().unwrap();
+        let id = format!("chat_{}", uuid::Uuid::new_v4());
+        store
+            .create_chat_session(&crate::store::StoredChatSession {
+                id: id.clone(),
+                project_id: "proj_1".into(),
+                harness: super::super::presets().remove(0).launch.id,
+                native_session_id: None,
+                title: None,
+                title_source: None,
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived: false,
+                context_usage_json: None,
+                bootstrap_context: None,
+                goal: None,
+                autonomy: None,
+                active_leaf_id: None,
+                side_parent_session_id: None,
+                side_parent_leaf_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        store
+            .set_acp_configuration(&id, &json!({"modes": {"currentModeId": "initial"}}))
+            .unwrap();
+        let host = Arc::new(Host::default());
+        let client = new_client(&host, &id).await;
+        let mut events = client.begin_turn();
+        client
+            .request(
+                "session/set_config_option",
+                json!({"sessionId": client.native_id(), "configId": "opaque-model", "value": "second"}),
+            )
+            .await
+            .unwrap();
+        // The update reaches the turn only after the store write.
+        assert!(
+            matches!(events.try_recv(), Ok(Event::Update(update)) if update["sessionUpdate"] == "current_mode_update")
+        );
+        let configuration = store.acp_session_state(&id).unwrap().unwrap().configuration;
+        assert_eq!(configuration["modes"]["currentModeId"], "agent-changed");
+        client.end_turn();
         host.shutdown().await;
     }
 

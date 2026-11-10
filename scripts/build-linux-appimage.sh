@@ -81,6 +81,11 @@ DEPLOY_GTK_VERSION=3 linuxdeploy \
   --custom-apprun "$ROOT/linux/AppRun" \
   --plugin gtk
 
+# linuxdeploy wraps custom entry points with its hooks. AppRun must capture the
+# host environment before running those hooks itself, exactly once.
+install -m755 "$ROOT/linux/AppRun" "$APPDIR/AppRun"
+rm -f "$APPDIR/AppRun.wrapped"
+
 # linuxdeploy leaves files below usr/lib looking beside themselves, so they
 # would load the host's libraries (or none); point them at the bundled usr/lib.
 patchelf --set-rpath '$ORIGIN/../..' \

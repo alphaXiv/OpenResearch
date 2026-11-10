@@ -183,6 +183,8 @@ pub(crate) struct Settings {
     pub dashboard_locale: Option<String>,
     #[serde(default)]
     harness_snapshot: Option<harness::InitialSnapshot>,
+    #[serde(default)]
+    acp_harness_snapshot: Option<harness::InitialSnapshot>,
     /// Fields from a newer orx, kept across this version's saves.
     #[serde(flatten)]
     unknown: serde_json::Map<String, serde_json::Value>,
@@ -700,8 +702,11 @@ fn build_payload_with_id(
     event: &str,
     install_id: &str,
     event_id: uuid::Uuid,
-    properties: serde_json::Value,
+    mut properties: serde_json::Value,
 ) -> serde_json::Value {
+    if let Some(id) = properties["harness"].as_str().and_then(harness::wire_id) {
+        properties["harness"] = json!(id);
+    }
     let mut payload = json!({
         "schemaVersion": 1,
         "installId": install_id,
@@ -2055,6 +2060,25 @@ mod tests {
         assert_eq!(build_channel(), "production");
         harness::assert_production_contract().await;
         let payloads = [
+            build_payload(
+                "chat_model_usage",
+                "cli-release-contract-test",
+                json!({
+                    "reportId": uuid::Uuid::new_v4().to_string(), "harness": "acp:custom",
+                    "model": null, "provider": null, "inputTokens": 10, "outputTokens": 5,
+                    "cacheReadTokens": null, "cacheWriteTokens": null, "reasoningTokens": null,
+                    "totalTokens": 15, "outcome": "done", "coverage": "complete",
+                    "attribution": "unresolved", "attributionReason": "identity_not_reported",
+                }),
+            ),
+            build_payload(
+                "experiment_finished",
+                "cli-release-contract-test",
+                json!({
+                    "harness": "acp:deepseek-harness", "model": null, "provider": null,
+                    "status": "done", "attribution": "unresolved", "attributionReason": "invoker_not_linked",
+                }),
+            ),
             build_payload(
                 "harness_setup",
                 "cli-release-contract-test",

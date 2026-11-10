@@ -14,6 +14,9 @@ const log = process.env.ORX_E2E_AGENT_LOG
 const reverse = new Map<string, (message: Message) => void>()
 let nextReverse = 0
 let turn: { abort: AbortController } | undefined
+// orx gives every chat session its MCP servers and a one-shot (title, starter prompts, summary) none. One-shots end with
+// no text, so they keep orx's fallbacks and never take a script meant for a chat turn.
+const oneShots = new Set<string>()
 
 function send(message: Omit<Message, 'jsonrpc'>) {
   const line = JSON.stringify({ jsonrpc: '2.0', ...message })
@@ -58,6 +61,7 @@ async function run(sessionId: string, step: Extract<Step, { run: string }>) {
 
 async function prompt(request: Message) {
   const { sessionId, prompt: blocks } = request.params
+  if (oneShots.has(sessionId)) return send({ id: request.id, result: { stopReason: 'end_turn' } })
   const text = blocks.map((block: { text?: string }) => block.text ?? '').join('\n')
   const abort = new AbortController()
   turn = { abort }
@@ -90,8 +94,11 @@ function handle(message: Message) {
         id: message.id,
         result: { protocolVersion: 1, agentInfo: { name: 'orx e2e agent', version: '1.0.0' }, agentCapabilities: { loadSession: true } },
       })
-    case 'session/new':
-      return send({ id: message.id, result: { sessionId: `e2e-${crypto.randomUUID()}` } })
+    case 'session/new': {
+      const sessionId = `e2e-${crypto.randomUUID()}`
+      if (!message.params?.mcpServers?.length) oneShots.add(sessionId)
+      return send({ id: message.id, result: { sessionId } })
+    }
     case 'session/load':
       return send({ id: message.id, result: {} })
     case 'session/prompt':
