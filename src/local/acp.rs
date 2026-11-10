@@ -721,7 +721,7 @@ fn one_shot_event(
                         .is_some_and(|kind| kind.starts_with("reject"))
                 })
                 .and_then(|option| option["optionId"].as_str());
-            if !reject.is_some_and(|option| client.answer(&id, option).is_ok()) {
+            if reject.is_none_or(|option| client.answer(&id, option).is_err()) {
                 client.cancel_permissions();
             }
         }
