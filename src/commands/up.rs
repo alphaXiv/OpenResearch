@@ -5695,7 +5695,9 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
             .into_response();
         }
     };
-    let move_claimed = move_store.claim_data_dir_move(&move_token).unwrap_or(false);
+    let move_claimed = move_store
+        .claim_data_dir_move(&move_token, &state.chat.held_turn_leases())
+        .unwrap_or(false);
     if !move_claimed {
         release(&state);
         return ApiError(
