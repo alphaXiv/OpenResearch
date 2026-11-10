@@ -29,6 +29,8 @@ So GET handlers must not change state. No route sends CORS headers, so a cross-s
 
 `orx up --host 0.0.0.0` opts into a trusted private network, such as a headless workstation driven from a laptop; anyone on that network can use the dashboard. orx's own clients still use `127.0.0.1`. The guard then also refuses any peer outside the loopback, RFC 1918, link-local and CGNAT IPv4 ranges, and accepts a Host only when it is `localhost` or a literal address in those ranges, so DNS rebinding still fails.
 
+Signing in to alphaXiv runs in the server, which tells the page where to approve it; signing in to OpenResearch runs `orx login` in a terminal the page reads. A page that reached the server by another address than loopback, or a server inside SSH, gets alphaXiv's link and code for the device grant ([remote](remote.md)) rather than a redirect its browser cannot follow; the page opens only that link, in a tab it reserved during the click so pop-up blockers allow it.
+
 The only extra origin accepted is the dev UI server's, `ORX_UI_DEV_ORIGIN`, which must be loopback HTTP; a remote workspace's own gateway port refuses it. Terminal websockets re-check same-origin in the handler with no allowance.
 
 Credentials stack on top: `/api/internal/` needs a token issued to that agent ([agents](agents.md)), `/api/v2/` the server's bearer from its owner-only descriptor, apart from the hello challenge ([experiments](experiments.md)), and every other path on a persistent remote host a live attachment's bearer, apart from its own agents' run callbacks ([remote](remote.md)).

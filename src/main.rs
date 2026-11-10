@@ -215,6 +215,10 @@ pub struct LoginArgs {
     /// Connect alphaXiv to an existing OpenResearch sign-in.
     #[arg(long)]
     pub alphaxiv: bool,
+    /// Approve the sign-in with a code on any device, instead of this computer's
+    /// browser. The default inside an SSH session.
+    #[arg(long)]
+    pub device: bool,
 }
 
 #[derive(Args, Debug)]

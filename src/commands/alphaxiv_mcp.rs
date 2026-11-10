@@ -22,7 +22,8 @@ pub const LIBRARY_READ_TOOLS: &[&str] =
     &["list_library", "list_annotated_papers", "get_paper_notes"];
 pub const WRITE_TOOLS: &[&str] = &["save_papers_to_folder", "create_folder"];
 const SIGNED_OUT: &str = "alphaXiv is signed out on the computer running this chat, so library tools are unavailable. Research tools still work.";
-const INSTRUCTIONS: &str = "alphaXiv tools research papers and researchers. Library tools read the user's saved folders, notes and highlights and need alphaXiv sign-in on the computer running this chat. Save papers or create folders only when requested. Want to read, Reading and Completed are folders, not exclusive states. Link papers as https://www.alphaxiv.org/abs/<arXiv id>.";
+const FORWARDED_LAPSED: &str = "The alphaXiv sign-in the user's laptop shared with the computer running this chat has expired, so library tools are unavailable until the user reconnects to this computer from OpenResearch on their laptop. Research tools still work.";
+const INSTRUCTIONS: &str = "alphaXiv tools research papers and researchers. Library tools read the user's saved folders, notes and highlights and need alphaXiv sign-in on the computer running this chat, or on the laptop connected to it. Save papers or create folders only when requested. Want to read, Reading and Completed are folders, not exclusive states. Link papers as https://www.alphaxiv.org/abs/<arXiv id>.";
 
 /// Under the agents' 300 s tool-call timeouts, so this error reaches the agent first.
 const CALL_TIMEOUT: Duration = Duration::from_secs(240);
@@ -133,10 +134,12 @@ async fn handle(message: Value) -> Value {
                     return reply;
                 }
                 Err(error) => {
-                    let error = if error.is::<crate::alphaxiv::NotConnected>() {
-                        SIGNED_OUT.to_owned()
-                    } else {
-                        format!("alphaXiv tools are unavailable: {error}")
+                    let error = match error.downcast_ref::<crate::alphaxiv::NotConnected>() {
+                        Some(crate::alphaxiv::NotConnected::SignedOut) => SIGNED_OUT.to_owned(),
+                        Some(crate::alphaxiv::NotConnected::ForwardedLapsed) => {
+                            FORWARDED_LAPSED.to_owned()
+                        }
+                        None => format!("alphaXiv tools are unavailable: {error}"),
                     };
                     eprintln!("{error}");
                     if listing {
@@ -286,6 +289,22 @@ mod tests {
             "IP rate limit"
         );
         assert!(!crate::alphaxiv::signed_in());
+
+        // A lapsed token from the user's laptop says how to renew it, and research still works.
+        std::fs::write(
+            config.join("alphaxiv-forwarded.json"),
+            json!({"apiUrl":api,"accessToken":"forwarded","expiresAtMs":0}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            handle(call("list_library")).await["result"]["content"][0]["text"],
+            FORWARDED_LAPSED
+        );
+        assert_eq!(
+            handle(call("discover_papers")).await["result"]["content"][0]["text"],
+            "IP rate limit"
+        );
+
         let calls = calls.lock().unwrap();
         assert_eq!(calls[4], ("/mcp/v1/anonymous".to_owned(), None));
         assert!(calls[..2]
