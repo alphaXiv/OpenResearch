@@ -25,7 +25,6 @@ fn packaged_orx_bootstraps_host_without_binary_directory() {
             .env("ORX_DATA_DIR", &data)
             .env("ORX_SSH_CONFIG", server.config_path())
             .env("ORX_NO_UPDATE_CHECK", "1")
-            .env("ORX_RUN_ENGINE", "1")
             .env_remove("ORX_HOST_BIN_DIR")
             .env_remove("ORX_LOCAL_SESSION")
             .env_remove("ORX_UP_PORT")

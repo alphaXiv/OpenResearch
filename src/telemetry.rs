@@ -106,8 +106,6 @@ fn flush_window() -> Duration {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_engine: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop_zoom_percent: Option<i32>,
     #[serde(default)]
     pub acp_harnesses: Vec<crate::local::acp::Definition>,
@@ -1465,9 +1463,6 @@ mod tests {
                 set_github_default_prompt_seen(true).unwrap()
             }),
             (&["autoUpdate"], || set_auto_update_enabled(false).unwrap()),
-            (&["runEngine"], || {
-                crate::config::set_run_engine_enabled(true).unwrap()
-            }),
             (&["updateChannel"], || {
                 set_update_channel(crate::updates::ReleaseChannel::Canary).unwrap()
             }),

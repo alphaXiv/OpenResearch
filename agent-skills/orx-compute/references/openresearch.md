@@ -18,4 +18,4 @@ orx exp run <expId> --backend openresearch --flavor cpu5c:32 --org <orgId>
   run ends, so all evidence must reach the run log.
 - `orx` streams the committed snapshot to the provisioned machine.
 
-See [run monitoring](../SKILL.md#run-engine-setting).
+See [run monitoring](../SKILL.md#who-watches-a-run).

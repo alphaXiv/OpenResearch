@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{sh_quote, shell_path, ssh_run, JobState, SshTarget};
+use super::{sh_quote, ssh_run, SshTarget};
 use crate::error::{anyhow, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,30 +172,6 @@ impl ContainerRun {
             "set -e\nfound=$(docker container ls --all --no-trunc --quiet --filter id={id})\n[ -n \"$found\" ] || exit 0\nactual=$(docker container inspect --format {check} -- {id})\ncase \"$actual\" in {running}|{paused}) {stop} ;; *) exit 0 ;; esac\n"
         )
     }
-
-    pub async fn require_running(&self, target: &SshTarget) -> Result<()> {
-        if let Some(reason) = unavailable(target, self).await? {
-            return Err(anyhow!("{reason}"));
-        }
-        Ok(())
-    }
-}
-
-async fn unavailable(target: &SshTarget, container: &ContainerRun) -> Result<Option<String>> {
-    let Some(found) = inspection(target, &container.id).await? else {
-        return Ok(Some(format!(
-            "Container '{}' was removed; host logs are preserved.",
-            container.reference
-        )));
-    };
-    if found.id != container.id || found.started_at != container.started_at {
-        return Ok(Some(format!(
-            "Container '{}' restarted; the experiment cannot resume.",
-            container.reference
-        )));
-    }
-    Ok((found.status != "running")
-        .then(|| format!("Container '{}' is {}.", container.reference, found.status)))
 }
 
 // Linux process start time prevents a recycled PID from identifying another experiment.
@@ -239,147 +215,6 @@ set -eo pipefail
 exit "$?"
 "#
     )
-}
-
-pub(super) async fn upload_script(
-    target: &SshTarget,
-    container: &ContainerRun,
-    script: &str,
-) -> Result<()> {
-    let dir = sh_quote(&container.run_dir);
-    ssh_run(
-        target,
-        &container.exec(&format!(
-            "umask 077; cat > {dir}/run.sh && chmod 600 {dir}/run.sh"
-        )),
-        Some(script),
-    )
-    .await?;
-    Ok(())
-}
-
-pub(super) fn host_script(dir: &str, container: &ContainerRun) -> String {
-    let inner = sh_quote(&format!("{}/run.sh", container.run_dir));
-    let check = sh_quote("{{.State.StartedAt}} {{.State.Status}}");
-    let expected = sh_quote(&format!("{} running", container.started_at));
-    let id = sh_quote(&container.id);
-    let dir = shell_path(dir);
-    format!("#!/usr/bin/env bash\ncd {dir} || exit 97\nprintf '%s\\n' \"$$\" > pid\n(\nactual=$(docker container inspect --format {check} -- {id}) || exit $?\n[ \"$actual\" = {expected} ] || {{ echo 'Container generation or readiness changed before launch' >&2; exit 97; }}\ndocker exec {id} setsid --wait bash {inner} </dev/null\n) >> log 2>&1\nprintf '%s\\n' \"$?\" > exit_code\n")
-}
-
-fn failed(message: String) -> JobState {
-    JobState {
-        stage: "ERROR".into(),
-        message: Some(message),
-    }
-}
-
-async fn host_state(target: &SshTarget, dir: &str) -> Result<String> {
-    let dir = shell_path(dir);
-    ssh_run(target, &format!(r#"d={dir}; if [ -f "$d/exit_code" ]; then echo "EXIT $(cat "$d/exit_code")"; elif [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null; then echo RUNNING; else echo DEAD; fi; if [ -f "$d/launch_time" ]; then echo "$(( $(date +%s) - $(cat "$d/launch_time") ))"; else echo 0; fi"#), None).await
-}
-
-pub(super) async fn inspect(
-    target: &SshTarget,
-    dir: &str,
-    container: &ContainerRun,
-) -> Result<JobState> {
-    let host = host_state(target, dir).await?;
-    let mut lines = host.lines();
-    let state = lines.next().unwrap_or_default();
-    if state.starts_with("EXIT ") {
-        return super::parse_job_state(state);
-    }
-    super::parse_job_state(state)?;
-    let age: i64 = lines.next().unwrap_or("0").parse()?;
-    if let Some(reason) = unavailable(target, container).await? {
-        if reason.ends_with(" is paused.") {
-            return Ok(JobState {
-                stage: "RUNNING".into(),
-                message: Some(format!(
-                    "{reason} Unpause it to continue or finish cancellation."
-                )),
-            });
-        }
-        return Ok(failed(reason));
-    }
-    let directory = sh_quote(&container.run_dir);
-    let probe = format!(
-        r#"{PROCESS_HELPERS}
-cd {directory} || exit 1
-if [ ! -f identity ]; then echo PENDING; exit 0; fi
-read -r p started < identity
-current=$(start_time "$p")
-if [ -n "$current" ] && [ "$current" != "$started" ]; then echo REUSED
-elif group_alive; then echo RUNNING
-else echo DEAD; fi
-"#
-    );
-    let inner = super::ssh_status(target, &container.exec(&probe), None).await?;
-    match inner.trim() {
-        "RUNNING" if state == "RUNNING" => Ok(JobState {
-            stage: "RUNNING".into(),
-            message: None,
-        }),
-        "PENDING" if age < 30 => Ok(JobState {
-            stage: "RUNNING".into(),
-            message: Some("Waiting for the container launcher.".into()),
-        }),
-        "RUNNING" | "PENDING" => {
-            if inner.trim() == "RUNNING" {
-                // The wrapper can start between the first host read and the inner probe.
-                let current = host_state(target, dir).await?;
-                let state = current.lines().next().unwrap_or_default();
-                if state == "RUNNING" || state.starts_with("EXIT ") {
-                    return super::parse_job_state(state);
-                }
-            }
-            cancel(target, container).await?;
-            super::cancel_job(target, dir, None).await?;
-            Ok(failed("SSH launcher disappeared or did not start within 30 seconds; the container experiment was stopped.".into()))
-        }
-        "REUSED" => Ok(failed(
-            "The container experiment's process identity changed.".into(),
-        )),
-        "DEAD" => {
-            // The host wrapper may still be writing the final exit code.
-            let final_state = super::inspect_host_job(target, dir).await?;
-            if final_state.stage != "RUNNING" {
-                return Ok(final_state);
-            }
-            let d = shell_path(dir);
-            let waited = super::ssh_status(target, &format!(r#"d={d}; umask 077; if [ ! -f "$d/completion_wait" ]; then date +%s > "$d/completion_wait.tmp" && mv "$d/completion_wait.tmp" "$d/completion_wait"; fi; echo "$(( $(date +%s) - $(cat "$d/completion_wait") ))""#), None).await?;
-            if waited.trim().parse::<i64>()? >= 30 {
-                let final_state = super::inspect_host_job(target, dir).await?;
-                if final_state.stage != "RUNNING" {
-                    return Ok(final_state);
-                }
-                super::cancel_job(target, dir, None).await?;
-                return Ok(failed("The container experiment ended, but the SSH launcher did not record its exit status within 30 seconds.".into()));
-            }
-            Ok(JobState {
-                stage: "RUNNING".into(),
-                message: Some("Waiting for the launcher to record the exit status.".into()),
-            })
-        }
-        other => Err(anyhow!("Unexpected container process state: {other}")),
-    }
-}
-
-pub(super) async fn cancel(target: &SshTarget, container: &ContainerRun) -> Result<()> {
-    if let Some(reason) = unavailable(target, container).await? {
-        if reason.ends_with(" is paused.") {
-            return Err(anyhow!("{reason} Unpause it to complete cancellation."));
-        }
-        return Ok(());
-    }
-    super::ssh_control(
-        target,
-        &container.exec(&cancel_script(&container.run_dir)),
-        None,
-    )
-    .await?;
-    Ok(())
 }
 
 fn cancel_script(run_dir: &str) -> String {

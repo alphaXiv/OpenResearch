@@ -1656,11 +1656,6 @@ export interface PublicProject {
 /** Where a shared project comes from: a picked file, a file on this machine, or a published link. */
 export type SharedSource = File | string | { link: string };
 
-export interface RunEngineSettings {
-  enabled: boolean;
-  forcedBy: "canary" | "environment" | null;
-}
-
 export function createApi(
   client: WorkspaceClient,
   invalidation: WorkspaceInvalidation,
@@ -2294,10 +2289,6 @@ export function createApi(
 
   const trackioPreflight = () => post<TrackioPreflight>("/api/settings/trackio/preflight", {});
 
-  const getRunEngine = (signal?: AbortSignal) => get<RunEngineSettings>("/api/settings/run-engine", signal);
-
-  const setRunEngine = (enabled: boolean) => post<RunEngineSettings>("/api/settings/run-engine", { enabled });
-
   const getComputeSettings = (projectId?: string, signal?: AbortSignal) =>
     get<ComputeSettings>(
       `/api/settings/compute${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
@@ -2888,8 +2879,6 @@ export function createApi(
     rayPreflight,
     getTrackioRuns,
     trackioPreflight,
-    getRunEngine,
-    setRunEngine,
     getComputeSettings,
     setComputeDefault,
     getLocalMachine,

@@ -206,26 +206,6 @@ async fn completion(events: &mut (impl Stream<Item = Result<Value>> + Unpin)) ->
     panic!("event stream ended before completion")
 }
 
-fn run_with_engine(test: &str) -> bool {
-    if std::env::var("ORX_RUN_ENGINE").as_deref() == Ok("1") {
-        return false;
-    }
-    // libtest names a test by its path inside the crate, which `module_path!` prefixes with the crate's name.
-    let test = test.split_once("::").map_or(test, |(_, path)| path);
-    let output = crate::process::command(std::env::current_exe().unwrap())
-        .env("ORX_RUN_ENGINE", "1")
-        .args(["--exact", test, "--nocapture"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(" 1 passed"),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    true
-}
-
 struct Fixture {
     api: Arc<Api>,
     backend: Arc<Fake>,
@@ -807,12 +787,6 @@ async fn a_force_quit_stops_runs_that_need_the_app_even_those_launched_while_a_b
 
 #[tokio::test]
 async fn a_force_quit_waits_for_a_launching_run_to_answer_its_stop() {
-    if run_with_engine(concat!(
-        module_path!(),
-        "::a_force_quit_waits_for_a_launching_run_to_answer_its_stop"
-    )) {
-        return;
-    }
     use clap::Parser;
     let _serial = crate::commands::up::ACTIVE_TEST_LOCK.lock().await;
     let f = Fixture::new().await;
@@ -864,12 +838,6 @@ async fn a_force_quit_waits_for_a_launching_run_to_answer_its_stop() {
 
 #[tokio::test]
 async fn cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundaries() {
-    if run_with_engine(concat!(
-        module_path!(),
-        "::cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundaries"
-    )) {
-        return;
-    }
     use clap::Parser;
     let f = Fixture::new().await;
     let cli =
@@ -998,12 +966,6 @@ async fn log_feed_is_refcounted_and_pushes_without_a_cli_poll() {
 
 #[tokio::test]
 async fn v2_launches_are_host_checked_admitted_and_keep_a_run_submission_active() {
-    if run_with_engine(concat!(
-        module_path!(),
-        "::v2_launches_are_host_checked_admitted_and_keep_a_run_submission_active"
-    )) {
-        return;
-    }
     use clap::Parser;
     let _guard = crate::commands::up::ACTIVE_TEST_LOCK.lock().await;
     let f = Fixture::new().await;
@@ -1819,10 +1781,9 @@ async fn dashboard_host_routes_report_states_and_retry_only_key_hosts() {
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
-    let connect_required = cfg!(windows) && !crate::config::run_engine_settings().unwrap().0;
     assert_eq!(
         serde_json::from_slice::<Value>(&bytes).unwrap(),
-        json!([{"alias":"lab","status":"backoff","class":"key","connectRequired":connect_required,"sinceMs":100,"nextRetryMs":200,"cause":"offline","root":"/engine"}])
+        json!([{"alias":"lab","status":"backoff","class":"key","connectRequired":false,"sinceMs":100,"nextRetryMs":200,"cause":"offline","root":"/engine"}])
     );
     let request = || {
         Request::builder()

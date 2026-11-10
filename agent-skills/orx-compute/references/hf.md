@@ -24,4 +24,4 @@ orx exp run <expId> --backend hf --flavor cpu-upgrade --image python:3.12
 - `orx` uploads the committed snapshot into a private job volume. The job never
   clones a repository or needs repository credentials.
 
-See [run monitoring](../SKILL.md#run-engine-setting).
+See [run monitoring](../SKILL.md#who-watches-a-run).

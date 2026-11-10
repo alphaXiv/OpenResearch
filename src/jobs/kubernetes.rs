@@ -24,8 +24,8 @@
 //!   exactly that list.
 //!
 //! Job stages are mapped onto the HF stage vocabulary (SCHEDULING/RUNNING/
-//! COMPLETED/ERROR/CANCELED/DELETED) so `stage_to_run_status` and
-//! `is_terminal_stage` in `jobs/mod.rs` apply unchanged.
+//! COMPLETED/ERROR/CANCELED/DELETED) so `is_terminal_stage` in `jobs/mod.rs`
+//! applies unchanged.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;

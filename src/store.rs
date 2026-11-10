@@ -2391,6 +2391,15 @@ impl Store {
     /// Update only the run's backend descriptor — for a supervisor learning
     /// more about its job mid-flight (e.g. the openresearch box's SSH
     /// endpoint) without clobbering status/markdown/cancel state.
+    /// The descriptor an orx 0.2 launch wrote beside the store in case SQLite refused it.
+    pub fn submission_handle(&self, run_id: &str) -> Result<Option<String>> {
+        match std::fs::read_to_string(self.run_artifact_path(SUBMISSION_HANDLE, run_id)) {
+            Ok(json) => Ok(Some(json)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn set_backend_json(&self, run_id: &str, backend_json: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE runs SET backend_json = ?2, updated_at = ?3 WHERE id = ?1",

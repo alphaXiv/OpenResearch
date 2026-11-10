@@ -3,15 +3,14 @@
 //! Driven through the official `vercel` Python SDK (`vercel.sandbox`), the same
 //! shape as the Modal backend: every operation shells out to a bundled launcher
 //! running in an orx-managed venv. Sandboxes are addressable by name
-//! (`get_sandbox(name=...)`), which lets a detached `orx supervise` reattach from
-//! a fresh process.
+//! (`get_sandbox(name=...)`), which lets the engine reattach from a fresh process.
 //!
 //! Two Vercel specifics shape the launcher:
 //! - A sandbox outlives its command until the session's execution time limit,
-//!   billing provisioned memory the whole time, so the supervisor `finish`es
+//!   billing provisioned memory the whole time, so the engine `finish`es
 //!   (stops and destroys) it once the run is terminal and its logs are drained.
-//! - Process output streams are single-use and forward-only, while supervise
-//!   replays logs from the start on every reconnect. The job therefore writes
+//! - Process output streams are single-use and forward-only, while a reconnect
+//!   reads logs from the start. The job therefore writes
 //!   to a log file inside the sandbox and `logs` tails that file from line 1.
 //!
 //! Auth is Vercel's own: `VERCEL_OIDC_TOKEN`, or `VERCEL_TOKEN` +
@@ -126,7 +125,7 @@ def status(name, pid):
     try:
         box = sandbox.get_sandbox(name=name)
     except types.SandboxApiError as error:
-        # Already destroyed. A terminal stage lets supervise finish the run;
+        # Already destroyed. A terminal stage lets the engine finish the run;
         # raising here would retry forever and leave it "running".
         if getattr(error, "status_code", None) == 404:
             print(json.dumps({
@@ -177,7 +176,7 @@ def status(name, pid):
         pass
     _emit_exit(code)
 
-# Replays from line 1 (supervise dedups by line count) until the wrapper pid
+# Replays from line 1 until the wrapper pid
 # exits. GNU tail --pid when the image has it; otherwise a polling loop. A
 # failure prints ORX_LOG_FOLLOW_ERROR: instead of exiting with no output.
 FOLLOW = r'''@@LOG_FOLLOW@@'''
@@ -995,7 +994,7 @@ pub fn session_limit(timeout_seconds: u64, session_cap: u64) -> u64 {
         .min(session_cap)
 }
 
-/// Sandbox state in the shared stage vocabulary (see `jobs::stage_to_run_status`).
+/// Sandbox state in the shared stage vocabulary (see `jobs::is_terminal_stage`).
 #[derive(Debug, Clone)]
 pub struct JobState {
     pub stage: String,
@@ -1569,7 +1568,7 @@ def get_sandbox(**kw): return Box()
         assert!(process.contains("( python train.py ) > /tmp/orx-run.log 2>&1"));
     }
 
-    /// A missing sandbox is terminal. Raising would make supervise retry forever
+    /// A missing sandbox is terminal. Raising would make the engine retry forever
     /// and leave the run `running`.
     #[tokio::test]
     async fn status_reports_deleted_when_the_sandbox_is_gone() {

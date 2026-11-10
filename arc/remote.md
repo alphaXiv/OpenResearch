@@ -47,7 +47,7 @@ Only production builds ([desktop](desktop.md)) install a released binary, the la
 
 ## orx-host
 
-**A host keeps files and one wrapper per run; there is no daemon to install, upgrade or restart.** With the run engine on ([experiments](experiments.md#choosing-the-run-engine)), `orx-host` (`crates/orx-host`) drives SSH, Slurm and OpenResearch box runs on Linux and macOS, needing only `/bin/sh`, Bash, tar and coreutils there. Releases embed it, named by SHA-256, so one root holds several versions and the SSH bootstrap (`src/engine/transport/ssh.rs`) uploads each once.
+**A host keeps files and one wrapper per run; there is no daemon to install, upgrade or restart.** `orx-host` (`crates/orx-host`) drives SSH, Slurm and OpenResearch box runs on Linux and macOS, needing only `/bin/sh`, Bash, tar and coreutils there. Releases embed it, named by SHA-256, so one root holds several versions and the SSH bootstrap (`src/engine/transport/ssh.rs`) uploads each once.
 
 A root, `~/.orx/engine` or `<remote root>/engine` beside the 0.2.x run directories, holds the binaries, content-addressed source archives and one directory per run; FROZEN.md defines every file in it.
 
