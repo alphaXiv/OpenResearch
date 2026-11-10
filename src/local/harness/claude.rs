@@ -2359,25 +2359,38 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             }
         }
     };
-    let client = route.client();
+    let client = route.client().clone();
     let auth_generation = client.auth_generation();
     let bridge_active = client.config().bridge_active;
-    ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
-    ctx.persist_delivery(DeliveryState::Unknown)?;
-    if let Err(e) = client.send_user_message(&ctx.text).await {
-        ctx.host.claude.kill_session(&ctx.session_id).await;
-        return Err(anyhow!(
-            "claude stdin write failed: {e}; see {}",
-            crate::store::data_dir().join("agent-claude.log").display()
-        ));
-    }
-
     let mut state = TurnState {
         bridge_active,
         ..Default::default()
     };
+    // The segment this turn was started for already went to another turn.
+    if ctx.agent_started && !route.adopted() {
+        state.saw_result = true;
+        return Ok((state, auth_generation));
+    }
+    ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
+    if ctx.agent_started {
+        // Recovery continues it rather than retrying an input it never had.
+        ctx.persist_delivery(DeliveryState::Accepted)?;
+    } else {
+        ctx.persist_delivery(DeliveryState::Unknown)?;
+        if let Err(e) = client.send_user_message(&ctx.text).await {
+            ctx.host.claude.kill_session(&ctx.session_id).await;
+            return Err(anyhow!(
+                "claude stdin write failed: {e}; see {}",
+                crate::store::data_dir().join("agent-claude.log").display()
+            ));
+        }
+    }
+
     let mut saw_event = false;
-    let mut saw_user_echo = false;
+    // Nothing is echoed into a turn the agent started. A message sent while it
+    // ran on its own shows that segment first, then the reply after its echo.
+    let mut saw_user_echo = ctx.agent_started;
+    let adopted = route.adopted();
     // Absolute, so steering can't push it back: a wedged child that the user
     // keeps typing at must still trip the detector.
     let mut deadline = tokio::time::Instant::now() + FIRST_EVENT_TIMEOUT;
@@ -2468,7 +2481,8 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 if accepted_now {
                     ctx.mark_delivery(DeliveryState::Accepted);
                 }
-                if !belongs {
+                let adopted_line = adopted && !saw_user_echo;
+                if !belongs && !adopted_line {
                     saw_event = true;
                     if value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("init")
@@ -2485,6 +2499,9 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                     commit_attempt_session(ctx, &state);
                 }
                 ctx.maybe_flush();
+                if done && adopted_line {
+                    continue;
+                }
                 if done {
                     // A turn that spawned background sub-agents can auto-resume
                     // right AFTER its result (the CLI queues a completed task's
@@ -2513,6 +2530,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             }
         }
     }
+    route.finish(&mut rx);
 
     if !state.saw_result {
         commit_attempt_session(ctx, &state);

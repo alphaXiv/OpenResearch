@@ -80,6 +80,9 @@ impl LifecycleStopReason {
 struct TurnSlot {
     sender: Option<mpsc::UnboundedSender<TurnEvent>>,
     idle_since: Instant,
+    /// Lines of a segment Claude Code runs on its own, as when a background task
+    /// finishes between turns, held for the turn that adopts them.
+    unclaimed: Vec<Value>,
 }
 
 impl TurnSlot {
@@ -87,6 +90,7 @@ impl TurnSlot {
         Self {
             sender: None,
             idle_since: now,
+            unclaimed: Vec::new(),
         }
     }
 
@@ -96,7 +100,7 @@ impl TurnSlot {
         now: Instant,
         idle_timeout: Duration,
     ) -> Option<LifecycleStopReason> {
-        if self.sender.is_some() {
+        if self.sender.is_some() || !self.unclaimed.is_empty() {
             return None;
         }
         if now.duration_since(started_at) >= STALE_AFTER {
@@ -108,8 +112,23 @@ impl TurnSlot {
         None
     }
 
-    fn register(&mut self, sender: mpsc::UnboundedSender<TurnEvent>) {
+    /// Registers the turn and hands it the held lines; returns whether there
+    /// were any, from a segment Claude Code began or is about to begin.
+    fn register(&mut self, sender: mpsc::UnboundedSender<TurnEvent>) -> bool {
+        let adopted = !self.unclaimed.is_empty();
+        for line in self.unclaimed.drain(..) {
+            let _ = sender.send(TurnEvent::Line(line));
+        }
         self.sender = Some(sender);
+        adopted
+    }
+
+    /// Whether a line no turn is listening for belongs to a segment Claude Code
+    /// runs on its own, which a background task's notification or an `init` opens.
+    fn holds(&self, line: &Value) -> bool {
+        !self.unclaimed.is_empty()
+            || is_system(line, "task_notification")
+            || is_system(line, "init")
     }
 
     fn release(&mut self, sender: &mpsc::UnboundedSender<TurnEvent>, now: Instant) -> bool {
@@ -424,11 +443,42 @@ impl ClaudeClient {
         tx: mpsc::UnboundedSender<TurnEvent>,
         reaper_notify: Arc<Notify>,
     ) -> TurnRoute {
-        self.turn.lock().unwrap().register(tx.clone());
+        let adopted = self.turn.lock().unwrap().register(tx.clone());
         TurnRoute {
             client: self.clone(),
             tx,
             reaper_notify,
+            adopted,
+        }
+    }
+
+    /// Routes an output line to the live turn. With none listening, a segment
+    /// Claude Code starts on its own waits for a turn to adopt it; any other
+    /// line is dropped once its tool identities are recorded.
+    fn route_line(self: &Arc<Self>, value: Value) {
+        let mut turn = self.turn.lock().unwrap();
+        if let Some(tx) = turn.sender.as_ref() {
+            let _ = tx.send(TurnEvent::Line(value));
+        } else if turn.holds(&value) {
+            let began = is_system(&value, "init");
+            turn.unclaimed.push(value);
+            drop(turn);
+            if began {
+                request_agent_turn(self);
+            }
+        } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
+            drop(turn);
+            if let Some(message) = value.get("message").cloned() {
+                let session_id = self.session_id.clone();
+                // Off the reader so a busy store never stalls Claude's stdout.
+                tokio::task::spawn_blocking(move || {
+                    crate::local::chat::record_native_invocations(
+                        "claude-code",
+                        &session_id,
+                        &message,
+                    )
+                });
+            }
         }
     }
 
@@ -459,11 +509,40 @@ pub struct TurnRoute {
     client: Arc<ClaudeClient>,
     tx: mpsc::UnboundedSender<TurnEvent>,
     reaper_notify: Arc<Notify>,
+    /// The turn starts inside a segment Claude Code began on its own.
+    adopted: bool,
 }
 
 impl TurnRoute {
     pub fn client(&self) -> &Arc<ClaudeClient> {
         &self.client
+    }
+
+    pub fn adopted(&self) -> bool {
+        self.adopted
+    }
+
+    /// Ends the turn, holding what it never read for the next turn to adopt:
+    /// a background task can finish right after the turn's last `result`.
+    pub fn finish(self, rx: &mut mpsc::UnboundedReceiver<TurnEvent>) {
+        let began = {
+            let mut turn = self.client.turn.lock().unwrap();
+            if !turn.release(&self.tx, Instant::now()) {
+                return;
+            }
+            let mut began = false;
+            while let Ok(TurnEvent::Line(line)) = rx.try_recv() {
+                if turn.holds(&line) {
+                    began |= is_system(&line, "init");
+                    turn.unclaimed.push(line);
+                }
+            }
+            began
+        };
+        self.reaper_notify.notify_one();
+        if began {
+            request_agent_turn(&self.client);
+        }
     }
 }
 
@@ -492,6 +571,29 @@ fn reported_permission_mode(event: &Value) -> Option<PermissionMode> {
         },
         _ => None,
     }
+}
+
+fn is_system(event: &Value, subtype: &str) -> bool {
+    event.get("type").and_then(Value::as_str) == Some("system")
+        && event.get("subtype").and_then(Value::as_str) == Some(subtype)
+}
+
+/// Asks the chat for a turn to adopt the segment Claude Code began on its own.
+fn request_agent_turn(client: &Arc<ClaudeClient>) {
+    let Some(chat) = client.chat.upgrade() else {
+        return;
+    };
+    let session_id = client.session_id.clone();
+    let held = Arc::downgrade(client);
+    tokio::spawn(async move {
+        chat.start_agent_turn(&session_id, move || {
+            held.upgrade().is_some_and(|client| {
+                !client.terminated.load(Ordering::Acquire)
+                    && !client.turn.lock().unwrap().unclaimed.is_empty()
+            })
+        })
+        .await;
+    });
 }
 
 /// Reader task: pump child stdout, route each line. On EOF every pending control
@@ -526,25 +628,7 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                         }
                     }
                 }
-                // Route to the live turn; dropped if none is listening (a
-                // between-turns line, or an aborted turn's tail) once its tool identities are recorded.
-                let turn = client.turn.lock().unwrap();
-                if let Some(tx) = turn.sender.as_ref() {
-                    let _ = tx.send(TurnEvent::Line(value));
-                } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
-                    drop(turn);
-                    if let Some(message) = value.get("message").cloned() {
-                        let session_id = client.session_id.clone();
-                        // Off the reader so a busy store never stalls Claude's stdout.
-                        tokio::task::spawn_blocking(move || {
-                            crate::local::chat::record_native_invocations(
-                                "claude-code",
-                                &session_id,
-                                &message,
-                            )
-                        });
-                    }
-                }
+                client.route_line(value);
             }
             ClaudeLine::Junk => {}
         }
@@ -1401,8 +1485,8 @@ mod tests {
             next_id: AtomicI64::new(1),
             pending: std::sync::Mutex::new(HashMap::new()),
             turn: std::sync::Mutex::new(TurnSlot {
-                sender: None,
                 idle_since,
+                ..TurnSlot::new(started_at)
             }),
             config: std::sync::Mutex::new(cfg(None, None, None, false)),
             auth_generation: 0,
@@ -1788,6 +1872,90 @@ mod tests {
             slot.stop_reason(started_at, released_at, IDLE_TIMEOUT),
             Some(LifecycleStopReason::Stale)
         );
+    }
+
+    fn lines(rx: &mut mpsc::UnboundedReceiver<TurnEvent>) -> Vec<Value> {
+        let mut lines = Vec::new();
+        while let Ok(TurnEvent::Line(line)) = rx.try_recv() {
+            lines.push(line);
+        }
+        lines
+    }
+
+    /// Claude Code 2.1.322 when a background Bash finishes after the turn that
+    /// started it ended: a whole segment arrives with no turn listening.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_segment_claude_starts_between_turns_waits_for_a_turn_to_adopt_it() {
+        let now = Instant::now();
+        let client = test_client("between", now, now - IDLE_TIMEOUT, "sleep 600").await;
+        let segment = [
+            json!({"type": "system", "subtype": "task_notification", "task_id": "b1", "status": "completed"}),
+            json!({"type": "system", "subtype": "background_tasks_changed"}),
+            json!({"type": "system", "subtype": "init", "session_id": "native"}),
+            json!({"type": "assistant", "message": {"id": "m2", "content": [{"type": "text", "text": "BGDONE"}]}}),
+            json!({"type": "result", "subtype": "success", "result": "BGDONE"}),
+        ];
+        client.route_line(json!({"type": "system", "subtype": "background_tasks_changed"}));
+        for line in &segment {
+            client.route_line(line.clone());
+        }
+        assert_eq!(
+            client.stop_reason(now, IDLE_TIMEOUT),
+            None,
+            "a held segment keeps its worker"
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let route = client.register_turn(tx, Arc::new(Notify::new()));
+        assert!(route.adopted());
+        assert_eq!(lines(&mut rx), segment);
+
+        drop(route);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        assert!(!client.register_turn(tx, Arc::new(Notify::new())).adopted());
+        terminate_client(&client).await;
+    }
+
+    /// A message sent before the resumed segment's `init` still shows it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_registered_after_a_notification_adopts_the_segment() {
+        let now = Instant::now();
+        let client = test_client("notified", now, now, "sleep 600").await;
+        let notification =
+            json!({"type": "system", "subtype": "task_notification", "task_id": "b1"});
+        client.route_line(notification.clone());
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(client.register_turn(tx, Arc::new(Notify::new())).adopted());
+        assert_eq!(lines(&mut rx), [notification]);
+        terminate_client(&client).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_finished_turn_holds_the_segment_it_never_read() {
+        let now = Instant::now();
+        let client = test_client("tail", now, now, "sleep 600").await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let route = client.register_turn(tx, Arc::new(Notify::new()));
+        let result = json!({"type": "result", "subtype": "success"});
+        let next = [
+            json!({"type": "system", "subtype": "task_notification", "task_id": "b1"}),
+            json!({"type": "system", "subtype": "init"}),
+        ];
+        client.route_line(result.clone());
+        assert_eq!(lines(&mut rx), [result]);
+        for line in &next {
+            client.route_line(line.clone());
+        }
+        route.finish(&mut rx);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(client.register_turn(tx, Arc::new(Notify::new())).adopted());
+        assert_eq!(lines(&mut rx), next);
+        terminate_client(&client).await;
     }
 
     #[test]

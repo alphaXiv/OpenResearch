@@ -5641,6 +5641,71 @@ impl ChatHost {
         Ok(())
     }
 
+    /// Records a turn the agent started on its own, as when a background task it
+    /// ran finishes, once the chat is idle and while `wanted` still holds. Its
+    /// turn has no input; the harness adopts what the agent already produces.
+    pub(crate) async fn start_agent_turn(
+        self: &Arc<Self>,
+        session_id: &str,
+        wanted: impl Fn() -> bool,
+    ) {
+        let mut events = self.subscribe();
+        let mut tried_idle = false;
+        while wanted() {
+            let reservation = TurnState::Reserved { turn_id: None };
+            if let Some(mut guard) = TurnGuard::claim_idle(self, session_id, reservation).await {
+                if !wanted() {
+                    guard.release().await;
+                    return;
+                }
+                let request = SendTurnRequest {
+                    messages: Vec::new(),
+                    prepared_input: Some(String::new()),
+                    replace_settings: false,
+                    transcript: TranscriptDisplay {
+                        text: None,
+                        annotations: None,
+                        orx: Vec::new(),
+                        record_user_message: false,
+                    },
+                    overrides: TurnOverrides::default(),
+                    images: TurnAttachments::Uploaded(Vec::new()),
+                    admission: TurnAdmission::Preclaimed(guard),
+                    client_turn_id: None,
+                    request_hash: None,
+                };
+                if let Err(error) = self.send_message_showing(session_id, request).await {
+                    eprintln!(
+                        "orx up: could not start a turn for what {session_id}'s agent began on its own: {error}"
+                    );
+                }
+                return;
+            }
+            // A queued message's turn adopts it instead; a slot that stays taken
+            // with no turn running belongs to a deletion or another `orx up`.
+            if !self.is_busy(session_id).await {
+                if tried_idle {
+                    eprintln!("orx up: no turn could adopt what {session_id}'s agent started");
+                    return;
+                }
+                tried_idle = true;
+                continue;
+            }
+            loop {
+                match events.recv().await {
+                    Ok(("chat.busy", data))
+                        if data["sessionId"] == session_id && data["busy"] == false =>
+                    {
+                        break
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => break,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        }
+    }
+
     /// Starts a turn with messages orx writes, each shown under its sender.
     async fn send_orx_messages(
         self: &Arc<Self>,
@@ -7874,6 +7939,8 @@ pub struct TurnCtx {
     pub reasoning_level: Option<String>,
     pub project: LocalProject,
     pub text: String,
+    /// The agent started this turn on its own, so there is no message to send.
+    pub agent_started: bool,
     pub assistant: WireMessage,
     /// Latest context-window usage the harness reported this turn. Persisted at
     /// turn end; `report_usage` also streams it live over `chat.usage`.
@@ -7947,6 +8014,7 @@ fn turn_ctx_from_stored(
         reasoning_level: session.reasoning_level.clone(),
         project,
         text,
+        agent_started: turn.prepared_input.is_empty(),
         assistant,
         context_usage: session
             .context_usage_json
@@ -8346,6 +8414,7 @@ impl TurnCtx {
                 updated_at: 0,
             },
             text: String::new(),
+            agent_started: false,
             assistant: WireMessage {
                 id: "test-msg".into(),
                 role: "assistant".into(),
