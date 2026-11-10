@@ -59,6 +59,8 @@ Homes (`src/local/native_store.rs`) let an agent behave as the user set it up wh
 
 Links are reconciled when an agent starts, and before every Codex turn even on a running process. Claude Code and Codex chats from the user's own CLI can be adopted (`src/local/native_chats.rs`): they keep resolving to the user's native store, and orx's copy of recent history is for display only.
 
+Claude Code keeps the chat's saved model selection separate from its effective process model. Before launch or a live model change, orx resolves native model aliases through Claude's catalog in the chat's worktree and prepared home. An alias mapped to an external model uses that explicit ID, so plan mode cannot switch it to another native alias. Native Claude aliases, `opusplan`, the default, and explicit custom IDs keep their own behavior. An unchanged resident child reuses its resolution; a new child resolves again. A catalog failure stops alias resolution with an error. No model selection enters shared settings files.
+
 ## Local models
 
 OpenCode runs local inference over connections to OpenAI-compatible servers (`src/local/local_models.rs`). They live in `local-models.json` in the data directory, owner-only, and reach OpenCode as inline configuration on every spawn, so the user's OpenCode files stay untouched.

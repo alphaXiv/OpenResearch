@@ -45,8 +45,8 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use crate::error::{anyhow, Result};
 use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
 use crate::local::harness::claude::{
-    claude_permission_mode, find_claude, uses_permission_bridge, write_mcp_config, write_settings,
-    CLAUDE_ENTRYPOINT,
+    claude_permission_mode, find_claude, resolve_claude_model, uses_permission_bridge,
+    write_mcp_config, write_settings, CLAUDE_ENTRYPOINT,
 };
 use crate::local::harness::{HarnessAuthState, PermissionMode};
 use crate::local::native_store::NativeStore;
@@ -134,6 +134,7 @@ impl TurnSlot {
 pub struct SpawnConfig {
     pub permission_mode: Option<PermissionMode>,
     pub effort: Option<String>,
+    /// Saved picker selection, not the resolved external model ID.
     pub model: Option<String>,
     pub native_store: NativeStore,
     pub alphaxiv_signed_in: bool,
@@ -389,15 +390,14 @@ impl ClaudeClient {
         })?
     }
 
-    /// Retune the resident child's model in place via `set_model`. On success,
-    /// record the new model in `config` so the reuse decision stays truthful.
-    async fn set_model(&self, model: &str) -> Result<()> {
+    /// Record the saved selection only after Claude accepts the effective model ID.
+    async fn set_model(&self, selected: &str, effective: &str) -> Result<()> {
         match self
-            .control_request(json!({ "subtype": "set_model", "model": model }))
+            .control_request(json!({ "subtype": "set_model", "model": effective }))
             .await?
         {
             Ok(_) => {
-                self.config.lock().unwrap().model = Some(model.to_string());
+                self.config.lock().unwrap().model = Some(selected.to_string());
                 Ok(())
             }
             Err(msg) => Err(anyhow!("claude set_model failed: {msg}")),
@@ -611,6 +611,12 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     let bin = find_claude().ok_or_else(|| {
         anyhow!("claude not found on PATH — install Claude Code and run `claude` once to sign in")
     })?;
+    let effective_model = resolve_claude_model(
+        spec.config.model.as_deref(),
+        &spec.repo,
+        spec.config.native_store,
+    )
+    .await?;
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
         "--print",
@@ -640,7 +646,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     // its lifetime is managed by the host reaper and explicit stop paths, not
     // by dropping a per-turn handle.
     .kill_on_drop(true);
-    if let Some(model) = &spec.config.model {
+    if let Some(model) = &effective_model {
         cmd.args(["--model", model]);
     }
     if let Some(effort) = spec.config.effort.as_deref() {
@@ -1220,23 +1226,32 @@ impl ClaudeHost {
                         self.inner.lock().await.remove(&session);
                         stop_client(live, "authentication-changed").await;
                     }
-                    ChildAction::SetModel(model) => match live.set_model(&model).await {
-                        Ok(()) => {
-                            let latest = self.auth_snapshot();
-                            if latest.state == HarnessAuthState::Ready
-                                && live.auth_generation() == latest.generation
-                            {
-                                return Ok(live.register_turn(tx, self.reaper_notify.clone()));
+                    ChildAction::SetModel(model) => {
+                        let effective = resolve_claude_model(
+                            Some(&model),
+                            &spec.repo,
+                            spec.config.native_store,
+                        )
+                        .await?
+                        .expect("an explicit model resolves to an explicit model");
+                        match live.set_model(&model, &effective).await {
+                            Ok(()) => {
+                                let latest = self.auth_snapshot();
+                                if latest.state == HarnessAuthState::Ready
+                                    && live.auth_generation() == latest.generation
+                                {
+                                    return Ok(live.register_turn(tx, self.reaper_notify.clone()));
+                                }
+                                self.inner.lock().await.remove(&session);
+                                stop_client(live, "authentication-changed").await;
                             }
-                            self.inner.lock().await.remove(&session);
-                            stop_client(live, "authentication-changed").await;
+                            Err(e) => {
+                                eprintln!("orx up: claude set_model failed, respawning: {e}");
+                                self.inner.lock().await.remove(&session);
+                                stop_client(live, "set-model-failed").await;
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("orx up: claude set_model failed, respawning: {e}");
-                            self.inner.lock().await.remove(&session);
-                            stop_client(live, "set-model-failed").await;
-                        }
-                    },
+                    }
                     ChildAction::Respawn => {
                         self.inner.lock().await.remove(&session);
                         stop_client(live, "configuration-changed").await;
@@ -1374,6 +1389,535 @@ mod tests {
     use super::*;
 
     const IDLE_TIMEOUT: Duration = IdlePolicy::DEFAULT.idle_timeout;
+
+    #[cfg(unix)]
+    use crate::local::{chat::DeliveryState, harness::TurnFailure};
+
+    #[cfg(unix)]
+    const EXTERNAL_CLAUDE_SETTINGS: &str =
+        r#"{"model":"external-sentinel","env":{"KEEP":"unchanged"}}"#;
+
+    #[cfg(unix)]
+    struct ModelTestSandbox {
+        root: PathBuf,
+        external_settings: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl ModelTestSandbox {
+        fn assert_external_settings_unchanged(&self) {
+            assert_eq!(
+                std::fs::read_to_string(&self.external_settings).unwrap(),
+                EXTERNAL_CLAUDE_SETTINGS
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn fake_model_cli() -> Option<ModelTestSandbox> {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::env::var("ORX_TEST_CHILD").unwrap(),
+            std::thread::current().name().unwrap(),
+            "model tests must change the environment only in their child process"
+        );
+        let external_home = std::env::temp_dir().join("claude-model-external");
+        let external_settings = external_home.join(".claude/settings.json");
+        std::fs::create_dir_all(external_settings.parent().unwrap()).unwrap();
+        std::fs::write(&external_settings, EXTERNAL_CLAUDE_SETTINGS).unwrap();
+        let home = crate::config::test_home();
+        std::fs::create_dir_all(&home).unwrap();
+        let paths = [
+            ("HOME", home.clone()),
+            ("USERPROFILE", home.clone()),
+            ("XDG_CONFIG_HOME", home.join(".config")),
+            ("XDG_DATA_HOME", home.join(".local/share")),
+            ("XDG_CACHE_HOME", home.join(".cache")),
+            ("XDG_STATE_HOME", home.join(".local/state")),
+            ("XDG_RUNTIME_DIR", home.join("runtime")),
+            ("CLAUDE_CONFIG_DIR", home.join(".claude")),
+            ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.join(".claude")),
+            ("ORX_DATA_DIR", home.join(".local/share/openresearch")),
+            ("ORX_CACHE_DIR", home.join(".cache/openresearch")),
+            ("CODEX_HOME", home.join(".codex")),
+            ("CURSOR_CONFIG_DIR", home.join(".cursor")),
+            ("CURSOR_DATA_DIR", home.join(".cursor")),
+            ("OPENCODE_DB", home.join("opencode.db")),
+        ];
+        // Incoming home/config paths must not survive the test's native-store guard.
+        for (key, _) in &paths {
+            std::env::set_var(key, &external_home);
+        }
+        std::env::set_var("CLAUDE_CONFIG_DIR", external_settings.parent().unwrap());
+        let synced = home.join(".openresearch/env");
+        std::fs::create_dir_all(synced.parent().unwrap()).unwrap();
+        std::fs::write(
+            &synced,
+            format!(
+                "export CLAUDE_CONFIG_DIR='{}'\n",
+                external_settings.parent().unwrap().display()
+            ),
+        )
+        .unwrap();
+        for (key, value) in &paths {
+            std::env::set_var(key, value);
+        }
+        for (key, value) in &paths {
+            assert_eq!(
+                crate::local::shell_env::var(key).as_deref(),
+                Some(value.as_os_str()),
+                "the effective {key} must stay in the model test sandbox"
+            );
+        }
+        assert_eq!(dirs::home_dir().as_deref(), Some(home.as_path()));
+        assert_eq!(
+            crate::local::native_store::claude_home(NativeStore::Legacy),
+            home.join(".claude")
+        );
+        assert!(crate::local::native_store::claude_home(NativeStore::Isolated).starts_with(&home));
+        let Some(python) = crate::local::shell_env::find("python3") else {
+            crate::config::skip_without_tool("python3");
+            return None;
+        };
+        let root = home.join("claude-models");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let bin = root.join("claude");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!{}\n{}",
+                python.display(),
+                r#"
+import json, os, sys
+args = sys.argv[1:]
+model = args[args.index('--model') + 1] if '--model' in args else 'default'
+def record(kind, **fields):
+    with open(os.environ['ORX_CLAUDE_TEST_LOG'], 'a') as log:
+        log.write(json.dumps(dict(kind=kind, args=args, cwd=os.getcwd(),
+            home=os.environ.get('CLAUDE_CONFIG_DIR'), **fields)) + '\n')
+def emit(value):
+    print(json.dumps(value), flush=True)
+record('launch')
+for line in sys.stdin:
+    message = json.loads(line)
+    if message['type'] == 'control_request':
+        request = message['request']
+        subtype = request['subtype']
+        record(subtype, request=request)
+        response = dict(subtype='success', request_id=message['request_id'], response={})
+        if subtype == 'list_models':
+            with open('catalog.json') as catalog:
+                value = json.load(catalog)
+            if value == 'closed':
+                sys.exit(0)
+            if value == 'timeout':
+                sys.stdin.read()
+                sys.exit(0)
+            if value == 'error':
+                response.update(subtype='error', error='catalog access denied')
+            else:
+                response['response'] = value
+        elif subtype == 'set_model':
+            if os.path.exists('reject-control'):
+                response.update(subtype='error', error='model control rejected')
+            else:
+                model = request['model']
+        emit(dict(type='control_response', response=response))
+    elif message['type'] == 'user':
+        emit(message)
+        prompt = message['message']['content'][0]['text']
+        active = 'sonnet' if model == 'haiku' and prompt == 'enter_plan' else model
+        record('user', model=active, prompt=prompt)
+        emit(dict(type='assistant', message=dict(model=active)))
+        emit(dict(type='result', subtype='success', is_error=False))
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut path = vec![root.clone()];
+        path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        std::env::set_var("PATH", std::env::join_paths(path).unwrap());
+        std::env::set_var("ORX_CLAUDE_TEST_LOG", root.join("events.jsonl"));
+        std::fs::write(root.join("playbook.md"), "Test playbook").unwrap();
+        std::fs::write(
+            root.join("catalog.json"),
+            json!({"models": [
+                {"value": "haiku", "displayName": "GPT-6 Astra (Copilot)",
+                    "description": "gpt-6-astra via Copilot proxy", "resolvedModel": "gpt-6-astra"},
+                {"value": "sonnet", "resolvedModel": "claude-sonnet-4.6"},
+                {"value": "opusplan", "resolvedModel": "custom-plan"},
+                {"value": "opus[1m]", "resolvedModel": "custom-long-context"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        Some(ModelTestSandbox {
+            root,
+            external_settings,
+        })
+    }
+
+    #[cfg(unix)]
+    fn model_cli_events(root: &std::path::Path) -> Vec<Value> {
+        let contents = match std::fs::read_to_string(root.join("events.jsonl")) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => panic!("Could not read fake Claude events: {error}"),
+        };
+        contents
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn model_spec(host: Arc<ClaudeHost>, root: &std::path::Path, model: Option<&str>) -> SpawnSpec {
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host,
+        ));
+        SpawnSpec {
+            chat,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            repo: root.to_path_buf(),
+            playbook: root.join("playbook.md"),
+            resume: None,
+            config: cfg(Some(PermissionMode::Auto), None, model, false),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn model_turn(host: &Arc<ClaudeHost>, spec: &SpawnSpec, text: &str) -> Arc<ClaudeClient> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let route = host.acquire_turn(spec.clone(), tx).await.unwrap();
+        let client = route.client().clone();
+        client.send_user_message(text).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    TurnEvent::Line(value) if value["type"] == "result" => return,
+                    TurnEvent::Closed => panic!("fake Claude closed during a model test"),
+                    _ => {}
+                }
+            }
+            panic!("fake Claude did not return a result");
+        })
+        .await
+        .unwrap();
+        client
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_model_selection_survives_all_resident_process_paths() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let Some(sandbox) = fake_model_cli() else {
+            return;
+        };
+        let root = sandbox.root.clone();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let host = Arc::new(ClaudeHost::new());
+            host.auth.write().unwrap().state = HarnessAuthState::Ready;
+            let legacy_home = crate::local::native_store::claude_home(NativeStore::Legacy);
+            std::fs::create_dir_all(&legacy_home).unwrap();
+            let settings = legacy_home.join("settings.json");
+            let original = r#"{"env":{"ANTHROPIC_DEFAULT_HAIKU_MODEL":"gpt-6-astra"}}"#;
+            std::fs::write(&settings, original).unwrap();
+            let mut spec = model_spec(host.clone(), &root, Some("haiku"));
+            let first = model_turn(&host, &spec, "enter_plan").await;
+            assert_eq!(first.config().model.as_deref(), Some("haiku"));
+            let isolated_settings = crate::local::native_store::claude_home(NativeStore::Isolated)
+                .join("settings.json");
+            let original_link = std::fs::read_link(&isolated_settings).unwrap();
+            let events_before = model_cli_events(&root);
+            let unchanged = model_turn(&host, &spec, "exit_plan").await;
+            assert!(Arc::ptr_eq(&first, &unchanged));
+            let count = |events: &[Value], kind: &str| {
+                events.iter().filter(|event| event["kind"] == kind).count()
+            };
+            let events = model_cli_events(&root);
+            assert_eq!(count(&events, "launch"), count(&events_before, "launch"));
+            assert_eq!(count(&events, "list_models"), 1);
+
+            host.kill_session(&spec.session_id).await;
+            spec.resume = Some("saved-native-id".into());
+            let resumed = model_turn(&host, &spec, "resume").await;
+            assert!(!Arc::ptr_eq(&first, &resumed));
+            spec.config.effort = Some("high".into());
+            let restarted = model_turn(&host, &spec, "restart").await;
+            assert!(!Arc::ptr_eq(&resumed, &restarted));
+            host.compact_session(spec.clone(), Duration::from_secs(5))
+                .await
+                .unwrap();
+
+            spec.config.model = Some("sonnet".into());
+            let native = model_turn(&host, &spec, "native").await;
+            assert!(Arc::ptr_eq(&restarted, &native));
+            assert_eq!(native.config().model.as_deref(), Some("sonnet"));
+            spec.config.model = Some("haiku".into());
+            let custom = model_turn(&host, &spec, "enter_plan").await;
+            assert!(Arc::ptr_eq(&native, &custom));
+            assert_eq!(custom.config().model.as_deref(), Some("haiku"));
+            host.kill_session(&spec.session_id).await;
+            host.compact_session(spec.clone(), Duration::from_secs(5))
+                .await
+                .unwrap();
+            spec.config.model = Some("other-custom".into());
+            let mut other = model_spec(host.clone(), &root, Some("haiku"));
+            other.config.native_store = NativeStore::Legacy;
+            let (left, right) = tokio::join!(
+                model_turn(&host, &spec, "left"),
+                model_turn(&host, &other, "right"),
+            );
+            assert_eq!(left.config().model.as_deref(), Some("other-custom"));
+            assert_eq!(right.config().model.as_deref(), Some("haiku"));
+            std::fs::write(root.join("reject-control"), "").unwrap();
+            spec.config.model = Some("haiku".into());
+            let fallback = model_turn(&host, &spec, "control-restart").await;
+            assert!(!Arc::ptr_eq(&left, &fallback));
+            assert_eq!(fallback.config().model.as_deref(), Some("haiku"));
+            host.shutdown().await;
+
+            let events = model_cli_events(&root);
+            for event in events.iter().filter(|event| event["kind"] == "user") {
+                let expected = match event["prompt"].as_str().unwrap() {
+                    "native" => "sonnet",
+                    "left" => "other-custom",
+                    _ => "gpt-6-astra",
+                };
+                assert_eq!(event["model"], expected);
+            }
+            let controls: Vec<_> = events
+                .iter()
+                .filter(|event| event["kind"] == "set_model")
+                .map(|event| event["request"]["model"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                controls,
+                ["sonnet", "gpt-6-astra", "other-custom", "gpt-6-astra"]
+            );
+            let launches: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    event["kind"] == "launch"
+                        && event["args"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|arg| arg == "--replay-user-messages")
+                })
+                .collect();
+            assert_eq!(launches.len(), 6);
+            for launch in launches {
+                let args = launch["args"].as_array().unwrap();
+                let model_index = args.iter().position(|arg| arg == "--model").unwrap();
+                assert_eq!(args[model_index + 1], "gpt-6-astra");
+            }
+            let resumed_launches: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    event["kind"] == "launch"
+                        && event["args"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|arg| arg == "--resume")
+                })
+                .collect();
+            assert_eq!(resumed_launches.len(), 4);
+            for launch in resumed_launches {
+                let args = launch["args"].as_array().unwrap();
+                let model_index = args.iter().position(|arg| arg == "--model").unwrap();
+                assert_eq!(args[model_index + 1], "gpt-6-astra");
+            }
+            for request in events.iter().filter(|event| event["kind"] == "list_models") {
+                assert_eq!(request["cwd"], root.to_str().unwrap());
+                let home = request["home"].as_str().unwrap();
+                assert!(events
+                    .iter()
+                    .any(|event| event["kind"] == "user" && event["home"] == home));
+            }
+            assert_eq!(std::fs::read_to_string(&settings).unwrap(), original);
+            assert_eq!(
+                std::fs::read_link(&isolated_settings).unwrap(),
+                original_link
+            );
+            assert_eq!(
+                std::fs::read_to_string(&isolated_settings).unwrap(),
+                original
+            );
+            let child_settings: Value = serde_json::from_str(
+                &std::fs::read_to_string(
+                    root.join(".openresearch/agent/claude-plan-settings.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(child_settings.get("model").is_none());
+            assert!(child_settings.get("env").is_none());
+        });
+        sandbox.assert_external_settings_unchanged();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_resolution_preserves_native_aliases_defaults_and_explicit_ids() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let Some(sandbox) = fake_model_cli() else {
+            return;
+        };
+        let root = sandbox.root.clone();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for selected in [
+                None,
+                Some("gpt-6-astra"),
+                Some("custom-not-in-catalog"),
+                Some("opusplan"),
+                Some("default"),
+            ] {
+                assert_eq!(
+                    resolve_claude_model(selected, &root, NativeStore::Isolated)
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    selected
+                );
+            }
+            assert!(model_cli_events(&root).is_empty());
+            for (selected, expected) in [
+                ("sonnet", "sonnet"),
+                ("opus", "opus"),
+                ("opus[1m]", "custom-long-context"),
+                ("haiku", "gpt-6-astra"),
+            ] {
+                assert_eq!(
+                    resolve_claude_model(Some(selected), &root, NativeStore::Isolated)
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some(expected)
+                );
+            }
+        });
+        sandbox.assert_external_settings_unchanged();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_resolution_failures_reach_the_caller_without_a_model_change() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let Some(sandbox) = fake_model_cli() else {
+            return;
+        };
+        let root = sandbox.root.clone();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let host = Arc::new(ClaudeHost::new());
+                host.auth.write().unwrap().state = HarnessAuthState::Ready;
+                let mut spec = model_spec(host.clone(), &root, Some("explicit-custom"));
+                let live = model_turn(&host, &spec, "before-failure").await;
+                let original = spec.clone();
+                spec.config.model = Some("haiku".into());
+                for (catalog, cause) in [
+                    (json!("error"), "catalog access denied"),
+                    (json!("closed"), "closed"),
+                    (json!({"models": null}), "invalid catalog"),
+                    (json!({"models": [{"value": "haiku"}]}), "did not resolve"),
+                    (
+                        json!({"models": [{"value": "haiku", "resolvedModel": ""}]}),
+                        "did not resolve",
+                    ),
+                ] {
+                    std::fs::write(root.join("catalog.json"), catalog.to_string()).unwrap();
+                    let (tx, _rx) = mpsc::unbounded_channel();
+                    let error = match host.acquire_turn(spec.clone(), tx).await {
+                        Ok(_) => panic!("invalid catalog must fail model resolution"),
+                        Err(error) => error,
+                    };
+                    let message = TurnFailure::adapter(error, DeliveryState::NotSent).to_string();
+                    assert!(message.contains("haiku"), "{message}");
+                    assert!(message.contains(root.to_str().unwrap()), "{message}");
+                    assert!(message.contains(cause), "{message}");
+                    assert_eq!(live.config().model.as_deref(), Some("explicit-custom"));
+                }
+                std::fs::write(root.join("catalog.json"), json!("timeout").to_string()).unwrap();
+                let previous_requests = model_cli_events(&root)
+                    .iter()
+                    .filter(|event| event["kind"] == "list_models")
+                    .count();
+                let waiting_host = host.clone();
+                let waiting_spec = spec.clone();
+                let waiting = tokio::spawn(async move {
+                    let (tx, _rx) = mpsc::unbounded_channel();
+                    waiting_host
+                        .acquire_turn(waiting_spec, tx)
+                        .await
+                        .err()
+                        .unwrap()
+                });
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if model_cli_events(&root)
+                            .iter()
+                            .filter(|event| event["kind"] == "list_models")
+                            .count()
+                            > previous_requests
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(16)).await;
+                let error = waiting.await.unwrap();
+                tokio::time::resume();
+                let message = TurnFailure::adapter(error, DeliveryState::NotSent).to_string();
+                assert!(message.contains("within 15s"), "{message}");
+                assert_eq!(live.config().model.as_deref(), Some("explicit-custom"));
+                let unchanged = model_turn(&host, &original, "after-failure").await;
+                assert!(Arc::ptr_eq(&live, &unchanged));
+                for event in model_cli_events(&root)
+                    .iter()
+                    .filter(|event| event["kind"] == "user")
+                {
+                    assert_eq!(event["model"], "explicit-custom");
+                }
+                std::fs::write(root.join("catalog.json"), json!("error").to_string()).unwrap();
+                host.shutdown().await;
+                assert!(!model_cli_events(&root)
+                    .iter()
+                    .any(|event| event["kind"] == "set_model"));
+                let (tx, _rx) = mpsc::unbounded_channel();
+                assert!(host.acquire_turn(spec.clone(), tx).await.is_err());
+                assert!(host.inner.lock().await.is_empty());
+                std::fs::write(root.join("claude"), "#!/orx-missing-interpreter\n").unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let error = host.acquire_turn(spec, tx).await.err().unwrap();
+                let message = TurnFailure::adapter(error, DeliveryState::NotSent).to_string();
+                assert!(message.contains("haiku"), "{message}");
+                assert!(message.contains("Could not start"), "{message}");
+                assert!(
+                    message.contains(&std::io::Error::from_raw_os_error(libc::ENOENT).to_string()),
+                    "{message}"
+                );
+            });
+        sandbox.assert_external_settings_unchanged();
+    }
 
     #[cfg(unix)]
     async fn test_client(

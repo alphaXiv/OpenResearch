@@ -38,7 +38,7 @@ use super::{
     CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure,
     TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
 };
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::chat::{
     find_part_mut, prepare_env, ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx,
     WirePart, WirePrompt, WireQuestionOption, WireToolState,
@@ -326,11 +326,15 @@ async fn probe_auth_and_ultracode(bin: &Path, sequence: u64) -> (AuthProbe, bool
 /// back unparsed: the ultracode probe decides the parse, and detection runs
 /// both children concurrently.
 async fn claude_models_response(bin: PathBuf) -> Option<Value> {
+    request_claude_models(&bin, None).await.ok()
+}
+
+async fn request_claude_models(bin: &Path, context: Option<(&Path, NativeStore)>) -> Result<Value> {
     // Acquire the spawn lane before the deadline — queue time must not spend
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
     let fut = async move {
-        let mut cmd = crate::process::tokio_command(&bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.args([
             "--print",
             "--input-format",
@@ -340,13 +344,36 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
             "--verbose",
         ]);
         prepare_env(&mut cmd);
+        if let Some((repo, store)) = context {
+            let home = tokio::task::spawn_blocking(move || native_store::prepare_claude(store))
+                .await
+                .context("Claude config preparation task failed")??;
+            cmd.current_dir(repo)
+                .env("CLAUDE_CONFIG_DIR", home)
+                .env(
+                    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+                    native_store::claude_secure_storage_config_dir(),
+                )
+                .env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
-        let mut stdin = child.stdin.take()?;
-        let mut lines = BufReader::new(child.stdout.take()?).lines();
+        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit)
+            .await
+            .with_context(|| format!("Could not start {} for list_models", bin.display()))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("Claude list_models has no stdin")?;
+        let mut lines = BufReader::new(
+            child
+                .stdout
+                .take()
+                .context("Claude list_models has no stdout")?,
+        )
+        .lines();
 
         use tokio::io::AsyncWriteExt;
         let req = serde_json::json!({
@@ -356,28 +383,88 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
         });
         let mut line = req.to_string();
         line.push('\n');
-        stdin.write_all(line.as_bytes()).await.ok()?;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .context("Could not send Claude list_models request")?;
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .context("Could not read Claude list_models response")?
+        {
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
             if v.get("type").and_then(Value::as_str) != Some("control_response") {
                 continue;
             }
-            let resp = v.get("response")?;
+            let resp = v
+                .get("response")
+                .context("Claude list_models response is invalid")?;
             if resp.get("request_id").and_then(Value::as_str) != Some("orx_list_models") {
                 continue;
             }
-            // An `error` subtype has no inner response.
-            return resp.get("response").cloned();
+            if resp.get("subtype").and_then(Value::as_str) != Some("success") {
+                return Err(anyhow!(
+                    "Claude list_models failed: {}",
+                    resp.get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("no error details")
+                ));
+            }
+            return resp
+                .get("response")
+                .cloned()
+                .context("Claude list_models payload is missing");
         }
-        None
+        Err(anyhow!("Claude closed before it answered list_models"))
     };
     tokio::time::timeout(Duration::from_secs(15), fut)
         .await
-        .ok()
-        .flatten()
+        .context("Claude list_models did not answer within 15s")?
+}
+
+pub(crate) async fn resolve_claude_model(
+    selected: Option<&str>,
+    repo: &Path,
+    store: NativeStore,
+) -> Result<Option<String>> {
+    let Some(alias @ ("haiku" | "sonnet" | "opus" | "haiku[1m]" | "sonnet[1m]" | "opus[1m]")) =
+        selected
+    else {
+        return Ok(selected.map(str::to_string));
+    };
+    let resolve = async {
+        let bin = find_claude().context("Claude Code is not installed")?;
+        let response = request_claude_models(&bin, Some((repo, store))).await?;
+        let models = response
+            .get("models")
+            .and_then(Value::as_array)
+            .context("Claude list_models returned an invalid catalog")?;
+        let Some(model) = models
+            .iter()
+            .find(|model| model.get("value").and_then(Value::as_str) == Some(alias))
+        else {
+            return Ok(alias.to_string());
+        };
+        let resolved = model
+            .get("resolvedModel")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .with_context(|| format!("Claude list_models did not resolve {alias}"))?;
+        // Native aliases keep mode-dependent behavior; external IDs must not enter that alias path.
+        Ok(if resolved.starts_with("claude-") {
+            alias.to_string()
+        } else {
+            resolved.to_string()
+        })
+    };
+    let resolved: Result<String> = resolve.await;
+    resolved.map(Some).map_err(|error| anyhow!(
+        "Could not resolve Claude Code model {alias} in {}: {error:#}. Check the Claude Code model configuration and re-check the harness",
+        repo.display()
+    ))
 }
 
 pub(crate) async fn external_model_catalog(bin: PathBuf, ultracode: bool) -> Vec<ModelInfo> {
@@ -434,8 +521,8 @@ async fn claude_spec_probes(bin: PathBuf, sequence: u64) -> (AuthProbe, bool, Op
 /// `list_models` response → per-model `ModelInfo`. Split from the transport
 /// for testability.
 ///
-/// * `value` is the id the CLI's own picker submits (aliases like `sonnet`,
-///   `opus[1m]`), so it's what we store and pass back as `--model`.
+/// * `value` is the saved picker id (aliases like `sonnet`, `opus[1m]`).
+///   The process boundary resolves external mappings before launch or live control.
 /// * The `default` entry is skipped — the composer's "Default model" row (a
 ///   null model) already means "let the CLI pick".
 /// * A model without `supportedEffortLevels` (Haiku) gets an empty list, which
