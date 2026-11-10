@@ -34,7 +34,7 @@ use super::options::{
 use super::{
     CompactCtx, CompactOutcome, Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
 };
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::acp::{host::Event, Definition};
 use crate::local::chat::{prepare_env, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt};
 use crate::local::opencode::ensure_playbook;
@@ -343,6 +343,11 @@ pub(crate) fn stop_error_path(session_id: &str) -> PathBuf {
     crate::store::data_dir().join(format!("agent-antigravity-{session_id}.error.json"))
 }
 
+/// Present while the chat's agy asks before running tools, which its subagents cannot do over ACP.
+pub(crate) fn approvals_path(session_id: &str) -> PathBuf {
+    crate::store::data_dir().join(format!("agent-antigravity-{session_id}.approvals"))
+}
+
 /// The error the `Stop` hook saved for this conversation's turn, consumed.
 fn take_stop_error(session_id: &str, conversation: &str) -> Option<String> {
     let path = stop_error_path(session_id);
@@ -377,7 +382,24 @@ fn launch(bin: &Path, session_id: &str, skip_permissions: bool) -> Definition {
 async fn prepare_worktree(
     project: &crate::local::model::LocalProject,
     session_id: &str,
+    skip_permissions: bool,
 ) -> Result<PathBuf> {
+    // Side chats can share the worktree, so its hook file cannot hold a chat's mode.
+    let approvals = approvals_path(session_id);
+    let recorded = if skip_permissions {
+        match std::fs::remove_file(&approvals) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    } else {
+        std::fs::write(&approvals, "")
+    };
+    recorded.with_context(|| {
+        format!(
+            "could not record this chat's approval mode at {}",
+            approvals.display()
+        )
+    })?;
     let project = project.clone();
     let session_id = session_id.to_owned();
     let (repo, _playbook) = tokio::task::spawn_blocking(move || {
@@ -412,9 +434,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 
 async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
     let bin = find_agy_or_error()?;
-    let repo = prepare_worktree(&ctx.project, &ctx.session_id).await?;
     let bypass = ctx.permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass;
-    let definition = launch(&bin, &ctx.session_id, bypass && !ctx.plan_mode);
+    let skip_permissions = bypass && !ctx.plan_mode;
+    let repo = prepare_worktree(&ctx.project, &ctx.session_id, skip_permissions).await?;
+    let definition = launch(&bin, &ctx.session_id, skip_permissions);
     let session = super::acp::open_session(ctx, &definition, &repo, false).await?;
     let native_id = session.native_id.clone();
     if let Some(model) = ctx
@@ -595,8 +618,8 @@ fn turn_usage(result: &Value) -> Option<crate::store::TokenUsage> {
 /// conversation.
 async fn compact(ctx: &CompactCtx, native_id: &str) -> Result<()> {
     let bin = find_agy_or_error()?;
-    let repo = prepare_worktree(&ctx.project, &ctx.session_id).await?;
     let bypass = ctx.permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass;
+    let repo = prepare_worktree(&ctx.project, &ctx.session_id, bypass).await?;
     let definition = launch(&bin, &ctx.session_id, bypass);
     let host = ctx.host.acp.clone();
     let mut client = host.get(&ctx.session_id, &definition, &repo).await?;
@@ -720,6 +743,14 @@ fn write_hooks(repo: &Path) -> Result<()> {
             "PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": command, "timeout": 60}]}]
         }),
     );
+    // agy asks about a subagent's tools only in its own terminal, never over ACP.
+    object.insert(
+        "openresearch-subagents".into(),
+        json!({
+            "enabled": true,
+            "PreToolUse": [{"matcher": "invoke_subagent", "hooks": [{"type": "command", "command": command, "timeout": 60}]}]
+        }),
+    );
     object.insert(
         "openresearch-accounting".into(),
         json!({"enabled": true, "PostInvocation": [{"type": "command", "command": command}]}),
@@ -744,6 +775,16 @@ pub(crate) fn normalize_tool<'a>(
         "invoke_subagent" => ("task", &[("Role", "description")]),
         "run_command" => ("Bash", &[("CommandLine", "command"), ("Cwd", "cwd")]),
         "view_file" => ("Read", &[("AbsolutePath", "file_path")]),
+        "read_file" => ("Read", &[("Path", "file_path")]),
+        "write_file" => ("Write", &[("Path", "file_path"), ("Content", "content")]),
+        "edit_file" => (
+            "Edit",
+            &[
+                ("Path", "file_path"),
+                ("Target", "old_string"),
+                ("Replacement", "new_string"),
+            ],
+        ),
         "write_to_file" => (
             "Write",
             &[("TargetFile", "file_path"), ("CodeContent", "content")],
@@ -851,6 +892,11 @@ mod tests {
         .unwrap();
         write_hooks(&repo).unwrap();
         let hooks: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(hooks["openresearch-subagents"]["enabled"], true);
+        assert_eq!(
+            hooks["openresearch-subagents"]["PreToolUse"][0]["matcher"],
+            "invoke_subagent"
+        );
         assert!(hooks.get("openresearch-approval").is_none());
         assert_eq!(hooks["mine"]["enabled"], true);
         assert_eq!(hooks["openresearch-invocation"]["enabled"], !cfg!(windows));
