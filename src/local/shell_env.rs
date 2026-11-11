@@ -181,12 +181,15 @@ pub fn find(binary: &str) -> Option<PathBuf> {
 /// then the agent's `own` install locations. Only when none has it, `npx`'s
 /// cache. The path is returned as it sits in its directory; a caller that needs
 /// the real binary behind a symlink composes with `resolve_symlinks`. Under test
-/// it panics on a copy outside the test's temp root, which is the user's own.
+/// a copy outside the test's temp root is the developer's own and stays unseen.
 pub fn installs(binary: &str, own: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    every_install(binary, own)
+    let found = every_install(binary, own);
+    #[cfg(test)]
+    let found = found
         .into_iter()
-        .map(crate::config::test_contained)
-        .collect()
+        .filter(|path| crate::config::contained(path))
+        .collect();
+    found
 }
 
 fn every_install(binary: &str, own: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
@@ -431,11 +434,10 @@ mod tests {
         }
         std::env::set_var("PATH", &outside);
 
-        let panic = std::panic::catch_unwind(|| installs("claude", [])).unwrap_err();
+        let found = installs("claude", []);
         std::fs::remove_dir_all(&outside).unwrap();
 
-        let message = panic.downcast_ref::<String>().unwrap();
-        assert!(message.contains(&agent.display().to_string()), "{message}");
+        assert!(!found.contains(&agent), "{found:?}");
     }
 
     #[test]
