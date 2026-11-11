@@ -3407,3 +3407,91 @@ async fn ray_refusals_fail_the_run_unless_the_job_exists() {
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn k8s_refusals_fail_the_run_unless_something_may_remain() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/kubectl"),
+        r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+a = sys.argv[1:]
+mode = os.environ['ORX_TEST_K8S']
+with (Path(os.environ['ORX_API_ROOT'])/'kubectl.log').open('a') as f: f.write(mode+' '+' '.join(a)+'\n')
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+if '--dry-run=client' in a:
+    if mode == 'invalid':
+        fail('error: error validating "STDIN": error validating data: ValidationError(Job.spec): unknown field "templat" in io.k8s.api.batch.v1.JobSpec')
+    if mode == 'unparsable':
+        fail('error: error parsing STDIN: error converting YAML to JSON: yaml: line 3: mapping values are not allowed in this context')
+    if mode == 'unrecognized':
+        fail('error: Get "https://k8s:6443/api?timeout=32s": net/http: TLS handshake timeout')
+    if mode == 'offline':
+        fail('E1111 memcache.go:265] couldn\'t get current server API group list: Get "https://k8s:6443/api": dial tcp: i/o timeout\nUnable to connect to the server: dial tcp: i/o timeout')
+    print(sys.stdin.read())
+elif a[0] == 'apply':
+    sys.stdin.read()
+elif a[0] == 'create':
+    if json.loads(sys.stdin.read())['kind'] == 'ConfigMap':
+        pass
+    elif mode == 'limited':
+        fail('Error from server (TooManyRequests): error when creating "STDIN": the server has received too many requests and has asked us to try again later')
+    else:
+        fail('Error from server (Forbidden): error when creating "STDIN": jobs.batch is forbidden: User "lab" cannot create resource "jobs" in API group "batch" in the namespace "default"')
+elif a[0] == 'delete':
+    if mode == 'stuck':
+        fail('Unable to connect to the server: dial tcp: i/o timeout')
+elif a[0] == 'get':
+    print('{"items":[]}')
+else:
+    raise Exception(a)
+"#,
+    );
+    let config =
+        json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ORX_RUN}}-config"}});
+    let job = json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"{{ORX_RUN}}"},"spec":{"template":{"spec":{"restartPolicy":"Never","containers":[{"name":"run","image":"python","command":["bash","-c","eval \"$ORX_SCRIPT\""]}]}}}});
+    let metadata = BackendDescriptor::parse(r#"{"kind":"k8s_job"}"#).unwrap();
+    let launch = LaunchSpec {
+        kind: "k8s_job".into(),
+        target: Some("default".into()),
+        options: json!({
+            "manifest":format!("{config}{job}"), "script":"true", "run_token":"run", "env":{}, "timeout_seconds":3600, "labels":{}, "pod_env":[], "source_archive":root.join("archive.tar")
+        }),
+    };
+    let engine = engine(&root);
+    let adapter = super::api::Adapter::new(
+        K8sAccount::new(None, "default".into()),
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    );
+    for (run, status, reason) in [
+        ("forbidden", "failed", "jobs.batch is forbidden"),
+        ("invalid", "failed", "unknown field"),
+        ("unparsable", "failed", "error parsing STDIN"),
+        ("unrecognized", "submitting", "TLS handshake timeout"),
+        ("limited", "submitting", "TooManyRequests"),
+        ("stuck", "submitting", "rolling back"),
+        ("offline", "submitting", "Unable to connect"),
+    ] {
+        std::env::set_var("ORX_TEST_K8S", run);
+        engine
+            .submit(&adapter, pending(run, &metadata, &launch))
+            .await
+            .unwrap();
+        let (got, why) = launch_outcome(&engine, run);
+        assert_eq!(got, status, "{run}: {why}");
+        assert!(why.contains(reason), "{run}: {why}");
+    }
+    let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
+    assert!(
+        calls
+            .lines()
+            .any(|call| call.starts_with("forbidden delete configmap/run-config")),
+        "{calls}"
+    );
+}

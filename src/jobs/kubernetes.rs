@@ -303,7 +303,9 @@ pub(crate) async fn run_manifest(
             "type": "Opaque",
             "stringData": spec.env,
         });
-        kubectl(context, &["apply", "-f", "-"], Some(&secret.to_string())).await?;
+        kubectl(context, &["apply", "-f", "-"], Some(&secret.to_string()))
+            .await
+            .map_err(refused)?;
     }
 
     let (docs, job_name) = prepared_manifest(context, namespace, spec).await?;
@@ -322,10 +324,13 @@ pub(crate) async fn run_manifest(
         )
         .await
         {
-            for r in created.iter().rev() {
-                let _ = delete_resources(context, namespace, std::slice::from_ref(r)).await;
+            let error = anyhow!("could not create {handle}: {e}");
+            if let Err(rollback) = delete_resources(context, namespace, &created).await {
+                return Err(anyhow!(
+                    "{error}; rolling back what orx created failed: {rollback}"
+                ));
             }
-            return Err(anyhow!("could not create {handle}: {e}"));
+            return Err(refused(error));
         }
         created.push(handle);
     }
@@ -341,8 +346,8 @@ pub(crate) async fn prepared_manifest(
     spec: &ManifestSpec,
 ) -> Result<(Vec<Value>, String)> {
     let rendered = spec.manifest.replace("{{ORX_RUN}}", &spec.run_token);
-    // YAML → JSON plus schema sanity in one step, without touching the
-    // cluster and without a YAML dependency.
+    // YAML → JSON plus schema sanity in one step, without a YAML dependency;
+    // kubectl still asks the cluster which kinds it serves.
     let converted = kubectl(
         context,
         &[
@@ -358,12 +363,25 @@ pub(crate) async fn prepared_manifest(
         Some(&rendered),
     )
     .await
-    .map_err(|e| anyhow!("manifest failed client-side validation: {e}"))?;
+    .map_err(|e| {
+        let message = e.to_string();
+        let error = anyhow!("manifest failed client-side validation: {message}");
+        if message.contains("Error from server") {
+            refused(error)
+        } else if INVALID_MANIFEST
+            .iter()
+            .any(|marker| message.contains(marker))
+        {
+            invalid(error)
+        } else {
+            error
+        }
+    })?;
     // Multi-doc manifests come back as *concatenated* JSON objects, not a
     // List — read the stream.
     let mut converted_docs: Vec<Value> = Vec::new();
     for v in serde_json::Deserializer::from_str(&converted).into_iter::<Value>() {
-        converted_docs.push(v?);
+        converted_docs.push(v.map_err(|e| invalid(e.into()))?);
     }
 
     let (docs, job_name) = prepare_docs(
@@ -373,9 +391,60 @@ pub(crate) async fn prepared_manifest(
         spec.timeout_seconds,
         &spec.labels,
         &spec.pod_env,
-    )?;
+    )
+    .map_err(invalid)?;
 
     Ok((docs, job_name))
+}
+
+/// What kubectl prints for a manifest it can't parse, decode, map or validate. kubectl exits 1
+/// for every failure and has no structured error output, so its prose is all there is; any
+/// other dry-run failure, such as one reaching the cluster, may pass on a retry.
+const INVALID_MANIFEST: [&str; 5] = [
+    "error parsing STDIN:",
+    "unable to decode \"STDIN\":",
+    "error validating data: ValidationError",
+    "error validating data: [",
+    "no matches for kind",
+];
+
+/// A manifest turned down before the cluster saw it, so nothing was created.
+fn invalid(error: crate::error::Error) -> crate::error::Error {
+    super::Refused {
+        status: None,
+        message: error.to_string(),
+    }
+    .into()
+}
+
+/// kubectl's error as a [`super::Refused`] when the API server answered it with a 4xx
+/// `Error from server (<StatusReason>)`; anything else may have taken effect.
+fn refused(error: crate::error::Error) -> crate::error::Error {
+    let message = error.to_string();
+    let reason = message
+        .split_once("Error from server (")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(reason, _)| reason);
+    let status = match reason {
+        Some("BadRequest") => 400,
+        Some("Unauthorized") => 401,
+        Some("Forbidden") => 403,
+        Some("NotFound") => 404,
+        Some("MethodNotAllowed") => 405,
+        Some("NotAcceptable") => 406,
+        Some("AlreadyExists" | "Conflict") => 409,
+        Some("Gone" | "Expired") => 410,
+        Some("RequestEntityTooLarge") => 413,
+        Some("UnsupportedMediaType") => 415,
+        Some("Invalid") => 422,
+        Some("TooManyRequests") => 429,
+        _ => return error,
+    };
+    super::Refused {
+        status: Some(status),
+        message,
+    }
+    .into()
 }
 
 /// Whether the source is already in `pod`, as a lost reply or an earlier orx may have left it.

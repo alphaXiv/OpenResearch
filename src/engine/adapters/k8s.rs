@@ -88,7 +88,7 @@ impl Api for K8sAccount {
         let spec = self.spec(intent).map_err(api::rejected)?;
         let submitted = k8s::run_manifest(self.context.as_deref(), &self.namespace, &spec, Some(fence))
             .await
-            .map_err(api::interrupted)?;
+            .map_err(api::launch_error)?;
         Ok(Self::handle(
             intent,
             submitted.resources,
