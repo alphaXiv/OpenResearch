@@ -4,6 +4,7 @@ import { EMPTY_COMPOSER_STASH, mergeFailedComposer } from "../src/composerStash.
 import { ltr } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
 import { annotate, assistantMessage, codex, composer, deferred, emit, press, refused, renderChat, session, userMessage } from "./chat.mjs";
+import { model } from "./models.mjs";
 
 const transcripts = { s: [userMessage("u1", "hello"), assistantMessage("a1", "Keep the old selection in mind.", "u1"), userMessage("u2", "and next?", "a1")] };
 const sideTab = (sessionId) => `?pane=${encodeURIComponent(JSON.stringify({ kind: "side", sessionId }))}`;
@@ -480,7 +481,7 @@ test("retrying a failed plan message does not toggle plan a second time", async 
 });
 
 test("sending during an agent switch keeps the draft until the new agent is ready", async () => {
-  const claude = { ...codex, id: "claude-code", name: "Claude Code", models: [{ id: "claude-model", displayName: "Claude Model" }] };
+  const claude = { ...codex, id: "claude-code", name: "Claude Code", models: [model("claude-model", "Claude Model")] };
   const switched = deferred();
   const chat = await renderChat("/projects/p/tasks/s", {
     harnesses: [codex, claude],

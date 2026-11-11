@@ -6,6 +6,7 @@ import { TARGET_LABELS } from "../src/computeTargets.ts";
 import { m } from "../src/paraglide/messages.js";
 import { assistantMessage, codex, composer, deferred, emit, renderChat, session, userMessage } from "./chat.mjs";
 import { clients, find, press, render, renderApp, serve, serveApp, settle, type } from "./render.mjs";
+import { model } from "./models.mjs";
 
 const click = async (element) => {
   await act(async () => element.click());
@@ -69,7 +70,7 @@ test("agent settings list what works, OpenResearch's accounts and installs, and 
   ];
   serveApp({
     "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
-    "GET /api/settings/ui-state": () => ({ onboardingCompleted: true, hiddenAgents: [] }),
+    "GET /api/settings/ui-state": () => ({ onboardingCompleted: true, hiddenAgents: [], hiddenModels: [], modelSectionOrder: [] }),
     "GET /api/harnesses": () => ({ harnesses }),
     "GET /api/harnesses/acp": () => [{ id: "acp:custom", name: "acp:custom", executable: "custom", arguments: [] }],
     "GET /api/harnesses/acp/presets": () => [],
@@ -217,7 +218,7 @@ test("an edit typed while the send prepares survives the send", async () => {
 
 test("a late agent switch cannot replace a newer chat's selection or draft settings", async () => {
   const claude = {
-    ...codex, id: "claude-code", name: "Claude Code", models: [{ id: "target-model" }, { id: "newer-model" }],
+    ...codex, id: "claude-code", name: "Claude Code", models: [model("target-model"), model("newer-model")],
     options: { ...codex.options, permissionModes: [{ id: "auto", label: "Auto" }, { id: "plan", label: "Plan" }] },
   };
   const switched = deferred();

@@ -3,10 +3,11 @@ import test from "node:test";
 import { act } from "react";
 import { m } from "../src/paraglide/messages.js";
 import { find, renderApp, serveApp, settle, type } from "./render.mjs";
+import { model } from "./models.mjs";
 
 const preset = { id: "acp:preset", name: "Kimi Code", executable: "kimi", arguments: ["acp"], setupUrl: "https://example.com", needsConnectionAdapter: false };
 const harness = (id, name, extra = {}) => ({
-  id, name, installed: true, installBroken: false, authenticated: true, authState: "ready", agentReady: true, models: [{ id: "model" }], defaultModel: "model", ...extra,
+  id, name, installed: true, installBroken: false, authenticated: true, authState: "ready", agentReady: true, models: [model("model")], defaultModel: "model", ...extra,
 });
 const codex = harness("codex", "Codex");
 const saved = (extra) => harness("acp:saved", "Saved ACP", extra);

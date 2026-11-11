@@ -180,7 +180,7 @@ export interface UiState {
   opencodeFreeModels: boolean;
   /** The model families the picker lists first. */
   favoriteModels: string[];
-  /** Models turned off in Settings, by `canonical` (`:free` added for a free tier): the picker hides them and agents can't delegate to them. */
+  /** Models turned off in Settings, by {@link ModelName.key}: the picker hides them and agents can't delegate to them. */
   hiddenModels: string[];
   /** Agents found on this computer that are turned off, by harness id; `opencode` stands for the sign-ins made in OpenCode itself. */
   hiddenAgents: string[];
@@ -1088,10 +1088,33 @@ export interface HarnessModel {
   serviceTiers?: OptionChoice[];
   /** Whether the model accepts images; absent when the catalog doesn't say. */
   imageInput?: boolean;
-  /** The provider-neutral id agents delegate to it by (`claude-opus-5.5`). */
-  canonical?: string;
   /** Its id names a free tier. */
   free?: boolean;
+  parsed: ModelName;
+}
+
+/** What an offer adds to its model: Cursor's and Antigravity's effort, speed and thinking, Claude Code's long context. */
+export interface ModelVariant {
+  effort: string | null;
+  fast: boolean;
+  thinking: boolean;
+  context: string | null;
+}
+
+/** A model's name as the server reads it, so the picker groups what Settings hides and delegation skips. */
+export interface ModelName {
+  /** The same for one model in every agent's catalog, `:free` added for its free tier. Settings turns models off by it. */
+  key: string;
+  /** `key` without its version or free tier: what a favorite stars. */
+  family: string;
+  /** `family` without tier words a lab reuses across versions: a newer version of any tier makes an older one old. */
+  series: string;
+  version: number[] | null;
+  /** The catalog's name without variant words, dates or asides. */
+  label: string;
+  variant: ModelVariant;
+  /** How far the catalog's name is from its model's plain variant; a tile runs the lowest by default. */
+  variantRank: number;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
@@ -1504,6 +1527,8 @@ export interface ChatSession {
   profile?: string | null;
   harnessName?: string | null;
   nativeConfiguration?: unknown;
+  /** The models an ACP agent's live configuration offers, when it offers any. */
+  nativeModels?: HarnessModel[] | null;
   title: string | null;
   /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
    * (harness auto-title), `"user"` (explicitly chosen — a rename, or the title a

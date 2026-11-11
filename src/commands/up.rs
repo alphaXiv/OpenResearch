@@ -8254,6 +8254,8 @@ async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQu
     let hidden = Store::open()?.ui_state()?.hidden_agents;
     for entry in payload["harnesses"].as_array_mut().into_iter().flatten() {
         entry["off"] = json!(local::model_routes::turned_off(entry, &hidden));
+        let harness = entry["id"].as_str().unwrap_or_default().to_string();
+        local::model_routes::name_models(&harness, &mut entry["models"]);
     }
     Ok(Json(payload))
 }

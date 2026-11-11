@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type InputHTMLAttributes, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, GripVertical } from "lucide-react";
-import { groupModelLines, hideId } from "../modelLines";
+import { groupModelLines } from "../modelLines";
 import { m } from "../paraglide/messages.js";
 import { useWorkspace } from "../workspace";
 import { mutUpdateUiState } from "../queries/settings";
@@ -37,9 +37,8 @@ export function ModelSettings({ heading }: { heading: ReactNode }) {
   const [dragged, setDragged] = useState<{ lab: Lab; order: Lab[]; from: Lab[] }>();
   const listRef = useRef<HTMLDivElement>(null);
 
-  // Only models the server can name can be turned off, so an agent's lone default isn't listed.
   const lines = useMemo(
-    () => groupModelLines(pickerAgents(catalog ?? [], providers ?? [], endpoints ?? []).flatMap(agentOffers).filter((offer) => hideId(offer.model))),
+    () => groupModelLines(pickerAgents(catalog ?? [], providers ?? [], endpoints ?? []).flatMap(agentOffers)),
     [catalog, providers, endpoints],
   );
   if (!uiState || !lines.length) return null;
@@ -59,10 +58,10 @@ export function ModelSettings({ heading }: { heading: ReactNode }) {
     return order;
   };
 
-  const isOn = (line: PickerLine) => line.offers.some((offer) => !hidden.has(hideId(offer.model)!));
+  const isOn = (line: PickerLine) => !hidden.has(line.key);
 
   const toggle = (targets: PickerLine[], on: boolean) => {
-    const ids = targets.flatMap((line) => line.offers.map((offer) => hideId(offer.model)!));
+    const ids = targets.map((line) => line.key);
     mutUpdateUiState.run(workspace, { hiddenModels: on ? uiState.hiddenModels.filter((id) => !ids.includes(id)) : [...new Set([...uiState.hiddenModels, ...ids])] });
   };
 

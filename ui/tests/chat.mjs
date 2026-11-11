@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { fmtNumber } from "../src/api.ts";
 import { m } from "../src/paraglide/messages.js";
 import { clients, find, navigate, press, renderApp, serveApp, settle, streams } from "./render.mjs";
+import { model } from "./models.mjs";
 
 // The transcript virtualizes against its viewport, which happy-dom never lays out.
 for (const size of ["clientHeight", "clientWidth", "offsetHeight", "offsetWidth"]) {
@@ -16,7 +17,7 @@ afterEach(() => toast.dismiss());
 
 export const codex = {
   id: "codex", name: "Codex", installed: true, installBroken: false, authenticated: true, authState: "ready", agentReady: true,
-  supportsSteering: false, supportsCompaction: true, models: [{ id: "gpt-6.1-sol" }, { id: "gpt-6-astra" }], defaultModel: "gpt-6.1-sol",
+  supportsSteering: false, supportsCompaction: true, models: [model("gpt-6.1-sol"), model("gpt-6-astra")], defaultModel: "gpt-6.1-sol",
   options: { permissionModes: [{ id: "auto", label: "Auto" }], defaultPermissionMode: "auto", planActivation: "command", reasoningLevels: [] },
 };
 

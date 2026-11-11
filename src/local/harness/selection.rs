@@ -43,17 +43,13 @@ pub(crate) fn resolve_models(
     let ranked: Vec<_> = models
         .iter()
         .map(|model| {
-            let name = format!(
-                "{} {} {}",
-                model.display_name.as_deref().unwrap_or(""),
-                model.resolved_model.as_deref().unwrap_or(""),
-                model.id
-            )
-            .to_ascii_lowercase();
-            let words: Vec<_> = name
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .filter(|word| !word.is_empty())
-                .collect();
+            let name = crate::local::model_routes::parse(
+                harness,
+                &model.id,
+                model.display_name.as_deref(),
+                model.resolved_model.as_deref(),
+            );
+            let words: Vec<&str> = name.family.split(' ').collect();
             let family = if words.contains(&"opus") {
                 0
             } else if words.contains(&"sol") && words.contains(&"gpt") {
@@ -61,44 +57,11 @@ pub(crate) fn resolve_models(
             } else {
                 2
             };
-            let version_text = name
-                .find(|c: char| c.is_ascii_digit())
-                .map(|start| {
-                    name[start..]
-                        .chars()
-                        .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
-                        .collect::<String>()
-                })
-                .unwrap_or_default();
-            let mut version: Vec<u64> = version_text
-                .split(['.', '_', '-'])
-                .filter_map(|word| word.parse().ok())
-                .collect();
+            let mut version = name.version.clone().unwrap_or_default();
             while version.last() == Some(&0) {
                 version.pop();
             }
-            let label = model.display_name.as_deref().unwrap_or(&model.id);
-            let variant = label
-                .to_ascii_lowercase()
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .any(|word| {
-                    matches!(
-                        word,
-                        "low"
-                            | "medium"
-                            | "high"
-                            | "xhigh"
-                            | "max"
-                            | "fast"
-                            | "slow"
-                            | "thinking"
-                            | "reasoning"
-                            | "mini"
-                            | "pro"
-                            | "speed"
-                    )
-                });
-            (model, family, version, variant, label)
+            (model, family, version, name)
         })
         .collect();
     let preferred = match harness {
@@ -111,10 +74,13 @@ pub(crate) fn resolve_models(
         .into_iter()
         .filter(|row| !has_preferred || row.1 == preferred)
         .max_by(|a, b| {
+            let plain = |name: &crate::local::model_routes::ModelName| {
+                (name.variant_rank, name.family != name.series)
+            };
             a.2.cmp(&b.2)
-                .then_with(|| b.3.cmp(&a.3))
-                .then_with(|| b.4.len().cmp(&a.4.len()))
-                .then_with(|| b.4.cmp(a.4))
+                .then_with(|| plain(&b.3).cmp(&plain(&a.3)))
+                .then_with(|| b.3.label.len().cmp(&a.3.label.len()))
+                .then_with(|| b.3.label.cmp(&a.3.label))
                 .then_with(|| b.0.id.cmp(&a.0.id))
         })
         .map(|row| row.0.id.clone())

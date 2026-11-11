@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { formatAcpCommand, nativeOptions, parseAcpCommand, sessionAcpHarness, validAcpLaunch } from "../src/acp.ts";
+import { model } from "./models.mjs";
 
 test("a pasted ACP command preserves quoted paths and argument boundaries", () => {
   assert.deepEqual(parseAcpCommand('kimi acp'), { executable: 'kimi', arguments: ['acp'] });
@@ -39,7 +40,7 @@ test("native controls retain opaque IDs, grouped choices, and agent ordering", (
 });
 
 test("session labels and models survive removal of a saved harness", () => {
-  const harness = sessionAcpHarness({ harness: "acp:stable-id", harnessName: "My agent", nativeConfiguration: { configOptions: [{ id: "m", name: "Model", category: "model", type: "select", currentValue: "native/model", options: [{ value: "native/model", name: "Native Model" }] }] } }, undefined);
+  const harness = sessionAcpHarness({ harness: "acp:stable-id", harnessName: "My agent", nativeModels: [model("native/model", "Native Model")] }, undefined);
   assert.equal(harness.name, "My agent");
   assert.equal(harness.agentReady, true);
   assert.equal(harness.supportsCompaction, false);
@@ -54,10 +55,10 @@ test("modern options take precedence and unsupported controls keep defaults", ()
 });
 
 test("an uninitialized ACP chat uses the discovered catalog until native options arrive", () => {
-  const catalog = { id: "acp:stable-id", name: "Agent", models: [{ id: "a", displayName: "Model A" }, { id: "b", displayName: "Model B" }] };
-  const session = { harness: catalog.id, nativeConfiguration: {} };
+  const catalog = { id: "acp:stable-id", name: "Agent", models: [model("a", "Model A"), model("b", "Model B")] };
+  const session = { harness: catalog.id, nativeConfiguration: {}, nativeModels: null };
   assert.deepEqual(sessionAcpHarness(session, catalog).models, catalog.models);
-  session.nativeConfiguration = { models: { currentModelId: "c", availableModels: [{ modelId: "c", name: "Session Model" }] } };
+  session.nativeModels = [model("c", "Session Model")];
   assert.deepEqual(sessionAcpHarness(session, catalog).models.map((model) => model.id), ["c"]);
 });
 

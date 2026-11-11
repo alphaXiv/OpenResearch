@@ -1,5 +1,5 @@
 import { reconcileReasoning, reconcileServiceTier, type AgentSelection, type Harness, type HarnessModel } from "./api";
-import { groupModelLines, parseModel } from "./modelLines.ts";
+import { groupModelLines } from "./modelLines.ts";
 
 /** The entry a selection or chat runs on: its agent, and the account when it names one. */
 export function selectionHarness(harnesses: Harness[], selection: Pick<AgentSelection, "harness" | "profile"> | null | undefined): Harness | undefined {
@@ -18,7 +18,7 @@ export function keptInstall(h: Harness): boolean {
 
 /** An agent's models as the picker lists them: one line per model, older versions last. */
 export function agentModelLines(harness: string, models: HarnessModel[]) {
-  const lines = groupModelLines(models.map((model) => ({ tile: harness, model, parsed: parseModel(harness, model) })));
+  const lines = groupModelLines(models.map((model) => ({ tile: harness, model })));
   return [...lines.filter((line) => !line.older), ...lines.filter((line) => line.older)];
 }
 
