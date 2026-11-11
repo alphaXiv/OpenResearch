@@ -242,6 +242,16 @@ test("OpenResearch sign-in in this computer's browser only links the address in 
   assert.equal(find("a", authUrl).getAttribute("href"), authUrl);
 });
 
+test("OpenResearch sign-in answers the cursor query ConPTY waits on before printing", async () => {
+  const socket = await session({ connectOnly: false, tab: null });
+  const replies = [];
+  socket.readyState = WebSocket.OPEN;
+  socket.send = (data) => replies.push(new TextDecoder().decode(data));
+  await output(socket, "\x1b[6n");
+  await settle();
+  assert.match(replies.join(""), /^\x1b\[\d+;\d+R$/);
+});
+
 test("OpenResearch sign-in with a code sends the reserved tab to alphaXiv once and shows the code", async (t) => {
   const opened = t.mock.method(window, "open", () => ({}));
   const tab = reservedTab();
