@@ -444,7 +444,7 @@ with (root/'kubectl.log').open('a') as f: f.write(' '.join(a)+'\n')
 if '--dry-run=client' in a:
     print(sys.stdin.read())
 elif a[0]=='get' and a[1]=='pods':
-    print('{"items":[]}' if a[-1]=='json' else 'pod-1',end='')
+    print(json.dumps({'items':[{'metadata':{'name':'pod-1','annotations':{'kubectl.kubernetes.io/default-container':'run'}},'status':{'phase':'Running','containerStatuses':[{'name':'run','state':{'running':{}}}]}}]}))
 elif a[0]=='get' and a[1]=='job' and a[2]!='-n' and (root/'finished').exists():
     print('{"status":{"succeeded":1}}')
 elif a[0]=='get':
@@ -479,7 +479,7 @@ else:
     let metadata = BackendDescriptor::parse(r#"{"kind":"k8s_job"}"#).unwrap();
     let launch = LaunchSpec {
         kind: "k8s_job".into(),
-        target: None,
+        target: Some("default".into()),
         options: json!({
             "manifest":manifest.to_string(), "script":"true", "run_token":"run", "env":{}, "timeout_seconds":3600, "labels":{}, "pod_env":[], "source_archive":archive
         }),
@@ -499,27 +499,42 @@ else:
             },
         )
         .unwrap();
-    let adapter = super::api::Adapter::new(
-        K8sAccount {
-            context: None,
-            namespace: "default".into(),
-        },
-        Arc::new(TestClock::new()),
-        root.join("spools"),
-    );
-    engine.recover(&adapter, "run").await.unwrap();
+    let adapter = |clock: &Arc<TestClock>| {
+        super::api::Adapter::new(
+            K8sAccount::new(None, "default".into()),
+            clock.clone(),
+            root.join("spools"),
+        )
+    };
+    let clock = Arc::new(TestClock::new());
+    let first = adapter(&clock);
+    engine.recover(&first, "run").await.unwrap();
     assert_eq!(engine.load("run").unwrap().0.status, "starting");
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: handle_of(&engine.load("run").unwrap().0).unwrap(),
+    };
+    let budget = Duration::from_secs(10);
+    engine
+        .observe_runs(&first, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
     assert_eq!(std::fs::read(root.join("source.tar")).unwrap(), b"snapshot");
+    engine
+        .observe_runs(&adapter(&clock), std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("copies")).unwrap(),
+        "copy\n"
+    );
+    let adapter = first;
     let state = engine.load("run").unwrap().1;
     let mut intent = RunIntent::new(engine.load("run").unwrap().0, &state).unwrap();
     assert!(matches!(
         adapter.recover(&intent).await,
         Recovery::Found(Handle::Api { .. })
     ));
-    assert_eq!(
-        std::fs::read_to_string(root.join("copies")).unwrap(),
-        "copy\n"
-    );
     let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
     assert!(
         !calls
@@ -576,6 +591,213 @@ else:
     assert!(matches!(adapter.recover(&intent).await, Recovery::Absent));
     let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
     assert!(calls.contains("delete job/primary -n default --cascade=foreground --wait=false"));
+}
+
+/// A cluster whose one Job's pod is whatever `pod.json` says; `cp` fails as a real API server
+/// does until the pod is on a node.
+const WAITING_KUBECTL: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['ORX_API_ROOT'])
+a = sys.argv[1:]
+with (root/'kubectl.log').open('a') as f: f.write(' '.join(a)+'\n')
+pod = json.loads((root/'pod.json').read_text())
+pod['metadata'] = {'name': 'run-pod', 'annotations': {'kubectl.kubernetes.io/default-container': 'run'}}
+deleted = (root/'deleted').exists()
+if '--dry-run=client' in a:
+    print(sys.stdin.read())
+elif a[0] in ('apply', 'create'):
+    sys.stdin.read()
+elif a[0] == 'delete':
+    (root/'deleted').touch()
+elif a[:2] == ['get', 'job']:
+    if deleted:
+        print('Error from server (NotFound): jobs.batch "run" not found', file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({'status': {'active': 1}}))
+elif a[:2] == ['get', 'pods'] and a[-1] == 'json':
+    print(json.dumps({'items': [] if deleted else [pod]}))
+elif a[:2] == ['get', 'pods']:
+    print('' if deleted else 'run-pod', end='')
+elif a[:2] == ['get', 'pod']:
+    print(json.dumps(pod))
+elif a[:2] == ['get', 'events']:
+    path = root/'events.json'
+    print(path.read_text() if path.exists() else '{"items":[]}')
+elif a[0] == 'exec' and 'test' in a:
+    sys.exit(0 if (root/'ready').exists() else 1)
+elif a[0] == 'cp':
+    if not pod['spec'].get('nodeName'):
+        print('Error from server (BadRequest): pod run-pod does not have a host assigned', file=sys.stderr)
+        sys.exit(1)
+    (root/'source.tar').write_bytes(Path(a[1]).read_bytes())
+elif a[0] == 'exec' and 'sh' in a:
+    (root/'ready').touch()
+else:
+    raise Exception(a)
+"#;
+
+fn waiting_pod(root: &Path, node: Option<&str>, status: Value) {
+    let pod = json!({"spec": {"nodeName": node}, "status": status});
+    std::fs::write(root.join("pod.json"), pod.to_string()).unwrap();
+}
+
+fn script_waiting(reason: &str, message: &str) -> Value {
+    json!({"phase": "Pending", "containerStatuses": [
+        {"name": "run", "state": {"waiting": {"reason": reason, "message": message}}}
+    ]})
+}
+
+/// Submits a k8s run against [`WAITING_KUBECTL`] and returns its engine, adapter and handle.
+async fn waiting_run(
+    root: &Path,
+) -> (
+    Engine,
+    super::api::Adapter<K8sAccount>,
+    Arc<TestClock>,
+    WatchedRun,
+) {
+    script(&root.join("bin/kubectl"), WAITING_KUBECTL);
+    let archive = root.join("archive.tar");
+    std::fs::write(&archive, "snapshot").unwrap();
+    let manifest = json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"run"},"spec":{"template":{"spec":{"restartPolicy":"Never","containers":[{"name":"run","image":"ghcr.io/lab/train:v1","command":["bash","-c","eval \"$ORX_SCRIPT\""]}]}}}});
+    let metadata = BackendDescriptor::parse(r#"{"kind":"k8s_job"}"#).unwrap();
+    let launch = LaunchSpec {
+        kind: "k8s_job".into(),
+        target: Some("default".into()),
+        options: json!({
+            "manifest":manifest.to_string(), "script":"true", "run_token":"run", "env":{}, "timeout_seconds":3600, "labels":{}, "pod_env":[], "source_archive":archive
+        }),
+    };
+    let engine = engine(root);
+    let clock = Arc::new(TestClock::new());
+    let adapter = super::api::Adapter::new(
+        K8sAccount::new(None, "default".into()),
+        clock.clone(),
+        root.join("spools"),
+    );
+    engine
+        .submit(&adapter, pending("run", &metadata, &launch))
+        .await
+        .unwrap();
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: handle_of(&engine.load("run").unwrap().0).expect("the launch recorded no handle"),
+    };
+    (engine, adapter, clock, run)
+}
+
+#[tokio::test]
+async fn k8s_waiting_pod_stays_queued_and_receives_the_source_once_it_runs() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    waiting_pod(
+        &root,
+        None,
+        json!({"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+            "reason": "Unschedulable", "message": "0/2 nodes are available: 2 Insufficient nvidia.com/gpu."}]}),
+    );
+    let (engine, adapter, clock, run) = waiting_run(&root).await;
+    let starting = |engine: &Engine| {
+        let (row, state) = engine.load("run").unwrap();
+        assert_eq!(row.status, "starting");
+        assert_eq!(state.contact, crate::store::Contact::Live);
+    };
+    starting(&engine);
+
+    let budget = Duration::from_secs(10);
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    starting(&engine);
+
+    waiting_pod(
+        &root,
+        Some("gpu-1"),
+        script_waiting("ContainerCreating", ""),
+    );
+    clock.advance(budget);
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    starting(&engine);
+    assert!(!root.join("source.tar").exists());
+
+    // orx up restarts before the pod runs.
+    let adapter = super::api::Adapter::new(
+        K8sAccount::new(None, "default".into()),
+        clock.clone(),
+        root.join("spools"),
+    );
+    waiting_pod(
+        &root,
+        Some("gpu-1"),
+        json!({"phase": "Running", "containerStatuses": [{"name": "run", "state": {"running": {}}}]}),
+    );
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(root.join("source.tar")).unwrap(), b"snapshot");
+    assert_eq!(engine.load("run").unwrap().0.status, "running");
+    let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
+    assert!(
+        !calls.lines().any(|call| call.starts_with("delete")),
+        "{calls}"
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| call.starts_with("create -f"))
+            .count(),
+        1,
+        "{calls}"
+    );
+}
+
+#[tokio::test]
+async fn k8s_unpullable_image_fails_with_the_pull_error_and_frees_the_job() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let backoff = || {
+        script_waiting(
+            "ImagePullBackOff",
+            "Back-off pulling image \"ghcr.io/lab/train:v1\"",
+        )
+    };
+    waiting_pod(&root, Some("gpu-1"), backoff());
+    let events = |message: &str| {
+        let events = json!({"items": [{"reason": "Failed", "message": message}]});
+        std::fs::write(root.join("events.json"), events.to_string()).unwrap();
+    };
+    events("Failed to pull image \"ghcr.io/lab/train:v1\": toomanyrequests: rate limit exceeded");
+    let (engine, adapter, clock, run) = waiting_run(&root).await;
+    let budget = Duration::from_secs(10);
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    assert_eq!(engine.load("run").unwrap().0.status, "starting");
+    assert!(!root.join("deleted").exists());
+
+    events("Failed to pull image \"ghcr.io/lab/train:v1\": rpc error: code = NotFound desc = failed to resolve reference \"ghcr.io/lab/train:v1\": not found");
+    clock.advance(budget);
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    let row = engine.load("run").unwrap().0;
+    assert_eq!(row.status, "failed");
+    let reason = row.result_markdown.unwrap();
+    assert!(
+        reason.contains("ghcr.io/lab/train:v1") && reason.contains("not found"),
+        "{reason}"
+    );
+    assert!(root.join("deleted").exists());
 }
 
 #[tokio::test]
@@ -2304,6 +2526,8 @@ elif a[:2] == ['get', 'pods']:
 elif a[0] == 'logs':
     assert not (root/'gone').exists()
     print('2026-11-05T01:42:00Z SMOKE_CANCEL_READY')
+elif a[:3] == ['exec', '-n', 'default']:
+    assert 'test' in a, 'the source was already staged'
 else:
     raise Exception(a)
 "#,
@@ -2346,10 +2570,7 @@ else:
         id: "run".into(),
         handle,
     };
-    let account = K8sAccount {
-        context: None,
-        namespace: "default".into(),
-    };
+    let account = K8sAccount::new(None, "default".into());
     for terminating in [false, true] {
         std::fs::write(root.join("unexpected-deletion"), "").unwrap();
         if terminating {
@@ -2438,10 +2659,7 @@ async fn kubernetes_missing_pods_close_logs_only_after_job_deletion() {
             &root.join("bin/kubectl"),
             &format!("#!/bin/sh\ncase \"$1\" in\nget) {get} ;;\nlogs) exit 0 ;;\nesac\n"),
         );
-        let account = K8sAccount {
-            context: None,
-            namespace: "default".into(),
-        };
+        let account = K8sAccount::new(None, "default".into());
         let mut cursor = crate::jobs::kubernetes::LogResume::default();
         let closed = account
             .logs(&run, &mut cursor, Duration::from_secs(5), &mut |_| {})
@@ -2521,10 +2739,7 @@ esac
         .to_string()
         .contains("timed out"));
     assert_eq!(modal_cursor, 0);
-    let k8s = K8sAccount {
-        context: None,
-        namespace: "default".into(),
-    };
+    let k8s = K8sAccount::new(None, "default".into());
     let k8s_run = WatchedRun {
         id: "k8s".into(),
         handle: crate::engine::adapters::api::test_handle(

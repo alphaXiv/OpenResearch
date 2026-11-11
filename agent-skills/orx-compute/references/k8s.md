@@ -49,5 +49,9 @@ The submit-time contract is:
 - Auxiliary resources may accompany the Job and are deleted on cancellation.
   They must reference the `orx-env` Secret themselves when needed.
 - The run log follows the primary Job's sole pod.
+- A run whose pod waits for capacity or a slow image pull stays starting, and
+  `orx` copies the source in once the container runs. Kubernetes counts that
+  wait against `activeDeadlineSeconds`, so `--timeout` must cover queue time
+  too. An image that can never be pulled fails the run with the pull error.
 
 See [run monitoring](../SKILL.md#who-watches-a-run).

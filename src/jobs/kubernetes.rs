@@ -24,8 +24,7 @@
 //!   exactly that list.
 //!
 //! Job stages are mapped onto the HF stage vocabulary (SCHEDULING/RUNNING/
-//! COMPLETED/ERROR/CANCELED/DELETED) so `is_terminal_stage` in `jobs/mod.rs`
-//! applies unchanged.
+//! COMPLETED/ERROR/CANCELED/DELETED) that the engine's API adapters read.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -37,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context as _, Result};
 
 /// Env vars land in this namespace-local Secret; the primary Job gets an
 /// `envFrom` ref injected (`optional: true`, so an empty env file is fine);
@@ -286,7 +285,8 @@ pub struct Submitted {
 }
 
 /// Sync the env Secret, then validate and create the manifest's resources.
-/// On a partial failure everything already created is rolled back.
+/// On a partial failure everything already created is rolled back. The source
+/// is copied in once the pod runs, which may be long after.
 pub(crate) async fn run_manifest(
     context: Option<&str>,
     namespace: &str,
@@ -328,13 +328,6 @@ pub(crate) async fn run_manifest(
             return Err(anyhow!("could not create {handle}: {e}"));
         }
         created.push(handle);
-    }
-    let staged = stage_source(context, namespace, &job_name, &spec.source_archive).await;
-    if let Err(error) = staged {
-        for resource in created.iter().rev() {
-            let _ = delete_resources(context, namespace, std::slice::from_ref(resource)).await;
-        }
-        return Err(error);
     }
     Ok(Submitted {
         job_name,
@@ -385,106 +378,53 @@ pub(crate) async fn prepared_manifest(
     Ok((docs, job_name))
 }
 
-pub(crate) async fn stage_source(
-    context: Option<&str>,
-    namespace: &str,
-    job_name: &str,
-    archive: &std::path::Path,
-) -> Result<()> {
-    let selector = format!("job-name={job_name}");
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    let mut last_error = String::new();
-    while std::time::Instant::now() < deadline {
-        let pod = kubectl(
-            context,
-            &[
-                "get",
-                "pods",
-                "-n",
-                namespace,
-                "-l",
-                &selector,
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ],
-            None,
-        )
-        .await
-        .unwrap_or_default();
-        let pod = pod.trim();
-        if !pod.is_empty() {
-            if kubectl(
-                context,
-                &[
-                    "exec",
-                    "-n",
-                    namespace,
-                    pod,
-                    "--",
-                    "test",
-                    "-f",
-                    "/tmp/orx-source/source.tar.ready",
-                ],
-                None,
-            )
-            .await
-            .is_ok()
-            {
-                return Ok(());
-            }
-            let local = archive.to_string_lossy().into_owned();
-            let remote = format!("{namespace}/{pod}:/tmp/orx-source/source.tar.part");
-            let size = tokio::fs::metadata(archive).await?.len();
-            let publish = format!("set -e; cd /tmp/orx-source; test -f source.tar.ready && exit 0; test $(wc -c < source.tar.part) -eq {size}; mv source.tar.part source.tar; touch source.tar.ready");
-            match kubectl(context, &["cp", &local, &remote], None).await {
-                Ok(_) => match kubectl(
-                    context,
-                    &["exec", "-n", namespace, pod, "--", "sh", "-c", &publish],
-                    None,
-                )
-                .await
-                {
-                    Ok(_) => return Ok(()),
-                    Err(error) => last_error = error.to_string(),
-                },
-                Err(error) => last_error = error.to_string(),
-            }
-            // An exited script container or pod can never be staged; say why instead of timing out.
-            if let Some((exit, container)) = exited(context, namespace, pod).await {
-                let logs = kubectl(
-                    context,
-                    &["logs", "-n", namespace, pod, "-c", &container, "--tail=20"],
-                    None,
-                )
-                .await
-                .unwrap_or_else(|e| e.to_string());
-                return Err(anyhow!(
-                    "Kubernetes pod {namespace}/{pod} exited ({exit}) before orx could stage \
-                     the source. Last log lines:\n{}",
-                    logs.trim()
-                ));
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    Err(anyhow!(
-        "Kubernetes source staging timed out for Job {namespace}/{job_name}: {last_error}"
-    ))
-}
-
-/// How the pod ended and which container's logs explain it, once its script
-/// container (the default container `prepare_docs` annotates) or the whole pod has.
-async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<(String, String)> {
-    let json = kubectl(
+/// Whether the source is already in `pod`, as a lost reply or an earlier orx may have left it.
+pub(crate) async fn source_staged(context: Option<&str>, namespace: &str, pod: &str) -> bool {
+    kubectl(
         context,
-        &["get", "pod", "-n", namespace, pod, "-o", "json"],
+        &[
+            "exec",
+            "-n",
+            namespace,
+            pod,
+            "--",
+            "test",
+            "-f",
+            "/tmp/orx-source/source.tar.ready",
+        ],
         None,
     )
     .await
-    .ok()?;
-    pod_exit(&serde_json::from_str(&json).ok()?)
+    .is_ok()
 }
 
+/// Copies the archive into `pod`'s script container and publishes it there; once published it
+/// never changes, so a repeated or interrupted copy is safe.
+pub(crate) async fn stage_source(
+    context: Option<&str>,
+    namespace: &str,
+    pod: &str,
+    archive: &std::path::Path,
+) -> Result<()> {
+    let local = archive.to_string_lossy().into_owned();
+    let remote = format!("{namespace}/{pod}:/tmp/orx-source/source.tar.part");
+    let size = tokio::fs::metadata(archive).await?.len();
+    let publish = format!("set -e; cd /tmp/orx-source; test -f source.tar.ready && exit 0; test $(wc -c < source.tar.part) -eq {size}; mv source.tar.part source.tar; touch source.tar.ready");
+    kubectl(context, &["cp", &local, &remote], None)
+        .await
+        .with_context(|| format!("Could not copy the source into pod {namespace}/{pod}"))?;
+    kubectl(
+        context,
+        &["exec", "-n", namespace, pod, "--", "sh", "-c", &publish],
+        None,
+    )
+    .await
+    .with_context(|| format!("Could not publish the source in pod {namespace}/{pod}"))?;
+    Ok(())
+}
+
+/// How the pod ended and which container's logs explain it, once its script container (the
+/// default container `prepare_docs` annotates) or the whole pod has.
 fn pod_exit(pod: &Value) -> Option<(String, String)> {
     let script = pod["metadata"]["annotations"]["kubectl.kubernetes.io/default-container"]
         .as_str()?
@@ -757,6 +697,8 @@ pub struct JobState {
     pub stage: String,
     pub message: Option<String>,
     pub exit_code: Option<i32>,
+    /// Why the pod can never start while the Job still waits for it, such as a missing image.
+    pub unstartable: Option<String>,
 }
 
 pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> Result<JobState> {
@@ -773,6 +715,7 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
                 stage: "DELETED".to_string(),
                 message: None,
                 exit_code: None,
+                unstartable: None,
             })
         }
         Err(e) => return Err(e),
@@ -794,6 +737,7 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
             stage: "COMPLETED".to_string(),
             message: None,
             exit_code: Some(0),
+            unstartable: None,
         });
     }
     let pods_raw = kubectl(
@@ -810,55 +754,106 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
         ],
         None,
     )
-    .await
-    .unwrap_or_default();
-    let pods: Value = serde_json::from_str(&pods_raw).unwrap_or_default();
+    .await?;
+    let pods: Value = serde_json::from_str(&pods_raw)?;
+    let pods = pods["items"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Unexpected kubectl pod listing for Job {namespace}/{name}"))?;
     if let Some(failed) = condition("Failed") {
         let reason = failed["reason"].as_str().unwrap_or("");
         let msg = failed["message"].as_str().unwrap_or("");
+        let mut message = format!("{reason}: {msg}")
+            .trim_matches([':', ' '])
+            .to_string();
+        let exit_code = pods.iter().find_map(|pod| {
+            let script = pod["metadata"]["annotations"]["kubectl.kubernetes.io/default-container"]
+                .as_str()?;
+            pod["status"]["containerStatuses"]
+                .as_array()?
+                .iter()
+                .find(|container| container["name"] == script)?["state"]["terminated"]["exitCode"]
+                .as_i64()
+                .and_then(|code| i32::try_from(code).ok())
+                .filter(|code| *code != 0)
+        });
+        // Without a script exit code the run log is empty; say which container ended it.
+        let ended = pods
+            .iter()
+            .find_map(|pod| Some((pod["metadata"]["name"].as_str()?, pod_exit(pod)?)));
+        if let (None, Some((pod, (exit, container)))) = (exit_code, ended) {
+            let logs = kubectl(
+                context,
+                &["logs", "-n", namespace, pod, "-c", &container, "--tail=20"],
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| e.to_string());
+            message = format!(
+                "{message}. Pod {namespace}/{pod} exited ({exit}). Last log lines:\n{}",
+                logs.trim()
+            );
+        }
         return Ok(JobState {
             stage: "ERROR".to_string(),
-            exit_code: pods["items"]
-                .as_array()
-                .unwrap_or(&empty)
-                .iter()
-                .find_map(|pod| {
-                    let script = pod["metadata"]["annotations"]
-                        ["kubectl.kubernetes.io/default-container"]
-                        .as_str()?;
-                    pod["status"]["containerStatuses"]
-                        .as_array()?
-                        .iter()
-                        .find(|container| container["name"] == script)?["state"]["terminated"]
-                        ["exitCode"]
-                        .as_i64()
-                        .and_then(|code| i32::try_from(code).ok())
-                        .filter(|code| *code != 0)
-                }),
-            message: Some(
-                format!("{reason}: {msg}")
-                    .trim_matches([':', ' '])
-                    .to_string(),
-            ),
+            exit_code,
+            message: Some(message),
+            unstartable: None,
         });
     }
 
-    // Live: RUNNING once every expected pod runs (the whole gang for Indexed
-    // jobs), SCHEDULING before that (surfacing pod waiting reasons like
-    // ImagePullBackOff so "stuck" is diagnosable).
-    let mut waiting_msg = None;
+    // Live: RUNNING once every expected pod's script container has started (the whole gang for
+    // Indexed jobs), SCHEDULING before that with the scheduler's or kubelet's reason.
+    let mut waiting = None;
+    let mut unstartable = None;
     let mut live = 0u64;
-    for pod in pods["items"].as_array().unwrap_or(&empty) {
-        match pod["status"]["phase"].as_str() {
-            Some("Running") | Some("Succeeded") => live += 1,
+    for pod in pods {
+        let status = &pod["status"];
+        let script =
+            pod["metadata"]["annotations"]["kubectl.kubernetes.io/default-container"].as_str();
+        let containers: Vec<&Value> = ["initContainerStatuses", "containerStatuses"]
+            .iter()
+            .filter_map(|key| status[*key].as_array())
+            .flatten()
+            .collect();
+        let script_waiting = containers
+            .iter()
+            .any(|c| c["name"].as_str() == script && c["state"]["waiting"].is_object());
+        match status["phase"].as_str() {
+            Some("Succeeded") => {
+                live += 1;
+                continue;
+            }
+            Some("Running") if !script_waiting => {
+                live += 1;
+                continue;
+            }
             _ => {}
         }
-        for cs in pod["status"]["containerStatuses"]
+        let unscheduled = status["conditions"]
             .as_array()
             .unwrap_or(&empty)
-        {
-            if let Some(reason) = cs["state"]["waiting"]["reason"].as_str() {
-                waiting_msg = Some(reason.to_string());
+            .iter()
+            .find(|c| c["type"] == "PodScheduled" && c["status"] == "False");
+        if let Some(unscheduled) = unscheduled {
+            waiting = unscheduled["message"]
+                .as_str()
+                .or(unscheduled["reason"].as_str())
+                .map(str::to_owned);
+        }
+        for container in containers {
+            let state = &container["state"]["waiting"];
+            let Some(reason) = state["reason"].as_str() else {
+                continue;
+            };
+            let message = state["message"].as_str().unwrap_or_default();
+            waiting = Some(if message.is_empty() {
+                reason.to_string()
+            } else {
+                format!("{reason}: {message}")
+            });
+            if unstartable.is_none() {
+                let name = pod["metadata"]["name"].as_str().unwrap_or_default();
+                unstartable = unpullable(context, namespace, name, reason, message).await?;
             }
         }
     }
@@ -867,13 +862,83 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
             stage: "RUNNING".to_string(),
             message: None,
             exit_code: None,
+            unstartable: None,
         });
     }
     Ok(JobState {
         stage: "SCHEDULING".to_string(),
-        message: waiting_msg,
+        message: waiting,
         exit_code: None,
+        unstartable,
     })
+}
+
+/// Why `pod` can never pull its image, when a container waits for `reason`; `None` while the
+/// pull runs or may still succeed on kubelet's next retry.
+async fn unpullable(
+    context: Option<&str>,
+    namespace: &str,
+    pod: &str,
+    reason: &str,
+    message: &str,
+) -> Result<Option<String>> {
+    let permanent = |message: &str| {
+        let message = message.to_ascii_lowercase();
+        [
+            "not found",
+            "manifest unknown",
+            "does not exist",
+            "denied",
+            "unauthorized",
+            "authentication required",
+            "invalid reference format",
+        ]
+        .iter()
+        .any(|marker| message.contains(marker))
+    };
+    let detail = match reason {
+        "InvalidImageName" | "ErrImageNeverPull" => message.to_string(),
+        "ErrImagePull" | "ImagePullBackOff" if permanent(message) => message.to_string(),
+        // Older kubelets back off with only "Back-off pulling image"; the error is in the events.
+        "ImagePullBackOff" => {
+            let selector =
+                format!("involvedObject.kind=Pod,involvedObject.name={pod},reason=Failed");
+            let events = kubectl(
+                context,
+                &[
+                    "get",
+                    "events",
+                    "-n",
+                    namespace,
+                    "--field-selector",
+                    &selector,
+                    "-o",
+                    "json",
+                ],
+                None,
+            )
+            .await
+            .with_context(|| {
+                format!("Could not read why pod {namespace}/{pod} can't pull its image")
+            })?;
+            let events: Value = serde_json::from_str(&events)?;
+            let failure = events["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|event| event["message"].as_str())
+                .find(|message| permanent(message));
+            match failure {
+                Some(failure) => failure.to_string(),
+                None => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(format!(
+        "Pod {namespace}/{pod} can't pull its image ({reason}): {detail}. Fix the image in the \
+         manifest, commit, and run the experiment again."
+    )))
 }
 
 /// Cancel/cleanup = delete the run's recorded resources (`kind/name` handles,
@@ -910,7 +975,7 @@ pub async fn delete_resources(
 /// Indexed jobs (the annotation exists on any cluster with Indexed jobs),
 /// else the job's first pod by name. `None` while no pod exists yet.
 /// `None` while no pod is scheduled; a failed lookup is an error, never "no pod".
-async fn leader_pod(
+pub(crate) async fn leader_pod(
     context: Option<&str>,
     namespace: &str,
     job_name: &str,
