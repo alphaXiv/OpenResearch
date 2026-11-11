@@ -10,15 +10,6 @@ A project's experiments form a tree. A root is a **baseline**: starting code and
 
 Agents are taught that a run's command and environment are a fixed contract inherited down the tree, and that an experiment whose run answered its question is frozen, so a recorded result always matches its branch (`agent-skills/orx-experiment-tree/`).
 
-## Choosing the run engine
-
-The saved `runEngine` setting chooses who launches new runs; it defaults to off on stable and dev builds. `ORX_RUN_ENGINE=1` or `0` in the `orx up` server's environment overrides it, and any other value is an error. Canary builds always use the engine, ignoring both (`src/config.rs`). `POST /api/v2/runs` and the dashboard's `/api/runs` share one launch path, which reads this on every launch.
-
-- **On:** the engine launches and watches new runs.
-- **Off:** backend launchers and detached `orx supervise` processes do, as in 0.2.x (`src/compute.rs`, `src/local/`, `src/commands/supervise.rs`). The engine still runs, importing their results and wake-ups and recovering engine runs already in flight.
-
-Existing owners stay in place; the setting chooses which path recovers orphaned supervised runs ([Runs from 0.2.x](#runs-from-02x)). Snapshots work the same in both modes. The engine sections describe engine-owned runs.
-
 ## A run is an immutable snapshot
 
 **A backend never sees the project's history.** It gets one archive of the recorded commit, extracted into the run's own directory, and never clones the repository or touches an agent's worktree. Uncommitted edits do not ship.
@@ -129,10 +120,7 @@ Agents are taught to end their turn after launching: a blocking wait would die w
 
 ### Runs from 0.2.x
 
-A run under a detached `orx supervise` stays with that supervisor until it ends; the engine only reads it (`src/engine/legacy.rs`). Per-run supervisor locks decide who may write ([storage](storage.md)). Orphans depend on the setting:
-
-- **Off:** `orx up` re-spawns missing supervisors at startup and periodically.
-- **On:** only the engine adopts them, once the run has gone quiet for a settle period and its locks are free. Adopted runs keep their original descriptors and stop semantics.
+orx 0.2 and later builds with the engine switched off launched runs under a detached `orx supervise`; orx no longer launches that way. Such a run stays with its supervisor until it ends; the engine only reads it (`src/engine/legacy.rs`). Per-run supervisor locks decide who may write ([storage](storage.md)). Once a run has gone quiet for a settle period and its locks are free, the engine adopts it, keeping its original descriptor and stop semantics. A launch that died before recording its job takes the handle from its recovery file, or fails as its supervisor would have failed it.
 
 The engine imports each 0.2.x wake-up once, including ones accepted after a downgrade or while it runs.
 
@@ -142,7 +130,7 @@ A run's results are what its command prints to the run log and what it logs to T
 
 ## Managed rentals
 
-A run on an OpenResearch box rents a machine through openresearch.sh for that run alone. **The laptop sleeping, losing its network or quitting never decides when billing stops.** With the engine on, a box is an `orx-host` root like an SSH host, staged through the same transport, with the same receipts and log collection ([remote](remote.md)); billing duty is the one addition.
+A run on an OpenResearch box rents a machine through openresearch.sh for that run alone. **The laptop sleeping, losing its network or quitting never decides when billing stops.** A box is an `orx-host` root like an SSH host, staged through the same transport, with the same receipts and log collection ([remote](remote.md)); billing duty is the one addition.
 
 1. orx creates the box with a rental lease and stages source over SSH. While provisioning and staging, the laptop heartbeats the rental, within a bounded preparation budget.
 2. An owner-only file on the box holds a capability scoped to that rental; it never appears in API responses.
@@ -156,4 +144,4 @@ The rules around it (`crates/orx-host/src/rental.rs`, `src/engine/adapters/openr
 - **A rejected key cancels the run.** After a box reachable during this run rejects its SSH key continuously for a grace period, the engine issues Cancel if the companion API shows the rental active. Connect or live contact resets the clock; network outages never qualify. The timer only requests cancellation: release proof makes the run terminal, and an already released rental settles as lost.
 - **No research data crosses this protocol.** Logs, commands, source, experiment IDs, outcomes and artifacts never reach the billing service.
 - **Collection is bounded by the box's life.** Once release is verified, the local copy is the kept log, even if empty. A run whose final outcome went with the machine ends as lost.
-- **Older rentals keep their supervisor.** A run already under a detached `orx rental-supervise` stays a `Handle::Legacy` run the engine only inspects and collects; with the engine off, rentals still launch that way.
+- **Older rentals keep their supervisor.** A run already under a detached `orx rental-supervise` stays a `Handle::Legacy` run the engine only inspects and collects.

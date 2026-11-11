@@ -7,10 +7,12 @@ import { useSignIn } from "./AccountChip";
 import { OpenResearchAccount } from "./OpenResearchAccount";
 import { LitSourceLogo } from "./LitSourceLogo";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
+import { useMutate } from "@clo/react-mutation";
 import { Terminal as Xterm } from "@xterm/xterm";
 
 import { m } from "../paraglide/messages.js";
+import { mutCompleteOnboarding, mutInstallGit, mutUpdateUiState } from "../queries/settings";
 import { ltr } from "../i18n";
 import { AlertCircle, ArrowLeft, ArrowRight, Plus, RefreshCw, Terminal, TriangleAlert } from "lucide-react";
 import { Wordmark } from "./Wordmark";
@@ -72,19 +74,18 @@ export function Onboarding(props: OnboardingProps) {
   const { remote, preferredAgent } = props;
   const { id: elementId } = useContext(WorkspaceDomContext);
 
-  const { socketUrl } = useWorkspace();
+  const workspace = useWorkspace();
+  const { socketUrl, queryClient, workspaceScope, isCurrentScope } = workspace;
   const element = useRef<HTMLDivElement>(null);
-  const { showCustomDialog } = useWorkspace().dialogs;
-
-  const { completeOnboarding, captureUiEvent, installGit, updateUiState } = useWorkspace().api;
+  const { showCustomDialog } = workspace.dialogs;
+  const { captureUiEvent } = workspace.api;
   const {
     getPublicNetworkQuery,
     getHarnessesQuery,
     getProjectPathStatusQuery,
     getHarnessSetupCommandsQuery,
     refreshHarnesses,
-  } = useWorkspace().queries;
-  const { queryClient, workspaceScope, isCurrentScope } = useWorkspace();
+  } = workspace.queries;
   const { useOpenResearchAccount, useAlphaXivMe } = useMachines().owner.queries;
   const accountQuery = useOpenResearchAccount();
   const alphaXivMe = useAlphaXivMe();
@@ -92,8 +93,6 @@ export function Onboarding(props: OnboardingProps) {
   // An OpenResearch account without an alphaXiv connection still needs to connect it.
   const connectOnly = !!user && alphaXivMe.error instanceof AlphaXivNotConnectedError;
   const alphaXivLinked = !!user && alphaXivMe.isSuccess;
-
-  const completeOnboardingMutation = useMutation({ mutationFn: completeOnboarding });
 
   const [step, setStep] = useState<0 | 1 | 2>(remote ? 1 : 0);
   useEffect(() => {
@@ -160,13 +159,13 @@ export function Onboarding(props: OnboardingProps) {
       .finally(() => fresh() && setChecking(false));
   };
   useEffect(() => load(false), []);
-  const installGitMutation = useMutation({ mutationFn: installGit, onSuccess: () => load(true) });
+  const gitInstall = useMutate(mutInstallGit);
   const gitInstallPrompt = (
     <GitInstallPrompt
-      pending={installGitMutation.isPending}
-      error={installGitMutation.error}
+      pending={gitInstall.isMutating}
+      error={gitInstall.error}
       disabled={checking}
-      onInstall={() => installGitMutation.mutate()}
+      onInstall={() => gitInstall.runWithOptions(workspace, { onSuccessData: () => load(true), onError: () => {} })}
     />
   );
   useEffect(() => {
@@ -269,7 +268,7 @@ export function Onboarding(props: OnboardingProps) {
       if (!harness) throw new Error(m.harness_setup_not_ready());
       if (mode === "setup") return;
       const selection = selectionFor(harness, harness.models[0]?.id ?? null);
-      const completion = await completeOnboardingMutation.mutateAsync(selection);
+      const completion = await mutCompleteOnboarding.runAsHeadlessPromise(workspace, selection, {});
       props.onDone(completion.project, completion.selection);
     } catch (error) {
       if (automaticSetup) setupTask.current = null;
@@ -328,7 +327,7 @@ export function Onboarding(props: OnboardingProps) {
     setFinishError(null);
     try {
       const selection = selectionFor(harness, harness.models[0]?.id ?? null);
-      props.onDone(await updateUiState({ preferredAgent: selection }));
+      props.onDone(await mutUpdateUiState.runAsHeadlessPromise(workspace, { preferredAgent: selection }, {}));
     } catch (error) {
       setFinishError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -704,7 +703,7 @@ function GitInstallPrompt({
   onInstall,
 }: {
   pending: boolean;
-  error: Error | null;
+  error: unknown;
   disabled: boolean;
   onInstall: () => void;
 }) {
@@ -715,7 +714,7 @@ function GitInstallPrompt({
         {pending && <Spinner />}
         {pending ? m.onboarding_installing_git() : m.onboarding_install_git()}
       </Button>
-      {error && <p className="text-accent-red text-sm m-0">{error.message}</p>}
+      {error != null && <p className="text-accent-red text-sm m-0">{error instanceof Error ? error.message : String(error)}</p>}
     </div>
   );
 }

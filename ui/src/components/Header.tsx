@@ -10,6 +10,7 @@ import { appHotkeys } from "../hotkeys";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { useRuntime } from "../RemoteRuntime";
+import { mutApplyUpdate } from "../queries/settings";
 import { setQueryDevtoolsOpen, useQueryDevtoolsOpen } from "./QueryDevtools";
 import { BuildNotes, describeChanges, releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { BrandMark } from "./Wordmark";
@@ -41,11 +42,11 @@ export function RailHeader({ onCollapse }: { onCollapse?: () => void }) {
 function Brand() {
   const { portalContainer } = useContext(WorkspaceDomContext);
 
-  const { applyUpdate } = useWorkspace().api;
-  const { showFormDialog } = useWorkspace().dialogs;
+  const workspace = useWorkspace();
+  const { showFormDialog } = workspace.dialogs;
 
   const runtime = useRuntime();
-  const { status, apply } = useUpdateStatus(runtime.kind === "local");
+  const { status } = useUpdateStatus(runtime.kind === "local");
   const restart = useRestartApp(status);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,9 +57,10 @@ function Brand() {
   const check = () => {
     setChecking(true);
     setError(null);
-    applyUpdate()
-      .then(apply, (e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setChecking(false));
+    mutApplyUpdate.runWithOptions(workspace, {
+      onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+      onSettled: () => setChecking(false),
+    });
   };
   const busy = checking || restart.restarting;
   const action = !status ? null

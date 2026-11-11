@@ -1,6 +1,8 @@
 import type { Api } from "../api";
 import type { WorkspaceClient } from "./client";
+import type { Workspace } from "../workspace";
 import { isCommit } from "./invalidation";
+import { mutations } from "./mutations";
 import { queryOptions, type FetchQueryOptions } from "@tanstack/react-query";
 import type * as api from "../api";
 
@@ -212,3 +214,93 @@ export function createFileQueries(client: WorkspaceClient, api: Api) {
     refreshFile,
   };
 }
+
+/** Applies `edit` to the entry at `path` in a nested artifact listing; `null` removes it. */
+function editArtifact(entries: api.ArtifactEntry[], path: string, edit: (entry: api.ArtifactEntry) => api.ArtifactEntry | null): api.ArtifactEntry[] {
+  return entries.flatMap((entry) => {
+    if (entry.path === path) return edit(entry) ?? [];
+    if (!entry.children || !path.startsWith(`${entry.path}/`)) return [entry];
+    return [{ ...entry, children: editArtifact(entry.children, path, edit) }];
+  });
+}
+
+function movedArtifact(entry: api.ArtifactEntry, from: string, to: string): api.ArtifactEntry {
+  const path = to + entry.path.slice(from.length);
+  const children = entry.children?.map((child) => movedArtifact(child, from, to));
+  return { ...entry, path, ...(children && { children }) };
+}
+
+const renamedPath = (path: string, newName: string) => {
+  const slash = path.lastIndexOf("/");
+  return slash < 0 ? newName : `${path.slice(0, slash + 1)}${newName}`;
+};
+
+export const mutDeleteArtifact = mutations.define({
+  id: "files/artifact-delete",
+  mutate: (ws: Workspace, projectId: string, path: string) => ws.api.deleteArtifact(projectId, path),
+  optimistic({ helpers, args: [ws, projectId, path] }) {
+    helpers(ws.queryClient).updateExisting(ws.queries.getArtifactsQuery(projectId), (artifacts) =>
+      ({ ...artifacts, entries: editArtifact(artifacts.entries, path, () => null) }));
+  },
+  key: ({ args: [ws, projectId] }) => [ws.identity, projectId, "artifacts"],
+  describe: "delete the artifact",
+  describeResult: null,
+  refetchOnSuccess: true,
+});
+
+export const mutManageArtifactFile = mutations.define({
+  id: "files/artifact-manage",
+  mutate: (ws: Workspace, projectId: string, path: string, action: api.FileAction) => ws.api.manageArtifactFile(projectId, path, action),
+  optimistic({ helpers, args: [ws, projectId, path, action] }) {
+    if (action.action === "duplicate") return;
+    const newName = action.action === "rename" ? action.newName : null;
+    const edit = (entry: api.ArtifactEntry) =>
+      newName === null ? null : { ...movedArtifact(entry, path, renamedPath(path, newName)), name: newName };
+    helpers(ws.queryClient).updateExisting(ws.queries.getArtifactsQuery(projectId), (artifacts) =>
+      ({ ...artifacts, entries: editArtifact(artifacts.entries, path, edit) }));
+  },
+  key: ({ args: [ws, projectId] }) => [ws.identity, projectId, "artifacts"],
+  describe: "change the artifact",
+  describeResult: null,
+  refetchOnSuccess: true,
+});
+
+export const mutManageProjectFile = mutations.define({
+  id: "files/checkout-manage",
+  mutate: (ws: Workspace, projectId: string, sessionId: string | undefined, path: string, action: api.FileAction) =>
+    ws.api.manageProjectFile(projectId, path, action, { sessionId }),
+  optimistic({ helpers, args: [ws, projectId, sessionId, path, action] }) {
+    if (action.action === "duplicate") return;
+    const inside = (entry: string) => entry === path || entry.startsWith(`${path}/`);
+    const to = action.action === "rename" ? renamedPath(path, action.newName) : null;
+    helpers(ws.queryClient).updateExisting(ws.queries.getCodeTreeQuery(projectId, { sessionId }), (tree) => ({
+      ...tree,
+      entries: to === null
+        ? tree.entries.filter((entry) => !inside(entry))
+        : tree.entries.map((entry) => inside(entry) ? to + entry.slice(path.length) : entry).sort(),
+    }));
+  },
+  key: ({ args: [ws, projectId, sessionId] }) => [ws.identity, projectId, sessionId ?? ""],
+  describe: "change the file",
+  describeResult: null,
+  refetchOnSuccess: true,
+});
+
+/** Rejects with `FileChangedError` when the file changed on disk since `expectedVersion`. */
+export const mutSaveProjectFile = mutations.define({
+  id: "files/checkout-save",
+  mutate: (ws: Workspace, projectId: string, sessionId: string | undefined, path: string, content: string, expectedVersion: string) =>
+    ws.api.saveProjectFile(projectId, path, content, { sessionId, expectedVersion }),
+  optimistic({ args: [ws, projectId, sessionId, path, content], onSuccess }) {
+    onSuccess(({ version }) => ws.queryClient.setQueriesData<LoadedFile>({
+      queryKey: ws.workspaceKey("resolvedFile", projectId),
+      predicate: (query) => query.queryKey[6] === (sessionId ?? null) && query.queryKey[7] === null,
+    }, (loaded) => loaded?.source === "checkout" && loaded.file.path === path
+      ? { source: "checkout", file: { ...loaded.file, content, version } }
+      : loaded));
+  },
+  key: ({ args: [ws, projectId, sessionId, path] }) => [ws.identity, projectId, sessionId ?? "", path],
+  describe: "save the file",
+  describeResult: null,
+  refetchOnSuccess: false,
+});

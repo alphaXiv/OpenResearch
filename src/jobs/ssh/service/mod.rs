@@ -62,6 +62,23 @@ impl Host {
     }
 }
 
+/// An orx 0.2 `orx supervise` that predates shared SSH holds only the first lock; the engine
+/// and newer supervisors hold both.
+fn supervisor_without_shared_ssh(store: &crate::store::Store, run_id: &str) -> Result<bool> {
+    let [supervisor, shared] = store.supervisor_lock_paths(run_id)?;
+    let held = |path: std::path::PathBuf| -> Result<bool> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let held = matches!(lock.try_write(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock);
+        Ok(held)
+    };
+    Ok(held(supervisor)? && !held(shared)?)
+}
+
 #[derive(Default)]
 struct SlurmCache {
     sampled: Option<std::time::Instant>,
@@ -361,6 +378,7 @@ pub(crate) async fn hold(operation: Value) -> Result<(TcpStream, Value)> {
     open(&ensure().await?, None, operation).await
 }
 
+#[cfg(windows)]
 pub(crate) async fn request(target: &SshTarget, operation: Value) -> Result<Value> {
     let endpoint = ensure().await?;
     // A lost response may follow a successful mutation: never replay it here.
@@ -425,12 +443,6 @@ fn output(value: Value) -> Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&stdout).into_owned())
-}
-
-pub(crate) async fn upload(target: &SshTarget, command: &str, path: &Path) -> Result<String> {
-    let file = tokio::fs::File::open(path).await?;
-    let endpoint = ensure().await?;
-    upload_reader(&endpoint, target, command, file, "commands").await
 }
 
 async fn upload_reader(
@@ -500,13 +512,13 @@ impl Broker {
         if !explicit && next > crate::store::now_ms() {
             return Err(anyhow!("SSH connection unavailable; automatic retries are backing off. Use Connect if authentication is required."));
         }
-        for run in crate::store::Store::open()?.list_active_runs()? {
+        let store = crate::store::Store::open()?;
+        for run in store.list_active_runs()? {
             let descriptor = crate::jobs::BackendDescriptor::parse(&run.backend_json)?;
             if matches!(
                 descriptor.kind.as_str(),
                 "ssh_job" | "slurm_job" | "openresearch_job"
-            ) && crate::commands::supervise::supervisor_running(&run.id)
-                && !crate::commands::supervise::uses_shared_ssh(&run.id)
+            ) && supervisor_without_shared_ssh(&store, &run.id)?
             {
                 let legacy_target = match descriptor.kind.as_str() {
                     "ssh_job" | "slurm_job" => {
@@ -521,7 +533,7 @@ impl Broker {
                         continue;
                     };
                     if legacy.key == host.resolved.key {
-                        return Err(anyhow!("Run {} is monitored by an older OpenResearch process. Restart that monitor with the updated version before using shared SSH; its lock has not been taken over.", run.id));
+                        return Err(anyhow!("Run {} is monitored by an orx 0.2 process that keeps its own SSH login to this host. Shared SSH is available once that run ends.", run.id));
                     }
                 }
             }

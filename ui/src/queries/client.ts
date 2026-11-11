@@ -1,7 +1,8 @@
 import { QueryClient, type QueryFilters, type QueryKey, type DataTag } from "@tanstack/react-query";
 
-export function createWorkspaceClient(identity: string, basePath = "") {
-  const queryClient = new QueryClient({
+/** One cache for every machine; each workspace's keys start with its own scope. */
+export const createQueryClient = () =>
+  new QueryClient({
     defaultOptions: {
       queries: {
         staleTime: 30_000,
@@ -14,6 +15,8 @@ export function createWorkspaceClient(identity: string, basePath = "") {
       mutations: { retry: false, networkMode: "always" },
     },
   });
+
+export function createWorkspaceClient(queryClient: QueryClient, identity: string, basePath = "") {
   const scope = ["workspace", identity] as const;
   const lifetime = new AbortController();
   const listeners = new Set<() => void>();
@@ -64,7 +67,7 @@ export function createWorkspaceClient(identity: string, basePath = "") {
 
   function replaceWorkspace() {
     lifetime.abort();
-    void cancelAndRemove({});
+    void cancelAndRemove({ queryKey: scope });
     deletedSessionIds.clear();
     listeners.forEach((listener) => listener());
   }

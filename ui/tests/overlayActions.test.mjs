@@ -61,13 +61,17 @@ test("remote stop cancellation is blocked while stopping, including Escape", asy
 async function sshDialog(save = () => ({ ok: true })) {
   const saves = [];
   let closed = 0;
-  serve((path, init) => {
+  let content = "Host original";
+  serve(async (path, init) => {
     if (path !== "/api/settings/ssh/config") return;
     if (init.method === "PUT") {
-      saves.push(JSON.parse(init.body));
-      return save();
+      const body = JSON.parse(init.body);
+      saves.push(body);
+      const reply = await save();
+      if (!(reply instanceof Response) || reply.ok) content = body.content;
+      return reply;
     }
-    return { path: "/tmp/config", content: "Host original" };
+    return { path: "/tmp/config", content };
   });
   const { workspace } = await render(null);
   await act(async () => showSshConfigDialog(workspace.dialogs, () => closed++));

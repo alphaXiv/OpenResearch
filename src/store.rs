@@ -527,6 +527,66 @@ impl std::fmt::Display for RunStatus {
     }
 }
 
+/// What quitting `orx up` does to a pending run.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum AfterQuit {
+    /// Already finished; only its result has not reached a chat.
+    Reports,
+    /// Its machine or service finishes it and keeps the outcome.
+    Continues,
+    /// Runs on this machine, or only the engine stops its sandbox or collects its outcome, so the app won't quit.
+    NeedsApp,
+}
+
+/// A chat with a turn in flight.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingAgent {
+    pub project_id: String,
+    pub project: Option<String>,
+    pub session_id: String,
+    /// The chat a side chat branched from, which is where it opens.
+    pub side_parent_id: Option<String>,
+    pub harness: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingRun {
+    pub project_id: String,
+    pub project: Option<String>,
+    pub experiment_id: String,
+    pub run_id: String,
+    /// The chat its result goes to.
+    pub session_id: Option<String>,
+    /// The experiment's title, as the dashboard names it.
+    pub name: String,
+    /// The backend kind, such as `modal_job`.
+    pub backend: Option<String>,
+    pub after_quit: AfterQuit,
+}
+
+/// Chats with a turn in flight, and runs unfinished or with a result no chat has received.
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub(crate) struct PendingWork {
+    pub agents: Vec<PendingAgent>,
+    pub runs: Vec<PendingRun>,
+}
+
+impl PendingWork {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn blocks_quit(&self) -> bool {
+        self.runs
+            .iter()
+            .any(|run| run.after_quit == AfterQuit::NeedsApp)
+    }
+}
+
 /// Whether a stored run status string denotes a finished run. An unrecognized
 /// string is treated as non-terminal (the conservative choice: it keeps a run
 /// visible as active rather than silently dropping it from "in flight" views).
@@ -608,6 +668,20 @@ latest AS (
 )";
 
 pub(crate) const CHAT_TURN_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Delete turn leases not renewed within the TTL, except `held`, the claim tokens of this
+/// process's running turns: a stall or sleep leaves them stale but their turns alive.
+fn expire_turn_leases(conn: &Connection, held: &[String]) -> Result<()> {
+    conn.execute(
+        "DELETE FROM chat_turn_leases
+         WHERE heartbeat_at < ?1 AND claim_token NOT IN (SELECT value FROM json_each(?2))",
+        params![
+            expired_before(CHAT_TURN_LEASE_TTL),
+            serde_json::to_string(held)?
+        ],
+    )?;
+    Ok(())
+}
 
 /// Heartbeats and claims older than this belong to an owner that is gone.
 fn expired_before(ttl: std::time::Duration) -> i64 {
@@ -1750,29 +1824,73 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    pub(crate) fn engine_runs_block_idle(&self) -> Result<bool> {
-        let mut statement = self.conn.prepare("SELECT status FROM runs")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        for status in rows {
-            let status = status?;
+    /// What quitting would interrupt or leave unreported.
+    pub(crate) fn pending_work(&self) -> Result<PendingWork> {
+        let mut statement = self.conn.prepare(
+            "SELECT s.project_id, p.name, s.id, s.side_parent_session_id, s.harness, NULLIF(TRIM(s.title), '')
+             FROM chat_sessions s LEFT JOIN local_projects p ON p.id = s.project_id
+             WHERE EXISTS(SELECT 1 FROM chat_turns t WHERE t.session_id = s.id
+                          AND t.state IN ('preparing', 'retrying', 'running'))
+             ORDER BY s.updated_at DESC",
+        )?;
+        let agents = statement
+            .query_map([], |row| {
+                Ok(PendingAgent {
+                    project_id: row.get(0)?,
+                    project: row.get(1)?,
+                    session_id: row.get(2)?,
+                    side_parent_id: row.get(3)?,
+                    harness: row.get(4)?,
+                    title: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+
+        // A run under a detached supervisor is finished by it, whatever its backend.
+        let mut statement = self.conn.prepare(
+            "SELECT r.status, r.project_id, p.name, r.experiment_id, r.id,
+                    COALESCE(r.chat_session_id, e.chat_session_id),
+                    COALESCE(NULLIF(e.title, ''), e.slug, r.id),
+                    COALESCE(json_extract(r.launch_spec, '$.kind'),
+                             json_extract(r.backend_json, '$.handle.descriptor.kind'),
+                             json_extract(r.backend_json, '$.kind')),
+                    r.launch_spec IS NOT NULL
+                        AND json_extract(r.backend_json, '$.handle.type') IS NOT 'Legacy',
+                    EXISTS(SELECT 1 FROM run_notices n WHERE n.run_id = r.id
+                           AND n.delivered_at IS NULL AND n.retired_at IS NULL)
+             FROM runs r
+             LEFT JOIN local_experiments e ON e.id = r.experiment_id
+             LEFT JOIN local_projects p ON p.id = r.project_id
+             ORDER BY r.created_at",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut runs = Vec::new();
+        while let Some(row) = rows.next()? {
+            let status: String = row.get(0)?;
+            let backend: Option<String> = row.get(7)?;
+            let engine_owned: bool = row.get(8)?;
+            let unreported: bool = row.get(9)?;
             let phase = crate::engine::Phase::parse(&status)
                 .ok_or_else(|| anyhow!("Unknown run status: {status}"))?;
-            if !phase.is_terminal() {
-                return Ok(true);
-            }
+            let after_quit = match (phase.is_terminal(), backend.as_deref(), engine_owned) {
+                (true, _, _) if unreported => AfterQuit::Reports,
+                (true, _, _) => continue,
+                (false, Some("local_job" | "tinker_job"), _)
+                | (false, Some("vercel_job" | "openresearch_job"), true) => AfterQuit::NeedsApp,
+                (false, _, _) => AfterQuit::Continues,
+            };
+            runs.push(PendingRun {
+                project_id: row.get(1)?,
+                project: row.get(2)?,
+                experiment_id: row.get(3)?,
+                run_id: row.get(4)?,
+                session_id: row.get(5)?,
+                name: row.get(6)?,
+                backend,
+                after_quit,
+            });
         }
-        Ok(false)
-    }
-
-    pub(crate) fn engine_idle_blocked(&self) -> Result<bool> {
-        if self.engine_runs_block_idle()? {
-            return Ok(true);
-        }
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_notices WHERE delivered_at IS NULL AND retired_at IS NULL)
-                OR EXISTS(SELECT 1 FROM chat_turns WHERE state IN ('preparing','retrying','running'))",
-            [], |row| row.get(0),
-        )?)
+        Ok(PendingWork { agents, runs })
     }
 
     /// Runs or local processes that prevent moving their working directory.
@@ -2148,16 +2266,21 @@ impl Store {
         )?)
     }
 
-    pub fn claim_chat_turn(&self, chat_session_id: &str, token: &str) -> Result<bool> {
+    pub fn claim_chat_turn(
+        &self,
+        chat_session_id: &str,
+        token: &str,
+        held: &[String],
+    ) -> Result<bool> {
         self.clear_stale_data_dir_move_lease()?;
+        expire_turn_leases(&self.conn, held)?;
         self.conn.execute(
             "DELETE FROM chat_turn_leases
-             WHERE heartbeat_at < ?1
-                OR NOT EXISTS (
-                    SELECT 1 FROM chat_sessions
-                    WHERE chat_sessions.id = chat_turn_leases.chat_session_id
-                )",
-            params![expired_before(CHAT_TURN_LEASE_TTL)],
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM chat_sessions
+                 WHERE chat_sessions.id = chat_turn_leases.chat_session_id
+             )",
+            [],
         )?;
         let claimed = self.conn.execute(
             "INSERT OR IGNORE INTO chat_turn_leases
@@ -2187,11 +2310,8 @@ impl Store {
         Ok(())
     }
 
-    pub fn claim_data_dir_move(&self, token: &str) -> Result<bool> {
-        self.conn.execute(
-            "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![expired_before(CHAT_TURN_LEASE_TTL)],
-        )?;
+    pub fn claim_data_dir_move(&self, token: &str, held: &[String]) -> Result<bool> {
+        expire_turn_leases(&self.conn, held)?;
         self.clear_stale_data_dir_move_lease()?;
         let claimed = self.conn.execute(
             "INSERT OR IGNORE INTO data_dir_move_lease (id, claim_token, heartbeat_at)
@@ -2271,6 +2391,15 @@ impl Store {
     /// Update only the run's backend descriptor — for a supervisor learning
     /// more about its job mid-flight (e.g. the openresearch box's SSH
     /// endpoint) without clobbering status/markdown/cancel state.
+    /// The descriptor an orx 0.2 launch wrote beside the store in case SQLite refused it.
+    pub fn submission_handle(&self, run_id: &str) -> Result<Option<String>> {
+        match std::fs::read_to_string(self.run_artifact_path(SUBMISSION_HANDLE, run_id)) {
+            Ok(json) => Ok(Some(json)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn set_backend_json(&self, run_id: &str, backend_json: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE runs SET backend_json = ?2, updated_at = ?3 WHERE id = ?1",
@@ -4607,23 +4736,24 @@ impl Store {
     pub fn reconcile_unfinished_chat_turns(&self) -> Result<Vec<StoredChatTurn>> {
         // Sub-agent usage outliving its parent turn: its native connection died with the server.
         self.finalize_usage_turns("codex-late:", "cancelled")?;
-        self.reconcile_unfinished_chat_turns_inner(true)
+        self.reconcile_unfinished_chat_turns_inner(true, &[])
     }
 
-    pub fn reconcile_expired_unfinished_chat_turns(&self) -> Result<Vec<StoredChatTurn>> {
-        self.reconcile_unfinished_chat_turns_inner(false)
+    pub fn reconcile_expired_unfinished_chat_turns(
+        &self,
+        held: &[String],
+    ) -> Result<Vec<StoredChatTurn>> {
+        self.reconcile_unfinished_chat_turns_inner(false, held)
     }
 
     fn reconcile_unfinished_chat_turns_inner(
         &self,
         include_existing_failures: bool,
+        held: &[String],
     ) -> Result<Vec<StoredChatTurn>> {
         let now = now_ms();
         let transaction = self.conn.unchecked_transaction()?;
-        transaction.execute(
-            "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![expired_before(CHAT_TURN_LEASE_TTL)],
-        )?;
+        expire_turn_leases(&transaction, held)?;
         let newly_reconciled = {
             let mut statement = transaction.prepare(
                 "SELECT id FROM chat_turns
@@ -6996,13 +7126,197 @@ mod tests {
     }
 
     #[test]
+    fn pending_runs_say_what_quitting_does_to_them() {
+        let dir = std::env::temp_dir().join(format!("orx-pending-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let engine = |kind: &str| Some(serde_json::json!({ "kind": kind }).to_string());
+        let handle = r#"{"kind":"engine","handle":{"type":"Local","dir":"/run"}}"#;
+        let runs = [
+            (
+                "a",
+                "running",
+                handle,
+                engine("local_job"),
+                AfterQuit::NeedsApp,
+            ),
+            (
+                "b",
+                "running",
+                handle,
+                engine("tinker_job"),
+                AfterQuit::NeedsApp,
+            ),
+            (
+                "c",
+                "starting",
+                handle,
+                engine("vercel_job"),
+                AfterQuit::NeedsApp,
+            ),
+            (
+                "d",
+                "running",
+                handle,
+                engine("openresearch_job"),
+                AfterQuit::NeedsApp,
+            ),
+            (
+                "e",
+                "submitting",
+                r#"{"kind":"engine"}"#,
+                engine("hf_job"),
+                AfterQuit::Continues,
+            ),
+            (
+                "f",
+                "running",
+                handle,
+                engine("ssh_job"),
+                AfterQuit::Continues,
+            ),
+            // Detached supervisors from 0.2.x outlive the app and finish these themselves.
+            (
+                "g",
+                "running",
+                r#"{"kind":"vercel_job","jobId":"box"}"#,
+                None,
+                AfterQuit::Continues,
+            ),
+            (
+                "h",
+                "running",
+                r#"{"kind":"engine","handle":{"type":"Legacy","descriptor":{"kind":"openresearch_job"}}}"#,
+                engine("openresearch_job"),
+                AfterQuit::Continues,
+            ),
+            (
+                "i",
+                "running",
+                r#"{"kind":"local_job","jobId":"1"}"#,
+                None,
+                AfterQuit::NeedsApp,
+            ),
+        ];
+        for (index, (id, status, backend, launch, _)) in runs.iter().enumerate() {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, launch_spec, created_at, updated_at)
+                     VALUES (?1, 'experiment', 'project', ?2, ?3, ?4, ?5, 1)",
+                    params![id, status, backend, launch, index as i64],
+                )
+                .unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES ('finished', 'experiment', 'project', 'done', '{\"kind\":\"engine\"}', 99, 1)",
+                [],
+            )
+            .unwrap();
+
+        let pending = store.pending_work().unwrap();
+        assert!(pending.agents.is_empty());
+        assert!(pending.blocks_quit());
+        let fates = pending
+            .runs
+            .into_iter()
+            .map(|run| (run.run_id, run.after_quit));
+        let expected = runs
+            .into_iter()
+            .map(|(id, .., fate)| (id.to_string(), fate));
+        assert!(fates.eq(expected));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pending_work_names_each_chat_and_run_and_where_it_opens() {
+        let dir = std::env::temp_dir().join(format!("orx-pending-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, repo_path, created_at, updated_at)
+                 VALUES ('project', 'Scaling laws', 'scaling', '', '', '/repo', 1, 1);
+                 INSERT INTO chat_sessions (id, project_id, harness, title, created_at, updated_at)
+                 VALUES ('chat', 'project', 'codex', 'Tune the schedule', 1, 1),
+                        ('side', 'project', 'claude-code', '  ', 1, 2),
+                        ('idle', 'project', 'codex', 'Done', 1, 3);
+                 UPDATE chat_sessions SET side_parent_session_id = 'chat' WHERE id = 'side';
+                 INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
+                                         prepared_input, settings_json, state, delivery_state, created_at, updated_at)
+                 VALUES ('t1', 'chat', 'a1', 'c1', 'h', '', '{}', 'running', 'pending', 1, 1),
+                        ('t2', 'chat', 'a2', 'c2', 'h', '', '{}', 'preparing', 'pending', 1, 1),
+                        ('t3', 'side', 'a3', 'c3', 'h', '', '{}', 'retrying', 'pending', 1, 1),
+                        ('t4', 'idle', 'a4', 'c4', 'h', '', '{}', 'completed', 'delivered', 1, 1);
+                 INSERT INTO local_experiments (id, project_id, slug, branch_name, title, run_command,
+                                                created_at, updated_at, chat_session_id)
+                 VALUES ('experiment', 'project', 'lr-sweep', 'b', '', 'python train.py', 1, 1, 'chat');
+                 INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES ('run', 'experiment', 'project', 'running', '{\"kind\":\"modal_job\"}', 1, 1);",
+            )
+            .unwrap();
+
+        let pending = store.pending_work().unwrap();
+        assert_eq!(
+            pending.agents,
+            [
+                PendingAgent {
+                    project_id: "project".into(),
+                    project: Some("Scaling laws".into()),
+                    session_id: "side".into(),
+                    side_parent_id: Some("chat".into()),
+                    harness: "claude-code".into(),
+                    title: None,
+                },
+                PendingAgent {
+                    project_id: "project".into(),
+                    project: Some("Scaling laws".into()),
+                    session_id: "chat".into(),
+                    side_parent_id: None,
+                    harness: "codex".into(),
+                    title: Some("Tune the schedule".into()),
+                },
+            ]
+        );
+        assert_eq!(
+            pending.runs,
+            [PendingRun {
+                project_id: "project".into(),
+                project: Some("Scaling laws".into()),
+                experiment_id: "experiment".into(),
+                run_id: "run".into(),
+                session_id: Some("chat".into()),
+                name: "lr-sweep".into(),
+                backend: Some("modal_job".into()),
+                after_quit: AfterQuit::Continues,
+            }]
+        );
+        assert!(!pending.blocks_quit());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_retired_notice_batch_does_not_block_idle_and_is_reported_on_its_run() {
         let dir = std::env::temp_dir().join(format!("orx-retired-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         store
+            .conn
+            .execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES ('run', 'experiment', 'project', 'done', '{\"kind\":\"engine\"}', 1, 1)",
+                [],
+            )
+            .unwrap();
+        store
             .insert_run_notice("run", "owner", TERMINAL, TERMINAL, "done", 1)
             .unwrap();
-        assert!(store.engine_idle_blocked().unwrap());
+        let pending = store.pending_work().unwrap();
+        assert_eq!(pending.runs[0].after_quit, AfterQuit::Reports);
+        assert!(!pending.blocks_quit());
         assert_eq!(store.run_notice_error("run").unwrap(), None);
         let batch = store.run_notice_batch_at("owner", 10).unwrap();
         store
@@ -7014,7 +7328,7 @@ mod tests {
                 20,
             )
             .unwrap();
-        assert!(!store.engine_idle_blocked().unwrap());
+        assert!(store.pending_work().unwrap().is_empty());
         assert_eq!(
             store.run_notice_error("run").unwrap().as_deref(),
             Some("harness removed")
@@ -8550,7 +8864,7 @@ mod tests {
         drop(staging);
 
         let moving = store.acquire_data_dir_move_lock().unwrap();
-        assert!(store.claim_data_dir_move("move").unwrap());
+        assert!(store.claim_data_dir_move("move", &[]).unwrap());
         refuse("being moved");
         store.release_data_dir_move("move").unwrap();
         drop(moving);
@@ -8683,7 +8997,7 @@ mod tests {
         std::fs::write(attachments.join("att-3__unsent.png"), "bytes").unwrap();
 
         let moving = store.acquire_data_dir_move_lock().unwrap();
-        assert!(store.claim_data_dir_move("move").unwrap());
+        assert!(store.claim_data_dir_move("move", &[]).unwrap());
         store.cleanup_orphaned_chat_attachments().unwrap();
         assert!(attachments.join("att-2__orphan.png").exists());
         store.release_data_dir_move("move").unwrap();
@@ -9290,7 +9604,7 @@ mod tests {
         let mut turn = chat_turn_fixture("running", "client-running");
         turn.state = "running".into();
         store.admit_chat_turn(None, &turn).unwrap();
-        assert!(store.claim_chat_turn("chat_1", "owner").unwrap());
+        assert!(store.claim_chat_turn("chat_1", "owner", &[]).unwrap());
 
         assert!(store.reconcile_unfinished_chat_turns().unwrap().is_empty());
         assert_eq!(
@@ -9311,13 +9625,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .reconcile_expired_unfinished_chat_turns()
+                .reconcile_expired_unfinished_chat_turns(&[])
                 .unwrap()
                 .len(),
             1
         );
         assert!(store
-            .reconcile_expired_unfinished_chat_turns()
+            .reconcile_expired_unfinished_chat_turns(&[])
             .unwrap()
             .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -11112,23 +11426,23 @@ mod tests {
             .unwrap();
         let second = Store::open_at(dir.clone()).unwrap();
 
-        assert!(first.claim_chat_turn("chat_A", "token_A").unwrap());
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(first.claim_chat_turn("chat_A", "token_A", &[]).unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         assert!(!second.renew_chat_turn("chat_A", "token_B").unwrap());
-        assert!(!second.claim_data_dir_move("move_A").unwrap());
+        assert!(!second.claim_data_dir_move("move_A", &[]).unwrap());
         second.release_chat_turn("chat_A", "token_B").unwrap();
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         first.release_chat_turn("chat_A", "token_A").unwrap();
         let move_lock = first.acquire_data_dir_move_lock().unwrap();
-        assert!(first.claim_data_dir_move("move_A").unwrap());
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(first.claim_data_dir_move("move_A", &[]).unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         second.release_data_dir_move("move_B").unwrap();
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         drop(move_lock);
         let service_lock =
             acquire_data_dir_lock(first.data_dir_move_lock_path.clone(), false).unwrap();
         assert!(first.acquire_data_dir_move_lock().is_err());
-        assert!(second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
 
         drop(service_lock);
         drop(second);

@@ -1,12 +1,32 @@
 import type { WorkspaceQueries } from "../workspace";
 import type { WorkspaceClient } from "./client";
 import { useCallback, useMemo, useSyncExternalStore } from "react";
-import { useQuery, type QueryCacheNotifyEvent } from "@tanstack/react-query";
+import { useQuery, type QueryCacheNotifyEvent, type QueryClient } from "@tanstack/react-query";
 
 import { markLiveUpdate } from "./live";
 import { reducer, type Action, type ChatState } from "./chatState";
 
 type Snapshot = Awaited<ReturnType<import("../api").Api["getChatMessages"]>>;
+
+function isChatDataEvent(event: QueryCacheNotifyEvent) {
+  return (
+    (event.query.queryKey[2] === "listChatSessions" ||
+      event.query.queryKey[2] === "getChatMessages") &&
+    (event.type === "removed" ||
+      (event.type === "updated" && event.action.type === "success"))
+  );
+}
+
+/** Counts chat data changes on every machine sharing `queryClient`; one subscription per cache, so a dropped machine's store is not kept alive by it. */
+const chatRevisions = new WeakMap<QueryClient, { value: number }>();
+function chatRevision(queryClient: QueryClient) {
+  const existing = chatRevisions.get(queryClient);
+  if (existing) return existing;
+  const revision = { value: 0 };
+  queryClient.getQueryCache().subscribe((event) => { if (isChatDataEvent(event)) revision.value++; });
+  chatRevisions.set(queryClient, revision);
+  return revision;
+}
 
 export function createChatStore(
   client: WorkspaceClient,
@@ -16,18 +36,32 @@ export function createChatStore(
     client;
   const { getChatMessagesQuery, listChatSessionsQuery } = queries;
 
-  let revision = 0;
-  function isChatDataEvent(event: QueryCacheNotifyEvent) {
-    return (
-      (event.query.queryKey[2] === "listChatSessions" ||
-        event.query.queryKey[2] === "getChatMessages") &&
-      (event.type === "removed" ||
-        (event.type === "updated" && event.action.type === "success"))
-    );
+  const revision = chatRevision(queryClient);
+  const subscribeChat = (notify: () => void) => queryClient.getQueryCache().subscribe((event) => { if (isChatDataEvent(event) && isCurrentScope(event.query.queryKey)) notify(); });
+  const getRevision = () => revision.value;
+
+  let writeTail: Promise<unknown> = Promise.resolve();
+  /** Holds the next place among session writes and sends; `run` fills it, `release` gives it up. One must be called. */
+  function reserve() {
+    let fill!: (write: (() => Promise<unknown>) | null) => void;
+    const slot = new Promise<(() => Promise<unknown>) | null>((resolve) => { fill = resolve; });
+    const result = writeTail.catch(() => {}).then(() => slot).then((write) => {
+      if (!write) return;
+      if (!isCurrentScope(workspaceScope())) throw new DOMException("Workspace changed", "AbortError");
+      return write();
+    });
+    writeTail = result.catch(() => {});
+    return {
+      run<T>(write: () => Promise<T>) {
+        fill(write);
+        return result as Promise<T>;
+      },
+      release: () => fill(null),
+    };
   }
-  queryClient.getQueryCache().subscribe((event) => { if (isChatDataEvent(event)) revision++; });
-  const subscribeChat = (notify: () => void) => queryClient.getQueryCache().subscribe((event) => { if (isChatDataEvent(event)) notify(); });
-  const getRevision = () => revision;
+
+  /** Runs session writes and sends one at a time, so a turn starts with the settings changed before it. */
+  const serialize = <T>(write: () => Promise<T>) => reserve().run(write);
 
   function readChatState(projectId: string, activeId: string | null): ChatState {
     const sessions = queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey) ?? [];
@@ -84,7 +118,8 @@ export function createChatStore(
   }
 
   return {
-    isChatDataEvent,
+    reserve,
+    serialize,
     subscribeChat,
     readChatState,
     dispatchChat,

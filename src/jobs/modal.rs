@@ -3,7 +3,7 @@
 //! Modal is Python-SDK-driven (there is no generic REST job-submit API), so
 //! every operation shells out to a bundled Python launcher that drives
 //! `modal.Sandbox`. Sandboxes are reconnectable by id (`Sandbox.from_id`),
-//! which is exactly what lets the detached `orx supervise` reattach from a
+//! which is exactly what lets the engine reattach from a
 //! fresh process — the same reattach model the HF and k8s backends rely on.
 //!
 //! Transport is `<python> -c <LAUNCHER> <subcommand> [args]`, mirroring how the
@@ -95,8 +95,7 @@ def status(sid):
 def logs(sid):
     modal = _modal()
     sb = modal.Sandbox.from_id(sid)
-    # StreamReader replays from the start on each (re)connect, which matches
-    # supervise's skip/dedup contract (same as HF's SSE).
+    # StreamReader replays from the start on each (re)connect, like HF's SSE.
     for line in sb.stdout:
         if not line.endswith("\n"):
             line += "\n"

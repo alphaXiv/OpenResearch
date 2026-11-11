@@ -24,4 +24,4 @@ orx exp run <expId> --backend modal --flavor cpu --image python:3.12
 - `orx` copies the committed snapshot into the Sandbox; Modal never needs
   repository access.
 
-See [run monitoring](../SKILL.md#run-engine-setting).
+See [run monitoring](../SKILL.md#who-watches-a-run).
