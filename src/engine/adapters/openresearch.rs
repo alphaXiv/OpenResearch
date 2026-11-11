@@ -406,7 +406,7 @@ impl OpenResearch {
                 return Ok(vec![(
                     watched.id.clone(),
                     Observation::Queued {
-                        detail: "Provisioning box".into(),
+                        detail: Some("Provisioning box".into()),
                     },
                 )]);
             }
@@ -539,7 +539,7 @@ impl OpenResearch {
             summary.state,
             orx_host_proto::RunState::Missing
                 | orx_host_proto::RunState::Staging
-                | orx_host_proto::RunState::Starting
+                | orx_host_proto::RunState::Starting { .. }
         ) {
             self.bootstrap.lock().await.take();
         }

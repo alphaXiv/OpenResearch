@@ -66,7 +66,10 @@ pub async fn run(args: crate::RunsArgs) -> Result<()> {
     );
 
     for run in &filtered {
-        if let Some(detail) = run.contact_detail() {
+        for detail in [run.waiting_detail(), run.contact_detail()]
+            .into_iter()
+            .flatten()
+        {
             println!("{}  {detail}", run.id);
         }
     }

@@ -1,8 +1,9 @@
-import { fmtClock, fmtNumber, ltr } from "../i18n";
+import { autoDir, fmtClock, fmtNumber, ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
 import type { RunDisplay } from "../runDisplay";
 import { m } from "../paraglide/messages.js";
 import { StatusIndicator, type StatusTone } from "./ui";
+import { cn } from "./ui/cn";
 
 export interface StatusStyle {
   tone: StatusTone;
@@ -72,14 +73,17 @@ export function statusLabel(s: string, stopping?: RunDisplay["stopping"]): strin
 }
 
 /** Spread a `runDisplay(run)` into it; `stale` and `since` mark a status that was last seen, not live. */
-export function StatusBadge({ status, stopping, stale = false, since = null, className }: { status: string; stopping?: RunDisplay["stopping"]; stale?: boolean; since?: number | null; className?: string }) {
+export function StatusBadge({ status, stopping, waiting, stale = false, since = null, className }: { status: string; stopping?: RunDisplay["stopping"]; waiting?: string; stale?: boolean; since?: number | null; className?: string }) {
   const style = statusStyle(status);
   const text = statusLabel(status);
   const full = statusLabel(status, stopping);
-  const title = stale && since !== null ? `${full} · ${m.status_last_seen({ time: fmtClock(since) })}` : full;
+  const note = waiting ? autoDir(waiting) : stale && since !== null ? m.status_last_seen({ time: fmtClock(since) }) : null;
   return (
     <StatusIndicator tone={style.tone} live={style.live} stale={stale} className={className}>
-      <span className="min-w-0 truncate" title={title}>{text}</span>
+      <span className={cn("min-w-0 truncate", waiting && "max-w-80")} title={note ? `${full} · ${note}` : full}>
+        {text}
+        {waiting && <span className="font-normal text-subtext"> · {autoDir(waiting)}</span>}
+      </span>
     </StatusIndicator>
   );
 }

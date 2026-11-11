@@ -11,11 +11,13 @@ export type RunDisplayStatus =
   | "unconfirmed"
   | "abandoned";
 
-type RunState = Pick<Run, "status"> & Partial<Pick<Run, "contact" | "cancelling" | "lostReason" | "host" | "cancelUnconfirmed">> & { cancelRequested?: boolean };
+type RunState = Pick<Run, "status"> & Partial<Pick<Run, "contact" | "cancelling" | "lostReason" | "host" | "cancelUnconfirmed" | "waitingReason">> & { cancelRequested?: boolean };
 
 export interface RunDisplay {
   status: RunDisplayStatus;
   stopping?: { count: number; host: string };
+  /** Why the run hasn't started, in the backend's words. */
+  waiting?: string;
   /** The status is what was last seen, not live knowledge. */
   stale: boolean;
   /** When contact was lost, for the "when last seen" tooltip. */
@@ -77,7 +79,7 @@ export function runDisplay(run: RunState): RunDisplay {
     const pending = run.status === "submitting" || contact?.type === "unreachable" || contact?.type === "needs_auth";
     return { status: pending ? "cancellation_pending" : "cancelling", stale: contact !== null, since };
   }
-  if (contact === null) return { status: run.status, stale: false, since };
+  if (contact === null) return { status: run.status, ...(run.waitingReason ? { waiting: run.waitingReason } : {}), stale: false, since };
 
   if (contact.type === "needs_auth") return { status: "needs_auth", stale: true, since };
   const status = contact.type === "unreconciled" || contact.type === "stopping" ? "unconfirmed" : contact.type;

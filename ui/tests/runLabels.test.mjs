@@ -109,3 +109,18 @@ test("survivor counts take the locale's plural form, with the count and host", a
     }
   }
 });
+
+test("a starting run shows the backend's waiting reason as plain text until contact is lost", async () => {
+  const reason = "0/4 nodes are available: <b>4 Insufficient nvidia.com/gpu</b>";
+  const waiting = run({ status: "starting", waitingReason: reason });
+  const { container } = await render(createElement(StatusBadge, runDisplay(waiting)));
+  assert.equal(plain(container.textContent), `${m.status_starting()} · ${reason}`);
+  assert.equal(container.querySelector("b"), null);
+  assert.ok(plain(container.querySelector("[title]").getAttribute("title")).endsWith(reason));
+
+  const banner = plain((await render(createElement(ExperimentRunBanner, { runs: [{ run: waiting, experimentName: "SSH sandwich" }] }))).container.textContent);
+  assert.ok(banner.includes(reason), banner);
+
+  const lost = await surfaces(run({ status: "starting", waitingReason: reason, contact: { type: "unreachable", since: 1, cause: "Offline" } }));
+  assert.ok(!lost.badge.includes(reason), lost.badge);
+});

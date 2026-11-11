@@ -825,6 +825,35 @@ printf '123\n'"#);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_slurm_job_shows_why_it_waits() {
+    let f = Fixture::new().await;
+    let waiting = |id: &str| {
+        f.store()
+            .engine_run_state(id)
+            .unwrap()
+            .unwrap()
+            .waiting_reason
+    };
+    f.shim("sbatch", "cat >/dev/null; printf '456\\n'");
+    f.shim("sacct", "exit 1");
+    f.shim("squeue", "printf '456|pending|PENDING|Resources\\n'");
+    let slurm = Slurm::new(f.ssh.clone(), f.clock.clone());
+    let intent = f.intent("pending", "true", "slurm_job");
+    f.submit(&slurm, &intent).await;
+    f.poll(&slurm, &["pending"], Duration::ZERO).await;
+    assert_eq!(waiting("pending").as_deref(), Some("Resources"));
+
+    f.shim("squeue", "printf '456|pending|RUNNING|None\\n'");
+    f.clock.advance(Duration::from_secs(31));
+    f.poll(&slurm, &["pending"], Duration::ZERO).await;
+    assert_eq!(
+        f.store().get_run("pending").unwrap().unwrap().status,
+        "running"
+    );
+    assert_eq!(waiting("pending"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slurm_cancel_keeps_started_wrappers_and_scancels_pending_jobs() {
     let f = Fixture::new().await;
     let home = f.server.home();

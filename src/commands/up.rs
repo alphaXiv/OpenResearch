@@ -1239,6 +1239,7 @@ struct ApiRun {
     contact: Option<crate::store::Contact>,
     cancelling: bool,
     cancel_unconfirmed: Option<Vec<u32>>,
+    waiting_reason: Option<String>,
     lost_reason: Option<String>,
     host: Option<String>,
     notice_error: Option<String>,
@@ -1291,6 +1292,9 @@ impl ApiRun {
             cancel_unconfirmed: state
                 .as_ref()
                 .and_then(|state| state.cancel_unconfirmed.clone()),
+            waiting_reason: state
+                .as_ref()
+                .and_then(|state| state.waiting_reason.clone()),
             contact: state
                 .map(|state| state.contact)
                 .filter(|contact| *contact != crate::store::Contact::Live),

@@ -4,6 +4,7 @@ import { mutCancelRun } from "../queries/projects";
 import { ChevronRight, CircleStop, FlaskConical, Plug, ScrollText } from "lucide-react";
 import { useEffect, useState } from "react";
 import { fmtDuration, type ChatActiveRun } from "../api";
+import { autoDir } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { runConnectHost, runDisplay } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -54,6 +55,7 @@ function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; on
           </Button>
         )}
       </div>
+      {display.waiting && <span className="w-full min-w-0 truncate ps-6 text-subtext" title={display.waiting}>{autoDir(display.waiting)}</span>}
       {error && <span className="w-full text-accent-red" role="alert">{error}</span>}
     </div>
   );

@@ -328,15 +328,33 @@ pub struct ProcessOutcome {
 pub enum RunState {
     Missing,
     Staging,
-    Starting,
+    /// `reason` is the scheduler's word on why a queued job has not started.
+    Starting {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     Running,
-    Exited { receipt: ExitReceipt },
-    Failed { reason: String },
-    Lost { reason: String },
-    Cancelled { reason: String },
-    Unreconciled { detail: String },
-    InvalidData { detail: String },
-    Unreachable { cause: String },
+    Exited {
+        receipt: ExitReceipt,
+    },
+    Failed {
+        reason: String,
+    },
+    Lost {
+        reason: String,
+    },
+    Cancelled {
+        reason: String,
+    },
+    Unreconciled {
+        detail: String,
+    },
+    InvalidData {
+        detail: String,
+    },
+    Unreachable {
+        cause: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
