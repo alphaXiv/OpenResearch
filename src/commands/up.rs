@@ -6471,10 +6471,31 @@ enum PtyEvent {
 }
 
 struct PtySession {
-    master: Box<dyn MasterPty + Send>,
+    master: PtyMaster,
     input: std::sync::mpsc::Sender<Vec<u8>>,
     events: mpsc::Receiver<PtyEvent>,
     kill: std::sync::mpsc::Sender<()>,
+}
+
+/// Closes the PTY on its own thread: closing a ConPTY blocks until conhost
+/// exits, which it never does while waiting on a cursor report from a client
+/// that left, and a blocked runtime worker stalls the whole server.
+struct PtyMaster(Option<Box<dyn MasterPty + Send>>);
+
+impl std::ops::Deref for PtyMaster {
+    type Target = dyn MasterPty + Send;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().expect("taken only on drop")
+    }
+}
+
+impl Drop for PtyMaster {
+    fn drop(&mut self) {
+        if let Some(master) = self.0.take() {
+            std::thread::spawn(move || drop(master));
+        }
+    }
 }
 
 struct PtyChildGuard {
@@ -6700,7 +6721,7 @@ fn start_pty_with_env(
     });
 
     Ok(PtySession {
-        master: pair.master,
+        master: PtyMaster(Some(pair.master)),
         input: input_tx,
         events: event_rx,
         kill: kill_tx,
@@ -10520,6 +10541,34 @@ mod tests {
         assert!(!test.tools_found);
         assert_eq!(test.error.as_deref(), Some("authentication failed"));
         assert!(test.tested_at > 0);
+    }
+
+    /// A client that leaves before answering ConPTY's cursor query leaves conhost waiting on it.
+    #[test]
+    fn closing_a_pty_whose_client_left_returns_promptly() {
+        let (program, args) = if cfg!(windows) {
+            ("cmd", vec!["/c".into(), "echo ready & pause".into()])
+        } else {
+            ("sh", vec!["-c".into(), "echo ready; read _".into()])
+        };
+        let PtySession {
+            master,
+            input,
+            mut events,
+            kill,
+        } = start_pty(program, args).unwrap();
+        assert!(matches!(events.blocking_recv(), Some(PtyEvent::Output(_))));
+
+        // The order `relay_pty` tears down in when its socket closes.
+        let _ = kill.send(());
+        drop((events, input));
+        let (dropped, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(master);
+            let _ = dropped.send(());
+        });
+        done.recv_timeout(Duration::from_secs(10))
+            .expect("closing the PTY blocked its caller");
     }
 
     #[cfg(unix)]
