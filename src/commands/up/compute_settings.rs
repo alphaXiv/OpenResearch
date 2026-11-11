@@ -1248,7 +1248,7 @@ pub(super) async fn openresearch_ssh_readiness() -> SshReadiness {
         return SshReadiness::NoUsableKey;
     };
     match crate::local::ssh_identity::check(&creds).await {
-        KeyStatus::Matched => SshReadiness::Ready,
+        KeyStatus::Matched { .. } => SshReadiness::Ready,
         KeyStatus::NoLocalMatch { .. } | KeyStatus::NoneRegistered { .. } => {
             SshReadiness::NoUsableKey
         }
@@ -1525,7 +1525,7 @@ pub(super) async fn openresearch_settings() -> ApiResult {
             .map(tilde);
     };
     let ssh_key_status = match crate::local::ssh_identity::check(&creds).await {
-        KeyStatus::Matched => "matched",
+        KeyStatus::Matched { .. } => "matched",
         KeyStatus::NoLocalMatch { local, .. } => {
             note_key(&local);
             "no_local_match"

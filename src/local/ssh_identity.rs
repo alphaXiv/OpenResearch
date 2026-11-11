@@ -61,12 +61,17 @@ pub struct LocalKey {
     pub line: String,
     /// `None` for an agent-only key, which has no `.pub` to register.
     pub path: Option<PathBuf>,
+    /// The SSH agent holds it, so ssh signs with it without a prompt.
+    pub agent: bool,
 }
 
 /// What the account/machine comparison found.
 #[derive(Debug, Clone)]
 pub enum KeyStatus {
-    Matched,
+    /// `matched` holds this computer's keys that are registered on the account.
+    Matched {
+        matched: Vec<LocalKey>,
+    },
     NoLocalMatch {
         registered: Vec<String>,
         local: Vec<LocalKey>,
@@ -106,6 +111,7 @@ pub async fn local_keys() -> Vec<LocalKey> {
                             fingerprint: fp,
                             line: line.trim().to_string(),
                             path: Some(path.clone()),
+                            agent: false,
                         });
                     }
                 }
@@ -127,14 +133,18 @@ pub async fn local_keys() -> Vec<LocalKey> {
     if let Ok(Ok(out)) = agent {
         if out.status.success() {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
-                if let Some(fp) = fingerprint(line.trim()) {
-                    if seen.insert(fp.clone()) {
-                        keys.push(LocalKey {
-                            fingerprint: fp,
-                            line: line.trim().to_string(),
-                            path: None,
-                        });
-                    }
+                let Some(fp) = fingerprint(line.trim()) else {
+                    continue;
+                };
+                if seen.insert(fp.clone()) {
+                    keys.push(LocalKey {
+                        fingerprint: fp,
+                        line: line.trim().to_string(),
+                        path: None,
+                        agent: true,
+                    });
+                } else if let Some(key) = keys.iter_mut().find(|key| key.fingerprint == fp) {
+                    key.agent = true;
                 }
             }
         }
@@ -174,15 +184,20 @@ fn compare(registered: &[SshKey], local: Vec<LocalKey>) -> KeyStatus {
         return KeyStatus::NoneRegistered { local };
     }
 
-    let mut unreadable = false;
-    for key in registered {
-        if fingerprint(&key.public_key).is_none() {
-            unreadable = true;
-            continue;
-        }
-        if is_local(&local, &key.public_key) {
-            return KeyStatus::Matched;
-        }
+    let unreadable = registered
+        .iter()
+        .any(|key| fingerprint(&key.public_key).is_none());
+    let matched: Vec<LocalKey> = local
+        .iter()
+        .filter(|key| {
+            registered
+                .iter()
+                .any(|registered| is_local(std::slice::from_ref(key), &registered.public_key))
+        })
+        .cloned()
+        .collect();
+    if !matched.is_empty() {
+        return KeyStatus::Matched { matched };
     }
 
     // A key we couldn't parse might be the one that works, so "none of yours are
@@ -258,21 +273,88 @@ pub fn tilde(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// Turn a raw `Permission denied (publickey)` into a short reason. Matches on
-/// the method list OpenSSH prints, not a bare "permission denied" — that is far
-/// more likely to be the remote command hitting a read-only $HOME.
-pub fn explain_launch_failure(sandbox_id: &str, err: &str) -> String {
-    if !err.to_lowercase().contains("publickey") {
-        // `orx runs` prints each failure on one line; ssh stderr is several.
-        let one_line = err.split_whitespace().collect::<Vec<_>>().join(" ");
-        return format!("Could not launch the run on box {sandbox_id}: {one_line}");
+/// A private key file from `matched` when ssh, which never prompts for orx, can use none of
+/// them: none is in the agent and each file needs a passphrase. `None` when one is usable or a
+/// check fails.
+pub async fn locked(matched: &[LocalKey]) -> Option<PathBuf> {
+    let mut locked = None;
+    for key in matched {
+        let public = key.path.as_deref().filter(|_| !key.agent)?;
+        let private = public.with_extension("");
+        let probe = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::process::tokio_command("ssh-keygen")
+                .args(["-y", "-P", "", "-f"])
+                .arg(&private)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        let Ok(Ok(output)) = probe else {
+            return None;
+        };
+        if output.status.success()
+            || !String::from_utf8_lossy(&output.stderr).contains("incorrect passphrase")
+        {
+            return None;
+        }
+        locked.get_or_insert(private);
     }
-    // No key path here — this runs in the supervisor with no view of ~/.ssh, and
-    // `orx ssh-key list` names the file without us guessing at one.
-    format!(
-        "Could not launch the run on box {sandbox_id}: it refused this computer's SSH key. \
-         Run `orx ssh-key list` to see which key to register, then relaunch."
-    )
+    locked
+}
+
+/// How to let ssh use the passphrase-protected `private` key without a prompt.
+pub fn unlock_hint(private: &std::path::Path) -> String {
+    if cfg!(windows) {
+        format!(
+            "Start the ssh-agent service (in an administrator PowerShell: `Get-Service ssh-agent | Set-Service -StartupType Automatic; Start-Service ssh-agent`), then load the key with `ssh-add {}`",
+            private.display()
+        )
+    } else if cfg!(target_os = "macos") {
+        format!(
+            "Load it into your SSH agent with `ssh-add --apple-use-keychain {}`",
+            tilde(private)
+        )
+    } else {
+        format!(
+            "Load it into your SSH agent with `ssh-add {}`",
+            tilde(private)
+        )
+    }
+}
+
+/// Why box `sandbox_id` refused this computer's SSH key, and the fix, on one line.
+pub async fn explain_refusal(creds: &Credentials, sandbox_id: &str) -> String {
+    let cause = match check(creds).await {
+        KeyStatus::Matched { matched } => match locked(&matched).await {
+            Some(private) => format!(
+                "{} needs its passphrase, and no SSH agent holds it. {}, then relaunch.",
+                tilde(&private),
+                unlock_hint(&private)
+            ),
+            None => format!(
+                "the box never accepted {}, which is registered on your account. Relaunch the run; if a box refuses it again, pass a different `--provider`.",
+                matched
+                    .iter()
+                    .filter_map(|key| {
+                        key.path
+                            .as_deref()
+                            .map(tilde)
+                            .or_else(|| sha256_fingerprint(&key.line))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        },
+        KeyStatus::NoLocalMatch { registered, .. } => format!(
+            "none of your registered keys ({}) are on this computer. Register this computer's key with `orx ssh-key add`, then relaunch.",
+            registered.join(", ")
+        ),
+        KeyStatus::NoneRegistered { .. } => "no SSH key is registered on your account. Register this computer's key with `orx ssh-key add`, then relaunch.".into(),
+        KeyStatus::Unknown { .. } => "run `orx ssh-key list` to see which key to register, then relaunch.".into(),
+    };
+    format!("Box {sandbox_id} refused this computer's SSH key: {cause}")
 }
 
 #[cfg(test)]
@@ -334,16 +416,19 @@ mod tests {
                 fingerprint: "ssh-rsa A".into(),
                 line: "ssh-rsa A".into(),
                 path: Some("/h/.ssh/id_rsa.pub".into()),
+                agent: false,
             },
             LocalKey {
                 fingerprint: "ssh-ed25519 B".into(),
                 line: "ssh-ed25519 B".into(),
                 path: None,
+                agent: true,
             },
             LocalKey {
                 fingerprint: "ssh-ed25519 C".into(),
                 line: "ssh-ed25519 C".into(),
                 path: Some("/h/.ssh/id_ed25519.pub".into()),
+                agent: false,
             },
         ];
         assert_eq!(preferred_local(&keys).unwrap().fingerprint, "ssh-ed25519 C");
@@ -355,6 +440,7 @@ mod tests {
             fingerprint: "ssh-ed25519 B".into(),
             line: "ssh-ed25519 B".into(),
             path: None,
+            agent: true,
         }];
         assert!(preferred_local(&keys).is_none(), "no .pub to register");
     }
@@ -375,9 +461,10 @@ mod tests {
                 fingerprint: "ssh-ed25519 AAAA".into(),
                 line: "ssh-ed25519 AAAA someone-else@host".into(),
                 path: None,
+                agent: true,
             }],
         );
-        assert!(matches!(status, KeyStatus::Matched));
+        assert!(matches!(status, KeyStatus::Matched { .. }));
     }
 
     #[test]
@@ -388,6 +475,7 @@ mod tests {
                 fingerprint: "ssh-ed25519 BBBB".into(),
                 line: "ssh-ed25519 BBBB home".into(),
                 path: None,
+                agent: true,
             }],
         );
         match status {
@@ -422,6 +510,7 @@ mod tests {
             fingerprint: "ssh-ed25519 C".into(),
             line: "ssh-ed25519 C".into(),
             path: Some("/h/.ssh/id_ed25519.pub".into()),
+            agent: false,
         }]
     }
 
@@ -460,36 +549,81 @@ mod tests {
         assert!(msg.contains("orx ssh-key add ~/.ssh/id_ed25519.pub"));
     }
 
-    /// Real ssh stderr carries a host-key warning before the denial, and
-    /// `orx runs` prints each failure on one line.
-    #[test]
-    fn a_publickey_denial_becomes_one_line_of_actionable_advice() {
-        let msg = explain_launch_failure(
-            "sb_1",
-            "ssh root@h failed (exit 255):\nWarning: Permanently added 'h' to known hosts.\nroot@h: Permission denied (publickey).",
-        );
-        assert_eq!(msg.lines().count(), 1);
-        // Points at the command that *names* the key rather than guessing a path
-        // this code can't see.
-        assert!(msg.contains("orx ssh-key list"));
-        assert!(!msg.contains("id_ed25519"), "no guessed key path");
-        assert!(
-            !msg.contains("known hosts"),
-            "drops the noise before the denial"
-        );
-    }
-
-    /// The remote command's stderr rides the same string, so a read-only $HOME
-    /// must not be diagnosed as an SSH key problem.
-    #[test]
-    fn other_failures_keep_the_original_error_and_get_no_key_advice() {
-        for err in [
-            "ssh: connect to host h port 22: Connection refused",
-            "ssh root@h failed (exit 1): mkdir: cannot create directory '/root/.orx': Permission denied",
-        ] {
-            let msg = explain_launch_failure("sb_1", err);
-            assert!(msg.contains(err), "keeps the cause: {err}");
-            assert!(!msg.contains("ssh-key add"), "no key advice for: {err}");
+    /// The agent is how a passphrase-protected key becomes usable without a prompt.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_passphrase_key_is_locked_until_an_agent_holds_it() {
+        if !crate::config::in_test_child(&["SSH_AUTH_SOCK"]) {
+            return;
         }
+        let home = crate::config::test_home();
+        std::env::set_var("HOME", &home);
+        let ssh = home.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        let key = |name: &str, passphrase: &str| {
+            assert!(crate::process::command("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", passphrase, "-f"])
+                .arg(ssh.join(name))
+                .status()
+                .unwrap()
+                .success());
+        };
+        key("id_ed25519", "secret");
+        key("spare", "");
+        let mut local = local_keys().await;
+        local.sort_by_key(|key| key.path.clone());
+        let (locked_key, spare) = (&local[..1], &local[1..]);
+        assert_eq!(
+            locked(locked_key).await,
+            Some(ssh.join("id_ed25519")),
+            "{local:?}"
+        );
+        assert_eq!(locked(spare).await, None);
+        assert_eq!(locked(&local).await, None, "one usable key is enough");
+
+        // Unix socket paths are capped near 100 bytes.
+        let socket = PathBuf::from(format!(
+            "/tmp/orx-agent-{}",
+            &uuid::Uuid::new_v4().to_string()[..8]
+        ));
+        let _agent = crate::process::tokio_command("ssh-agent")
+            .arg("-D")
+            .arg("-a")
+            .arg(&socket)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !socket.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("ssh-agent listens");
+        let askpass = home.join("askpass");
+        std::fs::write(&askpass, "#!/bin/sh\necho secret\n").unwrap();
+        std::fs::set_permissions(
+            &askpass,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        std::env::set_var("SSH_AUTH_SOCK", &socket);
+        assert!(crate::process::command("ssh-add")
+            .arg(ssh.join("id_ed25519"))
+            .env("SSH_ASKPASS", &askpass)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", ":0")
+            .stdin(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+        let local = local_keys().await;
+        let held: Vec<_> = local.iter().filter(|key| key.agent).collect();
+        assert_eq!(held.len(), 1, "{local:?}");
+        assert_eq!(locked(&local[..]).await, None);
+        assert_eq!(locked(&[held[0].clone()]).await, None);
+        let _ = std::fs::remove_file(socket);
     }
 }

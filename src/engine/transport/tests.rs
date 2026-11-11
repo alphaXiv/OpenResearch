@@ -516,6 +516,24 @@ async fn black_hole_is_unreachable_by_deadline_and_recovers_in_one_backoff_step(
         .unwrap();
 }
 
+/// A connection to `server` under the managed rental alias `alias`.
+fn start_managed(server: &Sshd, clock: Arc<TestClock>, alias: &str) -> HostConn {
+    let store = Store::open_at(server.directory().join("store")).unwrap();
+    let mut config = config(server);
+    config.alias = alias.into();
+    let text = fs::read_to_string(server.config_path()).unwrap();
+    fs::write(
+        server.config_path(),
+        text.replace(
+            &format!("Host {}", server.alias()),
+            &format!("Host {alias}"),
+        ),
+    )
+    .unwrap();
+    let auth = Auth::new(&store, alias).unwrap();
+    HostConn::start_shared(config, store, clock, auth).unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn managed_rental_reconnects_after_repeated_failures_within_collection_grace() {
     if !paced_child() {
@@ -523,20 +541,7 @@ async fn managed_rental_reconnects_after_repeated_failures_within_collection_gra
     }
     let server = Sshd::start().unwrap();
     let clock = TestClock::new();
-    let store = Store::open_at(server.directory().join("store")).unwrap();
-    let mut config = config(&server);
-    config.alias = "orx-box-recovery".into();
-    let text = fs::read_to_string(server.config_path()).unwrap();
-    fs::write(
-        server.config_path(),
-        text.replace(
-            &format!("Host {}", server.alias()),
-            &format!("Host {}", config.alias),
-        ),
-    )
-    .unwrap();
-    let auth = Auth::new(&store, &config.alias).unwrap();
-    let conn = HostConn::start_shared(config, store, clock.clone(), auth).unwrap();
+    let conn = start_managed(&server, clock.clone(), "orx-box-recovery");
     status(&conn, Status::Live).await;
     let disconnected_at = clock.wall_ms();
     server
@@ -574,6 +579,63 @@ async fn managed_rental_reconnects_after_repeated_failures_within_collection_gra
         .await
         .expect("rental must retry before collection grace expires");
     assert!(clock.wall_ms() - disconnected_at < 900_000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_rental_retries_refused_keys_until_the_key_sync_grace_ends() {
+    let server = Sshd::start().unwrap();
+    let authorized = server.directory().join("authorized_keys");
+    let key = fs::read(&authorized).unwrap();
+    fs::write(&authorized, "").unwrap();
+    let clock = TestClock::new();
+    let conn = start_managed(&server, clock.clone(), "orx-box-keys");
+
+    let refused = status(&conn, Status::Backoff).await;
+    assert!(
+        key_refused(refused.cause.as_deref().unwrap()),
+        "{refused:?}"
+    );
+    fs::write(&authorized, &key).unwrap();
+    clock.advance((refused.next_retry_ms.unwrap() - clock.wall_ms()).max(0) as u64 + 1);
+    status(&conn, Status::Live).await;
+    let auth = Store::open_at(server.directory().join("store"))
+        .unwrap()
+        .engine_host_auth("orx-box-keys")
+        .unwrap();
+    assert_eq!(auth.class, Some(HostClass::Key));
+
+    fs::write(&authorized, "").unwrap();
+    server.proxy().reset().unwrap();
+    let mut state = conn.state();
+    let mut first_refusal = None;
+    let opened = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let snapshot = state.borrow_and_update().clone();
+            if snapshot.status == Status::NeedsAuth {
+                return snapshot;
+            }
+            if snapshot.status == Status::Backoff
+                && snapshot.cause.as_deref().is_some_and(key_refused)
+            {
+                first_refusal.get_or_insert(snapshot.since_ms);
+                let due = snapshot.next_retry_ms.unwrap() - clock.wall_ms();
+                clock.advance(due.max(0) as u64 + 1);
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(100), state.changed()).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(key_refused(opened.cause.as_deref().unwrap()));
+    assert!(opened.since_ms - first_refusal.unwrap() >= KEY_SYNC_GRACE_MS);
+    let refusals = auth_attempts(&server)
+        .get(&("publickey".into(), "Failed".into()))
+        .copied()
+        .unwrap_or(0);
+    assert!((3..=8).contains(&refusals), "{refusals}");
+    clock.advance(30 * 60 * 1000);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(conn.state().borrow().status, Status::NeedsAuth);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1162,6 +1224,9 @@ fn ssh_diagnostics_preserve_primary_errors_and_proxy_hops() {
         ("SSH connection closed", "ssh: Could not resolve hostname x: nodename nor servname provided, or not known\n", Some(255), "Could not resolve hostname x: nodename nor servname provided, or not known", false),
         ("SSH connection closed", "kex_exchange_identification: read: X\n", Some(255), "SSH connection closed: X", true),
         ("SSH connection closed", "user@jump: Permission denied (publickey).\r\nkex_exchange_identification: Connection closed by UNKNOWN port 65535\n", Some(255), "Permission denied (publickey)", true),
+        ("No orx-host for linux-x86_64", "Warning: Permanently added '64.247.196.69' (ED25519) to the list of known hosts.\r\n", Some(255), "No orx-host for linux-x86_64", true),
+        ("SSH connection closed", "Warning: Permanently added 'box' (ED25519) to the list of known hosts.\r\n** WARNING: connection is not using a post-quantum key exchange algorithm.\r\n** This session may be vulnerable to \"store now, decrypt later\" attacks.\r\nbash: module: command not found\n", Some(98), "Could not prepare the remote run directory: command not found", true),
+        ("SSH connection closed", "Warning: Permanently added 'box' (ED25519) to the list of known hosts.\r\nssh: connect to host box port 22: Connection refused\r\n", Some(255), "Connection refused", false),
         ("invalid response", "", Some(97), "The remote host rejected the bootstrap request", true),
         ("invalid response", "", Some(96), "Could not install or verify the remote host binary", true),
         ("invalid response", "", Some(95), "The remote host binary is missing", true),

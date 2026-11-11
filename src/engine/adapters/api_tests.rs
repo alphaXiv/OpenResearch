@@ -64,7 +64,7 @@ fn pending<'a>(
 /// Runs the calling test alone in a child process, against a fake provider API
 /// and with fake provider CLIs first on `PATH`. `None` in the parent.
 async fn isolated() -> Option<PathBuf> {
-    if !crate::config::in_test_child(&[]) {
+    if !crate::config::in_test_child(&["SSH_AUTH_SOCK"]) {
         return None;
     }
     let root = std::env::temp_dir().join("orx-api");
@@ -99,6 +99,15 @@ async fn isolated() -> Option<PathBuf> {
             )
                 .into_response();
         }
+        if method == axum::http::Method::GET && uri.path() == "/ssh-keys" {
+            if let Ok(keys) = std::fs::read(root.join("ssh-keys.json")) {
+                return (
+                    headers,
+                    Json(serde_json::from_slice::<Value>(&keys).unwrap()),
+                )
+                    .into_response();
+            }
+        }
         if uri.path().starts_with("/sandboxes/") {
             if method == axum::http::Method::GET {
                 if root.join("box-released").exists() {
@@ -108,14 +117,16 @@ async fn isolated() -> Option<PathBuf> {
                     return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({})))
                         .into_response();
                 }
-                return (
-                    headers,
-                    Json(json!({"sandbox": {
-                        "id":"box", "organizationId":"org", "status":"online",
-                        "machineType":"cpu", "updatedAt":"now"
-                    }})),
-                )
-                    .into_response();
+                let mut sandbox = json!({
+                    "id":"box", "organizationId":"org", "status":"online",
+                    "machineType":"cpu", "updatedAt":"now"
+                });
+                if let Ok(fields) = std::fs::read(root.join("sandbox.json")) {
+                    let fields: serde_json::Map<String, Value> =
+                        serde_json::from_slice(&fields).unwrap();
+                    sandbox.as_object_mut().unwrap().extend(fields);
+                }
+                return (headers, Json(json!({ "sandbox": sandbox }))).into_response();
             }
             if (method == axum::http::Method::DELETE || uri.path().ends_with("/lease/release"))
                 && root.join("delete-fails").exists()
@@ -1444,6 +1455,443 @@ async fn openresearch_completed_log_is_readable_after_release() {
         return;
     };
     legacy_box(root, "done").await;
+}
+
+/// An engine-launched run on box `box`, its descriptor extended with `fields`.
+fn box_run(engine: &Engine, fields: Value) -> WatchedRun {
+    let mut descriptor = json!({
+        "kind":"openresearch_job", "namespace":"org", "jobId":"box",
+        "rentalLease":{"apiUrl":std::env::var("HF_ENDPOINT").unwrap(),"sandboxId":"box","token":"fake"}
+    });
+    descriptor
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    let descriptor = BackendDescriptor::parse(&descriptor.to_string()).unwrap();
+    let launch = LaunchSpec {
+        kind: "openresearch_job".into(),
+        target: Some("org".into()),
+        options: json!({}),
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut submission = pending(&id, &descriptor, &launch);
+    submission.created_at = engine.clock.wall_ms();
+    engine.insert(submission).unwrap();
+    engine
+        .store()
+        .set_submission_fence(
+            &id,
+            1,
+            &crate::store::SubmissionFence {
+                taken_at: 1,
+                submitter: None,
+            },
+        )
+        .unwrap();
+    let handle = Handle::OpenResearch {
+        descriptor: Box::new(descriptor),
+    };
+    assert!(engine.store().record_run_handle(&id, 1, &handle).unwrap());
+    WatchedRun { id, handle }
+}
+
+/// Makes `~/.ssh/id_ed25519` with `passphrase` and registers its public half on the fake account.
+fn local_key(root: &Path, passphrase: &str) {
+    let ssh = dirs::home_dir().unwrap().join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let key = ssh.join("id_ed25519");
+    for path in [key.clone(), key.with_extension("pub")] {
+        let _ = std::fs::remove_file(path);
+    }
+    assert!(crate::process::command("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", passphrase, "-f"])
+        .arg(&key)
+        .status()
+        .unwrap()
+        .success());
+    let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+    std::fs::write(
+        root.join("ssh-keys.json"),
+        json!({"sshKeys":[{"id":"key","name":"laptop","publicKey":public.trim()}]}).to_string(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn openresearch_box_refusing_the_key_fails_the_run_with_the_cause() {
+    use super::openresearch::{LegacyTransport, OpenResearch};
+    use super::ssh::Ssh;
+    use crate::engine::transport::{Auth, Config, HostConn};
+
+    let Some(root) = isolated().await else {
+        return;
+    };
+    std::env::set_var("HOME", root.join("home"));
+    crate::config::save_credentials(&crate::config::Credentials {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        token: "fake".into(),
+    })
+    .await
+    .unwrap();
+    for (case, passphrase) in [
+        ("absent", ""),
+        ("locked", "secret"),
+        ("released", ""),
+        ("dead", ""),
+    ] {
+        local_key(&root, passphrase);
+        let server = orx_test_support::Sshd::start().unwrap();
+        std::fs::write(server.directory().join("authorized_keys"), "").unwrap();
+        let alias = "orx-box-refusal";
+        let config = std::fs::read_to_string(server.config_path())
+            .unwrap()
+            .replace(
+                &format!("Host {}", server.alias()),
+                &format!("Host {alias}"),
+            );
+        std::fs::write(server.config_path(), config).unwrap();
+
+        let dir = root.join(case);
+        let clock = Arc::new(TestClock::new());
+        let mut engine = engine(&dir);
+        engine.clock = clock.clone();
+        let engine = Arc::new(engine);
+        let store = Store::open_at(dir.join("transport")).unwrap();
+        let auth = Auth::new(&store, alias).unwrap();
+        let conn = HostConn::start_shared(
+            Config {
+                alias: alias.into(),
+                root: "~/engine-root".into(),
+                ssh_config: Some(server.config_path()),
+                control_dir: server.directory().join("cm"),
+                binary_dir: Some(orx_test_support::host_binaries()),
+                sharing_home: None,
+                askpass_executable: std::env::current_exe().unwrap(),
+            },
+            store,
+            clock.clone(),
+            auth,
+        )
+        .unwrap();
+        let transport = Arc::new(LegacyTransport::new(
+            Arc::new(Ssh::new(alias.into(), "~/engine-root".into(), conn)),
+            dir.join("store/run-logs"),
+        ));
+        let watched = box_run(
+            &engine,
+            json!({"sshHost":"127.0.0.1", "sshPort":server.port(), "sshUser":server.user()}),
+        );
+        let adapter = OpenResearch::new(engine.clone(), Arc::new(move |_| Ok(transport.clone())));
+        std::fs::write(root.join("http.log"), "").unwrap();
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                engine
+                    .observe_runs(&adapter, std::slice::from_ref(&watched), Duration::ZERO)
+                    .await
+                    .unwrap();
+                let (run, state) = engine.load(&watched.id).unwrap();
+                if phase_of(&run).unwrap().is_terminal() {
+                    break;
+                }
+                if case == "released"
+                    && matches!(state.contact, crate::store::Contact::Unreachable { .. })
+                {
+                    std::fs::write(root.join("box-released"), "").unwrap();
+                }
+                if case == "dead"
+                    && matches!(state.contact, crate::store::Contact::NeedsAuth { .. })
+                {
+                    let sandbox =
+                        json!({"status":"dead", "provisionWarnings":"the host was reclaimed"});
+                    std::fs::write(root.join("sandbox.json"), sandbox.to_string()).unwrap();
+                }
+                clock.advance(Duration::from_secs(10));
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let (run, _) = engine.load(&watched.id).unwrap();
+        assert_eq!(run.status, "failed", "{case}");
+        let reason = run.result_markdown.unwrap();
+        assert!(
+            reason.starts_with("Box box refused this computer's SSH key: "),
+            "{reason}"
+        );
+        if case == "locked" {
+            assert!(
+                reason.contains("~/.ssh/id_ed25519 needs its passphrase"),
+                "{reason}"
+            );
+            assert!(reason.contains("ssh-add"), "{reason}");
+        } else {
+            assert!(
+                reason.contains("never accepted ~/.ssh/id_ed25519.pub"),
+                "{reason}"
+            );
+        }
+        assert_eq!(
+            reason.ends_with("(OpenResearch reports box box went dead: the host was reclaimed)"),
+            case == "dead",
+            "{reason}"
+        );
+        let releases = std::fs::read_to_string(root.join("http.log"))
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "POST /sandboxes/box/lease/release")
+            .count();
+        assert_eq!(releases, usize::from(case != "released"), "{case}");
+        let _ = std::fs::remove_file(root.join("box-released"));
+        let _ = std::fs::remove_file(root.join("sandbox.json"));
+    }
+}
+
+#[tokio::test]
+async fn openresearch_box_that_never_comes_online_fails_with_the_service_reason() {
+    use super::openresearch::OpenResearch;
+
+    let Some(root) = isolated().await else {
+        return;
+    };
+    // Paces the box deletion retries this test makes fail.
+    std::env::set_var("ORX_TEST_SPEEDUP", "100");
+    crate::config::save_credentials(&crate::config::Credentials {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        token: "fake".into(),
+    })
+    .await
+    .unwrap();
+    for (case, sandbox, reason) in [
+        (
+            "failed",
+            json!({"status":"failed", "failureCode":"readiness_timeout", "failureMessage":"The box was not ready within 5 minutes."}),
+            "Provisioning failed: readiness_timeout: The box was not ready within 5 minutes.",
+        ),
+        (
+            "offline",
+            json!({"status":"offline", "provisionWarnings":"host unreachable"}),
+            "Provisioning failed: box box went offline: host unreachable",
+        ),
+        (
+            "deleted",
+            json!({}),
+            "Provisioning failed: box box was deleted before it came online, and OpenResearch kept no reason.",
+        ),
+        (
+            "deadline",
+            json!({"status":"provisioning"}),
+            "Provisioning failed: box box was still provisioning after 10 minutes, so orx released it.",
+        ),
+    ] {
+        std::fs::write(root.join("sandbox.json"), sandbox.to_string()).unwrap();
+        if case == "deleted" {
+            std::fs::write(root.join("box-released"), "").unwrap();
+        }
+        std::fs::write(root.join("http.log"), "").unwrap();
+        let clock = Arc::new(TestClock::new());
+        let mut engine = engine(&root.join(case));
+        engine.clock = clock.clone();
+        let engine = Arc::new(engine);
+        let watched = [box_run(&engine, json!({}))];
+        let adapter = OpenResearch::new(
+            engine.clone(),
+            Arc::new(|_| panic!("no SSH before the box is online")),
+        );
+        let observe = || async {
+            engine
+                .observe_runs(&adapter, &watched, Duration::ZERO)
+                .await
+                .unwrap();
+            engine.load(&watched[0].id).unwrap().0
+        };
+        if case == "deadline" {
+            assert_eq!(observe().await.status, "starting");
+            clock.advance(Duration::from_secs(10 * 60));
+            std::fs::write(root.join("delete-fails"), "").unwrap();
+            assert_eq!(observe().await.status, "starting");
+            std::fs::remove_file(root.join("delete-fails")).unwrap();
+        }
+        let run = observe().await;
+        assert_eq!(run.status, "failed", "{case}");
+        assert_eq!(run.result_markdown.as_deref(), Some(reason));
+        let released = std::fs::read_to_string(root.join("http.log"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "POST /sandboxes/box/lease/release");
+        assert_eq!(released, case == "deadline", "{case}");
+        let _ = std::fs::remove_file(root.join("box-released"));
+    }
+}
+
+#[tokio::test]
+async fn openresearch_box_lost_after_contact_keeps_the_service_reason() {
+    use super::openresearch::{LegacyTransport, OpenResearch};
+    use super::ssh::Ssh;
+    use crate::engine::transport::{Auth, Config, HostClass, HostConn, HostState, Status};
+
+    let Some(root) = isolated().await else {
+        return;
+    };
+    crate::config::save_credentials(&crate::config::Credentials {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        token: "fake".into(),
+    })
+    .await
+    .unwrap();
+    for (case, sandbox, reached, status, reason) in [
+        (
+            "dead",
+            Some(json!({"status":"dead", "provisionWarnings":"the provider reclaimed the host"})),
+            true,
+            "lost",
+            "Outcome unavailable: box box went dead: the provider reclaimed the host",
+        ),
+        (
+            "failed",
+            Some(
+                json!({"status":"failed", "failureCode":"host_lost", "failureMessage":"The provider lost the host."}),
+            ),
+            true,
+            "lost",
+            "Outcome unavailable: host_lost: The provider lost the host.",
+        ),
+        (
+            "unreached",
+            None,
+            false,
+            "failed",
+            "Box box was released before orx could reach it: Connection refused",
+        ),
+        (
+            "unreached dead",
+            Some(json!({"status":"dead", "provisionWarnings":"the provider reclaimed the host"})),
+            false,
+            "failed",
+            "Box box was released before orx could reach it: Connection refused (OpenResearch reports box box went dead: the provider reclaimed the host)",
+        ),
+        (
+            "unreached offline",
+            Some(json!({"status":"offline", "provisionWarnings":"host unreachable"})),
+            false,
+            "failed",
+            "Box box was released before orx could reach it: Connection refused (OpenResearch reports box box went offline: host unreachable)",
+        ),
+    ] {
+        let dir = root.join(case);
+        let clock = Arc::new(TestClock::new());
+        let mut engine = engine(&dir);
+        engine.clock = clock.clone();
+        let engine = Arc::new(engine);
+        let watched = [box_run(
+            &engine,
+            json!({"sshHost":"unused", "sshPort":22, "sshUser":"root"}),
+        )];
+        clock.advance(Duration::from_secs(60));
+        let store = Store::open_at(dir.join("store")).unwrap();
+        store
+            .seed_engine_host(
+                "box",
+                "/root",
+                Some(HostClass::Key),
+                &HostState {
+                    status: Status::NeedsAuth,
+                    since_ms: clock.wall_ms(),
+                    last_live_ms: reached.then(|| clock.wall_ms() - 1),
+                    cause: Some(
+                        if reached {
+                            "Host key verification failed"
+                        } else {
+                            "Connection refused"
+                        }
+                        .into(),
+                    ),
+                    ..HostState::default()
+                },
+            )
+            .unwrap();
+        let auth = Auth::new(&store, "box").unwrap();
+        let conn = HostConn::start_shared(
+            Config {
+                alias: "box".into(),
+                root: "/root".into(),
+                ssh_config: Some(dir.join("never-connect")),
+                control_dir: dir.join("cm"),
+                sharing_home: None,
+                binary_dir: None,
+                askpass_executable: std::env::current_exe().unwrap(),
+            },
+            store,
+            clock.clone(),
+            auth,
+        )
+        .unwrap();
+        let transport = Arc::new(LegacyTransport::new(
+            Arc::new(Ssh::new("box".into(), "/root".into(), conn)),
+            dir.join("logs"),
+        ));
+        let adapter = OpenResearch::new(engine.clone(), Arc::new(move |_| Ok(transport.clone())));
+        match &sandbox {
+            Some(sandbox) => std::fs::write(root.join("sandbox.json"), sandbox.to_string()),
+            None => std::fs::write(root.join("box-released"), ""),
+        }
+        .unwrap();
+        std::fs::write(root.join("http.log"), "").unwrap();
+        engine
+            .observe_runs(&adapter, &watched, Duration::ZERO)
+            .await
+            .unwrap();
+        let (run, _) = engine.load(&watched[0].id).unwrap();
+        assert_eq!(run.status, status, "{case}");
+        assert_eq!(run.result_markdown.as_deref(), Some(reason));
+        let released = std::fs::read_to_string(root.join("http.log"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "POST /sandboxes/box/lease/release");
+        assert_eq!(released, sandbox.is_some(), "{case}");
+        let _ = std::fs::remove_file(root.join("sandbox.json"));
+        let _ = std::fs::remove_file(root.join("box-released"));
+    }
+}
+
+#[tokio::test]
+async fn openresearch_launch_checks_the_key_is_usable_without_a_prompt() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    std::env::set_var("HOME", root.join("home"));
+    crate::config::save_credentials(&crate::config::Credentials {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        token: "fake".into(),
+    })
+    .await
+    .unwrap();
+    let mut args = crate::compute::tests::tinker_args();
+    args.backend = Some("openresearch".into());
+    args.flavor = Some("cpu5c".into());
+    args.org = Some("org".into());
+
+    local_key(&root, "secret");
+    let launched = crate::local::openresearch::launch_spec(&args).await;
+    assert_eq!(
+        launched.is_ok(),
+        cfg!(target_os = "macos"),
+        "{:?}",
+        launched.as_ref().err()
+    );
+    if let Err(error) = launched {
+        let error = error.to_string();
+        assert!(
+            error.starts_with("~/.ssh/id_ed25519 needs its passphrase"),
+            "{error}"
+        );
+        assert!(error.contains("ssh-add"), "{error}");
+    }
+    local_key(&root, "");
+    crate::local::openresearch::launch_spec(&args)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
