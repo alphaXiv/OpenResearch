@@ -5,6 +5,7 @@ import { AlphaXivNotConnectedError, OpenResearchAccountError } from "../api";
 import { Menu } from "@base-ui/react/menu";
 import { useContext, useEffect, useRef, useState } from "react";
 import { UserRound } from "lucide-react";
+import { Terminal as Xterm } from "@xterm/xterm";
 import { type DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
@@ -176,13 +177,21 @@ export function LoginSession({
       if (next.code) open(next.url);
       else tab?.close();
     };
+    // ConPTY holds `orx login`'s output until a terminal answers its queries.
+    const terminal = new Xterm();
+    terminal.onData((data) => {
+      if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data));
+    });
     const timer = window.setTimeout(() => {
       socket = new WebSocket(socketUrl(connectOnly ? "/api/settings/alphaxiv/login" : "/api/settings/openresearch/login"));
       socket.binaryType = "arraybuffer";
+      // ConPTY hard-wraps at the terminal's width, which would split the sign-in URL.
+      socket.onopen = () => socket?.send(JSON.stringify({ type: "resize", cols: 1000, rows: 24 }));
       socket.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
+          terminal.write(new Uint8Array(event.data));
           output += new TextDecoder().decode(event.data);
-          const url = output.match(/https?:\/\/[^\s\x1b]+(?=\s)/)?.[0];
+          const url = output.match(/https?:\/\/[^\s\x1b]+(?=[\s\x1b])/)?.[0];
           if (url) show({ url, code: output.match(/approve the code (\S+):/)?.[1] });
           return;
         }
@@ -200,7 +209,7 @@ export function LoginSession({
       };
       socket.onclose = () => { if (!finished) callbacks.current.onError({}); };
     }, 0);
-    return () => { clearTimeout(timer); if (socket) { socket.onclose = null; socket.close(); } };
+    return () => { clearTimeout(timer); terminal.dispose(); if (socket) { socket.onclose = null; socket.close(); } };
   }, [connectOnly, tab, socketUrl]);
 
   if (prompt?.code) {
