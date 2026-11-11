@@ -45,6 +45,7 @@ import sys, json, shlex, subprocess
 LOG = "/tmp/orx-run.log"
 PID = "/tmp/orx-run.pid"
 ENV = "/tmp/orx-env.sh"
+SCRIPT = "/tmp/orx-run.sh"
 EXIT_TAG = "orx_exit"
 
 def _sdk():
@@ -117,10 +118,12 @@ def submit():
                         break
                     dst.write(chunk)
             box.fs.write_text("/tmp/orx-source.tar.ready", "")
+        # A script of its own, so even a parse error in it is logged after the pid is written.
+        box.fs.write_text(SCRIPT, spec["script"], mode=0o600)
         wrapper = (
             "echo $$ > %s; set -a; . %s; set +a; rm -f %s; "
-            "( %s ) > %s 2>&1"
-        ) % (PID, ENV, ENV, spec["script"], LOG)
+            "exec bash %s > %s 2>&1"
+        ) % (PID, ENV, ENV, SCRIPT, LOG)
         kill_after = spec.get("killAfter")
         proc = box.create_process(
             "bash", ["-c", wrapper],
@@ -128,6 +131,12 @@ def submit():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Status reads a missing pid file as a wrapper that never started.
+        started = box.run_process(
+            "bash", ["-c", "for _ in $(seq 300); do [ -s %s ] && exit 0; sleep 0.1; done; exit 1" % PID],
+        )
+        if started.returncode != 0:
+            raise RuntimeError("its wrapper never wrote %s" % PID)
     except BaseException as error:
         try:
             box.stop()
@@ -174,12 +183,18 @@ def status(name, pid):
         return
     # The API only records a process's exit once a client waits on it, and a
     # wait blocks while it runs, so check the wrapper's pid inside the sandbox
-    # first. No pid file yet means the wrapper hasn't started.
+    # first. Submit waits for the pid file, so a missing one means the wrapper never started.
     probe = box.run_process(
         "bash",
-        ["-c", "[ ! -s %s ] || kill -0 \"$(cat %s)\" 2>/dev/null && echo running || echo exited" % (PID, PID)],
+        ["-c", "if [ ! -s %s ]; then echo missing; elif kill -0 \"$(cat %s)\" 2>/dev/null; then echo running; else echo exited; fi" % (PID, PID)],
         capture_output=True,
     )
+    if probe.stdout.strip() == "missing":
+        print(json.dumps({
+            "stage": "ERROR",
+            "message": "the run never started in sandbox %s: %s is missing" % (name, PID),
+        }))
+        return
     if probe.stdout.strip() != "exited":
         print(json.dumps({"stage": "RUNNING"}))
         return
@@ -1454,6 +1469,10 @@ mod tests {
                 "exited",
                 json!({"stage": "ERROR", "message": "exited with code 7", "exitCode": 7}),
             ),
+            (
+                "missing",
+                json!({"stage": "ERROR", "message": "the run never started in sandbox orx-run-1: /tmp/orx-run.pid is missing"}),
+            ),
         ] {
             let dir = std::env::temp_dir().join(format!("orx-vercel-{}", uuid::Uuid::new_v4()));
             let pkg = dir.join("vercel").join("sandbox");
@@ -1528,12 +1547,14 @@ class FS:
         sys.stderr.write(json.dumps({"write": path, "mode": mode, "text": text}) + "\n")
 class Proc:
     id = "cmd_1"
+    returncode = 0
 class Box:
     name = "orx-run-1"
     fs = FS()
     def create_process(self, cmd, args, **kw):
         sys.stderr.write(json.dumps({"process": args[1]}) + "\n")
         return Proc()
+    def run_process(self, cmd, args, **kw): return Proc()
 def create_sandbox(**kw):
     sys.stderr.write(json.dumps({"create": {k: v for k, v in kw.items() if k != "resources"},
                                  "vcpus": kw["resources"].vcpus}) + "\n")
@@ -1580,8 +1601,95 @@ def get_sandbox(**kw): return Box()
         let env_file = &events[1];
         assert_eq!(env_file["mode"], 0o600);
         assert_eq!(env_file["text"], "export HF_TOKEN='s3cr'\"'\"'et'\n");
-        let process = events[2]["process"].as_str().unwrap();
-        assert!(process.contains("( python train.py ) > /tmp/orx-run.log 2>&1"));
+        assert_eq!(events[2]["text"], "python train.py");
+        let process = events[3]["process"].as_str().unwrap();
+        assert!(process.contains("bash /tmp/orx-run.sh > /tmp/orx-run.log 2>&1"));
+    }
+
+    /// Runs the launcher's real wrapper in bash, with the sandbox's `/tmp` mapped to a temp dir.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_script_that_does_not_parse_fails_the_run_with_bash_error_in_the_log() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(VERCEL_ENV.min_python, VERCEL_ENV.label).await
+        else {
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-vercel-{}", uuid::Uuid::new_v4()));
+        let pkg = dir.join("vercel").join("sandbox");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::create_dir_all(dir.join("box")).unwrap();
+        std::fs::write(dir.join("vercel").join("__init__.py"), "").unwrap();
+        std::fs::write(
+            pkg.join("__init__.py"),
+            "class SandboxResources:\n    def __init__(self, vcpus=None, memory=None): self.vcpus = vcpus\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("sync.py"),
+            r#"import os, subprocess, time
+ROOT = os.path.join(os.environ["PYTHONPATH"], "box")
+def local(text): return text.replace("/tmp/", ROOT + "/")
+class FS:
+    def write_text(self, path, text, mode=None): open(local(path), "w").write(text)
+class Done:
+    def __init__(self, ran): self.returncode, self.stdout = ran.returncode, ran.stdout
+class Proc:
+    id = "cmd_1"
+    @property
+    def returncode(self): return int(open(ROOT + "/exit").read())
+class Box:
+    name = "orx-run-1"
+    status = "running"
+    tags = {}
+    fs = FS()
+    def create_process(self, cmd, args, **kw):
+        subprocess.Popen([cmd, "-c", 'bash -c "$1"; echo $? > "$2"', "-", local(args[1]), ROOT + "/exit"])
+        return Proc()
+    def run_process(self, cmd, args, **kw):
+        return Done(subprocess.run([cmd, "-c", local(args[1])], capture_output=True, text=True))
+    def get_process(self, pid, wait=False):
+        for _ in range(100 if wait else 0):
+            if os.path.exists(ROOT + "/exit"): break
+            time.sleep(0.1)
+        return Proc()
+    def update(self, tags): pass
+def create_sandbox(**kw): return Box()
+def get_sandbox(**kw): return Box()
+"#,
+        )
+        .unwrap();
+        let launch = |args: &[&str], stdin: &[u8]| {
+            let mut child = crate::process::command(python)
+                .arg("-c")
+                .arg(launcher())
+                .args(args)
+                .env("PYTHONPATH", &dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(stdin).unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()
+        };
+        launch(
+            &["submit"],
+            br#"{"name": "orx-run-1", "script": "echo (", "vcpus": 1, "executionTimeLimit": 60}"#,
+        );
+        let status = launch(&["status", "orx-run-1", "cmd_1"], b"");
+        let log = std::fs::read_to_string(dir.join("box").join("orx-run.log")).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(status["stage"], "ERROR", "{status}");
+        assert_eq!(status["exitCode"], 2, "{status}");
+        assert!(log.contains("syntax error"), "{log}");
     }
 
     /// A missing sandbox is terminal. Raising would make the engine retry forever
