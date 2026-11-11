@@ -2731,6 +2731,7 @@ mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
     use std::sync::Arc;
 
     /// The lines Claude writes when it resumes on its own and replies `reply`.
