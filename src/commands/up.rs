@@ -7816,11 +7816,11 @@ async fn connect_local_model(
     Json(req): Json<local::local_models::Connect>,
 ) -> OpenCodeResult {
     opencode_for_change().await?;
-    let model = local::local_models::connect(req)
+    let (model, created) = local::local_models::connect(req)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
     recheck_opencode(&state).await;
-    Ok(Json(json!({"model":model})))
+    Ok(Json(json!({"model":model,"created":created})))
 }
 
 #[derive(Deserialize)]

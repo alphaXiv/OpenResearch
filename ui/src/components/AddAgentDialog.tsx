@@ -249,11 +249,11 @@ const STEPS: Step[] = ["provider", "signin", "name"];
 
 /** What this dialog made, which leaving before the end removes. A vendor's own sign-in stays with
  * its agent, so it never appears here. `name` is what it was made with; `replaced` marks an OpenCode
- * sign-in the user already had, which leaving keeps. */
+ * sign-in or endpoint model the user already had, which leaving keeps. */
 type Saved =
   | { kind: "profile"; id: string; name: string }
   | { kind: "provider"; id: string; name: string; replaced?: boolean }
-  | { kind: "endpoint"; id: string; model: string; name: string };
+  | { kind: "endpoint"; id: string; model: string; name: string; replaced: boolean };
 
 /** Which agent the wizard added; Claude Code and Codex name the account. */
 type AddedAgent = { harness: HarnessId; profile?: string };
@@ -429,7 +429,7 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
     if (oauth && !signedIn) await api.cancelOpenCodeSignIn(oauth.attempt).catch(() => {});
     if (saved?.kind === "profile") await api.removeAgentProfile(saved.id);
     if (saved?.kind === "provider" && !saved.replaced) await api.removeOpenCodeProvider(saved.id);
-    if (saved?.kind === "endpoint") await api.removeLocalModel(saved.id, saved.model);
+    if (saved?.kind === "endpoint" && !saved.replaced) await api.removeLocalModel(saved.id, saved.model);
     setSaved(null);
     setOauth(null);
   };
@@ -468,13 +468,15 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
   const connectEndpoint = () => run(async () => {
     const request = endpoint.request;
     if (!request) return;
-    const { model } = await api.connectLocalModel(request);
+    const { model, created } = await api.connectLocalModel(request);
     const id = model.slice(0, model.indexOf("/"));
+    const previous = saved?.kind === "endpoint" ? saved : null;
+    const same = previous?.id === id && previous.model === request.model;
     // Coming back to change the model replaces the one this dialog saved.
-    if (saved?.kind === "endpoint" && (saved.id !== id || saved.model !== request.model)) await api.removeLocalModel(saved.id, saved.model);
+    if (previous && !same && !previous.replaced) await api.removeLocalModel(previous.id, previous.model);
     const connectionName = endpoints.data?.find((connection) => connection.id === id)?.name ?? request.name;
-    const recordName = saved?.kind === "endpoint" && saved.id === id ? name : freeName(connectionName, takenNames(id));
-    setSaved({ kind: "endpoint", id, model: request.model, name: connectionName });
+    const recordName = previous?.id === id ? name : freeName(connectionName, takenNames(id));
+    setSaved({ kind: "endpoint", id, model: request.model, name: connectionName, replaced: previous && same ? previous.replaced : !created });
     setName(recordName);
     setSignedIn(true);
     setStep("name");
@@ -960,6 +962,8 @@ function OAuthPanel({ signIn, disabled, onComplete, onRetry }: {
   const [code, setCode] = useState("");
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  /** Status checks failed in a row, each waiting twice as long as the last. */
+  const [misses, setMisses] = useState(0);
   const completeRef = useRef(onComplete);
   completeRef.current = onComplete;
 
@@ -968,12 +972,17 @@ function OAuthPanel({ signIn, disabled, onComplete, onRetry }: {
     const controller = new AbortController();
     const timer = setTimeout(() => {
       void getOpenCodeSignIn(signIn.attempt, controller.signal).then((next) => {
+        setMisses(0);
         setStatus(next);
         if (next.status === "complete") completeRef.current();
-      }, () => {});
-    }, 1500);
+      }, (cause: unknown) => {
+        if (controller.signal.aborted) return;
+        if (misses < 4) setMisses(misses + 1);
+        else setStatus({ status: "failed", message: cause instanceof Error ? cause.message : String(cause) });
+      });
+    }, 1500 * 2 ** misses);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [signIn.attempt, status]);
+  }, [signIn.attempt, status, misses]);
 
   const send = async () => {
     if (!code.trim() || sending) return;

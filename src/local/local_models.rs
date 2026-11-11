@@ -464,7 +464,9 @@ pub async fn discover(req: &Probe) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-pub async fn connect(req: Connect) -> Result<String> {
+/// Adds a model to the connection at its address, made under the request's name unless one is
+/// saved there already; true when the model is new to it.
+pub async fn connect(req: Connect) -> Result<(String, bool)> {
     validate_identity(&req.name, req.icon.as_ref())?;
     if req.context_window < 4096 {
         return Err(anyhow!(
@@ -486,22 +488,19 @@ pub async fn connect(req: Connect) -> Result<String> {
         .map(|(id, _)| id.clone())
         .unwrap_or_else(|| format!("orx-local-{}", uuid::Uuid::new_v4()));
     let connection = connections.entry(id.clone()).or_insert_with(|| Connection {
-        name: req.name.clone(),
-        icon: req.icon.clone(),
+        name: req.name,
+        icon: req.icon,
         base_url: base,
         api_key: req.probe.api_key.clone(),
         models: BTreeMap::new(),
     });
-    connection.name = req.name;
-    if let Some(icon) = req.icon {
-        connection.icon = Some(icon);
-    }
     connection.api_key = req.probe.api_key;
-    connection
+    let created = connection
         .models
-        .insert(req.model.clone(), req.context_window);
+        .insert(req.model.clone(), req.context_window)
+        .is_none();
     save(&connections)?;
-    Ok(format!("{id}/{}", req.model))
+    Ok((format!("{id}/{}", req.model), created))
 }
 
 fn save(connections: &BTreeMap<String, Connection>) -> Result<()> {

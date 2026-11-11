@@ -429,7 +429,13 @@ pub(crate) fn environment(command: &mut tokio::process::Command, bin: &Path) {
             paths.push(modules.join(".bin"));
         }
     }
-    if let Some(path) = crate::local::shell_env::var("PATH") {
+    let prepared = command
+        .as_std()
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value.map(ToOwned::to_owned))
+        .or_else(|| crate::local::shell_env::var("PATH"));
+    if let Some(path) = prepared {
         paths.extend(std::env::split_paths(&path));
     }
     if let Ok(path) = std::env::join_paths(paths) {
@@ -579,6 +585,24 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         eprintln!("{agent}: {}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    #[test]
+    fn managed_runtime_directories_go_ahead_of_the_prepared_path() {
+        let bin = super::super::executable("codex", &root().join("codex").join("0.166.0"));
+        let prepared = ["/orx/bin", "/git/cmd"].map(PathBuf::from);
+        let mut command = crate::process::tokio_command(&bin);
+        command.env("PATH", std::env::join_paths(&prepared).unwrap());
+        environment(&mut command, &bin);
+        let path = command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value)
+            .unwrap();
+        let paths: Vec<_> = std::env::split_paths(path).collect();
+        assert!(paths.contains(&bin.parent().unwrap().to_path_buf()));
+        assert!(paths.ends_with(&prepared), "{paths:?}");
     }
 
     #[test]

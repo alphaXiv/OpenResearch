@@ -2889,7 +2889,7 @@ export function createApi(
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/respond`, answer);
   const getLocalModels = (signal?: AbortSignal) => get<LocalModelConnection[]>("/api/local-models", signal);
   const discoverLocalModels = (request: { baseUrl: string; apiKey: string }) => post<{ models: string[] }>("/api/local-models/discover", request);
-  const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string }>("/api/local-models", request);
+  const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string; created: boolean }>("/api/local-models", request);
   const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
   /** Removes one model, or with none named the whole connection. */
   const removeLocalModel = (id: string, model?: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}${model ? `?${new URLSearchParams({ model })}` : ""}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
