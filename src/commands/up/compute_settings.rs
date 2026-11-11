@@ -1,6 +1,7 @@
 //! Shared compute settings operations for the dashboard and standalone CLI.
 
 use super::*;
+use std::collections::BTreeMap;
 
 // --- HF token settings ------------------------------------------------------
 
@@ -1008,11 +1009,14 @@ pub(super) fn slurm_settings_json() -> Value {
         "host": settings.host,
         "partition": settings.partition,
         "account": settings.account,
+        "qos": settings.qos,
         "timeLimit": settings.time_limit,
         "cpusPerTask": settings.cpus_per_task,
         "mem": settings.mem,
         "remoteRoot": settings.remote_root,
         "keepRemoteRuns": settings.keep_remote_runs,
+        "sbatchArgs": settings.sbatch_args,
+        "requestOneTask": settings.request_one_task != Some(false),
         "hosts": list_ssh_hosts(),
     })
 }
@@ -1030,19 +1034,73 @@ pub(super) struct SetSlurmSettingsReq {
     host: Option<String>,
     partition: Option<String>,
     account: Option<String>,
+    qos: Option<String>,
     time_limit: Option<String>,
     /// Cores per job. `Some(0)` clears it (partition default).
     cpus_per_task: Option<u32>,
     mem: Option<String>,
     remote_root: Option<String>,
     keep_remote_runs: Option<bool>,
+    /// Replaces the saved list; blank entries are dropped.
+    sbatch_args: Option<Vec<String>>,
+    request_one_task: Option<bool>,
 }
 
-pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> ApiResult {
+/// A rejected Slurm save, each message under the field it is about so the form can show it
+/// there; `error` joins them for the CLI and older dashboards.
+#[derive(Debug)]
+pub(super) enum SlurmSaveError {
+    Fields(BTreeMap<&'static str, Vec<String>>),
+    Api(ApiError),
+}
+
+fn joined(fields: &BTreeMap<&'static str, Vec<String>>) -> String {
+    fields
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+impl From<SlurmSaveError> for ApiError {
+    fn from(error: SlurmSaveError) -> Self {
+        match error {
+            SlurmSaveError::Fields(fields) => bad_request(joined(&fields)),
+            SlurmSaveError::Api(error) => error,
+        }
+    }
+}
+
+impl From<crate::error::Error> for SlurmSaveError {
+    fn from(error: crate::error::Error) -> Self {
+        Self::Api(error.into())
+    }
+}
+
+impl IntoResponse for SlurmSaveError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Fields(fields) => {
+                let body = json!({"error": joined(&fields), "fields": fields});
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            Self::Api(error) => error.into_response(),
+        }
+    }
+}
+
+pub(super) async fn set_slurm_settings(
+    Json(req): Json<SetSlurmSettingsReq>,
+) -> std::result::Result<Json<Value>, SlurmSaveError> {
     // One spawn_blocking around the whole load→mutate→save→respond body
     // (settings + ~/.ssh/config are sync fs I/O), like the git handlers.
     tokio::task::spawn_blocking(move || {
         let mut settings = slurm::load_settings()?.unwrap_or_default();
+        let mut errors: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+        let mut reject = |field, error: crate::error::Error| {
+            errors.entry(field).or_default().push(error.to_string())
+        };
         let norm = |v: String| Some(v.trim().to_string()).filter(|s| !s.is_empty());
         if let Some(h) = req.host {
             settings.host = norm(h);
@@ -1053,40 +1111,111 @@ pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> 
         if let Some(a) = req.account {
             settings.account = norm(a);
         }
-        if let Some(t) = req.time_limit {
-            // Reject a default that would fail every later launch.
-            let t = norm(t);
-            if let Some(t) = &t {
-                crate::jobs::huggingface::parse_timeout(t).map_err(bad_request)?;
+        // Each check rejects a default that would fail every later launch.
+        if let Some(q) = req.qos {
+            settings.qos = norm(q);
+            if let Some(Err(error)) = settings
+                .qos
+                .as_deref()
+                .map(|q| slurm::parse_value("QoS", q))
+            {
+                reject("qos", error);
             }
-            settings.time_limit = t;
+        }
+        if let Some(t) = req.time_limit {
+            settings.time_limit = norm(t);
+            let parsed = settings
+                .time_limit
+                .as_deref()
+                .map(crate::jobs::huggingface::parse_timeout);
+            if let Some(Err(error)) = parsed {
+                reject("timeLimit", error);
+            }
         }
         if let Some(c) = req.cpus_per_task {
             settings.cpus_per_task = Some(c).filter(|c| *c > 0);
         }
         if let Some(m) = req.mem {
-            // Reject a default that would fail every later launch.
-            let m = norm(m);
-            settings.mem = match m {
-                Some(m) => Some(slurm::parse_mem(&m).map_err(bad_request)?),
-                None => None,
+            settings.mem = match norm(m).map(|m| slurm::parse_mem(&m)).transpose() {
+                Ok(mem) => mem,
+                Err(error) => {
+                    reject("mem", error);
+                    None
+                }
             };
         }
         if let Some(root) = req.remote_root {
-            let root = norm(root);
-            if let Some(root) = &root {
-                crate::jobs::ssh::validate_remote_root(root).map_err(bad_request)?;
+            settings.remote_root = norm(root);
+            if let Some(Err(error)) = settings
+                .remote_root
+                .as_deref()
+                .map(crate::jobs::ssh::validate_remote_root)
+            {
+                reject("remoteRoot", error);
             }
-            settings.remote_root = root;
         }
         if let Some(keep) = req.keep_remote_runs {
             settings.keep_remote_runs = keep;
+        }
+        if let Some(one_task) = req.request_one_task {
+            settings.request_one_task = (!one_task).then_some(false);
+        }
+        if let Some(args) = req.sbatch_args {
+            settings.sbatch_args = args
+                .iter()
+                .filter(|arg| !arg.trim().is_empty())
+                .filter_map(|arg| {
+                    slurm::parse_sbatch_arg(arg)
+                        .map_err(|e| reject("sbatchArgs", e))
+                        .ok()
+                })
+                .collect();
+        }
+
+        let written = [
+            (
+                "ntasks",
+                settings.request_one_task != Some(false),
+                "Request one task",
+            ),
+            ("time", settings.time_limit.is_some(), "Time limit"),
+            ("partition", settings.partition.is_some(), "Partition"),
+            ("account", settings.account.is_some(), "Account"),
+            ("qos", settings.qos.is_some(), "QoS"),
+            (
+                "cpus-per-task",
+                settings.cpus_per_task.is_some(),
+                "CPUs per job",
+            ),
+            ("mem", settings.mem.is_some(), "Memory"),
+        ];
+        let written_lines = written
+            .iter()
+            .filter(|(_, set, _)| *set)
+            .map(|(line, ..)| *line);
+        for arg in &settings.sbatch_args {
+            let Some(line) = slurm::repeated_line(arg, written_lines.clone()) else {
+                continue;
+            };
+            let (.., field) = written.iter().find(|(name, ..)| *name == line).unwrap();
+            let fix = if line == "ntasks" {
+                format!(
+                    "which OpenResearch sets to 1 while {field} is on. Turn it off to use your own"
+                )
+            } else {
+                format!("which {field} already sets. Remove that line or clear {field}")
+            };
+            reject("sbatchArgs", anyhow!("{arg} sets --{line}, {fix}."));
+        }
+
+        if !errors.is_empty() {
+            return Err(SlurmSaveError::Fields(errors));
         }
         slurm::save_settings(&settings)?;
         Ok(Json(slurm_settings_json()))
     })
     .await
-    .map_err(|e| ApiError::from(anyhow!("slurm task failed: {e}")))?
+    .map_err(|e| SlurmSaveError::from(anyhow!("slurm task failed: {e}")))?
 }
 
 #[derive(Deserialize)]
@@ -1724,7 +1853,9 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
             }
             ssh_settings().await
         }
-        "slurm" => set_slurm_settings(Json(serde_json::from_value(body)?)).await,
+        "slurm" => set_slurm_settings(Json(serde_json::from_value(body)?))
+            .await
+            .map_err(ApiError::from),
         "ray" => set_ray_settings(Json(serde_json::from_value(body)?)).await,
         "k8s" => set_k8s_settings(Json(serde_json::from_value(body)?)).await,
         "hf" => set_hf_token(Json(serde_json::from_value(body)?)).await,
@@ -1868,6 +1999,94 @@ mod tests {
                 serde_json::from_slice(&std::fs::read(dir.join(file)).unwrap()).unwrap();
             assert_eq!(saved["fieldFromANewerOrx"], newer, "{file}");
         }
+    }
+
+    #[tokio::test]
+    async fn slurm_launch_options_save_over_a_shipped_settings_file() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let shipped: Vec<Value> =
+            serde_json::from_str(include_str!("../../../tests/contracts/slurm-settings.json"))
+                .unwrap();
+        let dir = crate::config::config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("slurm.json"), shipped[0].to_string()).unwrap();
+        let save = |body: Value| set_slurm_settings(Json(serde_json::from_value(body).unwrap()));
+
+        let Json(saved) = save(json!({
+            "qos": " acc_ehpc ",
+            "sbatchArgs": ["--rsc p=1:g=1", " ", "#SBATCH --mail-type=END"],
+            "requestOneTask": false,
+        }))
+        .await
+        .unwrap();
+        assert_eq!(saved["qos"], "acc_ehpc");
+        assert_eq!(
+            saved["sbatchArgs"],
+            json!(["--rsc p=1:g=1", "--mail-type=END"])
+        );
+        assert_eq!(saved["requestOneTask"], false);
+        assert_eq!(saved["partition"], "gpu");
+        assert_eq!(saved["cpusPerTask"], 16);
+
+        // Every line that would fail every launch is named under its field.
+        let Err(SlurmSaveError::Fields(fields)) = save(json!({
+            "qos": "a b",
+            "timeLimit": "soon",
+            "sbatchArgs": ["--output=/scratch/me/log", "-p debug", "--rsc g=1", "--mem=8G"],
+            "requestOneTask": true,
+        }))
+        .await
+        else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            fields.keys().copied().collect::<Vec<_>>(),
+            ["qos", "sbatchArgs", "timeLimit"]
+        );
+        let sbatch = fields["sbatchArgs"].join("\n");
+        assert!(
+            sbatch.contains("--output=/scratch/me/log sets --output"),
+            "{sbatch}"
+        );
+        assert!(
+            sbatch.contains("-p debug sets --partition, which Partition"),
+            "{sbatch}"
+        );
+        assert!(
+            sbatch.contains("--mem=8G sets --mem, which Memory"),
+            "{sbatch}"
+        );
+        assert!(
+            !sbatch.contains("--rsc") && !sbatch.contains('"'),
+            "{sbatch}"
+        );
+        let Err(SlurmSaveError::Fields(fields)) =
+            save(json!({"sbatchArgs": ["--ntasks=4"], "requestOneTask": true})).await
+        else {
+            panic!("expected field errors");
+        };
+        assert!(
+            fields["sbatchArgs"][0].contains("Request one task"),
+            "{fields:?}"
+        );
+        assert_eq!(
+            slurm::load_settings().unwrap().unwrap().request_one_task,
+            Some(false)
+        );
+
+        let Json(cleared) = save(json!({"qos": "", "sbatchArgs": [], "requestOneTask": true}))
+            .await
+            .unwrap();
+        assert_eq!(cleared["qos"], Value::Null);
+        assert_eq!(cleared["sbatchArgs"], json!([]));
+        assert_eq!(cleared["requestOneTask"], true);
+        let rewritten: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("slurm.json")).unwrap())
+                .unwrap();
+        assert_eq!(rewritten.get("requestOneTask"), None);
+        assert_eq!(rewritten["account"], "lab");
     }
 
     #[test]

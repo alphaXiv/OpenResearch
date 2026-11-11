@@ -1550,6 +1550,40 @@ async fn a_cancel_accepted_while_pinning_stops_before_launch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slurm_script_carries_placement_and_the_users_own_arguments() {
+    let f = Fixture::new().await;
+    f.shim("sbatch", "cat >/dev/null; printf '321\\n'");
+    f.shim("squeue", "exit 0");
+    let slurm = Slurm::new(f.ssh.clone(), f.clock.clone());
+    let mut intent = f.intent("placed", "true", "slurm_job");
+    intent.launch.options = json!({
+        "directives": {
+            "qos": "acc_ehpc",
+            "nodelist": "node[01-02]",
+            "constraint": "a100&ib",
+            "exclude": "node07",
+        },
+        "sbatch_args": ["--rsc p=1:g=1", "--mail-type=END"],
+    });
+    f.submit(&slurm, &intent).await;
+    let script = fs::read_to_string(f.dir("placed").join("job.sbatch")).unwrap();
+    assert!(script.starts_with(
+        "#!/bin/bash\n#SBATCH --constraint=a100&ib\n#SBATCH --exclude=node07\n\
+         #SBATCH --nodelist=node[01-02]\n#SBATCH --qos=acc_ehpc\n\
+         #SBATCH --rsc p=1:g=1\n#SBATCH --mail-type=END\nexec "
+    ));
+
+    let mut split = f.intent("split-argument", "true", "slurm_job");
+    split.launch.options = json!({"sbatch_args": ["--rsc g=1\n#SBATCH --output=elsewhere"]});
+    f.submit(&slurm, &split).await;
+    assert_eq!(
+        f.store().get_run("split-argument").unwrap().unwrap().status,
+        "failed"
+    );
+    assert!(!f.dir("split-argument").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sbatch_rejection_fails_with_stderr_and_slurm_containers_are_rejected() {
     let f = Fixture::new().await;
     f.shim(
