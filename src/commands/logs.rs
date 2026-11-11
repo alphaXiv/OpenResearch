@@ -68,7 +68,7 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
             .logs(&args.run_id, true)
             .await;
     }
-    resolve_run(Store::open()?, &args.run_id)?;
+    resolve_run(Store::open_for_reading()?, &args.run_id)?;
     let ranges = crate::commands::up::api_v2::kept_ranges(&crate::store::data_dir(), &args.run_id)?;
     if let Some(tail) = ranges.iter().max_by_key(|range| range.offset) {
         let total = ranges
@@ -104,7 +104,7 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
         {
-            let live = Store::open()?
+            let live = Store::open_for_reading()?
                 .get_run(&args.run_id)?
                 .is_some_and(|run| !crate::local::is_terminal(&run.status));
             if live {

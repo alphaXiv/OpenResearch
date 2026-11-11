@@ -7,7 +7,7 @@ use crate::local::trackio::{self, MetricSummary, Point, RunMetrics};
 use crate::store::Store;
 
 pub async fn run(args: crate::MetricsArgs) -> Result<()> {
-    let store = Store::open()?;
+    let store = Store::open_for_reading()?;
     // Dropped at exit, which stops a local dashboard this command had to start.
     let local = std::sync::Arc::new(trackio::LocalServer::default());
     let mut reports = Vec::new();
