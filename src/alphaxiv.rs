@@ -513,10 +513,22 @@ async fn access(rejected: Option<String>) -> Result<Access> {
     if tokens_path().exists() {
         return Ok(fresh_tokens(rejected, 60_000).await?.into());
     }
-    let forwarded = std::fs::read(forwarded_path())
-        .ok()
-        .and_then(|body| serde_json::from_slice::<Access>(&body).ok())
-        .ok_or(NotConnected::SignedOut)?;
+    let path = forwarded_path();
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(NotConnected::SignedOut.into())
+        }
+        Err(error) => {
+            return Err(anyhow!("Could not read {}: {error}", path.display()));
+        }
+    };
+    let forwarded: Access = serde_json::from_slice(&body).map_err(|error| {
+        anyhow!(
+            "{} is damaged ({error}). Delete it, or run `orx login --alphaxiv` here.",
+            path.display()
+        )
+    })?;
     if Some(&forwarded.access_token) == rejected.as_ref()
         || forwarded.expires_at_ms <= crate::store::now_ms()
     {
@@ -1174,5 +1186,11 @@ mod tests {
         forget_forwarded().unwrap();
         remove(tokens_path()).unwrap();
         assert!(!signed_in());
+
+        // A file that can't be read is reported with its path, not as signed out.
+        std::fs::write(forwarded_path(), "{").unwrap();
+        let damaged = super::get("/folders/v3", &[]).await.unwrap_err();
+        assert!(!damaged.is::<NotConnected>());
+        assert!(damaged.to_string().contains("alphaxiv-forwarded.json"));
     }
 }

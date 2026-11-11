@@ -1154,7 +1154,10 @@ async fn forward_alphaxiv(
                             let error = response.text().await.unwrap_or_default();
                             eprintln!("orx: {host} refused this laptop's alphaXiv sign-in ({status}): {error}");
                         }
-                        forwarded = Some(access);
+                        // A host that failed on its side is asked again.
+                        if !status.is_server_error() {
+                            forwarded = Some(access);
+                        }
                     }
                     Err(error) => eprintln!(
                         "orx: could not forward the alphaXiv sign-in to {host}: {}",
@@ -2833,14 +2836,17 @@ mod tests {
         let api = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, alphaxiv).await.unwrap() });
 
-        // A host recording what reaches it; `older` answers the way a host
-        // without the route does, with its dashboard page.
-        let host = |older: bool| async move {
+        // A host recording what reaches it. `older` answers the way a host
+        // without the route does, with its dashboard page; `flaky` fails its
+        // first answer.
+        let host = |mode: &'static str| async move {
             let (sender, received) = tokio::sync::mpsc::unbounded_channel();
+            let failed = Arc::new(std::sync::atomic::AtomicBool::new(mode != "flaky"));
             let app = Router::new().route(
                 "/_orx/alphaxiv",
                 axum::routing::any(move |request: Request| {
                     let sender = sender.clone();
+                    let failed = failed.clone();
                     async move {
                         let method = request.method().to_string();
                         let bearer = request.headers()[header::AUTHORIZATION]
@@ -2855,8 +2861,10 @@ mod tests {
                             .and_then(|body| Some(body["accessToken"].as_str()?.to_owned()))
                             .unwrap_or_default();
                         sender.send((method, bearer, access)).unwrap();
-                        if older {
+                        if mode == "older" {
                             "<!doctype html>".into_response()
+                        } else if !failed.swap(true, Ordering::SeqCst) {
+                            StatusCode::SERVICE_UNAVAILABLE.into_response()
                         } else {
                             StatusCode::NO_CONTENT.into_response()
                         }
@@ -2896,7 +2904,7 @@ mod tests {
         let client = crate::net::loopback_client().build().unwrap();
 
         // Signed out at attach: whatever an earlier laptop left is withdrawn.
-        let (port, mut received) = host(false).await;
+        let (port, mut received) = host("ok").await;
         let forwarding = tokio::spawn({
             let client = client.clone();
             async move { forward_alphaxiv(&client, "box", port, "attachment").await }
@@ -2922,9 +2930,19 @@ mod tests {
         assert_eq!(method, "DELETE");
         forwarding.abort();
 
-        // An older host is told once per token and the attachment carries on.
+        // A host that failed to save is asked again with the same token.
         sign_in("access-a", 3_600_000);
-        let (port, mut received) = host(true).await;
+        let (port, mut received) = host("flaky").await;
+        let forwarding = tokio::spawn({
+            let client = client.clone();
+            async move { forward_alphaxiv(&client, "box", port, "attachment").await }
+        });
+        assert_eq!(next(&mut received).await.2, "access-a");
+        assert_eq!(next(&mut received).await.2, "access-a");
+        forwarding.abort();
+
+        // An older host is told once per token and the attachment carries on.
+        let (port, mut received) = host("older").await;
         let forwarding =
             tokio::spawn(async move { forward_alphaxiv(&client, "box", port, "attachment").await });
         assert_eq!(next(&mut received).await.2, "access-a");

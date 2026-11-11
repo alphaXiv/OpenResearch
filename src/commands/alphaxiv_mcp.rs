@@ -52,16 +52,17 @@ pub async fn run() -> Result<()> {
         let sender = sender.clone();
         tokio::spawn(async move {
             let reply = handle(message.clone()).await;
-            let list_failed = message["method"] == "tools/list" && reply.get("error").is_some();
+            let list_stale = message["method"] == "tools/list" && !listing_is_complete(&reply);
             let _ = sender.send(reply);
-            if !list_failed {
+            if !list_stale {
                 return;
             }
-            // Agents keep their first tool list; ask them to list again once alphaXiv answers.
+            // Agents keep their first tool list; ask them to list again once alphaXiv
+            // answers, or a lapsed sign-in is renewed.
             let sender = sender.downgrade();
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                if handle(message.clone()).await.get("error").is_none() {
+                if listing_is_complete(&handle(message.clone()).await) {
                     if let Some(sender) = sender.upgrade() {
                         let _ = sender.send(
                             json!({"jsonrpc":"2.0", "method":"notifications/tools/list_changed"}),
@@ -75,6 +76,18 @@ pub async fn run() -> Result<()> {
     drop(sender);
     writer.await??;
     Ok(())
+}
+
+/// A listing that matches this computer's sign-in: errors and the research-only
+/// fallback for a lapsed grant are not.
+fn listing_is_complete(reply: &Value) -> bool {
+    let Some(tools) = reply.pointer("/result/tools").and_then(Value::as_array) else {
+        return false;
+    };
+    !crate::alphaxiv::signed_in()
+        || tools
+            .iter()
+            .any(|tool| LIBRARY_READ_TOOLS.contains(&tool["name"].as_str().unwrap_or("")))
 }
 
 fn allowed(name: &str, signed_in: bool) -> bool {
@@ -271,7 +284,7 @@ mod tests {
         let config = crate::config::config_dir();
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("alphaxiv.json"), json!({"apiUrl":api,"accessToken":"test-access","refreshToken":"test-refresh","expiresAtMs":crate::store::now_ms()+3_600_000}).to_string()).unwrap();
-        let reply = handle(list).await;
+        let reply = handle(list.clone()).await;
         assert_eq!(reply["id"], "tools");
         assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 3);
         assert_eq!(
@@ -304,6 +317,15 @@ mod tests {
             handle(call("discover_papers")).await["result"]["content"][0]["text"],
             "IP rate limit"
         );
+
+        // Agents that listed during the lapse are told to list again once it is renewed.
+        assert!(!listing_is_complete(&handle(list.clone()).await));
+        std::fs::write(
+            config.join("alphaxiv-forwarded.json"),
+            json!({"apiUrl":api,"accessToken":"forwarded","expiresAtMs":crate::store::now_ms()+3_600_000}).to_string(),
+        )
+        .unwrap();
+        assert!(listing_is_complete(&handle(list).await));
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls[4], ("/mcp/v1/anonymous".to_owned(), None));
