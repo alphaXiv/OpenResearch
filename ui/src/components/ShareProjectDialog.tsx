@@ -11,6 +11,11 @@ import { mutPublishProject } from "../queries/projects";
 import { useSignIn } from "./AccountChip";
 import { Button, ButtonLink, DialogContent, DialogTitle, IconButton, Input, Spinner, showAlert } from "./ui";
 
+export function showShareExclusions(count: number) {
+  if (count === 0) return;
+  showAlert(count === 1 ? m.share_skipped_one() : m.share_skipped({ count }), "warning");
+}
+
 export function ShareProjectDialog({ project, remote, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage }: DialogContentProps<ShareChoice> & {
   project: Project;
   remote: boolean;
@@ -69,7 +74,7 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
     {!link && <div className="mt-4 flex flex-wrap justify-end gap-2">
       <Button ref={publishRef} type="button" disabled={busy || !ready || !linkQuery.data || (remote && !signedIn)} onClick={() => {
         if (signedIn) publish.runWithOptions(workspace, project.id, choice, {
-          onSuccessData: ({ skipped }) => { if (skipped.length > 0) showAlert(m.share_skipped({ paths: skipped.join(", ") }), "warning"); },
+          onSuccessData: ({ skipped }) => showShareExclusions(skipped.length),
         });
         else openSignIn(false, publishRef.current);
       }}>{publish.isPending ? <Spinner /> : <Link2 size={16} />}{linkQuery.data && !signedIn ? m.share_publish_sign_in() : m.share_publish()}</Button>

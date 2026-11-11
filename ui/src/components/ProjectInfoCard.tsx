@@ -12,7 +12,7 @@ import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings,
 import { type Project } from "../api";
 import { downloadFile } from "../download";
 import { m } from "../paraglide/messages.js";
-import { ShareProjectDialog } from "./ShareProjectDialog";
+import { ShareProjectDialog, showShareExclusions } from "./ShareProjectDialog";
 import { Button, DialogContent, DialogTitle, Spinner, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
 
 function deleteExplanation(project: Project) {
@@ -95,7 +95,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
                   onConfirm: async (choice) => {
                     const { file, fileName, skipped } = await shareProject(project.id, choice);
                     downloadFile(fileName, file);
-                    if (skipped.length > 0) showAlert(m.share_skipped({ paths: skipped.join(", ") }), "warning");
+                    showShareExclusions(skipped.length);
                   },
                 });
               }}><span className="flex items-center gap-2"><Share2 size={16} />{m.share_project()}</span></Menu.Item>
