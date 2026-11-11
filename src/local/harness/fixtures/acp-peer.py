@@ -1,17 +1,21 @@
 import json
 import os
 import socket
+import subprocess
 import sys
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
 
-# A mode may carry the port that signals a stall or holds session/delete.
-mode, _, port = (sys.argv[1] if len(sys.argv) > 1 else "normal").partition(":")
+# A mode may carry a value: the test's port that signals a stall or holds session/delete, as in
+# "slow-delete:4000", or for "replay:<file>" the session updates that answer each prompt, one JSON
+# object a line.
+mode, _, value = (sys.argv[1] if len(sys.argv) > 1 else "normal").partition(":")
 record = sys.argv[2] if len(sys.argv) > 2 else None
 session = "peer-session"
 count = 0
 hanging = None
+children = {}
 startup = "pi v1.5.0\n---\nSkills: none\n"
 # Like pi-acp, the startup modes send a chunk after session/new, before the agent's turn.
 # It goes out when the prompt arrives, so it always reaches the client inside its turn.
@@ -44,8 +48,8 @@ def note(method, params):
 
 
 def signal_stall():
-    if port:
-        with socket.create_connection(("127.0.0.1", int(port))):
+    if value:
+        with socket.create_connection(("127.0.0.1", int(value))):
             pass
 
 
@@ -56,6 +60,10 @@ def config(model="first"):
                  currentValue="high" if model == "second" else "low",
                  options=[dict(group="levels", name="Levels", options=[dict(value="high" if model == "second" else "low", name="Native effort")])])]
 
+
+# A replayed agent records its own arguments, which follow the record path.
+if mode == "replay":
+    note("launch", dict(arguments=sys.argv[3:]))
 
 for line in sys.stdin:
     request = json.loads(line)
@@ -128,10 +136,18 @@ for line in sys.stdin:
     elif method == "session/delete" and mode in ["delete", "slow-delete"]:
         if mode == "slow-delete":
             # The test answers the delete by closing this connection.
-            with socket.create_connection(("127.0.0.1", int(port))) as hold:
+            with socket.create_connection(("127.0.0.1", int(value))) as hold:
                 hold.recv(1)
             note("answered session/delete", params)
         reply(request, {})
+    elif method == "session/set_mode" and mode == "replay":
+        reply(request, {})
+    elif method == "session/prompt" and mode == "replay":
+        if params["prompt"][0]["text"] != "/compact":
+            with open(value, encoding="utf-8") as frames:
+                for line in frames:
+                    update(json.loads(line))
+        reply(request, dict(stopReason="end_turn"))
     elif method == "session/prompt":
         if pending:
             update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=pending)))
@@ -144,6 +160,29 @@ for line in sys.stdin:
             send(dict(id=request["id"], error=dict(code=-32603, message="Model overloaded")))
             continue
         if text == "empty":
+            reply(request, dict(stopReason="end_turn"))
+            continue
+        # Like agy's async command: reported running, and never closed once its turn ends.
+        if text == "background":
+            update(dict(sessionUpdate="tool_call", toolCallId="background", kind="execute", title="sleep 600", status="in_progress"))
+            reply(request, dict(stopReason="end_turn"))
+            continue
+        # A command in a session of its own, as agy starts each of its commands, and a helper in the agent's own session.
+        if text in ["detached", "attached"]:
+            children[text] = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=text == "detached")
+            reply(request, dict(stopReason="end_turn"))
+            continue
+        if text == "end-detached":
+            children["detached"].kill()
+            children["detached"].wait()
+            reply(request, dict(stopReason="end_turn"))
+            continue
+        if text == "live-terminal":
+            terminal = reverse("terminal/create", dict(command=sys.executable, args=["-c", "import time; time.sleep(600)"]))["result"]["terminalId"]
+            reply(request, dict(stopReason="end_turn"))
+            continue
+        if text == "kill-live-terminal":
+            reverse("terminal/kill", dict(terminalId=terminal))
             reply(request, dict(stopReason="end_turn"))
             continue
         count += 1

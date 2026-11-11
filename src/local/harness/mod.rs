@@ -531,6 +531,7 @@ pub struct CompactCtx {
     pub model: Option<String>,
     pub project: crate::local::model::LocalProject,
     pub permission_mode: Option<PermissionMode>,
+    pub plan_mode: bool,
     pub service_tier: Option<String>,
     pub reasoning_level: Option<String>,
 }
