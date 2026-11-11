@@ -1,6 +1,6 @@
 //! OpenResearch launch intents: an ephemeral org-billed box for one run. The engine
-//! provisions it at launch; the legacy loop waits for it, runs the payload over SSH, collects
-//! the log, and releases the box.
+//! provisions it at launch, waits for it, runs the payload over SSH, collects the log, and
+//! releases the box.
 
 use crate::client::list_orgs;
 use crate::error::{anyhow, Result};
@@ -74,7 +74,22 @@ pub async fn launch_spec(args: &crate::ExpRunArgs) -> Result<LaunchSpec> {
     // with whatever this machine's ssh offers — so a key registered from another
     // computer leaves the box online but unreachable.
     match ssh_identity::check(&creds).await {
-        ssh_identity::KeyStatus::Matched => {}
+        ssh_identity::KeyStatus::Matched { matched } => {
+            if let Some(private) = ssh_identity::locked(&matched).await {
+                let problem = format!(
+                    "{} needs its passphrase, and no SSH agent holds it, so orx can't reach a box with it. {}, then launch again.",
+                    ssh_identity::tilde(&private),
+                    ssh_identity::unlock_hint(&private)
+                );
+                // macOS ssh may read the passphrase from the keychain without a prompt, and a
+                // config `ssh -G` can't resolve may offer a key orx can't see.
+                if cfg!(target_os = "macos") || ssh_identity::offered_identities().await.is_none() {
+                    eprintln!("warning: {problem}");
+                } else {
+                    return Err(anyhow!("{problem}"));
+                }
+            }
+        }
         ssh_identity::KeyStatus::Unknown { reason } => {
             eprintln!("warning: could not check your registered SSH keys: {reason}");
         }
@@ -86,9 +101,9 @@ pub async fn launch_spec(args: &crate::ExpRunArgs) -> Result<LaunchSpec> {
                 ssh_identity::remediation(&[], &local)
             ));
         }
-        // We only enumerate the agent and ~/.ssh/*.pub, so ssh can still succeed
-        // via an IdentityFile elsewhere or a key whose .pub isn't on disk. Warn
-        // loudly rather than block a launch that would have worked.
+        // ssh can still succeed with a key orx can't see: another agent, a token, or a
+        // passphrase-protected identity file with no .pub beside it. Warn loudly
+        // rather than block a launch that would have worked.
         ssh_identity::KeyStatus::NoLocalMatch { registered, local } => {
             eprintln!(
                 "warning: {}\n\n{}",
