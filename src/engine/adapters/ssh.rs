@@ -143,7 +143,26 @@ impl Ssh {
             ));
         }
         let submitting = matches!(&request, Request::Launch(_) | Request::SlurmSubmit { .. });
+        let pinning = matches!(&request, Request::PinSource { .. });
         match self.conn.request(request).await {
+            // Staging sends no launch: a busy lock or a blob swept before its pin retries next
+            // tick, and any other refusal fails the run with the host's cause.
+            Ok(Response::Error {
+                code: ErrorCode::Busy,
+                ..
+            }) if !submitting => Err(LaunchError::Blocked {
+                contact: crate::store::Contact::Live,
+            }),
+            Ok(Response::Error {
+                code: ErrorCode::NotFound,
+                ..
+            }) if pinning => Err(LaunchError::Blocked {
+                contact: crate::store::Contact::Live,
+            }),
+            Ok(Response::Error { message, .. }) if !submitting => Err(rejected(format!(
+                "Couldn't stage the source on {}: {message}",
+                self.host
+            ))),
             Ok(Response::Error {
                 code: ErrorCode::InvalidRequest | ErrorCode::Conflict,
                 message,
@@ -183,14 +202,20 @@ impl Ssh {
         {
             return Ok(());
         }
-        let mut file = tokio::fs::File::open(path).await.map_err(rejected)?;
-        if file.metadata().await.map_err(rejected)?.len() != len {
+        let unreadable = |error| {
+            rejected(format!(
+                "Couldn't read the source snapshot {}: {error}",
+                path.display()
+            ))
+        };
+        let mut file = tokio::fs::File::open(path).await.map_err(unreadable)?;
+        if file.metadata().await.map_err(unreadable)?.len() != len {
             return Err(rejected("Source snapshot length changed"));
         }
         let mut offset = 0;
         let mut bytes = vec![0; 256 * 1024];
         loop {
-            let read = file.read(&mut bytes).await.map_err(rejected)?;
+            let read = file.read(&mut bytes).await.map_err(unreadable)?;
             if read == 0 && len != 0 {
                 break;
             }
@@ -208,9 +233,9 @@ impl Ssh {
                     offset = remote;
                     file.seek(std::io::SeekFrom::Start(offset))
                         .await
-                        .map_err(rejected)?;
+                        .map_err(unreadable)?;
                 }
-                _ => return Err(interrupted(UNEXPECTED)),
+                _ => return Err(rejected(UNEXPECTED)),
             }
             if offset == len {
                 break;
@@ -232,8 +257,8 @@ impl Ssh {
     }
 
     /// Holds the staged blob in the run dir against source sweeps, one bounded slice per
-    /// request when it must be copied. A blob swept since staging, or a cancel accepted
-    /// meanwhile, fails as Interrupted, so recovery decides what comes next.
+    /// request when it must be copied. A cancel accepted meanwhile fails as Interrupted, so
+    /// recovery decides what comes next; a blob swept since staging is staged again next tick.
     pub(super) async fn pin_source(
         &self,
         run: &str,
@@ -253,7 +278,7 @@ impl Ssh {
             {
                 Response::PinSource { pinned: true } => return Ok(()),
                 Response::PinSource { pinned: false } => {}
-                _ => return Err(interrupted(UNEXPECTED)),
+                _ => return Err(rejected(UNEXPECTED)),
             }
         }
     }
@@ -558,7 +583,7 @@ impl Backend for Ssh {
                         Err(_) if cancelled() => return Recovery::Found(self.handle()),
                         Err(error) => {
                             return Recovery::Unknown {
-                                detail: format!("{error:?}"),
+                                detail: error.to_string(),
                             }
                         }
                     };
@@ -567,8 +592,11 @@ impl Backend for Ssh {
                     }
                     match self.request(Request::Launch(payload)).await {
                         Ok(Response::Launch { .. }) => Recovery::Found(self.handle()),
-                        result => Recovery::Unknown {
-                            detail: format!("SSH recovery: {result:?}"),
+                        Ok(_) => Recovery::Unknown {
+                            detail: UNEXPECTED.into(),
+                        },
+                        Err(error) => Recovery::Unknown {
+                            detail: error.to_string(),
                         },
                     }
                 }
