@@ -444,9 +444,11 @@ with (root/'kubectl.log').open('a') as f: f.write(' '.join(a)+'\n')
 if '--dry-run=client' in a:
     print(sys.stdin.read())
 elif a[0]=='get' and a[1]=='pods':
-    print(json.dumps({'items':[{'metadata':{'name':'pod-1','annotations':{'kubectl.kubernetes.io/default-container':'run'}},'status':{'phase':'Running','containerStatuses':[{'name':'run','state':{'running':{}}}]}}]}))
+    print(json.dumps({'items':[{'metadata':{'name':'pod-1','annotations':{'kubectl.kubernetes.io/default-container':'run'}},'status':{'phase':'Running','containerStatuses':[{'name':'run','state':{'running':{'startedAt':'2026-01-01T00:00:00Z'}}}]}}]}))
 elif a[0]=='get' and a[1]=='job' and a[2]!='-n' and (root/'finished').exists():
     print('{"status":{"succeeded":1}}')
+elif a[0]=='get' and a[1]=='job' and a[2]!='-n':
+    print('{"spec":{"activeDeadlineSeconds":3600}}')
 elif a[0]=='get':
     print((root/'resources.json').read_text())
 elif a[0]=='exec' and 'test' in a:
@@ -594,7 +596,8 @@ else:
 }
 
 /// A cluster whose one Job's pod is whatever `pod.json` says; `cp` fails as a real API server
-/// does until the pod is on a node.
+/// does until the pod is on a node. The Job started at 2026-01-01T00:00:00Z and fails once `now`
+/// (seconds since then) reaches its deadline.
 const WAITING_KUBECTL: &str = r#"#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -604,17 +607,34 @@ with (root/'kubectl.log').open('a') as f: f.write(' '.join(a)+'\n')
 pod = json.loads((root/'pod.json').read_text())
 pod['metadata'] = {'name': 'run-pod', 'annotations': {'kubectl.kubernetes.io/default-container': 'run'}}
 deleted = (root/'deleted').exists()
+job_path = root/'job.json'
+job = json.loads(job_path.read_text()) if job_path.exists() else {'spec': {}}
 if '--dry-run=client' in a:
     print(sys.stdin.read())
-elif a[0] in ('apply', 'create'):
+elif a[0] == 'apply':
     sys.stdin.read()
+elif a[0] == 'create':
+    doc = json.loads(sys.stdin.read())
+    if doc['kind'] == 'Job':
+        job_path.write_text(json.dumps(doc))
+elif a[0] == 'patch':
+    job['spec'].update(json.loads(a[a.index('-p') + 1])['spec'])
+    job_path.write_text(json.dumps(job))
 elif a[0] == 'delete':
     (root/'deleted').touch()
 elif a[:2] == ['get', 'job']:
     if deleted:
         print('Error from server (NotFound): jobs.batch "run" not found', file=sys.stderr)
         sys.exit(1)
-    print(json.dumps({'status': {'active': 1}}))
+    now = int((root/'now').read_text()) if (root/'now').exists() else 0
+    deadline = job['spec'].get('activeDeadlineSeconds')
+    status = {'startTime': '2026-01-01T00:00:00Z'}
+    if deadline is not None and now >= deadline:
+        status['conditions'] = [{'type': 'Failed', 'status': 'True', 'reason': 'DeadlineExceeded',
+                                 'message': 'Job was active longer than specified deadline'}]
+    else:
+        status['active'] = 1
+    print(json.dumps({'spec': job['spec'], 'status': status}))
 elif a[:2] == ['get', 'pods'] and a[-1] == 'json':
     print(json.dumps({'items': [] if deleted else [pod]}))
 elif a[:2] == ['get', 'pods']:
@@ -645,6 +665,12 @@ fn waiting_pod(root: &Path, node: Option<&str>, status: Value) {
 fn script_waiting(reason: &str, message: &str) -> Value {
     json!({"phase": "Pending", "containerStatuses": [
         {"name": "run", "state": {"waiting": {"reason": reason, "message": message}}}
+    ]})
+}
+
+fn script_running(started_at: &str) -> Value {
+    json!({"phase": "Running", "containerStatuses": [
+        {"name": "run", "state": {"running": {"startedAt": started_at}}}
     ]})
 }
 
@@ -732,11 +758,7 @@ async fn k8s_waiting_pod_stays_queued_and_receives_the_source_once_it_runs() {
         clock.clone(),
         root.join("spools"),
     );
-    waiting_pod(
-        &root,
-        Some("gpu-1"),
-        json!({"phase": "Running", "containerStatuses": [{"name": "run", "state": {"running": {}}}]}),
-    );
+    waiting_pod(&root, Some("gpu-1"), script_running("2026-01-01T00:01:00Z"));
     engine
         .observe_runs(&adapter, std::slice::from_ref(&run), budget)
         .await
@@ -756,6 +778,44 @@ async fn k8s_waiting_pod_stays_queued_and_receives_the_source_once_it_runs() {
         1,
         "{calls}"
     );
+}
+
+#[tokio::test]
+async fn k8s_timeout_starts_when_the_script_container_does() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    waiting_pod(
+        &root,
+        None,
+        json!({"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+            "reason": "Unschedulable", "message": "0/2 nodes are available: 2 Insufficient nvidia.com/gpu."}]}),
+    );
+    let (engine, adapter, clock, run) = waiting_run(&root).await;
+    let budget = Duration::from_secs(10);
+    let observe_at = |now: u64| {
+        std::fs::write(root.join("now"), now.to_string()).unwrap();
+        clock.advance(budget);
+        async {
+            engine
+                .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+                .await
+                .unwrap();
+            engine.load("run").unwrap().0
+        }
+    };
+
+    // Waits two hours for a GPU, twice its one-hour timeout.
+    assert_eq!(observe_at(7200).await.status, "starting");
+
+    waiting_pod(&root, Some("gpu-1"), script_running("2026-01-01T02:00:00Z"));
+    assert_eq!(observe_at(7200).await.status, "running");
+    assert_eq!(observe_at(7200 + 3599).await.status, "running");
+
+    let row = observe_at(7200 + 3600).await;
+    assert_eq!(row.status, "failed");
+    let reason = row.result_markdown.unwrap();
+    assert!(reason.contains("DeadlineExceeded"), "{reason}");
 }
 
 #[tokio::test]

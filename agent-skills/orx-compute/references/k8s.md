@@ -44,14 +44,16 @@ The submit-time contract is:
 - Every resource needs `metadata.name`; do not use `generateName` or set a
   foreign namespace. Include `{{ORX_RUN}}` in names to prevent rerun collisions.
 - `orx` injects run labels and the `orx-env` Secret into primary containers. It
-  also supplies defaults for `activeDeadlineSeconds`,
-  `ttlSecondsAfterFinished`, and `backoffLimit: 0` when absent.
+  also supplies defaults for `ttlSecondsAfterFinished` and `backoffLimit: 0`
+  when absent.
 - Auxiliary resources may accompany the Job and are deleted on cancellation.
   They must reference the `orx-env` Secret themselves when needed.
 - The run log follows the primary Job's sole pod.
 - A run whose pod waits for capacity or a slow image pull stays starting, and
-  `orx` copies the source in once the container runs. Kubernetes counts that
-  wait against `activeDeadlineSeconds`, so `--timeout` must cover queue time
-  too. An image that can never be pulled fails the run with the pull error.
+  `orx` copies the source in once the container runs. `--timeout` counts from
+  that start, like Slurm's `--time`: `orx` sets the Job's
+  `activeDeadlineSeconds` then. A deadline the manifest sets counts from Job
+  creation, wait included. An image that can never be pulled fails the run
+  with the pull error.
 
 See [run monitoring](../SKILL.md#who-watches-a-run).

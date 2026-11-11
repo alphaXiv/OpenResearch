@@ -16,8 +16,8 @@
 //!   env var holding the snapshot-and-run script (the run command stays the
 //!   experiment's fixed contract);
 //! - orx injects run labels, the `orx-env` Secret ref, and defaults for
-//!   `activeDeadlineSeconds` / `ttlSecondsAfterFinished` / `backoffLimit`
-//!   when the manifest doesn't set them;
+//!   `ttlSecondsAfterFinished` / `backoffLimit` when the manifest doesn't set
+//!   them, and sets `activeDeadlineSeconds` once the script container starts;
 //! - `{{ORX_RUN}}` in the manifest text is replaced with a run-unique,
 //!   DNS-safe id — use it in resource names so re-runs don't collide;
 //! - every applied resource is recorded on the run, and cancel deletes
@@ -268,7 +268,8 @@ pub struct ManifestSpec {
     /// Synced into the `orx-env` Secret.
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// Injected as `activeDeadlineSeconds` when the manifest doesn't set one.
+    /// Counted from the script container's start, unless the manifest sets
+    /// `activeDeadlineSeconds`.
     pub timeout_seconds: u64,
     pub labels: HashMap<String, String>,
     /// Set on the primary Job's containers, not in the shared `orx-env` Secret.
@@ -388,7 +389,6 @@ pub(crate) async fn prepared_manifest(
         converted_docs,
         namespace,
         &spec.script,
-        spec.timeout_seconds,
         &spec.labels,
         &spec.pod_env,
     )
@@ -492,6 +492,98 @@ pub(crate) async fn stage_source(
     Ok(())
 }
 
+/// Sets the Job's deadline to `timeout_seconds` after its script container in `pod` started, so
+/// waiting for capacity or an image pull doesn't count; a deadline the manifest set stays. Derived
+/// from recorded start times, so a repeat after orx restarts patches the same value.
+pub(crate) async fn start_deadline(
+    context: Option<&str>,
+    namespace: &str,
+    job: &str,
+    pod: &str,
+    timeout_seconds: u64,
+) -> Result<()> {
+    let raw = kubectl(
+        context,
+        &["get", "job", job, "-n", namespace, "-o", "json"],
+        None,
+    )
+    .await?;
+    let job_json: Value = serde_json::from_str(&raw)?;
+    if !job_json["spec"]["activeDeadlineSeconds"].is_null() {
+        return Ok(());
+    }
+
+    let raw = kubectl(
+        context,
+        &["get", "pod", pod, "-n", namespace, "-o", "json"],
+        None,
+    )
+    .await?;
+    let pod_json: Value = serde_json::from_str(&raw)?;
+    let script =
+        pod_json["metadata"]["annotations"]["kubectl.kubernetes.io/default-container"].as_str();
+    let container = pod_json["status"]["containerStatuses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|c| c["name"].as_str() == script);
+    let started = container.and_then(|c| {
+        let state = &c["state"];
+        state["running"]["startedAt"]
+            .as_str()
+            .or(state["terminated"]["startedAt"].as_str())
+    });
+    let job_started = job_json["status"]["startTime"].as_str();
+    let (Some(started), Some(job_started)) = (
+        started.and_then(epoch_seconds),
+        job_started.and_then(epoch_seconds),
+    ) else {
+        return Err(anyhow!(
+            "Could not read when Job {namespace}/{job} and its script container in pod {pod} \
+             started, so the run's timeout can't start"
+        ));
+    };
+
+    let waited = u64::try_from(started - job_started).unwrap_or(0);
+    let patch = json!({"spec": {"activeDeadlineSeconds": waited + timeout_seconds}}).to_string();
+    kubectl(
+        context,
+        &[
+            "patch",
+            "job",
+            job,
+            "-n",
+            namespace,
+            "--type=merge",
+            "-p",
+            &patch,
+        ],
+        None,
+    )
+    .await
+    .with_context(|| format!("Could not start the timeout of Job {namespace}/{job}"))?;
+    Ok(())
+}
+
+/// Seconds since the epoch of a Kubernetes timestamp, which is always UTC to the second.
+fn epoch_seconds(time: &str) -> Option<i64> {
+    if time.len() != 20 || !time.ends_with('Z') {
+        return None;
+    }
+    let field = |range: std::ops::Range<usize>| time.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (field(0..4)?, field(5..7)?, field(8..10)?);
+    let (hour, minute, second) = (field(11..13)?, field(14..16)?, field(17..19)?);
+
+    // Days since 1970-01-01 in the proleptic Gregorian calendar (Hinnant's days_from_civil).
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 /// How the pod ended and which container's logs explain it, once its script container (the
 /// default container `prepare_docs` annotates) or the whole pod has.
 fn pod_exit(pod: &Value) -> Option<(String, String)> {
@@ -545,13 +637,11 @@ pub(crate) fn resource_handle(doc: &Value) -> String {
 ///
 /// Injections: run labels on every doc (and the primary Job's pod template);
 /// `ORX_SCRIPT` and the run context env + `orx-env` envFrom on the primary Job's containers;
-/// `activeDeadlineSeconds` / `ttlSecondsAfterFinished` / `backoffLimit`
-/// defaults on the primary Job when absent.
+/// `ttlSecondsAfterFinished` / `backoffLimit` defaults on the primary Job when absent.
 fn prepare_docs(
     converted: Vec<Value>,
     namespace: &str,
     script: &str,
-    timeout_seconds: u64,
     labels: &HashMap<String, String>,
     pod_env: &[(String, String)],
 ) -> Result<(Vec<Value>, String)> {
@@ -650,9 +740,6 @@ fn prepare_docs(
         ));
     }
     label_map(&mut job["spec"]["template"]["metadata"]["labels"]);
-    if job["spec"]["activeDeadlineSeconds"].is_null() {
-        job["spec"]["activeDeadlineSeconds"] = json!(timeout_seconds);
-    }
     if job["spec"]["ttlSecondsAfterFinished"].is_null() {
         job["spec"]["ttlSecondsAfterFinished"] = json!(86400);
     }
@@ -1257,7 +1344,7 @@ mod tests {
     }
 
     fn prepare(v: Value) -> Result<(Vec<Value>, String)> {
-        prepare_docs(vec![v], "default", "echo hi", 14400, &labels(), &pod_env())
+        prepare_docs(vec![v], "default", "echo hi", &labels(), &pod_env())
     }
 
     #[test]
@@ -1268,7 +1355,7 @@ mod tests {
         assert_eq!(j["metadata"]["namespace"], "default");
         assert_eq!(j["metadata"]["labels"]["or_run"], "r1");
         assert_eq!(j["spec"]["template"]["metadata"]["labels"]["or_run"], "r1");
-        assert_eq!(j["spec"]["activeDeadlineSeconds"], 14400);
+        assert!(j["spec"]["activeDeadlineSeconds"].is_null());
         assert_eq!(j["spec"]["ttlSecondsAfterFinished"], 86400);
         assert_eq!(j["spec"]["backoffLimit"], 0);
         let c = &j["spec"]["template"]["spec"]["containers"][0];
@@ -1312,7 +1399,6 @@ mod tests {
             vec![svc, job("train")],
             "default",
             "echo hi",
-            14400,
             &labels(),
             &pod_env(),
         )
@@ -1425,8 +1511,7 @@ mod tests {
             ("TRACKIO_PROJECT".to_string(), "orx-project".to_string()),
             ("ORX_EXPERIMENT".to_string(), "baseline".to_string()),
         ];
-        let (docs, _) =
-            prepare_docs(vec![j], "default", "echo hi", 14400, &labels(), &pod_env).unwrap();
+        let (docs, _) = prepare_docs(vec![j], "default", "echo hi", &labels(), &pod_env).unwrap();
         let env = docs[0]["spec"]["template"]["spec"]["containers"][0]["env"]
             .as_array()
             .unwrap()

@@ -646,8 +646,8 @@ pub struct ExpRunArgs {
     /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes; Vercel
     /// defaults to 40m on Hobby so a 45-minute session still includes 5 minutes
     /// to read logs and the exit status, and caps a session at 24h otherwise). With
-    /// `--backend k8s` it becomes activeDeadlineSeconds unless the manifest
-    /// sets its own. With `--backend slurm` it becomes `#SBATCH --time=` and
+    /// `--backend k8s` it counts from the run's start, excluding the wait for a
+    /// node or image, unless the manifest sets activeDeadlineSeconds. With `--backend slurm` it becomes `#SBATCH --time=` and
     /// has no 4h default — unset falls back to the slurm settings, then the
     /// cluster's own limit. With `--backend openresearch` it bounds the run's
     /// wall clock on the box (the box itself is deleted when the run ends).

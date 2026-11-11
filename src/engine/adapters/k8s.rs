@@ -5,7 +5,6 @@ use crate::jobs::kubernetes as k8s;
 use async_trait::async_trait;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::Duration;
 
 /// How long one inspect waits for a source copy before reporting it still running.
@@ -305,11 +304,24 @@ async fn stage(context: Option<&str>, namespace: &str, job: &str, run: &str) -> 
     let pod = k8s::leader_pod(context, namespace, job)
         .await?
         .ok_or_else(|| anyhow!("Job {namespace}/{job} has no pod to copy the source into"))?;
+    let spec = launch_spec(run)?;
+    // Before the copy, so the command never runs without its deadline.
+    k8s::start_deadline(context, namespace, job, &pod, spec.timeout_seconds).await?;
     if k8s::source_staged(context, namespace, &pod).await {
         return Ok(Copied::Staged);
     }
-    let archive = source_archive(run)?;
-    if !archive.is_file() {
+    let archive = spec.source_archive;
+    let missing = match tokio::fs::metadata(&archive).await {
+        Ok(metadata) => !metadata.is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            return Err(anyhow!(
+                "Could not read the source snapshot at {}: {error}",
+                archive.display()
+            ))
+        }
+    };
+    if missing {
         return Ok(Copied::Unstartable(format!(
             "The source snapshot for this run is missing at {}, so its pod can never start. Run \
              the experiment again.",
@@ -320,13 +332,12 @@ async fn stage(context: Option<&str>, namespace: &str, job: &str, run: &str) -> 
     Ok(Copied::Staged)
 }
 
-fn source_archive(run: &str) -> Result<PathBuf> {
+fn launch_spec(run: &str) -> Result<k8s::ManifestSpec> {
     let launch = crate::store::Store::open()?
         .engine_run_state(run)?
         .and_then(|state| state.launch)
-        .ok_or_else(|| anyhow!("Run {run} has no launch spec to copy its source from"))?;
-    let spec: k8s::ManifestSpec = serde_json::from_value(launch.options)?;
-    Ok(spec.source_archive)
+        .ok_or_else(|| anyhow!("Run {run} has no launch spec to start it from"))?;
+    Ok(serde_json::from_value(launch.options)?)
 }
 
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
