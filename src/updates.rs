@@ -2146,7 +2146,7 @@ impl UpdateWarning {
                     && release_available(&current, latest, &cache.latest_tag)
             })
         });
-        let automatic = available && auto_update_eligible();
+        let automatic = available && !in_chat && auto_update_eligible();
 
         if let Some(message) = cached_latest
             .as_ref()
@@ -2174,7 +2174,7 @@ impl UpdateWarning {
             );
         }
 
-        if may_update && automatic && !in_chat && attempt_due(cache.as_ref()) {
+        if may_update && automatic && attempt_due(cache.as_ref()) {
             spawn_background_update();
         }
 
