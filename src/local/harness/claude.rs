@@ -43,7 +43,7 @@ use crate::local::chat::{
     find_part_mut, prepare_env, ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx,
     WirePart, WirePrompt, WireQuestionOption, WireToolState,
 };
-use crate::local::claude::{SpawnConfig, SpawnSpec, TurnEvent};
+use crate::local::claude::{starts_segment, SpawnConfig, SpawnSpec, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::installs;
@@ -2327,7 +2327,18 @@ const FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 const BACKGROUND_RESUME_GRACE: Duration = Duration::from_secs(3);
 
 async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u64)> {
+    let resumed_alone = ctx.continuation;
     let (route, mut rx) = loop {
+        if resumed_alone {
+            break ctx
+                .host
+                .claude
+                .take_continuation(&ctx.session_id)
+                .await
+                .ok_or_else(|| {
+                    anyhow!("Claude Code stopped before what it wrote on its own could be recorded")
+                })?;
+        }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let acquire = ctx.host.claude.acquire_turn(spec.clone(), tx);
         let result = match ctx.orx_retry_remaining() {
@@ -2363,13 +2374,15 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
     let auth_generation = client.auth_generation();
     let bridge_active = client.config().bridge_active;
     ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
-    ctx.persist_delivery(DeliveryState::Unknown)?;
-    if let Err(e) = client.send_user_message(&ctx.text).await {
-        ctx.host.claude.kill_session(&ctx.session_id).await;
-        return Err(anyhow!(
-            "claude stdin write failed: {e}; see {}",
-            crate::store::data_dir().join("agent-claude.log").display()
-        ));
+    if !resumed_alone {
+        ctx.persist_delivery(DeliveryState::Unknown)?;
+        if let Err(e) = client.send_user_message(&ctx.text).await {
+            ctx.host.claude.kill_session(&ctx.session_id).await;
+            return Err(anyhow!(
+                "claude stdin write failed: {e}; see {}",
+                crate::store::data_dir().join("agent-claude.log").display()
+            ));
+        }
     }
 
     let mut state = TurnState {
@@ -2377,7 +2390,11 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         ..Default::default()
     };
     let mut saw_event = false;
-    let mut saw_user_echo = false;
+    // A continuation has no prompt: everything the child writes is the turn.
+    let mut saw_user_echo = resumed_alone;
+    // On a child that has served a turn, a segment it starts on its own before
+    // the prompt's echo, held or not, is folded in; its `result` ends nothing.
+    let folds_before_echo = route.served() && !resumed_alone;
     // Absolute, so steering can't push it back: a wedged child that the user
     // keeps typing at must still trip the detector.
     let mut deadline = tokio::time::Instant::now() + FIRST_EVENT_TIMEOUT;
@@ -2468,11 +2485,17 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 if accepted_now {
                     ctx.mark_delivery(DeliveryState::Accepted);
                 }
-                if !belongs {
+                if accepted_now && folds_before_echo {
+                    // A folded segment's failure was its own; the prompt's result decides this turn.
+                    state.turn_errored = false;
+                    state.usage_limited = false;
+                    state.auth_failed = false;
+                    ctx.terminal_error = None;
+                }
+                let folded = folds_before_echo && !accepted_now;
+                if !belongs && !folded {
                     saw_event = true;
-                    if value.get("type").and_then(Value::as_str) == Some("system")
-                        && value.get("subtype").and_then(Value::as_str) == Some("init")
-                    {
+                    if starts_segment(&value) {
                         if let Some(sid) = value.get("session_id").and_then(Value::as_str) {
                             state.native_session_id = Some(sid.to_string());
                         }
@@ -2480,26 +2503,50 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                     continue;
                 }
                 saw_event = true;
-                let done = apply_event(ctx, &mut state, &value);
+                let done = apply_event(ctx, &mut state, &value) && saw_user_echo;
                 if state.had_activity {
                     commit_attempt_session(ctx, &state);
                 }
                 ctx.maybe_flush();
                 if done {
-                    // A turn that spawned background sub-agents can auto-resume
-                    // right AFTER its result (the CLI queues a completed task's
-                    // report as a fresh segment: init + messages + another
-                    // result). Give that continuation a short window to show up
-                    // before ending the turn; a quiet window means the report
-                    // was already delivered in this segment. A failed turn has nothing to resume.
-                    if !state.saw_background_task || state.turn_errored {
+                    // The turn goes on only into another segment's `init`: one
+                    // already waiting (a second held segment) or, after background
+                    // sub-agents, the report the CLI queues as a fresh segment
+                    // right after the result. A quiet window means the report was
+                    // already delivered in this segment; a failed turn has nothing
+                    // to resume. Task updates before that `init` are applied, and
+                    // a closed child just ends the finished turn. The route ends
+                    // only once nothing more is queued for it, so a segment that
+                    // starts as the turn ends is held for another turn, not lost.
+                    let grace = state.saw_background_task && !state.turn_errored;
+                    if grace {
+                        let _ = ctx.flush();
+                    }
+                    let until = tokio::time::Instant::now()
+                        + if grace {
+                            BACKGROUND_RESUME_GRACE
+                        } else {
+                            Duration::ZERO
+                        };
+                    let next_segment = loop {
+                        let event = match tokio::time::timeout_at(until, rx.recv()).await {
+                            Ok(event) => event,
+                            Err(_) => route.end(&mut rx),
+                        };
+                        match event {
+                            Some(TurnEvent::Line(line)) if starts_segment(&line) => {
+                                break Some(line)
+                            }
+                            Some(TurnEvent::Line(line)) => {
+                                apply_event(ctx, &mut state, &line);
+                            }
+                            _ => break None,
+                        }
+                    };
+                    let Some(init) = next_segment else {
                         break;
-                    }
-                    let _ = ctx.flush();
-                    match tokio::time::timeout(BACKGROUND_RESUME_GRACE, rx.recv()).await {
-                        Ok(Some(event)) => queued = Some(event),
-                        _ => break,
-                    }
+                    };
+                    queued = Some(TurnEvent::Line(init));
                 }
             }
             TurnEvent::Closed => {
@@ -2690,6 +2737,145 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+    use serde_json::json;
+    #[cfg(unix)]
+    use std::sync::Arc;
+
+    /// The lines Claude writes when it resumes on its own and replies `reply`.
+    fn segment(reply: &str) -> Vec<Value> {
+        vec![
+            json!({"type": "system", "subtype": "init", "session_id": "native"}),
+            json!({"type": "assistant", "message": {"id": reply,
+                "content": [{"type": "text", "text": reply}]}}),
+            json!({"type": "result", "subtype": "success"}),
+        ]
+    }
+
+    /// A turn on a fake Claude worker that has served one turn and then written
+    /// `held` on its own, after which it exits if `exited`. With a `prompt` the
+    /// turn sends it; without, it records the held segment.
+    #[cfg(unix)]
+    async fn turn_after_continuation(
+        prompt: Option<&str>,
+        held: &[Value],
+        exited: bool,
+    ) -> (TurnCtx, Result<(TurnState, u64)>) {
+        use crate::local::claude::terminate_client;
+        use crate::local::claude::tests::{echo_worker, emit, serve_turn};
+
+        let (claude, client) = echo_worker("test-session").await;
+        serve_turn(&claude, &client).await;
+        emit(&client, held).await;
+        if exited {
+            terminate_client(&client).await;
+        }
+
+        let mut ctx = TurnCtx::test_stub();
+        ctx.host = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            claude.clone(),
+        ));
+        match prompt {
+            Some(prompt) => ctx.text = prompt.into(),
+            None => ctx.continuation = claude.claim_continuation("test-session").await,
+        }
+        let spec = SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo: PathBuf::new(),
+            playbook: PathBuf::new(),
+            resume: None,
+            config: client.config(),
+        };
+        let attempt =
+            tokio::time::timeout(Duration::from_secs(5), run_attempt(&mut ctx, spec)).await;
+        claude.shutdown().await;
+        (ctx, attempt.expect("the turn ends"))
+    }
+
+    fn texts(ctx: &TurnCtx) -> Vec<&str> {
+        ctx.assistant
+            .parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn continuation_turn_records_what_claude_wrote_on_its_own() {
+        let (ctx, attempt) = turn_after_continuation(None, &segment("TASK_DONE"), false).await;
+        let (state, _) = attempt.unwrap();
+        assert!(state.saw_result);
+        assert_eq!(texts(&ctx), ["TASK_DONE"]);
+        assert_eq!(ctx.native_session_id.as_deref(), Some("native"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn continuation_turn_records_every_segment_already_held() {
+        let next = [
+            json!({"type": "system", "subtype": "task_notification", "task_id": "b"}),
+            json!({"type": "system", "subtype": "background_tasks_changed", "tasks": []}),
+        ];
+        let held = [segment("TASK_DONE"), next.to_vec(), segment("AGAIN")].concat();
+        let (ctx, attempt) = turn_after_continuation(None, &held, false).await;
+        attempt.unwrap();
+        assert_eq!(texts(&ctx), ["TASK_DONE", "AGAIN"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn continuation_turn_ends_at_its_result_when_task_updates_follow() {
+        let updates = [
+            json!({"type": "system", "subtype": "task_notification", "task_id": "b"}),
+            json!({"type": "system", "subtype": "background_tasks_changed", "tasks": []}),
+        ];
+        let held = [segment("TASK_DONE"), updates.to_vec()].concat();
+        let (ctx, attempt) = turn_after_continuation(None, &held, false).await;
+        attempt.unwrap();
+        assert_eq!(texts(&ctx), ["TASK_DONE"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn continuation_turn_keeps_its_reply_when_the_child_has_exited() {
+        let (ctx, attempt) = turn_after_continuation(None, &segment("TASK_DONE"), true).await;
+        attempt.unwrap();
+        assert_eq!(texts(&ctx), ["TASK_DONE"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompted_turn_keeps_a_held_continuation_and_ends_at_its_own_result() {
+        let (ctx, attempt) =
+            turn_after_continuation(Some("next"), &segment("TASK_DONE"), false).await;
+        attempt.unwrap();
+        assert_eq!(texts(&ctx), ["TASK_DONE", "REPLY"]);
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompted_turn_keeps_a_continuation_the_child_starts_before_the_echo() {
+        let (ctx, attempt) = turn_after_continuation(Some("RESUMES_FIRST"), &[], false).await;
+        attempt.unwrap();
+        assert_eq!(texts(&ctx), ["TASK_DONE", "REPLY"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompted_turn_is_not_failed_by_a_held_continuation_that_failed() {
+        let mut held = segment("TASK_DONE");
+        held[2] = json!({"type": "result", "subtype": "error_during_execution",
+            "is_error": true, "result": "tool crashed"});
+        let (ctx, attempt) = turn_after_continuation(Some("next"), &held, false).await;
+        let (state, _) = attempt.unwrap();
+        assert!(!state.turn_errored);
+        assert!(ctx.terminal_error.is_none());
+        assert_eq!(texts(&ctx).last(), Some(&"REPLY"));
+    }
 
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {
