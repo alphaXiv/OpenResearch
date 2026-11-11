@@ -813,16 +813,18 @@ fn a_caller_with_its_own_config_dir_launches_only_with_the_settings_orx_up_uses(
     assert!(started.status.success(), "{}", diagnostics(&started));
     let agent_config = sandbox.root.join("agent-config");
     let slurm = |partition: &str| format!(r#"{{"partition":"{partition}"}}"#);
-    let launch = || {
+    let launch_with = |flags: &[&str]| {
         let output = sandbox
             .command()
             .env("XDG_CONFIG_HOME", &agent_config)
             .args(["exp", "run", "exp", "--force", "--backend", "slurm"])
             .args(["--host", sandbox.server.alias()])
+            .args(flags)
             .output()
             .unwrap();
         String::from_utf8_lossy(&output.stderr).into_owned()
     };
+    let launch = || launch_with(&[]);
     let refused = |stderr: &str| stderr.contains(agent_config.to_str().unwrap());
 
     let empty = launch();
@@ -846,4 +848,17 @@ fn a_caller_with_its_own_config_dir_launches_only_with_the_settings_orx_up_uses(
     .unwrap();
     let equal = launch();
     assert!(!refused(&equal), "{equal}");
+
+    let limits = |mem: &str| format!(r#"{{"partition":"gpu","mem":"{mem}"}}"#);
+    std::fs::write(agent_config.join("openresearch/slurm.json"), limits("32G")).unwrap();
+    std::fs::write(
+        sandbox.root.join("config/openresearch/slurm.json"),
+        limits("64G"),
+    )
+    .unwrap();
+    let saved_limit = launch();
+    assert!(refused(&saved_limit), "{saved_limit}");
+    assert!(saved_limit.contains("mem"), "{saved_limit}");
+    let flagged = launch_with(&["--mem", "16G"]);
+    assert!(!refused(&flagged), "{flagged}");
 }

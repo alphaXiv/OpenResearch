@@ -3138,6 +3138,12 @@ pub(crate) async fn launch_settings(
                 ),
                 ("account".into(), file.account),
                 ("remoteRoot".into(), file.remote_root),
+                ("timeLimit".into(), args.timeout.clone().or(file.time_limit)),
+                (
+                    "cpusPerTask".into(),
+                    args.cpus.or(file.cpus_per_task).map(|n| n.to_string()),
+                ),
+                ("mem".into(), args.mem.clone().or(file.mem)),
             ]);
             (settings, set)
         }
