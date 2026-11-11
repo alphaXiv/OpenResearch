@@ -3130,6 +3130,8 @@ pub(crate) async fn launch_settings(
             let file = slurm::load_settings()?;
             let set = file.is_some();
             let file = file.unwrap_or_default();
+            let sbatch_args: Vec<_> = file.sbatch_args.iter().chain(&args.sbatch_args).collect();
+            let sbatch_args = serde_json::to_string(&sbatch_args)?;
             let settings = LaunchSettings::from([
                 ("host".into(), args.host.clone().or(file.host)),
                 (
@@ -3144,6 +3146,12 @@ pub(crate) async fn launch_settings(
                     args.cpus.or(file.cpus_per_task).map(|n| n.to_string()),
                 ),
                 ("mem".into(), args.mem.clone().or(file.mem)),
+                ("qos".into(), args.qos.clone().or(file.qos)),
+                ("sbatchArgs".into(), Some(sbatch_args)),
+                (
+                    "requestOneTask".into(),
+                    Some((file.request_one_task != Some(false)).to_string()),
+                ),
             ]);
             (settings, set)
         }

@@ -861,4 +861,51 @@ fn a_caller_with_its_own_config_dir_launches_only_with_the_settings_orx_up_uses(
     assert!(saved_limit.contains("mem"), "{saved_limit}");
     let flagged = launch_with(&["--mem", "16G"]);
     assert!(!refused(&flagged), "{flagged}");
+
+    let save = |caller: &str, own: &str| {
+        let saved = |field: &str| format!(r#"{{"partition":"gpu",{field}}}"#);
+        std::fs::write(agent_config.join("openresearch/slurm.json"), saved(caller)).unwrap();
+        std::fs::write(
+            sandbox.root.join("config/openresearch/slurm.json"),
+            saved(own),
+        )
+        .unwrap();
+    };
+    for (name, caller, own) in [
+        ("qos", r#""qos":"acc_debug""#, r#""qos":"acc_ehpc""#),
+        (
+            "sbatchArgs",
+            r#""sbatchArgs":["--rsc g=1"]"#,
+            r#""sbatchArgs":[]"#,
+        ),
+        (
+            "requestOneTask",
+            r#""requestOneTask":false"#,
+            r#""requestOneTask":true"#,
+        ),
+    ] {
+        save(caller, own);
+        let stderr = launch();
+        assert!(
+            refused(&stderr) && stderr.contains(name),
+            "{name}: {stderr}"
+        );
+    }
+    save(r#""qos":"acc_debug""#, r#""qos":"acc_ehpc""#);
+    let qos_flag = launch_with(&["--qos", "acc_debug"]);
+    assert!(!refused(&qos_flag), "{qos_flag}");
+
+    // Without the setting, orx writes --ntasks=1 just as `true` asks.
+    std::fs::write(
+        agent_config.join("openresearch/slurm.json"),
+        r#"{"partition":"gpu","requestOneTask":true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        sandbox.root.join("config/openresearch/slurm.json"),
+        r#"{"partition":"gpu"}"#,
+    )
+    .unwrap();
+    let one_task = launch();
+    assert!(!refused(&one_task), "{one_task}");
 }
