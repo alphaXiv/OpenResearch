@@ -721,24 +721,26 @@ impl Store {
         Ok(())
     }
 
-    /// The native model id the chat's harness last reported a call from, sub-agents included.
-    /// The chat's configured model is no substitute: Claude Code's is an alias such as `opus`.
+    /// The native model id behind the chat's latest reported call, sub-agents included; `None`
+    /// when that label names no model, such as Cursor's `Auto`. The chat's configured model is
+    /// no substitute: Claude Code's is an alias such as `opus`.
     pub(crate) fn last_reported_chat_model(&self, session_id: &str) -> Result<Option<String>> {
-        Ok(self
+        let latest: Option<(String, String)> = self
             .conn
             .query_row(
-                "SELECT model FROM (
-                     SELECT COALESCE(s.model, json_extract(n.identity_json, '$.model')) AS model, s.rowid AS seq
-                     FROM chat_usage_samples s
-                     JOIN chat_usage_executions u ON u.execution_id = s.execution_id
-                     JOIN chat_turns t ON t.id = u.turn_id
-                     LEFT JOIN native_invocation_identities n ON n.harness = s.harness AND n.call_id = s.sample_id
-                     WHERE t.session_id = ?1
-                 ) WHERE model IS NOT NULL ORDER BY seq DESC LIMIT 1",
+                "SELECT s.harness, s.model FROM chat_usage_samples s
+                 JOIN chat_usage_executions u ON u.execution_id = s.execution_id
+                 JOIN chat_turns t ON t.id = u.turn_id
+                 WHERE t.session_id = ?1 AND s.model IS NOT NULL
+                 ORDER BY s.rowid DESC LIMIT 1",
                 [session_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()?)
+            .optional()?;
+        Ok(latest.and_then(|(harness, model)| {
+            let (attribution, _) = chat_attribution(&harness, Some(&model), true, None);
+            (attribution == "exact").then_some(model)
+        }))
     }
 }
 
@@ -1803,20 +1805,19 @@ mod tests {
             .begin_usage_execution("e2", "t2", "claude-code")
             .unwrap();
         store
-            .record_native_invocation(
+            .record_usage_sample(
+                "e2",
                 "s2",
-                &InvocationIdentity {
-                    harness: "claude-code".into(),
-                    model: "claude-opus-5-5".into(),
-                    provider: None,
-                },
-                Some("chat"),
+                "claude-code",
+                Some("claude-opus-5-5"),
+                None,
+                &TokenUsage::default(),
             )
             .unwrap();
         store
             .record_usage_sample(
                 "e2",
-                "s2",
+                "s3",
                 "claude-code",
                 None,
                 None,
@@ -1839,6 +1840,18 @@ mod tests {
             store.last_reported_chat_model("chat").unwrap().as_deref(),
             Some("claude-opus-5-5")
         );
+
+        store
+            .record_usage_sample(
+                "e2",
+                "s4",
+                "claude-code",
+                Some("<synthetic>"),
+                None,
+                &TokenUsage::default(),
+            )
+            .unwrap();
+        assert_eq!(store.last_reported_chat_model("chat").unwrap(), None);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
