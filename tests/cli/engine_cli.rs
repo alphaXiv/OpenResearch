@@ -31,8 +31,7 @@ impl Sandbox {
 
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_orx"));
-        command
-            .env("HOME", &self.root)
+        crate::home::isolate_home(&mut command, &self.root)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("ORX_DATA_DIR", self.data())
             .env("ORX_NO_UPDATE_CHECK", "1")
@@ -48,8 +47,7 @@ impl Sandbox {
     }
 
     fn stop_service(&self) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_orx"))
-            .env("HOME", &self.root)
+        crate::home::isolate_home(&mut Command::new(env!("CARGO_BIN_EXE_orx")), &self.root)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("ORX_DATA_DIR", self.data())
             .args(["ssh-service", "stop"])

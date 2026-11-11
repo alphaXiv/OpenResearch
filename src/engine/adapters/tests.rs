@@ -1126,20 +1126,10 @@ async fn submission_child() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_engine_at_each_submission_boundary_then_restart_executes_once() {
-    if std::env::var_os("ORX_ADAPTER_CRASH_PARENT").is_none() {
-        let output = crate::process::tokio_command(std::env::current_exe().unwrap())
-            .args(["--exact", "engine::adapters::tests::kill_engine_at_each_submission_boundary_then_restart_executes_once", "--nocapture"])
-            .env("ORX_ADAPTER_CRASH_PARENT", "1")
-            .env(crate::jobs::tinker::API_KEY_ENV, "test-only-tinker-key")
-            .output().await.unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if !crate::config::in_test_child(&[]) {
         return;
     }
+    std::env::set_var(crate::jobs::tinker::API_KEY_ENV, "test-only-tinker-key");
 
     let mut f = Fixture::new().await;
     let local = Local::new(f.server.directory().join("local-runs"));

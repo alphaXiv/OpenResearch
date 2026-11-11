@@ -662,7 +662,7 @@ mod tests {
         assert!(protocol_for_version("0.0.0-next-unknown").is_err());
         assert!(protocol_for_version("3.0.0").is_err());
         let probe = ProbeEnvironment::new().unwrap();
-        let mut cmd = crate::process::tokio_command("opencode");
+        let mut cmd = crate::process::tokio_command(std::env::temp_dir().join("opencode"));
         cmd.env("OPENCODE_DB", "/do-not-open/user.db");
         probe.configure(&mut cmd);
         let env: std::collections::HashMap<_, _> = cmd.as_std().get_envs().collect();

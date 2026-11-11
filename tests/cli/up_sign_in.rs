@@ -60,7 +60,7 @@ async fn openresearch_sign_in_from_another_machine_shows_a_code() {
         .local_addr()
         .unwrap()
         .port();
-    let up = Command::new(env!("CARGO_BIN_EXE_orx"))
+    let up = crate::home::isolate_home(&mut Command::new(env!("CARGO_BIN_EXE_orx")), &root)
         .args([
             "--no-telemetry",
             "up",
@@ -70,7 +70,6 @@ async fn openresearch_sign_in_from_another_machine_shows_a_code() {
             "--port",
         ])
         .arg(port.to_string())
-        .env("HOME", &root)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("share"))
         .env("ORX_DATA_DIR", root.join("data"))

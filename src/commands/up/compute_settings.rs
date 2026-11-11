@@ -418,7 +418,7 @@ pub(super) async fn set_k8s_settings(Json(req): Json<SetK8sSettingsReq>) -> ApiR
 /// (wildcard patterns skipped) — read-only groundwork for an SSH compute
 /// backend. No keys are read.
 pub(super) fn list_ssh_hosts() -> Vec<Value> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::config::home_dir() else {
         return Vec::new();
     };
     ssh_hosts_in(&home)
@@ -815,7 +815,7 @@ pub(super) async fn save_ssh_default(Json(req): Json<SaveSshDefaultReq>) -> ApiR
 }
 
 pub(super) fn ssh_config_path() -> Result<std::path::PathBuf> {
-    Ok(dirs::home_dir()
+    Ok(crate::config::home_dir()
         .ok_or_else(|| anyhow!("no home directory"))?
         .join(".ssh")
         .join("config"))
@@ -2139,6 +2139,16 @@ Host b
         assert_eq!(hosts.len(), SSH_INCLUDE_MAX_DEPTH - 1);
         assert_eq!(hosts[0]["host"], "depth-0");
         assert_eq!(hosts.last().unwrap()["host"], "depth-14");
+    }
+
+    #[test]
+    fn the_ssh_config_resolves_inside_the_test_home_whatever_home_is() {
+        let path = ssh_config_path().unwrap();
+        assert!(
+            path.starts_with(crate::config::test_home()),
+            "{}",
+            path.display()
+        );
     }
 }
 
