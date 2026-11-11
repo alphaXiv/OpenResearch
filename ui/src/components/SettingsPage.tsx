@@ -3,7 +3,6 @@ import { useSignIn } from "./AccountChip";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
 import {
   useContext,
-  useId,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -47,7 +46,6 @@ import {
   mutSetEnvVar,
   mutSetGithubForNewProjects,
   mutSetReleaseChannel,
-  mutSetRunEngine,
   mutSetTelemetry,
   mutSignOutOpenResearch,
   mutUpdateUiState,
@@ -2316,40 +2314,6 @@ function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onE
     </DialogContent>;
 }
 
-function RunEngineSetting() {
-  const workspace = useWorkspace();
-
-  const id = useId();
-  const engineQuery = useQuery(workspace.queries.getRunEngineQuery());
-  const engineMutation = useMutate(mutSetRunEngine);
-  const failure = engineMutation.error ?? engineQuery.error;
-
-  return (
-    <div className={SETTINGS_CARD_CLASS_NAME}>
-      <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
-        <div>
-          <div id={`run-engine-label-${id}`} className="project-default-title text-base font-medium">{m.settings_run_engine_label()}</div>
-          <div id={`run-engine-description-${id}`}>
-            <p>{m.settings_run_engine_description()}</p>
-            <p>{m.settings_run_engine_note()}</p>
-            {engineQuery.data?.forcedBy === "canary" && <p>{m.settings_run_engine_canary()}</p>}
-            {engineQuery.data?.forcedBy === "environment" && <p>{m.settings_run_engine_override()}</p>}
-          </div>
-        </div>
-        <Switch
-          type="button"
-          checked={engineQuery.data?.enabled ?? false}
-          disabled={!engineQuery.data || engineQuery.data.forcedBy !== null}
-          aria-labelledby={`run-engine-label-${id}`}
-          aria-describedby={`run-engine-description-${id}`}
-          onClick={() => engineMutation.run(workspace, !engineQuery.data?.enabled)}
-        />
-      </div>
-      {failure && <div role="alert" className="error">{failure instanceof Error ? failure.message : String(failure)}</div>}
-    </div>
-  );
-}
-
 function ComputeTab({
   project,
   onViewHistory,
@@ -2456,7 +2420,6 @@ function ComputeTab({
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
-      <RunEngineSetting />
       <ComputeActivity projectId={project?.id} onViewHistory={onViewHistory} />
       {loadError ? (
         <div className="error">{loadError}</div>
@@ -4303,9 +4266,6 @@ export function SettingsView({
         <>
           <h1 tabIndex={-1}>{m.settings_page_settings()}</h1>
           <div className="settings-stack mt-4.5">
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <RunEngineSetting />
-            </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
             </section>

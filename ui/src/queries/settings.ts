@@ -61,12 +61,6 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 300_000,
   });
 
-  const getRunEngineQuery = () => queryOptions({
-    queryKey: workspaceKey("getRunEngine"),
-    queryFn: ({ signal }) => api.getRunEngine(signal),
-    staleTime: 30_000,
-  });
-
   const getComputeSettingsQuery = (projectId?: string) => queryOptions({
     queryKey: workspaceKey("getComputeSettings", projectId ?? null),
     queryFn: ({ signal }) => api.getComputeSettings(projectId, signal),
@@ -203,6 +197,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 30_000,
   });
 
+  const getPendingWorkQuery = () => queryOptions({
+    queryKey: workspaceKey("getPendingWork"),
+    queryFn: ({ signal }) => api.getPendingWork(signal),
+    refetchInterval: 1_000,
+  });
+
   const getBuildNotesQuery = () => queryOptions({
     queryKey: workspaceKey("getBuildNotes"),
     queryFn: ({ signal }) => api.getBuildNotes(signal),
@@ -325,7 +325,6 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     getVercelSettingsQuery,
     getSlurmSettingsQuery,
     getRaySettingsQuery,
-    getRunEngineQuery,
     getComputeSettingsQuery,
     getLocalMachineQuery,
     getPublicNetworkQuery,
@@ -346,6 +345,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     getRuntimeQuery,
     listRemoteSessionsQuery,
     getUpdateStatusQuery,
+    getPendingWorkQuery,
     getBuildNotesQuery,
     getLitSourcesQuery,
     getProjectDefaultsQuery,
@@ -484,20 +484,6 @@ export const mutSetComputeDefault = mutations.define({
   refetchOnSuccess: false,
 });
 
-export const mutSetRunEngine = mutations.define({
-  id: "settings/run-engine",
-  mutate: (ws: Workspace, enabled: boolean) => ws.api.setRunEngine(enabled),
-  optimistic({ helpers, args: [ws, enabled], onSuccess }) {
-    const options = ws.queries.getRunEngineQuery();
-    helpers(ws.queryClient).objSet(options, ["enabled"], enabled);
-    onSuccess((saved) => ws.setScopedQueryData(options.queryKey, saved));
-  },
-  key: ({ args: [ws] }) => [ws.identity, "run-engine"],
-  describe: "switch the run engine",
-  describeResult: null,
-  refetchOnSuccess: false,
-});
-
 export const mutRetryEngineHost = mutations.define({
   id: "settings/engine-host-retry",
   mutate: (ws: Workspace, alias: string) => ws.api.retryEngineHost(alias),
@@ -577,7 +563,7 @@ export const mutSetReleaseChannel = mutations.define({
 
 export const mutRestartApp = mutations.define({
   id: "update/restart",
-  mutate: (ws: Workspace) => ws.api.restartApp(),
+  mutate: (ws: Workspace, stopAgents: boolean) => ws.api.restartApp(stopAgents),
   optimistic: () => {},
   describe: "restart OpenResearch",
   describeResult: null,

@@ -42,4 +42,4 @@ orx exp run <expId> --backend vercel --flavor 4 --image vercel/sandbox/universal
 OpenResearch stops and destroys the sandbox once the run ends and its logs
 are collected.
 
-See [run monitoring](../SKILL.md#run-engine-setting).
+See [run monitoring](../SKILL.md#who-watches-a-run).

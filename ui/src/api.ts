@@ -506,6 +506,35 @@ export interface BuildNotes {
   commits: string[];
 }
 
+/** What quitting does to a pending experiment. */
+export type AfterQuit = "reports" | "continues" | "needsApp";
+
+export interface PendingAgent {
+  projectId: string;
+  project: string | null;
+  sessionId: string;
+  sideParentId: string | null;
+  harness: HarnessId;
+  title: string | null;
+}
+
+export interface PendingRun {
+  projectId: string;
+  project: string | null;
+  experimentId: string;
+  runId: string;
+  sessionId: string | null;
+  name: string;
+  backend: string | null;
+  afterQuit: AfterQuit;
+}
+
+/** What a quit would interrupt on this machine. */
+export interface PendingWork {
+  agents: PendingAgent[];
+  runs: PendingRun[];
+}
+
 export interface UpdateStatus {
   current: string;
   /** Latest published release on the selected channel. */
@@ -1644,11 +1673,6 @@ export interface PublicProject {
 /** Where a shared project comes from: a picked file, a file on this machine, or a published link. */
 export type SharedSource = File | string | { link: string };
 
-export interface RunEngineSettings {
-  enabled: boolean;
-  forcedBy: "canary" | "environment" | null;
-}
-
 export function createApi(
   client: WorkspaceClient,
   invalidation: WorkspaceInvalidation,
@@ -2139,14 +2163,16 @@ export function createApi(
 
   const getUpdateStatus = (signal?: AbortSignal) => get<UpdateStatus>("/api/update", signal);
 
+  const getPendingWork = (signal?: AbortSignal) => get<PendingWork>("/api/pending-work", signal);
+
   const getBuildNotes = (signal?: AbortSignal) => get<BuildNotes | null>("/api/update/notes", signal);
 
   const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
 
-  /** Relaunch the server into the copy the updater installed. The old server
-   *  answers and then goes away; poll `getUpdateStatus` for the new one. */
-  const restartApp = () =>
-    post<{ restarting: boolean; version: string }>("/api/update/restart");
+  /** Relaunch the server into the copy the updater installed, stopping any agent at work when `stopAgents`.
+   *  The old server answers and then goes away; poll `getUpdateStatus` for the new one. */
+  const restartApp = (stopAgents = false) =>
+    post<{ restarting: boolean; version: string }>("/api/update/restart", { stopAgents });
 
   const setAutoUpdate = (enabled: boolean) =>
     post<UpdateStatus>("/api/update/auto", { enabled });
@@ -2279,10 +2305,6 @@ export function createApi(
     get<TrackioRuns>(`/api/trackio/projects/${encodeURIComponent(projectId)}/runs`, signal);
 
   const trackioPreflight = () => post<TrackioPreflight>("/api/settings/trackio/preflight", {});
-
-  const getRunEngine = (signal?: AbortSignal) => get<RunEngineSettings>("/api/settings/run-engine", signal);
-
-  const setRunEngine = (enabled: boolean) => post<RunEngineSettings>("/api/settings/run-engine", { enabled });
 
   const getComputeSettings = (projectId?: string, signal?: AbortSignal) =>
     get<ComputeSettings>(
@@ -2788,6 +2810,7 @@ export function createApi(
     getTinkerSettings,
     saveTinkerKey,
     getUpdateStatus,
+    getPendingWork,
     getBuildNotes,
     applyUpdate,
     restartApp,
@@ -2833,8 +2856,6 @@ export function createApi(
     rayPreflight,
     getTrackioRuns,
     trackioPreflight,
-    getRunEngine,
-    setRunEngine,
     getComputeSettings,
     setComputeDefault,
     getLocalMachine,

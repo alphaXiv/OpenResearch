@@ -408,8 +408,7 @@ impl Runtime {
     }
 
     fn tick(self: &Arc<Self>) -> Result<()> {
-        self.engine
-            .scan_legacy(crate::config::run_engine_settings()?.0)?;
+        self.engine.scan_legacy()?;
         self.engine.check_outages()?;
         let store = self.store()?;
         // Deleted from the dashboard or the CLI alike.
@@ -1039,7 +1038,6 @@ impl Commands for Runtime {
             };
             let supervised = || -> Result<bool> {
                 Ok(crate::compute::supervised_ssh_needed(
-                    crate::config::run_engine_settings()?.0,
                     &self.store()?.list_active_runs()?,
                     &host,
                     |id| self.engine.holds(id),

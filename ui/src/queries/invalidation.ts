@@ -40,7 +40,6 @@ const settingsFamilies: Record<string, readonly string[]> = {
   "lit-sources": ["getLitSources"],
   projects: ["getProjectDefaults", "getProjectGitStatus"],
   telemetry: ["getTelemetry"],
-  "run-engine": ["getRunEngine", "listEngineHosts"],
 };
 export function createInvalidation(client: WorkspaceClient) {
   const {

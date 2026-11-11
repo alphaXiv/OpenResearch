@@ -125,18 +125,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
         local::chat::reconcile_unfinished_turns(&store)?;
         // Under the engine lock, before any notice can be produced.
         store.migrate_run_wakeups()?;
-        if !crate::config::run_engine_settings()?.0 {
-            for run in store.list_active_runs()? {
-                if !crate::engine::is_engine_row(&run)
-                    && store.get_local_experiment(&run.experiment_id)?.is_some()
-                {
-                    store.watch_legacy_run(&run.id, None)?;
-                    if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
-                        eprintln!("could not recover supervisor for run {}: {err}", run.id);
-                    }
-                }
-            }
-        }
     }
     let clock: Arc<dyn crate::engine::clock::Clock> =
         Arc::new(crate::engine::clock::SystemClock::new());
@@ -243,10 +231,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_gate.clone(),
     ));
     runtime.start();
-    tokio::spawn(adopt_orphaned_runs(
-        state.data_dir_move_in_progress.clone(),
-        state.data_dir_gate.clone(),
-    ));
     tokio::spawn(reclaim_orphaned_run_artifacts(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
@@ -395,6 +379,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
         drop(backend_lock);
+        if let Err(error) = crate::commands::remote_host::ServerDescriptor::withdraw(&data_dir) {
+            eprintln!(
+                "orx up: could not withdraw the server descriptor before restarting: {error:#}"
+            );
+        }
         if !state.reopen.load(Ordering::SeqCst) && !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
             let failures = updates::failure_count();
@@ -832,6 +821,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
         )
+        .route("/api/pending-work", get(pending_work))
         .route("/api/update", get(update_status))
         .route("/api/update/notes", get(update_notes))
         .route("/api/update/apply", post(apply_update))
@@ -5074,59 +5064,6 @@ impl axum::body::HttpBody for ActiveBody {
 const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 const REMOTE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
-    // Runs whose spawn failure is already logged, so a stuck run logs once.
-    let mut reported = HashSet::new();
-    loop {
-        tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
-        if moving.load(Ordering::SeqCst) {
-            continue;
-        }
-        let _gate = gate.lock().await;
-        if moving.load(Ordering::SeqCst) {
-            continue;
-        }
-        match tokio::task::spawn_blocking(adopt_orphaned_runs_once).await {
-            Ok(Ok(failures)) => {
-                for (run_id, err) in failures {
-                    if reported.insert(run_id.clone()) {
-                        eprintln!("orx up: could not recover supervisor for run {run_id}: {err}");
-                    }
-                }
-            }
-            Ok(Err(err)) => {
-                eprintln!("orx up: could not check runs for missing supervisors: {err}")
-            }
-            Err(_) => {}
-        }
-    }
-}
-
-fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
-    let mut failures = Vec::new();
-    if crate::config::run_engine_settings()?.0 {
-        return Ok(failures);
-    }
-    let store = Store::open()?;
-    for run in store.list_active_runs()? {
-        // Without a job handle the launch may still be submitting, and a supervisor would fail it.
-        let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
-            .is_ok_and(|descriptor| descriptor.job_id.is_some());
-        if crate::engine::is_engine_row(&run)
-            || !submitted
-            || now_ms() - run.updated_at < crate::engine::ORPHANED_RUN_SETTLE_MS
-            || store.get_local_experiment(&run.experiment_id)?.is_none()
-            || crate::commands::supervise::supervisor_running(&run.id)
-        {
-            continue;
-        }
-        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
-            failures.push((run.id, err));
-        }
-    }
-    Ok(failures)
-}
-
 /// Background task so a large first reclaim never delays startup; it releases the gate between passes.
 async fn reclaim_orphaned_run_artifacts(
     moving: Arc<AtomicBool>,
@@ -5277,7 +5214,7 @@ fn spawn_restart_when_idle(state: AppState) {
             {
                 continue;
             }
-            if begin_restart(&state, 0).await {
+            if begin_restart(&state, 0, false).await {
                 state.restart.notify_one();
                 return;
             }
@@ -5289,8 +5226,8 @@ fn spawn_restart_when_idle(state: AppState) {
 static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
 
 /// Stop admitting work and commit to a restart if nothing is in flight beyond
-/// `own_requests` (the caller's). Returns false, and admits again, otherwise.
-async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
+/// `own_requests` (the caller's), save for chat turns when `stop_agents`. Returns false, and admits again, otherwise.
+async fn begin_restart(state: &AppState, own_requests: usize, stop_agents: bool) -> bool {
     let mut committed = RESTART_COMMITTED.lock().await;
     if *committed {
         return true;
@@ -5306,8 +5243,9 @@ async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
                     | RemoteSessionStatus::NeedsUpdate
             )
         })
-        && state.chat.stop_admitting_if_idle().await
+        && (stop_agents || state.chat.stop_admitting_if_idle().await)
     {
+        state.chat.stop_admitting();
         *committed = true;
         return true;
     }
@@ -5867,24 +5805,15 @@ fn reject_if_stopping(state: &AppState) -> std::result::Result<(), ApiError> {
     Ok(())
 }
 
+/// Older dashboards on a remote host still read and toggle this.
 async fn run_engine_settings() -> ApiResult {
-    let (enabled, forced_by) = crate::config::run_engine_settings().map_err(bad_request)?;
-    Ok(Json(json!({"enabled": enabled, "forcedBy": forced_by})))
+    Ok(Json(json!({"enabled": true, "forcedBy": null})))
 }
 
-#[derive(Deserialize)]
-struct RunEngineReq {
-    enabled: bool,
-}
-
-async fn set_run_engine(Json(req): Json<RunEngineReq>) -> ApiResult {
-    match crate::config::run_engine_settings().map_err(bad_request)?.1 {
-        Some("canary") => return Err(bad_request("Canary builds always use the new experiment engine.")),
-        Some(_) => return Err(bad_request("ORX_RUN_ENGINE controls this setting. Remove it from the server environment to use this switch.")),
-        None => {}
-    }
-    crate::config::set_run_engine_enabled(req.enabled)?;
-    run_engine_settings().await
+async fn set_run_engine() -> ApiResult {
+    Err(bad_request(
+        "Every build now uses the new experiment engine; update this app to remove the switch.",
+    ))
 }
 
 // --- git settings -----------------------------------------------------------
@@ -6105,6 +6034,13 @@ async fn set_dashboard_locale(Json(SetLocaleReq { locale }): Json<SetLocaleReq>)
     .map_err(|e| ApiError::from(anyhow!("locale task failed: {e}")))?
 }
 
+/// What a quit would interrupt, for the page's close dialog.
+async fn pending_work() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(json!(Store::open()?.pending_work()?))))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("pending work task failed: {e}")))?
+}
+
 // --- updates -----------------------------------------------------------------
 
 async fn update_status() -> ApiResult {
@@ -6192,7 +6128,18 @@ async fn apply_update() -> ApiResult {
 /// Relaunch into the copy the updater already installed. Answers first, then
 /// restarts, so the dashboard learns the request landed before the connection
 /// drops; it reloads once the new server is up.
-async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
+/// Sent by the dashboard once the user agreed to stop the agents that are working; older pages post no body.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestartReq {
+    stop_agents: bool,
+}
+
+async fn restart_after_update(
+    State(state): State<AppState>,
+    req: Option<Json<RestartReq>>,
+) -> ApiResult {
+    let stop_agents = req.is_some_and(|Json(req)| req.stop_agents);
     let status = tokio::task::spawn_blocking(updates::status)
         .await
         .map_err(|e| ApiError::from(anyhow!("update status task failed: {e}")))?;
@@ -6205,7 +6152,7 @@ async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
     // A dashboard poll landing alongside the click is not work worth refusing over.
     let mut began = false;
     for _ in 0..10 {
-        began = begin_restart(&state, 1).await;
+        began = begin_restart(&state, 1, stop_agents).await;
         if began {
             break;
         }

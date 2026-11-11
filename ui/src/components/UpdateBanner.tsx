@@ -1,5 +1,7 @@
 import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "@tanstack/react-router";
+import { askBeforeRestarting } from "../closeDialog";
 
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
@@ -62,8 +64,9 @@ export const releaseNotesUrl = (tag: string) =>
  *  so the polling errors in between are expected and swallowed. */
 export function useRestartApp(status: UpdateStatus | null): RestartState {
   const workspace = useWorkspace();
-  const { getUpdateStatusQuery } = workspace.queries;
-  const { isCurrentScope, queryClient } = workspace;
+  const { getUpdateStatusQuery, getPendingWorkQuery } = workspace.queries;
+  const { isCurrentScope, queryClient, dialogs } = workspace;
+  const router = useRouter();
 
   const [restarting, setRestarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,15 +79,25 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
   }, []);
 
   const previous = status?.restartRequired ? status.instance : null;
+  const asking = useRef(false);
   const restart = () => {
-    if (!previous || restarting) return;
+    if (!previous || restarting || asking.current) return;
     const options = getUpdateStatusQuery();
     const retired = () => unmounted.current || !isCurrentScope(options.queryKey);
-    setRestarting(true);
-    setError(null);
+    asking.current = true;
     void (async () => {
+      // Uncounted work restarts plainly, and the server refuses while an agent is working.
+      const work = await queryClient.fetchQuery({ ...getPendingWorkQuery(), staleTime: 0 }).catch(() => null);
+      const agents = work?.agents ?? [];
+      const open = (href: string) => void router.navigate({ href });
+      const agreed = agents.length === 0 || (await askBeforeRestarting(dialogs, agents, { machine: workspace, open }));
+      asking.current = false;
+      if (!agreed || retired()) return;
+
+      setRestarting(true);
+      setError(null);
       try {
-        await mutRestartApp.runAsHeadlessPromise(workspace, {});
+        await mutRestartApp.runAsHeadlessPromise(workspace, agents.length > 0, {});
         if (retired()) return;
         const deadline = Date.now() + RESTART_TIMEOUT_MS;
         while (Date.now() < deadline) {

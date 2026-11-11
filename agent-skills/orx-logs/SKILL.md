@@ -6,8 +6,7 @@ description: "Locate and read persisted experiment output with `orx logs`. Invok
 ## Reading run logs — `orx logs`
 
 A run's terminal output is kept on this computer when the run finishes. While
-it runs, engine-owned output stays on its compute host; supervised runs also
-stream it into a local log.
+it runs, output stays on its compute host.
 
 ```sh
 orx logs <runId>                    # local path, byte size, and last ~500 characters
