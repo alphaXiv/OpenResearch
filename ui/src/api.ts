@@ -1564,6 +1564,13 @@ export function fmtBytes(n: number): string {
     v /= 1024;
     u += 1;
   }
+  // ponytail: rounding to one decimal can push a value like 1023.98 up to
+  // display as "1024.0" instead of crossing into the next unit; re-check and
+  // bump when that would happen.
+  if (u > 0 && v >= 1023.95 && u < units.length - 1) {
+    v /= 1024;
+    u += 1;
+  }
   const number = new Intl.NumberFormat(getLocale(), { maximumFractionDigits: u === 0 ? 0 : 1, minimumFractionDigits: u === 0 ? 0 : 1 });
   return `${number.format(u === 0 ? n : v)} ${units[u]}`;
 }
