@@ -95,7 +95,13 @@ def submit():
         status = getattr(error, "status_code", None)
         if not isinstance(status, int):
             raise
-        _refuse(status, "Vercel didn't create the sandbox (HTTP %d): %s" % (status, error))
+        # create_sandbox also polls the new box, so only a box that doesn't exist was refused.
+        try:
+            sandbox.get_sandbox(name=spec["name"])
+        except types.SandboxApiError as missing:
+            if getattr(missing, "status_code", None) == 404:
+                _refuse(status, "Vercel didn't create the sandbox (HTTP %d): %s" % (status, error))
+        raise error
     try:
         # Secrets ride a 0600 file the job sources, never the sandbox or process
         # env config, which the Sandbox API and dashboard expose.

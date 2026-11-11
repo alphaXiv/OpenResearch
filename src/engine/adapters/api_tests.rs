@@ -3068,8 +3068,14 @@ class Box:
         open(os.environ["ORX_API_ROOT"] + "/destroyed", "a").write("x")
 def create_sandbox(**kwargs):
     mode = os.environ["ORX_TEST_VERCEL"]
-    if mode != "setup": raise SandboxApiError(int(mode))
-    return Box()
+    if mode == "setup": return Box()
+    if mode == "created-then-403":
+        open(os.environ["ORX_API_ROOT"] + "/created", "w").close()
+        raise SandboxApiError(403)
+    raise SandboxApiError(int(mode))
+def get_sandbox(**kwargs):
+    if os.path.exists(os.environ["ORX_API_ROOT"] + "/created"): return Box()
+    raise SandboxApiError(404)
 "#,
     )
     .unwrap();
@@ -3104,6 +3110,12 @@ def create_sandbox(**kwargs):
         ("quota", "402", "failed", "HTTP 402"),
         ("setup", "setup", "failed", "orx deleted it"),
         ("taken", "409", "submitting", "409 from Vercel"),
+        (
+            "polled",
+            "created-then-403",
+            "submitting",
+            "403 from Vercel",
+        ),
     ] {
         std::env::set_var("ORX_TEST_VERCEL", mode);
         engine
@@ -3123,24 +3135,25 @@ def create_sandbox(**kwargs):
 #[tokio::test]
 async fn ray_refusals_fail_the_run_unless_the_job_exists() {
     use std::sync::Mutex;
-    type Answers = Arc<Mutex<(u16, bool)>>;
+    type Answers = Arc<Mutex<(u16, u16)>>;
     async fn api(
         State(answers): State<Answers>,
         method: axum::http::Method,
     ) -> axum::response::Response {
         use axum::response::IntoResponse;
-        let (status, exists) = *answers.lock().unwrap();
+        let (status, inspected) = *answers.lock().unwrap();
         if method == axum::http::Method::POST {
             let status = axum::http::StatusCode::from_u16(status).unwrap();
             return (status, "Job with submission_id already exists").into_response();
         }
-        if exists {
-            Json(json!({"status":"RUNNING"})).into_response()
-        } else {
-            axum::http::StatusCode::NOT_FOUND.into_response()
+        match inspected {
+            200 => Json(json!({"status":"RUNNING"})).into_response(),
+            other => axum::http::StatusCode::from_u16(other)
+                .unwrap()
+                .into_response(),
         }
     }
-    let answers: Answers = Arc::new(Mutex::new((400, false)));
+    let answers: Answers = Arc::new(Mutex::new((400, 404)));
     let app = Router::new().fallback(any(api)).with_state(answers.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
@@ -3160,12 +3173,13 @@ async fn ray_refusals_fail_the_run_unless_the_job_exists() {
         Arc::new(TestClock::new()),
         root.join("spools"),
     );
-    for (run, status, exists, expected, reason) in [
-        ("refused", 400, false, "failed", "HTTP 400"),
-        ("duplicate", 400, true, "starting", ""),
-        ("limited", 429, false, "submitting", "HTTP 429"),
+    for (run, status, inspected, expected, reason) in [
+        ("refused", 400, 404, "failed", "HTTP 400"),
+        ("duplicate", 400, 200, "starting", ""),
+        ("uninspectable", 400, 500, "submitting", "inspect"),
+        ("limited", 429, 404, "submitting", "HTTP 429"),
     ] {
-        *answers.lock().unwrap() = (status, exists);
+        *answers.lock().unwrap() = (status, inspected);
         engine
             .submit(&adapter, pending(run, &metadata, &launch))
             .await

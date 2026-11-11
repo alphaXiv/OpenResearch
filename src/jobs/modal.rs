@@ -32,7 +32,7 @@ use crate::error::{anyhow, Result};
 ///
 /// Exit 3 = the `modal` package isn't importable (surfaced as a friendly hint),
 /// 4 = Modal rejected the token, 5 = the token check could not reach Modal,
-/// 6 = submit failed and terminated its sandbox (`jobs::Refused` on stderr).
+/// 6 = Modal refused the sandbox, or submit terminated it (`jobs::Refused` on stderr).
 const LAUNCHER: &str = r#"
 import sys, json
 
@@ -44,9 +44,11 @@ def _modal():
         sys.stderr.write("modal-not-installed")
         sys.exit(3)
 
-def submit():
-    modal = _modal()
-    spec = json.load(sys.stdin)
+def _refuse(message):
+    sys.stderr.write(json.dumps({"status": None, "message": message}))
+    sys.exit(6)
+
+def _sandbox(modal, spec):
     app = modal.App.lookup(spec.get("app", "openresearch"), create_if_missing=True)
     # Registry images rarely ship uv; append it to PATH so an image's own uv still wins.
     # The run command replaces an image ENTRYPOINT (vllm-openai's is `vllm serve`), as on k8s.
@@ -75,9 +77,20 @@ def submit():
     if tags:
         kwargs["tags"] = tags
     # Only stdout reaches the run log, so even a failure to start bash lands there.
-    sb = modal.Sandbox.create(
+    return modal.Sandbox.create(
         "sh", "-c", 'exec 2>&1; exec bash -c "$1"', "orx", spec["script"], **kwargs
     )
+
+def submit():
+    modal = _modal()
+    spec = json.load(sys.stdin)
+    try:
+        sb = _sandbox(modal, spec)
+    except Exception as error:
+        from modal.exception import AuthError, InvalidError
+        if not isinstance(error, (AuthError, InvalidError)):
+            raise
+        _refuse("Modal refused the sandbox: %s" % (str(error) or type(error).__name__))
     if spec.get("sourceArchive"):
         try:
             sb.filesystem.copy_from_local(spec["sourceArchive"], "/tmp/orx-source.tar")
@@ -95,8 +108,7 @@ def submit():
                     output = ""
                 message = "The Modal sandbox exited with code %d before its source arrived.\n%s" % (
                     code, output)
-            sys.stderr.write(json.dumps({"status": None, "message": message}))
-            sys.exit(6)
+            _refuse(message)
     print(json.dumps({"sandboxId": sb.object_id}))
 
 def status(sid):
@@ -853,7 +865,7 @@ class Sandbox:
         std::fs::write(dir.join("modal").join("__init__.py"), module).unwrap();
         std::fs::write(
             dir.join("modal").join("exception.py"),
-            "class AuthError(Exception): pass\n",
+            "class AuthError(Exception): pass\nclass InvalidError(Exception): pass\n",
         )
         .unwrap();
         let wrapper = dir.join("python");
@@ -932,6 +944,64 @@ class Sandbox:
         assert_eq!(refused.status, None);
         assert!(refused.message.contains("code 127"), "{refused}");
         assert!(refused.message.contains("bash: not found"), "{refused}");
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_sandbox_modal_refuses_fails_the_launch() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
+            return;
+        };
+        let dir = fake_modal(
+            python,
+            r#"import os
+from modal.exception import AuthError, InvalidError
+class App:
+    @staticmethod
+    def lookup(name, create_if_missing):
+        if os.environ.get("ORX_TEST_MODAL") == "auth": raise AuthError("Token invalid")
+        return name
+class Image:
+    @staticmethod
+    def from_registry(tag): return Image()
+    def dockerfile_commands(self, *cmds): return self
+class Secret:
+    @staticmethod
+    def from_dict(env): return env
+class Sandbox:
+    @classmethod
+    def create(cls, *args, gpu=None, **kwargs):
+        raise InvalidError("Invalid GPU type: %s" % gpu)
+"#,
+        );
+        let spec = ModalJobSpec {
+            script: "true".into(),
+            image: "alpine".into(),
+            gpu: Some("H1000".into()),
+            cpu: None,
+            memory: None,
+            env: HashMap::new(),
+            timeout_seconds: 60,
+            app: "openresearch".into(),
+            tags: HashMap::new(),
+            source_archive: None,
+        };
+        for (mode, cause) in [("gpu", "H1000"), ("auth", "Token invalid")] {
+            std::env::set_var("ORX_TEST_MODAL", mode);
+            let error = run_job(&spec).await.unwrap_err();
+            let refused = error
+                .downcast_ref::<super::super::Refused>()
+                .unwrap_or_else(|| panic!("{mode} is not a definite failure: {error}"));
+            assert_eq!(refused.status, None);
+            assert!(refused.message.contains(cause), "{refused}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(not(windows))]

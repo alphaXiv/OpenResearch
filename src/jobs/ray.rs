@@ -322,8 +322,8 @@ pub async fn run_job(address: &str, spec: &JobSubmission) -> Result<()> {
     }
     let body = res.text().await.unwrap_or_default();
     // Ray answers a reused submission ID with an error, though that job runs.
-    let known = inspect_job(address, &spec.submission_id).await;
-    if known.is_ok_and(|job| job.stage != "GONE") {
+    let known = inspect_job(address, &spec.submission_id).await?;
+    if known.stage != "GONE" {
         return Ok(());
     }
     Err(super::Refused {
