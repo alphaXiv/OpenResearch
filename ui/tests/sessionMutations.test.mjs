@@ -50,3 +50,25 @@ test("a message sent after a setting waits for it", async () => {
   await Promise.all([saved, sent]);
   assert.deepEqual(requests, ["PATCH /api/chat/sessions/s", "send"]);
 });
+
+test("a message sent while two settings are pending waits for both", async () => {
+  const { workspace, reply, requests } = setup();
+  const first = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { permissionMode: "auto" }, {});
+  const second = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { autonomy: "copilot" }, {});
+  const sent = workspace.chat.serialize(async () => { requests.push("send"); });
+  reply.resolve({ session: row("s", "Old") });
+  await Promise.all([first, second, sent]);
+  assert.deepEqual(requests, ["PATCH /api/chat/sessions/s", "PATCH /api/chat/sessions/s", "send"]);
+});
+
+test("a refused setting still lets the next message through", async () => {
+  const { workspace, reply, requests } = setup();
+  const first = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { title: " " }, {});
+  const second = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { autonomy: "copilot" }, {});
+  const sent = workspace.chat.serialize(async () => { requests.push("send"); });
+  reply.resolve(Response.json({ error: "A chat needs a title." }, { status: 400 }));
+  await assert.rejects(first);
+  await assert.rejects(second);
+  await sent;
+  assert.deepEqual(requests, ["PATCH /api/chat/sessions/s", "send"]);
+});

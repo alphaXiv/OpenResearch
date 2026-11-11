@@ -892,7 +892,7 @@ function VercelSection() {
     ? { token: typedToken || null, teamId: pickedTeam }
     : null;
   const lookupQuery = useQuery({
-    queryKey: ["vercelScopes", lookup?.token, lookup?.teamId],
+    queryKey: workspace.workspaceKey("vercelScopes", lookup?.token, lookup?.teamId),
     queryFn: () => getVercelScopes(lookup!.token, lookup!.teamId),
     enabled: lookup !== null,
     retry: false,

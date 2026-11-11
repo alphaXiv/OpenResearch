@@ -41,15 +41,27 @@ export function createChatStore(
   const getRevision = () => revision.value;
 
   let writeTail: Promise<unknown> = Promise.resolve();
-  /** Runs session writes and sends one at a time, so a turn starts with the settings changed before it. */
-  function serialize<T>(write: () => Promise<T>): Promise<T> {
-    const result = writeTail.catch(() => {}).then(() => {
+  /** Holds the next place among session writes and sends; `run` fills it, `release` gives it up. One must be called. */
+  function reserve() {
+    let fill!: (write: (() => Promise<unknown>) | null) => void;
+    const slot = new Promise<(() => Promise<unknown>) | null>((resolve) => { fill = resolve; });
+    const result = writeTail.catch(() => {}).then(() => slot).then((write) => {
+      if (!write) return;
       if (!isCurrentScope(workspaceScope())) throw new DOMException("Workspace changed", "AbortError");
       return write();
     });
     writeTail = result.catch(() => {});
-    return result;
+    return {
+      run<T>(write: () => Promise<T>) {
+        fill(write);
+        return result as Promise<T>;
+      },
+      release: () => fill(null),
+    };
   }
+
+  /** Runs session writes and sends one at a time, so a turn starts with the settings changed before it. */
+  const serialize = <T>(write: () => Promise<T>) => reserve().run(write);
 
   function readChatState(projectId: string, activeId: string | null): ChatState {
     const sessions = queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey) ?? [];
@@ -106,6 +118,7 @@ export function createChatStore(
   }
 
   return {
+    reserve,
     serialize,
     subscribeChat,
     readChatState,
