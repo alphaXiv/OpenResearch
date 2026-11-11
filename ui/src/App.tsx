@@ -2134,7 +2134,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         )}
         {mainView === "chat" && panelOpen && (
           <aside
-            className={`right-pane relative shrink-0 min-w-0 flex flex-col bg-background [&.max]:fixed [&.max]:inset-0 [&.max]:z-60 [&.max]:border-s-0 overflow-hidden ${stackPanel ? "border-t border-t-border" : "border-s border-s-border"} ${panelMax ? "max" : ""}`}
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col bg-background [&.max]:fixed [&.max]:inset-0 [&.max]:z-40 [&.max]:border-s-0 overflow-hidden ${stackPanel ? "border-t border-t-border" : "border-s border-s-border"} ${panelMax ? "max" : ""}`}
             style={mobile || panelMax ? undefined : stackPanel ? { width: "100%", height: "50%" } : { width: visiblePanelWidth }}
             data-onboarding="experiments"
           >

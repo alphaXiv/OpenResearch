@@ -516,7 +516,7 @@
     inset: env(safe-area-inset-top) 0 calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom));
     width: 100%;
     border: 0;
-    z-index: 60;
+    z-index: 40;
   }
   .right-pane .panel-resizer, .right-pane .panel-controls > :first-child { display: none; }
   .right-pane > .tabs { min-height: 52px; }
