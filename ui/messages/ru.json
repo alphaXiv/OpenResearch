@@ -440,6 +440,7 @@
   "settings_page_no_code_prompts_file_contents_or_account_identifiers": "Код, запросы, содержимое файлов и идентификаторы аккаунтов не отправляются.",
   "settings_page_no_hosts_found_in_ssh_config": "В ~/.ssh/config не найдено ни одного хоста.",
   "settings_page_no_job_create_permission": "Нет прав на создание задач",
+  "settings_page_no_job_patch_permission": "Нет прав на изменение задач",
   "settings_page_no_job_write_permission": "Нет прав на запись",
   "settings_hf_write_permission_help": "Токен действителен, но не может отправлять задачи Hugging Face Jobs. Создайте в настройках токенов Hugging Face токен с правом записи для Jobs и замените его здесь.",
   "settings_page_no_bucket_permission": "Нет доступа к бакету",

@@ -439,6 +439,7 @@
   "settings_page_no_code_prompts_file_contents_or_account_identifiers": "لا تُرسَل أي شيفرة أو طلبات أو محتويات ملفات أو معرّفات حسابات.",
   "settings_page_no_hosts_found_in_ssh_config": "لم يُعثر على مضيفين في ‎~/.ssh/config.",
   "settings_page_no_job_create_permission": "لا صلاحية لإنشاء المهام",
+  "settings_page_no_job_patch_permission": "لا صلاحية لتعديل المهام",
   "settings_page_no_job_write_permission": "لا صلاحيات كتابة",
   "settings_hf_write_permission_help": "هذا الرمز صالح لكنه لا يستطيع إرسال مهام Hugging Face. أنشئ رمزًا بصلاحية كتابة المهام في إعدادات رموز Hugging Face، ثم استبدله هنا.",
   "settings_page_no_bucket_permission": "لا توجد صلاحيات للحاوية",

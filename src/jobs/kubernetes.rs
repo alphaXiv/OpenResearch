@@ -195,61 +195,58 @@ pub struct Preflight {
     pub kubectl_found: bool,
     pub reachable: bool,
     pub can_create_jobs: bool,
+    /// orx patches a running Job's deadline to start its timeout.
+    pub can_patch_jobs: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 pub async fn preflight(context: Option<&str>, namespace: &str) -> Preflight {
+    let unreachable = |kubectl_found: bool, error: String| Preflight {
+        kubectl_found,
+        reachable: false,
+        can_create_jobs: false,
+        can_patch_jobs: false,
+        error: Some(error),
+    };
     if kubectl(None, &["version", "--client"], None).await.is_err() {
-        return Preflight {
-            kubectl_found: false,
-            reachable: false,
-            can_create_jobs: false,
-            error: Some("kubectl not found on PATH".to_string()),
-        };
+        return unreachable(false, "kubectl not found on PATH".to_string());
     }
-    // `auth can-i` answers reachability and permission in one round trip:
-    // "yes"/"no" on stdout both mean the API server responded (it exits 1 on
-    // "no", so run it raw rather than through the exit-code-checking runner).
+    let can_create_jobs = match can_i(context, "create", namespace).await {
+        Ok(answer) => answer,
+        Err(error) => return unreachable(true, error),
+    };
+    let can_patch_jobs = match can_i(context, "patch", namespace).await {
+        Ok(answer) => answer,
+        Err(error) => return unreachable(true, error),
+    };
+    Preflight {
+        kubectl_found: true,
+        reachable: true,
+        can_create_jobs,
+        can_patch_jobs,
+        error: None,
+    }
+}
+
+/// Whether kubectl may `verb` Jobs in `namespace`; an error when the API server didn't answer.
+async fn can_i(context: Option<&str>, verb: &str, namespace: &str) -> Result<bool, String> {
+    // "yes"/"no" on stdout both mean the API server responded; it exits 1 on "no", so run it
+    // raw rather than through the exit-code-checking runner.
     let mut cmd = crate::process::tokio_command("kubectl");
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
     let out = cmd
-        .args(["auth", "can-i", "create", "jobs", "-n", namespace])
+        .args(["auth", "can-i", verb, "jobs", "-n", namespace])
         .stdin(Stdio::null())
         .output()
-        .await;
-    match out {
-        Ok(out) => {
-            let answer = String::from_utf8_lossy(&out.stdout);
-            match answer.trim() {
-                "yes" => Preflight {
-                    kubectl_found: true,
-                    reachable: true,
-                    can_create_jobs: true,
-                    error: None,
-                },
-                "no" => Preflight {
-                    kubectl_found: true,
-                    reachable: true,
-                    can_create_jobs: false,
-                    error: None,
-                },
-                _ => Preflight {
-                    kubectl_found: true,
-                    reachable: false,
-                    can_create_jobs: false,
-                    error: Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-                },
-            }
-        }
-        Err(e) => Preflight {
-            kubectl_found: true,
-            reachable: false,
-            can_create_jobs: false,
-            error: Some(e.to_string()),
-        },
+        .await
+        .map_err(|e| e.to_string())?;
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "yes" => Ok(true),
+        "no" => Ok(false),
+        _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
     }
 }
 
@@ -561,6 +558,7 @@ pub(crate) async fn start_deadline(
         None,
     )
     .await
+    .map_err(refused)
     .with_context(|| format!("Could not start the timeout of Job {namespace}/{job}"))?;
     Ok(())
 }
@@ -1009,7 +1007,8 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
             });
             if unstartable.is_none() {
                 let name = pod["metadata"]["name"].as_str().unwrap_or_default();
-                unstartable = unpullable(context, namespace, name, reason, message).await?;
+                unstartable =
+                    unpullable(context, namespace, name, container, reason, message).await?;
             }
         }
     }
@@ -1029,12 +1028,13 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
     })
 }
 
-/// Why `pod` can never pull its image, when a container waits for `reason`; `None` while the
+/// Why `pod` can never pull its image, when `container` waits for `reason`; `None` while the
 /// pull runs or may still succeed on kubelet's next retry.
 async fn unpullable(
     context: Option<&str>,
     namespace: &str,
     pod: &str,
+    container: &Value,
     reason: &str,
     message: &str,
 ) -> Result<Option<String>> {
@@ -1078,15 +1078,33 @@ async fn unpullable(
                 format!("Could not read why pod {namespace}/{pod} can't pull its image")
             })?;
             let events: Value = serde_json::from_str(&events)?;
-            let failure = events["items"]
+            // Only this container's pulls of its current image; an older or another container's
+            // error may since have cleared.
+            let field = format!("{{{}}}", container["name"].as_str().unwrap_or_default());
+            let image = format!("\"{}\"", container["image"].as_str().unwrap_or_default());
+            let at = |event: &Value| {
+                ["lastTimestamp", "eventTime"]
+                    .iter()
+                    .find_map(|key| event[*key].as_str())
+                    .or(event["metadata"]["creationTimestamp"].as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let latest = events["items"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|event| event["message"].as_str())
-                .find(|message| permanent(message));
-            match failure {
-                Some(failure) => failure.to_string(),
-                None => return Ok(None),
+                .filter(|event| {
+                    event["involvedObject"]["fieldPath"]
+                        .as_str()
+                        .is_some_and(|path| path.ends_with(&field))
+                })
+                .filter_map(|event| Some((at(event), event["message"].as_str()?)))
+                .filter(|(_, message)| message.contains(&image))
+                .max_by(|a, b| a.0.cmp(&b.0));
+            match latest {
+                Some((_, failure)) if permanent(failure) => failure.to_string(),
+                _ => return Ok(None),
             }
         }
         _ => return Ok(None),

@@ -440,6 +440,7 @@
   "settings_page_no_code_prompts_file_contents_or_account_identifiers": "هیچ کد، پرامپت، محتوای فایل یا شناسهٔ حسابی ارسال نمی‌شود.",
   "settings_page_no_hosts_found_in_ssh_config": "میزبانی در ‎~/.ssh/config پیدا نشد.",
   "settings_page_no_job_create_permission": "مجوز ساخت Job وجود ندارد",
+  "settings_page_no_job_patch_permission": "مجوز ویرایش Job وجود ندارد",
   "settings_page_no_job_write_permission": "بدون مجوز نوشتن",
   "settings_hf_write_permission_help": "این توکن معتبر است، اما اجازهٔ ارسال کار به Hugging Face را ندارد. در تنظیمات توکن Hugging Face، توکنی با مجوز نوشتن Jobs بسازید و آن را اینجا جایگزین کنید.",
   "settings_page_no_bucket_permission": "بدون مجوز باکت",

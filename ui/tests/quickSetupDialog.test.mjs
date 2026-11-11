@@ -7,7 +7,7 @@ import { find, press, renderApp, serveApp, settle, type } from "./render.mjs";
 
 const k8s = {
   configured: false, contexts: [], currentContext: null, context: null, namespace: "default",
-  preflight: { kubectlFound: true, reachable: true, canCreateJobs: true },
+  preflight: { kubectlFound: true, reachable: true, canCreateJobs: true, canPatchJobs: true },
 };
 
 const click = async (element) => {

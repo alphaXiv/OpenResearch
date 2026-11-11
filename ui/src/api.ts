@@ -615,6 +615,7 @@ export interface K8sPreflight {
   kubectlFound: boolean;
   reachable: boolean;
   canCreateJobs: boolean;
+  canPatchJobs: boolean;
   error?: string;
 }
 

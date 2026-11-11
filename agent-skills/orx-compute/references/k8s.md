@@ -52,8 +52,9 @@ The submit-time contract is:
 - A run whose pod waits for capacity or a slow image pull stays starting, and
   `orx` copies the source in once the container runs. `--timeout` counts from
   that start, like Slurm's `--time`: `orx` sets the Job's
-  `activeDeadlineSeconds` then. A deadline the manifest sets counts from Job
-  creation, wait included. An image that can never be pulled fails the run
+  `activeDeadlineSeconds` then, so its kubeconfig needs `patch` on Jobs as well
+  as `create`. A deadline the manifest sets counts from Job creation, wait
+  included. An image that can never be pulled fails the run
   with the pull error.
 
 See [run monitoring](../SKILL.md#who-watches-a-run).

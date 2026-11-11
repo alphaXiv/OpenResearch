@@ -306,7 +306,19 @@ async fn stage(context: Option<&str>, namespace: &str, job: &str, run: &str) -> 
         .ok_or_else(|| anyhow!("Job {namespace}/{job} has no pod to copy the source into"))?;
     let spec = launch_spec(run)?;
     // Before the copy, so the command never runs without its deadline.
-    k8s::start_deadline(context, namespace, job, &pod, spec.timeout_seconds).await?;
+    if let Err(error) = k8s::start_deadline(context, namespace, job, &pod, spec.timeout_seconds).await
+    {
+        let forbidden = error
+            .downcast_ref::<crate::jobs::Refused>()
+            .is_some_and(|refused| refused.status == Some(403));
+        if forbidden {
+            return Ok(Copied::Unstartable(format!(
+                "{error:#}. Allow patching Jobs in namespace {namespace}, then run the experiment \
+                 again."
+            )));
+        }
+        return Err(error);
+    }
     if k8s::source_staged(context, namespace, &pod).await {
         return Ok(Copied::Staged);
     }

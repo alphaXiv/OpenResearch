@@ -618,6 +618,9 @@ elif a[0] == 'create':
     if doc['kind'] == 'Job':
         job_path.write_text(json.dumps(doc))
 elif a[0] == 'patch':
+    if (root/'patch-forbidden').exists():
+        print('Error from server (Forbidden): jobs.batch "run" is forbidden: User "lab" cannot patch resource "jobs" in API group "batch" in the namespace "default"', file=sys.stderr)
+        sys.exit(1)
     job['spec'].update(json.loads(a[a.index('-p') + 1])['spec'])
     job_path.write_text(json.dumps(job))
 elif a[0] == 'delete':
@@ -664,8 +667,25 @@ fn waiting_pod(root: &Path, node: Option<&str>, status: Value) {
 
 fn script_waiting(reason: &str, message: &str) -> Value {
     json!({"phase": "Pending", "containerStatuses": [
-        {"name": "run", "state": {"waiting": {"reason": reason, "message": message}}}
+        {"name": "run", "image": "ghcr.io/lab/train:v1",
+         "state": {"waiting": {"reason": reason, "message": message}}}
     ]})
+}
+
+/// `Failed` events kubelet recorded for the pod, as (container field path, time, message).
+fn pull_events(root: &Path, events: &[(&str, &str, &str)]) {
+    let items: Vec<Value> = events
+        .iter()
+        .map(|(field, at, message)| {
+            json!({"reason": "Failed", "lastTimestamp": at, "message": message,
+                "involvedObject": {"kind": "Pod", "name": "run-pod", "fieldPath": field}})
+        })
+        .collect();
+    std::fs::write(
+        root.join("events.json"),
+        json!({"items": items}).to_string(),
+    )
+    .unwrap();
 }
 
 fn script_running(started_at: &str) -> Value {
@@ -819,6 +839,99 @@ async fn k8s_timeout_starts_when_the_script_container_does() {
 }
 
 #[tokio::test]
+async fn k8s_pull_errors_that_may_have_cleared_keep_the_run_queued() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    waiting_pod(
+        &root,
+        Some("gpu-1"),
+        script_waiting(
+            "ImagePullBackOff",
+            "Back-off pulling image \"ghcr.io/lab/train:v1\"",
+        ),
+    );
+    pull_events(
+        &root,
+        &[
+            (
+                "spec.initContainers{setup}",
+                "2026-01-01T00:01:00Z",
+                "Failed to pull image \"ghcr.io/lab/setup:v1\": unauthorized: authentication required",
+            ),
+            (
+                "spec.containers{run}",
+                "2026-01-01T00:02:00Z",
+                "Failed to pull image \"ghcr.io/lab/train:v1\": unauthorized: authentication required",
+            ),
+            (
+                "spec.containers{run}",
+                "2026-01-01T00:03:00Z",
+                "Failed to pull image \"ghcr.io/lab/train:v1\": toomanyrequests: rate limit exceeded",
+            ),
+        ],
+    );
+    let (engine, adapter, _clock, run) = waiting_run(&root).await;
+    engine
+        .observe_runs(
+            &adapter,
+            std::slice::from_ref(&run),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.load("run").unwrap().0.status, "starting");
+    assert!(!root.join("deleted").exists());
+}
+
+#[tokio::test]
+async fn k8s_a_forbidden_deadline_patch_fails_the_run_and_frees_the_job() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    std::fs::write(root.join("patch-forbidden"), "").unwrap();
+    waiting_pod(&root, Some("gpu-1"), script_running("2026-01-01T00:01:00Z"));
+    let (engine, adapter, _clock, run) = waiting_run(&root).await;
+    engine
+        .observe_runs(
+            &adapter,
+            std::slice::from_ref(&run),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    let row = engine.load("run").unwrap().0;
+    assert_eq!(row.status, "failed");
+    let reason = row.result_markdown.unwrap();
+    assert!(reason.contains("cannot patch"), "{reason}");
+    assert!(root.join("deleted").exists());
+    assert!(!root.join("source.tar").exists());
+}
+
+#[tokio::test]
+async fn k8s_preflight_needs_permission_to_patch_jobs() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/kubectl"),
+        r#"#!/usr/bin/env python3
+import sys
+a = sys.argv[1:]
+if a[:2] == ['auth', 'can-i']:
+    print('yes' if a[2] == 'create' else 'no')
+    sys.exit(0 if a[2] == 'create' else 1)
+"#,
+    );
+    let backend = crate::compute::backend("k8s").unwrap();
+    let preflight = backend
+        .preflight(&crate::compute::tests::tinker_args())
+        .await
+        .unwrap();
+    assert!(!preflight.ready, "{:?}", preflight.detail);
+}
+
+#[tokio::test]
 async fn k8s_unpullable_image_fails_with_the_pull_error_and_frees_the_job() {
     let Some(root) = isolated().await else {
         return;
@@ -830,11 +943,12 @@ async fn k8s_unpullable_image_fails_with_the_pull_error_and_frees_the_job() {
         )
     };
     waiting_pod(&root, Some("gpu-1"), backoff());
-    let events = |message: &str| {
-        let events = json!({"items": [{"reason": "Failed", "message": message}]});
-        std::fs::write(root.join("events.json"), events.to_string()).unwrap();
-    };
-    events("Failed to pull image \"ghcr.io/lab/train:v1\": toomanyrequests: rate limit exceeded");
+    let rate_limited = (
+        "spec.containers{run}",
+        "2026-01-01T00:01:00Z",
+        "Failed to pull image \"ghcr.io/lab/train:v1\": toomanyrequests: rate limit exceeded",
+    );
+    pull_events(&root, &[rate_limited]);
     let (engine, adapter, clock, run) = waiting_run(&root).await;
     let budget = Duration::from_secs(10);
     engine
@@ -844,7 +958,12 @@ async fn k8s_unpullable_image_fails_with_the_pull_error_and_frees_the_job() {
     assert_eq!(engine.load("run").unwrap().0.status, "starting");
     assert!(!root.join("deleted").exists());
 
-    events("Failed to pull image \"ghcr.io/lab/train:v1\": rpc error: code = NotFound desc = failed to resolve reference \"ghcr.io/lab/train:v1\": not found");
+    let missing = (
+        "spec.containers{run}",
+        "2026-01-01T00:02:00Z",
+        "Failed to pull image \"ghcr.io/lab/train:v1\": rpc error: code = NotFound desc = failed to resolve reference \"ghcr.io/lab/train:v1\": not found",
+    );
+    pull_events(&root, &[rate_limited, missing]);
     clock.advance(budget);
     engine
         .observe_runs(&adapter, std::slice::from_ref(&run), budget)

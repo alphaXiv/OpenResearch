@@ -1941,7 +1941,9 @@ pub(crate) async fn check(
         }
         "ray" => value["reachable"] == true,
         "k8s" => {
-            value["preflight"]["reachable"] == true && value["preflight"]["canCreateJobs"] == true
+            value["preflight"]["reachable"] == true
+                && value["preflight"]["canCreateJobs"] == true
+                && value["preflight"]["canPatchJobs"] == true
         }
         "hf" => {
             value["validationStatus"] == "valid"

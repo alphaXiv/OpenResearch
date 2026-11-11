@@ -970,6 +970,7 @@ function K8sHealthBadge({ s }: { s: K8sSettings }) {
   if (!p.kubectlFound) return <Badge variant="error">{m.settings_page_kubectl_not_found()}</Badge>;
   if (!p.reachable) return <Badge variant="error">{m.settings_page_cluster_unreachable()}</Badge>;
   if (!p.canCreateJobs) return <Badge variant="error">{m.settings_page_no_job_create_permission()}</Badge>;
+  if (!p.canPatchJobs) return <Badge variant="error">{m.settings_page_no_job_patch_permission()}</Badge>;
   return <Badge variant="success">{m.settings_page_connected()}</Badge>;
 }
 

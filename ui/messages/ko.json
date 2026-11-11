@@ -440,6 +440,7 @@
   "settings_page_no_code_prompts_file_contents_or_account_identifiers": "코드, 프롬프트, 파일 내용, 계정 식별 정보는 전송되지 않습니다.",
   "settings_page_no_hosts_found_in_ssh_config": "~/.ssh/config에서 호스트를 찾지 못했습니다.",
   "settings_page_no_job_create_permission": "작업 생성 권한 없음",
+  "settings_page_no_job_patch_permission": "작업 수정 권한 없음",
   "settings_page_no_job_write_permission": "쓰기 권한 없음",
   "settings_hf_write_permission_help": "이 토큰은 유효하지만 Hugging Face Jobs에 작업을 제출할 수 없습니다. Hugging Face 토큰 설정에서 Jobs 쓰기 권한이 있는 토큰을 생성한 뒤 여기서 교체하세요.",
   "settings_page_no_bucket_permission": "버킷 권한 없음",
