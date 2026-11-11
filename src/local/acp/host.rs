@@ -1228,6 +1228,7 @@ exec "$@""#
                 project_id: "proj_1".into(),
                 harness: super::super::presets().remove(0).launch.id,
                 native_session_id: None,
+                native_fork_at: None,
                 title: None,
                 title_source: None,
                 model: None,

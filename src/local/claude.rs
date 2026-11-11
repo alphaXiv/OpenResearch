@@ -235,6 +235,9 @@ pub struct SpawnSpec {
     pub repo: PathBuf,
     pub playbook: PathBuf,
     pub resume: Option<String>,
+    /// Message within `resume` to branch from: the child starts a new native
+    /// session holding `resume`'s history up to it.
+    pub fork_at: Option<String>,
     pub config: SpawnConfig,
 }
 
@@ -776,6 +779,9 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     }
     if let Some(native_id) = &spec.resume {
         cmd.args(["--resume", native_id]);
+        if let Some(message_id) = &spec.fork_at {
+            cmd.args(["--resume-session-at", message_id, "--fork-session"]);
+        }
     }
 
     let mut config = spec.config.clone();
@@ -1465,6 +1471,24 @@ impl ClaudeHost {
         self.kill_session_for(session_id, "session-stop").await;
     }
 
+    /// Stops the session's child so its next turn resumes whatever the store
+    /// now names. Refused while the child still owes a reply: stopping it would
+    /// end its background tasks and lose what it writes about them.
+    pub async fn stop_idle(&self, session_id: &str) -> Result<()> {
+        let live = self.inner.lock().await.get(session_id).cloned();
+        let owes_reply = live.is_some_and(|client| {
+            !client.terminated.load(Ordering::Acquire)
+                && !client.turn.lock().unwrap().idle(Instant::now())
+        });
+        if owes_reply {
+            return Err(anyhow!(
+                "Claude is still finishing a background task. Wait for its reply, or ask Claude to stop the task."
+            ));
+        }
+        self.kill_session_for(session_id, "fork-switched").await;
+        Ok(())
+    }
+
     async fn kill_session_for(&self, session_id: &str, reason: &str) {
         let epoch = self.next_spawn_epoch.fetch_add(1, Ordering::AcqRel);
         self.spawn_epochs
@@ -1833,6 +1857,7 @@ pub(crate) mod tests {
                     repo: PathBuf::new(),
                     playbook: PathBuf::new(),
                     resume: Some("saved-native-id".into()),
+                    fork_at: None,
                     config: client.config(),
                 },
                 Duration::from_millis(10),
@@ -2336,6 +2361,7 @@ pub(crate) mod tests {
                     repo: PathBuf::new(),
                     playbook: PathBuf::new(),
                     resume: None,
+                    fork_at: None,
                     config: cfg(None, None, None, false),
                 },
                 tx,
