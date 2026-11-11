@@ -208,7 +208,7 @@ pub(crate) fn developers_home(var: &str, value: &std::ffi::OsStr) -> bool {
 
 /// Inside [`test_root`], or the root of the test process that started this one.
 #[cfg(test)]
-fn contained(path: &std::path::Path) -> bool {
+pub(crate) fn contained(path: &std::path::Path) -> bool {
     let path = resolved(&std::path::absolute(path).unwrap());
     let parent = std::env::var_os(PARENT_TEST_ROOT).map(PathBuf::from);
     std::iter::once(test_root())
