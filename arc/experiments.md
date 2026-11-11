@@ -48,6 +48,8 @@ A default flavor applies only to its own backend and never leaks onto an explici
 
 **The process that runs a job is never the engine.** A wrapper owns its payload and records the outcome in receipts on its machine; hosted services and rentals hold that state themselves. `orx up` may restart, sleep or update; it reconnects, reads what the job left and catches up. A headless `orx up` exits after a sustained idle period: no unfinished run, undelivered notice, active chat turn or client ([desktop](desktop.md) for the window).
 
+A local run keeps its machine from idle sleep until its exit receipt, as a playing video does; closing the lid still sleeps it. Its wrapper holds the operating system's idle-sleep prevention, which dies with the wrapper. Windows runs have no wrapper, so there `orx up` holds one while any local run is unfinished.
+
 [FROZEN.md](../crates/orx-host-proto/FROZEN.md) is the contract for host disk, the payload's environment, stored run state, API v2 and SSE, for the life of every queued job and lingering cleanup. Read it before changing any of them.
 
 ### Phase and contact

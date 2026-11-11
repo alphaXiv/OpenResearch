@@ -232,8 +232,12 @@ async fn connect(server: &Sshd, clock: Arc<dyn Clock>) -> Arc<Ssh> {
 }
 
 async fn exists(path: &Path) {
+    until(|| path.exists()).await;
+}
+
+async fn until(condition: impl Fn() -> bool) {
     tokio::time::timeout(Duration::from_secs(60), async {
-        while !path.exists() {
+        while !condition() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -934,6 +938,87 @@ printf '123\n'"#);
     f.clock.advance(Duration::from_secs(31));
     f.poll(&slurm, &["killed"], Duration::ZERO).await;
     assert_eq!(status("killed"), "cancelled");
+}
+
+/// The sleep preventions the wrapper of the run in `dir` holds: IOKit assertion types on macOS,
+/// elsewhere the `--what` of each inhibitor the fake `systemd-inhibit` recorded in `inhibitors`.
+fn sleep_locks(dir: &Path, inhibitors: &Path) -> Vec<String> {
+    let run = dir.file_name().unwrap().to_string_lossy();
+    if cfg!(target_os = "macos") {
+        let wrapper: orx_host_proto::ProcessIdentity =
+            orx_host::read_json(&dir.join("wrapper.json")).unwrap();
+        let assertions = crate::process::command("pmset")
+            .args(["-g", "assertions"])
+            .output()
+            .unwrap();
+        return String::from_utf8_lossy(&assertions.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains(&format!("pid {}(", wrapper.pid))
+                    && line.contains(&format!("OpenResearch experiment run {run}"))
+            })
+            .filter_map(|line| {
+                line.split_whitespace()
+                    .find(|word| word.starts_with("Prevent"))
+            })
+            .map(str::to_owned)
+            .collect();
+    }
+    fs::read_dir(inhibitors)
+        .unwrap()
+        .filter_map(|entry| fs::read_to_string(entry.unwrap().path()).ok())
+        .filter(|args| args.contains(&format!("Experiment run {run}")))
+        .filter_map(|args| {
+            args.split_whitespace()
+                .find_map(|arg| arg.strip_prefix("--what="))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_an_unfinished_local_run_keeps_this_machine_awake() {
+    let f = Fixture::new().await;
+    let inhibitors = f.server.directory().join("inhibitors");
+    fs::create_dir(&inhibitors).unwrap();
+    f.shim(
+        "systemd-inhibit",
+        &format!(
+            "for last; do :; done\nprintf '%s\\n' \"$*\" > '{}'/$$\n\"$last\"\nrm '{}'/$$",
+            inhibitors.display(),
+            inhibitors.display()
+        ),
+    );
+    let script = "touch ready; while [ ! -f release ]; do sleep .01; done";
+    let local = Local::new(f.server.directory().join("local-runs"));
+    let mut intent = f.intent("nearby", script, "local_job");
+    let path = format!(
+        "{}:{}",
+        f.server.directory().join("shims").display(),
+        std::env::var("PATH").unwrap()
+    );
+    intent.launch.options = json!({"env": {"PATH": path}});
+    f.submit(&local, &intent).await;
+    f.submit(f.ssh.as_ref(), &f.intent("faraway", script, "ssh_job"))
+        .await;
+    let nearby = f.server.directory().join("local-runs/nearby");
+    let faraway = f.dir("faraway");
+    exists(&nearby.join("ready")).await;
+    exists(&faraway.join("ready")).await;
+
+    let idle_only = [if cfg!(target_os = "macos") {
+        "PreventUserIdleSystemSleep"
+    } else {
+        "sleep"
+    }];
+    until(|| sleep_locks(&nearby, &inhibitors) == idle_only).await;
+    assert!(sleep_locks(&faraway, &inhibitors).is_empty());
+
+    fs::write(nearby.join("release"), "").unwrap();
+    fs::write(faraway.join("release"), "").unwrap();
+    assert_eq!(f.terminal(&local, "nearby").await.status, "done");
+    assert_eq!(f.terminal(f.ssh.as_ref(), "faraway").await.status, "done");
+    until(|| sleep_locks(&nearby, &inhibitors).is_empty()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

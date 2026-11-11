@@ -192,6 +192,9 @@ pub struct Runtime {
     watched: Mutex<HashMap<Key, watch::Sender<Vec<WatchedRun>>>>,
     changed: Notify,
     collect_now: Notify,
+    /// Held while a local run is unfinished; a failure is kept so it is logged once.
+    #[cfg(windows)]
+    awake: Mutex<Option<std::io::Result<std::os::windows::io::OwnedHandle>>>,
 }
 
 impl Runtime {
@@ -216,6 +219,8 @@ impl Runtime {
             watched: Mutex::default(),
             changed: Notify::new(),
             collect_now: Notify::new(),
+            #[cfg(windows)]
+            awake: Mutex::default(),
         })
     }
 
@@ -432,6 +437,8 @@ impl Runtime {
         let runs = store.list_engine_runs()?;
         drop(store);
         let mut watch: HashMap<Key, Vec<WatchedRun>> = HashMap::new();
+        #[cfg(windows)]
+        let mut local_unfinished = false;
         for run in runs {
             // 0.2.x rows are touched only once adoption holds their locks.
             if !is_engine_row(&run) && !self.engine.holds(&run.id) {
@@ -444,6 +451,10 @@ impl Runtime {
                     continue;
                 }
             };
+            #[cfg(windows)]
+            {
+                local_unfinished |= key == Key::Local && !crate::local::is_terminal(&run.status);
+            }
             match handle_of(&run) {
                 Some(handle) => watch
                     .entry(key)
@@ -461,6 +472,24 @@ impl Runtime {
                         }
                     });
                 }
+            }
+        }
+        #[cfg(windows)]
+        {
+            let mut awake = lock(&self.awake);
+            if !local_unfinished {
+                *awake = None;
+            } else {
+                // Renewed every tick: Windows ends power requests on lid close or Start → Sleep.
+                let held = super::adapters::local::keep_awake();
+                if let Err(error) = &held {
+                    if !matches!(*awake, Some(Err(_))) {
+                        eprintln!(
+                            "orx up: could not keep this machine awake for local runs: {error}"
+                        );
+                    }
+                }
+                *awake = Some(held);
             }
         }
         for run_id in self.engine.notify_due()? {
