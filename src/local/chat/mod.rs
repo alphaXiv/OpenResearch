@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
-use crate::error::{anyhow, Context as _, Result};
+use crate::error::{anyhow, Result};
 use crate::local::autonomy::Autonomy;
 use crate::local::harness::ResumeAction;
 use crate::local::model::LocalProject;
@@ -9844,8 +9844,9 @@ pub fn set_chat_session_env(
     cmd.env(CHAT_HARNESS_ENV, harness);
     // The agent's `orx` opens the store this dashboard serves, whatever a synced
     // `ORX_DATA_DIR` or the agent's own home would resolve.
-    let data_dir = crate::commands::remote_host::canonical_data_dir()
-        .context("The agent could not be given this dashboard's data directory")?;
+    let data_dir = crate::commands::remote_host::canonical_data_dir().map_err(|error| {
+        anyhow!("The agent could not be given this dashboard's data directory: {error:#}")
+    })?;
     cmd.env("ORX_DATA_DIR", data_dir);
     cmd.env(LOCAL_SESSION_ENV, "1");
     cmd.env("ORX_SESSION_ID", session_id);
@@ -10067,8 +10068,8 @@ mod session_env_tests {
         let mut cmd = crate::process::tokio_command("agent");
         let error = super::set_chat_session_env(&mut cmd, "session", "claude", None).unwrap_err();
         assert!(
-            format!("{error:#}").contains(&data_dir.display().to_string()),
-            "{error:#}"
+            error.to_string().contains(&data_dir.display().to_string()),
+            "{error}"
         );
     }
 
