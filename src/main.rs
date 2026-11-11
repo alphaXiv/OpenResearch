@@ -710,6 +710,11 @@ pub struct ExpRunArgs {
     #[arg(skip)]
     #[serde(default)]
     pub caller_python_overrides: std::collections::BTreeMap<String, String>,
+    /// What the caller's config dir sets for this backend; absent from an orx that sends only
+    /// the dir.
+    #[arg(skip)]
+    #[serde(default)]
+    pub caller_compute_settings: Option<crate::commands::up::LaunchSettings>,
 }
 
 /// Markers the native agent CLIs export to their shells; nested agents are `unknown`.

@@ -802,3 +802,48 @@ fn an_engine_run_finishing_while_up_is_down_keeps_the_receipt_finish_time() {
     assert_eq!(ended_at, finished_at);
     assert!(started_at <= ended_at);
 }
+
+/// An agent whose config dir is not orx up's, as in a sandbox with its own home, launches
+/// unless that dir sets compute settings orx up would not use.
+#[test]
+fn a_caller_with_its_own_config_dir_launches_only_with_the_settings_orx_up_uses() {
+    let sandbox = Sandbox::new();
+    sandbox.project("echo done\n");
+    let started = sandbox.run(&["exp", "run", "exp", "--force", "--backend", "local"]);
+    assert!(started.status.success(), "{}", diagnostics(&started));
+    let agent_config = sandbox.root.join("agent-config");
+    let slurm = |partition: &str| format!(r#"{{"partition":"{partition}"}}"#);
+    let launch = || {
+        let output = sandbox
+            .command()
+            .env("XDG_CONFIG_HOME", &agent_config)
+            .args(["exp", "run", "exp", "--force", "--backend", "slurm"])
+            .args(["--host", sandbox.server.alias()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let refused = |stderr: &str| stderr.contains(agent_config.to_str().unwrap());
+
+    let empty = launch();
+    assert!(!refused(&empty), "{empty}");
+
+    std::fs::create_dir_all(agent_config.join("openresearch")).unwrap();
+    std::fs::write(agent_config.join("openresearch/slurm.json"), slurm("gpu")).unwrap();
+    let different = launch();
+    assert!(refused(&different), "{different}");
+    assert!(different.contains("partition"), "{different}");
+    assert!(
+        different.contains(sandbox.root.join("config").to_str().unwrap()),
+        "{different}"
+    );
+
+    std::fs::create_dir_all(sandbox.root.join("config/openresearch")).unwrap();
+    std::fs::write(
+        sandbox.root.join("config/openresearch/slurm.json"),
+        slurm("gpu"),
+    )
+    .unwrap();
+    let equal = launch();
+    assert!(!refused(&equal), "{equal}");
+}

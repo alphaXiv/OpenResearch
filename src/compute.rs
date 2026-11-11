@@ -1226,6 +1226,7 @@ echo ok
             telemetry_suppressed: false,
             caller_config_dir: None,
             caller_python_overrides: Default::default(),
+            caller_compute_settings: None,
         }
     }
 

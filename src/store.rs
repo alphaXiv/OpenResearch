@@ -92,13 +92,14 @@ pub(crate) fn open_lifecycle_lock_at(
     path: &std::path::Path,
 ) -> Result<fd_lock::RwLock<std::fs::File>> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::paths::create_dir_all(parent)?;
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(path)?;
+        .open(path)
+        .with_context(|| format!("Could not open {}", path.display()))?;
     Ok(fd_lock::RwLock::new(file))
 }
 
@@ -996,15 +997,14 @@ impl Store {
         data_dir_move_lock_path: PathBuf,
         busy_timeout: Duration,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&dir)?;
+        crate::paths::create_dir_all(&dir)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             // SQLite and its sidecars contain scoped rental capabilities.
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         }
-        std::fs::create_dir_all(dir.join("run-logs"))
-            .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
+        crate::paths::create_dir_all(&dir.join("run-logs"))?;
         let conn = Connection::open(dir.join("orx.db"))?;
         conn.busy_timeout(busy_timeout)?;
         check_reader_floor(&conn)?;

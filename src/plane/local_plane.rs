@@ -629,6 +629,13 @@ impl ApiClient {
         args.agent_origin = crate::agent_origin();
         args.caller_config_dir = Some(crate::commands::up::absolute_config_dir());
         args.caller_python_overrides = crate::jobs::caller_python_overrides();
+        args.caller_compute_settings = Some(
+            crate::commands::up::launch_settings(&args)
+                .await?
+                .filter(|(_, set)| *set)
+                .map(|(settings, _)| settings)
+                .unwrap_or_default(),
+        );
         args.invocation_context = args
             .invocation_identity()?
             .map(|identity| serde_json::to_string(&identity))

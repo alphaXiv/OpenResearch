@@ -99,6 +99,7 @@ impl Api {
         args.forwarded = true;
         crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
         args.backend.get_or_insert_with(|| "local".into());
+        super::require_caller_settings(&args, &super::absolute_config_dir()).await?;
         self.commands.run(args, admission).await
     }
 
@@ -468,10 +469,6 @@ async fn run(
     State(api): State<Arc<Api>>,
     Json(args): Json<crate::ExpRunArgs>,
 ) -> ApiResult<Json<Value>> {
-    crate::commands::up::require_caller_config_dir(
-        args.caller_config_dir.as_deref(),
-        &crate::commands::up::absolute_config_dir(),
-    )?;
     let id = api.launch(args).await?;
     Ok(Json(api.view(&api.run(&id)?)?))
 }
