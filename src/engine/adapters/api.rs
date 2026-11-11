@@ -104,8 +104,8 @@ pub trait Api: Send + Sync {
         window: Duration,
         sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c Self::Cursor>) + Send),
     ) -> Result<bool>;
-    /// Where to continue a spool of `len` bytes an earlier engine left without a saved cursor;
-    /// `None` starts it over.
+    /// Where to continue a spool of `len` bytes that an earlier engine of this format left
+    /// without a saved cursor; `None` starts it over.
     fn resume(_len: u64) -> Option<Self::Cursor> {
         None
     }
@@ -132,7 +132,8 @@ pub fn spool_path(directory: &Path, run: &str) -> Result<PathBuf> {
 }
 
 /// The spool's first `len` bytes and the cursor that continues past them, written after those
-/// bytes so it may lag the spool but never lead it.
+/// bytes so it may lag the spool but never lead it. Saved as `null` when a spool starts, so a
+/// spool with no file beside it is one an older orx wrote in lines, not the provider's bytes.
 #[derive(Serialize, Deserialize)]
 struct Checkpoint<C> {
     len: u64,
@@ -143,10 +144,10 @@ fn checkpoint_path(spool: &Path) -> PathBuf {
     spool.with_extension("json")
 }
 
-fn save_checkpoint<C: Serialize>(spool: &Path, len: u64, cursor: &C) -> Result<()> {
+fn save_checkpoint<C: Serialize>(spool: &Path, saved: Option<Checkpoint<C>>) -> Result<()> {
     let path = checkpoint_path(spool);
     let part = path.with_extension("json.part");
-    std::fs::write(&part, serde_json::to_vec(&Checkpoint { len, cursor })?)?;
+    std::fs::write(&part, serde_json::to_vec(&saved)?)?;
     std::fs::rename(&part, &path)?;
     Ok(())
 }
@@ -273,7 +274,9 @@ impl<A: Api + 'static> Adapter<A> {
                         _ => {}
                     }
                 }
-                (options.open(&path)?, 0, A::Cursor::default())
+                let file = options.open(&path)?;
+                save_checkpoint::<A::Cursor>(&path, None)?;
+                (file, 0, A::Cursor::default())
             }
         };
         let log = Arc::new(Log {
@@ -304,9 +307,10 @@ impl<A: Api + 'static> Adapter<A> {
         };
         let len = file.metadata()?.len();
         let saved = match std::fs::read(checkpoint_path(path)) {
-            Ok(bytes) => match serde_json::from_slice::<Checkpoint<A::Cursor>>(&bytes) {
-                Ok(saved) if saved.len <= len => Some((saved.len, saved.cursor)),
-                Ok(_) => None,
+            Ok(bytes) => match serde_json::from_slice::<Option<Checkpoint<A::Cursor>>>(&bytes) {
+                Ok(Some(saved)) if saved.len <= len => Some((saved.len, saved.cursor)),
+                Ok(Some(_)) => None,
+                Ok(None) => A::resume(len).map(|cursor| (len, cursor)),
                 Err(error) => {
                     eprintln!(
                         "orx up: starting the provider log {} over, since its saved position \
@@ -316,9 +320,7 @@ impl<A: Api + 'static> Adapter<A> {
                     None
                 }
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                A::resume(len).map(|cursor| (len, cursor))
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
         let Some((len, cursor)) = saved else {
@@ -446,7 +448,14 @@ impl<A: Api + 'static> Backend for Adapter<A> {
                             }
                             failed = match (spool.append(chunk), next) {
                                 (Ok(()), Some(next)) => {
-                                    let error = save_checkpoint(&spool.path, spool.len, next).err();
+                                    let error = save_checkpoint(
+                                        &spool.path,
+                                        Some(Checkpoint {
+                                            len: spool.len,
+                                            cursor: next,
+                                        }),
+                                    )
+                                    .err();
                                     if error.is_none() {
                                         saved = Some((spool.len, next.clone()));
                                     }

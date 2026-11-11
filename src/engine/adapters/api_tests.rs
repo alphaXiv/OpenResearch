@@ -4125,3 +4125,45 @@ cat "frames/$n"
         "\n0\n\n"
     );
 }
+
+#[tokio::test]
+async fn modal_logs_an_older_orx_spooled_in_lines_are_rebuilt_from_the_start() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/modal-python"),
+        &format!(
+            r#"#!/bin/sh
+cd '{}'
+if [ "$3" = status ]; then echo '{{"stage":"RUNNING"}}'; exit; fi
+printf '%s\n' "$5" >> from.log
+cat frames
+"#,
+            root.display()
+        ),
+    );
+    std::fs::write(
+        root.join("frames"),
+        modal_frames(&[("0", b"a\r\nb\r\nc"), ("8", b"d\n")]),
+    )
+    .unwrap();
+    // How an older orx spooled the first chunk: one line at a time, each ending in `\n`.
+    std::fs::create_dir_all(root.join("spools")).unwrap();
+    std::fs::write(root.join("spools/run.spool.log"), "a\nb\nc\n").unwrap();
+    let backend = super::api::Adapter::new(
+        ModalAccount,
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    );
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("modal_job", None, None, vec!["sandbox".into()]),
+    };
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, "a\r\nb\r\ncd\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("from.log")).unwrap(),
+        "\n"
+    );
+}
