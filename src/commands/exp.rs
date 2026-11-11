@@ -285,9 +285,12 @@ fn request_legacy_run_cancel_at(
         .open(lock_path)?;
     let mut cancel_lock = fd_lock::RwLock::new(lock_file);
     let _cancel_guard = cancel_lock.write()?;
-    store
-        .get_run(run_id)?
-        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?;
+    store.get_run(run_id)?.ok_or_else(|| {
+        anyhow!(
+            "Run {run_id} was not found in the orx store at {}.",
+            store.data_dir().display()
+        )
+    })?;
     store.request_cancel(run_id, reason)?;
     Ok(())
 }

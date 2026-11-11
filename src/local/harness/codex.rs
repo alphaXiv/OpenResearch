@@ -4169,7 +4169,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         .flatten();
     let roots: Vec<PathBuf> = if policy == Some("workspace-write") {
         [
-            data_dir.clone(),
+            data_dir,
             Some(ensure_orx_lifecycle_lock_dir()?),
             shared_git_dir(&repo).await,
         ]
@@ -4198,10 +4198,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     // subcommand rejects `-s` ("unexpected argument"), but accepts `-c` on both
     // the fresh and resume paths (verified against codex-cli 0.143), so one form
     // works for the whole session lifecycle.
-    //
-    // Yields the data dir granted as a writable root (if any), so the child's
-    // store can be pinned to it below, after `prepare_env`.
-    let data_dir_pin = match policy {
+    match policy {
         Some(policy) => {
             cmd.args([
                 "-c",
@@ -4231,16 +4228,12 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             //     fail outright; grant the common dir (see `shared_git_dir`).
             if policy == "workspace-write" {
                 cmd.args(["-c", "sandbox_workspace_write.network_access=true"]);
-                data_dir
-            } else {
-                None
             }
         }
         None => {
             cmd.arg("--dangerously-bypass-approvals-and-sandbox");
-            None
         }
-    };
+    }
     // Reasoning level → Codex's own `model_reasoning_effort` config override.
     if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
@@ -4300,18 +4293,6 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     // session so it can be explicitly subscribed to. After prepare_env so it
     // isn't shadowed by a synced value.
     set_chat_session_env(&mut cmd, &ctx.session_id, "codex", ctx.host.up_port());
-    // Pin the sandboxed turn's store to the exact path granted above. The
-    // grant was resolved from the host's env, but the child could resolve a
-    // different data dir — `prepare_env` injects dashboard-synced vars (a
-    // synced `ORX_DATA_DIR`/`XDG_DATA_HOME` absent from the host env), and a
-    // relative `ORX_DATA_DIR` resolves against the child's cwd, not ours.
-    // Must come after `prepare_env`: later `cmd.env` calls win, and the
-    // synced-env injection guards on the *process* env, not the cmd's map.
-    // (Unsandboxed Bypass has no grant to stay coherent with, so no pin — a
-    // synced `ORX_DATA_DIR` still wins there.)
-    if let Some(dir) = &data_dir_pin {
-        cmd.env("ORX_DATA_DIR", dir);
-    }
     ctx.persist_delivery(DeliveryState::Unknown)?;
     let mut child = match cmd.spawn() {
         Ok(child) => child,

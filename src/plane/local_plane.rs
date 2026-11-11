@@ -351,9 +351,11 @@ impl LocalPlane {
         let parent_exp = match &parent {
             Some(parent_id) => Some(store.get_local_experiment(parent_id)?.ok_or_else(|| {
                 anyhow!(
-                    "Parent experiment {} not found in the local store. \
+                    "Parent experiment {} was not found in the orx store at {}. \
                      Choose an existing local experiment from `orx project view {}`, or omit --parent to branch off the project root.",
-                    parent_id, project.id
+                    parent_id,
+                    store.data_dir().display(),
+                    project.id
                 )
             })?),
             None if baseline => None,

@@ -9830,8 +9830,8 @@ fn child_env_value(key: &str) -> Option<std::ffi::OsString> {
     })
 }
 
-/// Stamp the launching session id and the running orx's bin dir onto a harness
-/// child's env, and write the shell hooks its tool calls source. Call *after*
+/// Stamp the launching session id, this dashboard's data dir and the running orx's
+/// bin dir onto a harness child's env, and write the shell hooks its tool calls source. Call *after*
 /// `prepare_env` so a dashboard-synced value can't shadow either. Harness
 /// children are one-per-session, so this is unambiguous.
 pub fn set_chat_session_env(
@@ -9842,6 +9842,11 @@ pub fn set_chat_session_env(
 ) {
     cmd.env(CHAT_SESSION_ENV, session_id);
     cmd.env(CHAT_HARNESS_ENV, harness);
+    // The agent's `orx` opens the store this dashboard serves, whatever a synced
+    // `ORX_DATA_DIR` or the agent's own home would resolve.
+    if let Ok(dir) = crate::commands::remote_host::canonical_data_dir() {
+        cmd.env("ORX_DATA_DIR", dir);
+    }
     cmd.env(LOCAL_SESSION_ENV, "1");
     cmd.env("ORX_SESSION_ID", session_id);
     cmd.env("ORX_AGENT_TOKEN", delegation::agent_token(session_id));
@@ -10024,6 +10029,28 @@ mod session_env_tests {
         };
         assert_eq!(forwarded.launching_chat_session(), None);
         assert!(forwarded.invocation_identity().unwrap().is_none());
+    }
+
+    /// A data dir saved in the synced env must not split an agent's `orx` from the store
+    /// this dashboard serves.
+    #[test]
+    fn agents_open_the_dashboards_store() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let synced = crate::config::test_home().join(".openresearch/env");
+        std::fs::create_dir_all(synced.parent().unwrap()).unwrap();
+        std::fs::write(&synced, "export ORX_DATA_DIR='/elsewhere'\n").unwrap();
+        let mut cmd = crate::process::tokio_command("agent");
+        super::prepare_env(&mut cmd);
+        super::set_chat_session_env(&mut cmd, "session", "claude", None);
+        let pinned = cmd
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "ORX_DATA_DIR")
+            .and_then(|(_, value)| value);
+        let served = crate::commands::remote_host::canonical_data_dir().unwrap();
+        assert_eq!(pinned, Some(served.as_os_str()));
     }
 
     #[test]

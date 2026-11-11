@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::{anyhow, Result};
 use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
-use crate::local::harness::codex::{ensure_orx_data_dir, find_codex, find_codex_required};
+use crate::local::harness::codex::{find_codex, find_codex_required};
 use crate::local::native_store::{self, NativeStore};
 
 /// Ceiling on a request's response wait — generous because `thread/start`
@@ -744,15 +744,6 @@ fn spawn_client(
     // run the agent starts via `orx exp run` is tagged with it and can be
     // explicitly subscribed to. After prepare_env so it isn't shadowed.
     crate::local::chat::set_chat_session_env(&mut cmd, session_id, "codex", up_port);
-    // Pin the child's store to the same canonicalized dir the sandbox policy
-    // grants (see harness/codex.rs `ensure_orx_data_dir`) — after prepare_env
-    // so the pin beats a dashboard-synced ORX_DATA_DIR. Unconditional: the
-    // child is shared by every permission mode, so unlike the old per-turn
-    // exec pin this also applies under Bypass (more coherent — agent store ==
-    // served store in every mode).
-    if let Some(dir) = ensure_orx_data_dir() {
-        cmd.env("ORX_DATA_DIR", &dir);
-    }
     // Own process group: a terminal SIGINT reaches orx up alone, which then
     // tears the child's group down deliberately (terminate()).
     #[cfg(unix)]

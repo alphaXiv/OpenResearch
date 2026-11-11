@@ -931,6 +931,10 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     pub(crate) fn relocate_project_paths(&self, paths: &[(String, String)]) -> Result<()> {
         let tx = self.begin()?;
         for (old, new) in paths {
