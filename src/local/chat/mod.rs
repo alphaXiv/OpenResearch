@@ -27,7 +27,6 @@ use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
 use crate::error::{anyhow, Result};
 use crate::local::autonomy::Autonomy;
-use crate::local::claude::ClaudeContinuation;
 use crate::local::harness::ResumeAction;
 use crate::local::model::LocalProject;
 use crate::local::opencode::AgentHost;
@@ -3032,9 +3031,9 @@ struct SendTurnRequest {
     admission: TurnAdmission,
     client_turn_id: Option<String>,
     request_hash: Option<String>,
-    /// Output a Claude child produced on its own, already routed to this turn;
-    /// no prompt is sent.
-    continuation: Option<ClaudeContinuation>,
+    /// Records output a Claude child produced on its own, claimed with
+    /// `claim_continuation`; no prompt is sent.
+    continuation: bool,
 }
 
 enum TurnAdmission {
@@ -4776,7 +4775,7 @@ impl ChatHost {
                         admission: TurnAdmission::Preclaimed(guard),
                         client_turn_id: Some(item.client_turn_id.clone()),
                         request_hash: Some(item.request_hash.clone()),
-                        continuation: None,
+                        continuation: false,
                     },
                 )
                 .await;
@@ -5100,7 +5099,7 @@ impl ChatHost {
                 admission: TurnAdmission::QueueIfBusy,
                 client_turn_id,
                 request_hash: None,
-                continuation: None,
+                continuation: false,
             },
         )
         .await
@@ -5407,7 +5406,7 @@ impl ChatHost {
                             admission: TurnAdmission::RejectIfBusy,
                             client_turn_id: Some(format!("recover_{turn_id}")),
                             request_hash: None,
-                            continuation: None,
+                            continuation: false,
                         },
                     )
                     .await?;
@@ -5589,7 +5588,7 @@ impl ChatHost {
                     admission: TurnAdmission::Preclaimed(guard),
                     client_turn_id: None,
                     request_hash: None,
-                    continuation: None,
+                    continuation: false,
                 },
             )
             .await;
@@ -5696,7 +5695,7 @@ impl ChatHost {
                 admission: TurnAdmission::Preclaimed(guard),
                 client_turn_id: None,
                 request_hash: None,
-                continuation: None,
+                continuation: false,
             },
         )
         .await
@@ -6244,7 +6243,7 @@ impl ChatHost {
             .transpose()?;
         // A continuation's output already reached the agent's own transcript;
         // recovering it means continuing, never re-sending an empty prompt.
-        let delivery = if continuation.is_some() {
+        let delivery = if continuation {
             DeliveryState::Accepted
         } else {
             DeliveryState::NotSent
@@ -6586,10 +6585,10 @@ impl ChatHost {
         let Some(mut guard) = TurnGuard::claim(self, session_id, None).await else {
             return;
         };
-        let Some(continuation) = self.claude.claim_continuation(session_id).await else {
+        if !self.claude.claim_continuation(session_id).await {
             guard.release().await;
             return;
-        };
+        }
 
         let request = SendTurnRequest {
             messages: Vec::new(),
@@ -6606,7 +6605,7 @@ impl ChatHost {
             admission: TurnAdmission::Preclaimed(guard),
             client_turn_id: None,
             request_hash: None,
-            continuation: Some(continuation),
+            continuation: true,
         };
         if let Err(error) = self.send_message_showing(session_id, request).await {
             eprintln!("orx up: could not record the continuation of chat {session_id}: {error}");
@@ -6979,7 +6978,7 @@ impl ChatHost {
                         admission: TurnAdmission::RejectIfBusy,
                         client_turn_id: None,
                         request_hash: None,
-                        continuation: None,
+                        continuation: false,
                     },
                 )
                 .await?;
@@ -7989,7 +7988,7 @@ pub struct TurnCtx {
     pending_target_events: Vec<(String, String, String, String, String)>,
     target_event_bindings: HashMap<String, Vec<String>>,
     /// The turn records output the agent produced on its own; there is no prompt to send.
-    pub continuation: Option<ClaudeContinuation>,
+    pub continuation: bool,
 }
 
 fn turn_ctx_from_stored(
@@ -8061,7 +8060,7 @@ fn turn_ctx_from_stored(
         target_event_offset: 0,
         pending_target_events: Vec::new(),
         target_event_bindings: HashMap::new(),
-        continuation: None,
+        continuation: false,
     })
 }
 
@@ -8465,7 +8464,7 @@ impl TurnCtx {
             target_event_offset: 0,
             pending_target_events: Vec::new(),
             target_event_bindings: HashMap::new(),
-            continuation: None,
+            continuation: false,
         }
     }
 
@@ -9247,7 +9246,7 @@ fn run_notice_request(notices: &[crate::store::RunNotice], guard: TurnGuard) -> 
         admission: TurnAdmission::Preclaimed(guard),
         client_turn_id: Some(notices[0].client_turn_id.clone()),
         request_hash: None,
-        continuation: None,
+        continuation: false,
     }
 }
 
@@ -12943,6 +12942,7 @@ for line in sys.stdin:
     #[test]
     fn claude_output_after_its_turn_becomes_a_turn_of_its_own() {
         use crate::local::claude::tests::{chat_echo_worker, emit, ready_host, serve_turn};
+        use crate::local::claude::TurnEvent;
 
         if !crate::config::in_test_child(&[]) {
             return;
@@ -13056,6 +13056,26 @@ for line in sys.stdin:
                 turns,
                 vec![("completed".to_string(), "accepted".to_string(), None); 5]
             );
+
+            // A segment whose turn cannot be stored waits for the chat's next turn.
+            let tx = store.begin().unwrap();
+            tx.execute_batch(
+                "CREATE TRIGGER unstored BEFORE INSERT ON chat_turns
+                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            emit(&client, &segment("UNSTORED")).await;
+            while claude.has_continuation("resumes").await {
+                tokio::task::yield_now().await;
+            }
+            idle().await;
+            let (_route, mut rx) = claude.take_continuation("resumes").await.unwrap();
+            let mut texts = Vec::new();
+            while let Ok(TurnEvent::Line(line)) = rx.try_recv() {
+                texts.extend(line["message"]["content"][0]["text"].as_str().map(str::to_string));
+            }
+            assert_eq!(texts, ["UNSTORED"]);
             claude.shutdown().await;
         });
     }

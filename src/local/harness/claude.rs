@@ -2327,10 +2327,17 @@ const FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 const BACKGROUND_RESUME_GRACE: Duration = Duration::from_secs(3);
 
 async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u64)> {
-    let resumed_alone = ctx.continuation.is_some();
+    let resumed_alone = ctx.continuation;
     let (route, mut rx) = loop {
-        if let Some(continuation) = ctx.continuation.take() {
-            break continuation;
+        if resumed_alone {
+            break ctx
+                .host
+                .claude
+                .take_continuation(&ctx.session_id)
+                .await
+                .ok_or_else(|| {
+                    anyhow!("Claude Code stopped before what it wrote on its own could be recorded")
+                })?;
         }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let acquire = ctx.host.claude.acquire_turn(spec.clone(), tx);

@@ -92,8 +92,11 @@ struct TurnSlot {
     /// that never ends.
     background: HashSet<String>,
     /// A segment the child began on its own after a turn ended, held until a
-    /// turn claims it.
+    /// turn takes it.
     unclaimed: Option<Vec<Value>>,
+    /// A turn is starting to record `unclaimed`, so no other is started for it.
+    /// If that turn never takes the lines, they wait for the chat's next turn.
+    recording: bool,
     /// When a background task last finished. The child resumes to report it a
     /// moment later, so it is kept until then.
     task_finished_at: Option<Instant>,
@@ -107,6 +110,7 @@ impl TurnSlot {
             served: false,
             background: HashSet::new(),
             unclaimed: None,
+            recording: false,
             task_finished_at: None,
         }
     }
@@ -142,6 +146,7 @@ impl TurnSlot {
         for line in self.unclaimed.take().into_iter().flatten() {
             let _ = sender.send(TurnEvent::Line(line));
         }
+        self.recording = false;
         self.sender = Some(sender);
         self.served
     }
@@ -1416,15 +1421,31 @@ impl ClaudeHost {
         Ok(client.register_turn(tx, self.reaper_notify.clone()))
     }
 
-    /// Whether the session's child holds a segment it started on its own.
+    /// Whether the session's child holds a segment it started on its own that
+    /// no turn is starting to record.
     pub async fn has_continuation(&self, session_id: &str) -> bool {
         let live = self.inner.lock().await.get(session_id).cloned();
-        live.is_some_and(|client| client.turn.lock().unwrap().unclaimed.is_some())
+        live.is_some_and(|client| {
+            let turn = client.turn.lock().unwrap();
+            turn.unclaimed.is_some() && !turn.recording
+        })
+    }
+
+    /// Marks the held segment as being recorded by a turn that will call
+    /// [`Self::take_continuation`]; false when there is none to record.
+    pub async fn claim_continuation(&self, session_id: &str) -> bool {
+        let Some(live) = self.inner.lock().await.get(session_id).cloned() else {
+            return false;
+        };
+        let mut turn = live.turn.lock().unwrap();
+        let claimable = turn.sender.is_none() && turn.unclaimed.is_some() && !turn.recording;
+        turn.recording |= claimable;
+        claimable
     }
 
     /// Route the held segment, and what the child writes after it, to a new
     /// turn. The live child is taken as it is: respawning it would lose the segment.
-    pub async fn claim_continuation(&self, session_id: &str) -> Option<ClaudeContinuation> {
+    pub async fn take_continuation(&self, session_id: &str) -> Option<ClaudeContinuation> {
         let live = self.inner.lock().await.get(session_id).cloned()?;
         let held = {
             let turn = live.turn.lock().unwrap();
@@ -2056,13 +2077,15 @@ pub(crate) mod tests {
             .await;
         assert!(host.inner.lock().await.contains_key("resumes"));
 
-        let (route, mut rx) = host.claim_continuation("resumes").await.unwrap();
+        assert!(host.claim_continuation("resumes").await);
+        assert!(!host.has_continuation("resumes").await);
+        assert!(!host.claim_continuation("resumes").await);
+        let (route, mut rx) = host.take_continuation("resumes").await.unwrap();
         assert!(route.served());
         for expected in [init, reply, result] {
             assert!(matches!(rx.recv().await, Some(TurnEvent::Line(line)) if line == expected));
         }
-        assert!(!host.has_continuation("resumes").await);
-        assert!(host.claim_continuation("resumes").await.is_none());
+        assert!(host.take_continuation("resumes").await.is_none());
         drop(route);
         host.shutdown().await;
     }
@@ -2076,7 +2099,7 @@ pub(crate) mod tests {
         emit(&client, std::slice::from_ref(&init)).await;
         terminate_client(&client).await;
 
-        let (_route, mut rx) = host.claim_continuation("exits").await.unwrap();
+        let (_route, mut rx) = host.take_continuation("exits").await.unwrap();
         assert!(matches!(rx.recv().await, Some(TurnEvent::Line(line)) if line == init));
         assert!(matches!(rx.recv().await, Some(TurnEvent::Closed)));
         host.shutdown().await;
