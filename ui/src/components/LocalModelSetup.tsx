@@ -6,11 +6,12 @@ import { type LocalModelConnection } from "../api";
 
 import { type DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
+import { mutConnectLocalModel, mutRemoveLocalModel } from "../queries/settings";
 import { OptionPicker } from "./ModelPicker";
 import lmStudioLogo from "../assets/lm-studio-logo.svg";
 import ollamaLogo from "../assets/ollama-logo.png";
 import omlxLogo from "../assets/omlx-logo.svg";
-import { DialogContent, DialogTitle, Badge, Button, ButtonLink, IconButton, Input, Spinner, showAlert } from "./ui";
+import { DialogContent, DialogTitle, Badge, Button, ButtonLink, IconButton, Input, Spinner } from "./ui";
 
 const LM_STUDIO = { id: "lmstudio", label: "LM Studio", icon: lmStudioLogo, url: "http://127.0.0.1:1234/v1" };
 const SERVERS = [
@@ -30,19 +31,13 @@ type ProviderDraft = {
 };
 
 export function LocalModelSetup() {
-  const { showCustomDialog } = useWorkspace().dialogs;
-
-  const { getLocalModelsQuery, getHarnessesQuery } = useWorkspace().queries;
-  const { removeLocalModel } = useWorkspace().api;
+  const workspace = useWorkspace();
+  const { showCustomDialog } = workspace.dialogs;
+  const { getLocalModelsQuery, getHarnessesQuery } = workspace.queries;
 
   const connections = useQuery(getLocalModelsQuery());
   const harnesses = useQuery(getHarnessesQuery());
   const opencode = harnesses.data?.find((harness) => harness.id === "opencode");
-  const remove = useMutation({ mutationFn: removeLocalModel });
-  const disconnect = async (id: string) => {
-    try { await remove.mutateAsync(id); }
-    catch (e) { showAlert(e instanceof Error ? e.message : String(e), "error"); }
-  };
 
   return (
     <section className="mt-4 space-y-3 border-t border-border pt-4" aria-label={m.local_models_title()}>
@@ -60,8 +55,7 @@ export function LocalModelSetup() {
             availableModels={opencode?.models.map((model) => model.id) ?? []}
             checking={harnesses.isFetching || (opencode?.catalogPending ?? false)}
             unknown={harnesses.isError || !harnesses.data}
-            disabled={remove.isPending}
-            onRemove={() => void disconnect(connection.id)} />
+            onRemove={() => mutRemoveLocalModel.run(workspace, connection.id)} />
         ))}
       </div>
     </section>
@@ -71,8 +65,9 @@ export function LocalModelSetup() {
 export function LocalModelDialog({ confirm, cancel, isDisabled, errorMessage, onConnected }: DialogContentProps<() => Promise<void>> & {
   onConnected?: (model: string) => void;
 }) {
-  const { getHarnessesQuery, refreshHarnesses } = useWorkspace().queries;
-  const { discoverLocalModels, connectLocalModel } = useWorkspace().api;
+  const workspace = useWorkspace();
+  const { getHarnessesQuery } = workspace.queries;
+  const { discoverLocalModels } = workspace.api;
 
   const harnesses = useQuery(getHarnessesQuery());
   const installed = harnesses.data?.find((harness) => harness.id === "opencode")?.installed ?? false;
@@ -96,16 +91,6 @@ export function LocalModelDialog({ confirm, cancel, isDisabled, errorMessage, on
     setDrafts((current) => ({ ...current, [server.id]: { ...(current[server.id] ?? draft), ...changes } }));
   };
   const probe = useMutation({ mutationFn: discoverLocalModels });
-  const save = useMutation({ mutationFn: async (request: Parameters<typeof connectLocalModel>[0]) => {
-    const result = await connectLocalModel(request);
-    // A plain read can land on a provisional entry whose model list is still
-    // empty — verify against the forced refresh instead.
-    const harnesses = await refreshHarnesses(true);
-    if (!harnesses.find((h) => h.id === "opencode")?.models.some((model) => model.id === result.model)) {
-      throw new Error(m.local_models_config_restricted());
-    }
-    return result;
-  } });
   const context = Number(contextWindow);
   const busy = probe.isPending || isDisabled;
   const canSubmit = !busy && installed && (models.length === 0 || Boolean(model && Number.isSafeInteger(context) && context >= 4096));
@@ -121,7 +106,7 @@ export function LocalModelDialog({ confirm, cancel, isDisabled, errorMessage, on
     if (!model) return;
     updateDraft({ error: null });
     confirm(async () => {
-      const result = await save.mutateAsync({ name: server.label, baseUrl: baseUrl.trim(), apiKey, model, contextWindow: context });
+      const result = await mutConnectLocalModel.runAsHeadlessPromise(workspace, { name: server.label, baseUrl: baseUrl.trim(), apiKey, model, contextWindow: context }, {});
       onConnected?.(result.model);
     });
   };
@@ -186,13 +171,12 @@ export function LocalModelDialog({ confirm, cancel, isDisabled, errorMessage, on
     </DialogContent>;
 }
 
-function SavedLocalModel({ connection, harnessReady, availableModels, checking, unknown, disabled, onRemove }: {
+function SavedLocalModel({ connection, harnessReady, availableModels, checking, unknown, onRemove }: {
   connection: LocalModelConnection;
   harnessReady: boolean;
   availableModels: string[];
   checking: boolean;
   unknown: boolean;
-  disabled: boolean;
   onRemove: () => void;
 }) {
   const { checkLocalModel } = useWorkspace().api;
@@ -223,10 +207,10 @@ function SavedLocalModel({ connection, harnessReady, availableModels, checking, 
             {pending ? m.common_checking() : statusUnknown ? m.settings_page_unknown() : connected ? m.local_models_connected() : m.model_picker_unavailable()}
           </Badge></span>
           <div className="flex items-center gap-1">
-            <Button variant="ghost" disabled={disabled || probe.isPending} onClick={() => probe.mutate()}>
+            <Button variant="ghost" disabled={probe.isPending} onClick={() => probe.mutate()}>
               <RefreshCw size={14} />{m.onboarding_re_check()}
             </Button>
-            <IconButton aria-label={m.local_models_disconnect({ name: connection.name })} disabled={disabled || probe.isPending} onClick={onRemove}><Trash2 size={14} /></IconButton>
+            <IconButton aria-label={m.local_models_disconnect({ name: connection.name })} disabled={probe.isPending} onClick={onRemove}><Trash2 size={14} /></IconButton>
           </div>
         </div>
       </div>

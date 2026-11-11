@@ -9,6 +9,7 @@ import { UserRound } from "lucide-react";
 import { type DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
+import { mutSignOutOpenResearch } from "../queries/settings";
 import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
 
 import { Button, DialogContent, DialogTitle, MenuItem, showAlert, Spinner } from "./ui";
@@ -62,13 +63,12 @@ export function useSignIn() {
 export function AccountChip({ onDetails }: { onDetails: () => void }) {
   const workspace = useWorkspace();
   const { owner } = useMachines();
-  const { useOpenResearchAccount, useAlphaXivFolders, useSignOutOpenResearch } = owner.queries;
+  const { useOpenResearchAccount, useAlphaXivFolders } = owner.queries;
   const openSignIn = useSignIn();
   const { portalContainer } = useContext(WorkspaceDomContext);
   const accountQuery = useOpenResearchAccount();
   const user = accountQuery.data?.user;
   const alphaXivNotConnected = useAlphaXivFolders().error instanceof AlphaXivNotConnectedError;
-  const signOut = useSignOutOpenResearch();
   const chipRef = useRef<HTMLButtonElement>(null);
   const focusAfterLogin = useRef(false);
   const name = user ? [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email : "";
@@ -94,7 +94,7 @@ export function AccountChip({ onDetails }: { onDetails: () => void }) {
           {reason && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => void accountQuery.refetch()}>{m.settings_check_again()}</Menu.Item>}
           {user && !accountQuery.isError && alphaXivNotConnected && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => signIn(true)}>{m.library_connect()}</Menu.Item>}
           <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={onDetails}>{m.account_details()}</Menu.Item>
-          {user && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} disabled={signOut.isPending} onClick={() => confirmOpenResearchSignOut(workspace.dialogs, signOut.mutateAsync)}>{m.settings_openresearch_sign_out()}</Menu.Item>}
+          {user && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => confirmOpenResearchSignOut(workspace.dialogs, () => mutSignOutOpenResearch.runAsHeadlessPromise(owner, {}))}>{m.settings_openresearch_sign_out()}</Menu.Item>}
         </Menu.Popup>
       </Menu.Positioner></Menu.Portal>
     </Menu.Root> : <button ref={chipRef} type="button" className={chipClass} disabled={accountQuery.isLoading} onClick={() => signIn(false)}>{contents}</button>;

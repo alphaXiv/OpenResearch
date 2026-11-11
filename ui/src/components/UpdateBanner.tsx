@@ -9,6 +9,7 @@ import { RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { type Changes, type UpdateStatus } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
+import { mutRestartApp } from "../queries/settings";
 
 import { Button, IconButton, Spinner } from "./ui";
 
@@ -16,23 +17,17 @@ export interface UpdateState {
   status: UpdateStatus | null;
   /** The initial fetch failed — distinct from "still loading". */
   error: string | null;
-  /** Adopt a status returned by a mutating call, so the card reflects the write
-   *  immediately instead of waiting for the next SSE sample. */
-  apply: (status: UpdateStatus) => void;
 }
 
 /** Live update status: the initial fetch plus every `update.status` SSE frame.
  *  Exported because the Updates settings card renders the same state. */
 export function useUpdateStatus(enabled = true): UpdateState {
   const { getUpdateStatusQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
 
-  const options = getUpdateStatusQuery();
-  const query = useQuery({ ...options, enabled });
+  const query = useQuery({ ...getUpdateStatusQuery(), enabled });
   return {
     status: query.data ?? null,
     error: query.error?.message ?? null,
-    apply: (status) => setScopedQueryData(options.queryKey, status),
   };
 }
 
@@ -71,7 +66,6 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
   const workspace = useWorkspace();
   const { getUpdateStatusQuery, getPendingWorkQuery } = workspace.queries;
   const { isCurrentScope, queryClient, dialogs } = workspace;
-  const { restartApp } = workspace.api;
   const router = useRouter();
 
   const [restarting, setRestarting] = useState(false);
@@ -103,7 +97,7 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
       setRestarting(true);
       setError(null);
       try {
-        await restartApp(agents.length > 0);
+        await mutRestartApp.runAsHeadlessPromise(workspace, agents.length > 0, {});
         if (retired()) return;
         const deadline = Date.now() + RESTART_TIMEOUT_MS;
         while (Date.now() < deadline) {

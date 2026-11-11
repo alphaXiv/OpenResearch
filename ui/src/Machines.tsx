@@ -1,9 +1,10 @@
 import { WorkspaceDomContext } from "./WorkspaceDom";
 import { Activity, useCallback, useEffect, useRef, useState } from "react";
-import { QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery, type QueryClient } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import type { RemoteSessionInfo } from "./api";
 import { createWorkspace, WorkspaceContext } from "./workspace";
+import { createQueryClient } from "./queries/client";
 import { createWorkspaceRouter } from "./router";
 import { MachineSelectionContext } from "./machineSelection";
 import { askBeforeClosing } from "./closeDialog";
@@ -11,10 +12,11 @@ import { QueryDevtools } from "./components/QueryDevtools";
 import { Button, Spinner } from "./components/ui";
 import { m } from "./paraglide/messages.js";
 
-function createMachine(id: string, initialLocation = "/") {
+function createMachine(queryClient: QueryClient, id: string, initialLocation = "/") {
   const workspace = createWorkspace(
     `${id}:${crypto.randomUUID()}`,
     id === "local" ? "" : `/_orx/workspaces/${encodeURIComponent(id)}`,
+    queryClient,
   );
   return {
     id,
@@ -117,24 +119,22 @@ function WorkspaceView({
 
   return (
     <WorkspaceContext value={workspace}>
-      <QueryClientProvider client={workspace.queryClient}>
-        <WorkspaceDomContext value={dom}>
-          <div
-            ref={element}
-            className="h-full"
-            data-machine={id}
-            hidden={!active}
-            inert={!active}
-          >
-            <Activity mode={active ? "visible" : "hidden"}>
-              <RouterProvider router={router} />
-              <DialogManager />
-              {import.meta.env.DEV && <QueryDevtools />}
-            </Activity>
-            <div ref={attachPortals} />
-          </div>
-        </WorkspaceDomContext>
-      </QueryClientProvider>
+      <WorkspaceDomContext value={dom}>
+        <div
+          ref={element}
+          className="h-full"
+          data-machine={id}
+          hidden={!active}
+          inert={!active}
+        >
+          <Activity mode={active ? "visible" : "hidden"}>
+            <RouterProvider router={router} />
+            <DialogManager />
+            {import.meta.env.DEV && <QueryDevtools />}
+          </Activity>
+          <div ref={attachPortals} />
+        </div>
+      </WorkspaceDomContext>
     </WorkspaceContext>
   );
 }
@@ -179,7 +179,7 @@ function MachineWorkspaces({
     setWorkspaces((current) =>
       current.has(session.id)
         ? current
-        : new Map(current).set(session.id, createMachine(session.id)),
+        : new Map(current).set(session.id, createMachine(owner.queryClient, session.id)),
     );
     setActiveId(session.id);
   }
@@ -238,7 +238,7 @@ function MachineWorkspaces({
       setWorkspaces((current) =>
         new Map(current).set(
           session.id,
-          createMachine(session.id, browserLocation()),
+          createMachine(owner.queryClient, session.id, browserLocation()),
         ),
       );
       setActiveId(session.id);
@@ -304,7 +304,7 @@ function MachineWorkspaces({
               ? replaceLocal
               : () =>
                   setWorkspaces((current) =>
-                    new Map(current).set(id, createMachine(id)),
+                    new Map(current).set(id, createMachine(owner.queryClient, id)),
                   )
           }
         />
@@ -316,6 +316,7 @@ function MachineWorkspaces({
 export function Machines() {
   const [local, setLocal] = useState(() =>
     createMachine(
+      createQueryClient(),
       "local",
       new URL(location.href).searchParams.has("machine")
         ? "/"
@@ -326,7 +327,7 @@ export function Machines() {
     <QueryClientProvider client={local.workspace.queryClient}>
       <MachineWorkspaces
         local={local}
-        replaceLocal={() => setLocal(createMachine("local"))}
+        replaceLocal={() => setLocal((current) => createMachine(current.workspace.queryClient, "local"))}
       />
     </QueryClientProvider>
   );

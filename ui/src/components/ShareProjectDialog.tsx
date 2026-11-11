@@ -1,4 +1,5 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutate } from "@clo/react-mutation";
+import { useQuery } from "@tanstack/react-query";
 import { Copy, Download, Link2, X } from "lucide-react";
 import { useRef, type RefObject } from "react";
 
@@ -6,6 +7,7 @@ import type { Project, ShareChoice } from "../api";
 import type { DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
 import { useWorkspace } from "../workspace";
+import { mutPublishProject } from "../queries/projects";
 import { useSignIn } from "./AccountChip";
 import { Button, ButtonLink, DialogContent, DialogTitle, IconButton, Input, Spinner, showAlert } from "./ui";
 
@@ -14,38 +16,27 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
   remote: boolean;
   returnFocus: RefObject<HTMLButtonElement | null>;
 }) {
-  const {
-    api: { getProjectLink, publishProject },
-    queries: { listChatSessionsQuery },
-    queryClient,
-    workspaceKey,
-  } = useWorkspace();
+  const workspace = useWorkspace();
+  const { listChatSessionsQuery, getProjectLinkQuery } = workspace.queries;
   const openSignIn = useSignIn();
   const chatsQuery = useQuery(listChatSessionsQuery(project.id));
   const chats = chatsQuery.data?.filter((chat) => !chat.sideParentSessionId);
   const choice: ShareChoice = { chats: chats?.map((chat) => chat.id) ?? [], logs: true, artifacts: true };
   // Asked of the machine that publishes: in an SSH workspace that is the remote, not this laptop.
-  const linkKey = workspaceKey("getProjectLink", project.id);
   const linkQuery = useQuery({
-    queryKey: linkKey,
-    queryFn: ({ signal }) => getProjectLink(project.id, signal),
+    ...getProjectLinkQuery(project.id),
     // `orx login` on the remote happens in a shell, so nothing else tells this dialog.
     refetchInterval: (query) => remote && query.state.data?.signedIn === false ? 3_000 : false,
   });
   const signedIn = linkQuery.data?.signedIn === true;
   const link = linkQuery.data?.sharedProject ?? null;
-  const publish = useMutation({
-    mutationFn: () => publishProject(project.id, choice),
-    onSuccess: ({ sharedProject, skipped }) => {
-      queryClient.setQueryData(linkKey, { signedIn: true, sharedProject });
-      if (skipped.length > 0) showAlert(m.share_skipped({ paths: skipped.join(", ") }), "warning");
-    },
-  });
+  const publish = useMutate(mutPublishProject);
+  const publishError = publish.error === undefined ? null : publish.error instanceof Error ? publish.error.message : String(publish.error);
   const publishRef = useRef<HTMLButtonElement>(null);
-  const busy = pending || publish.isPending;
+  const busy = pending || publish.isMutating;
   // Without the chat list the file would quietly leave every chat out, so sharing waits for it.
   const ready = Boolean(chats);
-  const save = () => { publish.reset(); confirm(choice); };
+  const save = () => { publish.clear(); confirm(choice); };
 
   return <DialogContent finalFocus={returnFocus} className="relative max-h-[calc(100vh-2.5rem)] overflow-y-auto text-text">
     <IconButton type="button" className="absolute end-3.5 top-3.5" aria-label={m.tour_close()} onClick={cancel} disabled={busy}><X size={16} /></IconButton>
@@ -74,10 +65,12 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
         </div>
       </div>}
     </section>
-    {(publish.error || errorMessage) && <p role="alert" className="mt-3 whitespace-pre-line break-words text-sm text-accent-red">{publish.error?.message ?? errorMessage}</p>}
+    {(publishError || errorMessage) && <p role="alert" className="mt-3 whitespace-pre-line break-words text-sm text-accent-red">{publishError ?? errorMessage}</p>}
     {!link && <div className="mt-4 flex flex-wrap justify-end gap-2">
       <Button ref={publishRef} type="button" disabled={busy || !ready || !linkQuery.data || (remote && !signedIn)} onClick={() => {
-        if (signedIn) publish.mutate();
+        if (signedIn) publish.runWithOptions(workspace, project.id, choice, {
+          onSuccessData: ({ skipped }) => { if (skipped.length > 0) showAlert(m.share_skipped({ paths: skipped.join(", ") }), "warning"); },
+        });
         else openSignIn(false, publishRef.current);
       }}>{publish.isPending ? <Spinner /> : <Link2 size={16} />}{linkQuery.data && !signedIn ? m.share_publish_sign_in() : m.share_publish()}</Button>
       <Button type="button" variant="primary" disabled={busy || !ready} onClick={save}>{isPending ? <Spinner /> : <Download size={16} />}{m.share_save()}</Button>

@@ -2,7 +2,7 @@ import { useWorkspace } from "../workspace";
 
 import { useQuery } from "@tanstack/react-query";
 import { useFileManagerLabel } from "./useFileManagerLabel";
-import { type LoadedFile } from "../queries/files";
+import { mutSaveProjectFile, type LoadedFile } from "../queries/files";
 
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
@@ -204,12 +204,12 @@ export function FileViewer({
   onShowSourceChange?: (showSource: boolean) => void;
 }) {
   const { resolvedFileQuery, refreshFile } = useWorkspace().queries;
-  const { setScopedQueryData, queryClient } = useWorkspace();
+  const workspace = useWorkspace();
+  const { queryClient } = workspace;
   const {
     absoluteFileUrl,
     artifactUrl,
     projectFileUrl,
-    saveProjectFile,
     openFileInEditor,
     revealFileInManager,
   } = useWorkspace().api;
@@ -218,9 +218,6 @@ export function FileViewer({
   const fileQuery = useQuery({ ...fileOptions, enabled: !bufferSession.saving });
   const loaded = fileQuery.data ?? null;
   const error = fileQuery.error?.message ?? null;
-  const setLoaded = (value: React.SetStateAction<LoadedFile | null>) => {
-    setScopedQueryData(fileOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const [nonce, setNonce] = useState(0);
   const isArtifacts = source === "artifacts";
   const isAbsolute = source === "abs";
@@ -371,18 +368,11 @@ export function FileViewer({
     setSaveError(null);
     try {
       await queryClient.cancelQueries(fileOptions);
-      const result = await saveProjectFile(projectId, filePath, content, {
-        sessionId,
-        expectedVersion: expectedVersion ?? savingState.version,
-      });
-      const current = bufferSession.getSnapshot();
-      if (!current) return false;
-      bufferSession.saved(savedDraft, result.version);
-      setLoaded((prev) =>
-        prev && prev.source === "checkout"
-          ? { source: "checkout", file: { ...prev.file, content, version: result.version } }
-          : prev,
+      const result = await mutSaveProjectFile.runAsHeadlessPromise(
+        workspace, projectId, sessionId, filePath, content, expectedVersion ?? savingState.version, {},
       );
+      if (!bufferSession.getSnapshot()) return false;
+      bufferSession.saved(savedDraft, result.version);
       return true;
     } catch (e) {
       if (e instanceof FileChangedError) {
