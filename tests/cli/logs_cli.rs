@@ -253,3 +253,31 @@ fn large_kept_log_previews_tail_and_identifies_both_ranges_and_missing_middle() 
     assert!(!stdout.contains("SETUP_SENTINEL"));
     assert!(!stdout.contains("full log file"));
 }
+
+#[test]
+fn a_closed_stdout_ends_short_commands_quietly() {
+    let sandbox = Sandbox::new();
+    let run_id = "run-closed-stdout";
+    sandbox.seed_run(run_id);
+    sandbox.write_log(run_id, b"line\n");
+    for args in [&["logs", run_id][..], &["projects"]] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let output = sandbox
+            .command()
+            .args(args)
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.is_empty(), "{args:?}: {stderr}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            assert_eq!(output.status.signal(), Some(libc::SIGPIPE), "{args:?}");
+        }
+        #[cfg(windows)]
+        assert!(output.status.success(), "{args:?}: {}", output.status);
+    }
+}

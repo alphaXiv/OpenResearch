@@ -885,7 +885,17 @@ impl ApiClient {
     }
 
     pub async fn logs(&self, id: &str, follow: bool) -> Result<()> {
-        self.logs_to(id, follow, &mut std::io::stdout()).await
+        let result = self.logs_to(id, follow, &mut std::io::stdout()).await;
+        // Of this call's I/O, only writing stdout can break a pipe.
+        if let Err(error) = &result {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+            {
+                crate::output::stdout_closed();
+            }
+        }
+        result
     }
 
     pub(crate) async fn logs_to(
