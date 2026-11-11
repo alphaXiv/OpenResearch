@@ -7,7 +7,7 @@ import { statusLabel } from "./StatusBadge";
 
 import { TARGET_LABELS } from "../computeTargets";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, FlaskConical, HelpCircle, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, Plus, Terminal } from "lucide-react";
+import { ChevronDown, ChevronRight, FlaskConical, HelpCircle, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, Plus, Search, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { countChanges, parseDiffFiles } from "./GitDiff";
@@ -22,7 +22,7 @@ import { formatForDisplay } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { navigateKeyboardList, navigateKeyboardRow } from "../keyboardNavigation";
 
-export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments, onSideChat, sessions, onSelectSideChat, onOpenDelegate }: {
+export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, findOpen, onFind, onArtifacts, onExperiments, onSideChat, sessions, onSelectSideChat, onOpenDelegate }: {
   expanded: boolean;
   experiments: Experiment[];
   runs: Run[];
@@ -36,6 +36,8 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   onChanges: () => void;
   onFiles: () => void;
   onTerminal: () => void;
+  findOpen: boolean;
+  onFind: () => void;
   onArtifacts: () => void;
   onExperiments: () => void;
   /** Absent until there is a chat to branch from. */
@@ -51,19 +53,21 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   const defaultBackend = compute.data?.configuredDefaultBackend ?? compute.data?.defaultBackend;
   const computeLabel = defaultBackend ? TARGET_LABELS[defaultBackend]() : compute.isPending ? "…" : compute.isError ? m.model_picker_unavailable() : m.settings_not_set();
   const items = [
+    { id: "search", label: m.chat_search_title(), Icon: Search, onClick: onFind, shortcut: appHotkeys["chat.find"].hotkey },
     { id: "files", label: m.app_files(), Icon: FolderOpen, onClick: onFiles, shortcut: appHotkeys["files.open"].hotkey },
     { id: "artifacts", label: m.app_artifacts(), Icon: Package, onClick: onArtifacts, shortcut: appHotkeys["artifacts.open"].hotkey },
     { id: "experiments", label: m.app_experiments(), Icon: FlaskConical, onClick: onExperiments, shortcut: appHotkeys["experiments.open"].hotkey },
     { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal, shortcut: appHotkeys["terminal.open"].hotkey },
   ].map((item) => ({
     ...item,
+    pressed: item.id === "search" ? findOpen : activeView === item.id,
     ariaShortcut: typeof item.shortcut === "string" ? `${item.shortcut.replace("Mod+", "Meta+")} ${item.shortcut.replace("Mod+", "Control+")}` : undefined,
   }));
   return (
     <>
     <nav aria-label={m.workspace_tools_heading()} className="workspace-mobile-nav hidden">
-      {items.map(({ id, label, Icon, onClick }) => (
-        <button key={id} type="button" aria-pressed={activeView === id} onClick={onClick}>
+      {items.map(({ id, label, Icon, onClick, pressed }) => (
+        <button key={id} type="button" aria-pressed={pressed} onClick={onClick}>
           <Icon size={20} aria-hidden="true" />
           <span>{label}</span>
         </button>
@@ -73,8 +77,8 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
     <div className="workspace-tools absolute end-3.5 top-2 mac-titlebar:top-1.5 z-30" style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
         <nav aria-label={m.workspace_tools_heading()} onKeyDown={navigateKeyboardRow} className="flex items-center justify-end gap-1">
-          {items.map(({ id, label, Icon, onClick, shortcut, ariaShortcut }) => (
-            <IconButton key={id} data-keyboard-horizontal-item active={activeView === id} className="text-text" data-tip={shortcut ? `${label} (${formatForDisplay(shortcut)})` : label} data-tip-align={id === "terminal" ? "end" : undefined} aria-label={label} aria-keyshortcuts={ariaShortcut} aria-pressed={activeView === id} onClick={onClick}>
+          {items.map(({ id, label, Icon, onClick, shortcut, ariaShortcut, pressed }) => (
+            <IconButton key={id} data-keyboard-horizontal-item active={pressed} className="text-text" data-tip={shortcut ? `${label} (${formatForDisplay(shortcut)})` : label} data-tip-align={id === "terminal" ? "end" : undefined} aria-label={label} aria-keyshortcuts={ariaShortcut} aria-pressed={pressed} onClick={onClick}>
               <Icon size={16} />
             </IconButton>
           ))}
