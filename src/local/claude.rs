@@ -235,6 +235,9 @@ pub struct SpawnSpec {
     pub repo: PathBuf,
     pub playbook: PathBuf,
     pub resume: Option<String>,
+    /// Message within `resume` to branch from: the child starts a new native
+    /// session holding `resume`'s history up to it.
+    pub fork_at: Option<String>,
     pub config: SpawnConfig,
 }
 
@@ -776,6 +779,9 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     }
     if let Some(native_id) = &spec.resume {
         cmd.args(["--resume", native_id]);
+        if let Some(message_id) = &spec.fork_at {
+            cmd.args(["--resume-session-at", message_id, "--fork-session"]);
+        }
     }
 
     let mut config = spec.config.clone();
@@ -1851,6 +1857,7 @@ pub(crate) mod tests {
                     repo: PathBuf::new(),
                     playbook: PathBuf::new(),
                     resume: Some("saved-native-id".into()),
+                    fork_at: None,
                     config: client.config(),
                 },
                 Duration::from_millis(10),
@@ -2354,6 +2361,7 @@ pub(crate) mod tests {
                     repo: PathBuf::new(),
                     playbook: PathBuf::new(),
                     resume: None,
+                    fork_at: None,
                     config: cfg(None, None, None, false),
                 },
                 tx,

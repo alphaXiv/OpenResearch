@@ -8610,6 +8610,7 @@ async fn create_chat_session(
         project_id: req.project_id,
         harness,
         native_session_id: None,
+        native_fork_at: None,
         title: None,
         title_source: None,
         model: nonempty(req.model),

@@ -821,6 +821,7 @@ impl Harness for ClaudeCode {
             repo,
             playbook,
             resume: Some(native_id),
+            fork_at: None,
             config: SpawnConfig {
                 permission_mode: ctx.permission_mode,
                 effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
@@ -1557,6 +1558,9 @@ struct TurnState {
     /// The provisional native session id from the latest `system/init` or
     /// `result`. An auth-failed attempt never commits it to the store.
     native_session_id: Option<String>,
+    /// The newest main-loop message in that session, where a fork ending at
+    /// this turn branches it (`--resume-session-at`).
+    native_message_id: Option<String>,
     /// The in-flight assistant message id from the stream's `message_start` —
     /// deltas carry only a block `index`, so this is what keys them to the
     /// same `{mid}-{index}` part ids the final complete `assistant` event
@@ -1673,7 +1677,13 @@ fn apply_subagent_blocks(
 /// the recv loop). Native-session-id application and flushing are the caller's
 /// job, keeping this store-free.
 fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool {
-    match event.get("type").and_then(Value::as_str) {
+    let kind = event.get("type").and_then(Value::as_str);
+    if matches!(kind, Some("user" | "assistant")) && subagent_parent(event).is_none() {
+        if let Some(uuid) = event.get("uuid").and_then(Value::as_str) {
+            state.native_message_id = Some(uuid.to_string());
+        }
+    }
+    match kind {
         // Partial-message deltas (opt-in via --include-partial-messages): the
         // text/thinking streams token by token instead of landing as one block
         // when the complete `assistant` event arrives. Deltas build a part
@@ -2295,6 +2305,9 @@ fn commit_attempt_session(ctx: &mut TurnCtx, state: &TurnState) {
         if let Some(sid) = state.native_session_id.as_deref() {
             ctx.set_native_session_id(sid);
         }
+        if state.native_message_id.is_some() {
+            ctx.native_message_id = state.native_message_id.clone();
+        }
     }
 }
 
@@ -2328,6 +2341,7 @@ const BACKGROUND_RESUME_GRACE: Duration = Duration::from_secs(3);
 
 async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u64)> {
     let resumed_alone = ctx.continuation;
+    let forking = spec.fork_at.is_some();
     let (route, mut rx) = loop {
         if resumed_alone {
             break ctx
@@ -2378,9 +2392,13 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         ctx.persist_delivery(DeliveryState::Unknown)?;
         if let Err(e) = client.send_user_message(&ctx.text).await {
             ctx.host.claude.kill_session(&ctx.session_id).await;
+            let log = crate::store::data_dir().join("agent-claude.log");
+            if forking {
+                return Err(abandon_fork(ctx, &spec, &log));
+            }
             return Err(anyhow!(
                 "claude stdin write failed: {e}; see {}",
-                crate::store::data_dir().join("agent-claude.log").display()
+                log.display()
             ));
         }
     }
@@ -2553,10 +2571,11 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 commit_attempt_session(ctx, &state);
                 ctx.host.claude.kill_session(&ctx.session_id).await;
                 let _ = ctx.flush();
-                return Err(anyhow!(
-                    "claude exited mid-turn; see {}",
-                    crate::store::data_dir().join("agent-claude.log").display()
-                ));
+                let log = crate::store::data_dir().join("agent-claude.log");
+                if forking && !saw_user_echo {
+                    return Err(abandon_fork(ctx, &spec, &log));
+                }
+                return Err(anyhow!("claude exited mid-turn; see {}", log.display()));
             }
         }
     }
@@ -2576,6 +2595,33 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
     }
     commit_attempt_session(ctx, &state);
     Ok((state, auth_generation))
+}
+
+/// A child that dies before echoing the prompt never read it, so the turn can
+/// be retried; it retries from a new session the handoff fills with the
+/// branch, since the CLI may not take the branch point again (an unknown
+/// message, or `--resume-session-at` gone from a newer release).
+fn abandon_fork(ctx: &mut TurnCtx, spec: &SpawnSpec, log: &Path) -> crate::error::Error {
+    eprintln!(
+        "orx up: Claude could not branch session={} native={:?} at={:?}",
+        ctx.session_id, spec.resume, spec.fork_at
+    );
+    ctx.mark_delivery(DeliveryState::Rejected);
+    ctx.native_session_id = None;
+    ctx.native_fork_at = None;
+    let cleared = crate::store::Store::open()
+        .and_then(|store| store.set_chat_session_native_id(&ctx.session_id, None));
+    match cleared {
+        Ok(()) => anyhow!(
+            "Claude Code could not resume this branch from its saved session. Retry to start \
+             a new Claude session from this branch's conversation; Claude's error is in {}",
+            log.display()
+        ),
+        Err(error) => anyhow!(
+            "Claude Code could not resume this branch, and orx could not set its saved \
+             session aside: {error}"
+        ),
+    }
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
@@ -2616,6 +2662,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .native_session_id
         .clone()
         .filter(|_| native_session.is_some());
+    let fork_at = ctx.native_fork_at.clone().filter(|_| resume.is_some());
     if ctx.native_session_id.is_some() && resume.is_none() {
         if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code")? {
             ctx.text = format!("{recovery}\n\n{}", ctx.text);
@@ -2627,6 +2674,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         repo,
         playbook,
         resume: resume.clone(),
+        fork_at,
         config: spawn_config(ctx, native_store),
     };
     let mut retry_count = 0;
@@ -2786,6 +2834,7 @@ mod tests {
             repo: PathBuf::new(),
             playbook: PathBuf::new(),
             resume: None,
+            fork_at: None,
             config: client.config(),
         };
         let attempt =
