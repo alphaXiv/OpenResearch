@@ -71,7 +71,7 @@ export function WorkspaceConnection({
           <div
             className={
               corner
-                ? "workspace-connection-corner fixed bottom-0 start-0 z-50"
+                ? "workspace-connection-corner fixed bottom-0 start-0 z-30"
                 : "relative shrink-0"
             }
           >
