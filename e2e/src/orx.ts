@@ -107,7 +107,15 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     async onboard() {
       const agent = { name: 'E2E Agent', executable: process.execPath, arguments: [FAKE_AGENT] }
       const { id: harness } = await api<{ id: string }>('/api/harnesses/acp', agent)
-      await api('/api/onboarding/complete', { harness })
+      const deadline = Date.now() + 30_000
+      let model: string | undefined
+      while (!model) {
+        const { harnesses } = await api<{ harnesses: { id: string; defaultModel?: string }[] }>('/api/harnesses')
+        model = harnesses.find((h) => h.id === harness)?.defaultModel
+        if (!model && Date.now() > deadline) throw new Error(`${agent.name} never reported a model`)
+        if (!model) await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+      await api('/api/onboarding/complete', { harness, model })
       await api('/api/settings/ui-state', { tourCompleted: true })
     },
     /** A blank project, as the New project dialog creates one. */
