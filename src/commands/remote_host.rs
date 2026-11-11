@@ -854,7 +854,36 @@ fn spawn_detached_host(
         use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
-    match command.spawn() {
+
+    #[cfg(not(windows))]
+    let spawned = command.spawn();
+    #[cfg(windows)]
+    let spawned = {
+        use windows_sys::Win32::Foundation::{
+            GetHandleInformation, SetHandleInformation, HANDLE_FLAG_INHERIT,
+        };
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        // A server inheriting this CLI's std pipes keeps whoever reads its output waiting until the server exits.
+        let inheritable: Vec<_> = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+            .into_iter()
+            .map(|id| unsafe { GetStdHandle(id) })
+            .filter(|&handle| unsafe {
+                let mut flags = 0;
+                GetHandleInformation(handle, &mut flags) != 0
+                    && flags & HANDLE_FLAG_INHERIT != 0
+                    && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0
+            })
+            .collect();
+        let spawned = command.spawn();
+        for handle in inheritable {
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        }
+        spawned
+    };
+
+    match spawned {
         Ok(child) => {
             #[cfg(unix)]
             let readiness = readiness.map(|(reader, _)| Readiness::Pipe(reader));

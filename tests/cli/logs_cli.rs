@@ -343,7 +343,7 @@ fn read_only_commands_work_on_a_read_only_store() {
 #[test]
 fn an_unusable_config_dir_is_named_in_the_error() {
     let sandbox = Sandbox::new();
-    let config = sandbox.0.join("config/openresearch");
+    let config = sandbox.0.join("config").join("openresearch");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "").unwrap();
     let output = sandbox.run(&["projects"]);
