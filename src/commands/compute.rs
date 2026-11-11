@@ -250,6 +250,9 @@ pub struct ConfigureArgs {
     partition: Option<String>,
     #[arg(long)]
     account: Option<String>,
+    /// Default `#SBATCH --qos` for Slurm runs.
+    #[arg(long)]
+    qos: Option<String>,
     #[arg(long)]
     time_limit: Option<String>,
     /// Default `#SBATCH --cpus-per-task` for Slurm runs.
@@ -258,6 +261,14 @@ pub struct ConfigureArgs {
     /// Default `#SBATCH --mem` for Slurm runs (64G, 4000M, or megabytes).
     #[arg(long)]
     mem: Option<String>,
+    /// An extra `#SBATCH` option for every Slurm run, such as --sbatch-arg='--rsc p=1:g=1';
+    /// repeat for several. Replaces the saved list.
+    #[arg(long = "sbatch-arg", value_name = "ARG", allow_hyphen_values = true)]
+    sbatch_args: Vec<String>,
+    /// true (the default) writes `#SBATCH --ntasks=1` into every Slurm job; false leaves it out,
+    /// for clusters that refuse it.
+    #[arg(long)]
+    request_one_task: Option<bool>,
     #[arg(long)]
     context: Option<String>,
     #[arg(long)]
@@ -338,11 +349,14 @@ impl ConfigureArgs {
                 "host",
                 "partition",
                 "account",
+                "qos",
                 "timeLimit",
                 "cpusPerTask",
                 "mem",
                 "remoteRoot",
                 "keepRemoteRuns",
+                "sbatchArgs",
+                "requestOneTask",
             ],
             "k8s" => &["context", "namespace"],
             "ray" => &["address"],
@@ -359,6 +373,7 @@ impl ConfigureArgs {
             ("defaultHost", self.default_host),
             ("partition", self.partition),
             ("account", self.account),
+            ("qos", self.qos),
             ("timeLimit", self.time_limit),
             ("mem", self.mem),
             ("context", self.context),
@@ -372,8 +387,14 @@ impl ConfigureArgs {
         if let Some(keep) = self.keep_remote_runs {
             body.insert("keepRemoteRuns".into(), json!(keep));
         }
+        if let Some(one_task) = self.request_one_task {
+            body.insert("requestOneTask".into(), json!(one_task));
+        }
         if let Some(cpus) = self.cpus_per_task {
             body.insert("cpusPerTask".into(), json!(cpus));
+        }
+        if !self.sbatch_args.is_empty() {
+            body.insert("sbatchArgs".into(), json!(self.sbatch_args));
         }
         if let Some(path) = self.credentials_file {
             let credentials: Map<String, Value> = serde_json::from_str(&read_input(&path)?)
@@ -409,6 +430,8 @@ impl ConfigureArgs {
                 "default-host" => "defaultHost",
                 "remote-root" => "remoteRoot",
                 "keep-remote-runs" => "keepRemoteRuns",
+                "sbatch-arg" => "sbatchArgs",
+                "request-one-task" => "requestOneTask",
                 other => other,
             };
             if !allowed.contains(&key)
@@ -428,6 +451,10 @@ impl ConfigureArgs {
                     json!(0)
                 } else if key == "keepRemoteRuns" {
                     json!(false)
+                } else if key == "requestOneTask" {
+                    json!(true)
+                } else if key == "sbatchArgs" {
+                    json!([])
                 } else {
                     json!("")
                 },
@@ -829,6 +856,34 @@ mod tests {
             json!({"host":"lab", "keepRemoteRuns":true})
         );
         assert!(body(&["ssh", "--remote-root", "/scratch/me/orx"]).is_err());
+        assert_eq!(
+            body(&[
+                "slurm",
+                "--qos",
+                "acc_ehpc",
+                "--sbatch-arg",
+                "--rsc p=1:g=1",
+                "--sbatch-arg=-G 1",
+                "--request-one-task",
+                "false",
+            ])
+            .unwrap(),
+            json!({"qos":"acc_ehpc", "sbatchArgs":["--rsc p=1:g=1", "-G 1"], "requestOneTask":false})
+        );
+        assert_eq!(
+            body(&[
+                "slurm",
+                "--clear",
+                "qos",
+                "--clear",
+                "sbatch-arg",
+                "--clear",
+                "request-one-task"
+            ])
+            .unwrap(),
+            json!({"qos":"", "sbatchArgs":[], "requestOneTask":true})
+        );
+        assert!(body(&["ssh", "--host", "lab", "--qos", "normal"]).is_err());
         assert!(crate::Cli::try_parse_from(["orx", "compute", "status", "--json"]).is_ok());
     }
 }

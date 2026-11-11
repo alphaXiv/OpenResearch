@@ -1,0 +1,4 @@
+[
+  {"host": "login", "partition": "gpu", "account": "lab", "timeLimit": "24h", "cpusPerTask": 16, "mem": "128G"},
+  {"host": "login", "partition": null, "account": null, "timeLimit": null, "cpusPerTask": null, "mem": null, "remoteRoot": "/scratch/me/orx", "keepRemoteRuns": true}
+]

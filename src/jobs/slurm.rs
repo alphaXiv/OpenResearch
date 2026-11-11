@@ -42,6 +42,9 @@ pub struct SlurmSettings {
     /// `#SBATCH --account=…` default (billing/allocation account).
     #[serde(default)]
     pub account: Option<String>,
+    /// `#SBATCH --qos=…` default; the `--qos` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<String>,
     /// `#SBATCH --time=…` default, in orx's duration syntax ("4h", "30m").
     #[serde(default)]
     pub time_limit: Option<String>,
@@ -58,6 +61,13 @@ pub struct SlurmSettings {
     /// Keep every finished run's remote dir, not just each project's newest few.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_remote_runs: bool,
+    /// `#SBATCH` arguments written after orx's own on every run, before each run's `--sbatch-arg`s.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sbatch_args: Vec<String>,
+    /// `Some(false)` leaves out `#SBATCH --ntasks=1`, which some clusters' submit filters refuse;
+    /// absent writes it, as some other clusters refuse a job without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_one_task: Option<bool>,
     /// Fields from a newer orx, kept across this version's saves.
     #[serde(flatten)]
     pub unknown: serde_json::Map<String, serde_json::Value>,
@@ -117,6 +127,155 @@ pub fn parse_mem(mem: &str) -> Result<String> {
     Ok(format!("{digits}{suffix}"))
 }
 
+/// A single-token directive value, named by its flag or its field (`--qos`, `QoS`, `--nodelist`):
+/// whitespace or a control character would split or end its `#SBATCH` line.
+pub fn parse_value(name: &str, value: &str) -> Result<String> {
+    if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(anyhow!(
+            "{name} takes one Slurm value without spaces, such as {}.",
+            match name {
+                "--qos" | "QoS" => "acc_ehpc",
+                "--nodelist" | "--exclude" => "node[01-04],gpu7",
+                _ => "a100&ib",
+            }
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// The long name an `#SBATCH` argument sets: `-p gpu` is `partition`, `--qos=x` is `qos`;
+/// empty for a short option orx never writes. Long names may be abbreviated, as sbatch's
+/// option parser accepts any unambiguous prefix.
+pub fn sbatch_option(arg: &str) -> &str {
+    if let Some(long) = arg.strip_prefix("--") {
+        return long.split(['=', ' ', '\t']).next().unwrap_or_default();
+    }
+    match arg.strip_prefix('-').and_then(|short| short.chars().next()) {
+        Some('o') => "output",
+        Some('e') => "error",
+        Some('J') => "job-name",
+        Some('a') => "array",
+        Some('W') => "wait",
+        Some('p') => "partition",
+        Some('A') => "account",
+        Some('q') => "qos",
+        Some('t') => "time",
+        Some('c') => "cpus-per-task",
+        Some('n') => "ntasks",
+        Some('w') => "nodelist",
+        Some('C') => "constraint",
+        Some('x') => "exclude",
+        _ => "",
+    }
+}
+
+/// Options orx-host passes to `sbatch` itself, or that would stop it tracking the job.
+const HOST_OWNED: [&str; 8] = [
+    "output",
+    "error",
+    "job-name",
+    "requeue",
+    "no-requeue",
+    "array",
+    "wait",
+    "wrap",
+];
+
+/// Validate one extra `#SBATCH` option (`--rsc g=1`), as written after `#SBATCH` or with it.
+/// Whether it repeats a line orx writes depends on the settings and the run; callers check that.
+pub fn parse_sbatch_arg(arg: &str) -> Result<String> {
+    let arg = arg.trim();
+    let arg = arg
+        .strip_prefix("#SBATCH")
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .map_or(arg, str::trim_start);
+    if arg.chars().any(char::is_control) {
+        return Err(anyhow!(
+            "{} spans more than one line. Give each sbatch option separately.",
+            arg.lines().next().unwrap_or_default()
+        ));
+    }
+    // sbatch unquotes and unescapes a line and ends it at `#` before parsing it, so an
+    // escaped, quoted or cut-off name could hide an option from the checks below.
+    let option = arg.split(['=', ' ', '\t']).next().unwrap_or_default();
+    if arg.contains(['\\', '#']) || option.contains(['"', '\'']) {
+        return Err(anyhow!(
+            "{arg} has a backslash, a # or a quoted option name. Write the option plainly, \
+             such as --rsc p=1:g=1."
+        ));
+    }
+    let name = sbatch_option(arg);
+    if !arg.starts_with('-') || (name.is_empty() && (arg == "-" || arg.starts_with("--"))) {
+        return Err(anyhow!(
+            "{arg} isn't an sbatch option. Write it as you would after #SBATCH, such as \
+             --rsc p=1:g=1."
+        ));
+    }
+    if !single_option(arg) {
+        return Err(anyhow!(
+            "{arg} holds more than one sbatch option. Put each on its own line."
+        ));
+    }
+    let owned = HOST_OWNED
+        .iter()
+        .find(|owned| !name.is_empty() && owned.starts_with(name));
+    if let Some(owned) = owned {
+        return Err(anyhow!(
+            "{arg} sets --{owned}, which OpenResearch sets itself to log and track the job. \
+             Remove that line."
+        ));
+    }
+    Ok(arg.to_string())
+}
+
+/// Whether `arg` is one option and at most one value, as sbatch splits an `#SBATCH` line:
+/// a second option, or a bundle of short flags such as `-vn4`, would escape the checks above.
+fn single_option(arg: &str) -> bool {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    for c in arg.chars() {
+        match (quote, c) {
+            (Some(open), c) if c == open => quote = None,
+            (None, '"' | '\'') => quote = Some(c),
+            (None, c) if c.is_whitespace() => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            (_, c) => word.push(c),
+        }
+    }
+    words.push(word);
+
+    // sbatch's short options that take no value; any other takes the rest of its word.
+    const FLAGS: &str = "hHIOQsuvVW";
+    let option = &words[0];
+    let attached_value = match option
+        .strip_prefix('-')
+        .filter(|_| !option.starts_with("--"))
+    {
+        Some(short) if short.starts_with(|c| FLAGS.contains(c)) => {
+            return short.len() == 1 && words.len() == 1
+        }
+        Some(short) => short.len() > 1,
+        None => option.contains('='),
+    };
+    match &words[1..] {
+        [] => true,
+        [value] => !attached_value && !value.starts_with('-'),
+        _ => false,
+    }
+}
+
+/// The line among `written` that `arg` would set a second time, if any.
+pub fn repeated_line<'a>(arg: &str, written: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let name = sbatch_option(arg);
+    written
+        .into_iter()
+        .find(|line| !name.is_empty() && line.starts_with(name))
+}
+
 pub fn resolve_time_limit(explicit: Option<&str>, saved: Option<&str>) -> Result<Option<u64>> {
     explicit
         .or(saved)
@@ -124,17 +283,17 @@ pub fn resolve_time_limit(explicit: Option<&str>, saved: Option<&str>) -> Result
         .transpose()
 }
 
-/// Map a `--flavor` string onto a `--gres` request. A flavor names GPUs —
-/// CPU-only runs just omit it (unlike HF/Modal there is no machine shape to
-/// pick). Cores and memory are asked for separately, with `--cpus`/`--mem`;
-/// omitting those leaves the partition defaults.
+/// Map a `--flavor` string onto a `--gres` request. A flavor names GPUs; `cpu`
+/// asks for none, as on Modal, so it can override a GPU default flavor. Cores
+/// and memory are asked for separately, with `--cpus`/`--mem`.
+///   "cpu"      -> no GRES
 ///   "gpu"      -> gpu:1
 ///   "gpu:…"    -> passed through verbatim (already a GRES spec)
 ///   "h100:2"   -> gpu:h100:2
 ///   "h100"     -> gpu:h100
 pub fn resolve_gres(flavor: &str) -> Option<String> {
     let f = flavor.trim();
-    if f.is_empty() {
+    if f.is_empty() || f.eq_ignore_ascii_case("cpu") {
         return None;
     }
     if f == "gpu" {
@@ -261,6 +420,32 @@ mod tests {
         }
     }
 
+    /// Settings files as shipped versions wrote them read back unchanged, with none of the
+    /// launch options added since.
+    #[test]
+    fn shipped_settings_read_and_rewrite_unchanged() {
+        let shipped: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../tests/contracts/slurm-settings.json"))
+                .unwrap();
+        for file in shipped {
+            let settings: SlurmSettings = serde_json::from_value(file.clone()).unwrap();
+            assert_eq!(settings.qos, None);
+            assert!(settings.sbatch_args.is_empty() && settings.request_one_task.is_none());
+            assert_eq!(serde_json::to_value(&settings).unwrap(), file);
+        }
+        let added = SlurmSettings {
+            qos: Some("acc_ehpc".into()),
+            sbatch_args: vec!["--rsc g=1".into()],
+            request_one_task: Some(false),
+            ..Default::default()
+        };
+        let read: SlurmSettings =
+            serde_json::from_value(serde_json::to_value(&added).unwrap()).unwrap();
+        assert_eq!(read.qos, added.qos);
+        assert_eq!(read.sbatch_args, added.sbatch_args);
+        assert_eq!(read.request_one_task, Some(false));
+    }
+
     #[test]
     fn slurm_time_formats() {
         assert_eq!(slurm_time(90), "00:01:30");
@@ -271,6 +456,8 @@ mod tests {
     #[test]
     fn gres_from_flavor() {
         assert_eq!(resolve_gres(""), None);
+        assert_eq!(resolve_gres("cpu"), None);
+        assert_eq!(resolve_gres(" CPU "), None);
         assert_eq!(resolve_gres("gpu").as_deref(), Some("gpu:1"));
         assert_eq!(resolve_gres("gpu:a100:4").as_deref(), Some("gpu:a100:4"));
         assert_eq!(resolve_gres("h100:2").as_deref(), Some("gpu:h100:2"));

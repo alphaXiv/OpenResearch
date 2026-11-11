@@ -84,6 +84,7 @@ import {
   type InstallChannel,
   type InstalledCli,
   AlphaXivNotConnectedError,
+  FieldErrors,
 } from "../api";
 
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
@@ -120,6 +121,7 @@ import {
   showAlert,
   Spinner,
   Switch,
+  Textarea,
   Tooltip,
   type BadgeVariant,
 } from "./ui";
@@ -1399,6 +1401,12 @@ function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPrefli
   return <Badge className="rounded-sm" variant="success">{m.settings_page_ready()}</Badge>;
 }
 
+/** Save-request fields the Slurm form shows rejections under; any other goes by Save. */
+const SLURM_FIELDS_WITH_ERRORS = ["qos", "timeLimit", "mem", "sbatchArgs"];
+
+/** Not translated: an sbatch option is written the same in every language. */
+const SBATCH_OPTION_EXAMPLE = "--rsc p=1:g=1";
+
 function SlurmSection() {
   const { id: elementId } = useContext(WorkspaceDomContext);
 
@@ -1418,11 +1426,15 @@ function SlurmSection() {
   const [host, setHost] = useState("");
   const [partition, setPartition] = useState("");
   const [account, setAccount] = useState("");
+  const [qos, setQos] = useState("");
   const [timeLimit, setTimeLimit] = useState("");
   const [cpusPerTask, setCpusPerTask] = useState("");
   const [mem, setMem] = useState("");
+  const [sbatchArgs, setSbatchArgs] = useState("");
+  const [requestOneTask, setRequestOneTask] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string[]>>({});
   const [test, setTest] = useState<SlurmPreflight | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
@@ -1436,51 +1448,64 @@ function SlurmSection() {
     setConnecting(true);
   }
 
-  const apply = (s: SlurmSettings) => {
-    setSettings(s);
+  const showSaved = (s: SlurmSettings) => {
     setHost(s.host ?? "");
     setPartition(s.partition ?? "");
     setAccount(s.account ?? "");
+    setQos(s.qos ?? "");
     setTimeLimit(s.timeLimit ?? "");
     setCpusPerTask(s.cpusPerTask === null ? "" : String(s.cpusPerTask));
     setMem(s.mem ?? "");
+    setSbatchArgs((s.sbatchArgs ?? []).join("\n"));
+    setRequestOneTask(s.requestOneTask ?? true);
   };
+  const apply = (s: SlurmSettings) => {
+    setSettings(s);
+    showSaved(s);
+  };
+  const sbatchArgList = sbatchArgs.split("\n").map((line) => line.trim()).filter(Boolean);
+  const edited = (field: string, set: (value: string) => void) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    set(e.target.value);
+    setFieldErrors(({ [field]: _, ...rest }) => rest);
+  };
+  const errorId = (field: string) => elementId(`slurm-${field}-error`);
+  const fieldError = (field: string) =>
+    fieldErrors[field] && (
+      <span id={errorId(field)} className="text-sm font-normal text-accent-red">
+        {fieldErrors[field].map((message) => <span key={message} className="block">{message}</span>)}
+      </span>
+    );
+  const describedBy = (field: string, hint?: string) => ({
+    "aria-invalid": fieldErrors[field] ? true : undefined,
+    "aria-describedby": [fieldErrors[field] && errorId(field), hint].filter(Boolean).join(" ") || undefined,
+  });
+  const matchesSaved = (s: SlurmSettings) =>
+    host === (s.host ?? "")
+    && partition.trim() === (s.partition ?? "")
+    && account.trim() === (s.account ?? "")
+    && qos.trim() === (s.qos ?? "")
+    && timeLimit.trim() === (s.timeLimit ?? "")
+    && cpusPerTask.trim() === (s.cpusPerTask === null ? "" : String(s.cpusPerTask))
+    && mem.trim() === (s.mem ?? "")
+    && sbatchArgList.join("\n") === (s.sbatchArgs ?? []).join("\n")
+    && requestOneTask === (s.requestOneTask ?? true);
+  const launchOptions = settings?.sbatchArgs !== undefined;
 
   const previousSettings = useRef<SlurmSettings | null>(null);
   useEffect(() => {
     const previous = previousSettings.current;
     previousSettings.current = settings;
-    if (settings && (!previous || (
-      host === (previous.host ?? "")
-      && partition.trim() === (previous.partition ?? "")
-      && account.trim() === (previous.account ?? "")
-      && timeLimit.trim() === (previous.timeLimit ?? "")
-      && cpusPerTask.trim() === (previous.cpusPerTask === null ? "" : String(previous.cpusPerTask))
-      && mem.trim() === (previous.mem ?? "")
-    ))) {
-      setHost(settings.host ?? "");
-      setPartition(settings.partition ?? "");
-      setAccount(settings.account ?? "");
-      setTimeLimit(settings.timeLimit ?? "");
-      setCpusPerTask(settings.cpusPerTask === null ? "" : String(settings.cpusPerTask));
-      setMem(settings.mem ?? "");
-    }
-  }, [settings, host, partition, account, timeLimit, cpusPerTask, mem]);
+    if (settings && (!previous || matchesSaved(previous))) showSaved(settings);
+  }, [settings]);
 
-  const unchanged =
-    settings !== null &&
-    host === (settings.host ?? "") &&
-    partition.trim() === (settings.partition ?? "") &&
-    account.trim() === (settings.account ?? "") &&
-    timeLimit.trim() === (settings.timeLimit ?? "") &&
-    cpusPerTask.trim() === (settings.cpusPerTask === null ? "" : String(settings.cpusPerTask)) &&
-    mem.trim() === (settings.mem ?? "");
+  const unchanged = settings !== null && matchesSaved(settings);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (saving) return;
     setSaving(true);
     setError(null);
+    setFieldErrors({});
     try {
       apply(
         await saveSlurmSettingsMutation.mutateAsync({
@@ -1491,9 +1516,15 @@ function SlurmSection() {
           // Blank means "clear it"; the API reads 0 as back-to-partition-default.
           cpusPerTask: Number(cpusPerTask.trim()) || 0,
           mem: mem.trim(),
+          ...(launchOptions && { qos: qos.trim(), sbatchArgs: sbatchArgList, requestOneTask }),
         }),
       );
     } catch (err) {
+      if (err instanceof FieldErrors) {
+        setFieldErrors(err.fields);
+        if (Object.keys(err.fields).some((field) => !SLURM_FIELDS_WITH_ERRORS.includes(field))) setError(err.message);
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
@@ -1596,17 +1627,36 @@ function SlurmSection() {
                   />
                 </label>
               </div>
-              <label className="mt-3 block max-w-xl">
-                {m.settings_page_time_limit()}
-                <Input
-                  type="text"
-                  value={timeLimit}
-                  onChange={(e) => setTimeLimit(e.target.value)}
-                  placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </label>
+              <div className="row2 mt-3">
+                {launchOptions && (
+                  <label>
+                    {m.settings_slurm_qos()}
+                    <Input
+                      type="text"
+                      value={qos}
+                      onChange={edited("qos", setQos)}
+                      placeholder={m.settings_page_cluster_default()}
+                      autoComplete="off"
+                      spellCheck={false}
+                      {...describedBy("qos")}
+                    />
+                    {fieldError("qos")}
+                  </label>
+                )}
+                <label>
+                  {m.settings_page_time_limit()}
+                  <Input
+                    type="text"
+                    value={timeLimit}
+                    onChange={edited("timeLimit", setTimeLimit)}
+                    placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
+                    autoComplete="off"
+                    spellCheck={false}
+                    {...describedBy("timeLimit")}
+                  />
+                  {fieldError("timeLimit")}
+                </label>
+              </div>
               <div className="row2 mt-3">
                 <label>
                   {m.settings_slurm_cpus_per_job()}
@@ -1624,13 +1674,54 @@ function SlurmSection() {
                   <Input
                     type="text"
                     value={mem}
-                    onChange={(e) => setMem(e.target.value)}
+                    onChange={edited("mem", setMem)}
                     placeholder={m.settings_slurm_memory_placeholder()}
                     autoComplete="off"
                     spellCheck={false}
+                    {...describedBy("mem")}
                   />
+                  {fieldError("mem")}
                 </label>
               </div>
+              {launchOptions && (
+                <>
+                  <label className="mt-3">
+                    {m.settings_slurm_extra_options()}
+                    <Textarea
+                      className="font-mono"
+                      rows={Math.max(2, sbatchArgs.split("\n").length)}
+                      value={sbatchArgs}
+                      onChange={edited("sbatchArgs", setSbatchArgs)}
+                      placeholder={SBATCH_OPTION_EXAMPLE}
+                      autoComplete="off"
+                      spellCheck={false}
+                      {...describedBy("sbatchArgs", elementId("slurm-sbatch-options-hint"))}
+                    />
+                    {fieldError("sbatchArgs")}
+                    <span id={elementId("slurm-sbatch-options-hint")} className="text-sm font-normal text-subtext">
+                      {m.settings_slurm_sbatch_options_hint({ directive: ltr("#SBATCH") })}
+                    </span>
+                  </label>
+                  <div className="mt-3 flex items-center justify-between gap-6">
+                    <div className="flex flex-col gap-1">
+                      <span id={elementId("slurm-one-task")} className="font-medium">{m.settings_slurm_one_task()}</span>
+                      <span id={elementId("slurm-one-task-hint")} className="text-sm text-subtext">
+                        {m.settings_slurm_one_task_hint({ option: ltr("--ntasks=1") })}
+                      </span>
+                    </div>
+                    <Switch
+                      type="button"
+                      checked={requestOneTask}
+                      aria-labelledby={elementId("slurm-one-task")}
+                      aria-describedby={elementId("slurm-one-task-hint")}
+                      onClick={() => {
+                        setRequestOneTask(!requestOneTask);
+                        setFieldErrors(({ sbatchArgs: _, ...rest }) => rest);
+                      }}
+                    />
+                  </div>
+                </>
+              )}
             </div>
             {error && <div className="error">{error}</div>}
             <div className="actions">
@@ -1981,7 +2072,7 @@ const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   hf: ["cpu-basic", "t4-small", "a10g-small", "a10g-large", "a100-large", "h100", "h200"],
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
-  slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
+  slurm: ["cpu", "gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   vercel: ["cpu", "cpu-1", "cpu-4", "cpu-8", "cpu-16", "cpu-32"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
