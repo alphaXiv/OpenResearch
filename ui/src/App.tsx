@@ -474,6 +474,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const workspaceWide = windowWidth >= WORKSPACE_CARD_MIN_WIDTH;
   const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
   const [railOpen, setRailOpen] = useState(true);
+  const mainFind = useState<number | null>(null);
   const [mobileRailOpen, setMobileRailOpen] = useState(false);
   const mobile = windowWidth < 768;
   useEffect(() => { setMobileRailOpen(false); }, [mobile, location.href]);
@@ -2050,6 +2051,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       <div ref={bodyRef} className={`app-body workspace-body relative flex flex-1 min-h-0 ${stackPanel ? "flex-col [&>.chat-pane]:overflow-y-auto [&_.chat-empty]:min-h-0 [&_.chat-empty]:overflow-y-auto [&_.chat-empty]:justify-start [&_.chat-empty]:p-0" : ""} ${workspaceCardVisible ? "workspace-card-visible" : ""} ${mainView === "chat" && workspaceReady && !conversationError ? "has-workspace-tools" : ""}`}>
         {projectId && (
           <ChatPanel
+            find={mainFind}
             projectId={projectId}
             projectName={activeProject.name}
             contentLoading={conversationLoading}
@@ -2124,6 +2126,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onChanges={() => focusOpenedTab("files", () => { setFilesView("changes"); openWorktreeTab(); })}
             onFiles={() => focusOpenedTab("files", () => { setFilesView("files"); openWorktreeTab(); })}
             onTerminal={() => focusOpenedTab("terminal", openTerminalTab)}
+            findOpen={mainFind[0] !== null}
+            onFind={() => mainFind[1](Date.now())}
             onArtifacts={() => focusOpenedTab("artifacts", openArtifactsTab)}
             onExperiments={() => focusOpenedTab("experiments", openExperimentsTab)}
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}

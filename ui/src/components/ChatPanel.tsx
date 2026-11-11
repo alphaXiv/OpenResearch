@@ -12,7 +12,9 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type Dispatch,
   type MouseEvent as ReactMouseEvent,
+  type SetStateAction,
 } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
@@ -5061,6 +5063,7 @@ export function ChatPanel({
   onOpenSubagent,
   runtime,
   composerFocusNonce = 0,
+  find,
   activeSessionId,
   onActiveSessionChange,
   onStartHarnessDraft,
@@ -5143,6 +5146,8 @@ export function ChatPanel({
   runtime: RuntimeInfo;
   /** Requests composer focus on change; a nonzero value also focuses on mount. */
   composerFocusNonce?: number;
+  /** Find-box state owned by the parent so its toolbar can open it; side chats own theirs. */
+  find?: readonly [number | null, Dispatch<SetStateAction<number | null>>];
   /** Demo run currently executing, for the monitor-it hint above the composer. */
   activeSessionId: string | null;
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
@@ -5418,7 +5423,8 @@ export function ChatPanel({
   // Render-fresh mirror of `sessions` for callbacks memoized on projectId
   // alone (syncSessionList snapshots it before fetching).
   const threadRef = useRef<HTMLDivElement>(null);
-  const [findRequest, setFindRequest] = useState<number | null>(null);
+  const localFind = useState<number | null>(null);
+  const [findRequest, setFindRequest] = find ?? localFind;
   const [branchReturn, setBranchReturn] = useState<{ sessionId: string; leafId: string } | null>(null);
   const searchRegion = useSyncExternalStore(subscribeCommandRegion, commandRegion);
   const openFind = useCallback(() => setFindRequest(Date.now()), []);
@@ -7611,7 +7617,7 @@ export function ChatPanel({
               <Trash2 size={16} />
             </IconButton>
           )}
-          <IconButton aria-label={m.chat_search_title()} data-tip={findRequest === null ? m.chat_search_title() : undefined} aria-expanded={findRequest !== null} aria-keyshortcuts="Control+f Meta+f" onClick={openFind}><Search size={16} /></IconButton>
+          {embedded && <IconButton aria-label={m.chat_search_title()} data-tip={findRequest === null ? m.chat_search_title() : undefined} aria-expanded={findRequest !== null} aria-keyshortcuts="Control+f Meta+f" onClick={openFind}><Search size={16} /></IconButton>}
           </div>
         </div>
 
