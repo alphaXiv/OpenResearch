@@ -231,6 +231,8 @@ pub(super) fn position(
                 == session.harness
             && session.native_session_id.is_some()
             && message.result_native_session_id == session.native_session_id
+            && (session.native_fork_at.is_none()
+                || message.result_native_message_id == session.native_fork_at)
             && !unconfirmed.contains(&message.id)
     });
     let tail = &path[seen.map_or(0, |index| index + 1)..];
@@ -278,7 +280,7 @@ pub(crate) fn position_for(store: &Store, session: &StoredChatSession) -> Result
 pub(crate) fn context(
     store: &Store,
     session: &StoredChatSession,
-    excluded_message: Option<&str>,
+    prompt: Option<&str>,
     since: Option<&str>,
     context_window: Option<u64>,
 ) -> Result<String> {
@@ -293,7 +295,7 @@ pub(crate) fn context(
     let selected: Vec<_> = path[start..]
         .iter()
         .copied()
-        .filter(|message| Some(message.id.as_str()) != excluded_message)
+        .filter(|message| message.role != "user" || Some(message.id.as_str()) != prompt)
         .collect();
     let prior = if since.is_none() {
         super::effective_bootstrap_context(store, session)?

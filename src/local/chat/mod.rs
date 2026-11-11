@@ -1867,8 +1867,7 @@ impl ChatHost {
         }
         let messages = store.list_chat_messages(session_id)?;
         let (resume, fork_at) = if agent.harness == "claude-code" {
-            claude_resume_point(&messages, session.active_leaf_id.as_deref())
-                .map_or((None, None), |(native, at)| (Some(native), at))
+            claude_resume_point(&messages, session.active_leaf_id.as_deref()).unzip()
         } else {
             let path = session
                 .active_leaf_id
@@ -8054,11 +8053,18 @@ fn turn_ctx_from_stored(
 ) -> Result<TurnCtx> {
     let mut text = rebase_prepared_attachment_paths(&turn.prepared_input);
     let position = handoff::position_for(store, session)?;
-    if position.switched || position.since.is_none() {
+    // A pending fork branches at the branch's resume point, which turns after
+    // it, such as an interrupted one, never reached.
+    if position.switched || position.since.is_none() || session.native_fork_at.is_some() {
+        // A retry records no user message: it re-sends the branch's leaf.
+        let prompt = turn
+            .user_message_id
+            .as_deref()
+            .or(session.active_leaf_id.as_deref());
         let context = handoff::context(
             store,
             session,
-            turn.user_message_id.as_deref(),
+            prompt,
             position.since.as_deref(),
             position.context_window,
         )?;
@@ -8914,47 +8920,41 @@ impl TurnCtx {
 
 // --- transcript tree ------------------------------------------------------------
 
-/// Where a Claude session continuing the branch ending at `leaf` resumes: the
-/// native session and message the branch's newest Claude reply ended at. A
-/// branch whose replies predate message tracking gets its newest session alone.
+/// Where a Claude session continuing the branch ending at `leaf` branches: the
+/// native session and message the branch's newest Claude reply that recorded
+/// one ended at. Later turns, such as one interrupted before Claude wrote a
+/// message or one recorded before orx kept them, reach Claude through the
+/// handoff (`handoff::position`); a branch with no such reply starts fresh.
 fn claude_resume_point(
     messages: &[StoredChatMessage],
     leaf: Option<&str>,
-) -> Option<(String, Option<String>)> {
-    let replies: Vec<_> = active_path(messages, Some(leaf?))
+) -> Option<(String, String)> {
+    active_path(messages, Some(leaf?))
         .into_iter()
+        .rev()
         .filter(|message| {
             message.role == "assistant" && message.native_harness.as_deref() == Some("claude-code")
         })
-        .filter_map(|message| Some((message.result_native_session_id.clone()?, message)))
-        .collect();
-    replies
-        .iter()
-        .rev()
-        .find_map(|(native, message)| {
-            let at = message.result_native_message_id.clone()?;
-            Some((native.clone(), Some(at)))
+        .find_map(|message| {
+            Some((
+                message.result_native_session_id.clone()?,
+                message.result_native_message_id.clone()?,
+            ))
         })
-        .or_else(|| replies.last().map(|(native, _)| (native.clone(), None)))
 }
 
 /// Moves a Claude chat onto the branch ending at `leaf`. Claude keeps one
 /// session id for a whole chat, so resuming it would bring every fork's turns
-/// along; instead the next start branches a new session where the branch's
-/// newest reply ended. A reply that predates message tracking starts a fresh
-/// session, which the handoff fills with the branch.
+/// along; instead the next start branches a new session at the branch's
+/// resume point, or starts fresh when it has none.
 fn fork_claude_branch(
     store: &Store,
     session_id: &str,
     messages: &[StoredChatMessage],
     leaf: Option<&str>,
 ) -> Result<()> {
-    match claude_resume_point(messages, leaf) {
-        Some((native, Some(at))) => {
-            store.set_chat_session_native_fork(session_id, Some(&native), Some(&at))
-        }
-        _ => store.set_chat_session_native_id(session_id, None),
-    }
+    let (native, at) = claude_resume_point(messages, leaf).unzip();
+    store.set_chat_session_native_fork(session_id, native.as_deref(), at.as_deref())
 }
 
 /// Where to put the harness session id before re-sampling `anchor`'s turn.
@@ -11324,7 +11324,7 @@ mod bridge_tests {
                             )])
                             .unwrap(),
                             result_native_session_id: session.native_session_id.clone(),
-                            result_native_message_id: None,
+                            result_native_message_id: Some("original-end".into()),
                             ..request.clone()
                         };
                         store.upsert_chat_message_on_branch(&original).unwrap();
@@ -13532,6 +13532,7 @@ done
             assert_eq!(finished(&chat, &mut events).await, "s2");
             assert_eq!(resumed(&spawns()[1]), fork("s1", "s1-a1"));
             assert!(!last_prompt().contains("one"), "{}", last_prompt());
+            assert_eq!(last_prompt().matches("two").count(), 1, "{}", last_prompt());
             let forked = session();
             assert_eq!(forked.native_session_id.as_deref(), Some("s2"));
             assert_eq!(forked.native_fork_at, None);
@@ -13621,6 +13622,47 @@ done
             let back = chat.set_agent("chat", agent("claude-code"), None).await.unwrap();
             assert_eq!(back.native_session_id.as_deref(), Some("s10"));
             assert_eq!(back.native_fork_at.as_deref(), Some("s10-a1"));
+
+            // A turn interrupted before Claude wrote a message records none, so
+            // the branch forks at the turn before it and the handoff carries it.
+            let forget_message = |id: &str| {
+                let tx = store.begin().unwrap();
+                tx.execute(
+                    "UPDATE chat_messages SET result_native_message_id = NULL WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            };
+            send("turn eight").await;
+            assert_eq!(finished(&chat, &mut events).await, "s11");
+            send("turn nine").await;
+            assert_eq!(finished(&chat, &mut events).await, "s11");
+            let interrupted = branch().last().unwrap().0.clone();
+            forget_message(&interrupted);
+            chat.select_branch("chat", &interrupted).await.unwrap();
+            send("turn ten").await;
+            assert_eq!(finished(&chat, &mut events).await, "s12");
+            assert_eq!(resumed(&spawns()[11]), fork("s11", "s11-a1"));
+            assert!(last_prompt().contains("turn nine"), "{}", last_prompt());
+            assert!(!last_prompt().contains("turn eight"), "{}", last_prompt());
+
+            // Coming back to a branch with no recorded message starts fresh
+            // rather than resuming a session that holds other forks' turns.
+            for (id, role, _) in branch() {
+                if role == "assistant" {
+                    forget_message(&id);
+                }
+            }
+            chat.set_agent("chat", agent("codex"), None).await.unwrap();
+            let back = chat.set_agent("chat", agent("claude-code"), None).await.unwrap();
+            assert_eq!(back.native_session_id, None);
+            assert_eq!(back.native_fork_at, None);
+            send("turn eleven").await;
+            assert_eq!(finished(&chat, &mut events).await, "s13");
+            assert_eq!(resumed(&spawns()[12]), fresh);
+            assert!(last_prompt().contains("one, edited"), "{}", last_prompt());
+            assert!(last_prompt().contains("turn ten"), "{}", last_prompt());
             claude.shutdown().await;
         });
     }
