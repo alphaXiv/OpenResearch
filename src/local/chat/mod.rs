@@ -1199,6 +1199,7 @@ fn imported_rows(
             parent_id: parent_id.replace(id.clone()),
             base_native_session_id: Some(native_id.to_string()),
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
             id,
         });
@@ -1218,6 +1219,7 @@ fn imported_rows(
         parent_id,
         base_native_session_id: Some(native_id.to_string()),
         result_native_session_id: Some(native_id.to_string()),
+        result_native_message_id: None,
         native_harness: None,
     });
     Ok(rows)
@@ -1251,6 +1253,7 @@ pub fn import_native_chat(
         project_id: project.id.clone(),
         harness: harness.to_string(),
         native_session_id: Some(native_id.to_string()),
+        native_fork_at: None,
         // Not the user's own words, but the closest source there is: it must
         // not be replaced by the auto-titler on the first turn.
         title_source: title.is_some().then(|| "user".to_string()),
@@ -1863,21 +1866,26 @@ impl ChatHost {
             agent.permission_mode = Some("plan".into());
         }
         let messages = store.list_chat_messages(session_id)?;
-        let path = session
-            .active_leaf_id
-            .as_deref()
-            .map(|leaf| active_path(&messages, Some(leaf)))
-            .unwrap_or_default();
-        let resume = path
-            .iter()
-            .rev()
-            .find(|message| message.native_harness.as_deref() == Some(&agent.harness))
-            .and_then(|message| {
-                message
-                    .result_native_session_id
-                    .as_deref()
-                    .or(message.base_native_session_id.as_deref())
-            });
+        let (resume, fork_at) = if agent.harness == "claude-code" {
+            claude_resume_point(&messages, session.active_leaf_id.as_deref()).unzip()
+        } else {
+            let path = session
+                .active_leaf_id
+                .as_deref()
+                .map(|leaf| active_path(&messages, Some(leaf)))
+                .unwrap_or_default();
+            let resume = path
+                .iter()
+                .rev()
+                .find(|message| message.native_harness.as_deref() == Some(&agent.harness))
+                .and_then(|message| {
+                    message
+                        .result_native_session_id
+                        .clone()
+                        .or(message.base_native_session_id.clone())
+                });
+            (resume, None)
+        };
         let mut part = WirePart::tool("provider_switch", handoff::SWITCH_TOOL, "completed", None);
         part.state.as_mut().unwrap().input = Some(json!({
             "fromHarness": session.harness,
@@ -1897,11 +1905,19 @@ impl ChatHost {
             parent_id: session.active_leaf_id.clone(),
             base_native_session_id: session.native_session_id.clone(),
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: Some(session.harness.clone()),
         };
         let command_plan =
             plan_mode && crate::local::harness::supports_command_plan(&agent.harness);
-        store.switch_chat_agent(session_id, &agent, resume, &marker, command_plan)?;
+        store.switch_chat_agent(
+            session_id,
+            &agent,
+            resume.as_deref(),
+            fork_at.as_deref(),
+            &marker,
+            command_plan,
+        )?;
         self.claude.kill_session(session_id).await;
         self.codex.kill_session(session_id).await;
         self.opencode.kill_session(session_id).await;
@@ -2043,7 +2059,12 @@ impl ChatHost {
         let ctx = crate::local::harness::CompactCtx {
             host: self.clone(),
             session_id: session_id.to_string(),
-            native_session_id: session.native_session_id.clone(),
+            // A pending fork's native session holds other forks' turns, so
+            // only a summary of the branch can compact it.
+            native_session_id: session
+                .native_session_id
+                .clone()
+                .filter(|_| session.native_fork_at.is_none()),
             model: session.model.clone(),
             project: Store::open()?
                 .get_local_project(&session.project_id)?
@@ -2167,6 +2188,7 @@ impl ChatHost {
             parent_id: message.parent_id.clone(),
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         };
         if previous.is_some() {
@@ -2298,6 +2320,7 @@ impl ChatHost {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         })?;
         store.touch_chat_session(session_id)?;
@@ -2358,6 +2381,7 @@ mod shell_command_tests {
             parent_id: message.parent_id.clone(),
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         }
     }
@@ -3031,6 +3055,9 @@ struct SendTurnRequest {
     admission: TurnAdmission,
     client_turn_id: Option<String>,
     request_hash: Option<String>,
+    /// Records output a Claude child produced on its own, claimed with
+    /// `claim_continuation`; no prompt is sent.
+    continuation: bool,
 }
 
 enum TurnAdmission {
@@ -3570,6 +3597,8 @@ impl TurnGuard {
             );
             if drain_queued {
                 self.host.drain_queue(&self.session_id).await;
+            } else {
+                self.host.record_held_continuation(&self.session_id);
             }
         }
     }
@@ -3608,6 +3637,8 @@ impl Drop for TurnGuard {
                 );
                 if drain_queued {
                     host.drain_queue(&session_id).await;
+                } else {
+                    host.record_held_continuation(&session_id);
                 }
             }
         });
@@ -3894,6 +3925,7 @@ impl ChatHost {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         })?;
         self.emit("chat.message", message_json(&msg, session_id));
@@ -4768,6 +4800,7 @@ impl ChatHost {
                         admission: TurnAdmission::Preclaimed(guard),
                         client_turn_id: Some(item.client_turn_id.clone()),
                         request_hash: Some(item.request_hash.clone()),
+                        continuation: false,
                     },
                 )
                 .await;
@@ -5091,6 +5124,7 @@ impl ChatHost {
                 admission: TurnAdmission::QueueIfBusy,
                 client_turn_id,
                 request_hash: None,
+                continuation: false,
             },
         )
         .await
@@ -5293,6 +5327,7 @@ impl ChatHost {
                             parent_id: assistant.parent_id.clone(),
                             base_native_session_id: None,
                             result_native_session_id: None,
+                            result_native_message_id: None,
                             native_harness: None,
                         })
                     });
@@ -5397,6 +5432,7 @@ impl ChatHost {
                             admission: TurnAdmission::RejectIfBusy,
                             client_turn_id: Some(format!("recover_{turn_id}")),
                             request_hash: None,
+                            continuation: false,
                         },
                     )
                     .await?;
@@ -5420,6 +5456,7 @@ impl ChatHost {
                         parent_id: failed_assistant.parent_id.clone(),
                         base_native_session_id: None,
                         result_native_session_id: None,
+                        result_native_message_id: None,
                         native_harness: None,
                     };
                     if store.mark_chat_turn_recovered_with_message(
@@ -5543,22 +5580,24 @@ impl ChatHost {
         let session = store
             .get_chat_session(session_id)?
             .ok_or_else(|| anyhow!("chat session not found"))?;
+        let claude = session.harness == "claude-code";
         let acp = session.harness.starts_with("acp:");
         let foreign = anchor
             .native_harness
             .as_deref()
             .is_some_and(|harness| harness != session.harness);
-        let reseed = acp || foreign;
-        let rewind = if reseed {
+        let rewind = if claude {
+            None
+        } else if acp || foreign {
             Some(None)
         } else {
             rewind_target(anchor)
         };
-        if reseed {
-            self.acp.stop(session_id).await;
-        }
+        self.leave_branch(&session).await?;
         store.set_chat_session_active_leaf(session_id, leaf.as_deref())?;
-        if let Some(native) = &rewind {
+        if claude {
+            fork_claude_branch(&store, session_id, &messages, leaf.as_deref())?;
+        } else if let Some(native) = &rewind {
             store.set_chat_session_native_id(session_id, native.as_deref())?;
         }
         self.emit(
@@ -5578,6 +5617,7 @@ impl ChatHost {
                     admission: TurnAdmission::Preclaimed(guard),
                     client_turn_id: None,
                     request_hash: None,
+                    continuation: false,
                 },
             )
             .await;
@@ -5587,9 +5627,12 @@ impl ChatHost {
         // rewind is worse than either end state.
         let started = matches!(&submitted, Ok(TurnSubmission::Started(_)));
         if !started {
-            if rewind.is_some() {
-                let _ = store
-                    .set_chat_session_native_id(session_id, session.native_session_id.as_deref());
+            if claude || rewind.is_some() {
+                let _ = store.set_chat_session_native_fork(
+                    session_id,
+                    session.native_session_id.as_deref(),
+                    session.native_fork_at.as_deref(),
+                );
             }
             let _ =
                 store.set_chat_session_active_leaf(session_id, session.active_leaf_id.as_deref());
@@ -5618,38 +5661,51 @@ impl ChatHost {
             .find(|m| m.id == leaf_id)
             .ok_or_else(|| anyhow!("message not found"))?;
         let tip = branch_tip(&messages, selected);
-        store.set_chat_session_active_leaf(session_id, Some(&tip.id))?;
-        // The id this branch ended at lives on its newest assistant message; a
-        // branch tipped by an unanswered user message resumes from that turn's
-        // own base.
         let session = store
             .get_chat_session(session_id)?
             .ok_or_else(|| anyhow!("chat session not found"))?;
-        let resume = active_path(&messages, Some(tip.id.as_str()))
-            .into_iter()
-            .rev()
-            .find(|message| {
-                message.native_harness.as_deref() == Some(&session.harness)
-                    || (message.native_harness.is_none()
-                        && (message.result_native_session_id.is_some()
-                            || message.base_native_session_id.is_some()))
-            })
-            .and_then(|message| {
-                message
-                    .result_native_session_id
-                    .clone()
-                    .or_else(|| message.base_native_session_id.clone())
-            });
-        if session.harness.starts_with("acp:") {
-            self.acp.stop(session_id).await;
+        self.leave_branch(&session).await?;
+        store.set_chat_session_active_leaf(session_id, Some(&tip.id))?;
+        if session.harness == "claude-code" {
+            fork_claude_branch(&store, session_id, &messages, Some(&tip.id))?;
+        } else if session.harness.starts_with("acp:") {
             store.set_chat_session_native_id(session_id, None)?;
         } else {
+            // The id this branch ended at lives on its newest assistant message;
+            // a branch tipped by an unanswered user message resumes from that
+            // turn's own base.
+            let resume = active_path(&messages, Some(tip.id.as_str()))
+                .into_iter()
+                .rev()
+                .find(|message| {
+                    message.native_harness.as_deref() == Some(&session.harness)
+                        || (message.native_harness.is_none()
+                            && (message.result_native_session_id.is_some()
+                                || message.base_native_session_id.is_some()))
+                })
+                .and_then(|message| {
+                    message
+                        .result_native_session_id
+                        .clone()
+                        .or_else(|| message.base_native_session_id.clone())
+                });
             store.set_chat_session_native_id(session_id, resume.as_deref())?;
         }
         self.emit(
             "chat.branch",
             json!({ "sessionId": session_id, "activeLeafId": tip.id }),
         );
+        Ok(())
+    }
+
+    /// Stops the chat's resident agent before its branch moves, so the next
+    /// turn resumes the selected fork. Call while holding the turn slot.
+    async fn leave_branch(&self, session: &StoredChatSession) -> Result<()> {
+        if session.harness == "claude-code" {
+            self.claude.stop_idle(&session.id).await?;
+        } else if session.harness.starts_with("acp:") {
+            self.acp.stop(&session.id).await;
+        }
         Ok(())
     }
 
@@ -5684,6 +5740,7 @@ impl ChatHost {
                 admission: TurnAdmission::Preclaimed(guard),
                 client_turn_id: None,
                 request_hash: None,
+                continuation: false,
             },
         )
         .await
@@ -5707,6 +5764,7 @@ impl ChatHost {
             admission,
             client_turn_id: requested_client_turn_id,
             request_hash: request_hash_override,
+            continuation,
         } = request;
         let request_hash = match request_hash_override {
             Some(hash) => hash,
@@ -6224,10 +6282,18 @@ impl ChatHost {
                     parent_id: message.parent_id.clone(),
                     base_native_session_id: session.native_session_id.clone(),
                     result_native_session_id: None,
+                    result_native_message_id: None,
                     native_harness: Some(session.harness.clone()),
                 })
             })
             .transpose()?;
+        // A continuation's output already reached the agent's own transcript;
+        // recovering it means continuing, never re-sending an empty prompt.
+        let delivery = if continuation {
+            DeliveryState::Accepted
+        } else {
+            DeliveryState::NotSent
+        };
         let turn = StoredChatTurn {
             id: turn_id.clone(),
             session_id: session.id.clone(),
@@ -6248,7 +6314,7 @@ impl ChatHost {
                 reasoning_level: session.reasoning_level.clone(),
             })?,
             state: "preparing".into(),
-            delivery_state: DeliveryState::NotSent.as_str().into(),
+            delivery_state: delivery.as_str().into(),
             attempt_count: 0,
             next_retry_at: None,
             error_kind: None,
@@ -6258,7 +6324,7 @@ impl ChatHost {
             created_at,
             updated_at: created_at,
         };
-        let ctx = turn_ctx_from_stored(
+        let mut ctx = turn_ctx_from_stored(
             self.clone(),
             &store,
             &session,
@@ -6273,6 +6339,8 @@ impl ChatHost {
                 parent_id: None,
             },
         )?;
+        ctx.delivery_state = delivery;
+        ctx.continuation = continuation;
         let mut turns = self.turns.lock().await;
         let Some(TurnState::Reserved { turn_id: reserved }) = turns.get_mut(session_id) else {
             drop(turns);
@@ -6491,7 +6559,7 @@ impl ChatHost {
     }
 
     /// Turn cleanup: drop the handle, bump the session, broadcast idle.
-    async fn finish_turn(&self, session_id: &str, message_id: Option<&str>) {
+    async fn finish_turn(self: &Arc<Self>, session_id: &str, message_id: Option<&str>) {
         let should_finish = {
             let turns = self.turns.lock().await;
             match (turns.get(session_id), message_id) {
@@ -6546,10 +6614,60 @@ impl ChatHost {
             "chat.busy",
             json!({ "sessionId": session_id, "busy": reserved_queue }),
         );
+        if !reserved_queue {
+            self.record_held_continuation(session_id);
+        }
     }
 
     async fn finish_interruption(self: &Arc<Self>, session_id: &str) {
         self.finish_turn(session_id, None).await;
+    }
+
+    /// Records what a resident Claude child wrote on its own after its turn
+    /// ended, such as its reply once a background task finished, as a turn with
+    /// no user message. While the chat is busy the lines wait: its next Claude
+    /// turn folds them in, or the freed slot records them here.
+    pub(crate) async fn record_continuation(self: &Arc<Self>, session_id: &str) {
+        let Some(mut guard) = TurnGuard::claim(self, session_id, None).await else {
+            return;
+        };
+        if !self.claude.claim_continuation(session_id).await {
+            guard.release().await;
+            return;
+        }
+
+        let request = SendTurnRequest {
+            messages: Vec::new(),
+            prepared_input: Some(String::new()),
+            replace_settings: false,
+            transcript: TranscriptDisplay {
+                text: Some(String::new()),
+                annotations: None,
+                orx: Vec::new(),
+                record_user_message: false,
+            },
+            overrides: TurnOverrides::default(),
+            images: TurnAttachments::Uploaded(Vec::new()),
+            admission: TurnAdmission::Preclaimed(guard),
+            client_turn_id: None,
+            request_hash: None,
+            continuation: true,
+        };
+        if let Err(error) = self.send_message_showing(session_id, request).await {
+            eprintln!("orx up: could not record the continuation of chat {session_id}: {error}");
+        }
+    }
+
+    /// Starts recording a segment the chat's Claude child began while its slot
+    /// was taken; call once the slot is free.
+    fn record_held_continuation(self: &Arc<Self>, session_id: &str) {
+        let chat = self.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            if chat.claude.has_continuation(&session_id).await {
+                chat.record_continuation(&session_id).await;
+            }
+        });
     }
 
     /// Abort an in-flight turn. Child processes die via kill_on_drop; the
@@ -6557,6 +6675,12 @@ impl ChatHost {
     /// stops generating. Returns whether a turn (or a reservation) was
     /// actually aborted — `false` means the session was already idle.
     pub async fn interrupt(self: &Arc<Self>, session_id: &str) -> Result<bool> {
+        self.stop_turn(session_id, true).await
+    }
+
+    /// `cancel` records the turn as stopped on purpose; without it the stored
+    /// turn is left for lease reconciliation, which offers a way to continue.
+    async fn stop_turn(self: &Arc<Self>, session_id: &str, cancel: bool) -> Result<bool> {
         let active = {
             let mut turns = self.turns.lock().await;
             let Some(state) = turns.get_mut(session_id) else {
@@ -6565,7 +6689,7 @@ impl ChatHost {
             match std::mem::replace(state, TurnState::Cancelling) {
                 TurnState::Active(active) => Some(active),
                 TurnState::Reserved { turn_id } => {
-                    if let Some(turn_id) = turn_id {
+                    if let Some(turn_id) = turn_id.filter(|_| cancel) {
                         if let Ok(store) = Store::open() {
                             let _ = store.interrupt_chat_turn(&turn_id);
                         }
@@ -6582,7 +6706,9 @@ impl ChatHost {
         };
         if let Some(active) = active.as_ref() {
             if let Ok(store) = Store::open() {
-                let _ = store.interrupt_chat_turn(&active.turn_id);
+                if cancel {
+                    let _ = store.interrupt_chat_turn(&active.turn_id);
+                }
                 if let Ok(Some(stored)) = store.get_chat_message(&active.message_id) {
                     let mut assistant = stored_to_wire(&stored);
                     assistant.completed_at = Some(now_ms());
@@ -6598,6 +6724,7 @@ impl ChatHost {
                         parent_id: assistant.parent_id.clone(),
                         base_native_session_id: None,
                         result_native_session_id: None,
+                        result_native_message_id: None,
                         native_harness: None,
                     });
                     self.emit("chat.message", message_json(&assistant, session_id));
@@ -6633,8 +6760,12 @@ impl ChatHost {
                 .flatten();
             if let Some(active) = active {
                 let _ = active.handle.await;
-                let _ = Store::open()
-                    .and_then(|store| store.finalize_turn_usage(&active.turn_id, "cancelled"));
+                let _ = Store::open().and_then(|store| {
+                    store.finalize_turn_usage(
+                        &active.turn_id,
+                        if cancel { "cancelled" } else { "failed" },
+                    )
+                });
                 crate::telemetry::retry_outbox();
                 let mut message = reconcile_target_file(&session_id, &active.message_id);
                 if let Some(items) = interrupted_items.as_deref() {
@@ -6734,6 +6865,7 @@ impl ChatHost {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    result_native_message_id: None,
                     native_harness: None,
                 })
                 .ok(),
@@ -6894,6 +7026,7 @@ impl ChatHost {
                         admission: TurnAdmission::RejectIfBusy,
                         client_turn_id: None,
                         request_hash: None,
+                        continuation: false,
                     },
                 )
                 .await?;
@@ -7865,10 +7998,14 @@ pub struct TurnCtx {
     retry_exhausted: bool,
     orx_retry_started: Option<Instant>,
     orx_retry_count: u32,
-    terminal_error: Option<(String, String)>,
+    pub(crate) terminal_error: Option<(String, String)>,
     pub session_id: String,
     pub harness: String,
     pub native_session_id: Option<String>,
+    /// Message within `native_session_id` a Claude start branches from.
+    pub native_fork_at: Option<String>,
+    /// Native message the turn has reached so far, recorded on its reply.
+    pub native_message_id: Option<String>,
     pub model: Option<String>,
     pub reset_codex_model: bool,
     /// Codex processing tier for this turn (`default` or `priority`).
@@ -7902,6 +8039,8 @@ pub struct TurnCtx {
     target_event_offset: u64,
     pending_target_events: Vec<(String, String, String, String, String)>,
     target_event_bindings: HashMap<String, Vec<String>>,
+    /// The turn records output the agent produced on its own; there is no prompt to send.
+    pub continuation: bool,
 }
 
 fn turn_ctx_from_stored(
@@ -7914,11 +8053,18 @@ fn turn_ctx_from_stored(
 ) -> Result<TurnCtx> {
     let mut text = rebase_prepared_attachment_paths(&turn.prepared_input);
     let position = handoff::position_for(store, session)?;
-    if position.switched || position.since.is_none() {
+    // A pending fork branches at the branch's resume point, which turns after
+    // it, such as an interrupted one, never reached.
+    if position.switched || position.since.is_none() || session.native_fork_at.is_some() {
+        // A retry records no user message: it re-sends the branch's leaf.
+        let prompt = turn
+            .user_message_id
+            .as_deref()
+            .or(session.active_leaf_id.as_deref());
         let context = handoff::context(
             store,
             session,
-            turn.user_message_id.as_deref(),
+            prompt,
             position.since.as_deref(),
             position.context_window,
         )?;
@@ -7946,6 +8092,8 @@ fn turn_ctx_from_stored(
         session_id: session.id.clone(),
         harness: session.harness.clone(),
         native_session_id: session.native_session_id.clone(),
+        native_fork_at: session.native_fork_at.clone(),
+        native_message_id: None,
         model: session.model.clone(),
         reset_codex_model: serde_json::from_str::<TurnOverrides>(&turn.settings_json)
             .is_ok_and(|settings| settings.clear_model),
@@ -7973,6 +8121,7 @@ fn turn_ctx_from_stored(
         target_event_offset: 0,
         pending_target_events: Vec::new(),
         target_event_bindings: HashMap::new(),
+        continuation: false,
     })
 }
 
@@ -8266,6 +8415,7 @@ impl TurnCtx {
                         parent_id: self.assistant.parent_id.clone(),
                         base_native_session_id: None,
                         result_native_session_id: None,
+                        result_native_message_id: None,
                         native_harness: None,
                     });
                     self.host.emit(
@@ -8336,6 +8486,8 @@ impl TurnCtx {
             session_id: "test-session".into(),
             harness: "test".into(),
             native_session_id: None,
+            native_fork_at: None,
+            native_message_id: None,
             model: None,
             reset_codex_model: false,
             service_tier: None,
@@ -8376,6 +8528,7 @@ impl TurnCtx {
             target_event_offset: 0,
             pending_target_events: Vec::new(),
             target_event_bindings: HashMap::new(),
+            continuation: false,
         }
     }
 
@@ -8464,14 +8617,18 @@ impl TurnCtx {
     pub fn persist_native_session_id(&mut self, native_id: &str) -> Result<()> {
         Store::open()?.set_chat_session_native_id(&self.session_id, Some(native_id))?;
         self.native_session_id = Some(native_id.to_string());
+        self.native_fork_at = None;
         Ok(())
     }
 
+    /// Records the id the agent reports, which also ends a pending fork: the
+    /// branched session is the one later starts resume.
     pub fn set_native_session_id(&mut self, native_id: &str) {
-        if self.native_session_id.as_deref() == Some(native_id) {
+        if self.native_session_id.as_deref() == Some(native_id) && self.native_fork_at.is_none() {
             return;
         }
         self.native_session_id = Some(native_id.to_string());
+        self.native_fork_at = None;
         if let Ok(store) = Store::open() {
             let _ = store.set_chat_session_native_id(&self.session_id, Some(native_id));
         }
@@ -8687,6 +8844,7 @@ impl TurnCtx {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: self.native_session_id.clone(),
+                result_native_message_id: self.native_message_id.clone(),
                 native_harness: Some(self.harness.clone()),
             })?;
             wire_assistant
@@ -8761,6 +8919,43 @@ impl TurnCtx {
 }
 
 // --- transcript tree ------------------------------------------------------------
+
+/// Where a Claude session continuing the branch ending at `leaf` branches: the
+/// native session and message the branch's newest Claude reply that recorded
+/// one ended at. Later turns, such as one interrupted before Claude wrote a
+/// message or one recorded before orx kept them, reach Claude through the
+/// handoff (`handoff::position`); a branch with no such reply starts fresh.
+fn claude_resume_point(
+    messages: &[StoredChatMessage],
+    leaf: Option<&str>,
+) -> Option<(String, String)> {
+    active_path(messages, Some(leaf?))
+        .into_iter()
+        .rev()
+        .filter(|message| {
+            message.role == "assistant" && message.native_harness.as_deref() == Some("claude-code")
+        })
+        .find_map(|message| {
+            Some((
+                message.result_native_session_id.clone()?,
+                message.result_native_message_id.clone()?,
+            ))
+        })
+}
+
+/// Moves a Claude chat onto the branch ending at `leaf`. Claude keeps one
+/// session id for a whole chat, so resuming it would bring every fork's turns
+/// along; instead the next start branches a new session at the branch's
+/// resume point, or starts fresh when it has none.
+fn fork_claude_branch(
+    store: &Store,
+    session_id: &str,
+    messages: &[StoredChatMessage],
+    leaf: Option<&str>,
+) -> Result<()> {
+    let (native, at) = claude_resume_point(messages, leaf).unzip();
+    store.set_chat_session_native_fork(session_id, native.as_deref(), at.as_deref())
+}
 
 /// Where to put the harness session id before re-sampling `anchor`'s turn.
 /// `None` leaves it alone: turns recorded before this build carry no fork point,
@@ -8901,6 +9096,7 @@ fn side_chat_session(
         project_id: parent.project_id.clone(),
         harness: parent.harness.clone(),
         native_session_id: None,
+        native_fork_at: None,
         title: None,
         title_source: None,
         model: parent.model.clone(),
@@ -9037,6 +9233,7 @@ fn materialize_unfinished_turns(
             parent_id: message.parent_id.clone(),
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         };
         if store.upsert_chat_recovery_message_if_actionable(&turn.id, &stored)? {
@@ -9157,6 +9354,7 @@ fn run_notice_request(notices: &[crate::store::RunNotice], guard: TurnGuard) -> 
         admission: TurnAdmission::Preclaimed(guard),
         client_turn_id: Some(notices[0].client_turn_id.clone()),
         request_hash: None,
+        continuation: false,
     }
 }
 
@@ -9282,7 +9480,7 @@ pub async fn watch_run_notices(
     }
 }
 
-/// Renews chat-turn leases every 3 s and interrupts turns whose lease was lost.
+/// Renews chat-turn leases every 3 s and stops turns whose lease was lost.
 pub async fn keep_turn_leases(
     chat: Arc<ChatHost>,
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
@@ -9298,15 +9496,28 @@ pub async fn keep_turn_leases(
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
             continue;
         }
-        for session_id in chat.renew_turn_leases() {
-            let _ = chat.interrupt(&session_id).await;
-        }
+        stop_turns_whose_lease_was_lost(&chat).await;
         let Ok(store) = Store::open() else { continue };
         if let Err(err) =
             news::deliver_news(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
         {
             eprintln!("orx up: news watcher: {err}");
         }
+    }
+}
+
+/// A turn whose lease another claim reaped stops here and is recorded as cut
+/// short, with a way to continue.
+async fn stop_turns_whose_lease_was_lost(chat: &Arc<ChatHost>) {
+    let lost = chat.renew_turn_leases();
+    for session_id in &lost {
+        let _ = chat.stop_turn(session_id, false).await;
+    }
+    if lost.is_empty() {
+        return;
+    }
+    if let Err(error) = chat.reconcile_expired_turn_leases() {
+        eprintln!("orx up: could not reconcile chat turns whose lease was lost: {error}");
     }
 }
 
@@ -9904,6 +10115,7 @@ mod cap_tests {
                 project_id: "proj_1".into(),
                 harness: "claude-code".into(),
                 native_session_id: None,
+                native_fork_at: None,
                 title: None,
                 title_source: None,
                 model: None,
@@ -10013,6 +10225,7 @@ mod cap_tests {
             project_id: "proj_1".into(),
             harness: "claude-code".into(),
             native_session_id: Some("native-1".into()),
+            native_fork_at: None,
             title: Some("Adopted".into()),
             title_source: Some("user".into()),
             model: None,
@@ -10088,6 +10301,7 @@ mod cap_tests {
             project_id: "proj_1".into(),
             harness: "cursor".into(),
             native_session_id: Some("native-1".into()),
+            native_fork_at: None,
             title: None,
             title_source: None,
             model: None,
@@ -10999,6 +11213,7 @@ mod bridge_tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                result_native_message_id: None,
                 native_harness: None,
             })
             .unwrap();
@@ -11036,6 +11251,7 @@ mod bridge_tests {
             project_id: "proj_1".into(),
             harness: "claude-code".into(),
             native_session_id: None,
+            native_fork_at: None,
             title: None,
             title_source: None,
             model: Some("claude-haiku-4-5".into()),
@@ -11095,6 +11311,7 @@ mod bridge_tests {
                             parent_id: None,
                             base_native_session_id: session.native_session_id.clone(),
                             result_native_session_id: None,
+                            result_native_message_id: None,
                             native_harness: Some(source.into()),
                         };
                         store.upsert_chat_message_on_branch(&request).unwrap();
@@ -11107,6 +11324,7 @@ mod bridge_tests {
                             )])
                             .unwrap(),
                             result_native_session_id: session.native_session_id.clone(),
+                            result_native_message_id: Some("original-end".into()),
                             ..request.clone()
                         };
                         store.upsert_chat_message_on_branch(&original).unwrap();
@@ -11189,6 +11407,7 @@ mod bridge_tests {
                             .unwrap(),
                             native_harness: Some(target.into()),
                             result_native_session_id: Some(format!("target_{source}_{target}")),
+                            result_native_message_id: None,
                             base_native_session_id: None,
                             ..original.clone()
                         };
@@ -11273,6 +11492,7 @@ mod bridge_tests {
                                 parent_id: None,
                                 base_native_session_id: None,
                                 result_native_session_id: None,
+                                result_native_message_id: None,
                                 ..request.clone()
                             };
                             let first_turn = StoredChatTurn {
@@ -11291,6 +11511,7 @@ mod bridge_tests {
                                 id: first_turn.assistant_message_id.clone(),
                                 role: "assistant".into(),
                                 result_native_session_id: unprimed.native_session_id.clone(),
+                                result_native_message_id: None,
                                 parts_json: serde_json::to_string(&[WirePart::tool("failure", "error", "error", Some("Unconfirmed delivery".into()))]).unwrap(),
                                 ..first.clone()
                             };
@@ -11392,6 +11613,7 @@ mod bridge_tests {
                             parent_id: None,
                             base_native_session_id: None,
                             result_native_session_id: None,
+                            result_native_message_id: None,
                             native_harness: None,
                         })
                         .unwrap();
@@ -11419,6 +11641,7 @@ mod bridge_tests {
                             parent_id: None,
                             base_native_session_id: None,
                             result_native_session_id: None,
+                            result_native_message_id: None,
                             native_harness: Some(session.harness.clone()),
                         };
                         let turn = StoredChatTurn {
@@ -11598,6 +11821,7 @@ mod bridge_tests {
                         parent_id: None,
                         base_native_session_id: None,
                         result_native_session_id: None,
+                        result_native_message_id: None,
                         native_harness: None,
                     })
                     .unwrap();
@@ -11693,6 +11917,7 @@ mod bridge_tests {
                             parent_id: None,
                             base_native_session_id: None,
                             result_native_session_id: None,
+                            result_native_message_id: None,
                             native_harness: None,
                         })
                         .unwrap();
@@ -11866,12 +12091,17 @@ mod run_wakeup_tests {
     use crate::store::{Store, StoredChatSession, StoredRun};
 
     fn session(store: &Store, id: &str) {
+        session_on(store, id, "codex");
+    }
+
+    fn session_on(store: &Store, id: &str, harness: &str) {
         store
             .create_chat_session(&StoredChatSession {
                 id: id.into(),
                 project_id: "p1".into(),
-                harness: "codex".into(),
+                harness: harness.into(),
                 native_session_id: None,
+                native_fork_at: None,
                 title: None,
                 title_source: None,
                 model: None,
@@ -12651,6 +12881,7 @@ for line in sys.stdin:
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    result_native_message_id: None,
                     native_harness: None,
                 })
                 .unwrap();
@@ -12798,6 +13029,705 @@ for line in sys.stdin:
                 .await
                 .is_none()
         );
+    }
+
+    /// Waits until a turn has started and ended in `events`, returning the
+    /// assistant text it streamed.
+    async fn next_turn_text(events: &mut broadcast::Receiver<(&'static str, Value)>) -> String {
+        let turn = async {
+            let mut started = false;
+            let mut text = String::new();
+            loop {
+                let (name, data) = events.recv().await.unwrap();
+                match name {
+                    "chat.busy" if data["busy"] == true => started = true,
+                    "chat.busy" if started => return text,
+                    "chat.message" if started => {
+                        let parts = data["message"]["parts"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        text = parts
+                            .iter()
+                            .filter_map(|part| part["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                    }
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(20), turn)
+            .await
+            .expect("a turn starts and ends")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_output_after_its_turn_becomes_a_turn_of_its_own() {
+        use crate::local::claude::tests::{chat_echo_worker, emit, ready_host, serve_turn};
+        use crate::local::claude::TurnEvent;
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            let repo = crate::store::data_dir().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::write(repo.join("README.md"), "demo\n").unwrap();
+            crate::local::git::initialize_repository(&repo).unwrap();
+            store
+                .create_local_project(&crate::local::model::LocalProject {
+                    id: "p1".into(),
+                    name: "demo".into(),
+                    slug: "demo".into(),
+                    github_owner: String::new(),
+                    github_repo: String::new(),
+                    github_sync_enabled: false,
+                    baseline_branch: "main".into(),
+                    repo_path: repo.to_string_lossy().into_owned(),
+                    run_command: None,
+                    paper_id: None,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .unwrap();
+            session_on(&store, "resumes", "claude-code");
+            let claude = ready_host();
+            let chat = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                claude.clone(),
+            ));
+            let client = chat_echo_worker(&claude, "resumes", Arc::downgrade(&chat)).await;
+            let mut events = chat.subscribe();
+            serve_turn(&claude, &client).await;
+            // What the CLI writes when a background task finishes and it resumes.
+            let segment = |text: &str| {
+                [
+                    json!({"type": "system", "subtype": "task_notification", "task_id": text}),
+                    json!({"type": "system", "subtype": "background_tasks_changed", "tasks": []}),
+                    json!({"type": "system", "subtype": "init", "session_id": "native"}),
+                    json!({"type": "assistant", "message": {"id": text,
+                        "content": [{"type": "text", "text": text}]}}),
+                    json!({"type": "result", "subtype": "success"}),
+                ]
+            };
+            let idle = || async {
+                while chat.is_busy("resumes").await {
+                    tokio::task::yield_now().await;
+                }
+            };
+
+            for text in ["ALPHA", "BETA"] {
+                idle().await;
+                emit(&client, &segment(text)).await;
+                assert_eq!(next_turn_text(&mut events).await, text);
+            }
+
+            // A segment that arrives while the slot is taken waits for each way it frees.
+            idle().await;
+            let mut released = TurnGuard::claim(&chat, "resumes", None).await.unwrap();
+            emit(&client, &segment("RELEASED")).await;
+            assert!(claude.has_continuation("resumes").await);
+            released.release().await;
+            assert_eq!(next_turn_text(&mut events).await, "RELEASED");
+
+            idle().await;
+            let dropped = TurnGuard::claim(&chat, "resumes", None).await.unwrap();
+            emit(&client, &segment("DROPPED")).await;
+            assert!(claude.has_continuation("resumes").await);
+            drop(dropped);
+            assert_eq!(next_turn_text(&mut events).await, "DROPPED");
+
+            idle().await;
+            let reserved = TurnGuard::claim(&chat, "resumes", None).await.unwrap();
+            let handle = tokio::spawn(std::future::pending());
+            chat.turns.lock().await.insert(
+                "resumes".into(),
+                TurnState::Active(ActiveTurn {
+                    handle,
+                    message_id: "finishing".into(),
+                    turn_id: "finishing".into(),
+                }),
+            );
+            reserved.defuse();
+            emit(&client, &segment("FINISHED")).await;
+            assert!(claude.has_continuation("resumes").await);
+            chat.finish_turn("resumes", Some("finishing")).await;
+            assert_eq!(next_turn_text(&mut events).await, "FINISHED");
+
+            let turns = {
+                let tx = store.begin().unwrap();
+                let mut statement = tx
+                    .prepare("SELECT state, delivery_state, user_message_id FROM chat_turns WHERE session_id = 'resumes'")
+                    .unwrap();
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                rows
+            };
+            assert_eq!(
+                turns,
+                vec![("completed".to_string(), "accepted".to_string(), None); 5]
+            );
+
+            // A segment whose turn cannot be stored waits for the chat's next turn.
+            let tx = store.begin().unwrap();
+            tx.execute_batch(
+                "CREATE TRIGGER unstored BEFORE INSERT ON chat_turns
+                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            emit(&client, &segment("UNSTORED")).await;
+            while claude.has_continuation("resumes").await {
+                tokio::task::yield_now().await;
+            }
+            idle().await;
+            let (_route, mut rx) = claude.take_continuation("resumes").await.unwrap();
+            let mut texts = Vec::new();
+            while let Ok(TurnEvent::Line(line)) = rx.try_recv() {
+                texts.extend(line["message"]["content"][0]["text"].as_str().map(str::to_string));
+            }
+            assert_eq!(texts, ["UNSTORED"]);
+            claude.shutdown().await;
+        });
+    }
+
+    /// A Claude child is bound to the fork it resumed, so moving to another
+    /// fork waits until it owes no reply, then stops it for the next turn.
+    #[cfg(unix)]
+    #[test]
+    fn switching_forks_stops_an_idle_claude_child_and_waits_for_a_busy_one() {
+        use crate::local::claude::tests::{chat_echo_worker, emit, ready_host, serve_turn};
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            let root = crate::store::data_dir();
+            let repo = root.join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::write(repo.join("README.md"), "demo\n").unwrap();
+            crate::local::git::initialize_repository(&repo).unwrap();
+            store
+                .create_local_project(&crate::local::model::LocalProject {
+                    id: "p1".into(),
+                    name: "demo".into(),
+                    slug: "demo".into(),
+                    github_owner: String::new(),
+                    github_repo: String::new(),
+                    github_sync_enabled: false,
+                    baseline_branch: "main".into(),
+                    repo_path: repo.to_string_lossy().into_owned(),
+                    run_command: None,
+                    paper_id: None,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .unwrap();
+            session_on(&store, "forks", "claude-code");
+            let message =
+                |id: &str, role: &str, parent: Option<&str>, native: &str| StoredChatMessage {
+                    id: id.into(),
+                    session_id: "forks".into(),
+                    role: role.into(),
+                    parts_json: serde_json::to_string(&[WirePart::text("text", id)]).unwrap(),
+                    created_at: 1,
+                    completed_at: Some(1),
+                    parent_id: parent.map(str::to_string),
+                    base_native_session_id: None,
+                    result_native_session_id: (role == "assistant").then(|| native.into()),
+                    result_native_message_id: (role == "assistant").then(|| format!("{id}-end")),
+                    native_harness: Some("claude-code".into()),
+                };
+            for row in [
+                message("ask-one", "user", None, ""),
+                message("reply-one", "assistant", Some("ask-one"), "fork-one"),
+                message("ask-two", "user", None, ""),
+                message("reply-two", "assistant", Some("ask-two"), "fork-two"),
+            ] {
+                store.upsert_chat_message(&row).unwrap();
+            }
+            store
+                .set_chat_session_active_leaf("forks", Some("reply-two"))
+                .unwrap();
+            store
+                .set_chat_session_native_id("forks", Some("fork-two"))
+                .unwrap();
+
+            let claude = ready_host();
+            let chat = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                claude.clone(),
+            ));
+            let client = chat_echo_worker(&claude, "forks", std::sync::Weak::new()).await;
+            let mut events = chat.subscribe();
+            serve_turn(&claude, &client).await;
+            let on_fork_two = || {
+                let session = store.get_chat_session("forks").unwrap().unwrap();
+                session.active_leaf_id.as_deref() == Some("reply-two")
+                    && session.native_session_id.as_deref() == Some("fork-two")
+            };
+            let refused = |result: Result<()>| {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("background task"), "{error}");
+            };
+            let idle = || async {
+                while chat.is_busy("forks").await {
+                    tokio::task::yield_now().await;
+                }
+            };
+
+            emit(
+                &client,
+                &[json!({"type": "system", "subtype": "task_started", "task_id": "shell"})],
+            )
+            .await;
+            refused(chat.select_branch("forks", "reply-one").await);
+            idle().await;
+            refused(
+                chat.fork_turn("forks", "reply-two", ForkKind::Retry)
+                    .await
+                    .map(|_| ()),
+            );
+            idle().await;
+            refused(
+                chat.fork_turn("forks", "ask-two", ForkKind::Edit("Edited.".into()))
+                    .await
+                    .map(|_| ()),
+            );
+            idle().await;
+            assert!(on_fork_two());
+
+            emit(
+                &client,
+                &[
+                    json!({"type": "system", "subtype": "background_tasks_changed", "tasks": []}),
+                    json!({"type": "system", "subtype": "init"}),
+                ],
+            )
+            .await;
+            assert!(claude.has_continuation("forks").await);
+            refused(chat.select_branch("forks", "reply-one").await);
+            assert!(on_fork_two());
+            // The refusal frees the slot, which records the held reply.
+            emit(
+                &client,
+                &[
+                    json!({"type": "assistant", "message": {"id": "held",
+                        "content": [{"type": "text", "text": "HELD"}]}}),
+                    json!({"type": "result", "subtype": "success"}),
+                ],
+            )
+            .await;
+            assert_eq!(next_turn_text(&mut events).await, "HELD");
+            idle().await;
+
+            chat.select_branch("forks", "reply-one").await.unwrap();
+            let session = store.get_chat_session("forks").unwrap().unwrap();
+            assert_eq!(session.active_leaf_id.as_deref(), Some("reply-one"));
+            assert_eq!(session.native_session_id.as_deref(), Some("fork-one"));
+            assert_eq!(session.native_fork_at.as_deref(), Some("reply-one-end"));
+            claude.shutdown().await;
+        });
+    }
+
+    /// Claude keeps one session id for a whole chat, so each fork switch
+    /// branches a new native session where the selected branch ended.
+    #[cfg(unix)]
+    #[test]
+    fn claude_fork_switches_branch_the_native_session() {
+        use std::os::unix::fs::PermissionsExt;
+
+        async fn finished(
+            chat: &ChatHost,
+            events: &mut broadcast::Receiver<(&'static str, Value)>,
+        ) -> String {
+            let text = next_turn_text(events).await;
+            while chat.is_busy("chat").await
+                || Store::open().unwrap().chat_turn_leased("chat").unwrap()
+            {
+                tokio::task::yield_now().await;
+            }
+            text
+        }
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            let root = crate::store::data_dir();
+            let repo = root.join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::write(repo.join("README.md"), "demo\n").unwrap();
+            crate::local::git::initialize_repository(&repo).unwrap();
+            store
+                .create_local_project(&crate::local::model::LocalProject {
+                    id: "p1".into(),
+                    name: "demo".into(),
+                    slug: "demo".into(),
+                    github_owner: String::new(),
+                    github_repo: String::new(),
+                    github_sync_enabled: false,
+                    baseline_branch: "main".into(),
+                    repo_path: repo.to_string_lossy().into_owned(),
+                    run_command: None,
+                    paper_id: None,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .unwrap();
+
+            // Stands in for the CLI: each spawn gets a new session id unless it
+            // resumes one without forking, and every message carries a uuid.
+            let bin = root.join("bin");
+            let args = root.join("claude-args");
+            let prompts = root.join("claude-prompts");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(
+                bin.join("claude"),
+                format!(
+                    r#"#!/bin/sh
+case "$1" in --print) ;; --version) echo '2.1.322 (Claude Code)'; exit 0 ;; *) exit 0 ;; esac
+printf '%s\n' "$*" >> '{args}'
+sid="s$(wc -l < '{args}' | tr -d ' ')"
+resume=; at=; fork=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --resume) resume="$2"; shift ;;
+    --resume-session-at) at="$2"; shift ;;
+    --fork-session) fork=1 ;;
+  esac
+  shift
+done
+if [ "$at" = gone ]; then echo "No message found with message.uuid of: $at" >&2; exit 1; fi
+if [ -n "$resume" ] && [ -z "$fork" ]; then sid="$resume"; fi
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/demo"
+: > "$CLAUDE_CONFIG_DIR/projects/demo/$sid.jsonl"
+n=0
+while IFS= read -r line; do
+  case "$line" in *'"type":"user"'*)
+    printf '%s\n' "$line" >> '{prompts}'
+    n=$((n+1))
+    printf '{{"type":"system","subtype":"init","session_id":"%s"}}\n' "$sid"
+    printf '%s\n' "$line" | sed "s/^{{/{{\"uuid\":\"$sid-u$n\",/"
+    printf '{{"type":"assistant","uuid":"%s-a%s","message":{{"id":"m-%s-%s","content":[{{"type":"text","text":"%s"}}]}}}}\n' "$sid" "$n" "$sid" "$n" "$sid"
+    printf '{{"type":"result","subtype":"success","session_id":"%s"}}\n' "$sid" ;;
+  esac
+done
+"#,
+                    args = args.display(),
+                    prompts = prompts.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            )))
+            .unwrap();
+            std::env::set_var("PATH", path);
+
+            let claude = crate::local::claude::tests::ready_host();
+            let chat = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                claude.clone(),
+            ));
+            let mut events = chat.subscribe();
+            let spawns = || {
+                std::fs::read_to_string(&args)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            };
+            let resumed = |spawn: &str| {
+                let flag = |name: &str| {
+                    let mut words = spawn.split(' ');
+                    words.find(|word| *word == name)?;
+                    words.next().map(str::to_string)
+                };
+                (
+                    flag("--resume"),
+                    flag("--resume-session-at"),
+                    spawn.split(' ').any(|word| word == "--fork-session"),
+                )
+            };
+            let last_prompt = || {
+                let prompts = std::fs::read_to_string(&prompts).unwrap();
+                prompts.lines().last().unwrap().to_string()
+            };
+            let fork = |native: &str, at: &str| (Some(native.into()), Some(at.into()), true);
+            let plain = |native: &str| (Some(native.to_string()), None, false);
+            let fresh = (None, None, false);
+            let session = || store.get_chat_session("chat").unwrap().unwrap();
+            // The active branch's messages as (role, text) pairs.
+            let branch = || {
+                let messages = store.list_chat_messages("chat").unwrap();
+                active_path(&messages, session().active_leaf_id.as_deref())
+                    .into_iter()
+                    .map(|message| {
+                        let text = stored_to_wire(message)
+                            .parts
+                            .iter()
+                            .filter_map(|part| part.text.clone())
+                            .collect::<String>();
+                        (message.id.clone(), message.role.clone(), text)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let id_of = |text: &str| {
+                branch()
+                    .into_iter()
+                    .find(|(_, _, said)| said == text)
+                    .map(|(id, _, _)| id)
+                    .unwrap_or_else(|| panic!("{text} is not on the branch"))
+            };
+            let send = |text: &'static str| {
+                let chat = chat.clone();
+                async move {
+                    chat.send_message(
+                        "chat",
+                        text.into(),
+                        TurnOverrides::default(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                }
+            };
+
+            session_on(&store, "chat", "claude-code");
+            send("one").await;
+            assert_eq!(finished(&chat, &mut events).await, "s1");
+            send("two").await;
+            assert_eq!(finished(&chat, &mut events).await, "s1");
+            assert_eq!(spawns().len(), 1, "a plain next turn reuses the child");
+            assert_eq!(resumed(&spawns()[0]), fresh);
+
+            // Retrying turn two branches from the end of turn one.
+            let reply_two = branch()[3].0.clone();
+            chat.fork_turn("chat", &reply_two, ForkKind::Retry)
+                .await
+                .unwrap();
+            assert_eq!(finished(&chat, &mut events).await, "s2");
+            assert_eq!(resumed(&spawns()[1]), fork("s1", "s1-a1"));
+            assert!(!last_prompt().contains("one"), "{}", last_prompt());
+            assert_eq!(last_prompt().matches("two").count(), 1, "{}", last_prompt());
+            let forked = session();
+            assert_eq!(forked.native_session_id.as_deref(), Some("s2"));
+            assert_eq!(forked.native_fork_at, None);
+
+            // The branch keeps its session: the live child, then a plain resume.
+            send("three").await;
+            assert_eq!(finished(&chat, &mut events).await, "s2");
+            claude.kill_session("chat").await;
+            send("four").await;
+            assert_eq!(finished(&chat, &mut events).await, "s2");
+            assert_eq!(resumed(&spawns()[2]), plain("s2"));
+
+            // Selecting the first answer to turn two branches where it ended.
+            chat.select_branch("chat", &reply_two).await.unwrap();
+            send("five").await;
+            assert_eq!(finished(&chat, &mut events).await, "s4");
+            assert_eq!(resumed(&spawns()[3]), fork("s1", "s1-a2"));
+
+            // Editing turn two branches from the end of turn one.
+            chat.fork_turn("chat", &id_of("two"), ForkKind::Edit("two, edited".into()))
+                .await
+                .unwrap();
+            assert_eq!(finished(&chat, &mut events).await, "s5");
+            assert_eq!(resumed(&spawns()[4]), fork("s1", "s1-a1"));
+
+            // Nothing precedes turn one, so its fork starts a new session.
+            chat.fork_turn("chat", &id_of("one"), ForkKind::Edit("one, edited".into()))
+                .await
+                .unwrap();
+            assert_eq!(finished(&chat, &mut events).await, "s6");
+            assert_eq!(resumed(&spawns()[5]), fresh);
+            chat.fork_turn("chat", &id_of("s6"), ForkKind::Retry)
+                .await
+                .unwrap();
+            assert_eq!(finished(&chat, &mut events).await, "s7");
+            assert_eq!(resumed(&spawns()[6]), fresh);
+
+            // Replies recorded before message ids start a new session that the
+            // handoff fills with the branch.
+            send("seven").await;
+            assert_eq!(finished(&chat, &mut events).await, "s7");
+            {
+                let tx = store.begin().unwrap();
+                tx.execute(
+                    "UPDATE chat_messages SET result_native_message_id = NULL WHERE id = ?1",
+                    [&branch()[1].0],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+            chat.fork_turn("chat", &id_of("seven"), ForkKind::Retry)
+                .await
+                .unwrap();
+            assert_eq!(finished(&chat, &mut events).await, "s8");
+            assert_eq!(resumed(&spawns()[7]), fresh);
+            assert!(last_prompt().contains("one, edited"), "{}", last_prompt());
+
+            // A branch point the CLI rejects fails the turn as retryable and sets
+            // the saved session aside, so the retry starts from the handoff.
+            claude.kill_session("chat").await;
+            store
+                .set_chat_session_native_fork("chat", Some("s8"), Some("gone"))
+                .unwrap();
+            send("six").await;
+            finished(&chat, &mut events).await;
+            assert_eq!(resumed(&spawns()[8]), fork("s8", "gone"));
+            let failed = store.latest_chat_turn("chat").unwrap().unwrap();
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.recovery_action.as_deref(), Some("retry"));
+            assert_eq!(session().native_session_id, None);
+            chat.recover_turn("chat", &failed.id, "retry", RecoveryOverrides::default())
+                .await
+                .unwrap();
+            assert_eq!(finished(&chat, &mut events).await, "s10");
+            assert_eq!(resumed(&spawns()[9]), fresh);
+            assert!(last_prompt().contains("seven"), "{}", last_prompt());
+
+            // Coming back from another agent branches where Claude last ended.
+            let agent = |harness: &str| crate::store::StoredAgentSelection {
+                harness: harness.into(),
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                reasoning_level: None,
+            };
+            chat.set_agent("chat", agent("codex"), None).await.unwrap();
+            let back = chat.set_agent("chat", agent("claude-code"), None).await.unwrap();
+            assert_eq!(back.native_session_id.as_deref(), Some("s10"));
+            assert_eq!(back.native_fork_at.as_deref(), Some("s10-a1"));
+
+            // A turn interrupted before Claude wrote a message records none, so
+            // the branch forks at the turn before it and the handoff carries it.
+            let forget_message = |id: &str| {
+                let tx = store.begin().unwrap();
+                tx.execute(
+                    "UPDATE chat_messages SET result_native_message_id = NULL WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            };
+            send("turn eight").await;
+            assert_eq!(finished(&chat, &mut events).await, "s11");
+            send("turn nine").await;
+            assert_eq!(finished(&chat, &mut events).await, "s11");
+            let interrupted = branch().last().unwrap().0.clone();
+            forget_message(&interrupted);
+            chat.select_branch("chat", &interrupted).await.unwrap();
+            send("turn ten").await;
+            assert_eq!(finished(&chat, &mut events).await, "s12");
+            assert_eq!(resumed(&spawns()[11]), fork("s11", "s11-a1"));
+            assert!(last_prompt().contains("turn nine"), "{}", last_prompt());
+            assert!(!last_prompt().contains("turn eight"), "{}", last_prompt());
+
+            // Coming back to a branch with no recorded message starts fresh
+            // rather than resuming a session that holds other forks' turns.
+            for (id, role, _) in branch() {
+                if role == "assistant" {
+                    forget_message(&id);
+                }
+            }
+            chat.set_agent("chat", agent("codex"), None).await.unwrap();
+            let back = chat.set_agent("chat", agent("claude-code"), None).await.unwrap();
+            assert_eq!(back.native_session_id, None);
+            assert_eq!(back.native_fork_at, None);
+            send("turn eleven").await;
+            assert_eq!(finished(&chat, &mut events).await, "s13");
+            assert_eq!(resumed(&spawns()[12]), fresh);
+            assert!(last_prompt().contains("one, edited"), "{}", last_prompt());
+            assert!(last_prompt().contains("turn ten"), "{}", last_prompt());
+            claude.shutdown().await;
+        });
+    }
+
+    #[test]
+    fn a_turn_whose_lease_was_lost_can_be_continued() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            let host = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            for running in [false, true] {
+                let session_id = format!("lost-{running}");
+                session(&store, &session_id);
+                let _guard = TurnGuard::claim(&host, &session_id, None).await.unwrap();
+                let turn = crate::store::StoredChatTurn {
+                    id: format!("turn-{session_id}"),
+                    session_id: session_id.clone(),
+                    user_message_id: None,
+                    assistant_message_id: format!("answer-{session_id}"),
+                    client_turn_id: format!("client-{session_id}"),
+                    request_hash: "task".into(),
+                    prepared_input: "task".into(),
+                    settings_json: "{}".into(),
+                    state: "running".into(),
+                    delivery_state: "accepted".into(),
+                    attempt_count: 1,
+                    next_retry_at: None,
+                    error_kind: None,
+                    error_message: None,
+                    recovery_action: None,
+                    recovered_by_turn_id: None,
+                    created_at: now_ms(),
+                    updated_at: now_ms(),
+                };
+                store.admit_chat_turn(None, &turn).unwrap();
+                let state = if running {
+                    TurnState::Active(ActiveTurn {
+                        handle: tokio::spawn(std::future::pending()),
+                        message_id: turn.assistant_message_id.clone(),
+                        turn_id: turn.id.clone(),
+                    })
+                } else {
+                    TurnState::Reserved {
+                        turn_id: Some(turn.id.clone()),
+                    }
+                };
+                host.turns.lock().await.insert(session_id.clone(), state);
+                let tx = store.begin().unwrap();
+                tx.execute("DELETE FROM chat_turn_leases", []).unwrap();
+                tx.commit().unwrap();
+
+                stop_turns_whose_lease_was_lost(&host).await;
+
+                let stored = store.get_chat_turn(&session_id, &turn.id).unwrap().unwrap();
+                assert_eq!(stored.state, "failed");
+                assert_eq!(stored.recovery_action.as_deref(), Some("continue"));
+                assert!(!host.is_busy(&session_id).await);
+            }
+        });
     }
 
     #[test]
@@ -12959,6 +13889,7 @@ mod transcript_tree_tests {
             parent_id: parent.map(Into::into),
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         }
     }
@@ -13002,6 +13933,7 @@ mod transcript_tree_tests {
             project_id: "proj_1".into(),
             harness: harness.into(),
             native_session_id: Some("native-parent".into()),
+            native_fork_at: None,
             title: Some("Parent".into()),
             title_source: Some("user".into()),
             model: Some("model-x".into()),
@@ -13251,6 +14183,7 @@ mod steering_tests {
                 project_id: "p1".into(),
                 harness: "codex".into(),
                 native_session_id: None,
+                native_fork_at: None,
                 title: None,
                 title_source: None,
                 model: None,

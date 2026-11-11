@@ -422,7 +422,7 @@
 
 /* Reserve room for the workspace toolbar. */
 .workspace-body > .chat-pane .chat-header {
-  padding-inline-end: 12rem;
+  padding-inline-end: 14.25rem;
 }
 
 .workspace-card-visible > .chat-pane {
@@ -446,7 +446,7 @@
 }
 
 .win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .workspace-body:not(.workspace-card-visible):is(:not(:has(> .right-pane)), .flex-col) > .chat-pane .chat-header {
-  padding-inline-end: calc(12rem + var(--spacing-win-controls));
+  padding-inline-end: calc(14.25rem + var(--spacing-win-controls));
 }
 
 .win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .settings-view-scroll:first-child {
@@ -516,7 +516,7 @@
     inset: env(safe-area-inset-top) 0 calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom));
     width: 100%;
     border: 0;
-    z-index: 60;
+    z-index: 40;
   }
   .right-pane .panel-resizer, .right-pane .panel-controls > :first-child { display: none; }
   .right-pane > .tabs { min-height: 52px; }

@@ -200,6 +200,9 @@ importers:
       '@clo/react-markdown':
         specifier: jsr:1.1.1
         version: '@jsr/clo__react-markdown@1.1.1'
+      '@clo/react-mutation':
+        specifier: jsr:4.0.0
+        version: '@jsr/clo__react-mutation@4.0.0'
       '@codemirror/commands':
         specifier: ^6.11.1
         version: 6.11.1
@@ -766,6 +769,9 @@ packages:
 
   '@jsr/clo__react-markdown@1.1.1':
     resolution: {integrity: sha512-no2p+01aol5OiHGUwzYGkAKDWWPGpNAlumZezytP+zidXMGSTFChHs7k7j3ILM8SYaTK0HyVg1to4yumyuX97A==, tarball: https://npm.jsr.io/~/11/@jsr/clo__react-markdown/1.1.1.tgz}
+
+  '@jsr/clo__react-mutation@4.0.0':
+    resolution: {integrity: sha512-To5WnhprB3y5YxDQDYFWPHCwC5ajFC317CsPBPjuRfN0NzOnwknzrGISVy6KgaZsAUh525R6aGYuWyWwr2jQgA==, tarball: https://npm.jsr.io/~/11/@jsr/clo__react-mutation/4.0.0.tgz}
 
   '@lezer/common@1.5.5':
     resolution: {integrity: sha512-Pw7PVCndruF1pb3ebCxpSVpkMHSDjwRCLcTRw+RizUKco5QbWylwq2g4lnG/RYN7yTTQDXE9F77MwtkAyphrjg==}
@@ -2928,6 +2934,13 @@ snapshots:
       unified: 11.0.5
     transitivePeerDependencies:
       - supports-color
+
+  '@jsr/clo__react-mutation@4.0.0':
+    dependencies:
+      '@jsr/clo__lib': 3.0.0
+      '@tanstack/react-query': 5.102.8(react@19.2.7)
+      '@types/react': 19.2.17
+      react: 19.2.7
 
   '@lezer/common@1.5.5': {}
 

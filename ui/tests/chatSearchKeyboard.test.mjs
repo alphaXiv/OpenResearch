@@ -24,7 +24,7 @@ const main = () => [...document.querySelectorAll(".chat-pane")].find((section) =
 const side = () => document.querySelector(".right-pane .chat-pane");
 
 /** One chat's find box and the transcript it searches. */
-function finder(chat) {
+function finder(chat, searchRoot = chat) {
   const field = () => chat().querySelector("[role=search] input[role=combobox]");
   return {
     field,
@@ -48,12 +48,12 @@ function finder(chat) {
         window.getSelection().removeAllRanges();
         window.getSelection().addRange(range);
       });
-      await act(async () => chat().querySelector(`button[aria-label="${m.chat_search_title()}"]`).click());
+      await act(async () => searchRoot().querySelector(`button[aria-label="${m.chat_search_title()}"]`).click());
       await settle();
     },
   };
 }
-const mainFind = finder(main);
+const mainFind = finder(main, () => document.querySelector(".workspace-tools"));
 const sideFind = finder(side);
 
 /** Presses `key` on `target` and lets the jump it starts render; reports whether the page claimed the key. */

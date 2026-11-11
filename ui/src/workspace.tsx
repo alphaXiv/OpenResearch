@@ -1,7 +1,7 @@
 import { createContext, useContext } from "react";
 import { createApi } from "./api";
 import { createEvents } from "./events";
-import { createWorkspaceClient } from "./queries/client";
+import { createQueryClient, createWorkspaceClient } from "./queries/client";
 import { createInvalidation } from "./queries/invalidation";
 import { createProjectQueries } from "./queries/projects";
 import { createFileQueries } from "./queries/files";
@@ -13,15 +13,15 @@ import { createProjectPersistence } from "./useProjectWorkspace";
 import { createDialogs } from "./dialog";
 import { createComposerState } from "./composerStash";
 
-export function createWorkspace(identity: string, basePath = "") {
-  const client = createWorkspaceClient(identity, basePath);
+export function createWorkspace(identity: string, basePath = "", queryClient = createQueryClient()) {
+  const client = createWorkspaceClient(queryClient, identity, basePath);
   const invalidation = createInvalidation(client);
   const api = createApi(client, invalidation);
   const events = createEvents(client);
   const queries = {
     ...createProjectQueries(client, api),
     ...createFileQueries(client, api),
-    ...createSettingsQueries(client, api, invalidation, events),
+    ...createSettingsQueries(client, api, events),
     ...createChatQueries(client, api, events),
   };
   const chat = createChatStore(client, queries);

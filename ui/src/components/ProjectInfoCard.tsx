@@ -2,6 +2,7 @@ import { useContext, useId, useRef, useState, type RefObject } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspace } from "../workspace";
+import { mutDeleteProject, mutUpdateProject } from "../queries/projects";
 import { type DialogContentProps } from "../dialog";
 import { useFileManagerLabel } from "./useFileManagerLabel";
 
@@ -11,7 +12,7 @@ import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings,
 import { type Project } from "../api";
 import { downloadFile } from "../download";
 import { m } from "../paraglide/messages.js";
-import { ShareProjectDialog } from "./ShareProjectDialog";
+import { ShareProjectDialog, showShareExclusions } from "./ShareProjectDialog";
 import { Button, DialogContent, DialogTitle, Spinner, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
 
 function deleteExplanation(project: Project) {
@@ -34,7 +35,8 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
 
   const { showCustomDialog } = useWorkspace().dialogs;
 
-  const { api: { deleteProject, updateProject, revealFileInManager, shareProject }, queries: { getRuntimeQuery } } = useWorkspace();
+  const workspace = useWorkspace();
+  const { api: { revealFileInManager, shareProject }, queries: { getRuntimeQuery } } = workspace;
 
   const revealLabel = useFileManagerLabel();
   const remote = useQuery(getRuntimeQuery()).data?.kind === "ssh";
@@ -48,7 +50,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
       props: { project, returnFocus: triggerRef },
       onCancel: "close",
       onConfirm: async (deleteArtifacts) => {
-        const artifactsError = await deleteProject(project.id, deleteArtifacts);
+        const artifactsError = await mutDeleteProject.runAsHeadlessPromise(workspace, project.id, deleteArtifacts, {});
         onRemoved();
         if (artifactsError) showAlert(artifactsError, "error");
       },
@@ -81,7 +83,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
                   component: EditProjectDialog,
                   props: { project, onDelete: remove, returnFocus: triggerRef },
                   onCancel: "close",
-                  onConfirm: async (name) => { await updateProject(project.id, { name }); },
+                  onConfirm: async (name) => { await mutUpdateProject.runAsHeadlessPromise(workspace, project.id, { name }, {}); },
                 });
               }}><span className="flex items-center gap-2"><Settings size={16} />{m.activity_edit()}</span></Menu.Item>
               <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
@@ -93,7 +95,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
                   onConfirm: async (choice) => {
                     const { file, fileName, skipped } = await shareProject(project.id, choice);
                     downloadFile(fileName, file);
-                    if (skipped.length > 0) showAlert(m.share_skipped({ paths: skipped.join(", ") }), "warning");
+                    showShareExclusions(skipped.length);
                   },
                 });
               }}><span className="flex items-center gap-2"><Share2 size={16} />{m.share_project()}</span></Menu.Item>

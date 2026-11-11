@@ -1,6 +1,5 @@
 import {
   useContext,
-  type SetStateAction,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -16,7 +15,9 @@ import { EscapeScope } from "./components/EscapeScope";
 import { navigateKeyboardList } from "./keyboardNavigation";
 import { chatSearchRanges } from "./chatSearch";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
+import { mutCancelRun, mutDeleteExperiment, mutSetExperimentArchived } from "./queries/projects";
+import { mutUpdateUiState } from "./queries/settings";
 import type { Viewport } from "@xyflow/react";
 
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
@@ -94,7 +95,6 @@ import {
   type Run,
   type ChatMessage,
   type ChatSearchHit,
-  type UiState,
 } from "./api";
 import { WorkspaceTools } from "./components/WorkspaceTools";
 import { ProjectTerminal } from "./components/ProjectTerminal";
@@ -240,14 +240,6 @@ const FULLSCREEN_SNAP_SLOP = 80;
 // Inward drag needed before snapping back to the last non-fullscreen width.
 const FULLSCREEN_RESTORE_DRAG = 48;
 
-function upsert<T extends { id: string }>(list: T[], item: T): T[] {
-  const i = list.findIndex((x) => x.id === item.id);
-  if (i < 0) return [...list, item];
-  const next = list.slice();
-  next[i] = item;
-  return next;
-}
-
 function useStableStringMap(next: Map<string, string>): Map<string, string> {
   const current = useRef(next);
   const unchanged = current.current.size === next.size
@@ -264,16 +256,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
 
+  const workspace = useWorkspace();
   const {
-    updateUiState,
-    setExperimentArchived,
-    deleteExperiment,
     captureUiEvent,
     openSideChat,
     sendChatMessage,
-    cancelRun,
     citedMessage,
-  } = useWorkspace().api;
+  } = workspace.api;
   const {
     listChatSessionsQuery,
     listProjectsQuery,
@@ -294,8 +283,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const { useProjectWorkspace, inheritNewTaskWorkspace, getCachedProjectWorkspace } = useWorkspace().projects;
   const { globalWorkspaceWriter, getRememberedGlobalWorkspace } = useWorkspace().persistence;
   const { useOrxEvents, onChatEvent } = useWorkspace().events;
-
-  const updateUiStateMutation = useMutation({ mutationFn: updateUiState });
 
   const router = useRouter();
   const location = useRouterState({ select: (state) => state.location });
@@ -359,21 +346,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const projectsOptions = useMemo(() => listProjectsQuery(), [projectId]);
   const projectsQuery = useQuery(projectsOptions);
   const projects = projectsQuery.data ?? null;
-  const setProjects = useCallback((value: SetStateAction<Project[] | null>) => {
-    setScopedQueryData(projectsOptions.queryKey, (current) => {
-      const next = typeof value === "function" ? value(current ?? null) : value;
-      return next ?? undefined;
-    });
-  }, [projectsOptions]);
   const uiStateOptions = useMemo(() => getUiStateQuery(), [projectId]);
   const uiStateQuery = useQuery(uiStateOptions);
   const uiState = uiStateQuery.data ?? null;
-  const setUiState = useCallback((value: SetStateAction<UiState | null>) => {
-    setScopedQueryData(uiStateOptions.queryKey, (current) => {
-      const next = typeof value === "function" ? value(current ?? null) : value;
-      return next ?? undefined;
-    });
-  }, [uiStateOptions]);
   const tourCompletedRef = useRef<boolean | undefined>(undefined);
   tourCompletedRef.current = uiState?.tourCompleted;
   const failedStartupItems = [
@@ -383,7 +358,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const startupError = failedStartupItems.length
     ? m.app_startup_load_failed({ items: new Intl.ListFormat(locale).format(failedStartupItems) })
     : null;
-  const persistedPreferredAgent = useRef<AgentSelection | null>(null);
   const experimentsQuery = useQuery(listExperimentsQuery(projectId));
   const experiments = experimentsQuery.data ?? [];
   const experimentDataReady = !experimentsQuery.isPending;
@@ -432,20 +406,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [scopedExperiments, showArchivedExperiments],
   );
   const archiveActions = useMemo(() => archiveActionsByExperiment(experiments), [experiments]);
-  const archiveExperiment = useCallback(async (id: string, direction: "ancestors" | "descendants" | "only" | "region" | "taskRegion", archived: boolean) => {
-    try {
-      await setExperimentArchived(id, direction, archived);
-      await queryClient.invalidateQueries({ queryKey: listExperimentsQuery(projectId).queryKey });
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    }
+  const archiveExperiment = useCallback((id: string, direction: Parameters<typeof mutSetExperimentArchived.run>[2], archived: boolean) => {
+    mutSetExperimentArchived.run(workspace, { id, projectId }, direction, archived);
   }, [projectId]);
   const deleteExperimentNode = useCallback(async (id: string) => {
-    await deleteExperiment(id);
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: listExperimentsQuery(projectId).queryKey }),
-      queryClient.invalidateQueries({ queryKey: listRunsQuery(projectId).queryKey }),
-    ]);
+    await mutDeleteExperiment.runAsHeadlessPromise(workspace, { id, projectId }, {});
+  }, [projectId]);
+  const cancelRun = useCallback(async (runId: string) => {
+    await mutCancelRun.runAsHeadlessPromise(workspace, { id: runId, projectId }, {});
   }, [projectId]);
   const restoreArchivedRegion = useCallback((id: string) => {
     void archiveExperiment(id, effectiveScope === "agent" ? "taskRegion" : "region", false);
@@ -506,6 +474,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const workspaceWide = windowWidth >= WORKSPACE_CARD_MIN_WIDTH;
   const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
   const [railOpen, setRailOpen] = useState(true);
+  const mainFind = useState<number | null>(null);
   const [mobileRailOpen, setMobileRailOpen] = useState(false);
   const mobile = windowWidth < 768;
   useEffect(() => { setMobileRailOpen(false); }, [mobile, location.href]);
@@ -810,9 +779,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const closeDemoWelcome = useCallback(async (choice: "explore_demo" | "create_project" | "dismiss") => {
     const firstClose = tourCompletedRef.current === false;
-    const saved = await updateUiStateMutation.mutateAsync({ tourCompleted: true });
+    await mutUpdateUiState.runAsHeadlessPromise(workspace, { tourCompleted: true }, {});
     if (firstClose) captureUiEvent({ name: "demo_welcome_choice", choice });
-    setUiState((current) => current && { ...current, tourCompleted: saved.tourCompleted });
     if (choice === "explore_demo") setComposerFocusNonce((n) => n + 1);
   }, []);
   const openNewProject = () => showCustomDialog({
@@ -893,7 +861,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   };
   useEffect(() => {
     if (!uiState || preferencesLoaded) return;
-    persistedPreferredAgent.current = uiState.preferredAgent;
     const prefs = getRememberedGlobalWorkspace() ?? uiState.workspace;
     if (prefs) {
       setRailOpen(prefs.railOpen);
@@ -907,41 +874,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (sessions && rememberedSessionRef.current && !sessions.includes(rememberedSessionRef.current)) rememberedSessionRef.current = null;
   }, [sessions]);
 
-  const preferredAgentWrite = useRef<Promise<void>>(Promise.resolve());
-  const preferredAgentSaveSeq = useRef(0);
-  const persistPreferredAgent = useCallback((selection: AgentSelection) => {
-    const saveSeq = ++preferredAgentSaveSeq.current;
-    setUiState((current) => current && { ...current, preferredAgent: selection });
-    const write = preferredAgentWrite.current
-      .then(() => updateUiStateMutation.mutateAsync({ preferredAgent: selection }))
-      .then((saved) => {
-        persistedPreferredAgent.current = saved.preferredAgent;
-        if (saveSeq === preferredAgentSaveSeq.current) {
-          setUiState((current) => current && { ...current, preferredAgent: saved.preferredAgent });
-        }
-      })
-      .catch((error: unknown) => {
-        if (saveSeq === preferredAgentSaveSeq.current) {
-          setUiState((current) =>
-            current && { ...current, preferredAgent: persistedPreferredAgent.current },
-          );
-        }
-        throw error;
-      });
-    preferredAgentWrite.current = write.catch(() => {});
-    return write;
+  const persistPreferredAgent = useCallback(async (selection: AgentSelection) => {
+    mutUpdateUiState.run(workspace, { preferredAgent: selection });
   }, []);
-
-  const preferredAutonomyWrite = useRef<Promise<unknown>>(Promise.resolve());
-  const preferredAutonomySaveSeq = useRef(0);
   const persistPreferredAutonomy = useCallback((autonomy: Autonomy) => {
-    const saveSeq = ++preferredAutonomySaveSeq.current;
-    setUiState((current) => current && { ...current, preferredAutonomy: autonomy });
-    preferredAutonomyWrite.current = preferredAutonomyWrite.current
-      .then(() => updateUiStateMutation.mutateAsync({ preferredAutonomy: autonomy }))
-      .catch(() => {
-        if (saveSeq === preferredAutonomySaveSeq.current) void uiStateQuery.refetch();
-      });
+    mutUpdateUiState.run(workspace, { preferredAutonomy: autonomy });
   }, []);
 
   useEffect(() => {
@@ -1828,7 +1765,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   };
 
   function onProjectCreated(project: Project, publicationError: string | null) {
-    setProjects((cur) => (cur ? upsert(cur, project) : [project]));
     void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}` });
     if (publicationError) {
       showAlert(publicationError, "error");
@@ -2115,6 +2051,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       <div ref={bodyRef} className={`app-body workspace-body relative flex flex-1 min-h-0 ${stackPanel ? "flex-col [&>.chat-pane]:overflow-y-auto [&_.chat-empty]:min-h-0 [&_.chat-empty]:overflow-y-auto [&_.chat-empty]:justify-start [&_.chat-empty]:p-0" : ""} ${workspaceCardVisible ? "workspace-card-visible" : ""} ${mainView === "chat" && workspaceReady && !conversationError ? "has-workspace-tools" : ""}`}>
         {projectId && (
           <ChatPanel
+            find={mainFind}
             projectId={projectId}
             projectName={activeProject.name}
             contentLoading={conversationLoading}
@@ -2169,9 +2106,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 remote={runtime.kind === "ssh"}
                 tab={mainView}
                 project={activeProject}
-                onProjectUpdate={(project) => {
-                  setProjects((current) => (current ? upsert(current, project) : [project]));
-                }}
                 onSelectTab={selectMainView}
               />
             ) : null}
@@ -2192,6 +2126,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onChanges={() => focusOpenedTab("files", () => { setFilesView("changes"); openWorktreeTab(); })}
             onFiles={() => focusOpenedTab("files", () => { setFilesView("files"); openWorktreeTab(); })}
             onTerminal={() => focusOpenedTab("terminal", openTerminalTab)}
+            findOpen={mainFind[0] !== null}
+            onFind={() => mainFind[1](Date.now())}
             onArtifacts={() => focusOpenedTab("artifacts", openArtifactsTab)}
             onExperiments={() => focusOpenedTab("experiments", openExperimentsTab)}
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}
@@ -2202,7 +2138,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         )}
         {mainView === "chat" && panelOpen && (
           <aside
-            className={`right-pane relative shrink-0 min-w-0 flex flex-col bg-background [&.max]:fixed [&.max]:inset-0 [&.max]:z-60 [&.max]:border-s-0 overflow-hidden ${stackPanel ? "border-t border-t-border" : "border-s border-s-border"} ${panelMax ? "max" : ""}`}
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col bg-background [&.max]:fixed [&.max]:inset-0 [&.max]:z-40 [&.max]:border-s-0 overflow-hidden ${stackPanel ? "border-t border-t-border" : "border-s border-s-border"} ${panelMax ? "max" : ""}`}
             style={mobile || panelMax ? undefined : stackPanel ? { width: "100%", height: "50%" } : { width: visiblePanelWidth }}
             data-onboarding="experiments"
           >

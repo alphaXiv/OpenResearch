@@ -12,7 +12,9 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type Dispatch,
   type MouseEvent as ReactMouseEvent,
+  type SetStateAction,
 } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
@@ -33,6 +35,24 @@ import { taskLocation } from "../workspaceState";
 import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
+import {
+  mutCancelQueuedMessage,
+  mutCompactChatSession,
+  mutCreateChatSession,
+  mutDeleteChatSession,
+  mutForkChatTurn,
+  mutImportNativeChat,
+  mutInterruptChat,
+  mutOpenSideChat,
+  mutPatchChatSession,
+  mutRecoverChatTurn,
+  mutRespondChat,
+  mutRetryQueuedMessage,
+  mutRunShellCommand,
+  mutSelectChatBranch,
+  mutSetChatConfiguration,
+} from "../queries/chat";
+import { useMutate } from "@clo/react-mutation";
 
 import { nativeOptions, sessionAcpHarness } from "../acp";
 import { deriveComposerSelection, resolveHarnessDefaultModel } from "../modelSelection";
@@ -40,7 +60,7 @@ import { deriveComposerSelection, resolveHarnessDefaultModel } from "../modelSel
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
 import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
-import { CancelledError, useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { CancelledError, useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 
 import {
@@ -101,7 +121,7 @@ import {
 
 import { BrandMark } from "./Wordmark";
 import {
-  type SidebarChatCursor,
+  type ChatSessionPatch,
   DEMO_FIGURE_SESSION_ID,
   DEMO_LITERATURE_SESSION_ID,
   DEMO_EXPERIMENT_LABELS,
@@ -5043,6 +5063,7 @@ export function ChatPanel({
   onOpenSubagent,
   runtime,
   composerFocusNonce = 0,
+  find,
   activeSessionId,
   onActiveSessionChange,
   onStartHarnessDraft,
@@ -5125,6 +5146,8 @@ export function ChatPanel({
   runtime: RuntimeInfo;
   /** Requests composer focus on change; a nonzero value also focuses on mount. */
   composerFocusNonce?: number;
+  /** Find-box state owned by the parent so its toolbar can open it; side chats own theirs. */
+  find?: readonly [number | null, Dispatch<SetStateAction<number | null>>];
   /** Demo run currently executing, for the monitor-it hint above the composer. */
   activeSessionId: string | null;
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
@@ -5149,69 +5172,34 @@ export function ChatPanel({
 
   const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
 
-  const {
-    setChatSessionPermissionMode,
-    setChatSessionPlanMode,
-    setChatSessionAutonomy,
-    setChatSessionAgent,
-    setChatSessionGoal,
-    importNativeChat,
-    openSideChat,
-    createChatSession,
-    setChatSessionArchived,
-    releaseDelegate,
-    renameChatSession,
-    deleteChatSession,
-    setChatConfiguration,
-    compactChatSession,
-    captureUiEvent,
-    sendChatMessage,
-    getChatSubmission,
-    runShellCommand,
-    interruptChat,
-    recoverChatTurn,
-    forkChatTurn,
-    selectChatBranch,
-    cancelQueuedMessage,
-    retryQueuedMessage,
-    respondChat,
-    getChatSession,
-  } = useWorkspace().api;
+  const { captureUiEvent, sendChatMessage, getChatSubmission, getChatSession, patchChatSession } = useWorkspace().api;
   const {
     listProjectsQuery,
     listProjectActivityQuery,
     listChatSessionsQuery,
-    readSidebarChatPage,
+    listSidebarChatSessionsQuery,
     listChatActiveRunsQuery,
     getHarnessesQuery,
     getSkillsQuery,
     getHarnessSetupCommandsQuery,
     getCodeTreeQuery,
-    listNativeChatsQuery,
     getChatMessagesQuery,
     getProjectStarterPromptsQuery,
     citedMessageQuery,
   } = useWorkspace().queries;
   // The alphaXiv account and library belong to the machine the app runs on.
   const owner = useMachines().owner;
-  const { workspaceKey, setScopedQueryData, queryClient, isCurrentScope, deletedSessionIds } = useWorkspace();
-  const { useChatState } = useWorkspace().chat;
+  const { setScopedQueryData, queryClient, isCurrentScope, deletedSessionIds } = useWorkspace();
+  const workspace = useWorkspace();
+  const { useChatState, serialize: queueSessionMutation } = workspace.chat;
+  const patchSession = (session: Pick<ChatSession, "id" | "projectId">, changes: ChatSessionPatch) =>
+    mutPatchChatSession.runAsHeadlessPromise(workspace, session, changes, {});
+  const agentSwitch = useMutate(mutPatchChatSession);
+  // Covers a switch still waiting behind another write to the session, not only the request itself.
+  const switchingAgent = agentSwitch.isOptimisticData;
   const { composerStashes, mountedComposers, composerSeed, forgetComposerSeed } = useWorkspace().composers;
   const { onChatEvent } = useWorkspace().events;
   const { removeSession: removeCachedSession } = useWorkspace().invalidation;
-
-  const setChatSessionPermissionModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPermissionMode>) => setChatSessionPermissionMode(...args) });
-  const setChatSessionPlanModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPlanMode>) => setChatSessionPlanMode(...args) });
-  const setChatSessionAutonomyMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAutonomy>) => setChatSessionAutonomy(...args) });
-  const setChatSessionAgentMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAgent>) => queueSessionMutation(() => setChatSessionAgent(...args)) });
-  const setChatSessionGoalMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionGoal>) => setChatSessionGoal(...args) });
-  const importNativeChatMutation = useMutation({ mutationFn: (args: Parameters<typeof importNativeChat>) => importNativeChat(...args) });
-  const openSideChatMutation = useMutation({ mutationFn: openSideChat });
-  const createChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createChatSession>) => createChatSession(...args) });
-  const setChatSessionArchivedMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionArchived>) => setChatSessionArchived(...args) });
-  const releaseDelegateMutation = useMutation({ mutationFn: releaseDelegate });
-  const renameChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof renameChatSession>) => renameChatSession(...args) });
-  const deleteChatSessionMutation = useMutation({ mutationFn: deleteChatSession });
 
   const navigate = useNavigate();
   const { data: sidebarProjects = [] } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
@@ -5267,10 +5255,7 @@ export function ChatPanel({
     })),
   });
   const flatSessions = useInfiniteQuery({
-    queryKey: workspaceKey("listSidebarChatSessions", sessionFilter),
-    queryFn: ({ pageParam, signal }: { pageParam: SidebarChatCursor | null; signal: AbortSignal }) => readSidebarChatPage(sessionFilter, pageParam, signal),
-    initialPageParam: null,
-    getNextPageParam: (page): SidebarChatCursor | undefined => page.next ?? undefined,
+    ...listSidebarChatSessionsQuery(sessionFilter),
     enabled: !embedded && sidebarGrouping === "list",
   });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
@@ -5398,7 +5383,6 @@ export function ChatPanel({
     };
   }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
-  const settingsMutationTail = useRef<Promise<void>>(Promise.resolve());
   const settingsMutationSeq = useRef(0);
   const planMutationSeq = useRef(0);
   const [planModeOverride, setPlanModeOverride] = useState<boolean | null>(null);
@@ -5424,7 +5408,6 @@ export function ChatPanel({
   const [recoveringTurnId, setRecoveringTurnId] = useState<string | null>(null);
   const recoveringTurnRef = useRef(false);
   const activeLeafRef = useRef<string | null>(null);
-  const [retryingQueuedId, setRetryingQueuedId] = useState<string | null>(null);
   const preparingSend = useRef(false);
   // Sessions whose title was just replaced by a harness-generated one, mapped
   // to a nonce that bumps per reveal so a second retitle remounts the spans and
@@ -5440,7 +5423,8 @@ export function ChatPanel({
   // Render-fresh mirror of `sessions` for callbacks memoized on projectId
   // alone (syncSessionList snapshots it before fetching).
   const threadRef = useRef<HTMLDivElement>(null);
-  const [findRequest, setFindRequest] = useState<number | null>(null);
+  const localFind = useState<number | null>(null);
+  const [findRequest, setFindRequest] = find ?? localFind;
   const [branchReturn, setBranchReturn] = useState<{ sessionId: string; leafId: string } | null>(null);
   const searchRegion = useSyncExternalStore(subscribeCommandRegion, commandRegion);
   const openFind = useCallback(() => setFindRequest(Date.now()), []);
@@ -5476,11 +5460,11 @@ export function ChatPanel({
   const composerRef = useRef<ComposerEditorHandle>(null);
   useEffect(() => {
     const focused = document.activeElement;
-    if (setChatSessionAgentMutation.isPending
+    if (switchingAgent
       && (focused === document.body || (focused instanceof HTMLButtonElement && focused.disabled))) {
       composerRef.current?.focus();
     }
-  }, [setChatSessionAgentMutation.isPending]);
+  }, [switchingAgent]);
   const connection = useRemoteConnection();
   const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
@@ -5794,21 +5778,21 @@ export function ChatPanel({
       setSettingsError(null);
       setSelection(agent);
       void onPreferredAgentChange(agent).catch(() => {});
-      void setChatSessionAgentMutation.mutateAsync([openSession.id, agent])
-        .then((session) => {
-          setSessions((current) => current.map((row) => row.id === session.id ? session : row));
+      agentSwitch.runWithOptions(workspace, openSession, { agent }, {
+        onSuccessData: () => {
           if (pendingScope.current !== scope) return;
           setSessionOverride({});
           setRecoveryOverrides({});
-        })
-        .catch((error: unknown) => {
+        },
+        onError: (error) => {
           if (pendingScope.current === scope) setSettingsError(error instanceof Error ? error.message : m.chat_switch_agent_failed());
-        });
+        },
+      });
       return;
     }
     if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
       if (next.model !== acpModel.currentValue) invalidatePendingRetry();
-      void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
+      mutSetChatConfiguration.run(workspace, openSession, acpModel.id, next.model);
       return;
     }
     if (!composerSelection) return;
@@ -5854,17 +5838,6 @@ export function ChatPanel({
     if (onStartHarnessDraft) onStartHarnessDraft();
     else onActiveSessionChangeRef.current(null, { projectId });
   }
-  const queueSessionMutation = useCallback(<T,>(mutation: () => Promise<T>): Promise<T> => {
-    const result = settingsMutationTail.current.catch(() => {}).then(() => {
-      if (!isCurrentScope(sessionsOptions.queryKey)) throw new DOMException("Workspace changed", "AbortError");
-      return mutation();
-    });
-    settingsMutationTail.current = result.then(
-      () => {},
-      () => {},
-    );
-    return result;
-  }, [sessionsOptions]);
   const setPermissionMode = (id: string) => {
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
@@ -5881,29 +5854,21 @@ export function ChatPanel({
       selectModel({ permissionMode: id });
     }
     if (!openSession) return;
-    const sessionId = openSession.id;
     const mutation = ++settingsMutationSeq.current;
+    const clearOverride = () =>
+      setSessionOverride((current) => {
+        const next = { ...current };
+        delete next.permissionMode;
+        return next;
+      });
     setSettingsError(null);
-    void queueSessionMutation(() => setChatSessionPermissionModeMutation.mutateAsync([sessionId, id]))
-      .then((session) => {
-        setSessions((current) =>
-          current.map((candidate) => (candidate.id === session.id ? session : candidate)),
-        );
-        if (settingsMutationSeq.current === mutation) {
-          setSessionOverride((current) => {
-            const next = { ...current };
-            delete next.permissionMode;
-            return next;
-          });
-        }
+    void patchSession(openSession, { permissionMode: id })
+      .then(() => {
+        if (settingsMutationSeq.current === mutation) clearOverride();
       })
       .catch(() => {
         if (settingsMutationSeq.current !== mutation) return;
-        setSessionOverride((current) => {
-          const next = { ...current };
-          delete next.permissionMode;
-          return next;
-        });
+        clearOverride();
         setSettingsError(m.chat_update_permissions_failed());
       });
   };
@@ -5915,24 +5880,11 @@ export function ChatPanel({
       else onPreferredAutonomyChange(autonomy);
       return;
     }
-    const sessionId = openSession.id;
-    const previous = openSession.autonomy;
     const mutation = ++settingsMutationSeq.current;
-    const replace = (session: ChatSession) =>
-      setSessions((current) => current.map((row) => (row.id === session.id ? session : row)));
-    replace({ ...openSession, autonomy });
     setSettingsError(null);
-    void queueSessionMutation(() => setChatSessionAutonomyMutation.mutateAsync([sessionId, autonomy]))
-      .then((session) => {
-        replace(session);
-        onPreferredAutonomyChange(session.autonomy);
-      })
+    void patchSession(openSession, { autonomy })
+      .then((session) => onPreferredAutonomyChange(session.autonomy))
       .catch(() => {
-        setSessions((current) =>
-          current.map((row) =>
-            row.id === sessionId && row.autonomy === autonomy ? { ...row, autonomy: previous } : row,
-          ),
-        );
         if (settingsMutationSeq.current === mutation) setSettingsError(m.chat_update_autonomy_failed());
       });
   };
@@ -5953,21 +5905,17 @@ export function ChatPanel({
     if (acpMode && openSession) {
       const next = planMode ? "plan" : acpMode.choices.find((choice) => choice.id !== "plan")?.id;
       if (!next) throw new Error(m.chat_toggle_plan_failed());
-      await queueSessionMutation(() => setChatConfiguration(openSession.id, acpMode.id, next));
+      await mutSetChatConfiguration.runAsHeadlessPromise(workspace, openSession, acpMode.id, next, {});
       return;
     }
     setRecoveryOverrides((current) => ({ ...current, planMode }));
     planModeOverrideRef.current = planMode;
     setPlanModeOverride(planMode);
     if (!openSession) return;
-    const sessionId = openSession.id;
     const mutation = ++planMutationSeq.current;
     setSettingsError(null);
     try {
-      const session = await queueSessionMutation(() => setChatSessionPlanModeMutation.mutateAsync([sessionId, planMode]));
-      setSessions((current) =>
-        current.map((candidate) => (candidate.id === session.id ? session : candidate)),
-      );
+      await patchSession(openSession, { planMode });
       if (planMutationSeq.current === mutation) {
         planModeOverrideRef.current = null;
         setPlanModeOverride(null);
@@ -6085,9 +6033,7 @@ export function ChatPanel({
     setSettingsError(null);
     const visit = projectVisitRef.current;
     try {
-      const session = await importNativeChatMutation.mutateAsync([projectId, chat]);
-      // The adopted chat is no longer one of the agent's unclaimed ones.
-      void queryClient.invalidateQueries({ queryKey: listNativeChatsQuery().queryKey });
+      const session = await mutImportNativeChat.runAsHeadlessPromise(workspace, projectId, chat, {});
       if (projectVisitRef.current !== visit) return;
       setSessions((current) => [session, ...current.filter((row) => row.id !== session.id)]);
       setSessionFilter("all");
@@ -6130,10 +6076,7 @@ export function ChatPanel({
     }
     const clearing = /^(clear|none|off)$/i.test(wanted);
     try {
-      const session = await queueSessionMutation(() =>
-        setChatSessionGoalMutation.mutateAsync([sessionId, clearing ? null : wanted]),
-      );
-      setSessions((current) => current.map((candidate) => (candidate.id === session.id ? session : candidate)));
+      await patchSession({ id: sessionId, projectId }, { goal: clearing ? null : wanted });
       showAlert(clearing ? m.chat_goal_cleared() : m.chat_goal_set(), "success");
     } catch (err) {
       if (!inSourceScope()) return;
@@ -6160,7 +6103,7 @@ export function ChatPanel({
     const sourceScope = composerScopeRef.current;
     try {
       // SSE may deliver the final result before this initial progress response.
-      const { message } = await compactChatSession(sessionId);
+      const { message } = await mutCompactChatSession.runAsHeadlessPromise(workspace, sessionId, {});
       dispatch({ type: "upsertMessage", sessionId, message, onlyIfMissing: true });
     } catch (err) {
       if (composerScopeRef.current.activeId !== sourceScope.activeId) return;
@@ -6580,7 +6523,7 @@ export function ChatPanel({
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
   async function send({ queue = false, starter }: { queue?: boolean; starter?: string } = {}) {
-    if (setChatSessionAgentMutation.isPending) return;
+    if (switchingAgent) return;
     // Slash tokens stay in the wire form: the server resolves every selected
     // skill and supplies this exact message as their shared request context.
     const originalText = (starter ?? draft).trim();
@@ -6729,7 +6672,7 @@ export function ChatPanel({
     if ((!text && pending.length === 0 && pendingAnnotations.length === 0) || (goalRequested && !text)) return;
     const persistMessageGoal = async (sessionId: string) => {
       if (!goalRequested) return;
-      const session = await setChatSessionGoalMutation.mutateAsync([sessionId, text]);
+      const session = await patchChatSession(sessionId, { goal: text });
       setSessions((current) => current.map((candidate) => candidate.id === session.id ? session : candidate));
     };
     const clientTurnId = retry?.id ?? `ct_${crypto.randomUUID()}`;
@@ -6954,17 +6897,17 @@ export function ChatPanel({
     const scope = composerScopeRef.current;
     const visit = projectVisitRef.current;
     let session = sideParentSessionId
-      ? await openSideChatMutation.mutateAsync(sideParentSessionId)
-      : await createChatSessionMutation.mutateAsync([projectId, selection.harness, {
+      ? await mutOpenSideChat.runAsHeadlessPromise(workspace, sideParentSessionId, {})
+      : await mutCreateChatSession.runAsHeadlessPromise(workspace, projectId, selection.harness, {
         model: selection.model,
         serviceTier: selection.serviceTier,
         permissionMode: selection.permissionMode,
         planMode,
         reasoningLevel: selection.reasoningLevel,
         autonomy: preferredAutonomy,
-      }]);
+      }, {});
     if (sideParentSessionId && sideDraftAutonomy !== null && session.autonomy !== sideDraftAutonomy) {
-      session = await setChatSessionAutonomyMutation.mutateAsync([session.id, sideDraftAutonomy]);
+      session = await patchSession(session, { autonomy: sideDraftAutonomy });
     }
     if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit) {
       setSessions((cur) => [session, ...cur.filter((row) => row.id !== session.id)]);
@@ -6985,7 +6928,7 @@ export function ChatPanel({
   /** Enter in bash mode: run the command where the agent works and show the
    * exchange on the branch. A new chat gets its session first, as send() does. */
   async function runShell() {
-    if (setChatSessionAgentMutation.isPending) return;
+    if (switchingAgent) return;
     const command = shellCommand;
     if (!command) return;
     setSettingsError(null);
@@ -7036,7 +6979,7 @@ export function ChatPanel({
     dispatch({ type: "localShell", sessionId: sid, id: localId, command });
     if (inSourceScope()) pinTranscriptToBottom();
     try {
-      const { message } = await runShellCommand(sid, command);
+      const { message } = await mutRunShellCommand.runAsHeadlessPromise(workspace, sid, command, {});
       dispatch({ type: "upsertMessage", sessionId: sid, message });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -7052,8 +6995,8 @@ export function ChatPanel({
 
   function stop() {
     if (!activeId) return;
-    void interruptChat(activeId).catch(() => {
-      setSettingsError(m.chat_stop_failed());
+    mutInterruptChat.runWithOptions(workspace, activeId, {
+      onError: (error) => setSettingsError(m.chat_stop_failed({ error: ltr(error instanceof Error ? error.message : String(error)) })),
     });
   }
 
@@ -7072,32 +7015,32 @@ export function ChatPanel({
           reasoningLevel: recoveryOverrides.reasoningLevel,
         });
         const sessionId = activeId;
-        const response = await recoverChatTurn(sessionId, turnId, action, turnOpts);
+        const response = await mutRecoverChatTurn.runAsHeadlessPromise(workspace, sessionId, turnId, action, turnOpts, {});
         if (response.turn.existing) await reseedSession(sessionId);
         setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-      } catch {
-        setSettingsError(m.chat_recover_failed());
+      } catch (error) {
+        setSettingsError(m.chat_recover_failed({ error: ltr(error instanceof Error ? error.message : String(error)) }));
       } finally {
         recoveringTurnRef.current = false;
         setRecoveringTurnId(null);
       }
     },
-    [activeId, recoveryOverrides, reseedSession],
+    [workspace, activeId, recoveryOverrides, reseedSession],
   );
 
   const forkTurn = useCallback(
     (messageId: string, text: string) => {
       if (!activeId || busy || !activeHarness?.agentReady) return;
       const sid = activeId;
-      dispatch({ type: "busy", sessionId: sid, busy: true });
       pinTranscriptToBottom();
-      void queueSessionMutation(() => forkChatTurn(sid, messageId, text)).catch((err) => {
-        dispatch({ type: "busy", sessionId: sid, busy: false });
-        const detail = err instanceof Error ? err.message : String(err);
-        dispatch({ type: "localError", sessionId: sid, text: m.chat_resend_failed({ error: ltr(detail) }) });
+      mutForkChatTurn.runWithOptions(workspace, { id: sid, projectId }, messageId, text, {
+        onError: (err) => {
+          const detail = err instanceof Error ? err.message : String(err);
+          dispatch({ type: "localError", sessionId: sid, text: m.chat_resend_failed({ error: ltr(detail) }) });
+        },
       });
     },
-    [activeId, busy, activeHarness?.agentReady, pinTranscriptToBottom, queueSessionMutation],
+    [workspace, activeId, projectId, busy, activeHarness?.agentReady, pinTranscriptToBottom],
   );
 
   /** Show a different fork. The server descends to that branch's newest tip and
@@ -7108,19 +7051,14 @@ export function ChatPanel({
       // turn's reply on whichever branch the pointer stopped at.
       if (!activeId || busy) return;
       const sid = activeId;
-      // Via the ref, not a dep: the leaf changes on every new message, and this
-      // callback reaches every row through the memoized `Message`.
-      const previous = activeLeafRef.current;
-      dispatch({ type: "activeLeaf", sessionId: sid, leafId });
-      void queueSessionMutation(() => selectChatBranch(sid, leafId)).catch((err) => {
-        // Leaving the client on a branch the server did not switch to would send
-        // the next message somewhere other than what is on screen.
-        dispatch({ type: "activeLeaf", sessionId: sid, leafId: previous });
-        const detail = err instanceof Error ? err.message : String(err);
-        dispatch({ type: "localError", sessionId: sid, text: m.chat_switch_fork_failed({ error: ltr(detail) }) });
+      mutSelectChatBranch.runWithOptions(workspace, sid, leafId, {
+        onError: (err) => {
+          const detail = err instanceof Error ? err.message : String(err);
+          dispatch({ type: "localError", sessionId: sid, text: m.chat_switch_fork_failed({ error: ltr(detail) }) });
+        },
       });
     },
-    [activeId, busy, queueSessionMutation],
+    [workspace, activeId, busy],
   );
 
   const forkedForNonce = useRef<number | undefined>(undefined);
@@ -7171,32 +7109,19 @@ export function ChatPanel({
     return () => { if (CSS.highlights.get(name) === highlight) CSS.highlights.delete(name); };
   }, [focusedMessage, activeId, pendingQuestions, embedded]);
 
-  // Durable cancellation wins before the chip disappears. If persistence
-  // fails, leave it visible so a restart cannot surprise the user by sending it.
   function cancelQueued(itemId: string) {
     if (!activeId) return;
-    const sid = activeId;
-    void cancelQueuedMessage(sid, itemId)
-      .then(({ removed }) => {
-        if (!removed) return;
-        return reseedSession(sid);
-      })
-      .catch(() => setSettingsError(m.chat_remove_queued_failed()));
+    mutCancelQueuedMessage.runWithOptions(workspace, activeId, itemId, {
+      onError: (error) => setSettingsError(m.chat_remove_queued_failed({ error: ltr(error instanceof Error ? error.message : String(error)) })),
+    });
   }
 
-  async function retryQueued(itemId: string) {
-    if (!activeId || retryingQueuedId) return;
-    const sid = activeId;
+  function retryQueued(itemId: string) {
+    if (!activeId) return;
     setSettingsError(null);
-    setRetryingQueuedId(itemId);
-    try {
-      await retryQueuedMessage(sid, itemId);
-      await reseedSession(sid);
-    } catch {
-      setSettingsError(m.chat_retry_queued_failed());
-    } finally {
-      setRetryingQueuedId(null);
-    }
+    mutRetryQueuedMessage.runWithOptions(workspace, activeId, itemId, {
+      onError: (error) => setSettingsError(m.chat_retry_queued_failed({ error: ltr(error instanceof Error ? error.message : String(error)) })),
+    });
   }
 
   useHotkey("Escape", () => {
@@ -7231,43 +7156,16 @@ export function ChatPanel({
     seenTitles.current.delete(sessionId);
   }
 
-  function updateSidebarSession(session: ChatSession, changes: Partial<ChatSession>) {
-    const options = listChatSessionsQuery(session.projectId);
-    markLiveUpdate(queryClient, options.queryKey, session.id);
-    setScopedQueryData(options.queryKey, (current) =>
-      current?.map((row) => row.id === session.id ? { ...row, ...changes } : row),
-    );
-  }
-
   function setArchived(session: ChatSession, archived: boolean) {
-    // Optimistic; the server also broadcasts the row over chat.session. On
-    // failure restore the pre-request snapshot (not the request's negation,
-    // which could undo a concurrent authoritative update).
-    const prev = session.archived;
-    updateSidebarSession(session, { archived });
-    void setChatSessionArchivedMutation.mutateAsync([session.id, archived]).catch(() => {
-      updateSidebarSession(session, { archived: prev });
-    });
+    mutPatchChatSession.run(workspace, session, { archived });
   }
 
   function stopNotifyingParent(session: ChatSession) {
-    const prev = session.delegate;
-    updateSidebarSession(session, { delegate: null });
-    void releaseDelegateMutation.mutateAsync(session.id).catch((error) => {
-      updateSidebarSession(session, { delegate: prev });
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    });
+    mutPatchChatSession.run(workspace, session, { notifyParent: false });
   }
 
   function rename(session: ChatSession, title: string) {
-    // Optimistic; the server trims and re-broadcasts the row over chat.session.
-    // On failure restore the pre-request title (not the draft) so a concurrent
-    // authoritative update isn't undone.
-    const prev = session.title;
-    updateSidebarSession(session, { title });
-    void renameChatSessionMutation.mutateAsync([session.id, title]).catch(() => {
-      updateSidebarSession(session, { title: prev });
-    });
+    mutPatchChatSession.run(workspace, session, { title });
   }
 
   function removeSession(session: ChatSession) {
@@ -7278,9 +7176,9 @@ export function ChatPanel({
       confirmLabel: m.chat_panel_delete(),
       destructive: true,
       onCancel: "close",
-      onConfirm: async () => {
-        await deleteChatSessionMutation.mutateAsync(session.id);
-        forgetSession(session.id);
+      onConfirm: () => {
+        if (session.id === activeId) onActiveSessionChangeRef.current(null, { replace: true });
+        mutDeleteChatSession.runWithOptions(workspace, session, { onSuccessData: () => forgetSession(session.id) });
       },
     });
   }
@@ -7291,30 +7189,12 @@ export function ChatPanel({
   const respond = useCallback(
     (answer: PromptAnswer): Promise<boolean> => {
       if (!activeId) return Promise.resolve(false);
-      const sid = activeId;
-      // The resumed turn streams over SSE; optimistically mark busy.
-      dispatch({ type: "busy", sessionId: sid, busy: true });
-      return queueSessionMutation(() => respondChat(sid, answer))
-        .then(() => true)
-        .catch((error: unknown) => {
-          showAlert(error instanceof Error ? error.message : String(error), "error");
-          return false;
-        })
-        .finally(() => {
-          if (!isCurrentScope(sessionsOptions.queryKey)) return;
-          // Reconcile with the store: if this tab's copy of the card was stale
-          // (e.g. the held turn timed out and resolved it while our SSE was
-          // dropped), the answer no-ops server-side and nothing re-broadcasts —
-          // without this the card stays actionable forever and every answer
-          // silently dead-ends. Busy is reconciled from the server for THIS
-          // session only (a whole-set replace could stomp another session's
-          // just-started optimistic flag), so the optimistic dispatch above
-          // can't wedge true after a no-op or failure.
-          void queryClient.fetchQuery({ ...getChatMessagesQuery(sid), staleTime: 0 }).catch(() => {});
-          void queryClient.fetchQuery({ ...listChatSessionsQuery(projectId), staleTime: 0 }).catch(() => {});
-        });
+      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
+        showAlert(error instanceof Error ? error.message : String(error), "error");
+        return false;
+      });
     },
-    [activeId, projectId, queueSessionMutation, sessionsOptions],
+    [workspace, activeId, projectId],
   );
 
   const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
@@ -7737,7 +7617,7 @@ export function ChatPanel({
               <Trash2 size={16} />
             </IconButton>
           )}
-          <IconButton aria-label={m.chat_search_title()} data-tip={findRequest === null ? m.chat_search_title() : undefined} aria-expanded={findRequest !== null} aria-keyshortcuts="Control+f Meta+f" onClick={openFind}><Search size={16} /></IconButton>
+          {embedded && <IconButton aria-label={m.chat_search_title()} data-tip={findRequest === null ? m.chat_search_title() : undefined} aria-expanded={findRequest !== null} aria-keyshortcuts="Control+f Meta+f" onClick={openFind}><Search size={16} /></IconButton>}
           </div>
         </div>
 
@@ -8021,18 +7901,16 @@ export function ChatPanel({
                   {q.dispatchState === "blocked" ? (
                     <>
                       <button
-                        onClick={() => void retryQueued(q.id)}
+                        onClick={() => retryQueued(q.id)}
                         aria-label={m.a11y_retry_queued_message({ text: q.text })}
-                        disabled={retryingQueuedId !== null}
-                        className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-sm text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-border-hover-strong"
+                        className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-sm text-text bg-background cursor-pointer [&:hover]:border-border-hover-strong"
                       >
-                        {retryingQueuedId === q.id ? m.retrying() : m.app_retry()}
+                        {m.app_retry()}
                       </button>
                       <button
                         onClick={() => cancelQueued(q.id)}
                         aria-label={m.a11y_remove_queued_message({ text: q.text })}
-                        disabled={retryingQueuedId !== null}
-                        className="shrink-0 px-1.5 py-0.5 border-0 text-sm text-muted bg-transparent cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:text-text"
+                        className="shrink-0 px-1.5 py-0.5 border-0 text-sm text-muted bg-transparent cursor-pointer [&:hover]:text-text"
                       >
                         {m.chat_panel_remove()}
                       </button>
@@ -8306,8 +8184,8 @@ export function ChatPanel({
                         onClick={() => void (bashMode ? runShell() : send())}
                         disabled={
                           bashMode
-                            ? setChatSessionAgentMutation.isPending || !shellCommand || (!activeId && !activeHarness?.agentReady)
-                            : setChatSessionAgentMutation.isPending || !activeHarness?.agentReady ||
+                            ? switchingAgent || !shellCommand || (!activeId && !activeHarness?.agentReady)
+                            : switchingAgent || !activeHarness?.agentReady ||
                             (!draft.trim() && annotations.length === 0)
                         }
                       >
@@ -8438,13 +8316,13 @@ export function ChatPanel({
                   onSelectReasoning={setReasoningLevel}
                   autonomy={openSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
-                  disabled={setChatSessionAgentMutation.isPending}
-                  lockHarness={busy || setChatSessionAgentMutation.isPending || (!openSession && !!sideParentSessionId)}
+                  disabled={switchingAgent}
+                  lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
                   openRequest={modelPickerRequest}
                   nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
                   onSelectNativeOption={(optionId, value) => {
                     if (!openSession) return;
-                    void setChatConfiguration(openSession.id, optionId, value).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
+                    mutSetChatConfiguration.run(workspace, openSession, optionId, value);
                   }}
                 />
                 <ContextMeter usage={openSession?.contextUsage} />

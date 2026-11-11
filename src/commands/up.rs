@@ -97,6 +97,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let data_dir = crate::commands::remote_host::canonical_data_dir()?;
     // The engine lock: one engine per data directory.
     let dashboard_lock = DashboardLock::acquire(&data_dir)?;
+    // A laptop attached to an earlier host may have signed out since.
+    if persistent_host {
+        if let Err(error) = crate::alphaxiv::forget_forwarded() {
+            eprintln!("orx up: could not forget the alphaXiv sign-in forwarded to the previous host: {error}");
+        }
+    }
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
     let backend_lock = tokio::task::spawn_blocking(updates::BackendLock::acquire)
@@ -1008,6 +1014,14 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
 }
 
 fn server_router(app: Router, remote_auth: Option<RemoteAuth>, reach: up_remote::Reach) -> Router {
+    // Outside `/api`, so no gateway forwards a browser's request to it.
+    let forwarded_alphaxiv = axum::routing::put(keep_forwarded_alphaxiv)
+        .delete(forget_forwarded_alphaxiv)
+        .layer(DefaultBodyLimit::max(16 * 1024));
+    let app = match remote_auth {
+        Some(_) => app.route("/_orx/alphaxiv", forwarded_alphaxiv),
+        None => app,
+    };
     let app = app
         .layer(middleware::from_fn(track_active))
         .layer(middleware::from_fn_with_state(
@@ -1062,6 +1076,22 @@ async fn require_remote_auth(
         )
         .into_response()
     }
+}
+
+/// An attached laptop's alphaXiv access token, for this host's agents and CLI.
+async fn keep_forwarded_alphaxiv(body: axum::body::Bytes) -> Result<StatusCode, ApiError> {
+    crate::alphaxiv::keep_forwarded(&body).map_err(|error| {
+        match error.downcast_ref::<crate::alphaxiv::HttpFailure>() {
+            Some(failure) => ApiError(failure.status, failure.message.clone()),
+            None => error.into(),
+        }
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn forget_forwarded_alphaxiv() -> Result<StatusCode, ApiError> {
+    crate::alphaxiv::forget_forwarded()?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn remote_route_forbidden(path: &str) -> bool {
@@ -7038,16 +7068,76 @@ fn session_checkout_root(
 }
 
 pub(crate) async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    openresearch_terminal(
-        headers,
-        ws,
-        vec!["login".into(), "--non-interactive".into()],
-    )
-    .await
+    let program = crate::paths::spawnable_exe()
+        .map(|exe| exe.to_string_lossy().into_owned())
+        .map_err(anyhow::Error::from);
+    let mut args = vec!["login".into(), "--non-interactive".into()];
+    if signs_in_with_code(&headers) {
+        args.push("--device".into());
+    }
+    command_terminal(&headers, ws, program, args, Vec::new(), false).await
 }
 
+/// alphaXiv can send only this machine's own browser back to it, so a page
+/// served elsewhere, or a server inside SSH, signs in with a code.
+fn signs_in_with_code(headers: &HeaderMap) -> bool {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    !up_remote::host_allowed(host, up_remote::Reach::Loopback)
+        || crate::remote::detect_ssh_session().is_some()
+}
+
+/// Connects alphaXiv over the websocket: `authUrl` with the page that approves
+/// it, then `complete` or `error`. Closing the socket abandons the sign-in.
 pub(crate) async fn alphaxiv_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    openresearch_terminal(headers, ws, vec!["login".into(), "--alphaxiv".into()]).await
+    if let Some(rejected) = reject_cross_origin(&headers) {
+        return rejected;
+    }
+    let device = signs_in_with_code(&headers);
+    let active = Active::new();
+    ws.on_upgrade(move |mut socket| async move {
+        let _active = active;
+        let (prompts, mut prompted) = tokio::sync::mpsc::unbounded_channel();
+        let login = crate::commands::login::connect_alphaxiv(device, move |prompt| {
+            let (url, code) = match prompt {
+                crate::commands::login::Prompt::Browser(url) => (url, None),
+                crate::commands::login::Prompt::Device { url, code } => (url, Some(code)),
+            };
+            let _ = prompts.send(json!({ "type": "authUrl", "url": url, "code": code }));
+        });
+        tokio::pin!(login);
+
+        let finished = loop {
+            tokio::select! {
+                biased;
+                Some(prompt) = prompted.recv() => {
+                    if socket.send(Message::Text(prompt.to_string().into())).await.is_err() {
+                        return;
+                    }
+                }
+                finished = &mut login => break finished,
+                incoming = socket.recv() => {
+                    if matches!(incoming, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) {
+                        return;
+                    }
+                }
+            }
+        };
+
+        let message = match finished {
+            Ok(_) => json!({ "type": "complete" }),
+            Err(error) => json!({ "type": "error", "error": error.to_string() }),
+        };
+        if socket
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .is_ok()
+        {
+            close_socket(&mut socket).await;
+        }
+    })
 }
 
 fn alphaxiv_error(error: crate::error::Error) -> ApiError {
@@ -7091,17 +7181,6 @@ pub(crate) async fn alphaxiv_papers(Query(query): Query<AlphaXivPapersQuery>) ->
     .await
     .map(Json)
     .map_err(alphaxiv_error)
-}
-
-async fn openresearch_terminal(
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-    args: Vec<String>,
-) -> Response {
-    let program = crate::paths::spawnable_exe()
-        .map(|exe| exe.to_string_lossy().into_owned())
-        .map_err(anyhow::Error::from);
-    command_terminal(&headers, ws, program, args, Vec::new(), false).await
 }
 
 /// Commands the settings page may run, keyed by the exact note text. The
@@ -8542,6 +8621,7 @@ async fn create_chat_session(
         project_id: req.project_id,
         harness,
         native_session_id: None,
+        native_fork_at: None,
         title: None,
         title_source: None,
         model: nonempty(req.model),
@@ -11050,6 +11130,131 @@ mod tests {
         line.split(' ').nth(1).unwrap().parse().unwrap()
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_browser_on_another_machine_connects_alphaxiv_with_a_code() {
+        use futures::StreamExt as _;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Mutex;
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest as _, Message as Frame};
+
+        if !crate::config::in_test_child(&[
+            "ALPHAXIV_API_URL",
+            "ALPHAXIV_WEB_URL",
+            "SSH_CONNECTION",
+            "SSH_TTY",
+            "SSH_CLIENT",
+        ]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "100");
+
+        // alphaXiv approves the second code after five polls; OpenResearch links it.
+        let issued = Arc::new(AtomicUsize::new(0));
+        let polls = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+        let fake = {
+            let (issued, polls) = (issued.clone(), polls.clone());
+            Router::new()
+                .route(
+                    "/auth/device/code",
+                    axum::routing::post(move |headers: HeaderMap| async move {
+                        let n = issued.fetch_add(1, Ordering::SeqCst) + 1;
+                        let site = format!("http://{}", headers["host"].to_str().unwrap());
+                        Json(json!({
+                            "device_code": format!("device-{n}"),
+                            "user_code": format!("WXYZ-000{n}"),
+                            "verification_uri": format!("{site}/device"),
+                            "verification_uri_complete": format!("{site}/device?user_code=WXYZ-000{n}"),
+                            "expires_in": 600,
+                            "interval": 1,
+                        }))
+                    }),
+                )
+                .route(
+                    "/auth/oauth2/token",
+                    axum::routing::post(
+                        move |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                            let code = form["device_code"].clone();
+                            let count = {
+                                let mut polls = polls.lock().unwrap();
+                                let count = polls.entry(code.clone()).or_default();
+                                *count += 1;
+                                *count
+                            };
+                            if code != "device-2" || count <= 5 {
+                                let pending = Json(json!({ "error": "authorization_pending" }));
+                                return (StatusCode::BAD_REQUEST, pending).into_response();
+                            }
+                            Json(json!({
+                                "access_token": "access-1",
+                                "refresh_token": "refresh-1",
+                                "expires_in": 3600,
+                                "id_token": "e30.e30.sig",
+                            }))
+                            .into_response()
+                        },
+                    ),
+                )
+                .route(
+                    "/auth/alphaxiv/link",
+                    axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+                )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, fake).await });
+        std::env::set_var("ALPHAXIV_API_URL", &api);
+        std::env::set_var("ALPHAXIV_WEB_URL", &api);
+        crate::config::save_credentials(&crate::config::Credentials {
+            api_url: api.clone(),
+            token: "pat-1".into(),
+        })
+        .await
+        .unwrap();
+
+        let address = serve(router(test_state(), None, up_remote::Reach::Lan)).await;
+        let lan = format!("192.168.1.5:{}", address.port());
+        let connect = || async {
+            let mut request = format!("ws://{address}/api/settings/alphaxiv/login")
+                .into_client_request()
+                .unwrap();
+            let headers = request.headers_mut();
+            headers.insert("host", lan.parse().unwrap());
+            headers.insert("origin", format!("http://{lan}").parse().unwrap());
+            tokio_tungstenite::connect_async(request).await.unwrap().0
+        };
+        async fn next<S, E>(socket: &mut S) -> Value
+        where
+            S: futures::Stream<Item = Result<Frame, E>> + Unpin,
+            E: std::fmt::Debug,
+        {
+            match socket.next().await {
+                Some(Ok(Frame::Text(text))) => serde_json::from_str(&text).unwrap(),
+                other => panic!("expected a control message, got {other:?}"),
+            }
+        }
+
+        // Closing the page's socket abandons the sign-in.
+        let mut abandoned = connect().await;
+        assert_eq!(
+            next(&mut abandoned).await,
+            json!({ "type": "authUrl", "url": format!("{api}/device?user_code=WXYZ-0001"), "code": "WXYZ-0001" })
+        );
+        abandoned.close(None).await.unwrap();
+        drop(abandoned);
+        let polls_when_closed = polls.lock().unwrap().get("device-1").copied().unwrap_or(0);
+
+        let mut socket = connect().await;
+        assert_eq!(next(&mut socket).await["code"], "WXYZ-0002");
+        assert_eq!(next(&mut socket).await, json!({ "type": "complete" }));
+        let stored: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::config::config_dir().join("alphaxiv.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored["refreshToken"], "refresh-1");
+        let device_1 = polls.lock().unwrap().get("device-1").copied().unwrap_or(0);
+        assert!(device_1 <= polls_when_closed + 1, "{device_1} polls");
+    }
+
     #[tokio::test]
     async fn a_lan_dashboard_answers_private_hosts_and_peers_only() {
         let app = router(test_state(), None, up_remote::Reach::Lan);
@@ -11289,6 +11494,64 @@ mod tests {
             status(address, "GET /api/health", &[&host, &attachment]).await,
             401
         );
+    }
+
+    #[tokio::test]
+    async fn only_an_attached_laptop_forwards_its_alphaxiv_sign_in() {
+        if !crate::config::in_test_child(&["ALPHAXIV_API_URL"]) {
+            return;
+        }
+        const ATTACHMENT: &str = "abcdefghijklmnopqrstuvwxyz-attachment";
+        const CALLBACK: &str = "abcdefghijklmnopqrstuvwxyz-callback";
+        let auth = RemoteAuth::new(CALLBACK);
+        auth.register(ATTACHMENT);
+        let host = serve(router(test_state(), Some(auth), up_remote::Reach::Loopback)).await;
+        let laptop = serve(router(test_state(), None, up_remote::Reach::Loopback)).await;
+        let forwarded = crate::config::config_dir().join("alphaxiv-forwarded.json");
+        let body = json!({
+            "apiUrl": crate::config::alphaxiv_api_url(),
+            "accessToken": "forwarded",
+            "expiresAtMs": crate::store::now_ms() + 3_600_000,
+        })
+        .to_string();
+        let client = crate::net::loopback_client().build().unwrap();
+        let put = |address: std::net::SocketAddr, bearer: &str, body: String| {
+            client
+                .put(format!("http://{address}/_orx/alphaxiv"))
+                .bearer_auth(bearer)
+                .body(body)
+                .send()
+        };
+
+        for bearer in ["guess", CALLBACK] {
+            let response = put(host, bearer, body.clone()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = put(laptop, ATTACHMENT, body.clone()).await.unwrap();
+        assert_ne!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!forwarded.exists());
+
+        let response = put(host, ATTACHMENT, body.clone()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(std::fs::read_to_string(&forwarded).unwrap(), body);
+        let elsewhere = body.replace(
+            &crate::config::alphaxiv_api_url(),
+            "https://alphaxiv.invalid",
+        );
+        let response = put(host, ATTACHMENT, elsewhere).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = put(host, ATTACHMENT, "x".repeat(32 * 1024)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(std::fs::read_to_string(&forwarded).unwrap(), body);
+
+        let response = client
+            .delete(format!("http://{host}/_orx/alphaxiv"))
+            .bearer_auth(ATTACHMENT)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!forwarded.exists());
     }
 
     #[tokio::test]

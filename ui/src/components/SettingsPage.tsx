@@ -23,7 +23,34 @@ import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarnessDialog";
 
-import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
+import { useQuery, useQueries } from "@tanstack/react-query";
+import { useMutate } from "@clo/react-mutation";
+import {
+  mutApplyUpdate,
+  mutDeleteEnvVar,
+  mutDisableProjectGithub,
+  mutEnableProjectGithub,
+  mutInitializeProjectGit,
+  mutInstallCli,
+  mutRemoveAcpHarness,
+  mutRetryEngineHost,
+  mutSaveHfToken,
+  mutSaveK8sSettings,
+  mutSaveModalToken,
+  mutSaveRaySettings,
+  mutSaveSlurmSettings,
+  mutSaveTinkerKey,
+  mutSaveVercelSetup,
+  mutSetAutoUpdate,
+  mutSetComputeDefault,
+  mutSetEnvVar,
+  mutSetGithubForNewProjects,
+  mutSetReleaseChannel,
+  mutSetTelemetry,
+  mutSignOutOpenResearch,
+  mutUpdateUiState,
+} from "../queries/settings";
+import { mutDeleteOverleafSession, mutDeleteOverleafToken, mutSaveOverleafSession, mutSaveOverleafToken } from "../queries/overleaf";
 
 import { worstPerAlias } from "../engineHosts";
 import { runActive, runDisplay } from "../runDisplay";
@@ -59,19 +86,13 @@ import {
   type ComputeTargetId,
   type ComputeTargetSummary,
   type EnvVar,
-  type OverleafSettings,
   type Project,
-  type ProjectDefaultsSettings,
-  type ProjectGitStatus,
-  type TelemetrySettings,
   type Harness,
   type HarnessSetupCommands,
   type HarnessId,
   type HfSettings,
-  type TinkerSettings,
   type K8sSettings,
   type LocalMachine,
-  type ModalSettings,
   type VercelPlan,
   type RayPreflight,
   type TrackioPreflight,
@@ -360,11 +381,11 @@ export function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undef
 function HarnessesTab({ remote }: { remote: boolean }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
 
-  const { showCustomDialog } = useWorkspace().dialogs;
-
-  const { getHarnessesQuery, getHarnessSetupCommandsQuery, refreshHarnesses } = useWorkspace().queries;
-  const { workspaceKey, queryClient } = useWorkspace();
-  const { listAcpHarnesses, listAcpPresets, removeAcpHarness } = useWorkspace().api;
+  const workspace = useWorkspace();
+  const { showCustomDialog } = workspace.dialogs;
+  const { getHarnessesQuery, getHarnessSetupCommandsQuery, refreshHarnesses, listAcpHarnessesQuery } = workspace.queries;
+  const { workspaceKey, queryClient } = workspace;
+  const { listAcpPresets } = workspace.api;
 
   const harnessesOptions = getHarnessesQuery();
   const { data: harnesses = null, isError: harnessesError } = useQuery(harnessesOptions);
@@ -372,13 +393,8 @@ function HarnessesTab({ remote }: { remote: boolean }) {
   const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
-  const definitions = useQuery({ queryKey: workspaceKey("getAcpHarnesses"), queryFn: listAcpHarnesses });
+  const definitions = useQuery(listAcpHarnessesQuery());
   const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets });
-  const reloadAcp = () => { void definitions.refetch(); load(true); };
-  const removeAcp = async (id: string) => {
-    try { await removeAcpHarness(id); reloadAcp(); }
-    catch (error) { showAlert(error instanceof Error ? error.message : String(error), "error"); }
-  };
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
@@ -396,7 +412,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
 
   const openAcp = (definition?: AcpDefinition) => showCustomDialog({
     component: AcpHarnessDialog,
-    props: { customOnly: !definition, definition, onSaved: reloadAcp },
+    props: { customOnly: !definition, definition, onSaved: () => load(true) },
     onConfirm: (save) => save(),
     onCancel: "close",
   });
@@ -500,7 +516,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                     {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
                     {!remote && h.adapterMissing && <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
                     {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => openAuth(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
-                    {acp && <><Button size="small" onClick={() => openAcp(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
+                    {acp && <><Button size="small" onClick={() => openAcp(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => mutRemoveAcpHarness.run(workspace, acp.id)}>{m.chat_panel_remove()}</Button></>}
                     {!h.id.startsWith("acp:") && !remote && !h.catalogPending && !h.needsConfigRepair && (h.installBroken || h.authState === "unsupported") && (
                       <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
                         <SquareTerminal size={14} />
@@ -584,16 +600,8 @@ function HarnessesTab({ remote }: { remote: boolean }) {
 }
 
 function NestedDelegationRow() {
-  const { updateUiState } = useWorkspace().api;
-  const { getUiStateQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
-  const uiStateOptions = getUiStateQuery();
-  const { data: uiState } = useQuery(uiStateOptions);
-  const save = useMutation({
-    mutationFn: (nestedDelegation: boolean) => updateUiState({ nestedDelegation }),
-    onSuccess: (saved) => setScopedQueryData(uiStateOptions.queryKey, saved),
-    onError: (error) => showAlert(error instanceof Error ? error.message : String(error), "error"),
-  });
+  const workspace = useWorkspace();
+  const { data: uiState } = useQuery(workspace.queries.getUiStateQuery());
   if (!uiState) return null;
   return (
     <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
@@ -605,8 +613,7 @@ function NestedDelegationRow() {
         type="button"
         checked={uiState.nestedDelegation}
         aria-label={m.settings_nested_subagents()}
-        disabled={save.isPending}
-        onClick={() => save.mutate(!uiState.nestedDelegation)}
+        onClick={() => mutUpdateUiState.run(workspace, { nestedDelegation: !uiState.nestedDelegation })}
       />
     </div>
   );
@@ -627,30 +634,18 @@ function K8sSection({
 }: {
   onEditState?: (state: { dirty: boolean; saving: boolean }) => void;
 }) {
-  const { saveK8sSettings } = useWorkspace().api;
-  const { getK8sSettingsQuery } = useWorkspace().queries;
-  const { setScopedQueryData, queryClient } = useWorkspace();
+  const workspace = useWorkspace();
+  const { getK8sSettingsQuery } = workspace.queries;
+  const { queryClient } = workspace;
 
-  const saveK8sSettingsMutation = useMutation({ mutationFn: saveK8sSettings });
-
-  const settingsOptions = getK8sSettingsQuery();
-  const settingsQuery = useQuery(settingsOptions);
+  const settingsQuery = useQuery(getK8sSettingsQuery());
   const settings = settingsQuery.data ?? null;
-  const setSettings = (value: React.SetStateAction<K8sSettings | null>) => {
-    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [context, setContext] = useState("");
   const [namespace, setNamespace] = useState("");
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const apply = (s: K8sSettings) => {
-    setSettings(s);
-    setContext(s.context ?? "");
-    setNamespace(s.namespace);
-  };
 
   const previousSettings = useRef<K8sSettings | null>(null);
   useEffect(() => {
@@ -692,7 +687,9 @@ function K8sSection({
     setSaving(true);
     setError(null);
     try {
-      apply(await saveK8sSettingsMutation.mutateAsync({ context, namespace: namespace.trim() }));
+      const saved = await mutSaveK8sSettings.runAsHeadlessPromise(workspace, { context, namespace: namespace.trim() }, {});
+      setContext(saved.context ?? "");
+      setNamespace(saved.namespace);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -777,18 +774,12 @@ function K8sSection({
 // --- compute (modal) ------------------------------------------------------------
 
 function ModalSection() {
-  const { saveModalToken } = useWorkspace().api;
-  const { getModalSettingsQuery } = useWorkspace().queries;
-  const { setScopedQueryData, queryClient } = useWorkspace();
+  const workspace = useWorkspace();
+  const { getModalSettingsQuery } = workspace.queries;
+  const { queryClient } = workspace;
 
-  const saveModalTokenMutation = useMutation({ mutationFn: (args: Parameters<typeof saveModalToken>) => saveModalToken(...args) });
-
-  const sOptions = getModalSettingsQuery();
-  const sQuery = useQuery(sOptions);
+  const sQuery = useQuery(getModalSettingsQuery());
   const s = sQuery.data ?? null;
-  const setS = (value: React.SetStateAction<ModalSettings | null>) => {
-    setScopedQueryData(sOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const [actionError, setError] = useState<string | null>(null);
   const error = actionError ?? sQuery.error?.message ?? null;
   const [tokenId, setTokenId] = useState("");
@@ -816,7 +807,7 @@ function ModalSection() {
     setSaving(true);
     setError(null);
     try {
-      setS(await saveModalTokenMutation.mutateAsync([tokenId.trim(), tokenSecret.trim()]));
+      await mutSaveModalToken.runAsHeadlessPromise(workspace, tokenId.trim(), tokenSecret.trim(), {});
       setTokenId("");
       setTokenSecret("");
     } catch (err) {
@@ -883,13 +874,11 @@ const VERCEL_PLAN_LIMITS: Record<VercelPlan, () => string> = {
 };
 
 function VercelSection() {
-  const { saveVercelSetup, getVercelScopes } = useWorkspace().api;
-  const { getVercelSettingsQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
+  const workspace = useWorkspace();
+  const { getVercelScopes } = workspace.api;
+  const { getVercelSettingsQuery } = workspace.queries;
 
-  const saveMutation = useMutation({ mutationFn: saveVercelSetup });
-  const sOptions = getVercelSettingsQuery();
-  const sQuery = useQuery(sOptions);
+  const sQuery = useQuery(getVercelSettingsQuery());
   const s = sQuery.data ?? null;
   const [token, setToken] = useState("");
   const [pickedTeam, setPickedTeam] = useState<string | null>(null);
@@ -903,7 +892,7 @@ function VercelSection() {
     ? { token: typedToken || null, teamId: pickedTeam }
     : null;
   const lookupQuery = useQuery({
-    queryKey: ["vercelScopes", lookup?.token, lookup?.teamId],
+    queryKey: workspace.workspaceKey("vercelScopes", lookup?.token, lookup?.teamId),
     queryFn: () => getVercelScopes(lookup!.token, lookup!.teamId),
     enabled: lookup !== null,
     retry: false,
@@ -939,13 +928,12 @@ function VercelSection() {
     setSaving(true);
     setSaveError(null);
     try {
-      const next = await saveMutation.mutateAsync({
+      await mutSaveVercelSetup.runAsHeadlessPromise(workspace, {
         token: typedToken || null,
         teamId,
         projectId: projectId === "new" ? null : projectId,
         newProject: projectId === "new" ? VERCEL_NEW_PROJECT : null,
-      });
-      setScopedQueryData(sOptions.queryKey, next);
+      }, {});
       setToken("");
       setPickedTeam(null);
       setPickedProject(null);
@@ -1122,12 +1110,11 @@ function HostTestCell({ test, connecting, masterRunning, containerFailed = false
 
 function SshSection() {
   const { id: elementId } = useContext(WorkspaceDomContext);
-  const { useEngineHosts, setEngineHost } = useWorkspace().queries;
-  const { takeHostConnect, onHostConnectRequest } = useWorkspace().events;
-  const { retryEngineHost } = useWorkspace().api;
-  const { dialogs } = useWorkspace();
-  const { getSshSettingsQuery } = useWorkspace().queries;
-  const { testSshExecution } = useWorkspace().api;
+  const workspace = useWorkspace();
+  const { useEngineHosts, getSshSettingsQuery } = workspace.queries;
+  const { takeHostConnect, onHostConnectRequest } = workspace.events;
+  const { testSshExecution } = workspace.api;
+  const { dialogs } = workspace;
 
   const hostsOptions = getSshSettingsQuery();
   const hostsQuery = useQuery(hostsOptions);
@@ -1186,7 +1173,7 @@ function SshSection() {
     }
   }
 
-  const retry = (host: string) => hostAction(host, async () => setEngineHost(await retryEngineHost(host)));
+  const retry = (host: string) => hostAction(host, async () => { await mutRetryEngineHost.runAsHeadlessPromise(workspace, host, {}); });
 
   const test = (host: string, reference: string | null) => hostAction(host, async () => {
     const result = await testSshExecution(host, reference?.trim() || null);
@@ -1410,18 +1397,10 @@ const SBATCH_OPTION_EXAMPLE = "--rsc p=1:g=1";
 function SlurmSection() {
   const { id: elementId } = useContext(WorkspaceDomContext);
 
-  const { saveSlurmSettings } = useWorkspace().api;
-  const { getSlurmSettingsQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
+  const workspace = useWorkspace();
 
-  const saveSlurmSettingsMutation = useMutation({ mutationFn: saveSlurmSettings });
-
-  const settingsOptions = getSlurmSettingsQuery();
-  const settingsQuery = useQuery(settingsOptions);
+  const settingsQuery = useQuery(workspace.queries.getSlurmSettingsQuery());
   const settings = settingsQuery.data ?? null;
-  const setSettings = (value: React.SetStateAction<SlurmSettings | null>) => {
-    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [host, setHost] = useState("");
   const [partition, setPartition] = useState("");
@@ -1458,10 +1437,6 @@ function SlurmSection() {
     setMem(s.mem ?? "");
     setSbatchArgs((s.sbatchArgs ?? []).join("\n"));
     setRequestOneTask(s.requestOneTask ?? true);
-  };
-  const apply = (s: SlurmSettings) => {
-    setSettings(s);
-    showSaved(s);
   };
   const sbatchArgList = sbatchArgs.split("\n").map((line) => line.trim()).filter(Boolean);
   const edited = (field: string, set: (value: string) => void) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -1507,18 +1482,16 @@ function SlurmSection() {
     setError(null);
     setFieldErrors({});
     try {
-      apply(
-        await saveSlurmSettingsMutation.mutateAsync({
-          host,
-          partition: partition.trim(),
-          account: account.trim(),
-          timeLimit: timeLimit.trim(),
-          // Blank means "clear it"; the API reads 0 as back-to-partition-default.
-          cpusPerTask: Number(cpusPerTask.trim()) || 0,
-          mem: mem.trim(),
-          ...(launchOptions && { qos: qos.trim(), sbatchArgs: sbatchArgList, requestOneTask }),
-        }),
-      );
+      showSaved(await mutSaveSlurmSettings.runAsHeadlessPromise(workspace, {
+        host,
+        partition: partition.trim(),
+        account: account.trim(),
+        timeLimit: timeLimit.trim(),
+        // Blank means "clear it"; the API reads 0 as back-to-partition-default.
+        cpusPerTask: Number(cpusPerTask.trim()) || 0,
+        mem: mem.trim(),
+        ...(launchOptions && { qos: qos.trim(), sbatchArgs: sbatchArgList, requestOneTask }),
+      }, {}));
     } catch (err) {
       if (err instanceof FieldErrors) {
         setFieldErrors(err.fields);
@@ -1761,29 +1734,17 @@ function SlurmSection() {
 }
 
 function RaySection() {
-  const { saveRaySettings, rayPreflight } = useWorkspace().api;
-  const { getRaySettingsQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
+  const workspace = useWorkspace();
+  const { rayPreflight } = workspace.api;
 
-  const saveRaySettingsMutation = useMutation({ mutationFn: saveRaySettings });
-
-  const settingsOptions = getRaySettingsQuery();
-  const settingsQuery = useQuery(settingsOptions);
+  const settingsQuery = useQuery(workspace.queries.getRaySettingsQuery());
   const settings = settingsQuery.data ?? null;
-  const setSettings = (value: React.SetStateAction<RaySettings | null>) => {
-    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [address, setAddress] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<"testing" | RayPreflight | null>(null);
   const preflight = test !== null && test !== "testing" ? test : null;
-
-  const apply = (s: RaySettings) => {
-    setSettings(s);
-    setAddress(s.address ?? "");
-  };
 
   const previousSettings = useRef<RaySettings | null>(null);
   useEffect(() => {
@@ -1802,7 +1763,8 @@ function RaySection() {
     setSaving(true);
     setError(null);
     try {
-      apply(await saveRaySettingsMutation.mutateAsync({ address }));
+      const saved = await mutSaveRaySettings.runAsHeadlessPromise(workspace, { address }, {});
+      setAddress(saved.address ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1904,7 +1866,8 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
   const { getOpenResearchSettingsQuery } = useWorkspace().queries;
 
   const settingsQuery = useQuery(getOpenResearchSettingsQuery());
-  const { useOpenResearchAccount, useAlphaXivFolders, useSignOutOpenResearch } = useMachines().owner.queries;
+  const { owner } = useMachines();
+  const { useOpenResearchAccount, useAlphaXivFolders } = owner.queries;
   const openSignIn = useSignIn();
   const accountQuery = useOpenResearchAccount();
   // A remote workspace's settings come from the remote host but its account from this machine; don't pair them.
@@ -1921,7 +1884,6 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
   const busy = settingsQuery.isFetching;
   const refresh = () => { void accountQuery.refetch(); return settingsQuery.refetch(); };
   const { dialogs } = useWorkspace();
-  const logout = useSignOutOpenResearch();
 
   return (
     <>
@@ -2014,7 +1976,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
       )}
       <div className="mt-4 flex flex-wrap justify-end gap-2">
         {(account?.apiUrl || s?.apiUrl) && <ButtonLink href={`${(account?.apiUrl || s?.apiUrl || "").replace(/\/$/, "")}/auth/login`} target="_blank" rel="noreferrer">{m.settings_openresearch_dashboard()} <ExternalLink size={14} /></ButtonLink>}
-        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || logout.isPending} onClick={() => confirmOpenResearchSignOut(dialogs, logout.mutateAsync)}>{m.settings_openresearch_sign_out()}</Button>}
+        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy} onClick={() => confirmOpenResearchSignOut(dialogs, () => mutSignOutOpenResearch.runAsHeadlessPromise(owner, {}))}>{m.settings_openresearch_sign_out()}</Button>}
         <Button onClick={() => void refresh()} disabled={busy}>
           <RefreshCw size={14} /> {busy ? m.common_checking() : m.settings_check_again()}
         </Button>
@@ -2096,15 +2058,11 @@ function isCustomFlavor(backend: ComputeTargetId, flavor: string) {
 function DefaultDestinationEditor({
   settings,
   projectId,
-  onSaved,
 }: {
   settings: ComputeSettings;
   projectId?: string;
-  onSaved: (settings: ComputeSettings) => void;
 }) {
-  const { setComputeDefault } = useWorkspace().api;
-
-  const setComputeDefaultMutation = useMutation({ mutationFn: setComputeDefault });
+  const workspace = useWorkspace();
 
   const savedBackend = settings.configuredDefaultBackend ?? settings.defaultBackend ?? "local";
   const savedFlavor = settings.defaultFlavor ?? "";
@@ -2145,13 +2103,11 @@ function DefaultDestinationEditor({
     setSaving(true);
     setError(null);
     try {
-      onSaved(
-        await setComputeDefaultMutation.mutateAsync({
-          backend: nextBackend,
-          flavor: nextFlavored ? nextFlavor.trim() || null : null,
-          projectId,
-        }),
-      );
+      await mutSetComputeDefault.runAsHeadlessPromise(workspace, {
+        backend: nextBackend,
+        flavor: nextFlavored ? nextFlavor.trim() || null : null,
+        projectId,
+      }, {});
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBackend(savedBackend);
@@ -2465,33 +2421,22 @@ function ComputeTab({
   const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
 
   const { getComputeSettingsQuery, getLocalMachineQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
 
-  const settingsOptions = getComputeSettingsQuery(project?.id);
-  const settingsQuery = useQuery(settingsOptions);
+  const settingsQuery = useQuery(getComputeSettingsQuery(project?.id));
   const settings = settingsQuery.data ?? null;
-  const setSettings = (value: React.SetStateAction<ComputeSettings | null>) => {
-    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [selectedTarget, setSelectedTarget] = useState<ComputeTargetId | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const localMachineOptions = getLocalMachineQuery();
   const localMachineQuery = useQuery(localMachineOptions);
   const localMachine = localMachineQuery.data ?? null;
   const localMachineError = localMachineQuery.error?.message ?? null;
-  useEffect(() => { setSelectedTarget(null); setError(null); }, [project?.id]);
+  useEffect(() => setSelectedTarget(null), [project?.id]);
   useEffect(() => {
     const open = () => { if (pendingHostConnect()) setSelectedTarget("ssh"); };
     open();
     return onHostConnectRequest(open);
   }, []);
   const needsConnect = [...worstPerAlias(useEngineHosts() ?? []).values()].filter((host) => host.status === "needs_auth");
-
-  const apply = (s: ComputeSettings) => {
-    setSettings(s);
-    setError(null);
-  };
 
   // Preserve server order except for the selected default, which leads its section.
   const targets = settings ? settings.targets : null;
@@ -2575,11 +2520,9 @@ function ComputeTab({
         </LoadingRow>
       ) : (
         <>
-          {error && <div className="error">{error}</div>}
           <DefaultDestinationEditor
             settings={settings}
             projectId={project?.id}
-            onSaved={apply}
           />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
@@ -2604,23 +2547,17 @@ function ComputeTab({
 // --- compute (tinker) ----------------------------------------------------------
 
 function TinkerSection({ target }: { target: ComputeTargetSummary }) {
-  const { saveTinkerKey } = useWorkspace().api;
-  const { getTinkerSettingsQuery } = useWorkspace().queries;
-  const { setScopedQueryData, queryClient } = useWorkspace();
-
-  const saveTinkerKeyMutation = useMutation({ mutationFn: saveTinkerKey });
+  const workspace = useWorkspace();
+  const { getTinkerSettingsQuery } = workspace.queries;
+  const { queryClient } = workspace;
 
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [actionError, setError] = useState<string | null>(null);
 
-  const settingsOptions = getTinkerSettingsQuery();
-  const settingsQuery = useQuery(settingsOptions);
+  const settingsQuery = useQuery(getTinkerSettingsQuery());
   const settings = settingsQuery.data ?? null;
   const error = actionError ?? settingsQuery.error?.message ?? null;
-  const setSettings = (value: React.SetStateAction<TinkerSettings | null>) => {
-    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const [refreshing, setRefreshing] = useState(false);
   const checking = settingsQuery.isPending || refreshing;
 
@@ -2643,7 +2580,7 @@ function TinkerSection({ target }: { target: ComputeTargetSummary }) {
     setSaving(true);
     setError(null);
     try {
-      setSettings(await saveTinkerKeyMutation.mutateAsync(apiKey.trim()));
+      await mutSaveTinkerKey.runAsHeadlessPromise(workspace, apiKey.trim(), {});
       setApiKey("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -2716,18 +2653,12 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
 }
 
 function HfSection({ remote }: { remote: boolean }) {
-  const { saveHfToken } = useWorkspace().api;
-  const { getHfSettingsQuery } = useWorkspace().queries;
-  const { setScopedQueryData, queryClient } = useWorkspace();
+  const workspace = useWorkspace();
+  const { getHfSettingsQuery } = workspace.queries;
+  const { queryClient } = workspace;
 
-  const saveHfTokenMutation = useMutation({ mutationFn: saveHfToken });
-
-  const settingsOptions = getHfSettingsQuery();
-  const settingsQuery = useQuery(settingsOptions);
+  const settingsQuery = useQuery(getHfSettingsQuery());
   const settings = settingsQuery.data ?? null;
-  const setSettings = (value: React.SetStateAction<HfSettings | null>) => {
-    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
@@ -2754,9 +2685,7 @@ function HfSection({ remote }: { remote: boolean }) {
     setSaving(true);
     setError(null);
     try {
-      const next = await saveHfTokenMutation.mutateAsync(token.trim());
-      setSettings(next);
-      setError(null);
+      await mutSaveHfToken.runAsHeadlessPromise(workspace, token.trim(), {});
       setToken("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -2867,16 +2796,11 @@ function showEnvError(name: string, err: unknown) {
 function EnvRow({
   name,
   entry,
-  onVars,
 }: {
   name: string;
   entry: EnvVar | undefined;
-  onVars: (vars: EnvVar[]) => void;
 }) {
-  const { setEnvVar, deleteEnvVar } = useWorkspace().api;
-
-  const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
-  const deleteEnvVarMutation = useMutation({ mutationFn: deleteEnvVar });
+  const workspace = useWorkspace();
 
   const plain = entry?.value != null;
   const stored = entry?.value ?? "";
@@ -2895,8 +2819,7 @@ function EnvRow({
     if (!value.trim() || saving || (plain && !dirty)) return;
     setSaving(true);
     try {
-      const vars = await setEnvVarMutation.mutateAsync([name, value.trim()]);
-      onVars(vars);
+      const vars = await mutSetEnvVar.runAsHeadlessPromise(workspace, name, value.trim(), {});
       // The server may normalize a plain value back to what was already stored.
       setValue(plain ? vars.find((v) => v.key === name)?.value ?? "" : "");
     } catch (err) {
@@ -2906,16 +2829,9 @@ function EnvRow({
     }
   }
 
-  async function remove() {
+  function remove() {
     if (saving) return;
-    setSaving(true);
-    try {
-      onVars(await deleteEnvVarMutation.mutateAsync(name));
-    } catch (err) {
-      showEnvError(name, err);
-    } finally {
-      setSaving(false);
-    }
+    mutDeleteEnvVar.runWithOptions(workspace, name, { onError: (err) => showEnvError(name, err) });
   }
 
   return (
@@ -2956,7 +2872,7 @@ function EnvRow({
               <IconButton
                 className="[&:hover:not(:disabled)]:text-accent-red"
                 aria-label={m.a11y_delete_item({ name: ltr(name) })}
-                onClick={() => void remove()}
+                onClick={remove}
                 disabled={saving}
               >
                 <Trash2 size={14} />
@@ -2977,16 +2893,8 @@ function EnvRow({
 }
 
 /** The in-table row for a new custom variable (opened by “Add variable”). */
-function AddVarRow({
-  onVars,
-  onDone,
-}: {
-  onVars: (vars: EnvVar[]) => void;
-  onDone: () => void;
-}) {
-  const { setEnvVar } = useWorkspace().api;
-
-  const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
+function AddVarRow({ onDone }: { onDone: () => void }) {
+  const workspace = useWorkspace();
 
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
@@ -2996,7 +2904,7 @@ function AddVarRow({
     if (!key.trim() || !value.trim() || saving) return;
     setSaving(true);
     try {
-      onVars(await setEnvVarMutation.mutateAsync([key.trim(), value.trim()]));
+      await mutSetEnvVar.runAsHeadlessPromise(workspace, key.trim(), value.trim(), {});
       onDone();
     } catch (err) {
       showEnvError(key.trim(), err);
@@ -3071,15 +2979,8 @@ function AddVarRow({
 }
 
 function EnvVarsSection() {
-  const { getEnvVarsQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
-
-  const varsOptions = getEnvVarsQuery();
-  const varsQuery = useQuery(varsOptions);
+  const varsQuery = useQuery(useWorkspace().queries.getEnvVarsQuery());
   const vars = varsQuery.data ?? null;
-  const setVars = (value: React.SetStateAction<EnvVar[] | null>) => {
-    setScopedQueryData(varsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const loadError = vars ? null : varsQuery.error?.message ?? null;
   const [adding, setAdding] = useState(false);
 
@@ -3116,11 +3017,10 @@ function EnvVarsSection() {
                   key={name}
                   name={name}
                   entry={vars.find((v) => v.key === name)}
-                  onVars={setVars}
                 />
               ))}
               {adding && (
-                <AddVarRow onVars={setVars} onDone={() => setAdding(false)} />
+                <AddVarRow onDone={() => setAdding(false)} />
               )}
             </tbody>
           </table>
@@ -3307,16 +3207,13 @@ const MANUAL_UPDATE_HINT: Partial<Record<InstallChannel, () => string>> = {
 };
 
 function UpdatesTab() {
-  const { showConfirmDialog } = useWorkspace().dialogs;
+  const workspace = useWorkspace();
+  const { showConfirmDialog } = workspace.dialogs;
 
-  const { setAutoUpdate: setAutoUpdateApi, setReleaseChannel, applyUpdate } = useWorkspace().api;
-
-  const setAutoUpdateApiMutation = useMutation({ mutationFn: (args: Parameters<typeof setAutoUpdateApi>) => setAutoUpdateApi(...args) });
-
-  const { status, error: loadError, apply } = useUpdateStatus();
-  // Per-action only so the right button reads "Working…"; any write disables
-  // all of them, since they mutate overlapping state.
-  const [busy, setBusy] = useState<"auto" | "apply" | "cli" | "channel" | null>(null);
+  const { status, error: loadError } = useUpdateStatus();
+  // Per-action only so the right button reads "Working…"; installing locks the
+  // switches too, since its answer replaces the whole status.
+  const [busy, setBusy] = useState<"apply" | "cli" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const channelGroupRef = useRef<HTMLDivElement>(null);
   const restart = useRestartApp(status);
@@ -3339,9 +3236,7 @@ function UpdatesTab() {
     );
   }
 
-  // Every mutating call returns the authoritative status; adopting it is what
-  // keeps the switch honest when a write fails or another client changes it.
-  const run = async (which: "auto" | "apply" | "cli" | "channel", action: () => Promise<unknown>) => {
+  const run = async (which: "apply" | "cli", action: () => Promise<unknown>) => {
     setBusy(which);
     setError(null);
     try {
@@ -3353,14 +3248,14 @@ function UpdatesTab() {
     }
   };
 
+  const showError = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
+
   const applyChannel = (channel: "stable" | "canary") => {
-    void run("channel", async () => {
-      const next = await setReleaseChannel(channel);
-      apply(next);
-      requestAnimationFrame(() => {
-        const group = channelGroupRef.current;
-        if (group?.contains(document.activeElement)) group.querySelector<HTMLButtonElement>(`[data-channel="${next.releaseChannel}"]`)?.focus();
-      });
+    setError(null);
+    mutSetReleaseChannel.runWithOptions(workspace, channel, { onError: showError });
+    requestAnimationFrame(() => {
+      const group = channelGroupRef.current;
+      if (group?.contains(document.activeElement)) group.querySelector<HTMLButtonElement>(`[data-channel="${channel}"]`)?.focus();
     });
   };
 
@@ -3372,13 +3267,8 @@ function UpdatesTab() {
       confirmLabel: m.settings_canary_confirm_action(),
       onCancel: "close",
       onConfirm: async () => {
-        setBusy("channel");
         setError(null);
-        try {
-          apply(await setReleaseChannel("canary"));
-        } finally {
-          setBusy(null);
-        }
+        await mutSetReleaseChannel.runAsHeadlessPromise(workspace, "canary", {});
       },
     });
     else applyChannel(channel);
@@ -3465,9 +3355,10 @@ function UpdatesTab() {
                 checked={status.autoUpdate}
                 aria-label={m.settings_page_install_updates_automatically()}
                 disabled={locked}
-                onClick={() =>
-                  void run("auto", () => setAutoUpdateApiMutation.mutateAsync([!status.autoUpdate]).then(apply))
-                }
+                onClick={() => {
+                  setError(null);
+                  mutSetAutoUpdate.runWithOptions(workspace, !status.autoUpdate, { onError: showError });
+                }}
               />
             </div>
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
@@ -3492,7 +3383,7 @@ function UpdatesTab() {
                 type="button"
 
                 disabled={locked}
-                onClick={() => void run("apply", () => applyUpdate().then(apply))}
+                onClick={() => void run("apply", () => mutApplyUpdate.runAsHeadlessPromise(workspace, {}))}
               >
                 {busy === "apply"
                   ? m.chat_working()
@@ -3526,31 +3417,13 @@ function UpdatesTab() {
 }
 
 function TelemetryTab() {
-  const { setTelemetry } = useWorkspace().api;
-  const { getTelemetryQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
+  const workspace = useWorkspace();
 
-  const setTelemetryMutation = useMutation({ mutationFn: setTelemetry });
-
-  const settingsOptions = getTelemetryQuery();
-  const settingsQuery = useQuery(settingsOptions);
+  const settingsQuery = useQuery(workspace.queries.getTelemetryQuery());
   const settings = settingsQuery.data ?? null;
-  const setSettings = (value: React.SetStateAction<TelemetrySettings | null>) => {
-    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
-  const [saving, setSaving] = useState(false);
-  const [actionError, setError] = useState<string | null>(null);
-  const error = actionError ?? settingsQuery.error?.message ?? null;
-
-  const toggle = () => {
-    if (!settings || saving) return;
-    setSaving(true);
-    setError(null);
-    void setTelemetryMutation.mutateAsync(!settings.preferenceEnabled)
-      .then(setSettings)
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setSaving(false));
-  };
+  const save = useMutate(mutSetTelemetry);
+  const failure = save.error ?? settingsQuery.error;
+  const error = failure ? (failure instanceof Error ? failure.message : String(failure)) : null;
 
   return (
     <>
@@ -3578,8 +3451,8 @@ function TelemetryTab() {
               type="button"
               checked={settings.enabled}
               aria-label={m.settings_page_anonymous_usage_analytics()}
-              disabled={saving || settings.locked}
-              onClick={toggle}
+              disabled={settings.locked}
+              onClick={() => save.run(workspace, !settings.preferenceEnabled)}
             />
           </div>
           {error && <div className="error">{error}</div>}
@@ -3596,13 +3469,11 @@ function InstallCliRow({
   disabled,
   run,
 }: {
-  busy: "auto" | "apply" | "cli" | "channel" | null;
+  busy: "apply" | "cli" | null;
   disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {
-  const { installCli } = useWorkspace().api;
-
-  const installCliMutation = useMutation({ mutationFn: installCli });
+  const workspace = useWorkspace();
 
   const [result, setResult] = useState<InstalledCli | null>(null);
   // Set once a plain install was refused for an existing orx on PATH; the retry
@@ -3611,7 +3482,7 @@ function InstallCliRow({
 
   const install = (force: boolean) =>
     void run("cli", () =>
-      installCliMutation.mutateAsync(force)
+      mutInstallCli.runAsHeadlessPromise(workspace, force, {})
         .then((r) => {
           setResult(r);
           setNeedsForce(false);
@@ -3657,36 +3528,28 @@ function InstallCliRow({
 
 // --- project defaults ----------------------------------------------------------
 
-function GithubSettings({ remote, onProjectUpdate }: {
-  remote: boolean;
-  onProjectUpdate: (project: Project) => void;
-}) {
+function GithubSettings({ remote }: { remote: boolean }) {
+  const workspace = useWorkspace();
   const {
     listProjectsQuery,
     getProjectDefaultsQuery,
     githubAccountQuery,
     githubOrganizationsQuery,
     getProjectGitStatusQuery,
-  } = useWorkspace().queries;
-  const { setProjectDefaults } = useWorkspace().api;
-  const { setScopedQueryData, queryClient } = useWorkspace();
+  } = workspace.queries;
+  const { queryClient } = workspace;
 
   const projectsQuery = useQuery(listProjectsQuery());
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const selectedProject = projectsQuery.data?.find((project) => project.id === selectedProjectId);
-  const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
 
-  const settingsOptions = getProjectDefaultsQuery();
-  const settingsQuery = useQuery(settingsOptions);
+  const settingsQuery = useQuery(getProjectDefaultsQuery());
   const settings = settingsQuery.data ?? null;
   useQuery({ ...githubAccountQuery(), enabled: Boolean(settings?.githubAuthenticated) });
   useQuery({ ...githubOrganizationsQuery(), enabled: Boolean(settings?.githubAuthenticated) });
-  const setSettings = (value: React.SetStateAction<ProjectDefaultsSettings | null>) => {
-    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
-  const [saving, setSaving] = useState(false);
-  const [actionError, setError] = useState<string | null>(null);
-  const error = actionError ?? settingsQuery.error?.message ?? null;
+  const save = useMutate(mutSetGithubForNewProjects);
+  const failure = save.error ?? settingsQuery.error;
+  const error = failure ? (failure instanceof Error ? failure.message : String(failure)) : null;
 
   const load = async () => {
     await settingsQuery.refetch({ cancelRefetch: false });
@@ -3697,17 +3560,6 @@ function GithubSettings({ remote, onProjectUpdate }: {
     ]);
   };
   const gh = useCommandRun();
-
-  const toggle = () => {
-    if (!settings || saving) return;
-    const enabled = !settings.githubForNewProjects;
-    setSaving(true);
-    setError(null);
-    void setProjectDefaultsMutation.mutateAsync([enabled, true])
-      .then(setSettings)
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setSaving(false));
-  };
 
   return (
     <>
@@ -3748,8 +3600,8 @@ function GithubSettings({ remote, onProjectUpdate }: {
               type="button"
               checked={settings.githubForNewProjects}
               aria-label={m.settings_page_enable_git_hub_syncing_for_new_projects()}
-              disabled={saving || (!settings.githubAuthenticated && !settings.githubForNewProjects)}
-              onClick={toggle}
+              disabled={!settings.githubAuthenticated && !settings.githubForNewProjects}
+              onClick={() => save.run(workspace, !settings.githubForNewProjects)}
             />
           </div>
           {!settings.githubAuthenticated && (
@@ -3778,7 +3630,7 @@ function GithubSettings({ remote, onProjectUpdate }: {
                 <Button size="small" onClick={() => void projectsQuery.refetch()}>{m.app_retry()}</Button>
               </div>
             )}
-            {selectedProject && <GitTab key={selectedProject.id} project={selectedProject} onProjectUpdate={onProjectUpdate} />}
+            {selectedProject && <GitTab key={selectedProject.id} project={selectedProject} />}
           </div>
         </div>
       )}
@@ -3830,35 +3682,10 @@ function GitHubCliHelp({
 }
 
 function OverleafCard() {
-  const {
-    deleteOverleafToken,
-    deleteOverleafSession,
-    saveOverleafToken,
-    saveOverleafSession,
-  } = useWorkspace().api;
-  const { getOverleafSettingsQuery } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
-
-  const deleteToken = useMutation({ mutationFn: deleteOverleafToken });
-  const deleteSession = useMutation({ mutationFn: deleteOverleafSession });
-  const tokenOptions = getOverleafSettingsQuery();
-  const settings = useQuery(tokenOptions);
+  const workspace = useWorkspace();
+  const settings = useQuery(workspace.queries.getOverleafSettingsQuery());
   const [tokenOpen, setTokenOpen] = useState(false);
   const [sessionOpen, setSessionOpen] = useState(false);
-  const [removing, setRemoving] = useState<"token" | "session" | null>(null);
-  const patch = (next: Partial<OverleafSettings>) =>
-    setScopedQueryData(tokenOptions.queryKey, (current) => current ? { ...current, ...next } : current);
-
-  const remove = async (kind: "token" | "session") => {
-    setRemoving(kind);
-    try {
-      patch(await (kind === "token" ? deleteToken.mutateAsync() : deleteSession.mutateAsync()));
-    } catch (err) {
-      showAlert(err instanceof Error ? err.message : String(err), "error");
-    } finally {
-      setRemoving(null);
-    }
-  };
 
   return (
     <>
@@ -3874,8 +3701,8 @@ function OverleafCard() {
               </Badge>
             </div>
             {settings.data?.hasToken ? (
-              <Button size="small" disabled={removing !== null} onClick={() => void remove("token")}>
-                {removing === "token" ? m.settings_removing() : m.remote_disconnect()}
+              <Button size="small" onClick={() => mutDeleteOverleafToken.run(workspace)}>
+                {m.remote_disconnect()}
               </Button>
             ) : (
               <Button size="small" disabled={!settings.data} aria-expanded={tokenOpen} onClick={() => setTokenOpen(!tokenOpen)}>
@@ -3887,8 +3714,8 @@ function OverleafCard() {
             <div className="mt-3">
               <p className="mt-0 mb-2 text-sm leading-relaxed text-text">{m.overleaf_token_instructions()}</p>
               <TokenForm
-                save={saveOverleafToken}
-                onSaved={(result) => { patch(result); setTokenOpen(false); }}
+                save={(token) => mutSaveOverleafToken.runAsHeadlessPromise(workspace, token, {})}
+                onSaved={() => setTokenOpen(false)}
                 placeholder={m.settings_page_overleaf_git_authentication_token()}
                 createHref="https://www.overleaf.com/user/settings"
               />
@@ -3904,8 +3731,8 @@ function OverleafCard() {
               </Badge>
             </div>
             {settings.data?.hasSession ? (
-              <Button size="small" disabled={removing !== null} onClick={() => void remove("session")}>
-                {removing === "session" ? m.settings_removing() : m.remote_disconnect()}
+              <Button size="small" onClick={() => mutDeleteOverleafSession.run(workspace)}>
+                {m.remote_disconnect()}
               </Button>
             ) : (
               <Button size="small" disabled={!settings.data} aria-expanded={sessionOpen} onClick={() => setSessionOpen(!sessionOpen)}>
@@ -3917,8 +3744,8 @@ function OverleafCard() {
             <div className="mt-3">
               <p className="mt-0 mb-2 text-sm leading-relaxed text-text">{m.overleaf_session_instructions()}</p>
               <TokenForm
-                save={saveOverleafSession}
-                onSaved={(result) => { patch(result); setSessionOpen(false); }}
+                save={(session) => mutSaveOverleafSession.runAsHeadlessPromise(workspace, session, null, {})}
+                onSaved={() => setSessionOpen(false)}
                 placeholder={m.overleaf_session_cookie()}
                 createHref="https://www.overleaf.com/project"
                 createLabel={m.overleaf_open_overleaf()}
@@ -3934,30 +3761,19 @@ function OverleafCard() {
 
 // --- git -----------------------------------------------------------------------
 
-export function GitTab({
-  project,
-  onProjectUpdate,
-}: {
-  project: Project | null;
-  onProjectUpdate: (project: Project) => void;
-}) {
+export function GitTab({ project }: { project: Project | null }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
 
+  const workspace = useWorkspace();
   const {
     getProjectGitStatusQuery,
     repoAccessQuery,
     githubAccountQuery,
     githubOrganizationsQuery,
-  } = useWorkspace().queries;
-  const { setScopedQueryData } = useWorkspace();
-  const { enableProjectGithub, initializeProjectGit, disableProjectGithub } = useWorkspace().api;
+  } = workspace.queries;
 
-  const statusOptions = { ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) };
-  const statusQuery = useQuery(statusOptions);
+  const statusQuery = useQuery({ ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) });
   const status = statusQuery.data ?? null;
-  const setStatus = (value: React.SetStateAction<ProjectGitStatus | null>) => {
-    setScopedQueryData(statusOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
-  };
   const [saving, setSaving] = useState(false);
   const [actionError, setError] = useState<string | null>(null);
   const error = actionError ?? statusQuery.error?.message ?? null;
@@ -4000,13 +3816,10 @@ export function GitTab({
     if (!project) return;
     setSaving(true);
     setError(null);
-    void enableProjectGithub(project.id, owner === githubLogin ? undefined : owner)
-      .then((result) => {
-        setStatus(result.git);
-        onProjectUpdate(result.project);
-      })
-      .catch((err) => setError(syncErrorMessage(err)))
-      .finally(() => setSaving(false));
+    mutEnableProjectGithub.runWithOptions(workspace, project.id, owner === githubLogin ? undefined : owner, {
+      onError: (err) => setError(syncErrorMessage(err)),
+      onSettled: () => setSaving(false),
+    });
   };
 
   return (
@@ -4028,7 +3841,7 @@ export function GitTab({
       ) : (
         <>
           <div className="mt-4 min-h-22">
-            {!status.initialized && <div className="flex flex-wrap gap-2 mt-3.5"><Button variant="primary" onClick={() => void initializeProjectGit(project.id).then(setStatus).catch((err) => setError(String(err)))}>{m.settings_page_initialize_git()}</Button></div>}
+            {!status.initialized && <div className="flex flex-wrap gap-2 mt-3.5"><Button variant="primary" onClick={() => mutInitializeProjectGit.runWithOptions(workspace, project.id, { onError: (err) => setError(err instanceof Error ? err.message : String(err)) })}>{m.settings_page_initialize_git()}</Button></div>}
             <div className={KV_CLASS_NAME}>
               <span className="k">{m.settings_page_project()}</span><span className="v">{hasGithubRepository ? <><span>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <Badge>{m.settings_page_syncing_off()}</Badge>}</> : <Badge>{m.settings_page_local_only()}</Badge>}</span>
               {status.github.enabled && <><span className="k">{m.settings_page_sync()}</span><span className="v">{status.github.syncStatus}</span></>}
@@ -4085,7 +3898,13 @@ export function GitTab({
                 </p>
                 <div className="flex flex-wrap gap-2 mt-3.5">
                   {status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
-                  <Button disabled={saving} onClick={() => { setSaving(true); void disableProjectGithub(project.id).then((result) => { setStatus(result.git); onProjectUpdate(result.project); }).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setSaving(false)); }}>{saving ? m.repository_updating() : m.repository_disable_syncing()}</Button>
+                  <Button disabled={saving} onClick={() => {
+                    setSaving(true);
+                    mutDisableProjectGithub.runWithOptions(workspace, project.id, {
+                      onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+                      onSettled: () => setSaving(false),
+                    });
+                  }}>{saving ? m.repository_updating() : m.repository_disable_syncing()}</Button>
                 </div>
               </>
             )}
@@ -4504,13 +4323,11 @@ function isSettingsSection(tab: Tab): boolean {
 export function SettingsView({
   tab,
   project,
-  onProjectUpdate,
   onSelectTab,
   remote = false,
 }: {
   tab: Tab;
   project: Project | null;
-  onProjectUpdate: (project: Project) => void;
   onSelectTab: (tab: Tab) => void;
   remote?: boolean;
 }) {
@@ -4544,10 +4361,7 @@ export function SettingsView({
               <AppearanceTab />
             </section>
             <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <GithubSettings
-                remote={remote}
-                onProjectUpdate={onProjectUpdate}
-              />
+              <GithubSettings remote={remote} />
             </section>
             <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <HarnessesTab remote={remote} />

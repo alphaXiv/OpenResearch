@@ -23,6 +23,9 @@ struct Context {
     harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_session_id: Option<String>,
+    /// Provider-neutral, so one model reads the same from every harness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     cli_version: &'static str,
     /// The `orx up` that spawned this agent, which may differ from `cli_version`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,6 +46,18 @@ pub async fn run(args: crate::FeedbackArgs) -> Result<()> {
         );
         return Ok(());
     }
+    let chat_session_id = crate::local::chat::launching_chat_session();
+    let model = match &chat_session_id {
+        Some(id) => crate::store::Store::open()
+            .and_then(|store| store.last_reported_chat_model(id))
+            .unwrap_or_else(|error| {
+                eprintln!("orx feedback: sending without the chat's model, which could not be read: {error}");
+                None
+            })
+            .map(|model| crate::local::model_routes::canonical(&model)),
+        None => None,
+    };
+
     let feedback = Feedback {
         kind: args.kind,
         summary: args.summary,
@@ -50,7 +65,8 @@ pub async fn run(args: crate::FeedbackArgs) -> Result<()> {
         quote: args.quote,
         context: Context {
             harness: crate::local::chat::launching_chat_harness(),
-            chat_session_id: crate::local::chat::launching_chat_session(),
+            chat_session_id,
+            model,
             cli_version: env!("CARGO_PKG_VERSION"),
             backend_version: std::env::var(crate::local::chat::UP_VERSION_ENV)
                 .ok()
@@ -81,6 +97,7 @@ mod tests {
             context: Context {
                 harness: Some("codex".into()),
                 chat_session_id: None,
+                model: Some("gpt-6.1-sol".into()),
                 cli_version: "0.2.8",
                 backend_version: Some("0.2.6".into()),
                 os: "macos",
@@ -97,6 +114,7 @@ mod tests {
                 "details": "d",
                 "context": {
                     "harness": "codex",
+                    "model": "gpt-6.1-sol",
                     "cliVersion": "0.2.8",
                     "backendVersion": "0.2.6",
                     "os": "macos",

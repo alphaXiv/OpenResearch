@@ -1,9 +1,11 @@
 import type { WorkspaceEvents } from "../workspace";
-import type { Api } from "../api";
+import type { Api, Autonomy, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarChatPage, TurnOptions } from "../api";
 import type { WorkspaceClient } from "./client";
 
-import { readLiveSnapshot, mergeLiveList } from "./live";
-import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
+import { readLiveSnapshot, mergeLiveList, markLiveUpdate } from "./live";
+import { mutations } from "./mutations";
+import type { Workspace } from "../workspace";
+import { infiniteQueryOptions, queryOptions, type InfiniteData } from "@tanstack/react-query";
 import type * as api from "../api";
 
 export function createChatQueries(
@@ -115,6 +117,13 @@ export function createChatQueries(
     } finally { off(); }
   }
 
+  const listSidebarChatSessionsQuery = (filter: "active" | "archived" | "all") => infiniteQueryOptions({
+    queryKey: workspaceKey("listSidebarChatSessions", filter),
+    queryFn: ({ pageParam, signal }) => readSidebarChatPage(filter, pageParam, signal),
+    initialPageParam: null as api.SidebarChatCursor | null,
+    getNextPageParam: (page) => page.next ?? undefined,
+  });
+
   /** The chat, author and first words of the message a ref cites. */
   const citedMessageQuery = (cited: string) => queryOptions({
     queryKey: workspaceKey("citedMessage", cited),
@@ -138,6 +147,265 @@ export function createChatQueries(
     chatSearchQuery,
     getChatMessagesQuery,
     readSidebarChatPage,
+    listSidebarChatSessionsQuery,
     listChatActiveRunsQuery,
   };
 }
+
+type ChatTurn = ReturnType<Workspace["chat"]["reserve"]>;
+const heldTurns = new Map<string, ChatTurn[]>();
+
+/**
+ * Takes a write's place among the chat's writes and sends when it is made, from `optimistic`. The library runs one
+ * definition's calls for a key one after another, so joining `chat.serialize` from `mutate` would let a send made
+ * while an earlier write was pending go first.
+ */
+function holdChatTurn(id: string, ws: Workspace, sessionId: string, onRestore: (restore: () => void) => void) {
+  const key = `${id}\0${ws.identity}\0${sessionId}`;
+  const turn = ws.chat.reserve();
+  heldTurns.set(key, [...heldTurns.get(key) ?? [], turn]);
+  onRestore(() => {
+    const rest = heldTurns.get(key)?.filter((held) => held !== turn) ?? [];
+    if (rest.length) heldTurns.set(key, rest);
+    else heldTurns.delete(key);
+    turn.release();
+  });
+}
+
+/** Runs `write` in the place `holdChatTurn` took for this call; the library calls `mutate` in the order calls were made. */
+function inChatTurn<T>(id: string, ws: Workspace, sessionId: string, write: () => Promise<T>) {
+  const key = `${id}\0${ws.identity}\0${sessionId}`;
+  const [turn, ...rest] = heldTurns.get(key) ?? [];
+  if (rest.length) heldTurns.set(key, rest);
+  else heldTurns.delete(key);
+  return turn!.run(write);
+}
+
+/** Joins the workspace's chat writes, so a turn sent after a setting starts with it. */
+export const mutPatchChatSession = mutations.define({
+  id: "chat/session",
+  mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">, changes: ChatSessionPatch) =>
+    inChatTurn("chat/session", ws, session.id, () => ws.api.patchChatSession(session.id, changes)),
+  optimistic({ helpers, args: [ws, session, changes], onSuccess, onRestore }) {
+    holdChatTurn("chat/session", ws, session.id, onRestore);
+    const { agent: _agent, notifyParent, ...fields } = changes;
+    const shown: Partial<ChatSession> = notifyParent === false ? { ...fields, delegate: null } : fields;
+    const options = ws.queries.listChatSessionsQuery(session.projectId);
+    helpers(ws.queryClient).arrayUpdate(options, {
+      filter: (row) => row.id === session.id,
+      update: (row) => ({ ...row, ...shown }),
+    });
+    onSuccess((saved) => {
+      markLiveUpdate(ws.queryClient, options.queryKey, saved.id);
+      ws.setScopedQueryData(options.queryKey, (rows) => rows?.map((row) => row.id === saved.id ? saved : row));
+    });
+  },
+  key: ({ args: [ws, session] }) => [ws.identity, session.id],
+  describe: "update a chat",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutDeleteChatSession = mutations.define({
+  id: "chat/session/delete",
+  mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">) => ws.api.deleteChatSession(session.id),
+  optimistic({ helpers, args: [ws, session] }) {
+    const cache = helpers(ws.queryClient);
+    cache.arrayRemove(ws.queries.listChatSessionsQuery(session.projectId), (row) => row.id === session.id);
+    for (const filter of ["active", "archived", "all"] as const) {
+      const { queryKey } = ws.queries.listSidebarChatSessionsQuery(filter);
+      cache.updateExisting<InfiniteData<SidebarChatPage>>({ queryKey }, (data) => ({
+        ...data,
+        pages: data.pages.map((page) => ({ ...page, sessions: page.sessions.filter((row) => row.id !== session.id) })),
+      }));
+    }
+  },
+  key: ({ args: [ws, session] }) => [ws.identity, session.id],
+  describe: "delete the chat",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutCreateChatSession = mutations.define({
+  id: "chat/session/create",
+  mutate: (ws: Workspace, projectId: string, harness: HarnessId, options: TurnOptions & { autonomy?: Autonomy }) =>
+    ws.api.createChatSession(projectId, harness, options),
+  optimistic: () => {},
+  key: ({ args: [ws, projectId] }) => [ws.identity, projectId],
+  describe: "start the chat",
+  describeResult: null,
+});
+
+export const mutOpenSideChat = mutations.define({
+  id: "chat/session/side",
+  mutate: (ws: Workspace, parentSessionId: string) => ws.api.openSideChat(parentSessionId),
+  optimistic: () => {},
+  key: ({ args: [ws, parentSessionId] }) => [ws.identity, parentSessionId],
+  describe: "open a side chat",
+  describeResult: null,
+});
+
+export const mutImportNativeChat = mutations.define({
+  id: "chat/session/import",
+  mutate: (ws: Workspace, projectId: string, chat: NativeChat) => ws.api.importNativeChat(projectId, chat),
+  optimistic({ helpers, args: [ws, , chat] }) {
+    helpers(ws.queryClient).arrayRemove(ws.queries.listNativeChatsQuery(), (row) => row.harness === chat.harness && row.nativeId === chat.nativeId);
+  },
+  key: ({ args: [ws, projectId] }) => [ws.identity, projectId],
+  describe: "import the chat",
+  describeResult: null,
+});
+
+/** `configuration` with one ACP option set to `value`, in whichever shape the agent reported it. */
+function withNativeValue(configuration: unknown, optionId: string, value: string): unknown {
+  if (typeof configuration !== "object" || configuration === null) return configuration;
+  const config: Record<string, unknown> = { ...configuration };
+  if (Array.isArray(config.configOptions)) {
+    config.configOptions = config.configOptions.map((option: unknown) =>
+      typeof option === "object" && option !== null && "id" in option && option.id === optionId ? { ...option, currentValue: value } : option);
+    return config;
+  }
+  const [section, field] = optionId === "model" ? ["models", "currentModelId"] : ["modes", "currentModeId"];
+  const current = config[section];
+  if (typeof current === "object" && current !== null) config[section] = { ...current, [field]: value };
+  return config;
+}
+
+export const mutSetChatConfiguration = mutations.define({
+  id: "chat/session/configuration",
+  mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">, optionId: string, value: string) =>
+    inChatTurn("chat/session/configuration", ws, session.id, () => ws.api.setChatConfiguration(session.id, optionId, value)),
+  optimistic({ helpers, args: [ws, session, optionId, value], onSuccess, onRestore }) {
+    holdChatTurn("chat/session/configuration", ws, session.id, onRestore);
+    const options = ws.queries.listChatSessionsQuery(session.projectId);
+    helpers(ws.queryClient).arrayUpdate(options, {
+      filter: (row) => row.id === session.id,
+      update: (row) => ({ ...row, nativeConfiguration: withNativeValue(row.nativeConfiguration, optionId, value) }),
+    });
+    onSuccess((saved) => {
+      markLiveUpdate(ws.queryClient, options.queryKey, saved.id);
+      ws.setScopedQueryData(options.queryKey, (rows) => rows?.map((row) => row.id === saved.id ? saved : row));
+    });
+  },
+  key: ({ args: [ws, session] }) => [ws.identity, session.id],
+  describe: "change the agent's setting",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutCompactChatSession = mutations.define({
+  id: "chat/session/compact",
+  mutate: (ws: Workspace, sessionId: string) => ws.api.compactChatSession(sessionId),
+  optimistic: () => {},
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "compact the chat",
+  describeResult: null,
+});
+
+export const mutRunShellCommand = mutations.define({
+  id: "chat/shell",
+  mutate: (ws: Workspace, sessionId: string, command: string) => ws.api.runShellCommand(sessionId, command),
+  optimistic: () => {},
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "run the command",
+  describeResult: null,
+});
+
+export const mutInterruptChat = mutations.define({
+  id: "chat/interrupt",
+  mutate: (ws: Workspace, sessionId: string) => ws.api.interruptChat(sessionId),
+  optimistic: () => {},
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "stop the turn",
+  describeResult: null,
+});
+
+export const mutRecoverChatTurn = mutations.define({
+  id: "chat/turn/recover",
+  mutate: (ws: Workspace, sessionId: string, turnId: string, action: "retry" | "continue", options: TurnOptions) =>
+    ws.api.recoverChatTurn(sessionId, turnId, action, options),
+  optimistic: () => {},
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "recover the turn",
+  describeResult: null,
+});
+
+export const mutForkChatTurn = mutations.define({
+  id: "chat/turn/fork",
+  mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">, messageId: string, text: string) =>
+    inChatTurn("chat/turn/fork", ws, session.id, () => ws.api.forkChatTurn(session.id, messageId, text)),
+  optimistic({ helpers, args: [ws, session], onRestore }) {
+    holdChatTurn("chat/turn/fork", ws, session.id, onRestore);
+    helpers(ws.queryClient).arrayUpdate(ws.queries.listChatSessionsQuery(session.projectId), {
+      filter: (row) => row.id === session.id,
+      update: (row) => ({ ...row, busy: true }),
+    });
+  },
+  key: ({ args: [ws, session] }) => [ws.identity, session.id],
+  describe: "re-send the message",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+/** The server descends to the newest tip under `leafId` and echoes the real leaf over `chat.branch`. */
+export const mutSelectChatBranch = mutations.define({
+  id: "chat/branch",
+  mutate: (ws: Workspace, sessionId: string, leafId: string) =>
+    inChatTurn("chat/branch", ws, sessionId, () => ws.api.selectChatBranch(sessionId, leafId)),
+  optimistic({ helpers, args: [ws, sessionId, leafId], onRestore }) {
+    holdChatTurn("chat/branch", ws, sessionId, onRestore);
+    helpers(ws.queryClient).updateExisting(ws.queries.getChatMessagesQuery(sessionId), (snapshot) => ({ ...snapshot, activeLeafId: leafId }));
+  },
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "switch fork",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutCancelQueuedMessage = mutations.define({
+  id: "chat/queue/cancel",
+  mutate: (ws: Workspace, sessionId: string, itemId: string) => ws.api.cancelQueuedMessage(sessionId, itemId),
+  optimistic({ helpers, args: [ws, sessionId, itemId] }) {
+    helpers(ws.queryClient).updateExisting(ws.queries.getChatMessagesQuery(sessionId), (snapshot) => ({
+      ...snapshot,
+      queued: snapshot.queued.filter((item) => item.id !== itemId),
+    }));
+  },
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "remove the queued message",
+  describeResult: null,
+});
+
+export const mutRetryQueuedMessage = mutations.define({
+  id: "chat/queue/retry",
+  mutate: (ws: Workspace, sessionId: string, itemId: string) => ws.api.retryQueuedMessage(sessionId, itemId),
+  optimistic({ helpers, args: [ws, sessionId, itemId] }) {
+    helpers(ws.queryClient).updateExisting(ws.queries.getChatMessagesQuery(sessionId), (snapshot) => ({
+      ...snapshot,
+      queued: snapshot.queued.map((item) => item.id === itemId ? { ...item, dispatchState: "queued" as const, error: null, nextRetryAt: null } : item),
+    }));
+  },
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "retry the queued message",
+  describeResult: null,
+});
+
+/** Marks the resumed turn busy; the card stays mounted, holding its draft, until the server resolves it. Refetches the
+ * transcript on success too: a stale card's answer no-ops server-side and nothing re-broadcasts. */
+export const mutRespondChat = mutations.define({
+  id: "chat/respond",
+  mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">, answer: PromptAnswer) =>
+    inChatTurn("chat/respond", ws, session.id, () => ws.api.respondChat(session.id, answer)),
+  optimistic({ helpers, args: [ws, session], onRestore }) {
+    holdChatTurn("chat/respond", ws, session.id, onRestore);
+    const cache = helpers(ws.queryClient);
+    cache.arrayUpdate(ws.queries.listChatSessionsQuery(session.projectId), {
+      filter: (row) => row.id === session.id,
+      update: (row) => ({ ...row, busy: true }),
+    });
+    cache.refetchOnSettled(ws.queries.getChatMessagesQuery(session.id));
+  },
+  key: ({ args: [ws, session] }) => [ws.identity, session.id],
+  describe: "send the answer",
+  describeResult: null,
+});

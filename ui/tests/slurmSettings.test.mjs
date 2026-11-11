@@ -18,12 +18,19 @@ const click = async (element) => {
 
 const field = (label) => find("label", label).querySelector("input, textarea");
 
-const routes = (save) => ({
-  "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
-  "GET /api/settings/compute": () => ({ defaultBackend: null, defaultFlavor: null, targets: [{ id: "slurm", configured: true, enabled: true, summary: "" }] }),
-  "GET /api/settings/slurm": () => saved,
-  "POST /api/settings/slurm": (init) => save(JSON.parse(init.body)),
-});
+const routes = (save) => {
+  let current = saved;
+  return {
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
+    "GET /api/settings/compute": () => ({ defaultBackend: null, defaultFlavor: null, targets: [{ id: "slurm", configured: true, enabled: true, summary: "" }] }),
+    "GET /api/settings/slurm": () => current,
+    "POST /api/settings/slurm": (init) => {
+      const response = save(JSON.parse(init.body));
+      if (!(response instanceof Response)) current = response;
+      return response;
+    },
+  };
+};
 
 const openSlurm = async () => {
   await renderApp("/projects/p/settings/compute");

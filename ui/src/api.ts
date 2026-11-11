@@ -1456,6 +1456,23 @@ export interface ChatSession {
   contextUsage?: ContextUsage;
 }
 
+/** Fields `PATCH /api/chat/sessions/<id>` changes; each is optional. */
+export interface ChatSessionPatch {
+  /** Trimmed by the server, which rejects an empty title. */
+  title?: string;
+  /** Archived chats stay resumable. */
+  archived?: boolean;
+  /** `false` keeps a delegate for the user: it stops telling the chat that started it and becomes a side chat. */
+  notifyParent?: false;
+  /** The session-specific Plan axis used by Codex, OpenCode and Cursor. */
+  planMode?: boolean;
+  /** `null` clears the goal. */
+  goal?: string | null;
+  autonomy?: Autonomy;
+  agent?: AgentSelection;
+  permissionMode?: string;
+}
+
 /** A chat the user had in an agent's own CLI, which orx has no session for. */
 export interface NativeChat {
   harness: HarnessId;
@@ -2627,57 +2644,17 @@ export function createApi(
       json<{ ok: boolean }>(r).then((result) => { removeSession(sessionId); return result; }),
     );
 
-  /** Archive/unarchive a session (archived chats stay resumable). */
-  const setChatSessionArchived = (sessionId: string, archived: boolean) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { archived }).then(
-      (r) => r.session,
-    );
-
-  /** Rename a session. The title is trimmed server-side; empty titles are rejected. */
-  /** Keep a delegate for the user: it stops telling the chat that started it and becomes a side chat. */
-  const releaseDelegate = (sessionId: string) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { notifyParent: false }).then(
+  const patchChatSession = (sessionId: string, changes: ChatSessionPatch) =>
+    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, changes).then(
       (r) => r.session,
     );
 
   /** The message an agent cited by ref: where it lives, the agent that wrote it if one did, and its first words. */
   const citedMessage = (cited: string) => get<CitedMessage>(`/api/chat/messages/${encodeURIComponent(cited)}`);
 
-  const renameChatSession = (sessionId: string, title: string) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { title }).then(
-      (r) => r.session,
-    );
-
-  /** Enter/leave the session-specific Plan axis used by Codex/OpenCode/Cursor. */
-  const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { planMode }).then(
-      (r) => r.session,
-    );
-
   /** Branch a persistent side chat off a snapshot of `sessionId`'s transcript. */
   const openSideChat = (sessionId: string) =>
     post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, {}).then(
-      (r) => r.session,
-    );
-
-  /** `null` clears the goal. */
-  const setChatSessionGoal = (sessionId: string, goal: string | null) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { goal }).then(
-      (r) => r.session,
-    );
-
-  const setChatSessionAutonomy = (sessionId: string, autonomy: Autonomy) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { autonomy }).then(
-      (r) => r.session,
-    );
-
-  const setChatSessionAgent = (sessionId: string, agent: AgentSelection) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { agent }).then(
-      (r) => r.session,
-    );
-
-  const setChatSessionPermissionMode = (sessionId: string, permissionMode: string) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { permissionMode }).then(
       (r) => r.session,
     );
 
@@ -2962,16 +2939,9 @@ export function createApi(
     createChatSession,
     getChatSession,
     deleteChatSession,
-    setChatSessionArchived,
-    renameChatSession,
-    releaseDelegate,
+    patchChatSession,
     citedMessage,
-    setChatSessionPlanMode,
     openSideChat,
-    setChatSessionGoal,
-    setChatSessionAutonomy,
-    setChatSessionAgent,
-    setChatSessionPermissionMode,
     getChatMessages,
     cancelQueuedMessage,
     retryQueuedMessage,
