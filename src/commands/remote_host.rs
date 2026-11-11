@@ -948,7 +948,7 @@ fn open_lock(path: &Path) -> Result<fd_lock::RwLock<File>> {
 
 pub(crate) fn canonical_data_dir() -> Result<PathBuf> {
     let data_dir = crate::store::data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    crate::paths::create_dir_all(&data_dir)?;
     crate::paths::canonicalize(&data_dir)
         .map_err(|error| anyhow!("Could not resolve {}: {error}", data_dir.display()))
 }

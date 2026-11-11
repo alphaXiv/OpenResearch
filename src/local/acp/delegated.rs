@@ -231,7 +231,7 @@ impl Delegated {
                 session_id,
                 harness,
                 Some(*port),
-            );
+            )?;
         }
         #[cfg(unix)]
         command.process_group(0);

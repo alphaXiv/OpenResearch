@@ -743,7 +743,7 @@ fn spawn_client(
     // Stamp the launching session (one app-server child per orx session) so a
     // run the agent starts via `orx exp run` is tagged with it and can be
     // explicitly subscribed to. After prepare_env so it isn't shadowed.
-    crate::local::chat::set_chat_session_env(&mut cmd, session_id, "codex", up_port);
+    crate::local::chat::set_chat_session_env(&mut cmd, session_id, "codex", up_port)?;
     // Own process group: a terminal SIGINT reaches orx up alone, which then
     // tears the child's group down deliberately (terminate()).
     #[cfg(unix)]

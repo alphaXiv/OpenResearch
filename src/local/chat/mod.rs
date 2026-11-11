@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context as _, Result};
 use crate::local::autonomy::Autonomy;
 use crate::local::harness::ResumeAction;
 use crate::local::model::LocalProject;
@@ -9839,14 +9839,14 @@ pub fn set_chat_session_env(
     session_id: &str,
     harness: &str,
     up_port: Option<u16>,
-) {
+) -> crate::error::Result<()> {
     cmd.env(CHAT_SESSION_ENV, session_id);
     cmd.env(CHAT_HARNESS_ENV, harness);
     // The agent's `orx` opens the store this dashboard serves, whatever a synced
     // `ORX_DATA_DIR` or the agent's own home would resolve.
-    if let Ok(dir) = crate::commands::remote_host::canonical_data_dir() {
-        cmd.env("ORX_DATA_DIR", dir);
-    }
+    let data_dir = crate::commands::remote_host::canonical_data_dir()
+        .context("The agent could not be given this dashboard's data directory")?;
+    cmd.env("ORX_DATA_DIR", data_dir);
     cmd.env(LOCAL_SESSION_ENV, "1");
     cmd.env("ORX_SESSION_ID", session_id);
     cmd.env("ORX_AGENT_TOKEN", delegation::agent_token(session_id));
@@ -9887,13 +9887,13 @@ pub fn set_chat_session_env(
 
     let shell_dir = shell_hook_dir(session_id);
     if std::fs::create_dir_all(&shell_dir).is_err() {
-        return;
+        return Ok(());
     }
     let original_zdotdir = child_env_value("ZDOTDIR")
         .map(PathBuf::from)
         .or_else(crate::config::home_dir);
     let Some(original_zdotdir) = original_zdotdir else {
-        return;
+        return Ok(());
     };
     let pointer = target_event_pointer(session_id);
     let zshenv = zshenv_hook(&original_zdotdir);
@@ -9907,7 +9907,7 @@ pub fn set_chat_session_env(
         .iter()
         .any(|(name, contents)| std::fs::write(shell_dir.join(name), contents).is_err())
     {
-        return;
+        return Ok(());
     }
 
     let bash_env = shell_dir.join("bash_env");
@@ -9915,12 +9915,13 @@ pub fn set_chat_session_env(
         child_env_value("BASH_ENV").map(|value| value.to_string_lossy().into_owned());
     let bash_hook = bash_env_hook(original_bash_env);
     if std::fs::write(&bash_env, bash_hook).is_err() {
-        return;
+        return Ok(());
     }
 
     cmd.env(CHAT_TARGET_POINTER_ENV, pointer);
     cmd.env("ZDOTDIR", shell_dir);
     cmd.env("BASH_ENV", bash_env);
+    Ok(())
 }
 
 /// The chat session that launched this run, read from the env the harness child
@@ -10043,7 +10044,7 @@ mod session_env_tests {
         std::fs::write(&synced, "export ORX_DATA_DIR='/elsewhere'\n").unwrap();
         let mut cmd = crate::process::tokio_command("agent");
         super::prepare_env(&mut cmd);
-        super::set_chat_session_env(&mut cmd, "session", "claude", None);
+        super::set_chat_session_env(&mut cmd, "session", "claude", None).unwrap();
         let pinned = cmd
             .as_std()
             .get_envs()
@@ -10051,6 +10052,24 @@ mod session_env_tests {
             .and_then(|(_, value)| value);
         let served = crate::commands::remote_host::canonical_data_dir().unwrap();
         assert_eq!(pinned, Some(served.as_os_str()));
+    }
+
+    /// An agent left on whatever store its environment names could split from the dashboard.
+    #[test]
+    fn an_unusable_data_dir_stops_the_agent_launch() {
+        if !crate::config::in_test_child(&["ORX_DATA_DIR"]) {
+            return;
+        }
+        let file = std::env::temp_dir().join(format!("orx-not-a-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&file, "").unwrap();
+        let data_dir = file.join("data");
+        std::env::set_var("ORX_DATA_DIR", &data_dir);
+        let mut cmd = crate::process::tokio_command("agent");
+        let error = super::set_chat_session_env(&mut cmd, "session", "claude", None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&data_dir.display().to_string()),
+            "{error:#}"
+        );
     }
 
     #[test]
