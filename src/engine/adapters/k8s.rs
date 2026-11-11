@@ -181,7 +181,7 @@ impl Api for K8sAccount {
         run: &WatchedRun,
         cursor: &mut k8s::LogResume,
         window: std::time::Duration,
-        sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+        sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c k8s::LogResume>) + Send),
     ) -> Result<bool> {
         let mut resume = cursor.clone();
         let job = self.job(run)?;

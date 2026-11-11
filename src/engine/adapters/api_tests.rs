@@ -59,6 +59,50 @@ fn pending<'a>(
     }
 }
 
+/// Serves the HF log stream for the next connection from `sse/<n>`, recording each query in
+/// `sse.log`; a missing script answers 503. Each script line is sent as is, except `!keepalive`,
+/// which sends keep-alive comments and no data from then on.
+fn sse(root: &Path, query: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use std::io::Write;
+    let log = root.join("sse.log");
+    let connection = std::fs::read_to_string(&log).map_or(0, |log| log.lines().count());
+    let mut requests = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    writeln!(requests, "{query}").unwrap();
+    let Ok(script) = std::fs::read_to_string(root.join("sse").join(connection.to_string())) else {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response();
+    };
+    let lines: std::collections::VecDeque<String> = script.lines().map(str::to_owned).collect();
+    let body = futures::stream::unfold(lines, |mut lines| async move {
+        let line = match lines.front()?.as_str() {
+            "!keepalive" => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                ": keep-alive\n".to_owned()
+            }
+            _ => format!("{}\n", lines.pop_front()?),
+        };
+        Some((Ok::<_, std::io::Error>(line), lines))
+    });
+    axum::body::Body::from_stream(body).into_response()
+}
+
+/// An SSE script of HF log events, each `(timestamp, data)`.
+fn hf_events(events: &[(&str, &str)]) -> String {
+    events
+        .iter()
+        .map(|(timestamp, data)| {
+            format!(
+                "data: {}\n\n",
+                json!({"data": data, "timestamp": timestamp})
+            )
+        })
+        .collect()
+}
+
 /// Runs the calling test alone in a child process, against a fake provider API
 /// and with fake provider CLIs first on `PATH`. `None` in the parent.
 async fn isolated() -> Option<PathBuf> {
@@ -84,6 +128,9 @@ async fn isolated() -> Option<PathBuf> {
             .unwrap();
         writeln!(requests, "{method} {}", uri.path()).unwrap();
         let headers = axum::http::HeaderMap::new();
+        if uri.path().ends_with("/logs") && root.join("sse").is_dir() {
+            return sse(&root, uri.query().unwrap_or_default());
+        }
         if uri.path().ends_with("/logs") && root.join("slow-logs").exists() {
             tokio::time::sleep(Duration::from_secs(5)).await;
             return (headers, Json(json!({}))).into_response();
@@ -356,12 +403,15 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
     }];
     assert_eq!(
         adapter.observe(&runs, Duration::from_secs(2)).await,
-        vec![(
-            "run".into(),
-            Observation::Running {
-                started_at: Some(1234)
-            }
-        )]
+        vec![
+            (
+                "run".into(),
+                Observation::Running {
+                    started_at: Some(1234)
+                }
+            ),
+            ("run".into(), Observation::Log { len: 0 })
+        ]
     );
     assert!(adapter
         .observe(&runs, Duration::from_secs(2))
@@ -370,7 +420,7 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
     clock.advance(Duration::from_secs(10));
     assert_eq!(
         adapter.observe(&runs, Duration::from_secs(2)).await.len(),
-        1
+        2
     );
     *response.lock().unwrap() = json!({"status":"SUCCEEDED", "start_time":1234, "end_time":4567});
     clock.advance(Duration::from_secs(10));
@@ -2466,7 +2516,7 @@ async fn chatty_modal_logs_publish_a_partial_page_and_reuse_it() {
         &format!(
             r#"#!/bin/sh
 printf 'download\n' >> '{}/downloads'
-while :; do printf 'line\n'; sleep 0.01; done
+while :; do printf '["", 5]\nline\n'; sleep 0.01; done
 "#,
             root.display()
         ),
@@ -2530,7 +2580,12 @@ status) cat state ;;
 logs)
   if ! mkdir active-stream; then touch overlapping-streams; exit 1; fi
   trap 'rmdir active-stream' EXIT
-  cat history
+  from=${{5:-0}}
+  cp history snapshot
+  size=$(wc -c < snapshot | tr -d ' ')
+  if [ "$size" -lt "$from" ]; then size=$from; fi
+  printf '["%s", %d]\n' "$from" $((size - from))
+  tail -c +$((from + 1)) snapshot
   ;;
 esac
 "#,
@@ -2632,7 +2687,7 @@ async fn finished_modal_logs_drain_through_pauses_before_they_are_kept() {
     };
     script(
         &root.join("bin/modal-python"),
-        "#!/bin/sh\nprintf 'first\\n'\nsleep 11\nprintf 'last\\n'\n",
+        "#!/bin/sh\nprintf '[\"\", 6]\\nfirst\\n'\nsleep 11\nprintf '[\"\", 5]\\nlast\\n'\n",
     );
     let backend = super::api::Adapter::new(
         ModalAccount,
@@ -2670,6 +2725,78 @@ async fn finished_modal_logs_drain_through_pauses_before_they_are_kept() {
     };
     assert!(eof);
     assert_eq!(bytes, b"first\nlast\n");
+}
+
+/// Modal launcher frames: each chunk with the point a reconnect replays it from.
+fn modal_frames(chunks: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut frames = Vec::new();
+    for (from, data) in chunks {
+        frames.extend_from_slice(json!([from, data.len()]).to_string().as_bytes());
+        frames.push(b'\n');
+        frames.extend_from_slice(data);
+    }
+    frames
+}
+
+#[tokio::test]
+async fn modal_logs_reopen_a_stalled_stream_mid_batch_without_losing_bytes() {
+    use super::api::Api;
+    let Some(root) = isolated().await else {
+        return;
+    };
+    std::env::set_var("ORX_TEST_SPEEDUP", "120");
+    script(
+        &root.join("bin/modal-python"),
+        &format!(
+            r#"#!/bin/sh
+cd '{}'
+n=$(cat from.log 2>/dev/null | wc -l | tr -d ' ')
+printf '%s\n' "$5" >> from.log
+cat "frames/$n"
+if [ -e "frames/$n.stall" ]; then exec sleep 600; fi
+"#,
+            root.display()
+        ),
+    );
+    let record = format!("{{\"summary\":\"{}\"}}\n", "x".repeat(59_000)).into_bytes();
+    std::fs::create_dir_all(root.join("frames")).unwrap();
+    std::fs::write(
+        root.join("frames/0"),
+        modal_frames(&[("", b"A\n"), ("1", &record[..16 * 1024])]),
+    )
+    .unwrap();
+    std::fs::write(root.join("frames/0.stall"), "").unwrap();
+    // The reconnect regroups the batch it resumes inside.
+    std::fs::write(
+        root.join("frames/1"),
+        modal_frames(&[
+            ("1", &record[..20_000]),
+            ("1", &record[20_000..]),
+            ("2", b"B"),
+        ]),
+    )
+    .unwrap();
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("modal_job", None, None, vec!["sandbox".into()]),
+    };
+    let mut cursor = crate::jobs::modal::LogResume::default();
+    let mut log = Vec::new();
+    let closed = ModalAccount
+        .logs(
+            &run,
+            &mut cursor,
+            Duration::from_secs(30),
+            &mut |bytes, _| log.extend_from_slice(bytes),
+        )
+        .await
+        .unwrap();
+    assert!(closed);
+    assert_eq!(log, [b"A\n".as_slice(), &record, b"B"].concat());
+    assert_eq!(
+        std::fs::read_to_string(root.join("from.log")).unwrap(),
+        "\n1\n"
+    );
 }
 
 #[tokio::test]
@@ -2841,7 +2968,7 @@ async fn kubernetes_missing_pods_close_logs_only_after_job_deletion() {
         let account = K8sAccount::new(None, "default".into());
         let mut cursor = crate::jobs::kubernetes::LogResume::default();
         let closed = account
-            .logs(&run, &mut cursor, Duration::from_secs(5), &mut |_| {})
+            .logs(&run, &mut cursor, Duration::from_secs(5), &mut |_, _| {})
             .await;
         assert_eq!(
             matches!(closed, Ok(true)),
@@ -2893,14 +3020,14 @@ esac
             vec!["job".into()],
         ),
     };
-    let mut hf_cursor = 0;
+    let mut hf_cursor = crate::jobs::huggingface::LogResume::default();
     assert!(hf
-        .logs(&hf_run, &mut hf_cursor, budget, &mut |_| {})
+        .logs(&hf_run, &mut hf_cursor, budget, &mut |_, _| {})
         .await
         .unwrap_err()
         .to_string()
         .contains("timed out"));
-    assert_eq!(hf_cursor, 0);
+    assert_eq!(hf_cursor, Default::default());
     let modal_run = WatchedRun {
         id: "modal".into(),
         handle: crate::engine::adapters::api::test_handle(
@@ -2910,14 +3037,14 @@ esac
             vec!["sandbox".into()],
         ),
     };
-    let mut modal_cursor = 0;
+    let mut modal_cursor = crate::jobs::modal::LogResume::default();
     assert!(ModalAccount
-        .logs(&modal_run, &mut modal_cursor, budget, &mut |_| {})
+        .logs(&modal_run, &mut modal_cursor, budget, &mut |_, _| {})
         .await
         .unwrap_err()
         .to_string()
         .contains("timed out"));
-    assert_eq!(modal_cursor, 0);
+    assert_eq!(modal_cursor, Default::default());
     let k8s = K8sAccount::new(None, "default".into());
     let k8s_run = WatchedRun {
         id: "k8s".into(),
@@ -2933,7 +3060,7 @@ esac
             &k8s_run,
             &mut crate::jobs::kubernetes::LogResume::default(),
             budget,
-            &mut |_| {}
+            &mut |_, _| {}
         )
         .await
         .unwrap_err()
@@ -3672,5 +3799,329 @@ else:
             .lines()
             .any(|call| call.starts_with("forbidden delete configmap/run-config")),
         "{calls}"
+    );
+}
+
+fn hf_backend(root: &Path, clock: Arc<TestClock>) -> super::api::Adapter<HfAccount> {
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(
+        root.join("inspect-response.json"),
+        json!({"id":"job", "status":{"stage":"RUNNING"}}).to_string(),
+    )
+    .unwrap();
+    super::api::Adapter::new(
+        HfAccount {
+            namespace: "org".into(),
+        },
+        clock,
+        root.join("spools"),
+    )
+}
+
+fn hf_run() -> WatchedRun {
+    WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("hf_job", Some("org"), None, vec!["job".into()]),
+    }
+}
+
+async fn spooled(backend: &dyn Backend, run: &WatchedRun) -> String {
+    let whole = ByteRange {
+        start: 0,
+        end: orx_host_proto::MAX_PAGE_LEN,
+    };
+    let LogPage::Data { bytes, .. } = backend
+        .read_log(run, LogFile::Log, whole, None)
+        .await
+        .unwrap()
+    else {
+        panic!("no log page")
+    };
+    String::from_utf8(bytes).unwrap()
+}
+
+fn sse_queries(root: &Path) -> Vec<String> {
+    std::fs::read_to_string(root.join("sse.log"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn hf_logs_keep_long_lines_whole_however_a_replay_splits_them() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let record = format!("{{\"metadata\":\"{}\"}}", "x".repeat(59_000));
+    let stamp = |ms: u32| format!("2026-11-10T12:00:00.{ms:03}Z");
+    let mut replay = vec![(stamp(100), "A".to_owned())];
+    for (i, piece) in record.as_bytes().chunks(16 * 1024).enumerate() {
+        replay.push((
+            stamp(200 + i as u32),
+            String::from_utf8(piece.to_vec()).unwrap(),
+        ));
+    }
+    replay.extend([(stamp(300), "B".to_owned()), (stamp(400), "C".to_owned())]);
+    let replay: Vec<_> = replay
+        .iter()
+        .map(|(t, d)| (t.as_str(), d.as_str()))
+        .collect();
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(
+        root.join("sse/0"),
+        hf_events(&[
+            (&stamp(0), "===== Job started at 2026-11-10 12:00:00 ====="),
+            (&stamp(100), "A"),
+            (&stamp(200), &record),
+            (&stamp(300), "B"),
+        ]),
+    )
+    .unwrap();
+    std::fs::write(root.join("sse/1"), hf_events(&replay)).unwrap();
+    std::fs::write(root.join("sse/2"), hf_events(&replay)).unwrap();
+    let expected = format!("A\n{record}\nB\nC\n");
+
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    let run = hf_run();
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, format!("A\n{record}\nB\n"));
+    backend
+        .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+        .await;
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, expected);
+
+    // A restarted engine continues from where the last one left off.
+    drop(backend);
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, expected);
+    assert_eq!(sse_queries(&root), ["", "tail=100", "tail=100"]);
+}
+
+#[tokio::test]
+async fn hf_logs_resume_past_a_capped_replay_and_a_tail_that_skips_output() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let lines = |range: std::ops::RangeInclusive<u32>| {
+        let events: Vec<_> = range
+            .map(|n| (format!("2026-11-10T12:00:{n:02}.000Z"), format!("line {n}")))
+            .collect();
+        let events: Vec<_> = events
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_str()))
+            .collect();
+        hf_events(&events)
+    };
+    let written = |range: std::ops::RangeInclusive<u32>| {
+        range.map(|n| format!("line {n}\n")).collect::<String>()
+    };
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(root.join("sse/0"), lines(1..=10)).unwrap();
+    // The provider keeps only the newest part of a long history.
+    std::fs::write(root.join("sse/1"), lines(6..=12)).unwrap();
+    std::fs::write(root.join("sse/2"), lines(14..=14)).unwrap();
+    std::fs::write(root.join("sse/3"), lines(5..=14)).unwrap();
+    let clock = Arc::new(TestClock::new());
+    let backend = hf_backend(&root, clock.clone());
+    let run = hf_run();
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, written(1..=10));
+    for expected in [written(1..=12), written(1..=14)] {
+        backend
+            .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+            .await;
+        clock.advance(Duration::from_secs(10));
+        backend.drain_log(&run).await.unwrap();
+        assert_eq!(spooled(&backend, &run).await, expected);
+    }
+    assert_eq!(sse_queries(&root), ["", "tail=100", "tail=100", ""]);
+}
+
+#[tokio::test]
+async fn hf_logs_reopen_a_stream_sending_only_keep_alives_and_survive_a_failed_reopen() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    std::env::set_var("ORX_TEST_SPEEDUP", "120");
+    let stamp = |s: u32| format!("2026-11-10T12:00:{s:02}.000Z");
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(
+        root.join("sse/0"),
+        hf_events(&[(&stamp(0), "zero"), (&stamp(1), "one")]) + "!keepalive\n",
+    )
+    .unwrap();
+    // sse/1 is missing, so the first reopen answers 503.
+    std::fs::write(
+        root.join("sse/2"),
+        hf_events(&[(&stamp(0), "zero"), (&stamp(1), "one"), (&stamp(2), "two")]),
+    )
+    .unwrap();
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    let run = hf_run();
+    assert!(backend.drain_log(&run).await.is_err());
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, "zero\none\ntwo\n");
+    assert_eq!(sse_queries(&root), ["", "tail=100", "tail=100"]);
+}
+
+#[tokio::test]
+async fn hf_logs_stream_while_running_unread_so_a_capped_final_replay_loses_nothing() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let lines = |range: std::ops::RangeInclusive<u32>| {
+        let events: Vec<_> = range
+            .map(|n| (format!("2026-11-10T12:00:{n:02}.000Z"), format!("line {n}")))
+            .collect();
+        let events: Vec<_> = events
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_str()))
+            .collect();
+        hf_events(&events)
+    };
+    let written = |range: std::ops::RangeInclusive<u32>| {
+        range.map(|n| format!("line {n}\n")).collect::<String>()
+    };
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(root.join("sse/0"), lines(1..=10)).unwrap();
+    let clock = Arc::new(TestClock::new());
+    let backend = hf_backend(&root, clock.clone());
+    let run = hf_run();
+    backend
+        .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+        .await;
+
+    let spool = super::api::spool_path(&root.join("spools"), &run.id).unwrap();
+    let mut kept = String::new();
+    for _ in 0..100 {
+        kept = std::fs::read_to_string(&spool).unwrap_or_default();
+        if kept == written(1..=10) {
+            break;
+        }
+        tokio::time::sleep(crate::config::paced(Duration::from_millis(50))).await;
+    }
+    assert_eq!(kept, written(1..=10), "nothing streamed the unread log");
+
+    // Once the job ends, the provider replays only the newest part of its history.
+    std::fs::write(
+        root.join("inspect-response.json"),
+        json!({"id":"job", "status":{"stage":"COMPLETED"}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(root.join("sse/1"), lines(6..=12)).unwrap();
+    clock.advance(Duration::from_secs(10));
+    backend
+        .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+        .await;
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, written(1..=12));
+}
+
+#[tokio::test]
+async fn hf_logs_continue_across_an_engine_restart_past_a_capped_replay() {
+    use std::io::Write;
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let lines = |range: std::ops::RangeInclusive<u32>| {
+        let events: Vec<_> = range
+            .map(|n| (format!("2026-11-10T12:00:{n:02}.000Z"), format!("line {n}")))
+            .collect();
+        let events: Vec<_> = events
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_str()))
+            .collect();
+        hf_events(&events)
+    };
+    let written = |range: std::ops::RangeInclusive<u32>| {
+        range.map(|n| format!("line {n}\n")).collect::<String>()
+    };
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(root.join("sse/0"), lines(1..=10) + "!keepalive\n").unwrap();
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    let run = hf_run();
+    let mut kept = String::new();
+    for _ in 0..100 {
+        kept = spooled(&backend, &run).await;
+        if kept == written(1..=10) {
+            break;
+        }
+        tokio::time::sleep(crate::config::paced(Duration::from_millis(50))).await;
+    }
+    assert_eq!(kept, written(1..=10));
+
+    // orx up stops mid-run, cut off partway through an append, while the provider goes on to
+    // keep only the newest part of the history.
+    drop(backend);
+    let spool = super::api::spool_path(&root.join("spools"), &run.id).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&spool)
+        .unwrap()
+        .write_all(b"line 1")
+        .unwrap();
+    std::fs::write(root.join("sse/1"), lines(6..=12)).unwrap();
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, written(1..=12));
+    assert_eq!(sse_queries(&root), ["", "tail=100"]);
+}
+
+#[tokio::test]
+async fn modal_logs_continue_across_a_regrouped_reconnect_and_an_engine_restart() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/modal-python"),
+        &format!(
+            r#"#!/bin/sh
+cd '{}'
+if [ "$3" = status ]; then echo '{{"stage":"RUNNING"}}'; exit; fi
+n=$(cat from.log 2>/dev/null | wc -l | tr -d ' ')
+printf '%s\n' "$5" >> from.log
+cat "frames/$n"
+"#,
+            root.display()
+        ),
+    );
+    let replay: [(&str, &[u8]); 4] = [
+        ("0", b"first\n"),
+        ("6", b"second\n"),
+        ("13", b"last\n"),
+        ("18", b"end\n"),
+    ];
+    std::fs::create_dir_all(root.join("frames")).unwrap();
+    std::fs::write(
+        root.join("frames/0"),
+        modal_frames(&[("0", b"first\nsecond\n")]),
+    )
+    .unwrap();
+    // The reconnect sends the chunk it resumes after in smaller pieces.
+    std::fs::write(root.join("frames/1"), modal_frames(&replay[..3])).unwrap();
+    std::fs::write(root.join("frames/2"), modal_frames(&replay)).unwrap();
+    let clock = Arc::new(TestClock::new());
+    let backend = super::api::Adapter::new(ModalAccount, clock.clone(), root.join("spools"));
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("modal_job", None, None, vec!["sandbox".into()]),
+    };
+    backend.drain_log(&run).await.unwrap();
+    backend
+        .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+        .await;
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, "first\nsecond\nlast\n");
+
+    drop(backend);
+    let backend = super::api::Adapter::new(ModalAccount, clock, root.join("spools"));
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, "first\nsecond\nlast\nend\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("from.log")).unwrap(),
+        "\n0\n\n"
     );
 }

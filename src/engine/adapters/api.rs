@@ -4,6 +4,7 @@ use crate::engine::*;
 use crate::error::{anyhow, Result};
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
@@ -85,7 +86,7 @@ pub fn id<'a>(
 
 #[async_trait]
 pub trait Api: Send + Sync {
-    type Cursor: Clone + Default + Send + 'static;
+    type Cursor: Clone + Default + Send + Serialize + DeserializeOwned + 'static;
     async fn launch(&self, intent: &RunIntent, fence: &Fence<'_>) -> Result<Handle, LaunchError>;
     async fn recover(&self, intent: &RunIntent) -> Recovery;
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation>;
@@ -94,20 +95,29 @@ pub trait Api: Send + Sync {
         Ok(())
     }
     /// Hands `sink` the bytes past `cursor` as they arrive, and says whether the stream closed
-    /// before `window` ran out. An error means nothing reached `sink`.
+    /// before `window` ran out. An error means nothing reached `sink`. A cursor given with the
+    /// bytes is where a later engine continues after them, saved beside the spool.
     async fn logs(
         &self,
         run: &WatchedRun,
         cursor: &mut Self::Cursor,
         window: Duration,
-        sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+        sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c Self::Cursor>) + Send),
     ) -> Result<bool>;
+    /// Where to continue a spool of `len` bytes an earlier engine left without a saved cursor;
+    /// `None` starts it over.
+    fn resume(_len: u64) -> Option<Self::Cursor> {
+        None
+    }
 }
 
 const PAGE_STREAM_WAIT: Duration = Duration::from_millis(20);
 const DRAIN_WINDOW: Duration = Duration::from_secs(60);
 /// How long one draining stream may stay open across callers' windows.
 const DRAIN_STREAM_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long a provider stream may go without log data before it is reopened from its resume
+/// point, since a stalled stream can keep sending keep-alives.
+pub const STREAM_IDLE: Duration = Duration::from_secs(120);
 
 /// Where a provider run's log is spooled as it arrives; pages and final collection read it.
 pub fn spool_path(directory: &Path, run: &str) -> Result<PathBuf> {
@@ -121,8 +131,28 @@ pub fn spool_path(directory: &Path, run: &str) -> Result<PathBuf> {
     Ok(directory.join(format!("{run}.spool.log")))
 }
 
-/// A provider log on disk, from the stream position `cursor` reached. It lasts one engine:
-/// a new one starts empty and reads the provider from the start.
+/// The spool's first `len` bytes and the cursor that continues past them, written after those
+/// bytes so it may lag the spool but never lead it.
+#[derive(Serialize, Deserialize)]
+struct Checkpoint<C> {
+    len: u64,
+    cursor: C,
+}
+
+fn checkpoint_path(spool: &Path) -> PathBuf {
+    spool.with_extension("json")
+}
+
+fn save_checkpoint<C: Serialize>(spool: &Path, len: u64, cursor: &C) -> Result<()> {
+    let path = checkpoint_path(spool);
+    let part = path.with_extension("json.part");
+    std::fs::write(&part, serde_json::to_vec(&Checkpoint { len, cursor })?)?;
+    std::fs::rename(&part, &path)?;
+    Ok(())
+}
+
+/// A provider log on disk, from the stream position `cursor` reached. A new engine continues
+/// it when the provider can say where, and otherwise starts it over.
 struct Spool<C> {
     path: PathBuf,
     /// `None` once the run is forgotten, so an aborted stream writes nothing more.
@@ -227,22 +257,31 @@ impl<A: Api + 'static> Adapter<A> {
         }
         let path = spool_path(&self.spools, &run.id)?;
         std::fs::create_dir_all(&self.spools)?;
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        // A fresh inode per engine, so pages kept from an earlier spool never match this one.
-        match std::fs::remove_file(&path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-            _ => {}
-        }
-        let file = options.open(&path)?;
+        let (file, len, cursor) = match Self::reopen(&path)? {
+            Some(kept) => kept,
+            None => {
+                let mut options = std::fs::OpenOptions::new();
+                options.create_new(true).write(true);
+                #[cfg(unix)]
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                // A fresh inode, so pages kept from the spool it replaces never match this one.
+                for stale in [checkpoint_path(&path), path.clone()] {
+                    match std::fs::remove_file(stale) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(error.into())
+                        }
+                        _ => {}
+                    }
+                }
+                (options.open(&path)?, 0, A::Cursor::default())
+            }
+        };
         let log = Arc::new(Log {
             spool: Arc::new(std::sync::Mutex::new(Spool {
                 path,
-                len: 0,
+                len,
                 file: Some(file),
-                cursor: A::Cursor::default(),
+                cursor,
                 error: None,
                 complete: false,
                 generation: 0,
@@ -254,6 +293,39 @@ impl<A: Api + 'static> Adapter<A> {
         });
         logs.insert(run.id.clone(), log.clone());
         Ok(log)
+    }
+
+    /// The spool an earlier engine left, cut back to the length its cursor continues from.
+    fn reopen(path: &Path) -> Result<Option<(File, u64, A::Cursor)>> {
+        let file = match std::fs::OpenOptions::new().write(true).open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let len = file.metadata()?.len();
+        let saved = match std::fs::read(checkpoint_path(path)) {
+            Ok(bytes) => match serde_json::from_slice::<Checkpoint<A::Cursor>>(&bytes) {
+                Ok(saved) if saved.len <= len => Some((saved.len, saved.cursor)),
+                Ok(_) => None,
+                Err(error) => {
+                    eprintln!(
+                        "orx up: starting the provider log {} over, since its saved position \
+                         is unreadable: {error}",
+                        path.display()
+                    );
+                    None
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                A::resume(len).map(|cursor| (len, cursor))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some((len, cursor)) = saved else {
+            return Ok(None);
+        };
+        file.set_len(len)?;
+        Ok(Some((file, len, cursor)))
     }
 }
 
@@ -287,12 +359,17 @@ impl<A: Api + 'static> Backend for Adapter<A> {
                     },
                 };
                 let settled = observation.ends_run();
+                // A running log streams whether or not anyone reads it, since a provider's
+                // replay at the end may keep only its newest part.
+                let log = match observation {
+                    Observation::Running { .. } => self.log(run).ok(),
+                    _ => lock(&self.logs).get(&run.id).cloned(),
+                };
                 let mut observations = vec![(run.id.clone(), observation)];
                 if settled {
                     observations
                         .push((run.id.clone(), Observation::Lingering { pids: Vec::new() }));
                 }
-                let log = lock(&self.logs).get(&run.id).cloned();
                 if let Some(log) = log {
                     {
                         let mut spool = lock(&log.spool);
@@ -325,6 +402,7 @@ impl<A: Api + 'static> Backend for Adapter<A> {
     async fn unwatch(&self, run: &WatchedRun) {
         self.forget_logs(&|id| id == run.id);
         if let Ok(path) = spool_path(&self.spools, &run.id) {
+            let _ = std::fs::remove_file(checkpoint_path(&path));
             let _ = std::fs::remove_file(path);
         }
     }
@@ -359,10 +437,23 @@ impl<A: Api + 'static> Backend for Adapter<A> {
                     };
                     let task = tokio::spawn(async move {
                         let mut failed = None;
-                        let mut sink = |chunk: &[u8]| {
-                            if failed.is_none() {
-                                failed = lock(&spool).append(chunk).err();
+                        let mut saved: Option<(u64, A::Cursor)> = None;
+                        let mut sink = |chunk: &[u8], next: Option<&A::Cursor>| {
+                            let mut spool = lock(&spool);
+                            // A forgotten spool takes no bytes, so no cursor past them either.
+                            if failed.is_some() || spool.file.is_none() {
+                                return;
                             }
+                            failed = match (spool.append(chunk), next) {
+                                (Ok(()), Some(next)) => {
+                                    let error = save_checkpoint(&spool.path, spool.len, next).err();
+                                    if error.is_none() {
+                                        saved = Some((spool.len, next.clone()));
+                                    }
+                                    error
+                                }
+                                (written, _) => written.err().map(Into::into),
+                            };
                         };
                         let closed = account
                             .logs(&run, &mut cursor, DRAIN_STREAM_LIMIT, &mut sink)
@@ -375,10 +466,15 @@ impl<A: Api + 'static> Backend for Adapter<A> {
                                 spool.error = None;
                                 Ok(closed)
                             }
-                            // The stream's position is unknown; what it appended goes.
+                            // What it appended past the last saved position goes.
                             (closed, failed) => {
-                                spool.truncate(start)?;
-                                Err(failed.map_or_else(|| closed.unwrap_err(), Into::into))
+                                if let Some((len, cursor)) = saved {
+                                    spool.truncate(len)?;
+                                    spool.cursor = cursor;
+                                } else {
+                                    spool.truncate(start)?;
+                                }
+                                Err(failed.unwrap_or_else(|| closed.unwrap_err()))
                             }
                         }
                     });
@@ -459,12 +555,12 @@ impl<A: Api + 'static> Backend for Adapter<A> {
 }
 
 /// Hands `sink` each line of a stream, counting them into `received`.
-pub fn lines<'a>(
-    sink: &'a mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+pub fn lines<'a, C>(
+    sink: &'a mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c C>) + Send),
     received: &'a mut u64,
 ) -> impl FnMut(&str) + Send + 'a {
     |line| {
-        sink(format!("{line}\n").as_bytes());
+        sink(format!("{line}\n").as_bytes(), None);
         *received += 1;
     }
 }
@@ -640,6 +736,8 @@ mod tests {
         peak_streams: AtomicUsize,
         /// History before this was rotated away: a stream from the start begins here.
         rotated: AtomicUsize,
+        /// Hands the sink the position past each send, as a provider whose cursor is saved does.
+        positions: AtomicBool,
     }
 
     struct Open(Arc<AtomicUsize>);
@@ -681,7 +779,7 @@ mod tests {
             _: &WatchedRun,
             cursor: &mut usize,
             _: Duration,
-            sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+            sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c usize>) + Send),
         ) -> Result<bool> {
             self.downloads.fetch_add(1, Ordering::SeqCst);
             *cursor = (*cursor).max(self.rotated.load(Ordering::SeqCst));
@@ -692,10 +790,13 @@ mod tests {
                 self.log_started.notify_one();
                 self.drain_resumed.notified().await;
             }
-            let mut send = |sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send)| {
+            let mut send = |sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c usize>)
+                                      + Send)| {
                 let text = self.text.lock().unwrap().clone();
-                sink(&text[*cursor..]);
-                *cursor = text.len();
+                let next = text.len();
+                let position = self.positions.load(Ordering::SeqCst).then_some(&next);
+                sink(&text[*cursor..], position);
+                *cursor = next;
             };
             send(sink);
             if self.pause_drains.load(Ordering::SeqCst) {
@@ -939,6 +1040,37 @@ mod tests {
         std::fs::remove_dir_all(spools).unwrap();
     }
 
+    /// A failed append costs only what followed the last saved position, which the provider
+    /// may no longer have.
+    #[tokio::test]
+    async fn a_failed_append_keeps_what_was_saved_before_it() {
+        let account = Arc::new(Fake::default());
+        *account.text.lock().unwrap() = b"first\n".to_vec();
+        account.positions.store(true, Ordering::SeqCst);
+        account.pause_drains.store(true, Ordering::SeqCst);
+        let (backend, spools) = adapter(&account, Arc::new(TestClock::new()));
+        let backend = Arc::new(backend);
+        let run = provider_run();
+        let draining = {
+            let (backend, run) = (backend.clone(), run.clone());
+            tokio::spawn(async move { backend.drain_log(&run).await })
+        };
+        account.drain_paused.notified().await;
+        lock(&backend.log(&run).unwrap().spool).fail_after = Some(0);
+        account.text.lock().unwrap().extend_from_slice(b"second\n");
+        account.drain_resumed.notify_one();
+        assert!(draining.await.unwrap().is_err());
+        let spool = spool_path(&spools, &run.id).unwrap();
+        assert_eq!(std::fs::read(&spool).unwrap(), b"first\n");
+
+        account.pause_drains.store(false, Ordering::SeqCst);
+        account.text.lock().unwrap().extend_from_slice(b"last\n");
+        account.rotated.store(6, Ordering::SeqCst);
+        backend.drain_log(&run).await.unwrap();
+        assert_eq!(page(&backend).await, b"first\nsecond\nlast\n");
+        std::fs::remove_dir_all(spools).unwrap();
+    }
+
     /// Forgetting a run, as collection and deletion do, stops its open drain; nothing more
     /// is written for it.
     #[tokio::test]
@@ -985,10 +1117,12 @@ mod tests {
                 ),
             })
             .collect();
-        assert_eq!(
-            backend.observe(&runs, Duration::from_secs(1)).await.len(),
-            50
-        );
+        let observations = backend.observe(&runs, Duration::from_secs(1)).await;
+        let inspected = observations
+            .iter()
+            .filter(|(_, observation)| !matches!(observation, Observation::Log { .. }))
+            .count();
+        assert_eq!(inspected, 50);
         assert_eq!(account.peak.load(Ordering::SeqCst), 8);
         let _ = std::fs::remove_dir_all(spools);
     }
