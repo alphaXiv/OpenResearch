@@ -364,11 +364,15 @@ pub(crate) fn paced(wait: std::time::Duration) -> std::time::Duration {
 
 /// Stands in for `$HOME` and the XDG dirs under test: one fresh, existing
 /// directory per process, so no test reads or writes the user's config or data.
+/// Its name stays short: fixtures nest git objects under it, within Windows' 260-character paths.
 #[cfg(test)]
 pub(crate) fn test_home() -> PathBuf {
     static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     HOME.get_or_init(|| {
-        let home = std::env::temp_dir().join(format!("orx-test-home-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!(
+            "orx-test-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
         std::fs::create_dir_all(&home).unwrap();
         home
     })
