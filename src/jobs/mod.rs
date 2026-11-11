@@ -6,7 +6,7 @@
 pub mod huggingface;
 pub mod kubernetes;
 pub mod localbox;
-mod managed_env;
+pub(crate) mod managed_env;
 pub mod modal;
 pub mod openresearch;
 pub mod ray;
@@ -16,7 +16,7 @@ pub mod ssh;
 pub mod tinker;
 pub mod vercel;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,43 @@ pub fn default_python_env(env: &HashMap<String, String>) -> HashMap<String, Stri
         .or_insert_with(|| "utf-8".to_string());
     env
 }
+
+/// This process's interpreter overrides, for `orx up` to check against its own.
+pub fn caller_python_overrides() -> BTreeMap<String, String> {
+    [modal::MODAL_ENV, vercel::VERCEL_ENV]
+        .iter()
+        .filter_map(|env| env.override_var)
+        .filter_map(|var| Some((var.to_string(), std::env::var(var).ok()?)))
+        .filter(|(_, python)| !python.trim().is_empty())
+        .collect()
+}
+
+/// A provider's answer to a launch that nothing started: its HTTP status, which the engine
+/// judges, or `None` when nothing is left running for certain.
+#[derive(Debug, Deserialize)]
+pub struct Refused {
+    pub status: Option<u16>,
+    pub message: String,
+}
+
+/// Launchers exit with this code after printing a [`Refused`] as JSON on stderr.
+const LAUNCHER_REFUSED: i32 = 6;
+
+/// A Python launcher's refusal, if its exit says it printed one.
+fn launcher_refusal(code: Option<i32>, stderr: &str) -> Option<Refused> {
+    if code != Some(LAUNCHER_REFUSED) {
+        return None;
+    }
+    serde_json::from_str(stderr.trim()).ok()
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 /// Backend descriptor stored on the local run; `kind` discriminates.
 #[derive(Debug, Clone, Serialize, Deserialize)]

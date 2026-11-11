@@ -441,6 +441,8 @@
   "settings_page_no_job_create_permission": "لا صلاحية لإنشاء المهام",
   "settings_page_no_job_write_permission": "لا صلاحيات كتابة",
   "settings_hf_write_permission_help": "هذا الرمز صالح لكنه لا يستطيع إرسال مهام Hugging Face. أنشئ رمزًا بصلاحية كتابة المهام في إعدادات رموز Hugging Face، ثم استبدله هنا.",
+  "settings_page_no_bucket_permission": "لا توجد صلاحيات للحاوية",
+  "settings_hf_bucket_permission_help": "يستطيع هذا الرمز إرسال مهام Hugging Face، لكنه لا يستطيع إنشاء الحاوية الخاصة jobs-artifacts أو الكتابة فيها، وهي التي يُرفع إليها مصدر كل تشغيل. امنح الرمز صلاحية الكتابة على المستودعات والحاويات في إعدادات رموز Hugging Face، ثم استبدله هنا.",
   "settings_page_no_key_on_this_computer_to_register_load": "لا مفتاح على هذا الحاسوب لتسجيله — حمّل مفتاحًا مسجّلًا عبر",
   "settings_page_no_key_on_this_computer_yet_create_one": "لا مفتاح على هذا الحاسوب بعد — أنشئ واحدًا عبر",
   "settings_page_no_slurm_cli": "لا توجد واجهة Slurm لسطر الأوامر",

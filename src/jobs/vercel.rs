@@ -36,7 +36,8 @@ use crate::error::{anyhow, Result};
 ///   cancel <name>         stop the sandbox (the job dies with it)
 ///   finish <name>         stop and destroy the sandbox once the run is over
 ///
-/// Exit 3 = the `vercel` package isn't importable (surfaced as a friendly hint).
+/// Exit 3 = the `vercel` package isn't importable (surfaced as a friendly hint),
+/// 6 = submit created nothing that still runs (`jobs::Refused` on stderr).
 /// `@@LOG_FOLLOW@@` is replaced with [`LOG_FOLLOW_SH`] before the launcher runs.
 const LAUNCHER: &str = r#"
 import sys, json, shlex, subprocess
@@ -67,6 +68,10 @@ def _emit_exit(code):
     out["exitCode"] = code
     print(json.dumps(out))
 
+def _refuse(status, message):
+    sys.stderr.write(json.dumps({"status": status, "message": message}))
+    sys.exit(6)
+
 def submit():
     sandbox, types = _sdk()
     spec = json.load(sys.stdin)
@@ -84,7 +89,13 @@ def submit():
         kwargs["region"] = spec["region"]
     if spec.get("tags"):
         kwargs["tags"] = spec["tags"]
-    box = sandbox.create_sandbox(**kwargs)
+    try:
+        box = sandbox.create_sandbox(**kwargs)
+    except Exception as error:
+        status = getattr(error, "status_code", None)
+        if not isinstance(status, int):
+            raise
+        _refuse(status, "Vercel didn't create the sandbox (HTTP %d): %s" % (status, error))
     try:
         # Secrets ride a 0600 file the job sources, never the sandbox or process
         # env config, which the Sandbox API and dashboard expose.
@@ -111,13 +122,16 @@ def submit():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except BaseException:
+    except BaseException as error:
         try:
             box.stop()
             box.destroy(delete_orphan_snapshots=True)
         except Exception:
-            pass
-        raise
+            raise error
+        if not isinstance(error, Exception):
+            raise
+        _refuse(None, "Could not start the run in Vercel sandbox %s, so orx deleted it: %s"
+                % (box.name, str(error) or type(error).__name__))
     print(json.dumps({"sandboxName": box.name, "processId": proc.id}))
 
 def status(name, pid):
@@ -314,13 +328,14 @@ fn launcher() -> &'static str {
 }
 
 /// The sync API with `SandboxResources` and process handles is in vercel 0.12.
-const VERCEL_ENV: ManagedEnv = ManagedEnv {
+pub(crate) const VERCEL_ENV: ManagedEnv = ManagedEnv {
     name: "vercel",
     label: "Vercel Sandbox",
     min_python: (3, 10),
     requirement: "vercel>=0.12",
     ready_check: "from vercel.sandbox import sync, SandboxResources; \
                   assert hasattr(sync, 'create_sandbox') and hasattr(sync, 'get_sandbox')",
+    override_var: Some("ORX_VERCEL_PYTHON"),
 };
 
 /// Credentials the Sandbox SDK reads from its environment.
@@ -690,24 +705,11 @@ pub fn check_vcpus(vcpus: Option<u32>, limits: &LaunchLimits) -> Result<()> {
     })
 }
 
-fn python_bin() -> String {
-    if let Ok(p) = std::env::var("ORX_VERCEL_PYTHON") {
-        if !p.trim().is_empty() {
-            return p;
-        }
-    }
-    let managed = VERCEL_ENV.python();
-    if managed.exists() {
-        return managed.to_string_lossy().into_owned();
-    }
-    "python3".to_string()
-}
-
 /// Ensure a usable interpreter exists, provisioning the orx-managed venv on
-/// first use. A no-op when `$ORX_VERCEL_PYTHON` is set. Only the launch path
+/// first use. A no-op when `ORX_VERCEL_PYTHON` is set. Only the launch path
 /// calls this — the supervisor relies on the env already being there.
 pub async fn ensure_env() -> Result<()> {
-    if std::env::var("ORX_VERCEL_PYTHON").is_ok_and(|p| !p.trim().is_empty()) {
+    if VERCEL_ENV.override_python().is_some() {
         return Ok(());
     }
     VERCEL_ENV.ensure().await.map_err(|e| {
@@ -795,10 +797,10 @@ fn missing_python_hint(e: &std::io::Error) -> crate::error::Error {
         anyhow!(
             "{} not found on PATH — Vercel Sandbox is driven through its Python SDK. Install \
              Python 3.10+, or point orx at an interpreter with `vercel` via ORX_VERCEL_PYTHON.",
-            python_bin()
+            VERCEL_ENV.interpreter()
         )
     } else {
-        anyhow!("Could not run {}: {}", python_bin(), e)
+        anyhow!("Could not run {}: {}", VERCEL_ENV.interpreter(), e)
     }
 }
 
@@ -808,13 +810,17 @@ fn launcher_error(what: &str, code: Option<i32>, stderr: &str) -> crate::error::
         return anyhow!(
             "The `vercel` Python package isn't importable by {}. Remove {} to force a rebuild, \
              or set ORX_VERCEL_PYTHON to an interpreter that has it.",
-            python_bin(),
+            VERCEL_ENV.interpreter(),
             VERCEL_ENV.dir().display()
         );
     }
+    let hint = plan_limit_hint(stderr);
+    if let Some(mut refused) = super::launcher_refusal(code, stderr) {
+        refused.message.push_str(hint.unwrap_or(""));
+        return refused.into();
+    }
     // The SDK's traceback ends with the useful line.
     let detail = stderr.lines().last().unwrap_or("no stderr");
-    let hint = plan_limit_hint(stderr);
     anyhow!(
         "vercel sandbox {} failed{}: {}{}",
         what,
@@ -849,7 +855,7 @@ fn plan_limit_hint(stderr: &str) -> Option<&'static str> {
 }
 
 async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>> {
-    let mut cmd = crate::process::tokio_command(python_bin());
+    let mut cmd = crate::process::tokio_command(VERCEL_ENV.interpreter());
     cmd.arg("-c")
         .arg(launcher())
         .args(args)
@@ -873,7 +879,7 @@ async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>>
     let out = child
         .wait_with_output()
         .await
-        .map_err(|e| anyhow!("Could not run {}: {}", python_bin(), e))?;
+        .map_err(|e| anyhow!("Could not run {}: {}", VERCEL_ENV.interpreter(), e))?;
     if !out.status.success() {
         return Err(launcher_error(
             args.first().copied().unwrap_or("?"),
@@ -1044,7 +1050,7 @@ pub async fn stream_logs(
 ) -> Result<u64> {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-    let mut child = crate::process::tokio_command(python_bin())
+    let mut child = crate::process::tokio_command(VERCEL_ENV.interpreter())
         .arg("-c")
         .arg(launcher())
         .args(["logs", sandbox_name])
@@ -1104,8 +1110,12 @@ pub async fn stream_logs(
 }
 
 /// Fail fast before source staging or submission if Vercel Sandbox isn't
-/// usable, provisioning the orx-managed env on first use.
-pub async fn preflight() -> Result<()> {
+/// usable, provisioning the orx-managed env on first use. `caller_overrides`
+/// come from the calling shell.
+pub async fn preflight(
+    caller_overrides: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    VERCEL_ENV.require_caller_override(caller_overrides)?;
     ensure_env().await?;
     if token_source().is_none() {
         return Err(anyhow!(
@@ -1114,7 +1124,7 @@ pub async fn preflight() -> Result<()> {
              `vercel env pull`) in the environment."
         ));
     }
-    let probe = crate::process::tokio_command(python_bin())
+    let probe = crate::process::tokio_command(VERCEL_ENV.interpreter())
         .args(["-c", VERCEL_ENV.ready_check])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

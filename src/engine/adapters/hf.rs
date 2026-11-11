@@ -49,7 +49,7 @@ impl Api for HfAccount {
             Some(fence),
         )
         .await
-        .map_err(api::interrupted)?;
+        .map_err(api::launch_error)?;
         Ok(api::handle(intent, vec![job.id]))
     }
     async fn recover(&self, intent: &RunIntent) -> Recovery {

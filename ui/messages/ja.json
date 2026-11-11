@@ -442,6 +442,8 @@
   "settings_page_no_job_create_permission": "ジョブ作成権限がありません",
   "settings_page_no_job_write_permission": "書き込み権限がありません",
   "settings_hf_write_permission_help": "このトークンは有効ですが、Hugging Face Jobs にジョブを送信できません。Hugging Face のトークン設定で Jobs の書き込み権限を持つトークンを作成し、ここで置き換えてください。",
+  "settings_page_no_bucket_permission": "バケットの権限なし",
+  "settings_hf_bucket_permission_help": "このトークンは Hugging Face Jobs を送信できますが、各実行のソースをアップロードする非公開バケット jobs-artifacts を作成したり書き込んだりできません。Hugging Face のトークン設定でリポジトリとバケットへの書き込み権限を付与し、ここで置き換えてください。",
   "settings_page_no_key_on_this_computer_to_register_load": "このコンピューターに登録するキーがありません。次のコマンドで登録済みのキーを読み込んでください",
   "settings_page_no_key_on_this_computer_yet_create_one": "このコンピューターにはまだキーがありません。次のコマンドで作成してください",
   "settings_page_no_slurm_cli": "Slurm CLI がありません",

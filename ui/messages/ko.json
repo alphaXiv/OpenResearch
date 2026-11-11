@@ -442,6 +442,8 @@
   "settings_page_no_job_create_permission": "작업 생성 권한 없음",
   "settings_page_no_job_write_permission": "쓰기 권한 없음",
   "settings_hf_write_permission_help": "이 토큰은 유효하지만 Hugging Face Jobs에 작업을 제출할 수 없습니다. Hugging Face 토큰 설정에서 Jobs 쓰기 권한이 있는 토큰을 생성한 뒤 여기서 교체하세요.",
+  "settings_page_no_bucket_permission": "버킷 권한 없음",
+  "settings_hf_bucket_permission_help": "이 토큰은 Hugging Face Jobs를 제출할 수 있지만, 각 실행의 소스를 업로드하는 비공개 버킷 jobs-artifacts를 만들거나 쓸 수 없습니다. Hugging Face 토큰 설정에서 저장소와 버킷 쓰기 권한을 부여한 뒤 여기서 교체하세요.",
   "settings_page_no_key_on_this_computer_to_register_load": "이 컴퓨터에 등록할 키가 없습니다. 다음 명령으로 등록된 키를 불러오세요",
   "settings_page_no_key_on_this_computer_yet_create_one": "이 컴퓨터에 아직 키가 없습니다. 다음 명령으로 생성하세요",
   "settings_page_no_slurm_cli": "Slurm CLI 없음",

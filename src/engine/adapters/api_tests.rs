@@ -2928,3 +2928,253 @@ async fn hf_exit_evidence_requires_the_provider_failure_format() {
         }
     }
 }
+
+#[tokio::test]
+async fn hf_refusals_fail_the_run_with_the_step_that_refused() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let Ok(real) = crate::jobs::managed_env::base_python((3, 10), "Hugging Face Jobs").await else {
+        crate::config::skip_without_tool("no Python 3.10+ on PATH");
+        return;
+    };
+    let library = root.join("hf-lib/huggingface_hub");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(
+        library.join("__init__.py"),
+        r#"import os
+class HTTPError(Exception):
+    def __init__(self, status, text):
+        super().__init__("%d %s" % (status, text))
+        self.response = type("Response", (), {"status_code": status})()
+def fail_at(step):
+    failing, status = os.environ["ORX_TEST_HF"].split(":")
+    with open(os.environ["ORX_API_ROOT"] + "/launches", "a") as log:
+        log.write(step + "\n")
+    if failing == step:
+        raise HTTPError(int(status), "Payment Required" if status == "402" else "refused")
+class HfApi:
+    def __init__(self, **kwargs): pass
+    def sync_job_volume(self, *args, **kwargs):
+        fail_at("staging")
+        return "volume"
+    def run_job(self, **kwargs):
+        fail_at("job")
+"#,
+    )
+    .unwrap();
+    script(
+        &crate::config::config_dir().join("envs/huggingface/bin/python"),
+        &format!(
+            "#!/bin/sh\nPYTHONPATH='{}' exec '{real}' \"$@\"\n",
+            library.parent().unwrap().display()
+        ),
+    );
+    let archive = root.join("source.tar");
+    std::fs::write(&archive, "snapshot").unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"snapshot"));
+    let metadata = BackendDescriptor::parse(
+        &json!({ "kind":"hf_job", "sourcePath":archive, "sourceDigest":digest, "sourceSize":8 })
+            .to_string(),
+    )
+    .unwrap();
+    let launch = LaunchSpec {
+        kind: "hf_job".into(),
+        target: Some("org".into()),
+        options: json!({
+            "command":["true"], "docker_image":"python", "flavor":"cpu", "environment":{}, "secrets":{}, "timeout_seconds":3600, "labels":{}
+        }),
+    };
+    let adapter = super::api::Adapter::new(
+        HfAccount {
+            namespace: "org".into(),
+        },
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    );
+    let engine = engine(&root);
+    for (run, failure, status, message) in [
+        ("billing", "job:402", "failed", "without billing"),
+        ("bucket", "staging:403", "failed", "org/jobs-artifacts"),
+        (
+            "outage",
+            "job:503",
+            "submitting",
+            "did not create the job in org",
+        ),
+    ] {
+        std::env::set_var("ORX_TEST_HF", failure);
+        engine
+            .submit(&adapter, pending(run, &metadata, &launch))
+            .await
+            .unwrap();
+        let (got, reason) = launch_outcome(&engine, run);
+        assert_eq!(got, status, "{failure}");
+        assert!(reason.contains(message), "{failure}: {reason}");
+        assert!(!reason.contains("staging failed"), "{failure}: {reason}");
+    }
+    let launches = std::fs::read_to_string(root.join("launches")).unwrap();
+    assert_eq!(
+        launches.lines().collect::<Vec<_>>(),
+        ["staging", "job", "staging", "staging", "job", "staging", "job"],
+        "a refusal is never retried; an outage is"
+    );
+}
+
+/// The run's reason: the failure, or what keeps it unreconciled.
+fn launch_outcome(engine: &Engine, run: &str) -> (String, String) {
+    let (row, state) = engine.load(run).unwrap();
+    let reason = match state.contact {
+        crate::store::Contact::Unreconciled { detail, .. } => detail,
+        _ => row.result_markdown.unwrap_or_default(),
+    };
+    (row.status, reason)
+}
+
+#[tokio::test]
+async fn vercel_refusals_fail_the_run_and_conflicts_stay_unknown() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let Ok(real) = crate::jobs::managed_env::base_python((3, 10), "Vercel Sandbox").await else {
+        crate::config::skip_without_tool("no Python 3.10+ on PATH");
+        return;
+    };
+    let package = root.join("vercel-lib/vercel/sandbox");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(root.join("vercel-lib/vercel/__init__.py"), "").unwrap();
+    std::fs::write(
+        package.join("__init__.py"),
+        r#"class SandboxResources:
+    def __init__(self, vcpus=None): self.vcpus = vcpus
+class SandboxApiError(Exception):
+    def __init__(self, status_code):
+        super().__init__("%d from Vercel" % status_code)
+        self.status_code = status_code
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("sync.py"),
+        r#"import os
+from vercel.sandbox import SandboxApiError
+class FS:
+    def write_text(self, *args, **kwargs): raise OSError("disk full")
+class Box:
+    name = "orx-run"
+    fs = FS()
+    def stop(self): pass
+    def destroy(self, **kwargs):
+        open(os.environ["ORX_API_ROOT"] + "/destroyed", "a").write("x")
+def create_sandbox(**kwargs):
+    mode = os.environ["ORX_TEST_VERCEL"]
+    if mode != "setup": raise SandboxApiError(int(mode))
+    return Box()
+"#,
+    )
+    .unwrap();
+    script(
+        &root.join("bin/vercel-python"),
+        &format!(
+            "#!/bin/sh\nPYTHONPATH='{}' exec '{real}' \"$@\"\n",
+            root.join("vercel-lib").display()
+        ),
+    );
+    let engine = engine(&root);
+    let metadata = BackendDescriptor::parse(r#"{"kind":"vercel_job"}"#).unwrap();
+    let launch = LaunchSpec {
+        kind: "vercel_job".into(),
+        target: None,
+        options: json!({
+            "name":"ignored", "script":"true", "image":"python", "vcpus":2, "env":{},
+            "timeout_seconds":60, "session_cap":2700, "region":null, "tags":{},
+            "source_archive":null
+        }),
+    };
+    let adapter = (super::api::provider("vercel_job").unwrap().build)(
+        &crate::engine::handle::ApiAccount {
+            target: None,
+            context: None,
+        },
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    )
+    .unwrap();
+    for (run, mode, status, reason) in [
+        ("quota", "402", "failed", "HTTP 402"),
+        ("setup", "setup", "failed", "orx deleted it"),
+        ("taken", "409", "submitting", "409 from Vercel"),
+    ] {
+        std::env::set_var("ORX_TEST_VERCEL", mode);
+        engine
+            .submit(adapter.as_ref(), pending(run, &metadata, &launch))
+            .await
+            .unwrap();
+        let (got, why) = launch_outcome(&engine, run);
+        assert_eq!(got, status, "{mode}: {why}");
+        assert!(why.contains(reason), "{mode}: {why}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("destroyed")).unwrap(),
+        "x"
+    );
+}
+
+#[tokio::test]
+async fn ray_refusals_fail_the_run_unless_the_job_exists() {
+    use std::sync::Mutex;
+    type Answers = Arc<Mutex<(u16, bool)>>;
+    async fn api(
+        State(answers): State<Answers>,
+        method: axum::http::Method,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let (status, exists) = *answers.lock().unwrap();
+        if method == axum::http::Method::POST {
+            let status = axum::http::StatusCode::from_u16(status).unwrap();
+            return (status, "Job with submission_id already exists").into_response();
+        }
+        if exists {
+            Json(json!({"status":"RUNNING"})).into_response()
+        } else {
+            axum::http::StatusCode::NOT_FOUND.into_response()
+        }
+    }
+    let answers: Answers = Arc::new(Mutex::new((400, false)));
+    let app = Router::new().fallback(any(api)).with_state(answers.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let root = std::env::temp_dir().join(format!("orx-ray-refused-{}", uuid::Uuid::new_v4()));
+    let engine = engine(&root);
+    let metadata = BackendDescriptor::parse(r#"{"kind":"ray_job"}"#).unwrap();
+    let launch = LaunchSpec {
+        kind: "ray_job".into(),
+        target: Some(address.clone()),
+        options: json!({
+            "entrypoint":"true", "submission_id":"ignored", "resources":{"cpus":1.0,"gpus":0.0,"memory_bytes":null}, "env":{}, "metadata":{}, "working_dir":null
+        }),
+    };
+    let adapter = super::api::Adapter::new(
+        RayAccount { address },
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    );
+    for (run, status, exists, expected, reason) in [
+        ("refused", 400, false, "failed", "HTTP 400"),
+        ("duplicate", 400, true, "starting", ""),
+        ("limited", 429, false, "submitting", "HTTP 429"),
+    ] {
+        *answers.lock().unwrap() = (status, exists);
+        engine
+            .submit(&adapter, pending(run, &metadata, &launch))
+            .await
+            .unwrap();
+        let (got, why) = launch_outcome(&engine, run);
+        assert_eq!(got, expected, "{run}: {why}");
+        assert!(why.contains(reason), "{run}: {why}");
+    }
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(root).unwrap();
+}

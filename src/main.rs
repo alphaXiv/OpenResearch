@@ -706,6 +706,10 @@ pub struct ExpRunArgs {
     #[arg(skip)]
     #[serde(default)]
     pub caller_config_dir: Option<std::path::PathBuf>,
+    /// The caller's interpreter overrides (`ORX_MODAL_PYTHON`, …), which must be the server's.
+    #[arg(skip)]
+    #[serde(default)]
+    pub caller_python_overrides: std::collections::BTreeMap<String, String>,
 }
 
 /// Markers the native agent CLIs export to their shells; nested agents are `unknown`.

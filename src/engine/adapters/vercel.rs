@@ -33,7 +33,7 @@ impl Api for VercelAccount {
         spec.env.extend(crate::config::launch_env(&intent.run.id));
         vercel::strip_credentials(&mut spec.env);
         vercel::ensure_env().await.map_err(api::rejected)?;
-        let submitted = vercel::run_job(&spec).await.map_err(api::interrupted)?;
+        let submitted = vercel::run_job(&spec).await.map_err(api::launch_error)?;
         Ok(api::handle(intent, vec![submitted.sandbox_name, submitted.process_id]))
     }
 

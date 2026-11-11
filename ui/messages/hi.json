@@ -442,6 +442,8 @@
   "settings_page_no_job_create_permission": "जॉब बनाने की अनुमति नहीं",
   "settings_page_no_job_write_permission": "लिखने की अनुमति नहीं",
   "settings_hf_write_permission_help": "यह टोकन मान्य है, पर Hugging Face Jobs सबमिट नहीं कर सकता। Hugging Face टोकन सेटिंग्स में Jobs राइट अनुमति वाला टोकन बनाएं, फिर इसे यहाँ बदलें।",
+  "settings_page_no_bucket_permission": "बकेट अनुमति नहीं",
+  "settings_hf_bucket_permission_help": "यह टोकन Hugging Face Jobs सबमिट कर सकता है, पर निजी jobs-artifacts बकेट नहीं बना सकता या उसमें लिख नहीं सकता, जहाँ हर रन का सोर्स अपलोड होता है। Hugging Face टोकन सेटिंग्स में टोकन को रिपॉज़िटरी और बकेट पर लिखने की अनुमति दें, फिर इसे यहाँ बदलें।",
   "settings_page_no_key_on_this_computer_to_register_load": "इस कंप्यूटर पर रजिस्टर करने के लिए कोई की नहीं है — इसके साथ एक रजिस्टर्ड की लोड करें",
   "settings_page_no_key_on_this_computer_yet_create_one": "इस कंप्यूटर पर अभी तक कोई की नहीं है — इसके साथ एक बनाएं",
   "settings_page_no_slurm_cli": "कोई Slurm CLI नहीं",

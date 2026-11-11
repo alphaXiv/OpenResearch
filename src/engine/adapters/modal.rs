@@ -19,7 +19,7 @@ impl Api for ModalAccount {
         modal::run_job(&spec)
             .await
             .map(|sandbox| api::handle(intent, vec![sandbox]))
-            .map_err(api::interrupted)
+            .map_err(api::launch_error)
     }
     async fn recover(&self, _intent: &RunIntent) -> Recovery {
         api::unknown(

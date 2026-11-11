@@ -28,8 +28,11 @@ use crate::error::{anyhow, Result};
 ///   status <id>     -> prints {"stage": "...", "message": "..."?}
 ///   logs   <id>     streams the sandbox's merged stdout/stderr, line per line
 ///   cancel <id>     terminate the sandbox
+///   auth            one authenticated call that checks the configured token
 ///
-/// Exit 3 = the `modal` package isn't importable (surfaced as a friendly hint).
+/// Exit 3 = the `modal` package isn't importable (surfaced as a friendly hint),
+/// 4 = Modal rejected the token, 5 = the token check could not reach Modal,
+/// 6 = submit failed and terminated its sandbox (`jobs::Refused` on stderr).
 const LAUNCHER: &str = r#"
 import sys, json
 
@@ -46,9 +49,11 @@ def submit():
     spec = json.load(sys.stdin)
     app = modal.App.lookup(spec.get("app", "openresearch"), create_if_missing=True)
     # Registry images rarely ship uv; append it to PATH so an image's own uv still wins.
+    # The run command replaces an image ENTRYPOINT (vllm-openai's is `vllm serve`), as on k8s.
     image = modal.Image.from_registry(spec["image"]).dockerfile_commands(
         "COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /uvx /opt/orx-uv/",
         "ENV PATH=$PATH:/opt/orx-uv",
+        "ENTRYPOINT []",
     )
     kwargs = {
         "app": app,
@@ -69,14 +74,29 @@ def submit():
     tags = spec.get("tags") or {}
     if tags:
         kwargs["tags"] = tags
-    sb = modal.Sandbox.create("bash", "-c", spec["script"], **kwargs)
+    # Only stdout reaches the run log, so even a failure to start bash lands there.
+    sb = modal.Sandbox.create(
+        "sh", "-c", 'exec 2>&1; exec bash -c "$1"', "orx", spec["script"], **kwargs
+    )
     if spec.get("sourceArchive"):
         try:
             sb.filesystem.copy_from_local(spec["sourceArchive"], "/tmp/orx-source.tar")
             sb.exec("touch", "/tmp/orx-source.tar.ready").wait()
-        except Exception:
+        except Exception as error:
+            code = sb.poll()
             sb.terminate()
-            raise
+            if code is None:
+                message = "Could not copy the run's source into the Modal sandbox: %s" % (
+                    str(error) or type(error).__name__)
+            else:
+                try:
+                    output = "".join(sb.stdout.read().splitlines(True)[-20:])
+                except Exception:
+                    output = ""
+                message = "The Modal sandbox exited with code %d before its source arrived.\n%s" % (
+                    code, output)
+            sys.stderr.write(json.dumps({"status": None, "message": message}))
+            sys.exit(6)
     print(json.dumps({"sandboxId": sb.object_id}))
 
 def status(sid):
@@ -106,6 +126,18 @@ def cancel(sid):
     modal = _modal()
     modal.Sandbox.from_id(sid).terminate()
 
+def auth():
+    modal = _modal()
+    from modal.exception import AuthError
+    try:
+        modal.Client.from_env().hello()
+    except AuthError as error:
+        sys.stderr.write(str(error))
+        sys.exit(4)
+    except Exception as error:
+        sys.stderr.write(str(error) or type(error).__name__)
+        sys.exit(5)
+
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 if cmd == "submit":
     submit()
@@ -115,48 +147,33 @@ elif cmd == "logs":
     logs(sys.argv[2])
 elif cmd == "cancel":
     cancel(sys.argv[2])
+elif cmd == "auth":
+    auth()
 else:
     sys.stderr.write("unknown launcher subcommand: %r" % cmd)
     sys.exit(2)
 "#;
 
 /// `Sandbox.create(tags=...)` arrived in modal 1.4.3, which requires Python 3.10.
-const MODAL_ENV: ManagedEnv = ManagedEnv {
+pub(crate) const MODAL_ENV: ManagedEnv = ManagedEnv {
     name: "modal",
     label: "Modal",
     min_python: (3, 10),
     requirement: "modal>=1.4.3",
     ready_check:
         "import inspect, modal; assert 'tags' in inspect.signature(modal.Sandbox.create).parameters",
+    override_var: Some("ORX_MODAL_PYTHON"),
 };
-
-/// The Python interpreter the launcher runs with — resolved with NO side
-/// effects, so it's safe to call from the detached supervisor:
-///   1. `$ORX_MODAL_PYTHON` (explicit override)
-///   2. the orx-managed venv, once `ensure_env` has provisioned it
-///   3. system `python3` (bootstrap / detection fallback)
-fn python_bin() -> String {
-    if let Ok(p) = std::env::var("ORX_MODAL_PYTHON") {
-        if !p.trim().is_empty() {
-            return p;
-        }
-    }
-    let managed = MODAL_ENV.python();
-    if managed.exists() {
-        return managed.to_string_lossy().into_owned();
-    }
-    "python3".to_string()
-}
 
 /// Ensure a usable Modal interpreter exists, provisioning the orx-managed venv
 /// on first use so `--backend modal` "just works" without the user pip-installing
 /// `modal` or setting `ORX_MODAL_PYTHON`. Idempotent and fast once built; a
-/// no-op when `$ORX_MODAL_PYTHON` is set (the user owns that interpreter).
+/// no-op when `ORX_MODAL_PYTHON` is set (the user owns that interpreter).
 /// Prints one-time progress to stderr. Only the launch path calls this — the
 /// supervisor relies on the env already being there.
 pub async fn ensure_env() -> Result<()> {
-    if std::env::var("ORX_MODAL_PYTHON").is_ok_and(|p| !p.trim().is_empty()) {
-        return Ok(()); // explicit override — trust it, don't provision
+    if MODAL_ENV.override_python().is_some() {
+        return Ok(());
     }
     MODAL_ENV.ensure().await.map_err(|e| {
         anyhow!(
@@ -192,21 +209,42 @@ fn missing_python_hint(e: &std::io::Error) -> crate::error::Error {
             "{} not found on PATH — Modal is driven through its Python SDK. Install Python 3 \
              and `pip install modal`, then `modal token new` (or set MODAL_TOKEN_ID / \
              MODAL_TOKEN_SECRET). Point orx at a specific interpreter with ORX_MODAL_PYTHON.",
-            python_bin()
+            MODAL_ENV.interpreter()
         )
     } else {
-        anyhow!("Could not run {}: {}", python_bin(), e)
+        anyhow!("Could not run {}: {}", MODAL_ENV.interpreter(), e)
     }
 }
 
-/// Map a launcher non-zero exit into a useful error (exit 3 = no `modal`).
+/// Map a launcher non-zero exit into a useful error (exit codes at `LAUNCHER`).
 fn launcher_error(what: &str, code: Option<i32>, stderr: &str) -> crate::error::Error {
     let stderr = stderr.trim();
     if code == Some(3) || stderr == "modal-not-installed" {
         return anyhow!(
             "The `modal` Python package isn't importable by {}. Run `pip install modal` \
              (and `modal token new`), or set ORX_MODAL_PYTHON to an interpreter that has it.",
-            python_bin()
+            MODAL_ENV.interpreter()
+        );
+    }
+    if code == Some(4) {
+        let source = match token_source() {
+            Some("env") => "orx up's environment",
+            Some("syncedEnv") => "Settings → Environment",
+            _ => "~/.modal.toml",
+        };
+        return anyhow!(
+            "Modal didn't accept the token in {source} ({stderr}). Run `modal token new`, or \
+             replace MODAL_TOKEN_ID and MODAL_TOKEN_SECRET in {source}, then run \
+             `orx compute test modal`."
+        );
+    }
+    if let Some(refused) = super::launcher_refusal(code, stderr) {
+        return refused.into();
+    }
+    if code == Some(5) {
+        return anyhow!(
+            "Could not reach Modal to check the token ({stderr}). Check your connection and run \
+             `orx compute test modal` again."
         );
     }
     anyhow!(
@@ -221,9 +259,14 @@ fn launcher_error(what: &str, code: Option<i32>, stderr: &str) -> crate::error::
     )
 }
 
-/// Run the launcher and capture its output (submit / status / cancel).
-async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>> {
-    let mut cmd = crate::process::tokio_command(python_bin());
+/// Run the launcher and capture its output. A launcher past `limit` is killed and fails with
+/// exit 5's error.
+async fn launcher_capture(
+    args: &[&str],
+    stdin: Option<&str>,
+    limit: Option<Duration>,
+) -> Result<Vec<u8>> {
+    let mut cmd = crate::process::tokio_command(MODAL_ENV.interpreter());
     cmd.arg("-c")
         .arg(LAUNCHER)
         .args(args)
@@ -237,7 +280,8 @@ async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>>
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(limit.is_some());
     let mut child = cmd.spawn().map_err(|e| missing_python_hint(&e))?;
     if let Some(input) = stdin {
         use tokio::io::AsyncWriteExt as _;
@@ -246,10 +290,18 @@ async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>>
             drop(pipe); // EOF
         }
     }
-    let out = child
-        .wait_with_output()
-        .await
-        .map_err(|e| anyhow!("Could not run {}: {}", python_bin(), e))?;
+    let output = child.wait_with_output();
+    let out = match limit {
+        Some(limit) => tokio::time::timeout(limit, output).await.map_err(|_| {
+            launcher_error(
+                args.first().copied().unwrap_or("?"),
+                Some(5),
+                &format!("no answer within {} seconds", limit.as_secs()),
+            )
+        })?,
+        None => output.await,
+    }
+    .map_err(|e| anyhow!("Could not run {}: {}", MODAL_ENV.interpreter(), e))?;
     if !out.status.success() {
         return Err(launcher_error(
             args.first().copied().unwrap_or("?"),
@@ -331,16 +383,13 @@ pub struct ModalJobSpec {
 
 /// Submit the sandbox; returns its object id (the reattach handle).
 pub async fn run_job(spec: &ModalJobSpec) -> Result<String> {
-    // Merge stderr into stdout for the whole script so the single stdout stream
-    // the launcher tails carries everything.
-    let merged = format!("{{\n{}\n}} 2>&1", spec.script);
     // Default the sandbox's Python to unbuffered so the job's own prints stream
     // live instead of block-buffering behind a pipe (see jobs::default_python_env).
     let env = super::default_python_env(&spec.env);
     let body = json!({
         "app": spec.app,
         "image": spec.image,
-        "script": merged,
+        "script": spec.script,
         "gpu": spec.gpu,
         "cpu": spec.cpu,
         "memory": spec.memory,
@@ -349,7 +398,7 @@ pub async fn run_job(spec: &ModalJobSpec) -> Result<String> {
         "tags": spec.tags,
         "sourceArchive": spec.source_archive,
     });
-    let out = launcher_capture(&["submit"], Some(&body.to_string())).await?;
+    let out = launcher_capture(&["submit"], Some(&body.to_string()), None).await?;
     let v: Value = serde_json::from_slice(&out).map_err(|e| {
         anyhow!(
             "Unreadable modal submit output: {} ({:?})",
@@ -373,7 +422,7 @@ pub struct JobState {
 }
 
 pub async fn inspect_job(sandbox_id: &str) -> Result<JobState> {
-    let out = launcher_capture(&["status", sandbox_id], None).await?;
+    let out = launcher_capture(&["status", sandbox_id], None, None).await?;
     let v: Value = serde_json::from_slice(&out)
         .map_err(|e| anyhow!("Unreadable modal status output: {}", e))?;
     Ok(JobState {
@@ -391,7 +440,7 @@ pub async fn inspect_job(sandbox_id: &str) -> Result<JobState> {
 }
 
 pub async fn cancel_job(sandbox_id: &str) -> Result<()> {
-    launcher_capture(&["cancel", sandbox_id], None).await?;
+    launcher_capture(&["cancel", sandbox_id], None, None).await?;
     Ok(())
 }
 
@@ -409,7 +458,7 @@ pub async fn stream_logs(
 ) -> Result<u64> {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-    let mut child = crate::process::tokio_command(python_bin())
+    let mut child = crate::process::tokio_command(MODAL_ENV.interpreter())
         .arg("-c")
         .arg(LAUNCHER)
         .args(["logs", sandbox_id])
@@ -459,6 +508,9 @@ pub async fn stream_logs(
     Ok(seen.max(skip))
 }
 
+/// Modal's client keeps retrying an unreachable server for about a minute.
+const TOKEN_CHECK_LIMIT: Duration = Duration::from_secs(10);
+
 /// Detected Modal readiness for preflight.
 pub struct ModalStatus {
     pub modal_importable: bool,
@@ -469,7 +521,11 @@ pub struct ModalStatus {
 /// Fail fast before doing any source staging or provider submission if
 /// Modal isn't usable — provisioning the orx-managed env on first use. Returns
 /// a friendly, actionable error otherwise.
-pub async fn preflight() -> Result<()> {
+/// `caller_overrides` come from the calling shell.
+pub async fn preflight(
+    caller_overrides: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    MODAL_ENV.require_caller_override(caller_overrides)?;
     // Build the managed venv on first launch (no-op once it exists).
     ensure_env().await?;
     let s = detect().await;
@@ -477,7 +533,7 @@ pub async fn preflight() -> Result<()> {
         return Err(anyhow!(
             "The `modal` SDK isn't importable by {} ({}). Remove {} to force a rebuild, or set \
              ORX_MODAL_PYTHON to an interpreter that has it.",
-            python_bin(),
+            MODAL_ENV.interpreter(),
             s.error.as_deref().unwrap_or("import modal failed"),
             MODAL_ENV.dir().display()
         ));
@@ -488,6 +544,12 @@ pub async fn preflight() -> Result<()> {
              MODAL_TOKEN_SECRET in the process environment or Settings → Environment."
         ));
     }
+    launcher_capture(
+        &["auth"],
+        None,
+        Some(crate::config::paced(TOKEN_CHECK_LIMIT)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -589,7 +651,7 @@ pub async fn detect() -> ModalStatus {
         token_configured,
         error,
     };
-    let probe = crate::process::tokio_command(python_bin())
+    let probe = crate::process::tokio_command(MODAL_ENV.interpreter())
         .arg("-c")
         .arg("import modal")
         .stdin(Stdio::null())
@@ -598,9 +660,10 @@ pub async fn detect() -> ModalStatus {
         .output()
         .await;
     match probe {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            mk(false, Some(format!("{} not found on PATH", python_bin())))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => mk(
+            false,
+            Some(format!("{} not found on PATH", MODAL_ENV.interpreter())),
+        ),
         Err(e) => mk(false, Some(e.to_string())),
         Ok(out) if out.status.success() => mk(true, None),
         Ok(out) => mk(
@@ -704,7 +767,7 @@ mod credential_tests {
     }
 
     #[tokio::test]
-    async fn submit_puts_uv_on_the_sandbox_path() {
+    async fn submit_prepares_the_registry_image_and_merges_stderr() {
         let Ok(python) =
             crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
         else {
@@ -731,7 +794,11 @@ class Sandbox:
     object_id = "sb-1"
     @classmethod
     def create(cls, *args, **kwargs):
+        import subprocess
         assert kwargs["image"] is Image.with_uv, "sandbox did not get the uv image"
+        # Modal's run log is the sandbox's stdout alone.
+        ran = subprocess.run(list(args), capture_output=True, text=True)
+        sys.stderr.write("\nstdout=%r stderr=%r" % (ran.stdout, ran.stderr))
         return cls()
 "#,
         )
@@ -748,7 +815,7 @@ class Sandbox:
             .stdin
             .take()
             .unwrap()
-            .write_all(br#"{"image": "python:3.12", "script": "true"}"#)
+            .write_all(br#"{"image": "python:3.12", "script": "echo out; echo err >&2"}"#)
             .unwrap();
         let out = child.wait_with_output().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -767,5 +834,166 @@ class Sandbox:
                 .any(|line| line == "ENV PATH=$PATH:/opt/orx-uv"),
             "{stderr}"
         );
+        assert!(
+            stderr.lines().any(|line| line == "ENTRYPOINT []"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(r"stdout='out\nerr\n' stderr=''"),
+            "{stderr}"
+        );
+    }
+
+    /// Points `ORX_MODAL_PYTHON` at a real interpreter that imports `module` as `modal`.
+    #[cfg(not(windows))]
+    fn fake_modal(python: &str, module: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("orx-modal-sdk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("modal")).unwrap();
+        std::fs::write(dir.join("modal").join("__init__.py"), module).unwrap();
+        std::fs::write(
+            dir.join("modal").join("exception.py"),
+            "class AuthError(Exception): pass\n",
+        )
+        .unwrap();
+        let wrapper = dir.join("python");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nPYTHONPATH={} exec {python} \"$@\"\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("ORX_MODAL_PYTHON", &wrapper);
+        dir
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_sandbox_that_exits_before_its_source_fails_the_launch_with_its_output() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
+            return;
+        };
+        let dir = fake_modal(
+            python,
+            r#"import io, subprocess
+class App:
+    @staticmethod
+    def lookup(name, create_if_missing): return name
+class Image:
+    @staticmethod
+    def from_registry(tag): return Image()
+    def dockerfile_commands(self, *cmds): return self
+class Secret:
+    @staticmethod
+    def from_dict(env): return env
+class Filesystem:
+    def __init__(self, sandbox): self.sandbox = sandbox
+    def copy_from_local(self, local, remote):
+        raise RuntimeError("Sandbox is not running")
+class Sandbox:
+    object_id = "sb-1"
+    @classmethod
+    def create(cls, *args, **kwargs):
+        sb = cls()
+        ran = subprocess.run(list(args), capture_output=True, text=True)
+        sb.code, sb.stdout = ran.returncode, io.StringIO(ran.stdout)
+        sb.filesystem = Filesystem(sb)
+        return sb
+    def poll(self): return self.code
+    def terminate(self): pass
+"#,
+        );
+        let spec = ModalJobSpec {
+            script: "echo 'bash: not found' >&2; exit 127".into(),
+            image: "alpine".into(),
+            gpu: None,
+            cpu: None,
+            memory: None,
+            env: HashMap::new(),
+            timeout_seconds: 60,
+            app: "openresearch".into(),
+            tags: HashMap::new(),
+            source_archive: Some(dir.join("source.tar")),
+        };
+        let error = run_job(&spec).await.unwrap_err();
+        std::fs::remove_dir_all(dir).unwrap();
+        let refused = error
+            .downcast_ref::<super::super::Refused>()
+            .unwrap_or_else(|| panic!("not a definite failure: {error}"));
+        assert_eq!(refused.status, None);
+        assert!(refused.message.contains("code 127"), "{refused}");
+        assert!(refused.message.contains("bash: not found"), "{refused}");
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn preflight_checks_the_token_with_modal() {
+        if !crate::config::in_test_child(&["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]) {
+            return;
+        }
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
+            return;
+        };
+        let dir = fake_modal(
+            python,
+            r#"import os
+from . import exception
+class Client:
+    @staticmethod
+    def from_env(): return Client()
+    def hello(self):
+        mode = os.environ["ORX_TEST_MODAL_AUTH"]
+        if mode == "rejected": raise exception.AuthError("Token validation failed")
+        if mode == "offline": raise ConnectionError("Could not connect to api.modal.com")
+        if mode == "hang": import time; time.sleep(600)
+"#,
+        );
+        std::env::set_var("MODAL_TOKEN_ID", "ak-1");
+        std::env::set_var("MODAL_TOKEN_SECRET", "as-1");
+        std::env::set_var("ORX_TEST_SPEEDUP", "4");
+        let none = std::collections::BTreeMap::new();
+
+        std::env::set_var("ORX_TEST_MODAL_AUTH", "ok");
+        preflight(&none).await.unwrap();
+
+        std::env::set_var("ORX_TEST_MODAL_AUTH", "rejected");
+        let error = preflight(&none).await.unwrap_err().to_string();
+        assert!(error.contains("didn't accept the token"), "{error}");
+        assert!(error.contains("orx up's environment"), "{error}");
+        assert!(error.contains("Token validation failed"), "{error}");
+
+        std::env::set_var("ORX_TEST_MODAL_AUTH", "offline");
+        let error = preflight(&none).await.unwrap_err().to_string();
+        assert!(error.contains("Could not reach Modal"), "{error}");
+
+        std::env::set_var("ORX_TEST_MODAL_AUTH", "hang");
+        let started = std::time::Instant::now();
+        let error = preflight(&none).await.unwrap_err().to_string();
+        assert!(error.contains("Could not reach Modal"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(30), "{error}");
+
+        std::env::set_var("ORX_TEST_MODAL_AUTH", "ok");
+        let caller = std::collections::BTreeMap::from([(
+            "ORX_MODAL_PYTHON".to_string(),
+            "/opt/py312/bin/python".to_string(),
+        )]);
+        let error = preflight(&caller).await.unwrap_err().to_string();
+        assert!(
+            error.contains("This shell sets ORX_MODAL_PYTHON"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
