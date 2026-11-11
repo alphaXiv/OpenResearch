@@ -1,5 +1,5 @@
-//! The `login` command: one browser trip to alphaXiv, which signs in to
-//! OpenResearch and keeps alphaXiv tokens for the library.
+//! The `login` command: one trip to alphaXiv, which signs in to OpenResearch and
+//! keeps alphaXiv tokens for the library.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -14,31 +14,31 @@ use crate::error::{anyhow, Result};
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub async fn run(args: crate::LoginArgs) -> Result<()> {
-    let (api_url, linking) = if args.alphaxiv {
-        let creds = load_credentials()
-            .await?
-            .ok_or_else(|| anyhow!("Not logged in. Run `orx login` first."))?;
-        (creds.api_url, Some(creds.token))
+    let device = args.device || crate::remote::detect_ssh_session().is_some();
+    let command = if args.alphaxiv {
+        "orx login --alphaxiv"
     } else {
-        (args.api_url.unwrap_or_else(default_api_url), None)
+        "orx login"
+    };
+    let show = |prompt: Prompt| match prompt {
+        Prompt::Browser(url) => {
+            println!("Opening your browser to sign in with alphaXiv\u{2026}");
+            println!("If it doesn't open, visit:\n  {url}\n");
+            println!("Signing in from another device? Run `{command} --device`.\n");
+        }
+        Prompt::Device { url, code } => {
+            println!("To sign in with alphaXiv, open this link on any device and approve the code {code}:");
+            println!("  {url}\n");
+        }
     };
 
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let authorization = crate::alphaxiv::Authorization::new(listener.local_addr()?.port())?;
-    println!("Opening your browser to sign in with alphaXiv\u{2026}");
-    println!("If it doesn't open, visit:\n  {}\n", authorization.url);
-    open_browser(&authorization.url, None);
-
-    tokio::time::timeout(
-        LOGIN_TIMEOUT,
-        complete(&listener, &authorization, api_url, linking),
-    )
-    .await
-    .map_err(|_| anyhow!("Sign-in timed out after 15 minutes."))??;
     if args.alphaxiv {
+        connect_alphaxiv(device, show).await?;
         println!("\u{2713} alphaXiv connected.");
         return Ok(());
     }
+    let api_url = args.api_url.unwrap_or_else(default_api_url);
+    sign_in(api_url, None, device, show).await?;
     println!("\u{2713} Logged in. Credentials saved.");
     if args.non_interactive {
         return Ok(());
@@ -52,9 +52,85 @@ pub async fn run(args: crate::LoginArgs) -> Result<()> {
     Ok(())
 }
 
-/// Waits for alphaXiv to send the browser back, signs in to OpenResearch with
-/// the id_token, or links it to the account whose personal access token is
-/// `linking`, keeps both credentials, and tells the browser how it went.
+/// Where the user approves a sign-in: this computer's browser, which orx opens,
+/// or alphaXiv's page for a code, opened on any device.
+pub enum Prompt<'a> {
+    Browser(&'a str),
+    Device { url: &'a str, code: &'a str },
+}
+
+/// Connects alphaXiv to this computer's OpenResearch sign-in.
+pub async fn connect_alphaxiv(device: bool, show: impl FnOnce(Prompt)) -> Result<Credentials> {
+    let creds = load_credentials()
+        .await?
+        .ok_or_else(|| anyhow!("Not logged in. Run `orx login` first."))?;
+    sign_in(creds.api_url, Some(creds.token), device, show).await
+}
+
+/// One trip to alphaXiv, through this computer's browser or, with `device`, a
+/// code approved anywhere; then [`keep`].
+async fn sign_in(
+    api_url: String,
+    linking: Option<String>,
+    device: bool,
+    show: impl FnOnce(Prompt),
+) -> Result<Credentials> {
+    if device {
+        let authorization = crate::alphaxiv::DeviceAuthorization::start().await?;
+        show(Prompt::Device {
+            url: &authorization.url,
+            code: &authorization.code,
+        });
+        let (tokens, id_token) = authorization.redeem().await?;
+        return keep(tokens, id_token, api_url, linking).await;
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let authorization = crate::alphaxiv::Authorization::new(listener.local_addr()?.port())?;
+    show(Prompt::Browser(&authorization.url));
+    open_browser(&authorization.url, None);
+    tokio::time::timeout(
+        LOGIN_TIMEOUT,
+        complete(&listener, &authorization, api_url, linking),
+    )
+    .await
+    .map_err(|_| anyhow!("Sign-in timed out after 15 minutes."))?
+}
+
+/// Signs in to OpenResearch with the id_token, or links it to the account whose
+/// personal access token is `linking`, and keeps both credentials. On failure
+/// the tokens are revoked and nothing changes.
+async fn keep(
+    tokens: crate::alphaxiv::Tokens,
+    id_token: String,
+    api_url: String,
+    linking: Option<String>,
+) -> Result<Credentials> {
+    let kept: Result<Credentials> = async {
+        match linking {
+            Some(token) => {
+                let creds = Credentials { api_url, token };
+                crate::client::link_alphaxiv(&creds, &id_token).await?;
+                crate::alphaxiv::store(&tokens, None).await?;
+                Ok(creds)
+            }
+            None => {
+                let token = crate::client::alphaxiv_desktop_token(&api_url, &id_token).await?;
+                let creds = Credentials { api_url, token };
+                crate::alphaxiv::store(&tokens, Some(&creds)).await?;
+                Ok(creds)
+            }
+        }
+    }
+    .await;
+    if kept.is_err() {
+        crate::alphaxiv::revoke(&tokens).await;
+    }
+    kept
+}
+
+/// Waits for alphaXiv to send the browser back, keeps the sign-in, and tells
+/// the browser how it went.
 async fn complete(
     listener: &TcpListener,
     authorization: &crate::alphaxiv::Authorization,
@@ -64,27 +140,7 @@ async fn complete(
     let (mut browser, code) = accept_callback(listener, &authorization.state).await?;
     let finished = async {
         let (tokens, id_token) = authorization.redeem(&code).await?;
-        let kept: Result<Credentials> = async {
-            match linking {
-                Some(token) => {
-                    let creds = Credentials { api_url, token };
-                    crate::client::link_alphaxiv(&creds, &id_token).await?;
-                    crate::alphaxiv::store(&tokens, None).await?;
-                    Ok(creds)
-                }
-                None => {
-                    let token = crate::client::alphaxiv_desktop_token(&api_url, &id_token).await?;
-                    let creds = Credentials { api_url, token };
-                    crate::alphaxiv::store(&tokens, Some(&creds)).await?;
-                    Ok(creds)
-                }
-            }
-        }
-        .await;
-        if kept.is_err() {
-            crate::alphaxiv::revoke(&tokens).await;
-        }
-        kept
+        keep(tokens, id_token, api_url, linking).await
     }
     .await;
 
@@ -409,6 +465,7 @@ mod tests {
                 api_url: Some(api),
                 non_interactive: true,
                 alphaxiv: false,
+                device: false,
             })
             .await
             .unwrap();
@@ -607,5 +664,214 @@ mod tests {
         );
         assert_eq!(stored_refresh_token(), "refresh-3");
         assert_eq!(load_credentials().await.unwrap().unwrap().token, "pat-1");
+    }
+
+    /// A fake alphaXiv's device authorization (RFC 8628): the token endpoint
+    /// answers each poll with the next of `answers`, then issues tokens.
+    #[derive(Default)]
+    struct Device {
+        unsupported: bool,
+        link: Option<String>,
+        expires_in: u64,
+        code_requests: Vec<HashMap<String, String>>,
+        answers: std::collections::VecDeque<&'static str>,
+        polls: Vec<std::time::Instant>,
+        issued: usize,
+    }
+
+    type DeviceState = State<Arc<Mutex<Device>>>;
+
+    async fn device_code(
+        State(device): DeviceState,
+        headers: HeaderMap,
+        Form(form): Form<HashMap<String, String>>,
+    ) -> Response {
+        let mut device = device.lock().unwrap();
+        if device.unsupported {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        device.code_requests.push(form);
+        let site = format!("http://{}", headers["host"].to_str().unwrap());
+        Json(json!({
+            "device_code": "device-1",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": format!("{site}/device"),
+            "verification_uri_complete": device.link.clone().unwrap_or(format!("{site}/device?user_code=ABCD-EFGH")),
+            "expires_in": device.expires_in,
+            "interval": 1,
+        }))
+        .into_response()
+    }
+
+    async fn device_token(
+        State(device): DeviceState,
+        Form(form): Form<HashMap<String, String>>,
+    ) -> Response {
+        let mut device = device.lock().unwrap();
+        assert_eq!(
+            form["grant_type"],
+            "urn:ietf:params:oauth:grant-type:device_code"
+        );
+        assert_eq!(form["device_code"], "device-1");
+        assert_eq!(form["client_id"], "openresearch-desktop");
+        assert!(form["resource"].ends_with("/mcp/v1"));
+        device.polls.push(std::time::Instant::now());
+        if let Some(error) = device.answers.pop_front() {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
+        }
+        device.issued += 1;
+        let n = device.issued;
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(json!({ "sub": "ax-1" }).to_string());
+        Json(json!({
+            "access_token": format!("device-access-{n}"),
+            "refresh_token": format!("device-refresh-{n}"),
+            "expires_in": 3600,
+            "token_type": "Bearer",
+            "id_token": format!("e30.{claims}.sig"),
+        }))
+        .into_response()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_code_approved_on_another_device_connects_alphaxiv() {
+        if !crate::config::in_test_child(&[
+            "ALPHAXIV_API_URL",
+            "ALPHAXIV_WEB_URL",
+            "SSH_CONNECTION",
+            "SSH_TTY",
+            "SSH_CLIENT",
+        ]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "100");
+
+        let device = Arc::new(Mutex::new(Device {
+            expires_in: 600,
+            ..Default::default()
+        }));
+        let upstream = Arc::new(Mutex::new(Upstream::default()));
+        let app = Router::new()
+            .route("/auth/device/code", post(device_code))
+            .route("/auth/oauth2/token", post(device_token))
+            .with_state(device.clone())
+            .merge(
+                Router::new()
+                    .route("/auth/oauth2/revoke", post(revoke))
+                    .route("/auth/alphaxiv/link", post(link))
+                    .with_state(upstream.clone()),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        std::env::set_var("ALPHAXIV_API_URL", &api);
+        std::env::set_var("ALPHAXIV_WEB_URL", &api);
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        crate::config::save_credentials(&Credentials {
+            api_url: api.clone(),
+            token: "pat-1".into(),
+        })
+        .await
+        .unwrap();
+
+        let connect = |answers: &[&'static str]| {
+            let mut device = device.lock().unwrap();
+            device.answers = answers.iter().copied().collect();
+            device.polls.clear();
+            async {
+                let mut shown = None;
+                let connected = connect_alphaxiv(true, |prompt| {
+                    let Prompt::Device { url, code } = prompt else {
+                        panic!("the device grant shows a code");
+                    };
+                    shown = Some((url.to_owned(), code.to_owned()));
+                })
+                .await;
+                (connected, shown)
+            }
+        };
+
+        // Waiting, then asked to slow down, then approved: linked and kept.
+        let (connected, shown) = connect(&[
+            "authorization_pending",
+            "slow_down",
+            "authorization_pending",
+        ])
+        .await;
+        assert_eq!(connected.unwrap().token, "pat-1");
+        assert_eq!(
+            shown,
+            Some((
+                format!("{api}/device?user_code=ABCD-EFGH"),
+                "ABCD-EFGH".to_string()
+            ))
+        );
+        assert_eq!(stored_refresh_token(), "device-refresh-1");
+        assert_eq!(upstream.lock().unwrap().linked_by, ["Bearer pat-1"]);
+        {
+            let device = device.lock().unwrap();
+            let request = &device.code_requests[0];
+            assert_eq!(request["client_id"], "openresearch-desktop");
+            assert_eq!(request["scope"], "openid email profile");
+            assert_eq!(request["resource"], format!("{api}/mcp/v1"));
+            assert_eq!(device.polls.len(), 4);
+            let gap = |n: usize| device.polls[n] - device.polls[n - 1];
+            let interval = crate::config::paced(Duration::from_secs(1));
+            assert!(gap(1) >= interval);
+            assert!(gap(2) >= interval + crate::config::paced(Duration::from_secs(5)));
+        }
+
+        // Denied or expired at alphaXiv: nothing changes.
+        let (denied, _) = connect(&["authorization_pending", "access_denied"]).await;
+        assert!(denied.unwrap_err().to_string().contains("denied"));
+        let (expired, _) = connect(&["expired_token"]).await;
+        assert!(expired.unwrap_err().to_string().contains("expired"));
+        let (refused, _) = connect(&["invalid_client"]).await;
+        assert!(refused.unwrap_err().to_string().contains("invalid_client"));
+        assert_eq!(stored_refresh_token(), "device-refresh-1");
+
+        // A code alphaXiv never settles ends when it expires.
+        device.lock().unwrap().expires_in = 2;
+        let (expired, _) = connect(&["authorization_pending"; 1000]).await;
+        assert!(expired.unwrap_err().to_string().contains("expired"));
+        let polls = device.lock().unwrap().polls.len();
+        assert!(polls > 0 && polls < 1000);
+        device.lock().unwrap().expires_in = 600;
+
+        // A link off alphaXiv's site is never shown.
+        device.lock().unwrap().link = Some("https://alphaxiv.example/device".into());
+        let (elsewhere, shown) = connect(&[]).await;
+        assert!(elsewhere.unwrap_err().to_string().contains("isn't on"));
+        assert_eq!(shown, None);
+        assert!(device.lock().unwrap().polls.is_empty());
+        device.lock().unwrap().link = None;
+
+        // An alphaXiv without device authorization says so instead of waiting.
+        device.lock().unwrap().unsupported = true;
+        let (unsupported, shown) = connect(&[]).await;
+        assert!(unsupported
+            .unwrap_err()
+            .to_string()
+            .contains("doesn't support signing in from another device"));
+        assert_eq!(shown, None);
+        device.lock().unwrap().unsupported = false;
+
+        // `orx login --alphaxiv` in an SSH session shows a code instead of opening a browser.
+        std::env::set_var("SSH_CONNECTION", "192.0.2.1 50000 192.0.2.2 22");
+        let requests = device.lock().unwrap().code_requests.len();
+        run(crate::LoginArgs {
+            api_url: None,
+            non_interactive: true,
+            alphaxiv: true,
+            device: false,
+        })
+        .await
+        .unwrap();
+        assert_eq!(device.lock().unwrap().code_requests.len(), requests + 1);
+        assert_eq!(stored_refresh_token(), "device-refresh-2");
+        assert_eq!(
+            upstream.lock().unwrap().revoked,
+            ["device-refresh-1"],
+            "the new sign-in replaces the old one"
+        );
     }
 }

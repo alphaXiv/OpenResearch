@@ -515,13 +515,7 @@ export function RuntimeRoot() {
     }
   }, [runtime]);
 
-  if (launchPlaceholder) {
-    return (
-      <main className="app flex h-full items-center justify-center gap-3 bg-background text-base text-text">
-        <div role="status" className="w-80 max-w-full px-6"><ProgressBar label={m.remote_preparing()} /></div>
-      </main>
-    );
-  }
+  if (launchPlaceholder) return <Outlet />;
   if (!runtime) {
     return (
       <main className="app flex h-full items-center justify-center gap-3 bg-background text-base text-text">

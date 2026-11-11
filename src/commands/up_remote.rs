@@ -1059,7 +1059,7 @@ async fn connect_once(
     });
     *session.route.write().await = Some(UpstreamRoute {
         port: local_port,
-        token,
+        token: token.clone(),
     });
     if !set_session_state_if_current(session, generation, RemoteSessionStatus::Connected, None)
         .await
@@ -1073,9 +1073,13 @@ async fn connect_once(
     let sharing = crate::jobs::ssh::setup_connection_sharing(&session.target);
     tokio::pin!(sharing);
     let mut sharing_pending = true;
+    let host = session.info.read().await.host.clone();
+    let alphaxiv = forward_alphaxiv(&session.client, &host, local_port, &token);
+    tokio::pin!(alphaxiv);
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
+            never = &mut alphaxiv => match never {},
             warning = &mut sharing, if sharing_pending => {
                 sharing_pending = false;
                 if let Some(warning) = warning {
@@ -1107,6 +1111,63 @@ async fn connect_once(
                 };
             }
         }
+    }
+}
+
+/// Keeps the host's copy of this laptop's alphaXiv access token current while
+/// attached. The refresh token never leaves the laptop: two machines refreshing
+/// one sign-in would each retire the other's token.
+async fn forward_alphaxiv(
+    client: &reqwest::Client,
+    host: &str,
+    port: u16,
+    token: &str,
+) -> std::convert::Infallible {
+    let url = format!("http://127.0.0.1:{port}/_orx/alphaxiv");
+    // What the host last answered for; unknown until the first answer.
+    let mut forwarded = None;
+    loop {
+        match crate::alphaxiv::forwardable().await {
+            Err(error) => {
+                eprintln!("orx: could not renew the alphaXiv sign-in for {host}: {error}")
+            }
+            Ok(access) if forwarded.as_ref() != Some(&access) => {
+                let request = match &access {
+                    Some(access) => client.put(&url).json(access),
+                    None => client.delete(&url),
+                };
+                let sent = request
+                    .bearer_auth(token)
+                    .timeout(Duration::from_secs(10))
+                    .send()
+                    .await;
+                match sent {
+                    Ok(response) => {
+                        let status = response.status();
+                        // An older host answers its dashboard page.
+                        if status.is_success()
+                            && status != StatusCode::NO_CONTENT
+                            && access.is_some()
+                        {
+                            eprintln!("orx: OpenResearch on {host} can't use this laptop's alphaXiv sign-in. Update it so its agents can read your alphaXiv library.");
+                        } else if !status.is_success() {
+                            let error = response.text().await.unwrap_or_default();
+                            eprintln!("orx: {host} refused this laptop's alphaXiv sign-in ({status}): {error}");
+                        }
+                        // A host that failed on its side is asked again.
+                        if !status.is_server_error() {
+                            forwarded = Some(access);
+                        }
+                    }
+                    Err(error) => eprintln!(
+                        "orx: could not forward the alphaXiv sign-in to {host}: {}",
+                        error.without_url()
+                    ),
+                }
+            }
+            Ok(_) => {}
+        }
+        tokio::time::sleep(crate::config::paced(Duration::from_secs(10))).await;
     }
 }
 
@@ -1359,7 +1420,7 @@ fn secure_response(mut response: Response) -> Response {
 }
 
 /// A literal address or `localhost`, never another name, which defeats DNS rebinding.
-fn host_allowed(value: &str, reach: Reach) -> bool {
+pub(crate) fn host_allowed(value: &str, reach: Reach) -> bool {
     let host = if value.starts_with('[') {
         value
             .split_once(']')
@@ -2723,6 +2784,22 @@ mod tests {
             redirect.headers()[header::LOCATION],
             "/_orx/workspaces/alpha/api/file?path=plot.png"
         );
+        // The page can't reach the host's alphaXiv sign-in, which bears the session's token.
+        let browser = manager
+            .serve_workspace(
+                "alpha",
+                Request::builder()
+                    .method("PUT")
+                    .uri("/_orx/workspaces/alpha/_orx/alphaxiv")
+                    .header(header::HOST, "127.0.0.1:4791")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await;
+        let body = axum::body::to_bytes(browser.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&body).is_err());
         let missing = manager
             .serve_workspace("missing", Request::new(Body::empty()))
             .await;
@@ -2730,6 +2807,149 @@ mod tests {
         for server in servers {
             server.abort();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_attachment_keeps_the_hosts_alphaxiv_token_current() {
+        if !crate::config::in_test_child(&["ALPHAXIV_API_URL", "ORX_TEST_SPEEDUP"]) {
+            return;
+        }
+        // Ticks every 10 ms; a token is renewed with under a second left.
+        std::env::set_var("ORX_TEST_SPEEDUP", "600");
+
+        let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let issued = refreshes.clone();
+        let alphaxiv = Router::new()
+            .route(
+                "/auth/oauth2/token",
+                post(move || async move {
+                    let n = issued.fetch_add(1, Ordering::SeqCst) + 1;
+                    Json(serde_json::json!({
+                        "access_token": format!("access-{n}"),
+                        "refresh_token": format!("refresh-{n}"),
+                        "expires_in": 3600,
+                    }))
+                }),
+            )
+            .route("/auth/oauth2/revoke", post(|| async {}));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, alphaxiv).await.unwrap() });
+
+        // A host recording what reaches it. `older` answers the way a host
+        // without the route does, with its dashboard page; `flaky` fails its
+        // first answer.
+        let host = |mode: &'static str| async move {
+            let (sender, received) = tokio::sync::mpsc::unbounded_channel();
+            let failed = Arc::new(std::sync::atomic::AtomicBool::new(mode != "flaky"));
+            let app = Router::new().route(
+                "/_orx/alphaxiv",
+                axum::routing::any(move |request: Request| {
+                    let sender = sender.clone();
+                    let failed = failed.clone();
+                    async move {
+                        let method = request.method().to_string();
+                        let bearer = request.headers()[header::AUTHORIZATION]
+                            .to_str()
+                            .unwrap()
+                            .to_owned();
+                        let body = axum::body::to_bytes(request.into_body(), 1 << 16)
+                            .await
+                            .unwrap();
+                        let access = serde_json::from_slice::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|body| Some(body["accessToken"].as_str()?.to_owned()))
+                            .unwrap_or_default();
+                        sender.send((method, bearer, access)).unwrap();
+                        if mode == "older" {
+                            "<!doctype html>".into_response()
+                        } else if !failed.swap(true, Ordering::SeqCst) {
+                            StatusCode::SERVICE_UNAVAILABLE.into_response()
+                        } else {
+                            StatusCode::NO_CONTENT.into_response()
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            (port, received)
+        };
+        async fn next(
+            received: &mut tokio::sync::mpsc::UnboundedReceiver<(String, String, String)>,
+        ) -> (String, String, String) {
+            tokio::time::timeout(Duration::from_secs(10), received.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+        let sign_in = |access: &str, expires_in_ms: i64| {
+            let config = crate::config::config_dir();
+            std::fs::create_dir_all(&config).unwrap();
+            let tokens = serde_json::json!({
+                "apiUrl": api,
+                "accessToken": access,
+                "refreshToken": "refresh-0",
+                "expiresAtMs": crate::store::now_ms() + expires_in_ms,
+            });
+            // Whole, as orx writes it, so the forwarder never reads half a file.
+            crate::local::git::atomic_write_with_mode(
+                &config.join("alphaxiv.json"),
+                tokens.to_string().as_bytes(),
+                Some(0o600),
+            )
+            .unwrap();
+        };
+        let client = crate::net::loopback_client().build().unwrap();
+
+        // Signed out at attach: whatever an earlier laptop left is withdrawn.
+        let (port, mut received) = host("ok").await;
+        let forwarding = tokio::spawn({
+            let client = client.clone();
+            async move { forward_alphaxiv(&client, "box", port, "attachment").await }
+        });
+        let (method, bearer, _) = next(&mut received).await;
+        assert_eq!(
+            (method.as_str(), bearer.as_str()),
+            ("DELETE", "Bearer attachment")
+        );
+
+        // Signed in: the access token goes over, and only it.
+        sign_in("access-0", 3_600_000);
+        let (method, _, access) = next(&mut received).await;
+        assert_eq!((method.as_str(), access.as_str()), ("PUT", "access-0"));
+        // Close to expiry: renewed once on the laptop, and the renewal follows.
+        sign_in("access-0", 500);
+        let (_, _, access) = next(&mut received).await;
+        assert_eq!(access, "access-1");
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        // Signing out on the laptop signs the host out too.
+        crate::alphaxiv::sign_out().await.unwrap();
+        let (method, _, _) = next(&mut received).await;
+        assert_eq!(method, "DELETE");
+        forwarding.abort();
+
+        // A host that failed to save is asked again with the same token.
+        sign_in("access-a", 3_600_000);
+        let (port, mut received) = host("flaky").await;
+        let forwarding = tokio::spawn({
+            let client = client.clone();
+            async move { forward_alphaxiv(&client, "box", port, "attachment").await }
+        });
+        assert_eq!(next(&mut received).await.2, "access-a");
+        assert_eq!(next(&mut received).await.2, "access-a");
+        forwarding.abort();
+
+        // An older host is told once per token and the attachment carries on.
+        let (port, mut received) = host("older").await;
+        let forwarding =
+            tokio::spawn(async move { forward_alphaxiv(&client, "box", port, "attachment").await });
+        assert_eq!(next(&mut received).await.2, "access-a");
+        sign_in("access-b", 3_600_000);
+        assert_eq!(next(&mut received).await.2, "access-b");
+        assert!(!forwarding.is_finished());
+        forwarding.abort();
     }
 
     #[test]

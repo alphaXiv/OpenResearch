@@ -658,6 +658,7 @@ async fn connect(args: &CheckArgs) -> Result<()> {
                 alphaxiv: false,
                 api_url: None,
                 non_interactive: false,
+                device: false,
             })
             .await?;
             super::ssh_key::add(None).await?;
