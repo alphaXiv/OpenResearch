@@ -83,7 +83,7 @@ pub async fn launch_spec(args: &crate::ExpRunArgs) -> Result<LaunchSpec> {
                 );
                 // macOS ssh may read the passphrase from the keychain without a prompt, and a
                 // config `ssh -G` can't resolve may offer a key orx can't see.
-                if cfg!(target_os = "macos") || ssh_identity::offered_identities().await.is_none() {
+                if cfg!(target_os = "macos") || !ssh_identity::offered_identities().await.1 {
                     eprintln!("warning: {problem}");
                 } else {
                     return Err(anyhow!("{problem}"));
