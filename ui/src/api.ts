@@ -506,6 +506,35 @@ export interface BuildNotes {
   commits: string[];
 }
 
+/** What quitting does to a pending experiment. */
+export type AfterQuit = "reports" | "continues" | "needsApp";
+
+export interface PendingAgent {
+  projectId: string;
+  project: string | null;
+  sessionId: string;
+  sideParentId: string | null;
+  harness: HarnessId;
+  title: string | null;
+}
+
+export interface PendingRun {
+  projectId: string;
+  project: string | null;
+  experimentId: string;
+  runId: string;
+  sessionId: string | null;
+  name: string;
+  backend: string | null;
+  afterQuit: AfterQuit;
+}
+
+/** What a quit would interrupt on this machine. */
+export interface PendingWork {
+  agents: PendingAgent[];
+  runs: PendingRun[];
+}
+
 export interface UpdateStatus {
   current: string;
   /** Latest published release on the selected channel. */
@@ -1414,6 +1443,23 @@ export interface ChatSession {
   contextUsage?: ContextUsage;
 }
 
+/** Fields `PATCH /api/chat/sessions/<id>` changes; each is optional. */
+export interface ChatSessionPatch {
+  /** Trimmed by the server, which rejects an empty title. */
+  title?: string;
+  /** Archived chats stay resumable. */
+  archived?: boolean;
+  /** `false` keeps a delegate for the user: it stops telling the chat that started it and becomes a side chat. */
+  notifyParent?: false;
+  /** The session-specific Plan axis used by Codex, OpenCode and Cursor. */
+  planMode?: boolean;
+  /** `null` clears the goal. */
+  goal?: string | null;
+  autonomy?: Autonomy;
+  agent?: AgentSelection;
+  permissionMode?: string;
+}
+
 /** A chat the user had in an agent's own CLI, which orx has no session for. */
 export interface NativeChat {
   harness: HarnessId;
@@ -1626,11 +1672,6 @@ export interface PublicProject {
 
 /** Where a shared project comes from: a picked file, a file on this machine, or a published link. */
 export type SharedSource = File | string | { link: string };
-
-export interface RunEngineSettings {
-  enabled: boolean;
-  forcedBy: "canary" | "environment" | null;
-}
 
 export function createApi(
   client: WorkspaceClient,
@@ -2122,14 +2163,16 @@ export function createApi(
 
   const getUpdateStatus = (signal?: AbortSignal) => get<UpdateStatus>("/api/update", signal);
 
+  const getPendingWork = (signal?: AbortSignal) => get<PendingWork>("/api/pending-work", signal);
+
   const getBuildNotes = (signal?: AbortSignal) => get<BuildNotes | null>("/api/update/notes", signal);
 
   const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
 
-  /** Relaunch the server into the copy the updater installed. The old server
-   *  answers and then goes away; poll `getUpdateStatus` for the new one. */
-  const restartApp = () =>
-    post<{ restarting: boolean; version: string }>("/api/update/restart");
+  /** Relaunch the server into the copy the updater installed, stopping any agent at work when `stopAgents`.
+   *  The old server answers and then goes away; poll `getUpdateStatus` for the new one. */
+  const restartApp = (stopAgents = false) =>
+    post<{ restarting: boolean; version: string }>("/api/update/restart", { stopAgents });
 
   const setAutoUpdate = (enabled: boolean) =>
     post<UpdateStatus>("/api/update/auto", { enabled });
@@ -2262,10 +2305,6 @@ export function createApi(
     get<TrackioRuns>(`/api/trackio/projects/${encodeURIComponent(projectId)}/runs`, signal);
 
   const trackioPreflight = () => post<TrackioPreflight>("/api/settings/trackio/preflight", {});
-
-  const getRunEngine = (signal?: AbortSignal) => get<RunEngineSettings>("/api/settings/run-engine", signal);
-
-  const setRunEngine = (enabled: boolean) => post<RunEngineSettings>("/api/settings/run-engine", { enabled });
 
   const getComputeSettings = (projectId?: string, signal?: AbortSignal) =>
     get<ComputeSettings>(
@@ -2586,57 +2625,17 @@ export function createApi(
       json<{ ok: boolean }>(r).then((result) => { removeSession(sessionId); return result; }),
     );
 
-  /** Archive/unarchive a session (archived chats stay resumable). */
-  const setChatSessionArchived = (sessionId: string, archived: boolean) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { archived }).then(
-      (r) => r.session,
-    );
-
-  /** Rename a session. The title is trimmed server-side; empty titles are rejected. */
-  /** Keep a delegate for the user: it stops telling the chat that started it and becomes a side chat. */
-  const releaseDelegate = (sessionId: string) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { notifyParent: false }).then(
+  const patchChatSession = (sessionId: string, changes: ChatSessionPatch) =>
+    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, changes).then(
       (r) => r.session,
     );
 
   /** The message an agent cited by ref: where it lives, the agent that wrote it if one did, and its first words. */
   const citedMessage = (cited: string) => get<CitedMessage>(`/api/chat/messages/${encodeURIComponent(cited)}`);
 
-  const renameChatSession = (sessionId: string, title: string) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { title }).then(
-      (r) => r.session,
-    );
-
-  /** Enter/leave the session-specific Plan axis used by Codex/OpenCode/Cursor. */
-  const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { planMode }).then(
-      (r) => r.session,
-    );
-
   /** Branch a persistent side chat off a snapshot of `sessionId`'s transcript. */
   const openSideChat = (sessionId: string) =>
     post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, {}).then(
-      (r) => r.session,
-    );
-
-  /** `null` clears the goal. */
-  const setChatSessionGoal = (sessionId: string, goal: string | null) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { goal }).then(
-      (r) => r.session,
-    );
-
-  const setChatSessionAutonomy = (sessionId: string, autonomy: Autonomy) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { autonomy }).then(
-      (r) => r.session,
-    );
-
-  const setChatSessionAgent = (sessionId: string, agent: AgentSelection) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { agent }).then(
-      (r) => r.session,
-    );
-
-  const setChatSessionPermissionMode = (sessionId: string, permissionMode: string) =>
-    patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { permissionMode }).then(
       (r) => r.session,
     );
 
@@ -2811,6 +2810,7 @@ export function createApi(
     getTinkerSettings,
     saveTinkerKey,
     getUpdateStatus,
+    getPendingWork,
     getBuildNotes,
     applyUpdate,
     restartApp,
@@ -2856,8 +2856,6 @@ export function createApi(
     rayPreflight,
     getTrackioRuns,
     trackioPreflight,
-    getRunEngine,
-    setRunEngine,
     getComputeSettings,
     setComputeDefault,
     getLocalMachine,
@@ -2922,16 +2920,9 @@ export function createApi(
     createChatSession,
     getChatSession,
     deleteChatSession,
-    setChatSessionArchived,
-    renameChatSession,
-    releaseDelegate,
+    patchChatSession,
     citedMessage,
-    setChatSessionPlanMode,
     openSideChat,
-    setChatSessionGoal,
-    setChatSessionAutonomy,
-    setChatSessionAgent,
-    setChatSessionPermissionMode,
     getChatMessages,
     cancelQueuedMessage,
     retryQueuedMessage,

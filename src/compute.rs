@@ -19,7 +19,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::{anyhow, Result};
 use crate::jobs::BackendDescriptor;
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::{LaunchSpec, RunStatus, Store, StoredRun};
+use crate::store::{LaunchSpec, Store, StoredRun};
 
 #[derive(Debug, Clone)]
 pub struct SourceSnapshot {
@@ -923,343 +923,21 @@ fn run_attribution(
     })
 }
 
-/// Connect also logs in 0.2.x supervisors' SSH: always with the setting off, otherwise only
-/// for the host's supervised runs the engine has not adopted (`held`).
+/// Connect also logs in 0.2.x supervisors' SSH for the host's supervised runs the engine has
+/// not adopted (`held`).
 pub(crate) fn supervised_ssh_needed(
-    engine_enabled: bool,
     runs: &[StoredRun],
     host: &str,
     held: impl Fn(&str) -> bool,
 ) -> bool {
-    !engine_enabled
-        || runs.iter().any(|run| {
-            !crate::local::is_terminal(&run.status)
-                && !held(&run.id)
-                && BackendDescriptor::parse(&run.backend_json).is_ok_and(|descriptor| {
-                    matches!(descriptor.kind.as_str(), "ssh_job" | "slurm_job")
-                        && descriptor.namespace.as_deref() == Some(host)
-                })
-        })
-}
-
-pub async fn submit_supervised(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    validate_run_args(args)?;
-    let backend_id = args.backend.as_deref().unwrap_or("local");
-    let backend = backend(backend_id)?;
-    let store = Store::open()?;
-    let ssh_launch = if backend_id == "ssh" {
-        Some(crate::jobs::ssh::resolve_launch(args).await?)
-    } else {
-        None
-    };
-    if backend_id == "slurm" {
-        let settings = crate::jobs::slurm::load_settings()?.unwrap_or_default();
-        let host = args
-            .host
-            .as_deref()
-            .or(settings.host.as_deref())
-            .ok_or_else(|| anyhow!("Slurm requires --host or a configured host."))?;
-        let check = crate::jobs::slurm::preflight(&crate::jobs::ssh::SshTarget::alias(host)).await;
-        if !check.reachable || !check.slurm_found || !check.tools_found {
-            return Err(anyhow!(
-                "{}",
-                check
-                    .error
-                    .as_deref()
-                    .unwrap_or("The Slurm host needs bash, tar, sbatch, squeue, and scancel.")
-            ));
-        }
-    }
-    let preflight = backend.preflight(args).await?;
-    if !preflight.ready {
-        return Err(anyhow!(
-            "{}",
-            preflight
-                .detail
-                .filter(|detail| !detail.trim().is_empty())
-                .unwrap_or_else(|| "Compute backend is not ready.".to_string())
-        ));
-    }
-    let artifacts_lock = store.run_artifacts_lock()?;
-    let deadline = std::time::Instant::now() + crate::store::RUN_ARTIFACTS_WAIT;
-    let _artifacts_guard = loop {
-        match artifacts_lock.try_read() {
-            Ok(guard) => break guard,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    && std::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(crate::store::RUN_ARTIFACTS_POLL).await;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(anyhow!("Run artifacts are busy; retry the run submission."))
-            }
-            Err(error) => return Err(error.into()),
-        }
-    };
-    let experiment = store
-        .get_local_experiment(&args.exp_id)?
-        .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
-    let project = store
-        .get_local_project(&experiment.project_id)?
-        .ok_or_else(|| anyhow!("Local project {} not found.", experiment.project_id))?;
-    let source = backend.stage_source(&project, &experiment).await?;
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let command = Some(experiment.run_command.clone())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            project
-                .run_command
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or_default();
-    let mut descriptor = BackendDescriptor {
-        ssh_container: None,
-        monitoring_error: None,
-        cancellation_accepted: false,
-        rental_lease: None,
-        kind: format!("{}_job", backend_id),
-        namespace: None,
-        job_id: None,
-        flavor: args.flavor.clone(),
-        image: args.image.clone(),
-        url: None,
-        context: None,
-        manifest: args.manifest.clone(),
-        resources: None,
-        ssh_host: None,
-        ssh_port: None,
-        ssh_user: None,
-        timeout_secs: None,
-        cpus_per_task: None,
-        mem: None,
-        source_digest: None,
-        source_path: None,
-        source_size: None,
-        remote_root: None,
-        unknown: Default::default(),
-    };
-    source.0.apply_to_descriptor(&mut descriptor);
-    let now = crate::store::now_ms();
-    let pending = StoredRun {
-        id: run_id.clone(),
-        experiment_id: experiment.id.clone(),
-        project_id: project.id.clone(),
-        status: "starting".to_string(),
-        backend_json: descriptor.to_json(),
-        command,
-        created_at: now,
-        updated_at: now,
-        ended_at: None,
-        exit_code: None,
-        commit_sha: Some(source.0.revision.clone()),
-        result_markdown: None,
-        cancel_requested: false,
-        cancel_reason: None,
-        chat_session_id: args.launching_chat_session(),
-    };
-    let chat_harness = match &pending.chat_session_id {
-        Some(session) => store.get_chat_session(session)?.map(|chat| chat.harness),
-        None => None,
-    };
-    let identity = args.invocation_identity()?;
-    let report = (!args.telemetry_suppressed && backend_id != "openresearch")
-        .then(|| {
-            crate::telemetry::pending_event_payload(
-                "experiment_finished",
-                run_attribution(
-                    identity.as_ref(),
-                    chat_harness,
-                    args.agent_origin.as_deref(),
-                ),
-            )
-        })
-        .flatten();
-    reserve_run(
-        &store,
-        &pending,
-        args.force,
-        identity.as_ref(),
-        report.as_ref(),
-    )?;
-    let pending_backend_json = descriptor.to_json();
-    let submitted = match backend_id {
-        "local" => {
-            crate::local::localrun::submit_local_run_with_source(args, source.0, run_id.clone())
-                .await
-        }
-        "tinker" => {
-            crate::local::localrun::submit_tinker_run_with_source(args, source.0, run_id.clone())
-                .await
-        }
-        "hf" => crate::local::hf::submit_local_hf_with_source(args, source.0, run_id.clone()).await,
-        "modal" => {
-            crate::local::modal::submit_local_modal_with_source(args, source.0, run_id.clone())
-                .await
-        }
-        "vercel" => {
-            crate::local::vercel::submit_local_vercel_with_source(args, source.0, run_id.clone())
-                .await
-        }
-        "k8s" => {
-            crate::local::k8s::submit_local_k8s_with_source(args, source.0, run_id.clone()).await
-        }
-        "ssh" => {
-            crate::local::ssh::submit_local_ssh_with_source(
-                args,
-                source.0,
-                run_id.clone(),
-                ssh_launch.as_ref().unwrap(),
-            )
-            .await
-        }
-        "slurm" => {
-            crate::local::slurm::submit_local_slurm_with_source(args, source.0, run_id.clone())
-                .await
-        }
-        "ray" => {
-            crate::local::ray::submit_local_ray_with_source(args, source.0, run_id.clone()).await
-        }
-        "openresearch" => {
-            crate::local::openresearch::submit_local_openresearch_with_source(
-                args,
-                source.0,
-                run_id.clone(),
-            )
-            .await
-        }
-        _ => unreachable!("backend validated above"),
-    };
-    match submitted {
-        Ok(run) => {
-            if project.github_enabled() {
-                if let Err(error) = crate::local::git::spawn_branch_publication(
-                    Path::new(&project.repo_path),
-                    &experiment.branch_name,
-                    &project.github_owner,
-                    &project.github_repo,
-                ) {
-                    eprintln!(
-                        "GitHub sync could not start; compute is already running from the source snapshot: {error}"
-                    );
-                }
-            }
-            Ok(run)
-        }
-        Err(error) => {
-            let current = store.get_run(&run_id)?;
-            let handle_was_persisted = current
-                .as_ref()
-                .is_some_and(|run| run.backend_json != pending_backend_json);
-            if !handle_was_persisted
-                && store.update_status(
-                    &run_id,
-                    RunStatus::Failed,
-                    Some(crate::store::now_ms()),
-                    None,
-                )?
-            {
-                store
-                    .set_result_markdown(&run_id, &format!("Compute submission failed: {error}"))?;
-            }
-            Err(error)
-        }
-    }
-}
-
-fn reserve_run(
-    store: &Store,
-    pending: &StoredRun,
-    force: bool,
-    identity: Option<&crate::store::InvocationIdentity>,
-    report: Option<&(String, serde_json::Value)>,
-) -> Result<()> {
-    let dir = crate::store::data_dir().join("submission-locks");
-    std::fs::create_dir_all(&dir)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(dir.join(&pending.experiment_id))?;
-    let mut lock = fd_lock::RwLock::new(file);
-    let _guard = lock.write()?;
-    if !force {
-        if let Some(run) = store
-            .list_runs_by_experiment(&pending.experiment_id)?
-            .into_iter()
-            .find(|run| !crate::local::is_terminal(&run.status))
-        {
-            return Err(anyhow!(
-                "Run {} is already in flight for this experiment ({}). Wait for it with \
-                 `orx exp wait {exp}`; cancel it with `orx exp cancel {exp}` only if it \
-                 should stop, or pass --force to launch anyway.",
-                run.id,
-                run.status,
-                exp = pending.experiment_id
-            ));
-        }
-    }
-    let tx = store.begin()?;
-    store.reserve_run_telemetry(&pending.id, identity, report)?;
-    store.upsert_run(pending)?;
-    store.watch_legacy_run(&pending.id, None)?;
-    tx.commit()?;
-    Ok(())
-}
-
-pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) -> Result<()> {
-    let database_error = Store::open()
-        .and_then(|store| store.set_backend_json(run_id, &descriptor.to_json()))
-        .err();
-    let dir = crate::store::data_dir().join("submission-handles");
-    if let Err(error) = prepare_snapshot_dir(&dir) {
-        return match database_error {
-            None => {
-                eprintln!("warning: could not create submission recovery directory: {error}");
-                Ok(())
-            }
-            Some(database_error) => Err(anyhow!(
-                "Could not persist provider handle in SQLite ({database_error}) or the recovery directory ({error})."
-            )),
-        };
-    }
-    let destination = dir.join(format!("{run_id}.json"));
-    let temporary = dir.join(format!(".{run_id}.{}.tmp", uuid::Uuid::new_v4()));
-    let file_error = (|| -> std::io::Result<()> {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        options
-            .open(&temporary)?
-            .write_all(descriptor.to_json().as_bytes())
-    })()
-    .and_then(|()| std::fs::rename(&temporary, destination))
-    .err();
-    if let Some(error) = file_error {
-        let _ = std::fs::remove_file(temporary);
-        if let Some(database_error) = database_error {
-            return Err(anyhow!(
-                "Could not persist provider handle in SQLite ({database_error}) or its recovery file ({error})."
-            ));
-        }
-        eprintln!("warning: could not write redundant submission recovery record: {error}");
-    }
-    Ok(())
-}
-
-pub fn recover_submission_handle(run_id: &str) -> Result<Option<BackendDescriptor>> {
-    let path = crate::store::data_dir()
-        .join("submission-handles")
-        .join(format!("{run_id}.json"));
-    match std::fs::read_to_string(path) {
-        Ok(json) => BackendDescriptor::parse(&json).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+    runs.iter().any(|run| {
+        !crate::local::is_terminal(&run.status)
+            && !held(&run.id)
+            && BackendDescriptor::parse(&run.backend_json).is_ok_and(|descriptor| {
+                matches!(descriptor.kind.as_str(), "ssh_job" | "slurm_job")
+                    && descriptor.namespace.as_deref() == Some(host)
+            })
+    })
 }
 
 fn not_ready(detail: impl Into<String>) -> Preflight {
@@ -1354,20 +1032,17 @@ echo ok
             chat_session_id: None,
         };
         let free = |_: &str| false;
-        assert!(supervised_ssh_needed(false, &[], "lab", free));
-        assert!(!supervised_ssh_needed(true, &[], "lab", free));
+        assert!(!supervised_ssh_needed(&[], "lab", free));
         for kind in ["ssh_job", "slurm_job", "engine", "hf_job"] {
             run.backend_json =
                 serde_json::json!({"kind": kind, "namespace": "lab", "jobId": "job"}).to_string();
             let runs = std::slice::from_ref(&run);
             let expected = matches!(kind, "ssh_job" | "slurm_job");
-            assert_eq!(supervised_ssh_needed(true, runs, "lab", free), expected);
-            assert!(!supervised_ssh_needed(true, runs, "other", free));
-            assert!(!supervised_ssh_needed(true, runs, "lab", |id| id == "run"));
-            assert!(supervised_ssh_needed(false, runs, "lab", |id| id == "run"));
+            assert_eq!(supervised_ssh_needed(runs, "lab", free), expected);
+            assert!(!supervised_ssh_needed(runs, "other", free));
+            assert!(!supervised_ssh_needed(runs, "lab", |id| id == "run"));
             run.status = "done".into();
             assert!(!supervised_ssh_needed(
-                true,
                 std::slice::from_ref(&run),
                 "lab",
                 free

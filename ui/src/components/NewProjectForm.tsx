@@ -1,7 +1,8 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
+import { mutCreateProject } from "../queries/projects";
 
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
@@ -84,8 +85,9 @@ export function NewProjectForm({
     searchPapersQuery,
     resolvePaperQuery,
   } = useWorkspace().queries;
-  const { createProject, pickProjectFolder, prewarmStarterPrompts } = useWorkspace().api;
-  const { queryClient } = useWorkspace();
+  const workspace = useWorkspace();
+  const { pickProjectFolder, prewarmStarterPrompts } = workspace.api;
+  const { queryClient } = workspace;
 
   const { data: harnesses = [] } = useQuery(getHarnessesQuery());
   const starterSelection = preferredAgent ?? defaultSelection(harnesses);
@@ -166,7 +168,6 @@ export function NewProjectForm({
     const error = paperId ? resolveQuery.error : searchQuery.error;
     if (canSearch && error) setError(error.message);
   }, [canSearch, paperId, resolveQuery.error, searchQuery.error]);
-  const createMutation = useMutation({ mutationFn: createProject });
 
   async function choosePaper(paperId: string) {
     const request = ++seq.current;
@@ -262,7 +263,7 @@ export function NewProjectForm({
       if (githubSyncEnabled && existingGithubRepo) {
         await queryClient.fetchQuery({ ...repoAccessQuery(existingGithubRepo.owner, existingGithubRepo.repo), staleTime: 0 }).catch(() => null);
       }
-      const result = await createMutation.mutateAsync({
+      const result = await mutCreateProject.runAsHeadlessPromise(workspace, {
         name: name.trim(),
         path: projectPath.trim(),
         creationMode: mode,
@@ -275,7 +276,7 @@ export function NewProjectForm({
         ...(mode === "paper" && paper
           ? { paperId: paper.paperId, cloneUrl: paper.repoUrl ?? undefined }
           : {}),
-      });
+      }, {});
       onCreated(result.project, result.githubPublicationError);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

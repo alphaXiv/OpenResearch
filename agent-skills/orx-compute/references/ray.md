@@ -19,4 +19,4 @@ orx exp run <expId> --backend ray --flavor cpu:2,mem:8GiB
 - There is no image, host, or timeout flag. Bound the work in the run command.
 - Ray receives the committed snapshot as its `working_dir` package.
 
-See [run monitoring](../SKILL.md#run-engine-setting).
+See [run monitoring](../SKILL.md#who-watches-a-run).

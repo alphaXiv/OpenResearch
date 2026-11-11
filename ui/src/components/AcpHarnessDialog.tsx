@@ -8,6 +8,7 @@ import { type AcpDefinition } from "../api";
 
 import { formatAcpCommand, parseAcpCommand, validAcpLaunch } from "../acp";
 import { m } from "../paraglide/messages.js";
+import { mutSaveAcpHarness } from "../queries/settings";
 import { OptionPicker } from "./ModelPicker";
 import { Button, DialogContent, DialogTitle, Input } from "./ui";
 
@@ -18,8 +19,9 @@ export function AcpHarnessDialog({ definition, customOnly = false, cancel, confi
 }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
 
-  const { workspaceKey } = useWorkspace();
-  const { listAcpPresets, testAcpHarness, saveAcpHarness } = useWorkspace().api;
+  const workspace = useWorkspace();
+  const { workspaceKey } = workspace;
+  const { listAcpPresets, testAcpHarness } = workspace.api;
 
   const cancelled = useRef(false);
   if (isDisabled && !isPending) cancelled.current = true;
@@ -69,9 +71,9 @@ export function AcpHarnessDialog({ definition, customOnly = false, cancel, confi
           const selected = presets.data?.find((option) => option.id === preset);
           if (!selected) return;
           const unchanged = selected.name === launch.name && selected.executable === launch.executable && selected.arguments.length === launch.arguments.length && selected.arguments.every((argument, index) => argument === launch.arguments[index]);
-          onSaved(unchanged ? result.harnessId ?? selected.id : (await saveAcpHarness(launch)).id);
+          onSaved(unchanged ? result.harnessId ?? selected.id : (await mutSaveAcpHarness.runAsHeadlessPromise(workspace, launch, undefined, {})).id);
         } else {
-          onSaved((await saveAcpHarness(launch, definition?.id)).id);
+          onSaved((await mutSaveAcpHarness.runAsHeadlessPromise(workspace, launch, definition?.id, {})).id);
         }
       }
     } catch (error) {

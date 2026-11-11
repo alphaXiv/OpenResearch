@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use orx_host_proto::{LogTarget, Request, Response};
-use sha2::{Digest, Sha256};
 
 use super::ssh::Ssh;
 use crate::engine::*;
@@ -55,26 +54,6 @@ impl LegacyTransport {
             )),
             _ => Err(anyhow!("Unexpected Exec response")),
         }
-    }
-
-    pub async fn upload(&self, command: &str, source: &Path) -> Result<String> {
-        let mut hash = Sha256::new();
-        let mut file = std::fs::File::open(source)?;
-        std::io::copy(&mut file, &mut hash)?;
-        let sha = format!("{:x}", hash.finalize());
-        self.ssh
-            .stage_blob(&sha, source, file.metadata()?.len())
-            .await
-            .map_err(|error| anyhow!("Source upload failed: {error:?}"))?;
-        let blob = format!("{}/sources/{sha}", self.ssh.root);
-        self.execute(
-            &format!(
-                "{{ {command}; }} < {}",
-                ssh::shell_path(blob.strip_prefix("~/").unwrap_or(&blob))
-            ),
-            &[],
-        )
-        .await
     }
 }
 
@@ -406,9 +385,17 @@ impl OpenResearch {
                         }
                     } else if inspection.alive {
                         Observation::Running { started_at: None }
+                    } else if inspection.pid.is_some() || inspection.receipt_unreadable {
+                        Observation::Unreconciled {
+                            detail: "Legacy process gone without a receipt".into(),
+                        }
                     } else {
-                        Observation::Queued {
-                            detail: "Waiting for the rental supervisor".into(),
+                        // Adoption means the 0.2 supervisor that would start the payload is gone.
+                        Observation::Unreconciled {
+                            detail: format!(
+                                "orx 0.2 stopped before starting this run on its box. Run `orx exp abandon {}` to release the box.",
+                                watched.id
+                            ),
                         }
                     };
                     Ok(vec![(watched.id.clone(), observation)])

@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          archives=(artifacts/*.tar.xz)
+          archives=(artifacts/*.tar.gz)
           manifests=(artifacts/*-dist-manifest.json)
           if (( ${#archives[@]} != 1 || ${#manifests[@]} != 1 )); then
             echo "::error::Expected one archive and one manifest, found ${#archives[@]} and ${#manifests[@]}"
@@ -101,7 +101,7 @@ jobs:
 
           rm "$archive"
           # shellcheck disable=SC2046 # one argument per top-level entry
-          (cd "$work" && COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -cJf "$GITHUB_WORKSPACE/$archive" $(ls -A))
+          (cd "$work" && COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -czf "$GITHUB_WORKSPACE/$archive" $(ls -A))
 
           # Same format dist writes, including its trailing blank line.
           sum="$(shasum -a 256 "$archive" | cut -d' ' -f1)"

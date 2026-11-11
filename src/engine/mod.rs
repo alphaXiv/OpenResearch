@@ -411,6 +411,14 @@ impl Engine {
         Ok(())
     }
 
+    /// Whether a stop is on its way to the run's backend.
+    pub fn delivering_cancel(&self, run_id: &str) -> bool {
+        self.memory()
+            .verifying
+            .get(run_id)
+            .is_some_and(|attempt| attempt.strong_count() > 0)
+    }
+
     /// Delivers a pending stop once per connection; rented boxes can be released without SSH.
     pub async fn deliver_cancel(&self, backend: &dyn Backend, run_id: &str) -> Result<()> {
         if !self.own(run_id)? {

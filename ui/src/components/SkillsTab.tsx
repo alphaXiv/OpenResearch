@@ -1,8 +1,9 @@
 import { useWorkspace } from "../workspace";
 import { type DialogContentProps } from "../dialog";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import { m } from "../paraglide/messages.js";
+import { mutDeleteLatexTemplate, mutDeleteUserSkill, mutUpdateUserSkill, mutUploadLatexTemplate, mutUploadUserSkill } from "../queries/settings";
 import { ltr } from "../i18n";
 import { Pencil, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
@@ -210,16 +211,12 @@ function SkillRow({
 }: {
   skill: UserSkill;
 }) {
-  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+  const workspace = useWorkspace();
+  const { showCustomDialog, showConfirmDialog } = workspace.dialogs;
+  const { getUserSkillContent } = workspace.api;
 
-  const { deleteUserSkill, getUserSkillContent, updateUserSkill } = useWorkspace().api;
-  const { listUserSkillsQuery } = useWorkspace().queries;
-
-  const deleteUserSkillMutation = useMutation({ mutationFn: deleteUserSkill });
-  const queryClient = useQueryClient();
   const [loading, setLoading] = useState(false);
 
-  const busy = deleteUserSkillMutation.isPending || loading;
   const edit = useCallback(async () => {
     setLoading(true);
     try {
@@ -230,8 +227,7 @@ function SkillRow({
         props: { name: skill.name, content, beforeCancel },
         onCancel: async () => { await beforeCancel.current(); },
         onConfirm: async (next) => {
-          await updateUserSkill(skill.name, next);
-          await queryClient.invalidateQueries({ queryKey: listUserSkillsQuery().queryKey });
+          await mutUpdateUserSkill.runAsHeadlessPromise(workspace, skill.name, next, {});
         },
       });
     } catch (e) {
@@ -239,7 +235,7 @@ function SkillRow({
     } finally {
       setLoading(false);
     }
-  }, [queryClient, skill.name]);
+  }, [skill.name]);
 
   return (
     <div className="flex items-center gap-2 py-1 border-t border-t-border first:border-t-0">
@@ -254,7 +250,7 @@ function SkillRow({
           data-tip={m.skills_edit_skill()}
           data-tip-align="end"
           aria-label={m.skills_edit_skill_label({ name: ltr(skill.name) })}
-          disabled={busy}
+          disabled={loading}
           onClick={() => void edit()}
         >
           <Pencil size={14} />
@@ -265,14 +261,14 @@ function SkillRow({
         data-tip={skill.origin ? m.skills_remove_imported() : m.skills_tab_delete_skill()}
         data-tip-align="end"
         aria-label={skill.origin ? m.skills_remove_imported_label({ name: ltr(skill.name) }) : m.skills_delete_skill_label({ name: ltr(skill.name) })}
-        disabled={busy}
+        disabled={loading}
         onClick={() => {
           showConfirmDialog({
             title: skill.origin ? m.skills_remove_imported() : m.skills_tab_delete_skill(),
             description: skill.origin ? m.skills_remove_imported_confirm({ name: ltr(skill.name) }) : m.skills_delete_skill_confirm({ name: ltr(skill.name) }),
             destructive: true,
             confirmLabel: skill.origin ? m.chat_panel_remove() : m.chat_panel_delete(),
-            onConfirm: async () => { await deleteUserSkillMutation.mutateAsync(skill.name); },
+            onConfirm: () => mutDeleteUserSkill.run(workspace, skill.name),
             onCancel: "close",
           });
         }}
@@ -288,13 +284,9 @@ function LatexTemplateRow({
 }: {
   template: LatexTemplate;
 }) {
-  const { showConfirmDialog } = useWorkspace().dialogs;
+  const workspace = useWorkspace();
+  const { showConfirmDialog } = workspace.dialogs;
 
-  const { deleteLatexTemplate } = useWorkspace().api;
-
-  const deleteLatexTemplateMutation = useMutation({ mutationFn: deleteLatexTemplate });
-
-  const busy = deleteLatexTemplateMutation.isPending;
   const support = template.supportFiles.length;
   return (
     <div className={SKILL_ROW_CLASS_NAME}>
@@ -313,14 +305,13 @@ function LatexTemplateRow({
         data-tip={m.skills_tab_delete_template()}
         data-tip-align="end"
         aria-label={m.skills_delete_template_label({ name: ltr(template.name) })}
-        disabled={busy}
         onClick={() => {
           showConfirmDialog({
             title: m.skills_tab_delete_template(),
             description: m.skills_delete_template_confirm({ name: ltr(template.name) }),
             destructive: true,
             confirmLabel: m.chat_panel_delete(),
-            onConfirm: async () => { await deleteLatexTemplateMutation.mutateAsync(template.name); },
+            onConfirm: () => mutDeleteLatexTemplate.run(workspace, template.name),
             onCancel: "close",
           });
         }}
@@ -348,10 +339,8 @@ function SkillDetectionDetails({ reports }: { reports: SkillDiscovery[] }) {
 /** Everything the agent can invoke with `/name`: skills uploaded here, and the
  * ones already installed in the user's coding agents, mirrored automatically. */
 function SkillsCard() {
-  const { uploadUserSkill } = useWorkspace().api;
-  const { listUserSkillsQuery } = useWorkspace().queries;
-
-  const uploadUserSkillMutation = useMutation({ mutationFn: uploadUserSkill });
+  const workspace = useWorkspace();
+  const { listUserSkillsQuery } = workspace.queries;
 
   const skillsQuery = useQuery(listUserSkillsQuery());
   const skills = skillsQuery.data?.skills;
@@ -394,10 +383,10 @@ function SkillsCard() {
       busyRef.current = true;
       setBusy(true);
       try {
-        await uploadUserSkillMutation.mutateAsync({
+        await mutUploadUserSkill.runAsHeadlessPromise(workspace, {
           filename: file.name,
           contentBase64: await fileToBase64(file),
-        });
+        }, {});
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -470,10 +459,8 @@ function SkillsCard() {
 /** LaTeX templates the `orx-paper` skill follows instead of its built-in
  * preamble — a conference class, a lab style. */
 function LatexTemplatesCard() {
-  const { uploadLatexTemplate } = useWorkspace().api;
-  const { listLatexTemplatesQuery } = useWorkspace().queries;
-
-  const uploadLatexTemplateMutation = useMutation({ mutationFn: uploadLatexTemplate });
+  const workspace = useWorkspace();
+  const { listLatexTemplatesQuery } = workspace.queries;
 
   const templatesQuery = useQuery(listLatexTemplatesQuery());
   const templates = templatesQuery.data;
@@ -498,10 +485,10 @@ function LatexTemplatesCard() {
       busyRef.current = true;
       setBusy(true);
       try {
-        await uploadLatexTemplateMutation.mutateAsync({
+        await mutUploadLatexTemplate.runAsHeadlessPromise(workspace, {
           filename: file.name,
           contentBase64: await fileToBase64(file),
-        });
+        }, {});
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {

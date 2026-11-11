@@ -1,13 +1,14 @@
 import { useContext, useRef, useState } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useMachines } from "../machineSelection";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { SlidersHorizontal, X } from "lucide-react";
 
 import type { DialogContentProps } from "../dialog";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
+import { mutCreateRemoteSession } from "../queries/settings";
 
 import { getThemePreference } from "../theme";
 import { ProgressBar } from "./ProgressBar";
@@ -25,10 +26,7 @@ export function RemoteHostDialog({
   const { id: elementId } = useContext(WorkspaceDomContext);
 
   const machines = useMachines();
-  const { createRemoteSession } = machines.owner.api;
   const { getSshSettingsQuery, listRemoteSessionsQuery } = machines.owner.queries;
-
-  const createRemoteSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createRemoteSession>) => createRemoteSession(...args) }, machines.owner.queryClient);
 
   const hostsQuery = useQuery(getSshSettingsQuery(), machines.owner.queryClient);
   const sessionsQuery = useQuery(listRemoteSessionsQuery(), machines.owner.queryClient);
@@ -43,10 +41,10 @@ export function RemoteHostDialog({
     setOpeningHost(host);
     confirm(async () => {
       try {
-        const session = await createRemoteSessionMutation.mutateAsync([host, {
+        const session = await mutCreateRemoteSession.runAsHeadlessPromise(machines.owner, host, {
           theme: getThemePreference(),
           locale: getLocale(),
-        }]);
+        }, {});
         machines.selectRemote(session);
       } finally {
         setOpeningHost(null);

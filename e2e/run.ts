@@ -44,6 +44,8 @@ const target = process.env.CARGO_TARGET_DIR ?? path.join(ROOT, 'target')
 const binary = path.join(E2E, '.out', 'bin', 'orx')
 mkdirSync(path.dirname(binary), { recursive: true })
 copyFileSync(path.join(target, 'debug', 'orx'), binary)
+// Debug builds start local runs with the orx-host beside their own executable.
+copyFileSync(path.join(target, 'debug', 'orx-host'), path.join(path.dirname(binary), 'orx-host'))
 
 const playwright = spawnSync(path.join(E2E, 'node_modules', '.bin', 'playwright'), ['test', ...process.argv.slice(2)], {
   cwd: E2E,

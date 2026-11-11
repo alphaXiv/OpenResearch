@@ -1,4 +1,5 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutate } from "@clo/react-mutation";
+import { useQuery } from "@tanstack/react-query";
 import { FolderOpen } from "lucide-react";
 import { useId, useState } from "react";
 
@@ -6,6 +7,7 @@ import type { OpenedSharedProject, SharedSource } from "../api";
 import { m } from "../paraglide/messages.js";
 import { slugify } from "./NewProjectForm";
 import { useWorkspace } from "../workspace";
+import { mutImportSharedProject } from "../queries/projects";
 import { Button, Input, LoadingRow, Spinner, showAlert } from "./ui";
 
 interface FormProps {
@@ -40,17 +42,22 @@ function PickFolder({ source, onCancel, onOpened, name, intro = m.open_shared_bo
   intro?: string;
   publisher?: string | null;
 }) {
-  const { api: { importSharedProject }, queries: { getProjectPathStatusQuery } } = useWorkspace();
+  const workspace = useWorkspace();
+  const { getProjectPathStatusQuery } = workspace.queries;
   const pathId = useId();
   const problemId = useId();
   const [path, setPath] = useState(`~/OpenResearch/${slugify(name.replace(/\.orx$/i, ""), 48)}`);
   const trimmed = path.trim();
   const status = useQuery({ ...getProjectPathStatusQuery(trimmed), enabled: Boolean(trimmed) }).data;
   const occupied = status?.exists === true && (status.directory === false || status.empty === false);
-  const open = useMutation({ mutationFn: () => importSharedProject(trimmed, source), onSuccess: onOpened });
-  const pending = open.isPending;
+  const open = useMutate(mutImportSharedProject);
+  const pending = open.isMutating;
+  const error = open.error === undefined ? null : open.error instanceof Error ? open.error.message : String(open.error);
 
-  return <form onSubmit={(event) => { event.preventDefault(); if (trimmed && !occupied && !pending) open.mutate(); }}>
+  return <form onSubmit={(event) => {
+    event.preventDefault();
+    if (trimmed && !occupied && !pending) open.runWithOptions(workspace, trimmed, source, { onSuccessData: onOpened });
+  }}>
     <p className="text-sm">{intro}</p>
     {publisher && <p className="mt-1 text-xs text-subtext">{m.open_shared_link_publisher({ name: publisher })}</p>}
     <label htmlFor={pathId} className="mt-5 mb-1 block text-sm font-medium">{m.open_shared_folder()}</label>
@@ -61,10 +68,10 @@ function PickFolder({ source, onCancel, onOpened, name, intro = m.open_shared_bo
     </div>
     {status?.resolvedPath && <p className="mt-1 break-all text-xs text-subtext">{status.resolvedPath}</p>}
     {occupied && <p id={problemId} className="mt-2 text-sm text-accent-red">{m.open_shared_folder_occupied()}</p>}
-    {open.error && <p role="alert" className="mt-3 whitespace-pre-line text-sm text-accent-red">{open.error.message}</p>}
+    {error && <p role="alert" className="mt-3 whitespace-pre-line text-sm text-accent-red">{error}</p>}
     <div className="mt-6 flex justify-end gap-2">
       <Button type="button" variant="ghost" disabled={pending} onClick={onCancel}>{m.projects_home_cancel()}</Button>
-      <Button type="submit" variant="primary" disabled={pending || !trimmed || occupied}>{pending && <Spinner />}{m.open_shared_submit()}</Button>
+      <Button type="submit" variant="primary" disabled={pending || !trimmed || occupied}>{open.isPending && <Spinner />}{m.open_shared_submit()}</Button>
     </div>
   </form>;
 }

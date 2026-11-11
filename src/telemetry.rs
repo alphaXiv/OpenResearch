@@ -106,8 +106,6 @@ fn flush_window() -> Duration {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_engine: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop_zoom_percent: Option<i32>,
     #[serde(default)]
     pub acp_harnesses: Vec<crate::local::acp::Definition>,
@@ -909,7 +907,7 @@ fn sort_oldest_first(
 }
 
 pub(crate) fn retry_outbox() {
-    if environment_disabled_reason().is_some() {
+    if environment_disabled_reason().is_some() || crate::local::chat::in_local_session() {
         return;
     }
     transfer_pending_events();
@@ -957,6 +955,22 @@ fn spawn_event(
     let event_id = uuid::Uuid::new_v4();
     let install_id = install_id()?;
     let payload = build_payload_with_id(&event.into(), &install_id, event_id, properties);
+    send_or_stage(event_id, payload)
+}
+
+/// An agent's sandbox may proxy a send and report the agent's command as failed
+/// when exit cuts the send off, so a command run in an `orx up` chat stages its
+/// events for `orx up` to deliver.
+fn send_or_stage(
+    event_id: uuid::Uuid,
+    payload: serde_json::Value,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if crate::local::chat::in_local_session() {
+        if let Ok(store) = crate::store::Store::open() {
+            let _ = store.stage_telemetry(&event_id.to_string(), &payload);
+        }
+        return None;
+    }
     let path = persist_payload(event_id, &payload);
     Some(tokio::spawn(deliver_payload(path, payload)))
 }
@@ -1465,9 +1479,6 @@ mod tests {
                 set_github_default_prompt_seen(true).unwrap()
             }),
             (&["autoUpdate"], || set_auto_update_enabled(false).unwrap()),
-            (&["runEngine"], || {
-                crate::config::set_run_engine_enabled(true).unwrap()
-            }),
             (&["updateChannel"], || {
                 set_update_channel(crate::updates::ReleaseChannel::Canary).unwrap()
             }),
@@ -2466,6 +2477,27 @@ mod tests {
             pending().lock().unwrap().is_empty(),
             "flush_pending must drain the pending set"
         );
+    }
+
+    #[tokio::test]
+    async fn chat_commands_leave_delivery_to_orx_up() {
+        if !crate::config::in_test_child(&[crate::local::chat::LOCAL_SESSION_ENV]) {
+            return;
+        }
+        std::env::set_var(crate::local::chat::LOCAL_SESSION_ENV, "1");
+        let event_id = uuid::Uuid::new_v4();
+        let payload =
+            build_payload_with_id("command", "install", event_id, json!({ "command": "exp" }));
+
+        assert!(send_or_stage(event_id, payload.clone()).is_none());
+        assert_eq!(
+            crate::store::Store::open()
+                .unwrap()
+                .pending_telemetry()
+                .unwrap(),
+            vec![(event_id.to_string(), payload)]
+        );
+        assert!(!outbox_dir().exists());
     }
 
     #[test]

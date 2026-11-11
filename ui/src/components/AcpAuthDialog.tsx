@@ -6,6 +6,7 @@ import { Terminal } from "lucide-react";
 import { type Harness } from "../api";
 
 import { m } from "../paraglide/messages.js";
+import { mutSetEnvVar } from "../queries/settings";
 import { HarnessLogo } from "./HarnessLogo";
 import { CommandTerminal } from "./SshConnectTerminal";
 import { Button, DialogContent, DialogTitle, Input, Spinner } from "./ui";
@@ -15,9 +16,8 @@ export function AcpAuthDialog({ harness, remote = false, onReady, cancel, isDisa
   remote?: boolean;
   onReady?: (harness: Harness) => void;
 }) {
-  const { getEnvVarsQuery, refreshHarnesses } = useWorkspace().queries;
-  const { setEnvVar } = useWorkspace().api;
-  const { queryClient } = useWorkspace();
+  const workspace = useWorkspace();
+  const { getEnvVarsQuery, refreshHarnesses } = workspace.queries;
 
   const cancelled = useRef(false);
   if (isDisabled) cancelled.current = true;
@@ -26,8 +26,7 @@ export function AcpAuthDialog({ harness, remote = false, onReady, cancel, isDisa
   const [error, setError] = useState<string | null>(null);
   const [command, setCommand] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const envOptions = getEnvVarsQuery();
-  const environment = useQuery({ ...envOptions, enabled: Boolean(harness.authEnvKey) });
+  const environment = useQuery({ ...getEnvVarsQuery(), enabled: Boolean(harness.authEnvKey) });
   const entry = environment.data?.find((entry) => entry.key === harness.authEnvKey);
   const commands = remote ? [] : harness.logo === "zcode-acp-server" ? ["zcode login zai", "zcode login bigmodel"]
     : harness.logo === "kimi" ? ["kimi login"]
@@ -49,9 +48,8 @@ export function AcpAuthDialog({ harness, remote = false, onReady, cancel, isDisa
     setError(null);
     try {
       if (save && harness.authEnvKey) {
-        await setEnvVar(harness.authEnvKey, value.trim());
+        await mutSetEnvVar.runAsHeadlessPromise(workspace, harness.authEnvKey, value.trim(), {});
         setValue("");
-        void queryClient.invalidateQueries({ queryKey: envOptions.queryKey });
       }
       const current = (await refreshHarnesses(true, true)).find((item) => item.id === harness.id);
       if (cancelled.current) return;

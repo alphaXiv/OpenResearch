@@ -114,7 +114,6 @@ export function ProjectsPage() {
               remote={runtime.kind === "ssh"}
               preferredAgent={state.preferredAgent}
               onCreated={(project, publicationError) => {
-                queryClient.setQueryData(projectsOptions.queryKey, (cur) => [...(cur ?? []).filter((p) => p.id !== project.id), project]);
                 void navigate({
                   href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}`,
                 });

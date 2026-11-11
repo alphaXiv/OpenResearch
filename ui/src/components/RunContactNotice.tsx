@@ -1,4 +1,6 @@
 import { useWorkspace } from "../workspace";
+import { mutAbandonRun, mutCancelRun, mutCleanupRun } from "../queries/projects";
+import { mutRetryEngineHost } from "../queries/settings";
 import { CircleStop, Plug, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { type Run } from "../api";
@@ -10,7 +12,7 @@ import { statusLabel } from "./StatusBadge";
 import { Button } from "./ui";
 import { cn } from "./ui/cn";
 
-type NoticeRun = Parameters<typeof runNotice>[0] & Pick<Run, "id" | "host">;
+type NoticeRun = Parameters<typeof runNotice>[0] & Pick<Run, "id" | "projectId" | "host">;
 
 const TONES = {
   warning: "text-accent-amber",
@@ -70,10 +72,10 @@ function copy(notice: RunNotice, nextRetryMs: number | null, provider: string | 
 
 /** What a run's status alone can't say: lost contact, a pending cancel, or an abandoned job's pending kill. */
 export function RunContactNotice({ run, className }: { run: NoticeRun; className?: string }) {
-  const { abandonRun, cancelRun, cleanupRun, retryEngineHost } = useWorkspace().api;
+  const workspace = useWorkspace();
   const { showConfirmDialog } = useWorkspace().dialogs;
   const { requestHostConnect } = useWorkspace().events;
-  const { setEngineHost, useEngineHosts } = useWorkspace().queries;
+  const { useEngineHosts } = workspace.queries;
 
   const hosts = useEngineHosts();
   const [busy, setBusy] = useState(false);
@@ -125,22 +127,22 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
             </Button>
           )}
           {retryHost && (
-            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(async () => setEngineHost(await retryEngineHost(retryHost)))}>
+            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(async () => { await mutRetryEngineHost.runAsHeadlessPromise(workspace, retryHost, {}); })}>
               <RefreshCw size={14} />{m.app_retry()}
             </Button>
           )}
           {rentalBilling && (
-            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => cancelRun(run.id))}>
+            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => mutCancelRun.runAsHeadlessPromise(workspace, run, {}))}>
               <CircleStop size={14} />{m.run_stop_box()}
             </Button>
           )}
           {stopAgain && (
-            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => cancelRun(run.id))}>
+            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => mutCancelRun.runAsHeadlessPromise(workspace, run, {}))}>
               <CircleStop size={14} />{m.run_stop_again()}
             </Button>
           )}
           {killPending && (
-            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => cleanupRun(run.id))}>
+            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => mutCleanupRun.runAsHeadlessPromise(workspace, run.id, {}))}>
               <CircleStop size={14} />{m.run_stop_now()}
             </Button>
           )}
@@ -152,7 +154,7 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
               confirmLabel: m.run_abandon_confirm(),
               cancelLabel: m.run_abandon_keep(),
               onCancel: "close",
-              onConfirm: async () => { await abandonRun(run.id); },
+              onConfirm: async () => { await mutAbandonRun.runAsHeadlessPromise(workspace, run.id, {}); },
             })}>
               {m.run_abandon()}
             </Button>

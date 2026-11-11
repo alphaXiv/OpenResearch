@@ -117,19 +117,12 @@ For Slurm, `--cpus` and `--mem` request `#SBATCH --cpus-per-task` and
 partition default. Read
 `references/slurm.md` before choosing values.
 
-## Run engine setting
+## Who watches a run
 
-Stable and dev builds use detached supervisors by default;
-`ORX_RUN_ENGINE=1|0` on `orx up` overrides the saved opt-in. Canary builds
-always use the new engine being tested and ignore both the setting and
-environment override. Leave the user's setting alone unless asked. Existing
-runs keep their launch mode when the setting changes. In supervised mode, a
-detached `orx supervise` watches each run and streams logs; do not kill it.
-With the new engine, the OpenResearch server watches runs and catches up when
-reopened. Jobs keep running while the server is closed in both modes. The
-snapshot, command, result-message and wake contracts apply in both modes.
-Engine-specific contact states, Abandon and interim notify messages apply to
-engine-owned runs.
+The OpenResearch server watches every run and catches up when reopened; jobs
+keep running while it is closed. A run launched by orx 0.2 may still have a
+detached supervisor process watching it; do not kill it, and the server takes
+the run over once it exits.
 
 ## Results arrive in the chat
 
@@ -137,7 +130,7 @@ Launch ready runs with `orx exp run`, then end your turn. The launching chat is
 subscribed automatically. Results wait until the chat is idle and may combine
 several updates into one message. No waiting command or live agent session is
 needed to keep the runs monitored. Silence does not mean a run failed. A run
-can post an interim result with the new engine by appending a line to
+can post an interim result by appending a line to
 `$ORX_NOTIFY_FILE` (`>>`) when set; it arrives at most once per run per 10
 minutes, with later lines coalesced.
 
@@ -148,12 +141,11 @@ before deciding whether to repair, refill a slot, promote a result, or stop.
 A failed run is not a new node: repair and relaunch the same experiment as
 specified by `orx-experiment-tree`.
 
-With the new engine, attention messages also arrive when monitoring or
-cancellation needs action. Supervised runs show monitoring errors in their
-status. Inspect `orx exp status <expId>` and tell the user what needs
+Attention messages also arrive when monitoring or cancellation needs action.
+Inspect `orx exp status <expId>` and tell the user what needs
 fixing. Cancel only a run that is broken or no longer wanted.
 
-With the new engine, **Cancellation pending** means the cancel has been
+**Cancellation pending** means the cancel has been
 accepted but has not reached the machine. It will be sent when the machine is
 reachable again or the launch is confirmed. **Cancelling…** means the machine
 is stopping the run. To stop tracking an unreachable run, use

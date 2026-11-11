@@ -1404,6 +1404,12 @@ impl ServerDescriptor {
         Ok(())
     }
 
+    /// Withdraws this server's descriptor before an exec relaunch, which keeps the pid and start time that vouch for it.
+    pub(crate) fn withdraw(data_dir: &Path) -> Result<()> {
+        std::fs::remove_file(runtime_path(data_dir, "server.json")?)?;
+        Ok(())
+    }
+
     pub(crate) async fn live(data_dir: &Path) -> Result<Option<Self>> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {

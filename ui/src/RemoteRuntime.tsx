@@ -19,6 +19,7 @@ import { type RemoteInstallPaths, type RemoteSessionInfo, type RuntimeInfo } fro
 import { ltr } from "./i18n";
 import { setLocale, useLocale } from "./locale";
 import { m } from "./paraglide/messages.js";
+import { mutDisconnectRemote, mutInstallRemote, mutReconnectRemote, mutStartRemoteHost, mutStopRemoteHost } from "./queries/settings";
 import { isLocale } from "./paraglide/runtime.js";
 import { setThemePreference } from "./theme";
 import { Button, Input, showAlert, Spinner } from "./components/ui";
@@ -168,16 +169,9 @@ function RemoteSetup({
 }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
 
-  const { showCustomDialog } = useWorkspace().dialogs;
-
-  const {
-    installRemoteSession,
-    reconnectCurrentRemote,
-    disconnectCurrentRemote,
-    getRemoteStopPreview,
-    stopCurrentRemoteHost,
-    startCurrentRemoteHost,
-  } = useWorkspace().api;
+  const workspace = useWorkspace();
+  const { showCustomDialog } = workspace.dialogs;
+  const { getRemoteStopPreview } = workspace.api;
 
   const { session } = runtime;
   const [paths, setPaths] = useState<RemoteInstallPaths | null>(session.installPaths);
@@ -191,39 +185,23 @@ function RemoteSetup({
     session.installPaths?.cache,
   ]);
 
-  async function install() {
+  const settle = { onSettled: () => setBusy(false) };
+
+  function install() {
     if (!paths) return;
     setBusy(true);
-    try {
-      await installRemoteSession(paths);
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setBusy(false);
-    }
+    mutInstallRemote.runWithOptions(workspace, paths, settle);
   }
 
-  async function reconnect(afterInteractiveSsh = false) {
+  function reconnect(afterInteractiveSsh = false) {
     setRetriedInteractiveError(afterInteractiveSsh ? session.error : null);
     setBusy(true);
-    try {
-      await reconnectCurrentRemote();
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setBusy(false);
-    }
+    mutReconnectRemote.runWithOptions(workspace, settle);
   }
 
-  async function disconnect() {
+  function disconnect() {
     setBusy(true);
-    try {
-      await disconnectCurrentRemote();
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setBusy(false);
-    }
+    mutDisconnectRemote.runWithOptions(workspace, settle);
   }
 
   async function prepareStopHost() {
@@ -233,7 +211,7 @@ function RemoteSetup({
       showCustomDialog({
         component: RemoteStopDialog,
         props: { host: session.host, preview, currentClientAttached: false },
-        onConfirm: async () => { await stopCurrentRemoteHost(preview); },
+        onConfirm: () => mutStopRemoteHost.runAsHeadlessPromise(workspace, preview, {}),
         onCancel: "close",
       });
     } catch (error) {
@@ -243,15 +221,9 @@ function RemoteSetup({
     }
   }
 
-  async function startNewHost() {
+  function startNewHost() {
     setBusy(true);
-    try {
-      await startCurrentRemoteHost();
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setBusy(false);
-    }
+    mutStartRemoteHost.runWithOptions(workspace, settle);
   }
 
   const installing = session.status === "applying" || busy;
@@ -350,7 +322,7 @@ function RemoteSetup({
                       onComplete={(value) => {
                         if (!isComplete(value)) return false;
                         setRepairTerminalOpen(false);
-                        void reconnect(true);
+                        reconnect(true);
                         return true;
                       }}
                       onError={(error) => {
@@ -369,7 +341,7 @@ function RemoteSetup({
               host={session.host}
               backend="ssh"
               path="/_orx/ssh/connect"
-              onComplete={() => void reconnect(true)}
+              onComplete={() => reconnect(true)}
             />
           )}
 
@@ -392,7 +364,7 @@ function RemoteSetup({
               ))}
               {!session.error && (
                 <div className="flex justify-end pt-1">
-                  <Button variant="primary" disabled={installing} onClick={() => void install()}>
+                  <Button variant="primary" disabled={installing} onClick={install}>
                     {installing ? <><Spinner /> {m.remote_installing()}</> : needsUpdate ? m.remote_update() : m.settings_page_install()}
                   </Button>
                 </div>
@@ -403,7 +375,7 @@ function RemoteSetup({
           {needsUpdate && paths && (
             <div className="mt-6 flex justify-end">
               {!session.error && (
-                <Button variant="primary" disabled={installing} onClick={() => void install()}>
+                <Button variant="primary" disabled={installing} onClick={install}>
                   {installing ? <><Spinner /> {m.remote_updating()}</> : m.remote_update()}
                 </Button>
               )}
@@ -413,12 +385,12 @@ function RemoteSetup({
           {session.status === "disconnected" && (
             <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
               {session.canStartNewHost ? (
-                <Button variant="primary" disabled={busy} onClick={() => void startNewHost()}>
+                <Button variant="primary" disabled={busy} onClick={startNewHost}>
                   {busy ? <Spinner /> : null}
                   {session.error ? m.remote_reconnect() : m.remote_start_new_host()}
                 </Button>
               ) : (
-                <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+                <Button variant="primary" disabled={busy} onClick={() => reconnect()}>
                   {busy ? <Spinner /> : null}
                   {m.remote_reconnect()}
                 </Button>
@@ -427,19 +399,19 @@ function RemoteSetup({
           )}
           {(session.status === "connecting" || session.status === "reconnecting") && (
             <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
-              <Button disabled={busy} onClick={() => void disconnect()}>
+              <Button disabled={busy} onClick={disconnect}>
                 {m.remote_disconnect()}
               </Button>
             </div>
           )}
           {needsUpdate && session.error && (
             <div className="mt-6 flex justify-end gap-2 border-t border-border-variant pt-5">
-              <Button disabled={busy} onClick={() => void disconnect()}>
+              <Button disabled={busy} onClick={disconnect}>
                 {m.remote_disconnect()}
               </Button>
               {session.installPaths !== null &&
                 (session.dashboardProtocol === null || session.dashboardProtocol < runtime.dashboardProtocol) && (
-                  <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+                  <Button variant="primary" disabled={busy} onClick={() => reconnect()}>
                     {busy ? <Spinner /> : null}
                     {m.remote_check_again()}
                   </Button>
@@ -454,7 +426,7 @@ function RemoteSetup({
           )}
           {needsInstall && session.error && (
             <div className="mt-6 flex justify-end">
-              <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+              <Button variant="primary" disabled={busy} onClick={() => reconnect()}>
                 {busy ? <Spinner /> : null}
                 {m.remote_check_again()}
               </Button>
@@ -489,9 +461,9 @@ function RemoteOverlay({ children }: { children: ReactNode }) {
 
 export function RuntimeRoot() {
   const machines = useMachines();
-  const { getRuntimeQuery, reportLocaleQuery } = useWorkspace().queries;
-  const { replaceWorkspace } = useWorkspace();
-  const { startCurrentRemoteHost, reconnectCurrentRemote } = useWorkspace().api;
+  const workspace = useWorkspace();
+  const { getRuntimeQuery, reportLocaleQuery } = workspace.queries;
+  const { replaceWorkspace } = workspace;
 
   const locale = useLocale();
   const launchPlaceholder = useLocation({ select: (location) => location.pathname === "/remote-launch" });
@@ -575,8 +547,8 @@ export function RuntimeRoot() {
     detail: phase === "lost" ? error ?? session.error : null,
     retry: async () => {
       if (error !== null) await runtimeQuery.refetch();
-      else if (session.canStartNewHost) await startCurrentRemoteHost();
-      else await reconnectCurrentRemote();
+      else if (session.canStartNewHost) await mutStartRemoteHost.runAsHeadlessPromise(workspace, {});
+      else await mutReconnectRemote.runAsHeadlessPromise(workspace, {});
     },
   };
   return (

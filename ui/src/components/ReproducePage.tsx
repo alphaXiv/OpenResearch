@@ -25,8 +25,7 @@ export function ReproducePage({ paperId }: { paperId: string | null }) {
   const runtime = useRuntime();
   const navigate = useNavigate();
   const { queryClient } = useRouteContext({ from: "__root__" });
-  const projectsOptions = listProjectsQuery();
-  const projectsQuery = useQuery(projectsOptions);
+  const projectsQuery = useQuery(listProjectsQuery());
   const stateQuery = useQuery(getUiStateQuery());
   useQuery({ ...resolvePaperQuery(paperId ?? ""), enabled: Boolean(paperId) });
   const shownPaper = useRef<string | null>(null);
@@ -55,7 +54,6 @@ export function ReproducePage({ paperId }: { paperId: string | null }) {
             const source = ARXIV_ID.test(paperId) ? `arXiv:${paperId}` : `alphaxiv.org/abs/${paperId}`;
             seedComposer(project.id, m.reproduce_paper_prompt({ title, source }));
           }
-          queryClient.setQueryData(projectsOptions.queryKey, (cur) => [...(cur ?? []).filter((p) => p.id !== project.id), project]);
           void navigate({
             href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}`,
             replace: true,
@@ -66,7 +64,7 @@ export function ReproducePage({ paperId }: { paperId: string | null }) {
       onConfirm: () => {},
       onCancel: () => { void navigate({ to: "/", replace: true }); },
     });
-  }, [paperId, projects, state, onboarding, error, runtime.kind, navigate, queryClient, projectsOptions.queryKey]);
+  }, [paperId, projects, state, onboarding, error, runtime.kind, navigate, queryClient]);
   if (error) return <RouteFailure error={error} reset={retry} />;
   if (!paperId || !projects || !state || onboarding) return <RoutePending />;
   return <div className="app flex flex-col h-full bg-background" />;
