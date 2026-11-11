@@ -185,11 +185,13 @@ export function LoginSession({
     const timer = window.setTimeout(() => {
       socket = new WebSocket(socketUrl(connectOnly ? "/api/settings/alphaxiv/login" : "/api/settings/openresearch/login"));
       socket.binaryType = "arraybuffer";
+      // ConPTY hard-wraps at the terminal's width, which would split the sign-in URL.
+      socket.onopen = () => socket?.send(JSON.stringify({ type: "resize", cols: 1000, rows: 24 }));
       socket.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
           terminal.write(new Uint8Array(event.data));
           output += new TextDecoder().decode(event.data);
-          const url = output.match(/https?:\/\/[^\s\x1b]+(?=\s)/)?.[0];
+          const url = output.match(/https?:\/\/[^\s\x1b]+(?=[\s\x1b])/)?.[0];
           if (url) show({ url, code: output.match(/approve the code (\S+):/)?.[1] });
           return;
         }
