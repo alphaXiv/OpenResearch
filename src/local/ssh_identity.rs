@@ -2,8 +2,8 @@
 //!
 //! Boxes authorize the public keys registered on the account, but `orx` never
 //! passes an identity — it shells out to `ssh`, which offers whatever the agent
-//! and `~/.ssh` hold. So a box can be online, trusting a key the user registered
-//! from another laptop, and every connection still dies with
+//! holds and the user's SSH config names. So a box can be online, trusting a key
+//! the user registered from another laptop, and every connection still dies with
 //! `Permission denied (publickey)`. Comparing the registered public keys against
 //! the locally-available ones catches that before a box is ever billed.
 
@@ -59,7 +59,8 @@ pub fn key_comment(line: &str) -> Option<String> {
 pub struct LocalKey {
     pub fingerprint: String,
     pub line: String,
-    /// `None` for an agent-only key, which has no `.pub` to register.
+    /// `None` when no `.pub` sits beside it: an agent-only key, or a configured identity file ssh
+    /// reads without a passphrase.
     pub path: Option<PathBuf>,
     /// The SSH agent holds it, so ssh signs with it without a prompt.
     pub agent: bool,
@@ -89,6 +90,21 @@ pub enum KeyStatus {
 pub async fn local_keys() -> Vec<LocalKey> {
     let mut seen = HashSet::new();
     let mut keys = Vec::new();
+    let mut add = |body: &str, path: Option<PathBuf>| {
+        for line in body.lines() {
+            let Some(fp) = fingerprint(line.trim()) else {
+                continue;
+            };
+            if seen.insert(fp.clone()) {
+                keys.push(LocalKey {
+                    fingerprint: fp,
+                    line: line.trim().to_string(),
+                    path: path.clone(),
+                    agent: false,
+                });
+            }
+        }
+    };
 
     // On-disk keys first, so a key the agent also holds keeps the `.pub` path
     // `preferred_local` needs.
@@ -99,23 +115,20 @@ pub async fn local_keys() -> Vec<LocalKey> {
                 if path.extension().and_then(|e| e.to_str()) != Some("pub") {
                     continue;
                 }
-                let Ok(body) = tokio::fs::read_to_string(&path).await else {
-                    continue;
-                };
-                for line in body.lines() {
-                    let Some(fp) = fingerprint(line.trim()) else {
-                        continue;
-                    };
-                    if seen.insert(fp.clone()) {
-                        keys.push(LocalKey {
-                            fingerprint: fp,
-                            line: line.trim().to_string(),
-                            path: Some(path.clone()),
-                            agent: false,
-                        });
-                    }
+                if let Ok(body) = tokio::fs::read_to_string(&path).await {
+                    add(&body, Some(path));
                 }
             }
+        }
+    }
+    for private in offered_identities().await.unwrap_or_default() {
+        let mut public = private.clone().into_os_string();
+        public.push(".pub");
+        let public = PathBuf::from(public);
+        if let Ok(body) = tokio::fs::read_to_string(&public).await {
+            add(&body, Some(public));
+        } else if let Some(body) = unlocked_public_key(&private).await {
+            add(&body, None);
         }
     }
 
@@ -273,6 +286,92 @@ pub fn tilde(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// The private key files ssh offers an `orx-box-*` host under the user's SSH config, as
+/// `ssh -G` resolves them. `None` when ssh can't say, or when what it offers depends on the box
+/// (`%h`, `%r`, …) or comes from an agent or token `ssh-add` doesn't reach.
+pub async fn offered_identities() -> Option<Vec<PathBuf>> {
+    let home = dirs::home_dir()?;
+    let config = home.join(".ssh").join("config");
+    let resolved = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::process::tokio_command("ssh")
+            .arg("-G")
+            .arg("-F")
+            .arg(if config.is_file() {
+                config.as_os_str()
+            } else {
+                "none".as_ref()
+            })
+            .arg("orx-box-preflight")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let Ok(Ok(output)) = resolved else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut files = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((option, value)) = line.split_once(' ') else {
+            continue;
+        };
+        match option {
+            "identityfile" => {
+                let mut path = String::new();
+                let mut chars = value.chars();
+                while let Some(char) = chars.next() {
+                    if char != '%' {
+                        path.push(char);
+                        continue;
+                    }
+                    match chars.next() {
+                        Some('%') => path.push('%'),
+                        Some('d') => path.push_str(&home.to_string_lossy()),
+                        _ => return None,
+                    }
+                }
+                files.push(match path.strip_prefix("~/") {
+                    Some(relative) => home.join(relative),
+                    None => PathBuf::from(path),
+                });
+            }
+            "identityagent" if value != "SSH_AUTH_SOCK" => return None,
+            "pkcs11provider" if value != "none" => return None,
+            _ => {}
+        }
+    }
+    Some(files)
+}
+
+/// The public half of `private` when ssh can read it without a passphrase.
+async fn unlocked_public_key(private: &std::path::Path) -> Option<String> {
+    let output = probe_private_key(private).await?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+async fn probe_private_key(private: &std::path::Path) -> Option<std::process::Output> {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::process::tokio_command("ssh-keygen")
+            .args(["-y", "-P", "", "-f"])
+            .arg(private)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()
+}
+
 /// A private key file from `matched` when ssh, which never prompts for orx, can use none of
 /// them: none is in the agent and each file needs a passphrase. `None` when one is usable or a
 /// check fails.
@@ -281,19 +380,7 @@ pub async fn locked(matched: &[LocalKey]) -> Option<PathBuf> {
     for key in matched {
         let public = key.path.as_deref().filter(|_| !key.agent)?;
         let private = public.with_extension("");
-        let probe = tokio::time::timeout(
-            Duration::from_secs(5),
-            crate::process::tokio_command("ssh-keygen")
-                .args(["-y", "-P", "", "-f"])
-                .arg(&private)
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
-        let Ok(Ok(output)) = probe else {
-            return None;
-        };
+        let output = probe_private_key(&private).await?;
         if output.status.success()
             || !String::from_utf8_lossy(&output.stderr).contains("incorrect passphrase")
         {
@@ -550,6 +637,60 @@ mod tests {
     }
 
     /// The agent is how a passphrase-protected key becomes usable without a prompt.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn keys_the_ssh_config_offers_boxes_count_as_local() {
+        if !crate::config::in_test_child(&["SSH_AUTH_SOCK"]) {
+            return;
+        }
+        let home = crate::config::test_home();
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("SSH_AUTH_SOCK");
+        let (ssh, keys) = (home.join(".ssh"), home.join("keys"));
+        let key = |path: PathBuf, passphrase: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            assert!(crate::process::command("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", passphrase, "-f"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            std::fs::read_to_string(path.with_extension("pub")).unwrap()
+        };
+        let old = key(ssh.join("id_ed25519"), "secret");
+        let work = key(keys.join("work"), "");
+        let bare = key(keys.join("bare"), "");
+        std::fs::remove_file(keys.join("bare.pub")).unwrap();
+        let config = ssh.join("config");
+        std::fs::write(
+            &config,
+            "Host *\n  IdentityFile ~/keys/work\n  IdentityFile %d/keys/bare\n",
+        )
+        .unwrap();
+
+        let local = local_keys().await;
+        for public in [&old, &work, &bare] {
+            assert!(is_local(&local, public), "{local:?}");
+        }
+        assert_eq!(
+            locked(&local).await,
+            None,
+            "a configured key needs no passphrase"
+        );
+        assert!(offered_identities()
+            .await
+            .unwrap()
+            .contains(&keys.join("work")));
+
+        for unresolved in [
+            "Host *\n  IdentityFile ~/keys/%r\n",
+            "Host *\n  IdentityAgent ~/another-agent.sock\n",
+        ] {
+            std::fs::write(&config, unresolved).unwrap();
+            assert_eq!(offered_identities().await, None, "{unresolved}");
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_passphrase_key_is_locked_until_an_agent_holds_it() {

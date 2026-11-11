@@ -81,8 +81,9 @@ pub async fn launch_spec(args: &crate::ExpRunArgs) -> Result<LaunchSpec> {
                     ssh_identity::tilde(&private),
                     ssh_identity::unlock_hint(&private)
                 );
-                // macOS ssh may read the passphrase from the keychain without a prompt.
-                if cfg!(target_os = "macos") {
+                // macOS ssh may read the passphrase from the keychain without a prompt, and a
+                // config `ssh -G` can't resolve may offer a key orx can't see.
+                if cfg!(target_os = "macos") || ssh_identity::offered_identities().await.is_none() {
                     eprintln!("warning: {problem}");
                 } else {
                     return Err(anyhow!("{problem}"));
@@ -100,9 +101,9 @@ pub async fn launch_spec(args: &crate::ExpRunArgs) -> Result<LaunchSpec> {
                 ssh_identity::remediation(&[], &local)
             ));
         }
-        // We only enumerate the agent and ~/.ssh/*.pub, so ssh can still succeed
-        // via an IdentityFile elsewhere or a key whose .pub isn't on disk. Warn
-        // loudly rather than block a launch that would have worked.
+        // ssh can still succeed with a key orx can't see: another agent, a token, or a
+        // passphrase-protected identity file with no .pub beside it. Warn loudly
+        // rather than block a launch that would have worked.
         ssh_identity::KeyStatus::NoLocalMatch { registered, local } => {
             eprintln!(
                 "warning: {}\n\n{}",

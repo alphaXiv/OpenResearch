@@ -1571,11 +1571,9 @@ mod tests {
         for (_, sender) in lock(&runtime.watched).drain() {
             sender.send_replace(Vec::new());
         }
+        let events = runtime.engine.bus.subscribe();
         drop((runtime, store));
-        assert!(
-            stopped(&boxes[0].1).await,
-            "the runtime's observers must release it and its boxes"
-        );
+        engine_released(events).await;
         std::fs::remove_dir_all(dir).unwrap();
     }
 

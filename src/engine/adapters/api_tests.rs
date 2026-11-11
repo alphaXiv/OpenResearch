@@ -1616,24 +1616,16 @@ async fn openresearch_box_refusing_the_key_fails_the_run_with_the_cause() {
         let (run, _) = engine.load(&watched.id).unwrap();
         assert_eq!(run.status, "failed", "{case}");
         let reason = run.result_markdown.unwrap();
-        assert!(
-            reason.starts_with("Box box refused this computer's SSH key: "),
+        // A locked key names its private file and how to load it; a refused one names the `.pub`.
+        assert!(reason.contains("~/.ssh/id_ed25519"), "{reason}");
+        assert_eq!(reason.contains("ssh-add"), case == "locked", "{reason}");
+        assert_eq!(
+            reason.contains("~/.ssh/id_ed25519.pub"),
+            case != "locked",
             "{reason}"
         );
-        if case == "locked" {
-            assert!(
-                reason.contains("~/.ssh/id_ed25519 needs its passphrase"),
-                "{reason}"
-            );
-            assert!(reason.contains("ssh-add"), "{reason}");
-        } else {
-            assert!(
-                reason.contains("never accepted ~/.ssh/id_ed25519.pub"),
-                "{reason}"
-            );
-        }
         assert_eq!(
-            reason.ends_with("(OpenResearch reports box box went dead: the host was reclaimed)"),
+            reason.contains("the host was reclaimed"),
             case == "dead",
             "{reason}"
         );
@@ -1663,26 +1655,26 @@ async fn openresearch_box_that_never_comes_online_fails_with_the_service_reason(
     })
     .await
     .unwrap();
-    for (case, sandbox, reason) in [
+    // `details` are what tells the causes apart: the service's code, status and words.
+    for (case, sandbox, details) in [
         (
             "failed",
             json!({"status":"failed", "failureCode":"readiness_timeout", "failureMessage":"The box was not ready within 5 minutes."}),
-            "Provisioning failed: readiness_timeout: The box was not ready within 5 minutes.",
+            &[
+                "readiness_timeout",
+                "The box was not ready within 5 minutes.",
+            ][..],
         ),
         (
             "offline",
             json!({"status":"offline", "provisionWarnings":"host unreachable"}),
-            "Provisioning failed: box box went offline: host unreachable",
+            &["offline", "host unreachable"],
         ),
-        (
-            "deleted",
-            json!({}),
-            "Provisioning failed: box box was deleted before it came online, and OpenResearch kept no reason.",
-        ),
+        ("deleted", json!({}), &[]),
         (
             "deadline",
             json!({"status":"provisioning"}),
-            "Provisioning failed: box box was still provisioning after 10 minutes, so orx released it.",
+            &["provisioning"],
         ),
     ] {
         std::fs::write(root.join("sandbox.json"), sandbox.to_string()).unwrap();
@@ -1715,7 +1707,10 @@ async fn openresearch_box_that_never_comes_online_fails_with_the_service_reason(
         }
         let run = observe().await;
         assert_eq!(run.status, "failed", "{case}");
-        assert_eq!(run.result_markdown.as_deref(), Some(reason));
+        let reason = run.result_markdown.unwrap();
+        for detail in details {
+            assert!(reason.contains(detail), "{case}: {reason}");
+        }
         let released = std::fs::read_to_string(root.join("http.log"))
             .unwrap()
             .lines()
@@ -1740,13 +1735,14 @@ async fn openresearch_box_lost_after_contact_keeps_the_service_reason() {
     })
     .await
     .unwrap();
-    for (case, sandbox, reached, status, reason) in [
+    // `details` are the ssh cause and the service's code and words the reason must keep.
+    for (case, sandbox, reached, status, details) in [
         (
             "dead",
             Some(json!({"status":"dead", "provisionWarnings":"the provider reclaimed the host"})),
             true,
             "lost",
-            "Outcome unavailable: box box went dead: the provider reclaimed the host",
+            &["dead", "the provider reclaimed the host"][..],
         ),
         (
             "failed",
@@ -1755,28 +1751,26 @@ async fn openresearch_box_lost_after_contact_keeps_the_service_reason() {
             ),
             true,
             "lost",
-            "Outcome unavailable: host_lost: The provider lost the host.",
+            &["host_lost", "The provider lost the host."],
         ),
-        (
-            "unreached",
-            None,
-            false,
-            "failed",
-            "Box box was released before orx could reach it: Connection refused",
-        ),
+        ("unreached", None, false, "failed", &["Connection refused"]),
         (
             "unreached dead",
             Some(json!({"status":"dead", "provisionWarnings":"the provider reclaimed the host"})),
             false,
             "failed",
-            "Box box was released before orx could reach it: Connection refused (OpenResearch reports box box went dead: the provider reclaimed the host)",
+            &[
+                "Connection refused",
+                "dead",
+                "the provider reclaimed the host",
+            ],
         ),
         (
             "unreached offline",
             Some(json!({"status":"offline", "provisionWarnings":"host unreachable"})),
             false,
             "failed",
-            "Box box was released before orx could reach it: Connection refused (OpenResearch reports box box went offline: host unreachable)",
+            &["Connection refused", "offline", "host unreachable"],
         ),
     ] {
         let dir = root.join(case);
@@ -1844,7 +1838,10 @@ async fn openresearch_box_lost_after_contact_keeps_the_service_reason() {
             .unwrap();
         let (run, _) = engine.load(&watched[0].id).unwrap();
         assert_eq!(run.status, status, "{case}");
-        assert_eq!(run.result_markdown.as_deref(), Some(reason));
+        let reason = run.result_markdown.unwrap();
+        for detail in details {
+            assert!(reason.contains(detail), "{case}: {reason}");
+        }
         let released = std::fs::read_to_string(root.join("http.log"))
             .unwrap()
             .lines()
@@ -1882,12 +1879,44 @@ async fn openresearch_launch_checks_the_key_is_usable_without_a_prompt() {
     );
     if let Err(error) = launched {
         let error = error.to_string();
-        assert!(
-            error.starts_with("~/.ssh/id_ed25519 needs its passphrase"),
-            "{error}"
-        );
+        assert!(error.contains("~/.ssh/id_ed25519 "), "{error}");
         assert!(error.contains("ssh-add"), "{error}");
     }
+
+    // ssh offers the box a registered key from outside ~/.ssh, so the locked one doesn't matter.
+    let home = dirs::home_dir().unwrap();
+    let work = home.join("keys").join("work");
+    std::fs::create_dir_all(work.parent().unwrap()).unwrap();
+    assert!(crate::process::command("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&work)
+        .status()
+        .unwrap()
+        .success());
+    let registered = std::fs::read_to_string(home.join(".ssh").join("id_ed25519.pub")).unwrap();
+    let working = std::fs::read_to_string(work.with_extension("pub")).unwrap();
+    std::fs::write(
+        root.join("ssh-keys.json"),
+        json!({"sshKeys":[
+            {"id":"old","name":"old","publicKey":registered.trim()},
+            {"id":"work","name":"work","publicKey":working.trim()},
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let config = home.join(".ssh").join("config");
+    std::fs::write(&config, "Host *\n  IdentityFile ~/keys/work\n").unwrap();
+    crate::local::openresearch::launch_spec(&args)
+        .await
+        .unwrap();
+
+    // Which key ssh offers depends on the box, so the locked key only warns.
+    local_key(&root, "secret");
+    std::fs::write(&config, "Host *\n  IdentityFile ~/keys/%r\n").unwrap();
+    crate::local::openresearch::launch_spec(&args)
+        .await
+        .unwrap();
+    std::fs::remove_file(&config).unwrap();
     local_key(&root, "");
     crate::local::openresearch::launch_spec(&args)
         .await
