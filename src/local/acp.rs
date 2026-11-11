@@ -779,7 +779,8 @@ mod tests {
 
     #[test]
     fn an_absolute_agent_outside_the_test_root_is_refused() {
-        let found = std::panic::catch_unwind(|| executable_path("/orx-not-an-agent"));
+        let outside = std::path::absolute("/orx-not-an-agent").unwrap();
+        let found = std::panic::catch_unwind(|| executable_path(&outside.to_string_lossy()));
         assert!(found.is_err(), "resolved {:?}", found.unwrap());
         let interpreter = fake_agent_interpreter("python3");
         assert_eq!(executable_path(&interpreter), Some(interpreter.into()));
