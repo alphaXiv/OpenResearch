@@ -442,6 +442,8 @@
   "settings_page_no_job_create_permission": "No job-create permission",
   "settings_page_no_job_write_permission": "No Write Permissions",
   "settings_hf_write_permission_help": "This token is valid, but cannot submit Hugging Face Jobs. Create a token with Jobs write permission in Hugging Face token settings, then replace it here.",
+  "settings_page_no_bucket_permission": "No Bucket Permissions",
+  "settings_hf_bucket_permission_help": "This token can submit Hugging Face Jobs but can't create or write the private jobs-artifacts bucket, where each run's source is uploaded. Give the token write access to repositories and buckets in Hugging Face token settings, then replace it here.",
   "settings_page_no_key_on_this_computer_to_register_load": "No key on this computer to register — load a registered key with",
   "settings_page_no_key_on_this_computer_yet_create_one": "No key on this computer yet — create one with",
   "settings_page_no_slurm_cli": "No Slurm CLI",

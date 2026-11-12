@@ -504,6 +504,8 @@ export interface HfSettings {
   validationError: string | null;
   username: string | null;
   jobsWrite: boolean | null;
+  sourceStaging: boolean | null;
+  sourceStagingError: string | null;
 }
 
 export interface TinkerSettings {

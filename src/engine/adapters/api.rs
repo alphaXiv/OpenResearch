@@ -561,6 +561,24 @@ pub fn interrupted(error: impl std::fmt::Display) -> LaunchError {
     }
 }
 
+/// Whether an HTTP status refuses a launch for certain, so a retry would be refused too: a 4xx
+/// other than a timeout, a conflict (the job may already exist) or a rate limit.
+pub fn refuses(status: u16) -> bool {
+    (400..500).contains(&status) && !matches!(status, 408 | 409 | 429)
+}
+
+/// A provider client's launch error: rejected when the provider refused it for certain.
+pub fn launch_error(error: crate::error::Error) -> LaunchError {
+    let refused = error
+        .downcast_ref::<crate::jobs::Refused>()
+        .is_some_and(|refused| refused.status.is_none_or(refuses));
+    if refused {
+        rejected(error)
+    } else {
+        interrupted(error)
+    }
+}
+
 pub fn unknown(error: impl std::fmt::Display) -> Recovery {
     Recovery::Unknown {
         detail: error.to_string(),

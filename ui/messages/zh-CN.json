@@ -442,6 +442,8 @@
   "settings_page_no_job_create_permission": "没有创建 Job 的权限",
   "settings_page_no_job_write_permission": "无写入权限",
   "settings_hf_write_permission_help": "此令牌有效，但无法提交 Hugging Face 任务。请在 Hugging Face 令牌设置中创建具有 Jobs 写入权限的令牌，然后在此处替换。",
+  "settings_page_no_bucket_permission": "无存储桶权限",
+  "settings_hf_bucket_permission_help": "此令牌可以提交 Hugging Face Jobs，但无法创建或写入私有存储桶 jobs-artifacts，每次运行的源代码都会上传到这里。请在 Hugging Face 令牌设置中为令牌授予仓库和存储桶的写入权限，然后在此替换。",
   "settings_page_no_key_on_this_computer_to_register_load": "此计算机上没有可注册的密钥——使用以下命令加载已注册的密钥：",
   "settings_page_no_key_on_this_computer_yet_create_one": "此计算机上还没有密钥——使用以下命令创建：",
   "settings_page_no_slurm_cli": "无 Slurm CLI",

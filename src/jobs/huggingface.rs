@@ -22,22 +22,32 @@ use serde_json::json;
 use super::managed_env::ManagedEnv;
 use crate::error::{anyhow, Result};
 
+/// Prints the job JSON, or exits 1 after printing `{"failed": "staging" | "job", "status", "message"}`.
 const SOURCE_LAUNCHER: &str = r#"
 import contextlib, json, sys
 from huggingface_hub import HfApi
+
+def attempt(step, call):
+    try:
+        return call()
+    except Exception as error:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        failure = {"failed": step, "status": status, "message": str(error)}
+        sys.__stdout__.write(json.dumps(failure))
+        sys.exit(1)
 
 spec = json.load(sys.stdin)
 api = HfApi(endpoint=spec["endpoint"], token=spec["token"])
 # sync_job_volume prints its sync plan to stdout, which must carry only the job JSON.
 with contextlib.redirect_stdout(sys.stderr):
-    volume = api.sync_job_volume(
+    volume = attempt("staging", lambda: api.sync_job_volume(
         spec["sourceDir"],
         "/orx-source",
         namespace=spec["namespace"],
         remote_name="orx-" + spec["digest"],
         read_only=True,
-    )
-    job = api.run_job(
+    ))
+    job = attempt("job", lambda: api.run_job(
         image=spec["image"],
         command=spec["command"],
         env=spec["environment"],
@@ -47,7 +57,7 @@ with contextlib.redirect_stdout(sys.stderr):
         labels=spec["labels"],
         volumes=[volume],
         namespace=spec["namespace"],
-    )
+    ))
 print(json.dumps({"id": job.id}))
 "#;
 
@@ -58,6 +68,7 @@ const CLIENT_ENV: ManagedEnv = ManagedEnv {
     min_python: (3, 10),
     requirement: "huggingface_hub>=1.22.0",
     ready_check: "from huggingface_hub import HfApi; assert hasattr(HfApi, 'sync_job_volume')",
+    override_var: None,
 };
 
 pub fn endpoint() -> String {
@@ -222,6 +233,53 @@ pub async fn whoami_details(token: &str) -> Result<WhoamiDetails> {
     Ok(WhoamiDetails { name, jobs_write })
 }
 
+/// The private bucket `sync_job_volume` stages each run's source into.
+const STAGING_BUCKET: &str = "jobs-artifacts";
+
+pub fn staging_forbidden(namespace: &str) -> String {
+    format!(
+        "Your Hugging Face token can't create or write the private bucket \
+         {namespace}/{STAGING_BUCKET}, where orx stages each run's source. Give the token write \
+         access to repositories and buckets in {namespace} at \
+         https://huggingface.co/settings/tokens, or use a token with the write role, then run \
+         `orx compute test hf`."
+    )
+}
+
+/// Whether the token can do what source staging does first: create the staging bucket, or
+/// read it when it already exists. Creating it early is harmless; staging creates the same one.
+pub async fn can_stage_source(token: &str, namespace: &str) -> Result<bool> {
+    let url = format!("{}/api/buckets/{namespace}/{STAGING_BUCKET}", endpoint());
+    let unreachable = |e: reqwest::Error| anyhow!("Could not reach Hugging Face: {}", e);
+    let create = http()
+        .post(&url)
+        .bearer_auth(token)
+        .json(&json!({"visibility": "private"}))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(unreachable)?;
+    let status = create.status();
+    if status.is_success() || status == reqwest::StatusCode::CONFLICT {
+        return Ok(true);
+    }
+    if !matches!(status.as_u16(), 401 | 403) {
+        return check(create, "the source bucket check").await.map(|_| true);
+    }
+    let info = http()
+        .get(&url)
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(unreachable)?;
+    match info.status().as_u16() {
+        200..=299 => Ok(true),
+        401 | 403 | 404 => Ok(false),
+        _ => check(info, "the source bucket check").await.map(|_| true),
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct JobSubmission {
     pub command: Vec<String>,
@@ -297,10 +355,13 @@ pub async fn run_job_with_source(
         .await?;
     let output = child.wait_with_output().await?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "Hugging Face source staging failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return Err(match serde_json::from_slice(&output.stdout) {
+            Ok(failure) => launch_failure(namespace, failure),
+            Err(_) => anyhow!(
+                "The Hugging Face launcher failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
     }
     let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let id = value["id"]
@@ -314,6 +375,48 @@ pub async fn run_job_with_source(
             message: None,
         },
     })
+}
+
+/// A step of `SOURCE_LAUNCHER` that failed.
+#[derive(Deserialize)]
+struct LaunchFailure {
+    failed: String,
+    status: Option<u16>,
+    message: String,
+}
+
+fn launch_failure(namespace: &str, failure: LaunchFailure) -> crate::error::Error {
+    let LaunchFailure {
+        failed,
+        status,
+        message,
+    } = failure;
+    let text = match (failed.as_str(), status) {
+        ("staging", Some(401 | 403)) => format!("{} ({message})", staging_forbidden(namespace)),
+        ("staging", _) => format!(
+            "Hugging Face could not stage the run's source in {namespace}/{STAGING_BUCKET}: {message}"
+        ),
+        ("job", Some(402)) => format!(
+            "Hugging Face won't run jobs in {namespace} without billing ({message}). Add a \
+             payment method or prepaid credit to {namespace} at \
+             https://huggingface.co/settings/billing, or in the organization's billing settings, \
+             then run the experiment again."
+        ),
+        ("job", Some(401 | 403)) => format!(
+            "Your Hugging Face token can't run jobs in {namespace} ({message}). Give it the \
+             job.write permission for {namespace} at https://huggingface.co/settings/tokens, then \
+             run `orx compute test hf`."
+        ),
+        _ => format!("Hugging Face did not create the job in {namespace}: {message}"),
+    };
+    match status {
+        Some(status) => super::Refused {
+            status: Some(status),
+            message: text,
+        }
+        .into(),
+        None => anyhow!(text),
+    }
 }
 
 pub async fn inspect_job(token: &str, namespace: &str, job_id: &str) -> Result<JobInfo> {

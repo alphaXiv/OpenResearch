@@ -442,6 +442,8 @@
   "settings_page_no_job_create_permission": "İş oluşturma izni yok",
   "settings_page_no_job_write_permission": "Yazma izni yok",
   "settings_hf_write_permission_help": "Bu token geçerli ancak Hugging Face Jobs'a iş gönderemiyor. Hugging Face token ayarlarında Jobs yazma izni olan bir token oluşturun, ardından buradaki token'ı değiştirin.",
+  "settings_page_no_bucket_permission": "Bucket izni yok",
+  "settings_hf_bucket_permission_help": "Bu token Hugging Face Jobs gönderebiliyor ancak her çalıştırmanın kaynağının yüklendiği özel jobs-artifacts bucket'ını oluşturamıyor veya ona yazamıyor. Hugging Face token ayarlarında token'a depolar ve bucket'lar için yazma izni verin, ardından buradaki token'ı değiştirin.",
   "settings_page_no_key_on_this_computer_to_register_load": "Bu bilgisayarda kaydedilecek anahtar yok — kayıtlı bir anahtarı şununla yükleyin:",
   "settings_page_no_key_on_this_computer_yet_create_one": "Bu bilgisayarda henüz anahtar yok — şununla bir tane oluşturun:",
   "settings_page_no_slurm_cli": "Slurm CLI yok",

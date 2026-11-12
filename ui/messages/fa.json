@@ -442,6 +442,8 @@
   "settings_page_no_job_create_permission": "مجوز ساخت Job وجود ندارد",
   "settings_page_no_job_write_permission": "بدون مجوز نوشتن",
   "settings_hf_write_permission_help": "این توکن معتبر است، اما اجازهٔ ارسال کار به Hugging Face را ندارد. در تنظیمات توکن Hugging Face، توکنی با مجوز نوشتن Jobs بسازید و آن را اینجا جایگزین کنید.",
+  "settings_page_no_bucket_permission": "بدون مجوز باکت",
+  "settings_hf_bucket_permission_help": "این توکن می‌تواند Hugging Face Jobs ارسال کند، اما نمی‌تواند باکت خصوصی jobs-artifacts را که کد هر اجرا در آن بارگذاری می‌شود بسازد یا در آن بنویسد. در تنظیمات توکن Hugging Face به توکن دسترسی نوشتن در مخزن‌ها و باکت‌ها بدهید و آن را اینجا جایگزین کنید.",
   "settings_page_no_key_on_this_computer_to_register_load": "کلیدی برای ثبت روی این رایانه نیست — کلید ثبت‌شده را با این فرمان بار کنید:",
   "settings_page_no_key_on_this_computer_yet_create_one": "هنوز کلیدی روی این رایانه نیست — با این فرمان یکی بسازید:",
   "settings_page_no_slurm_cli": "بدون CLI اسلورم",

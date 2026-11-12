@@ -242,9 +242,11 @@ pub fn staged_script(command: &str) -> String {
     format!("set -eo pipefail; cd repo; {command}")
 }
 
+/// Bash runs each line once it has read it, so a command that does not parse fails only after
+/// the source arrived, and the provider's copy still finds the container running.
 pub fn gated_script(archive_path: &str, command: &str) -> String {
     format!(
-        "set -eo pipefail; mkdir -p \"$(dirname -- {archive})\"; while [ ! -f {ready} ]; do sleep 0.1; done; mkdir -p repo; tar -xf {archive} -C repo; cd repo; {command}",
+        "set -eo pipefail; mkdir -p \"$(dirname -- {archive})\"; while [ ! -f {ready} ]; do sleep 0.1; done; mkdir -p repo; tar -xf {archive} -C repo; cd repo\n{command}",
         archive = shell_quote(archive_path),
         ready = shell_quote(&format!("{archive_path}.ready")),
     )
@@ -460,7 +462,7 @@ backend_adapter!(
         if args.flavor.is_none() {
             return Ok(not_ready("Modal requires --flavor."));
         }
-        crate::jobs::modal::preflight().await?;
+        crate::jobs::modal::preflight(&args.caller_python_overrides).await?;
         ready()
     },
     prepare | args,
@@ -482,7 +484,7 @@ backend_adapter!(
         if let Err(error) = crate::jobs::vercel::resolve_flavor(args.flavor.as_deref()) {
             return Ok(not_ready(error.to_string()));
         }
-        crate::jobs::vercel::preflight().await?;
+        crate::jobs::vercel::preflight(&args.caller_python_overrides).await?;
         ready()
     },
     prepare | args,
@@ -970,6 +972,55 @@ fn not_ready(detail: impl Into<String>) -> Preflight {
 pub(crate) mod tests {
     use super::*;
 
+    /// Providers copy the source into a container that is already running the script.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_does_not_parse_still_waits_for_its_source() {
+        let root = std::env::temp_dir().join(format!("orx-gate-{}", uuid::Uuid::new_v4()));
+        let archive = root.join("incoming/source.tar");
+        std::fs::create_dir_all(root.join("work")).unwrap();
+        let mut bash = crate::process::command("bash")
+            .args(["-c", &gated_script(archive.to_str().unwrap(), "echo (")])
+            .current_dir(root.join("work"))
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !archive.parent().unwrap().exists() {
+            assert!(
+                bash.try_wait().unwrap().is_none(),
+                "bash exited before the source arrived"
+            );
+            assert!(std::time::Instant::now() < deadline, "the gate never ran");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(bash.try_wait().unwrap().is_none());
+
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let tar = crate::process::command("tar")
+            .args([
+                "-cf",
+                archive.to_str().unwrap(),
+                "-C",
+                source.to_str().unwrap(),
+                ".",
+            ])
+            .status()
+            .unwrap();
+        assert!(tar.success());
+        std::fs::write(archive.with_extension("tar.ready"), "").unwrap();
+        let output = bash.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("syntax error"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn snapshot_dir_accepts_a_user_owned_symlinked_directory() {
@@ -1167,6 +1218,7 @@ echo ok
             forwarded: false,
             telemetry_suppressed: false,
             caller_config_dir: None,
+            caller_python_overrides: Default::default(),
         }
     }
 

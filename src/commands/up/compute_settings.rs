@@ -15,6 +15,9 @@ pub(super) struct HfSettings {
     validation_error: Option<String>,
     username: Option<String>,
     jobs_write: Option<bool>,
+    /// Whether the token can create or read the bucket staging uploads each run's source to.
+    source_staging: Option<bool>,
+    source_staging_error: Option<String>,
 }
 
 /// Never the full token: first 3 chars + ellipsis + last 4.
@@ -43,6 +46,8 @@ pub(super) async fn hf_token_status() -> HfSettings {
             validation_error: None,
             username: None,
             jobs_write: None,
+            source_staging: None,
+            source_staging_error: None,
         };
     };
     let source = match source {
@@ -51,15 +56,28 @@ pub(super) async fn hf_token_status() -> HfSettings {
         TokenSource::HfCache => "hfCache",
     };
     match huggingface::whoami_details(&token).await {
-        Ok(details) => HfSettings {
-            configured: true,
-            source: Some(source),
-            masked_token: Some(mask_token(&token)),
-            validation_status: "valid",
-            validation_error: None,
-            username: Some(details.name),
-            jobs_write: details.jobs_write,
-        },
+        Ok(details) => {
+            let (source_staging, source_staging_error) =
+                match huggingface::can_stage_source(&token, &details.name).await {
+                    Ok(true) => (Some(true), None),
+                    Ok(false) => (
+                        Some(false),
+                        Some(huggingface::staging_forbidden(&details.name)),
+                    ),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+            HfSettings {
+                configured: true,
+                source: Some(source),
+                masked_token: Some(mask_token(&token)),
+                validation_status: "valid",
+                validation_error: None,
+                username: Some(details.name),
+                jobs_write: details.jobs_write,
+                source_staging,
+                source_staging_error,
+            }
+        }
         Err(error) => {
             let validation_status = if error
                 .downcast_ref::<reqwest::Error>()
@@ -77,6 +95,8 @@ pub(super) async fn hf_token_status() -> HfSettings {
                 validation_error: Some(error.to_string()),
                 username: None,
                 jobs_write: None,
+                source_staging: None,
+                source_staging_error: None,
             }
         }
     }
@@ -1875,6 +1895,7 @@ pub(crate) async fn check(
     container: Option<String>,
     no_container: bool,
     address: Option<String>,
+    caller_python_overrides: &std::collections::BTreeMap<String, String>,
 ) -> Result<Value> {
     let mut value = match backend {
         "ssh" => {
@@ -1896,11 +1917,11 @@ pub(crate) async fn check(
             cli_result(slurm_preflight(Json(SlurmPreflightReq { host })).await)?
         }
         "ray" => cli_result(ray_preflight(Json(RayPreflightReq { address })).await)?,
-        "modal" => match modal::preflight().await {
+        "modal" => match modal::preflight(caller_python_overrides).await {
             Ok(()) => json!({"ready": true}),
             Err(error) => json!({"ready": false, "error": error.to_string()}),
         },
-        "vercel" => match vercel::preflight().await {
+        "vercel" => match vercel::preflight(caller_python_overrides).await {
             Ok(()) => json!({"ready": true}),
             Err(error) => json!({"ready": false, "error": error.to_string()}),
         },
@@ -1922,7 +1943,11 @@ pub(crate) async fn check(
         "k8s" => {
             value["preflight"]["reachable"] == true && value["preflight"]["canCreateJobs"] == true
         }
-        "hf" => value["validationStatus"] == "valid" && value["jobsWrite"] != false,
+        "hf" => {
+            value["validationStatus"] == "valid"
+                && value["jobsWrite"] != false
+                && value["sourceStaging"] == true
+        }
         "tinker" => value["validationStatus"] == "valid",
         "openresearch" => {
             value["loggedIn"] == true
@@ -2409,6 +2434,75 @@ mod account_tests {
         assert_eq!(
             account_response(Some(creds("valid"))).await.unwrap().0["failure"]["kind"],
             "offline"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hf_readiness_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// `compute test hf` is ready only when the token can do what staging does first.
+    #[tokio::test]
+    async fn hf_readiness_requires_the_source_bucket() {
+        if !crate::config::in_test_child(&["HF_TOKEN", "HF_ENDPOINT"]) {
+            return;
+        }
+        let bucket = Arc::new(Mutex::new((200u16, 200u16)));
+        let (create, info) = (bucket.clone(), bucket.clone());
+        let upstream = Router::new()
+            .route(
+                "/api/whoami-v2",
+                get(|| async {
+                    Json(json!({"name": "ada", "auth": {"accessToken": {"role": "write"}}}))
+                }),
+            )
+            .route(
+                "/api/buckets/ada/jobs-artifacts",
+                axum::routing::post(move || async move {
+                    StatusCode::from_u16(create.lock().unwrap().0).unwrap()
+                })
+                .get(move || async move { StatusCode::from_u16(info.lock().unwrap().1).unwrap() }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "HF_ENDPOINT",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        std::env::set_var("HF_TOKEN", "hf_fake");
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let none = Default::default();
+        let test = || check("hf", None, None, false, None, &none);
+
+        for (statuses, ready) in [
+            ((200, 200), true),
+            ((409, 200), true),
+            ((403, 200), true),
+            ((403, 404), false),
+            ((401, 403), false),
+        ] {
+            *bucket.lock().unwrap() = statuses;
+            let value = test().await.unwrap();
+            assert_eq!(value["ready"], ready, "{statuses:?}: {value}");
+            assert_eq!(value["sourceStaging"], ready, "{statuses:?}: {value}");
+            if !ready {
+                let error = value["sourceStagingError"].as_str().unwrap();
+                assert!(error.contains("ada/jobs-artifacts"), "{error}");
+                assert!(error.contains("huggingface.co/settings/tokens"), "{error}");
+            }
+        }
+
+        *bucket.lock().unwrap() = (503, 200);
+        let value = test().await.unwrap();
+        assert_eq!(value["ready"], false, "{value}");
+        assert!(value["sourceStaging"].is_null(), "{value}");
+        assert!(
+            value["sourceStagingError"]
+                .as_str()
+                .unwrap()
+                .contains("503"),
+            "{value}"
         );
     }
 }

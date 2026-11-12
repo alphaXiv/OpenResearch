@@ -442,6 +442,8 @@
   "settings_page_no_job_create_permission": "Нет прав на создание задач",
   "settings_page_no_job_write_permission": "Нет прав на запись",
   "settings_hf_write_permission_help": "Токен действителен, но не может отправлять задачи Hugging Face Jobs. Создайте в настройках токенов Hugging Face токен с правом записи для Jobs и замените его здесь.",
+  "settings_page_no_bucket_permission": "Нет доступа к бакету",
+  "settings_hf_bucket_permission_help": "Токен может отправлять задачи Hugging Face Jobs, но не может создать приватный бакет jobs-artifacts или записать в него, а туда загружается исходный код каждого запуска. Выдайте токену право записи в репозитории и бакеты в настройках токенов Hugging Face и замените его здесь.",
   "settings_page_no_key_on_this_computer_to_register_load": "На этом компьютере нет ключа для регистрации. Загрузите зарегистрированный ключ командой",
   "settings_page_no_key_on_this_computer_yet_create_one": "На этом компьютере пока нет ключа. Создайте его командой",
   "settings_page_no_slurm_cli": "Нет Slurm CLI",

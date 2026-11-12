@@ -24,7 +24,7 @@ impl Api for RayAccount {
         spec.env.extend(crate::config::launch_env(&intent.run.id));
         ray::run_job(&self.address, &spec)
             .await
-            .map_err(api::interrupted)?;
+            .map_err(api::launch_error)?;
         Ok(api::handle(intent, vec![intent.run.id.clone()]))
     }
     async fn recover(&self, intent: &RunIntent) -> Recovery {

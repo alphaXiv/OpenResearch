@@ -568,7 +568,7 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
 
 /// Checks run in the server, which owns SSH connections and relays their login prompts.
 async fn check(args: &CheckArgs, action: &str) -> Result<Value> {
-    let body = json!({"backend":args.backend.name(), "host":args.host, "container":args.container, "noContainer":args.no_container, "address":args.address});
+    let body = json!({"backend":args.backend.name(), "host":args.host, "container":args.container, "noContainer":args.no_container, "address":args.address, "callerPythonOverrides":crate::jobs::caller_python_overrides()});
     let client = crate::plane::local_plane::ApiClient::discover().await?;
     if action == "connect" && matches!(args.backend, Backend::Ssh | Backend::Slurm) {
         use std::io::IsTerminal as _;
