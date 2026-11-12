@@ -67,10 +67,19 @@ jobs:
         run: node scripts/ci-changes.mjs
 
   frontend:
-    name: Frontend
+    name: Frontend (${{ matrix.check }})
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: build
+          - check: test 1/2
+            shard: 1/2
+          - check: test 2/2
+            shard: 2/2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -91,14 +100,17 @@ jobs:
         working-directory: ui
         run: pnpm install --frozen-lockfile
       - name: Build UI
+        if: matrix.check == 'build'
         working-directory: ui
         run: pnpm exec vite build
       - name: UI typecheck
+        if: matrix.check == 'build'
         working-directory: ui
         run: pnpm typecheck
       - name: UI unit tests
+        if: matrix.shard != ''
         working-directory: ui
-        run: pnpm test
+        run: pnpm test --test-shard=${{ matrix.shard }}
 
   helpers:
     name: Helper tests
@@ -357,12 +369,18 @@ jobs:
         if: matrix.mode != 'lint'
         run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Install nextest
+        if: matrix.mode != 'lint'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-nextest@0.9.151
       - name: Test
         if: matrix.mode != 'lint'
         env:
-          RUST_TEST_THREADS: 16
           CARGO_PROFILE_TEST_DEBUG: 0
-        run: cargo test --locked --timings
+        run: |
+          cargo nextest run --locked --timings --test-threads 16 --retries 0 --no-fail-fast
+          cargo test --locked --doc
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Upload compilation timings
         if: always() && matrix.mode != 'lint'
