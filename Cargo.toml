@@ -170,6 +170,9 @@ opt-level = 3
 [profile.test.package.serde_json]
 opt-level = 3
 
+[profile.test.package.sha2]
+opt-level = 3
+
 [profile.test.package.orx-test-support]
 opt-level = 3
 
