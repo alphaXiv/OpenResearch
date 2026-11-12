@@ -419,6 +419,7 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
+      NEXTEST_TEST_THREADS: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
