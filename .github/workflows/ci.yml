@@ -415,7 +415,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(!inputs.release && '["lint", "test1", "test2", "test3", "test4", "integration", "demo", "chat"]' || '["all"]') }}
+        mode: ${{ fromJSON(!inputs.release && '["lint", "test1", "test2", "test3", "test4", "integration", "demo", "onboarding", "chat"]' || '["all"]') }}
     runs-on: windows-latest
     env:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
@@ -517,6 +517,7 @@ jobs:
           }
           $filters = @{
             demo = 'local::demo::tests::'
+            onboarding = 'local::demo::tests::prewarmed_onboarding_seeds_full_demo'
             chat = 'local::chat::'
           }
           $partitions = @{
@@ -527,7 +528,13 @@ jobs:
           }
           $testArgs = @('--locked')
           if ($filters.ContainsKey($env:TEST_MODE)) {
-            $testArgs += @('--bin', $binary, $filters[$env:TEST_MODE])
+            $filter = $filters[$env:TEST_MODE]
+            $testArgs += @('--bin', $binary, $filter, '--')
+            foreach ($nested in $filters.Values) {
+              if ($nested -ne $filter -and $nested.StartsWith($filter)) {
+                $testArgs += @('--skip', $nested)
+              }
+            }
           } elseif ($partitions.ContainsKey($env:TEST_MODE)) {
             $excluded = ($filters.Values | ForEach-Object { "test($_)" }) -join ' | '
             cargo nextest run --locked --profile ci --bin $binary --partition ($partitions[$env:TEST_MODE]) -E "not (kind(bin) & binary(=$binary) & ($excluded))"
