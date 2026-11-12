@@ -378,7 +378,7 @@ function ModelRow({ line, agents, selected, currentAgent, selectedAgent, lockedH
         {selected && <Check size={14} className="shrink-0 text-accent-blue-strong" aria-hidden="true" />}
       </button>
       <span className="flex shrink-0 items-center">
-        {agents.map((agent) => (
+        {agents.length > 1 && agents.map((agent) => (
           <Tooltip key={agent.key} interactive content={newChat(agent) ? m.model_picker_new_chat_with({ agent: agent.name }) : agent.name} className="rounded-md">
             <button
               type="button"
