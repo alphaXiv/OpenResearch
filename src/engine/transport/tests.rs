@@ -49,6 +49,13 @@ fn paced_child() -> bool {
 }
 
 fn config(server: &Sshd) -> Config {
+    let test = std::env::current_exe().unwrap();
+    // Cargo nests unit-test binaries at a varying depth below the profile directory holding `orx`.
+    let orx = test
+        .ancestors()
+        .map(|dir| dir.join("orx"))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no orx binary in any directory above {}", test.display()));
     Config {
         alias: server.alias().into(),
         root: "~/engine-root".into(),
@@ -57,13 +64,7 @@ fn config(server: &Sshd) -> Config {
         binary_dir: Some(binaries()),
         #[cfg(unix)]
         sharing_home: None,
-        askpass_executable: std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("orx"),
+        askpass_executable: orx,
     }
 }
 
