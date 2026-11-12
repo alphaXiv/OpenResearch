@@ -978,8 +978,17 @@ impl Actor {
                             let _ = action.reply.send(Err(anyhow!("Host requires Connect")));
                         }
                     }
+                    // A Connect pressed during an automatic attempt approves only the current route.
+                    let unapproved = !approve_route
+                        && result.is_ok()
+                        && queued_action
+                            .as_ref()
+                            .is_some_and(|action| !action.key_only)
+                        && ssh::route(&self.config).await.ok().as_ref()
+                            != self.auth.state.borrow().route.as_ref();
                     if queued_action.is_some()
                         && (result.is_err()
+                            || unapproved
                             || cfg!(unix)
                                 && !keep_master
                                 && queued_action
