@@ -676,9 +676,11 @@ async fn managed_setup(
         Ok(release) => release,
         Err(error) => return Ok(Some(install_failure(error))),
     };
-    if copy.is_some_and(|(_, version)| current_copy(&version, &release)) {
-        attempt.record("command_completed", "command", None, Some(0), None);
-        return Ok(None);
+    if let Some((bin, version)) = &copy {
+        if current_copy(version, &release) && managed::verify(harness, bin, version).await.is_ok() {
+            attempt.record("command_completed", "command", None, Some(0), None);
+            return Ok(None);
+        }
     }
     match install_with_progress(socket, harness, &release).await {
         Some(Ok(_)) => {
@@ -820,8 +822,10 @@ pub(super) async fn keep_current(harness: &'static str) -> crate::error::Result<
                 .push((harness, release.version.clone()));
         }
     }
-    if copy.is_some_and(|(_, version)| current_copy(&version, &release)) {
-        return Ok(false);
+    if let Some((bin, version)) = &copy {
+        if current_copy(version, &release) && managed::verify(harness, bin, version).await.is_ok() {
+            return Ok(false);
+        }
     }
     managed::install(harness, &release, &mut |_, _| {}).await?;
     Ok(true)

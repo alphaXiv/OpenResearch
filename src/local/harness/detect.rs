@@ -491,7 +491,11 @@ pub(super) async fn select_working_from(
     if own.is_some_and(|own| own >= version) {
         return working;
     }
-    Some((copy, BinProbe::Answered(Some(version.to_string()))))
+    let probe = probe_bin(&copy).await;
+    match probe {
+        BinProbe::Answered(_) => Some((copy, probe)),
+        _ => working.or(fallback).or(Some((copy, probe))),
+    }
 }
 
 /// Discovery order, one entry per path. `Vec::dedup` drops only *adjacent*
@@ -810,11 +814,11 @@ fn pe_version(_bin: &Path) -> Option<String> {
 
 /// `<bin> --version`, with a timeout (node CLIs can be slow).
 pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
-    if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
-        return BinProbe::Answered(Some(version));
-    }
-    if let Some(version) = super::managed::version_of(bin) {
-        return BinProbe::Answered(Some(version.to_string()));
+    let managed = super::managed::version_of(bin).is_some();
+    if !managed {
+        if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
+            return BinProbe::Answered(Some(version));
+        }
     }
     let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("--version").stdin(std::process::Stdio::null());
@@ -836,6 +840,9 @@ pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
             }
         }
     };
+    if managed && !out.status.success() {
+        return broken(&String::from_utf8_lossy(&out.stderr));
+    }
     // A version has a digit in it; anything else is the CLI complaining, and
     // must not reach the `Version` row as though it were one.
     let version = String::from_utf8_lossy(&out.stdout)
@@ -1135,6 +1142,7 @@ mod tests {
 
         // orx's own copy runs when it is newer than the working install, or
         // nothing else works; a tie keeps the user's.
+        script("managed", "#!/bin/sh\necho 2.1.300\n");
         let copy = || (dir.join("managed"), semver::Version::new(2, 1, 300));
         let pick = |candidates, managed| async move {
             select_working_from(candidates, None, managed)
@@ -1147,6 +1155,15 @@ mod tests {
         assert_eq!(pick(Vec::new(), Some(copy())).await, copy().0);
         let tie = (dir.join("managed"), semver::Version::new(2, 1, 210));
         assert_eq!(pick(vec![old.clone()], Some(tie)).await, old);
+        script("managed", "#!/bin/sh\nexit 1\n");
+        assert_eq!(pick(vec![old.clone()], Some(copy())).await, old);
+        assert!(matches!(
+            select_working_from(Vec::new(), None, Some(copy()))
+                .await
+                .unwrap()
+                .1,
+            BinProbe::Broken(_)
+        ));
 
         // Non-adjacent repeats are one candidate, so the same binary is never
         // probed twice at `VERSION_TIMEOUT`.
