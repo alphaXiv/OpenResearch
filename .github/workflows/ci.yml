@@ -416,23 +416,20 @@ jobs:
         with:
           shared-key: windows-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}${{ matrix.mode == 'lint' && '-lint' || '' }}
           save-if: ${{ matrix.mode != 'demo' }}
+          cache-on-failure: true
           workspaces: |
             ${{ env.DEV_DRIVE_WORKSPACE }} -> target
             ${{ env.DEV_DRIVE_WORKSPACE }}/windows/launcher -> target
-      - name: Cache incremental compilation
-        if: matrix.mode == 'test' || matrix.mode == 'all'
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        env: &windows-incremental-key
+      - name: Restore incremental compilation
+        if: matrix.mode != 'lint'
+        id: incremental
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env:
           INCREMENTAL_KEY: incremental-windows-test-debug0-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}-v1-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
-        with: &windows-incremental-cache
-          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/debug/incremental
+        with:
+          path: &windows-incremental-path ${{ env.DEV_DRIVE_WORKSPACE }}/target/debug/incremental
           key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
           restore-keys: ${{ env.INCREMENTAL_KEY }}-
-      - name: Restore incremental compilation
-        if: matrix.mode == 'demo'
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        env: *windows-incremental-key
-        with: *windows-incremental-cache
       - name: Clippy
         if: matrix.mode == 'lint' || matrix.mode == 'all'
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -453,14 +450,20 @@ jobs:
         if: matrix.mode == 'lint' || matrix.mode == 'all'
         run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-      - name: Test
+      - name: Build tests
         if: matrix.mode != 'lint'
-        env:
+        id: test-build
+        env: &windows-test-env
           CARGO_INCREMENTAL: 1
           CARGO_PROFILE_TEST_DEBUG: 0
           RUST_TEST_THREADS: 32
           TEST_MODE: ${{ matrix.mode }}
           DEMO_TEST_FILTER: 'local::demo::tests::'
+        run: cargo test --locked --timings --no-run
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Test
+        if: matrix.mode != 'lint'
+        env: *windows-test-env
         run: |
           $testArgs = @('--locked', '--timings')
           if ($env:TEST_MODE -eq 'demo') {
@@ -470,6 +473,12 @@ jobs:
           }
           cargo test @testArgs
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Save incremental compilation
+        if: always() && matrix.mode != 'demo' && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: *windows-incremental-path
+          key: ${{ steps.incremental.outputs.cache-primary-key }}
       - name: Upload compilation timings
         if: always() && matrix.mode != 'lint'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
