@@ -326,7 +326,11 @@ pub(super) fn compact(path: &Path) -> Result<()> {
         .open(sidecar(&path, ".orx-lock"))?;
     // Windows' exclusive-open check would see this process's own connection as another user.
     drop(connection);
-    if lock.try_lock().is_err() || ensure_no_external_users(&path).is_err() {
+    if lock.try_lock().is_err() {
+        return Ok(());
+    }
+    let _lock = crate::file_lock::FileLock::new(lock);
+    if ensure_no_external_users(&path).is_err() {
         return Ok(());
     }
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -427,7 +431,7 @@ fn sync_parent(path: &Path) -> Result<()> {
 
 pub struct DatabaseLease {
     path: PathBuf,
-    lock: File,
+    lock: crate::file_lock::FileLock,
     state: DatabaseState,
     migration: bool,
 }
@@ -504,6 +508,7 @@ impl DatabaseLease {
                 path.display()
             ),
         })?;
+        let lock = crate::file_lock::FileLock::new(lock);
         let current = inspect(&path)?;
         let journal = read_journal(&path)?;
         if current != state
@@ -794,19 +799,6 @@ fn referenced_sessions(database: &Path) -> Result<BTreeSet<String>> {
 mod tests {
     use super::*;
 
-    /// A lease just dropped lingers in any child a parallel test forked meanwhile, until that
-    /// child execs.
-    fn reacquire(path: &Path, major: u64) -> DatabaseLease {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            match DatabaseLease::acquire(path, major) {
-                Ok(lease) => return lease,
-                Err(error) => assert!(std::time::Instant::now() < deadline, "{error}"),
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    }
-
     const V1: &str = "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);
         CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);
         CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);
@@ -977,7 +969,7 @@ mod tests {
         assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
         connection.execute_batch(V2).unwrap();
         assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
-        let lease = reacquire(&path, 2);
+        let lease = DatabaseLease::acquire(&path, 2).unwrap();
         lease.prepare_with_sessions(ids).unwrap();
         assert!(table_has_session(&connection, "session", "history").unwrap());
     }
@@ -1033,7 +1025,7 @@ mod tests {
         assert!(has_session(&path, "history").unwrap());
         drop(lease);
 
-        let mut resumed = reacquire(&path, 2);
+        let mut resumed = DatabaseLease::acquire(&path, 2).unwrap();
         assert_eq!(
             resumed.prepare_with_sessions(expected).unwrap(),
             Some(backup.clone())
@@ -1103,7 +1095,9 @@ mod tests {
                 std::fs::remove_file(&backup).unwrap();
             }
             drop(lease);
-            assert!(!reacquire(&path, 2).requires_migration());
+            assert!(!DatabaseLease::acquire(&path, 2)
+                .unwrap()
+                .requires_migration());
             for suffix in ["", "-wal", "-shm"] {
                 assert!(!sidecar(&backup, suffix).exists());
             }
@@ -1213,7 +1207,7 @@ mod tests {
         let busy = DatabaseLease::acquire(&path, 2).err().unwrap();
         assert!(busy.downcast_ref::<DatabaseBusy>().is_some());
         drop((first, second));
-        reacquire(&path, 2);
+        DatabaseLease::acquire(&path, 2).unwrap();
     }
 
     #[test]
@@ -1235,7 +1229,7 @@ mod tests {
             .unwrap();
         let moved = fixture.0.path().join("moved");
         std::fs::rename(&old, &moved).unwrap();
-        let lease = reacquire(&moved.join("opencode.db"), 2);
+        let lease = DatabaseLease::acquire(&moved.join("opencode.db"), 2).unwrap();
         let old_backup = crate::paths::canonicalize(&moved)
             .unwrap()
             .join(backup.file_name().unwrap());

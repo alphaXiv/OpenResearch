@@ -3724,7 +3724,7 @@ impl Store {
     }
 
     /// Hold through ownership lookup, native purge and local row deletion, across dashboard processes.
-    pub fn lock_native_deletion(&self) -> Result<std::fs::File> {
+    pub fn lock_native_deletion(&self) -> Result<crate::file_lock::FileLock> {
         let path = self
             .conn
             .path()
@@ -3735,21 +3735,12 @@ impl Store {
             .read(true)
             .write(true)
             .open(Path::new(path).with_extension("native-deletion.lock"))?;
-        // A released lock lingers in children forked meanwhile, until they exec.
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        loop {
-            match lock.try_lock() {
-                Ok(()) => return Ok(lock),
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => {
-                    return Err(anyhow!(
-                        "Could not lock native chat deletion; retry when other deletions finish: {error}"
-                    ))
-                }
-            }
-        }
+        lock.try_lock().map_err(|error| {
+            anyhow!(
+                "Could not lock native chat deletion; retry when other deletions finish: {error}"
+            )
+        })?;
+        Ok(crate::file_lock::FileLock::new(lock))
     }
 
     pub fn native_sessions_for_deletion(
@@ -3866,7 +3857,7 @@ impl Store {
     }
 
     /// Keeps any dashboard from starting a data-dir move until dropped; `None` while a move holds or claims it.
-    fn hold_off_data_dir_move(&self) -> Result<Option<std::fs::File>> {
+    fn hold_off_data_dir_move(&self) -> Result<Option<crate::file_lock::FileLock>> {
         if self.data_dir_move_claimed()? {
             return Ok(None);
         }
@@ -3877,6 +3868,7 @@ impl Store {
             Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
         }
+        let hold = crate::file_lock::FileLock::new(hold);
         Ok((!self.data_dir_move_lease_exists()?).then_some(hold))
     }
 

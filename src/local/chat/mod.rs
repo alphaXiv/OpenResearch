@@ -7518,13 +7518,8 @@ impl ChatHost {
             .lock()
             .unwrap()
             .retain(|(queued_session_id, _), _| queued_session_id != session_id);
-        // The lock can wait out another deletion, so keep it off the async workers.
-        let (store, native_deletion) = tokio::task::spawn_blocking(|| {
-            let store = Store::open()?;
-            let native_deletion = store.lock_native_deletion()?;
-            Ok::<_, anyhow::Error>((store, native_deletion))
-        })
-        .await??;
+        let store = Store::open()?;
+        let native_deletion = store.lock_native_deletion()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
         Self::purge_native_history(&[session_id.to_string()]).await?;

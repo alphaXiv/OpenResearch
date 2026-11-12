@@ -97,6 +97,7 @@ impl Local {
             .truncate(false)
             .open(dir.join("launch.lock"))?;
         ownership.lock()?;
+        let ownership = crate::file_lock::FileLock::new(ownership);
         let launch = dir.join("launch.json");
         #[cfg(unix)]
         let existing = match orx_host::read_json::<orx_host_proto::LaunchIntent>(&launch) {

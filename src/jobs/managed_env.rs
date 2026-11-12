@@ -159,7 +159,7 @@ pub async fn base_python(min_python: (u32, u32), label: &str) -> Result<&'static
 
 /// Serializes installs across orx processes so one can't delete another's in-progress env.
 /// Best-effort, like the settings lock: a filesystem without locks shouldn't block launches.
-async fn lock_env(env_dir: &Path) -> Option<std::fs::File> {
+async fn lock_env(env_dir: &Path) -> Option<crate::file_lock::FileLock> {
     let lock_path = env_dir.with_extension("lock");
     std::fs::create_dir_all(lock_path.parent()?).ok()?;
     let lock_file = std::fs::OpenOptions::new()
@@ -168,9 +168,14 @@ async fn lock_env(env_dir: &Path) -> Option<std::fs::File> {
         .write(true)
         .open(&lock_path)
         .ok()?;
-    tokio::task::spawn_blocking(move || lock_file.lock().map(|()| lock_file).ok())
-        .await
-        .ok()?
+    tokio::task::spawn_blocking(move || {
+        lock_file
+            .lock()
+            .map(|()| crate::file_lock::FileLock::new(lock_file))
+            .ok()
+    })
+    .await
+    .ok()?
 }
 
 #[cfg(test)]

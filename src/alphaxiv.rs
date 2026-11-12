@@ -407,14 +407,17 @@ fn remove(path: PathBuf) -> Result<()> {
 
 /// Held until dropped, across threads and processes: reusing a rotated refresh
 /// token makes alphaXiv revoke this user's desktop sign-ins everywhere.
-async fn lock() -> Result<std::fs::File> {
+async fn lock() -> Result<crate::file_lock::FileLock> {
     std::fs::create_dir_all(config::config_dir())?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(config::config_dir().join("alphaxiv.lock"))?;
-    Ok(tokio::task::spawn_blocking(move || file.lock().map(|()| file)).await??)
+    Ok(tokio::task::spawn_blocking(move || {
+        file.lock().map(|()| crate::file_lock::FileLock::new(file))
+    })
+    .await??)
 }
 
 /// Keeps `tokens`, and the OpenResearch `credentials` they signed in with, in
