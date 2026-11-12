@@ -4,9 +4,8 @@ use std::process::{Command, Stdio};
 #[test]
 fn uncaptured_invocation_allows_the_tool_call() {
     let root = std::env::temp_dir().join(format!("orx-invocation-gate-{}", uuid::Uuid::new_v4()));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orx"))
+    let mut child = crate::home::isolate_home(&mut Command::new(env!("CARGO_BIN_EXE_orx")), &root)
         .arg("invocation-gate")
-        .env("HOME", &root)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("ORX_DATA_DIR", root.join("data"))
         .stdin(Stdio::piped())

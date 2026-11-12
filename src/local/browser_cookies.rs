@@ -62,7 +62,7 @@ mod imp {
     }
 
     fn home() -> PathBuf {
-        dirs::home_dir().unwrap_or_default()
+        crate::config::home_dir().unwrap_or_default()
     }
 
     fn unix_now() -> i64 {

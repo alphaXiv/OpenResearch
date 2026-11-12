@@ -608,7 +608,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
 
 /// Every `claude` install, in preference order.
 fn claude_candidates() -> Vec<PathBuf> {
-    let own = dirs::home_dir().map(|home| home.join(".claude").join("local"));
+    let own = crate::config::home_dir().map(|home| home.join(".claude").join("local"));
     installs("claude", own)
 }
 
@@ -707,7 +707,7 @@ impl ClaudeCode {
                         credential_tier.as_deref(),
                         None,
                     );
-                    if let Some(acct) = dirs::home_dir()
+                    if let Some(acct) = crate::config::home_dir()
                         .and_then(|h| read_json(h.join(".claude.json")))
                         .and_then(|cfg| cfg.get("oauthAccount").cloned())
                     {

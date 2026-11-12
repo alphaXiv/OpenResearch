@@ -2,6 +2,9 @@
 #![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
+#[path = "common/home.rs"]
+mod home;
+
 use orx_test_support::{Process, Sshd};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -19,8 +22,7 @@ fn packaged_orx_bootstraps_host_without_binary_directory() {
     let data = local.join("data");
     let command = || {
         let mut command = Command::new(&binary);
-        command
-            .env("HOME", &local)
+        home::isolate_home(&mut command, &local)
             .env("XDG_CONFIG_HOME", local.join("config"))
             .env("ORX_DATA_DIR", &data)
             .env("ORX_SSH_CONFIG", server.config_path())

@@ -249,7 +249,7 @@ impl Harness for Cursor {
 fn cursor_candidates() -> Vec<PathBuf> {
     let own = || {
         cfg!(windows)
-            .then(dirs::data_local_dir)
+            .then(crate::config::data_local_dir)
             .flatten()
             .map(|dir| dir.join("cursor-agent"))
     };
@@ -386,7 +386,7 @@ fn cursor_command(bin: &Path) -> Command {
         if let Some(name) = bin.file_name() {
             cmd.env("CURSOR_INVOKED_AS", name);
         }
-        if let Some(local) = dirs::data_local_dir() {
+        if let Some(local) = crate::config::data_local_dir() {
             cmd.env("NODE_COMPILE_CACHE", local.join("cursor-compile-cache"));
         }
         return cmd;

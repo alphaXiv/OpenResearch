@@ -47,10 +47,10 @@ impl Acp {
                 "pi-acp" => crate::local::acp::executable_path("pi").is_some(),
                 "zcode-acp-server" => {
                     crate::local::acp::executable_path("zcode").is_some()
-                        || dirs::home_dir()
+                        || crate::config::home_dir()
                             .is_some_and(|home| home.join("Applications/ZCode.app").is_dir())
                         || std::path::Path::new("/Applications/ZCode.app").is_dir()
-                        || dirs::data_local_dir()
+                        || crate::config::data_local_dir()
                             .is_some_and(|home| home.join("Programs/ZCode/ZCode.exe").is_file())
                 }
                 _ => false,

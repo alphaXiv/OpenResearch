@@ -40,10 +40,9 @@ fn idle_orx_up_relaunches_into_an_installed_update() {
         .unwrap()
         .port();
 
-    let mut up = Command::new(&orx)
+    let mut up = crate::home::isolate_home(&mut Command::new(&orx), &root)
         .args(["--no-telemetry", "up", "--no-browser", "--port"])
         .arg(port.to_string())
-        .env("HOME", &root)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("share"))
         .env("ORX_DATA_DIR", root.join("data"))

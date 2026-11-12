@@ -253,7 +253,7 @@ impl Runtime {
                     control_dir: control_dir(&self.data_dir),
                     binary_dir: None,
                     #[cfg(unix)]
-                    sharing_home: dirs::home_dir(),
+                    sharing_home: crate::config::home_dir(),
                     askpass_executable: crate::paths::spawnable_exe()?,
                 },
                 Store::open_at(self.data_dir.clone())?,
@@ -377,7 +377,7 @@ impl Runtime {
                 _ => bail!("Unexpected box SSH option {flag}"),
             }
         }
-        if dirs::home_dir().is_some_and(|home| home.join(".ssh/config").is_file()) {
+        if crate::config::home_dir().is_some_and(|home| home.join(".ssh/config").is_file()) {
             config.push_str("Host *\n  Include ~/.ssh/config\n");
         }
         let directory = self.data_dir.join("engine-ssh");
@@ -391,7 +391,7 @@ impl Runtime {
     }
 
     async fn supervise(self: Arc<Self>) {
-        let home = dirs::home_dir();
+        let home = crate::config::home_dir();
         let mut retired = home.is_none();
         let mut retire_after = tokio::time::Instant::now();
         loop {
@@ -1768,7 +1768,7 @@ mod tests {
             );
             return;
         }
-        let home = dirs::home_dir().unwrap();
+        let home = crate::config::home_dir().unwrap();
         let ssh = home.join(".ssh");
         std::fs::create_dir_all(&ssh).unwrap();
         let registry = ssh.join("openresearch_connections.json");

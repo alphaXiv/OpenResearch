@@ -560,10 +560,13 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
 /// Every `codex` install, in preference order, symlinks resolved — codex needs
 /// to find its `codex-code-mode-host` helper next to the real binary.
 fn codex_candidates() -> Vec<PathBuf> {
-    installs("codex", codex_install_dirs(dirs::home_dir().as_deref()))
-        .into_iter()
-        .map(resolve_symlinks)
-        .collect()
+    installs(
+        "codex",
+        codex_install_dirs(crate::config::home_dir().as_deref()),
+    )
+    .into_iter()
+    .map(resolve_symlinks)
+    .collect()
 }
 
 /// Codex's own installer locations. ChatGPT.app bundles the Codex CLI without
@@ -574,7 +577,7 @@ fn codex_install_dirs(home: Option<&Path>) -> Vec<PathBuf> {
         home.map(|home| home.join("Applications")),
     ];
     cfg!(windows)
-        .then(dirs::data_local_dir)
+        .then(crate::config::data_local_dir)
         .flatten()
         .map(|dir| dir.join("Programs/OpenAI/Codex/bin"))
         .into_iter()
@@ -1240,7 +1243,7 @@ impl Harness for Codex {
 
     fn native_skill_roots(&self) -> Vec<PathBuf> {
         [
-            dirs::home_dir().map(|home| home.join(".agents/skills")),
+            crate::config::home_dir().map(|home| home.join(".agents/skills")),
             self.config_home().map(|home| home.join("skills")),
         ]
         .into_iter()
@@ -1254,7 +1257,7 @@ impl Harness for Codex {
         // primary target is the real skill; the legacy prompt still rides along
         // via `extra_skill_targets` for older codex versions.
         Some(
-            dirs::home_dir()?
+            crate::config::home_dir()?
                 .join(".agents")
                 .join("skills")
                 .join("orx")

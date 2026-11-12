@@ -8,9 +8,8 @@ fn gate(asks: bool, payload: &str) -> serde_json::Value {
     if asks {
         std::fs::write(root.join("data/agent-antigravity-chat.approvals"), "").unwrap();
     }
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orx"))
+    let mut child = crate::home::isolate_home(&mut Command::new(env!("CARGO_BIN_EXE_orx")), &root)
         .arg("antigravity-gate")
-        .env("HOME", &root)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("ORX_DATA_DIR", root.join("data"))
         .env("ORX_SESSION_ID", "chat")

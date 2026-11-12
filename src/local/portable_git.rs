@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 fn base() -> Option<PathBuf> {
-    dirs::data_local_dir().map(|dir| dir.join("OpenResearch"))
+    crate::config::data_local_dir().map(|dir| dir.join("OpenResearch"))
 }
 
 /// The installed copy's `cmd` directory, the one Git's own installer puts on PATH.
