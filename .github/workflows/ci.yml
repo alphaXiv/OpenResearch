@@ -460,6 +460,11 @@ jobs:
           TEST_MODE: ${{ matrix.mode }}
         run: cargo test --locked --timings --no-run
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Install nextest
+        if: matrix.mode == 'test'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-nextest@0.9.151
       - name: Test
         if: matrix.mode != 'lint'
         env: *windows-test-env
@@ -472,7 +477,10 @@ jobs:
           if ($filters.ContainsKey($env:TEST_MODE)) {
             $testArgs += $filters[$env:TEST_MODE]
           } elseif ($env:TEST_MODE -eq 'test') {
-            $testArgs += '--'
+            $expression = ($filters.Values | ForEach-Object { '!test({0})' -f $_ }) -join ' & '
+            cargo nextest run --locked --profile ci -E $expression
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $testArgs += @('--doc', '--')
             foreach ($filter in $filters.Values) {
               $testArgs += @('--skip', $filter)
             }
