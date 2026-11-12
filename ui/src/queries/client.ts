@@ -1,5 +1,7 @@
 import { QueryClient, type QueryFilters, type QueryKey, type DataTag } from "@tanstack/react-query";
 
+import { m } from "../paraglide/messages.js";
+
 /** One cache for every machine; each workspace's keys start with its own scope. */
 export const createQueryClient = () =>
   new QueryClient({
@@ -47,7 +49,11 @@ export function createWorkspaceClient(queryClient: QueryClient, identity: string
     const signal = init.signal
       ? AbortSignal.any([init.signal, lifetime.signal])
       : lifetime.signal;
-    return fetch(url(path), { ...init, signal });
+    // WebKit and Chromium report a dropped connection as a bare TypeError ("Load failed").
+    return fetch(url(path), { ...init, signal }).catch((error: unknown) => {
+      if (error instanceof TypeError && !signal.aborted) throw new Error(m.request_connection_lost(), { cause: error });
+      throw error;
+    });
   }
 
   function socketUrl(path: string) {

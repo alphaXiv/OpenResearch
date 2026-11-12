@@ -665,11 +665,13 @@ async fn shared_projects_request(
 /// Uploads `file`, the `.orx` written with `manifest`, as the link for
 /// `source_project_id`: `POST /shared-projects`, a PUT to the presigned URL,
 /// then `POST /shared-projects/{id}/publish`. Publishing again replaces the file behind the same link.
+/// `on_progress` hears the bytes uploaded so far and the file's size.
 pub async fn publish_project(
     creds: &Credentials,
     source_project_id: &str,
     manifest: &crate::local::share::Manifest,
     file: &std::path::Path,
+    on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
 ) -> Result<PublishedProject> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -722,13 +724,19 @@ pub async fn publish_project(
     .json()
     .await?;
     let body = tokio::fs::File::open(file).await?;
+    on_progress(0, byte_size);
+    let mut sent = 0u64;
+    let body = futures::StreamExt::inspect(tokio_util::io::ReaderStream::new(body), move |chunk| {
+        if let Ok(chunk) = chunk {
+            sent += chunk.len() as u64;
+            on_progress(sent, byte_size);
+        }
+    });
     // The presigned URL signs the length, and R2 refuses chunked uploads.
     let mut put = http()
         .put(&reserved.upload.url)
         .header(reqwest::header::CONTENT_LENGTH, byte_size)
-        .body(reqwest::Body::wrap_stream(
-            tokio_util::io::ReaderStream::new(body),
-        ));
+        .body(reqwest::Body::wrap_stream(body));
     for (header, value) in &reserved.upload.headers {
         put = put.header(header, value);
     }
@@ -826,10 +834,12 @@ pub async fn get_public_project(api_url: &str, slug: &str) -> Result<PublicProje
 }
 
 /// Saves a link's `.orx` file to `out`; no sign-in — `GET /shared-projects/by-slug/{slug}/file`.
+/// `on_progress` hears the bytes received so far and the file's size when the response gives it.
 pub async fn download_public_project(
     api_url: &str,
     slug: &str,
     out: &std::path::Path,
+    mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -843,6 +853,8 @@ pub async fn download_public_project(
     .map_err(|_| anyhow!("Downloading the project stalled."))??;
     let mut file = tokio::fs::File::create(out).await?;
     let mut received = 0u64;
+    let total = response.content_length();
+    on_progress(0, total);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = tokio::time::timeout(STALL, stream.next())
         .await
@@ -857,6 +869,7 @@ pub async fn download_public_project(
             ));
         }
         file.write_all(&chunk).await?;
+        on_progress(received, total);
     }
     file.flush().await?;
     Ok(())
@@ -3222,16 +3235,27 @@ mod tests {
             "project": { "name": "Tiny LM", "baselineBranch": "main" },
         }))
         .unwrap();
-        let published = publish_project(&creds, "project-1", &manifest, &file)
+        let uploaded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = uploaded.clone();
+        let published =
+            publish_project(&creds, "project-1", &manifest, &file, move |sent, total| {
+                record.lock().unwrap().push((sent, total))
+            })
             .await
             .unwrap();
+        assert_eq!(*uploaded.lock().unwrap(), [(0, 5), (5, 5)]);
         assert_eq!(published.slug, "a1B2c3D4e5F6");
 
         let downloaded = dir.path().join("download.orx");
-        download_public_project(&base, &published.slug, &downloaded)
-            .await
-            .unwrap();
+        let mut progress = Vec::new();
+        download_public_project(&base, &published.slug, &downloaded, |received, total| {
+            progress.push((received, total))
+        })
+        .await
+        .unwrap();
         assert_eq!(std::fs::read(&downloaded).unwrap(), b"hello");
+        assert_eq!(progress.first(), Some(&(0, Some(5))));
+        assert_eq!(progress.last(), Some(&(5, Some(5))));
         server.abort();
     }
 }

@@ -1673,6 +1673,18 @@ export interface PublicProject {
 /** Where a shared project comes from: a picked file, a file on this machine, or a published link. */
 export type SharedSource = File | string | { link: string };
 
+/** How work that orx up runs in the background is going: opening a shared project, or publishing one. */
+export interface OperationProgress {
+  phase: "downloading" | "unpacking" | "opening" | "preparing" | "uploading";
+  bytes: number;
+  totalBytes: number | null;
+}
+
+interface OperationStatus<T> extends OperationProgress {
+  result: T | null;
+  error: string | null;
+}
+
 export function createApi(
   client: WorkspaceClient,
   invalidation: WorkspaceInvalidation,
@@ -2462,24 +2474,46 @@ export function createApi(
   const getProjectLink = (projectId: string, signal?: AbortSignal) =>
     get<{ signedIn: boolean; sharedProject: PublishedProject | null }>(`/api/projects/${projectId}/publish`, signal);
 
+  /** Follows background work `started` until it finishes; an older orx up answers with the result itself. */
+  async function followOperation<T extends object>(started: T | { operationId: string }, invalidates: string, onProgress?: (progress: OperationProgress) => void): Promise<T> {
+    if (!("operationId" in started)) return started;
+    for (;;) {
+      const status = await get<OperationStatus<T>>(`/api/operations/${encodeURIComponent(started.operationId)}`);
+      if (status.error !== null) throw new Error(status.error);
+      if (status.result !== null) {
+        invalidateWrite(invalidates, workspaceScope());
+        return status.result;
+      }
+      onProgress?.(status);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
   /** Upload the project to openresearch.sh; publishing again updates the same link. */
-  const publishProject = (projectId: string, options: ShareChoice) =>
-    post<{ sharedProject: PublishedProject; skipped: string[] }>(`/api/projects/${projectId}/publish`, options);
+  const publishProject = async (projectId: string, options: ShareChoice, onProgress?: (progress: OperationProgress) => void) => {
+    const url = `/api/projects/${projectId}/publish`;
+    type Published = { sharedProject: PublishedProject; skipped: string[] };
+    return followOperation(await post<Published | { operationId: string }>(`${url}?background=true`, options), url, onProgress);
+  };
 
   /** What anyone with a published link sees, fetched by the machine that will open it. */
   const getPublicProject = (slug: string, signal?: AbortSignal) =>
     get<{ sharedProject: PublicProject }>(`/api/shared-projects/${encodeURIComponent(slug)}`, signal);
 
-  /** Open a shared project as a new project in `path`. */
-  const importSharedProject = (path: string, source: SharedSource) => {
-    const query = `path=${encodeURIComponent(path)}`;
-    if (typeof source === "string") return post<OpenedSharedProject>(`/api/projects/import?${query}&file=${encodeURIComponent(source)}`);
-    if (!(source instanceof File)) return post<OpenedSharedProject>(`/api/projects/import?${query}&shared=${encodeURIComponent(source.link)}`);
-    return writeResponse(`/api/projects/import?${query}`, {
-      method: "POST",
-      headers: { "content-type": "application/octet-stream" },
-      body: source,
-    }).then((r) => json<OpenedSharedProject>(r));
+  /** Open a shared project as a new project in `path`, following it until it opens. */
+  const importSharedProject = async (path: string, source: SharedSource, onProgress?: (progress: OperationProgress) => void) => {
+    const url = `/api/projects/import?path=${encodeURIComponent(path)}&background=true`;
+    type Started = OpenedSharedProject | { operationId: string };
+    const started = typeof source === "string"
+      ? await post<Started>(`${url}&file=${encodeURIComponent(source)}`)
+      : !(source instanceof File)
+        ? await post<Started>(`${url}&shared=${encodeURIComponent(source.link)}`)
+        : await writeResponse(url, {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: source,
+        }).then((r) => json<Started>(r));
+    return followOperation(started, "/api/projects/import", onProgress);
   };
 
   const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/api/settings/telemetry", signal);

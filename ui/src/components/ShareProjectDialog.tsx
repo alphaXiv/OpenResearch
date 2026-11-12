@@ -1,14 +1,15 @@
 import { useMutate } from "@clo/react-mutation";
 import { useQuery } from "@tanstack/react-query";
 import { Copy, Download, Link2, X } from "lucide-react";
-import { useRef, type RefObject } from "react";
+import { useRef, useState, type RefObject } from "react";
 
-import type { Project, ShareChoice } from "../api";
+import type { OperationProgress, Project, ShareChoice } from "../api";
 import type { DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
 import { useWorkspace } from "../workspace";
 import { mutPublishProject } from "../queries/projects";
 import { useSignIn } from "./AccountChip";
+import { OperationProgressBar } from "./ProgressBar";
 import { Button, ButtonLink, DialogContent, DialogTitle, IconButton, Input, Spinner, showAlert } from "./ui";
 
 export function showShareExclusions(count: number) {
@@ -36,6 +37,7 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
   const signedIn = linkQuery.data?.signedIn === true;
   const link = linkQuery.data?.sharedProject ?? null;
   const publish = useMutate(mutPublishProject);
+  const [progress, setProgress] = useState<OperationProgress | null>(null);
   const publishError = publish.error === undefined ? null : publish.error instanceof Error ? publish.error.message : String(publish.error);
   const publishRef = useRef<HTMLButtonElement>(null);
   const busy = pending || publish.isMutating;
@@ -70,13 +72,21 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
         </div>
       </div>}
     </section>
+    {publish.isMutating && progress && <OperationProgressBar
+      label={progress.phase === "uploading" ? m.share_publish_uploading() : m.share_publish_preparing()}
+      progress={progress}
+    />}
     {(publishError || errorMessage) && <p role="alert" className="mt-3 whitespace-pre-line break-words text-sm text-accent-red">{publishError ?? errorMessage}</p>}
     {!link && <div className="mt-4 flex flex-wrap justify-end gap-2">
       <Button ref={publishRef} type="button" disabled={busy || !ready || !linkQuery.data || (remote && !signedIn)} onClick={() => {
-        if (signedIn) publish.runWithOptions(workspace, project.id, choice, {
+        if (!signedIn) {
+          openSignIn(false, publishRef.current);
+          return;
+        }
+        setProgress(null);
+        publish.runWithOptions(workspace, project.id, choice, setProgress, {
           onSuccessData: ({ skipped }) => showShareExclusions(skipped.length),
         });
-        else openSignIn(false, publishRef.current);
       }}>{publish.isPending ? <Spinner /> : <Link2 size={16} />}{linkQuery.data && !signedIn ? m.share_publish_sign_in() : m.share_publish()}</Button>
       <Button type="button" variant="primary" disabled={busy || !ready} onClick={save}>{isPending ? <Spinner /> : <Download size={16} />}{m.share_save()}</Button>
     </div>}

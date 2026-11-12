@@ -138,7 +138,8 @@ export const mutCreateProject = mutations.define({
 
 export const mutImportSharedProject = mutations.define({
   id: "projects/import",
-  mutate: (ws: Workspace, path: string, source: api.SharedSource) => ws.api.importSharedProject(path, source),
+  mutate: (ws: Workspace, path: string, source: api.SharedSource, onProgress: (progress: api.OperationProgress) => void) =>
+    ws.api.importSharedProject(path, source, onProgress),
   optimistic({ args: [ws], onSuccess }) {
     onSuccess(({ project }) => showProject(ws, project));
   },
@@ -180,7 +181,8 @@ export const mutDeleteProject = mutations.define({
 
 export const mutPublishProject = mutations.define({
   id: "projects/publish",
-  mutate: (ws: Workspace, projectId: string, choice: api.ShareChoice) => ws.api.publishProject(projectId, choice),
+  mutate: (ws: Workspace, projectId: string, choice: api.ShareChoice, onProgress: (progress: api.OperationProgress) => void) =>
+    ws.api.publishProject(projectId, choice, onProgress),
   optimistic({ args: [ws, projectId], onSuccess }) {
     onSuccess(({ sharedProject }) =>
       ws.setScopedQueryData(ws.queries.getProjectLinkQuery(projectId).queryKey, { signedIn: true, sharedProject }));
