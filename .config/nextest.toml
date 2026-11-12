@@ -10,5 +10,11 @@ filter = 'package(orx-host) & binary(wrapper) & (test(nondumpable) | test(unread
 threads-required = "num-test-threads"
 
 [[profile.ci.overrides]]
-filter = 'binary(cli) | test(gigabyte_random_pages_survive_one_hundred_reconnects) | test(one_shot_)'
+filter = '''
+binary(cli) |
+test(gigabyte_random_pages_survive_one_hundred_reconnects) |
+test(one_shot_) |
+test(store::tests::engine_) |
+test(local::overleaf::tests::)
+'''
 priority = 100
