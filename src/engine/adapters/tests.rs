@@ -603,13 +603,6 @@ async fn fifty_runs_share_one_ssh_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gigabyte_random_pages_survive_one_hundred_reconnects() {
-    {
-        use sha2::Digest as _;
-        let bytes = vec![17; 4 * 1024 * 1024];
-        let started = Instant::now();
-        std::hint::black_box(sha2::Sha256::digest(&bytes));
-        eprintln!("CI 4 MiB SHA-256: {:?}", started.elapsed());
-    }
     let f = Fixture::new().await;
     let dir = f.dir("large");
     fs::create_dir_all(&dir).unwrap();

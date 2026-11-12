@@ -974,8 +974,8 @@ impl Store {
         let mut delay = Duration::from_millis(1);
         while let Err(error) = conn.pragma_update(None, "journal_mode", "WAL") {
             let remaining = busy_timeout.saturating_sub(wal_start.elapsed());
-            if error.sqlite_error_code() != Some(rusqlite::ErrorCode::DatabaseBusy)
-                || remaining.is_zero()
+            if remaining.is_zero()
+                || error.sqlite_error_code() != Some(rusqlite::ErrorCode::DatabaseBusy)
             {
                 return Err(error).with_context(|| {
                     format!(
