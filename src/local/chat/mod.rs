@@ -11274,505 +11274,535 @@ mod bridge_tests {
     }
 
     #[test]
-    fn provider_switches_resume_each_harness_and_deliver_only_its_delta() {
-        const CHILD: &str = "ORX_TEST_PROVIDER_SWITCHES";
-        if std::env::var_os(CHILD).is_some() {
-            tokio::runtime::Runtime::new().unwrap().block_on(async {
-                let host = Arc::new(test_host());
-                let store = Store::open().unwrap();
-                let acp = crate::local::acp::presets().remove(0).launch;
-                for source in ["claude-code", "codex", "opencode", acp.id.as_str()] {
-                    for target in ["claude-code", "codex", "opencode"] {
-                        if source == target {
-                            continue;
-                        }
-                        let mut session = bare_session();
-                        session.id = format!("chat_{}", uuid::Uuid::new_v4());
-                        session.harness = source.into();
-                        session.native_session_id = Some(format!("native_{source}_{target}"));
-                        if source.starts_with("acp:") {
-                            session.model = Some("second".into());
-                        }
-                        store.create_chat_session(&session).unwrap();
-                        if source.starts_with("acp:") {
-                            store.set_acp_configuration(&session.id, &json!({"configOptions":[{"id":"model", "type":"select", "category":"model", "currentValue":"first", "options":[{"value":"first", "name":"First"},{"value":"second", "name":"Second"}]}]})).unwrap();
-                        }
-                        let request = StoredChatMessage {
-                            id: format!("msg_{}", uuid::Uuid::new_v4()),
-                            session_id: session.id.clone(),
-                            role: "user".into(),
-                            parts_json: serde_json::to_string(&[WirePart::text(
-                                "request",
-                                "Preserve the parser API.",
-                            )])
-                            .unwrap(),
-                            created_at: now_ms(),
-                            completed_at: Some(now_ms()),
-                            parent_id: None,
-                            base_native_session_id: session.native_session_id.clone(),
-                            result_native_session_id: None,
-                            result_native_message_id: None,
-                            native_harness: Some(source.into()),
-                        };
-                        store.upsert_chat_message_on_branch(&request).unwrap();
-                        let original = StoredChatMessage {
-                            id: format!("msg_{}", uuid::Uuid::new_v4()),
-                            role: "assistant".into(),
-                            parts_json: serde_json::to_string(&[WirePart::text(
-                                "answer",
-                                "Original plan.\nKeep this earlier native detail out of the handoff.",
-                            )])
-                            .unwrap(),
-                            result_native_session_id: session.native_session_id.clone(),
-                            result_native_message_id: Some("original-end".into()),
-                            ..request.clone()
-                        };
-                        store.upsert_chat_message_on_branch(&original).unwrap();
-                        let agent = crate::store::StoredAgentSelection {
-                            harness: target.into(),
-                            model: Some("target-model".into()),
-                            service_tier: None,
-                            permission_mode: None,
-                            reasoning_level: None,
-                        };
-                        let switched = host
-                            .set_agent(&session.id, agent.clone(), Some(200_000))
-                            .await
-                            .unwrap();
-                        assert_eq!(switched.harness, target);
-                        assert!(!host.is_busy(&session.id).await);
-                        assert_eq!(switched.native_session_id, None);
-                        assert!(
-                            store.latest_chat_turn(&session.id).unwrap().is_none(),
-                            "a switch must not start a turn"
-                        );
-                        let mut switching =
-                            TurnGuard::claim_idle(&host, &session.id, TurnState::Switching)
-                                .await
-                                .unwrap();
-                        assert!(!host.interrupt(&session.id).await.unwrap());
-                        assert!(host.is_busy(&session.id).await);
-                        let sent = host
-                            .send_message(
-                                &session.id,
-                                "Concurrent request".into(),
-                                TurnOverrides {
-                                    model: Some("source-model".into()),
-                                    ..TurnOverrides::default()
-                                },
-                                Vec::new(),
-                                Vec::new(),
-                                None,
-                                None,
-                            )
-                            .await;
-                        assert!(sent.unwrap_err().to_string().contains("switching"));
-                        assert!(store
-                            .list_queued_chat_messages_for_session(&session.id)
-                            .unwrap()
-                            .is_empty());
-                        assert_eq!(
-                            store.get_chat_session(&session.id).unwrap().unwrap().model,
-                            agent.model
-                        );
-                        switching.release().await;
-                        assert!(!host.is_busy(&session.id).await);
-                        let messages = store.list_chat_messages(&session.id).unwrap();
-                        let path = active_path(&messages, switched.active_leaf_id.as_deref());
-                        let position = handoff::position(
-                            &switched, &path, &store.unconfirmed_chat_replies(&session.id).unwrap(),
-                        );
-                        assert!(position.since.is_none());
-                        assert_eq!(position.context_window, Some(200_000));
-                        assert!(position.switched);
-                        assert!(
-                            handoff::context(&store, &switched, None, None, Some(200_000))
-                                .unwrap()
-                                .contains("Preserve the parser API.")
-                        );
-                        let same = host
-                            .set_agent(&session.id, agent.clone(), None)
-                            .await
-                            .unwrap();
-                        assert_eq!(
-                            same.active_leaf_id, switched.active_leaf_id,
-                            "a retried switch adds no row"
-                        );
-                        let answer = StoredChatMessage {
-                            id: format!("msg_{}", uuid::Uuid::new_v4()),
-                            parts_json: serde_json::to_string(&[WirePart::text(
-                                "answer",
-                                "Parser API preserved; tests passed.",
-                            )])
-                            .unwrap(),
-                            native_harness: Some(target.into()),
-                            result_native_session_id: Some(format!("target_{source}_{target}")),
-                            result_native_message_id: None,
-                            base_native_session_id: None,
-                            ..original.clone()
-                        };
-                        store.upsert_chat_message_on_branch(&answer).unwrap();
-                        store
-                            .set_chat_session_native_id(
-                                &session.id,
-                                answer.result_native_session_id.as_deref(),
-                            )
-                            .unwrap();
-                        let source_agent = crate::store::StoredAgentSelection {
-                            harness: source.into(),
-                            model: session.model.clone(),
-                            service_tier: None,
-                            permission_mode: None,
-                            reasoning_level: None,
-                        };
-                        let back = host
-                            .set_agent(&session.id, source_agent.clone(), Some(200_000))
-                            .await
-                            .unwrap();
-                        assert_eq!(back.native_session_id, session.native_session_id);
-                        if source.starts_with("acp:") {
-                            let wire = session_json_with(Some(&store), &back, false);
-                            assert_eq!(wire["model"], "second");
-                            assert!(wire["nativeConfiguration"].is_null());
-                        }
-                        let messages = store.list_chat_messages(&session.id).unwrap();
-                        let path = active_path(&messages, back.active_leaf_id.as_deref());
-                        let position = handoff::position(
-                            &back,
-                            &path,
-                            &store.unconfirmed_chat_replies(&session.id).unwrap(),
-                        );
-                        assert_eq!(position.since.as_deref(), Some(original.id.as_str()));
-                        let context = handoff::context(&store, &back, None, position.since.as_deref(), position.context_window).unwrap();
-                        assert!(context.contains(&format!(
-                            "through {}, your last reply as {source}",
-                            delegation::message_ref(&original.id)
-                        )));
-                        assert!(context.contains("Parser API preserved; tests passed."));
-                        assert_eq!(context.matches("Original plan.").count(), 1);
-                        assert!(!context.contains("Keep this earlier native detail"));
-                        let recovery = StoredChatTurn {
-                            id: "recovery".into(),
-                            session_id: session.id.clone(),
-                            user_message_id: Some(request.id.clone()),
-                            assistant_message_id: "recovered-answer".into(),
-                            client_turn_id: "recovery-client".into(),
-                            request_hash: "hash".into(),
-                            prepared_input: "Replay this request with its attachments.".into(),
-                            settings_json: "{}".into(),
-                            state: "failed".into(),
-                            delivery_state: "rejected".into(),
-                            attempt_count: 1,
-                            next_retry_at: None,
-                            error_kind: None,
-                            error_message: None,
-                            recovery_action: Some("retry".into()),
-                            recovered_by_turn_id: None,
-                            created_at: 1,
-                            updated_at: 1,
-                        };
-                        let ctx = turn_ctx_from_stored(
-                            host.clone(), &store, &back, TurnCtx::test_stub().project,
-                            &recovery, stored_to_wire(&answer),
-                        ).unwrap();
-                        assert_eq!(ctx.text.matches("<orx-handoff>").count(), 1);
-                        assert!(ctx.text.contains(&format!("You are the {source} agent")));
-                        assert!(!ctx.text.contains(&format!("You are the {target} agent")));
-                        assert!(ctx.text.ends_with(&recovery.prepared_input));
-                        for delivery in ["rejected", "unknown"] {
-                            let mut unprimed = bare_session();
-                            unprimed.id = format!("chat_{}", uuid::Uuid::new_v4());
-                            unprimed.harness = source.into();
-                            unprimed.native_session_id = Some(uuid::Uuid::new_v4().to_string());
-                            unprimed.bootstrap_context = Some("FROZEN_PARENT_CONTEXT".into());
-                            store.create_chat_session(&unprimed).unwrap();
-                            let first = StoredChatMessage {
-                                id: format!("msg_{}", uuid::Uuid::new_v4()),
-                                session_id: unprimed.id.clone(),
-                                parent_id: None,
-                                base_native_session_id: None,
-                                result_native_session_id: None,
-                                result_native_message_id: None,
-                                ..request.clone()
-                            };
-                            let first_turn = StoredChatTurn {
-                                id: uuid::Uuid::new_v4().to_string(),
-                                session_id: unprimed.id.clone(),
-                                user_message_id: Some(first.id.clone()),
-                                assistant_message_id: format!("msg_{}", uuid::Uuid::new_v4()),
-                                state: "preparing".into(),
-                                delivery_state: "not_sent".into(),
-                                ..recovery.clone()
-                            };
-                            store.admit_chat_turn(Some(&first), &first_turn).unwrap();
-                            let action = if delivery == "rejected" { "retry" } else { "continue" };
-                            store.fail_chat_turn(&first_turn.id, delivery, "test", "Unconfirmed delivery", Some(action)).unwrap();
-                            let failure = StoredChatMessage {
-                                id: first_turn.assistant_message_id.clone(),
-                                role: "assistant".into(),
-                                result_native_session_id: unprimed.native_session_id.clone(),
-                                result_native_message_id: None,
-                                parts_json: serde_json::to_string(&[WirePart::tool("failure", "error", "error", Some("Unconfirmed delivery".into()))]).unwrap(),
-                                ..first.clone()
-                            };
-                            store.upsert_chat_message_on_branch(&failure).unwrap();
-                            let unprimed = store.get_chat_session(&unprimed.id).unwrap().unwrap();
-                            let position = handoff::position_for(&store, &unprimed).unwrap();
-                            assert!(position.since.is_none());
-                            assert!(!position.switched);
-                            let failed = store.get_chat_turn(&unprimed.id, &first_turn.id).unwrap().unwrap();
-                            let retry = turn_ctx_from_stored(host.clone(), &store, &unprimed, TurnCtx::test_stub().project, &failed, stored_to_wire(&failure)).unwrap();
-                            assert!(retry.text.contains("FROZEN_PARENT_CONTEXT"));
-                            assert_eq!(retry.text.matches("<orx-handoff>").count(), 1);
-
-                            if delivery == "rejected" {
-                                assert!(store.reset_chat_turn_for_retry(&first_turn.id, now_ms()).unwrap());
-                                store.update_chat_turn_progress(&first_turn.id, "running", "accepted", 2, None).unwrap();
-                                let received = handoff::position_for(&store, &unprimed).unwrap();
-                                assert_eq!(received.since.as_deref(), Some(failure.id.as_str()));
-                                assert!(!received.switched);
-                            }
-                        }
-                        let (ids, _) = store
-                            .native_sessions_for_deletion(&[session.id.clone()], &[target])
-                            .unwrap();
-                        assert!(ids.contains(answer.result_native_session_id.as_ref().unwrap()));
-
-                        if source == "codex" && target == "claude-code" {
-                            host.set_plan_mode(&session.id, true).await.unwrap();
-                            let claude = host.set_agent(&session.id, agent.clone(), None).await.unwrap();
-                            assert_eq!(claude.permission_mode.as_deref(), Some("plan"));
-                            assert!(!claude.plan_mode);
-                            host.set_permission_mode(&session.id, "auto").await.unwrap();
-                            let codex = host
-                                .set_agent(&session.id, source_agent, None)
-                                .await
-                                .unwrap();
-                            assert!(!codex.plan_mode);
-                            assert!(codex.plan_reset_pending);
-                            assert_eq!(codex.native_session_id, session.native_session_id);
-                        }
-
-                        store.set_chat_session_active_leaf(&session.id, None).unwrap();
-                        store.set_chat_session_native_id(&session.id, None).unwrap();
-                        let empty = host.set_agent(&session.id, agent, None).await.unwrap();
-                        assert!(empty.native_session_id.is_none());
-                        assert!(!handoff::context(&store, &empty, None, None, None).unwrap().contains("Original plan."));
-                    }
-                }
-            });
-            return;
-        }
-        let fixture = crate::local::git::TemporaryDirectory::new("orx-provider-switches").unwrap();
-        let output = crate::process::command(std::env::current_exe().unwrap())
-            .args(["--exact", "local::chat::bridge_tests::provider_switches_resume_each_harness_and_deliver_only_its_delta", "--nocapture"])
-            .env(CHILD, "1").env("ORX_DATA_DIR", fixture.path().join("data"))
-            .env("XDG_CONFIG_HOME", fixture.path().join("config")).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    fn switch_claude_to_codex() {
+        check_provider_switch("claude-code", "codex");
     }
 
     #[test]
-    fn switched_recovery_and_forks_keep_selected_settings_and_parent_context() {
-        const CHILD: &str = "ORX_TEST_SWITCHED_RECOVERY";
-        if std::env::var_os(CHILD).is_some() {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
-                    let host = Arc::new(test_host());
-                    let store = Store::open().unwrap();
-                    let mut project = TurnCtx::test_stub().project;
-                    project.repo_path = crate::store::data_dir()
-                        .join("absent-project")
-                        .display()
-                        .to_string();
-                    project.github_sync_enabled = false;
-                    store.create_local_project(&project).unwrap();
-                    let mut parent = bare_session();
-                    parent.id = "parent-context".into();
-                    parent.project_id = project.id.clone();
-                    store.create_chat_session(&parent).unwrap();
-                    store
-                        .upsert_chat_message_on_branch(&StoredChatMessage {
-                            id: "parent-message".into(),
-                            session_id: parent.id.clone(),
-                            role: "user".into(),
-                            parts_json: serde_json::to_string(&[WirePart::text(
-                                "parent",
-                                "FROZEN_PARENT_CONTEXT",
-                            )])
-                            .unwrap(),
-                            created_at: 1,
-                            completed_at: Some(1),
-                            parent_id: None,
-                            base_native_session_id: None,
-                            result_native_session_id: None,
-                            result_native_message_id: None,
-                            native_harness: None,
-                        })
-                        .unwrap();
+    fn switch_claude_to_opencode() {
+        check_provider_switch("claude-code", "opencode");
+    }
 
-                    for action in ["recover", "recover-branch", "edit", "retry", "select"] {
-                        let mut session = bare_session();
-                        session.id = format!("chat_{action}");
-                        session.project_id = project.id.clone();
-                        session.title = Some("Test".into());
-                        session.model = Some("old-model".into());
-                        session.side_parent_session_id = Some(parent.id.clone());
-                        session.side_parent_leaf_id = Some("parent-message".into());
-                        store.create_chat_session(&session).unwrap();
-                        let request = StoredChatMessage {
-                            id: format!("request_{action}"),
-                            session_id: session.id.clone(),
-                            role: "user".into(),
-                            parts_json: serde_json::to_string(&[WirePart::text(
-                                "request",
-                                "Original request.",
-                            )])
-                            .unwrap(),
-                            created_at: 1,
-                            completed_at: Some(1),
-                            parent_id: None,
-                            base_native_session_id: None,
-                            result_native_session_id: None,
-                            result_native_message_id: None,
-                            native_harness: Some(session.harness.clone()),
-                        };
-                        let turn = StoredChatTurn {
-                            id: format!("turn_{action}"),
-                            session_id: session.id.clone(),
-                            client_turn_id: format!("client_{action}"),
-                            request_hash: "hash".into(),
-                            user_message_id: Some(request.id.clone()),
-                            assistant_message_id: format!("answer_{action}"),
-                            prepared_input: "Original request.".into(),
-                            settings_json: r#"{"model":"old-model"}"#.into(),
-                            state: "preparing".into(),
-                            delivery_state: "not_sent".into(),
-                            attempt_count: 1,
-                            next_retry_at: None,
-                            error_kind: None,
-                            error_message: None,
-                            recovery_action: None,
-                            recovered_by_turn_id: None,
-                            created_at: 1,
-                            updated_at: 1,
-                        };
-                        store.admit_chat_turn(Some(&request), &turn).unwrap();
-                        store
-                            .fail_chat_turn(
-                                &turn.id,
-                                "rejected",
-                                "test",
-                                "Failed request",
-                                Some("retry"),
-                            )
-                            .unwrap();
-                        let reply = StoredChatMessage {
-                            id: turn.assistant_message_id.clone(),
-                            role: "assistant".into(),
-                            parts_json: serde_json::to_string(&[WirePart::text(
-                                "reply",
-                                "Old answer.",
-                            )])
-                            .unwrap(),
-                            ..request.clone()
-                        };
-                        store.upsert_chat_message_on_branch(&reply).unwrap();
-                        let acp = crate::local::acp::presets().remove(0).launch;
-                        let agent = crate::store::StoredAgentSelection {
-                            harness: if action == "select" {
-                                acp.id
-                            } else {
-                                "codex".into()
-                            },
-                            model: Some("selected-model".into()),
-                            service_tier: None,
-                            permission_mode: None,
-                            reasoning_level: None,
-                        };
-                        host.set_agent(&session.id, agent.clone(), None)
-                            .await
-                            .unwrap();
-                        if action.starts_with("recover") {
-                            host.set_agent(
-                                &session.id,
-                                crate::store::StoredAgentSelection {
-                                    harness: session.harness.clone(),
-                                    ..agent
-                                },
-                                None,
-                            )
-                            .await
-                            .unwrap();
-                            if action == "recover-branch" {
-                                store
-                                    .set_chat_session_active_leaf(&session.id, Some(&reply.id))
-                                    .unwrap();
-                            }
-                            let recovered = host
-                                .recover_turn(
-                                    &session.id,
-                                    &turn.id,
-                                    "retry",
-                                    RecoveryOverrides::default(),
-                                )
-                                .await
-                                .unwrap();
-                            let stored = store
-                                .get_chat_turn(&session.id, &recovered.turn_id)
-                                .unwrap()
-                                .unwrap();
-                            let settings: TurnOverrides =
-                                serde_json::from_str(&stored.settings_json).unwrap();
-                            assert_eq!(settings.model.as_deref(), Some("selected-model"));
-                            assert_ne!(recovered.turn_id, turn.id);
-                        } else if action == "select" {
-                            host.select_branch(&session.id, &reply.id).await.unwrap();
-                        } else {
-                            let (id, kind) = if action == "edit" {
-                                (&request.id, ForkKind::Edit("Edited request.".into()))
-                            } else {
-                                (&reply.id, ForkKind::Retry)
-                            };
-                            assert!(host.fork_turn(&session.id, id, kind).await.unwrap());
-                        }
-                        // Abort admitted turns before this current-thread runtime polls a harness.
-                        if let Some(TurnState::Active(active)) =
-                            host.turns.try_lock().unwrap().remove(&session.id)
-                        {
-                            active.handle.abort();
-                        }
-                        let updated = store.get_chat_session(&session.id).unwrap().unwrap();
-                        assert!(updated.bootstrap_context.is_none());
-                        assert!(effective_bootstrap_context(&store, &updated)
-                            .unwrap()
-                            .unwrap()
-                            .contains("FROZEN_PARENT_CONTEXT"));
-                        assert!(handoff::context(&store, &updated, None, None, None)
-                            .unwrap()
-                            .contains("FROZEN_PARENT_CONTEXT"));
-                    }
-                });
+    #[test]
+    fn switch_codex_to_claude() {
+        check_provider_switch("codex", "claude-code");
+    }
+
+    #[test]
+    fn switch_codex_to_opencode() {
+        check_provider_switch("codex", "opencode");
+    }
+
+    #[test]
+    fn switch_opencode_to_claude() {
+        check_provider_switch("opencode", "claude-code");
+    }
+
+    #[test]
+    fn switch_opencode_to_codex() {
+        check_provider_switch("opencode", "codex");
+    }
+
+    #[test]
+    fn switch_acp_to_claude() {
+        check_provider_switch("acp", "claude-code");
+    }
+
+    #[test]
+    fn switch_acp_to_codex() {
+        check_provider_switch("acp", "codex");
+    }
+
+    #[test]
+    fn switch_acp_to_opencode() {
+        check_provider_switch("acp", "opencode");
+    }
+
+    fn check_provider_switch(source: &str, target: &str) {
+        if !crate::config::in_test_child(&[]) {
             return;
         }
-        let fixture = crate::local::git::TemporaryDirectory::new("orx-switched-recovery").unwrap();
-        let output = crate::process::command(std::env::current_exe().unwrap())
-            .args(["--exact", "local::chat::bridge_tests::switched_recovery_and_forks_keep_selected_settings_and_parent_context", "--nocapture"])
-            .env(CHILD, "1").env("ORX_DATA_DIR", fixture.path().join("data"))
-            .env("XDG_CONFIG_HOME", fixture.path().join("config")).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let host = Arc::new(test_host());
+            let store = Store::open().unwrap();
+            let acp = crate::local::acp::presets().remove(0).launch;
+            let source = if source == "acp" { acp.id.as_str() } else { source };
+            let mut session = bare_session();
+            session.id = format!("chat_{}", uuid::Uuid::new_v4());
+            session.harness = source.into();
+            session.native_session_id = Some(format!("native_{source}_{target}"));
+            if source.starts_with("acp:") {
+                session.model = Some("second".into());
+            }
+            store.create_chat_session(&session).unwrap();
+            if source.starts_with("acp:") {
+                store.set_acp_configuration(&session.id, &json!({"configOptions":[{"id":"model", "type":"select", "category":"model", "currentValue":"first", "options":[{"value":"first", "name":"First"},{"value":"second", "name":"Second"}]}]})).unwrap();
+            }
+            let request = StoredChatMessage {
+                id: format!("msg_{}", uuid::Uuid::new_v4()),
+                session_id: session.id.clone(),
+                role: "user".into(),
+                parts_json: serde_json::to_string(&[WirePart::text(
+                    "request",
+                    "Preserve the parser API.",
+                )])
+                .unwrap(),
+                created_at: now_ms(),
+                completed_at: Some(now_ms()),
+                parent_id: None,
+                base_native_session_id: session.native_session_id.clone(),
+                result_native_session_id: None,
+                result_native_message_id: None,
+                native_harness: Some(source.into()),
+            };
+            store.upsert_chat_message_on_branch(&request).unwrap();
+            let original = StoredChatMessage {
+                id: format!("msg_{}", uuid::Uuid::new_v4()),
+                role: "assistant".into(),
+                parts_json: serde_json::to_string(&[WirePart::text(
+                    "answer",
+                    "Original plan.\nKeep this earlier native detail out of the handoff.",
+                )])
+                .unwrap(),
+                result_native_session_id: session.native_session_id.clone(),
+                result_native_message_id: Some("original-end".into()),
+                ..request.clone()
+            };
+            store.upsert_chat_message_on_branch(&original).unwrap();
+            let agent = crate::store::StoredAgentSelection {
+                harness: target.into(),
+                model: Some("target-model".into()),
+                service_tier: None,
+                permission_mode: None,
+                reasoning_level: None,
+            };
+            let switched = host
+                .set_agent(&session.id, agent.clone(), Some(200_000))
+                .await
+                .unwrap();
+            assert_eq!(switched.harness, target);
+            assert!(!host.is_busy(&session.id).await);
+            assert_eq!(switched.native_session_id, None);
+            assert!(
+                store.latest_chat_turn(&session.id).unwrap().is_none(),
+                "a switch must not start a turn"
+            );
+            let mut switching =
+                TurnGuard::claim_idle(&host, &session.id, TurnState::Switching)
+                    .await
+                    .unwrap();
+            assert!(!host.interrupt(&session.id).await.unwrap());
+            assert!(host.is_busy(&session.id).await);
+            let sent = host
+                .send_message(
+                    &session.id,
+                    "Concurrent request".into(),
+                    TurnOverrides {
+                        model: Some("source-model".into()),
+                        ..TurnOverrides::default()
+                    },
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                )
+                .await;
+            assert!(sent.unwrap_err().to_string().contains("switching"));
+            assert!(store
+                .list_queued_chat_messages_for_session(&session.id)
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                store.get_chat_session(&session.id).unwrap().unwrap().model,
+                agent.model
+            );
+            switching.release().await;
+            assert!(!host.is_busy(&session.id).await);
+            let messages = store.list_chat_messages(&session.id).unwrap();
+            let path = active_path(&messages, switched.active_leaf_id.as_deref());
+            let position = handoff::position(
+                &switched, &path, &store.unconfirmed_chat_replies(&session.id).unwrap(),
+            );
+            assert!(position.since.is_none());
+            assert_eq!(position.context_window, Some(200_000));
+            assert!(position.switched);
+            assert!(
+                handoff::context(&store, &switched, None, None, Some(200_000))
+                    .unwrap()
+                    .contains("Preserve the parser API.")
+            );
+            let same = host
+                .set_agent(&session.id, agent.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                same.active_leaf_id, switched.active_leaf_id,
+                "a retried switch adds no row"
+            );
+            let answer = StoredChatMessage {
+                id: format!("msg_{}", uuid::Uuid::new_v4()),
+                parts_json: serde_json::to_string(&[WirePart::text(
+                    "answer",
+                    "Parser API preserved; tests passed.",
+                )])
+                .unwrap(),
+                native_harness: Some(target.into()),
+                result_native_session_id: Some(format!("target_{source}_{target}")),
+                result_native_message_id: None,
+                base_native_session_id: None,
+                ..original.clone()
+            };
+            store.upsert_chat_message_on_branch(&answer).unwrap();
+            store
+                .set_chat_session_native_id(
+                    &session.id,
+                    answer.result_native_session_id.as_deref(),
+                )
+                .unwrap();
+            let source_agent = crate::store::StoredAgentSelection {
+                harness: source.into(),
+                model: session.model.clone(),
+                service_tier: None,
+                permission_mode: None,
+                reasoning_level: None,
+            };
+            let back = host
+                .set_agent(&session.id, source_agent.clone(), Some(200_000))
+                .await
+                .unwrap();
+            assert_eq!(back.native_session_id, session.native_session_id);
+            if source.starts_with("acp:") {
+                let wire = session_json_with(Some(&store), &back, false);
+                assert_eq!(wire["model"], "second");
+                assert!(wire["nativeConfiguration"].is_null());
+            }
+            let messages = store.list_chat_messages(&session.id).unwrap();
+            let path = active_path(&messages, back.active_leaf_id.as_deref());
+            let position = handoff::position(
+                &back,
+                &path,
+                &store.unconfirmed_chat_replies(&session.id).unwrap(),
+            );
+            assert_eq!(position.since.as_deref(), Some(original.id.as_str()));
+            let context = handoff::context(&store, &back, None, position.since.as_deref(), position.context_window).unwrap();
+            assert!(context.contains(&format!(
+                "through {}, your last reply as {source}",
+                delegation::message_ref(&original.id)
+            )));
+            assert!(context.contains("Parser API preserved; tests passed."));
+            assert_eq!(context.matches("Original plan.").count(), 1);
+            assert!(!context.contains("Keep this earlier native detail"));
+            let recovery = StoredChatTurn {
+                id: "recovery".into(),
+                session_id: session.id.clone(),
+                user_message_id: Some(request.id.clone()),
+                assistant_message_id: "recovered-answer".into(),
+                client_turn_id: "recovery-client".into(),
+                request_hash: "hash".into(),
+                prepared_input: "Replay this request with its attachments.".into(),
+                settings_json: "{}".into(),
+                state: "failed".into(),
+                delivery_state: "rejected".into(),
+                attempt_count: 1,
+                next_retry_at: None,
+                error_kind: None,
+                error_message: None,
+                recovery_action: Some("retry".into()),
+                recovered_by_turn_id: None,
+                created_at: 1,
+                updated_at: 1,
+            };
+            let ctx = turn_ctx_from_stored(
+                host.clone(), &store, &back, TurnCtx::test_stub().project,
+                &recovery, stored_to_wire(&answer),
+            ).unwrap();
+            assert_eq!(ctx.text.matches("<orx-handoff>").count(), 1);
+            assert!(ctx.text.contains(&format!("You are the {source} agent")));
+            assert!(!ctx.text.contains(&format!("You are the {target} agent")));
+            assert!(ctx.text.ends_with(&recovery.prepared_input));
+            for delivery in ["rejected", "unknown"] {
+                let mut unprimed = bare_session();
+                unprimed.id = format!("chat_{}", uuid::Uuid::new_v4());
+                unprimed.harness = source.into();
+                unprimed.native_session_id = Some(uuid::Uuid::new_v4().to_string());
+                unprimed.bootstrap_context = Some("FROZEN_PARENT_CONTEXT".into());
+                store.create_chat_session(&unprimed).unwrap();
+                let first = StoredChatMessage {
+                    id: format!("msg_{}", uuid::Uuid::new_v4()),
+                    session_id: unprimed.id.clone(),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    ..request.clone()
+                };
+                let first_turn = StoredChatTurn {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    session_id: unprimed.id.clone(),
+                    user_message_id: Some(first.id.clone()),
+                    assistant_message_id: format!("msg_{}", uuid::Uuid::new_v4()),
+                    state: "preparing".into(),
+                    delivery_state: "not_sent".into(),
+                    ..recovery.clone()
+                };
+                store.admit_chat_turn(Some(&first), &first_turn).unwrap();
+                let action = if delivery == "rejected" { "retry" } else { "continue" };
+                store.fail_chat_turn(&first_turn.id, delivery, "test", "Unconfirmed delivery", Some(action)).unwrap();
+                let failure = StoredChatMessage {
+                    id: first_turn.assistant_message_id.clone(),
+                    role: "assistant".into(),
+                    result_native_session_id: unprimed.native_session_id.clone(),
+                    result_native_message_id: None,
+                    parts_json: serde_json::to_string(&[WirePart::tool("failure", "error", "error", Some("Unconfirmed delivery".into()))]).unwrap(),
+                    ..first.clone()
+                };
+                store.upsert_chat_message_on_branch(&failure).unwrap();
+                let unprimed = store.get_chat_session(&unprimed.id).unwrap().unwrap();
+                let position = handoff::position_for(&store, &unprimed).unwrap();
+                assert!(position.since.is_none());
+                assert!(!position.switched);
+                let failed = store.get_chat_turn(&unprimed.id, &first_turn.id).unwrap().unwrap();
+                let retry = turn_ctx_from_stored(host.clone(), &store, &unprimed, TurnCtx::test_stub().project, &failed, stored_to_wire(&failure)).unwrap();
+                assert!(retry.text.contains("FROZEN_PARENT_CONTEXT"));
+                assert_eq!(retry.text.matches("<orx-handoff>").count(), 1);
+
+                if delivery == "rejected" {
+                    assert!(store.reset_chat_turn_for_retry(&first_turn.id, now_ms()).unwrap());
+                    store.update_chat_turn_progress(&first_turn.id, "running", "accepted", 2, None).unwrap();
+                    let received = handoff::position_for(&store, &unprimed).unwrap();
+                    assert_eq!(received.since.as_deref(), Some(failure.id.as_str()));
+                    assert!(!received.switched);
+                }
+            }
+            let (ids, _) = store
+                .native_sessions_for_deletion(&[session.id.clone()], &[target])
+                .unwrap();
+            assert!(ids.contains(answer.result_native_session_id.as_ref().unwrap()));
+
+            if source == "codex" && target == "claude-code" {
+                host.set_plan_mode(&session.id, true).await.unwrap();
+                let claude = host.set_agent(&session.id, agent.clone(), None).await.unwrap();
+                assert_eq!(claude.permission_mode.as_deref(), Some("plan"));
+                assert!(!claude.plan_mode);
+                host.set_permission_mode(&session.id, "auto").await.unwrap();
+                let codex = host
+                    .set_agent(&session.id, source_agent, None)
+                    .await
+                    .unwrap();
+                assert!(!codex.plan_mode);
+                assert!(codex.plan_reset_pending);
+                assert_eq!(codex.native_session_id, session.native_session_id);
+            }
+
+            store.set_chat_session_active_leaf(&session.id, None).unwrap();
+            store.set_chat_session_native_id(&session.id, None).unwrap();
+            let empty = host.set_agent(&session.id, agent, None).await.unwrap();
+            assert!(empty.native_session_id.is_none());
+            assert!(!handoff::context(&store, &empty, None, None, None).unwrap().contains("Original plan."));
+        });
+    }
+
+    #[test]
+    fn recover_after_switch_keeps_settings_and_parent_context() {
+        check_switched_recovery("recover");
+    }
+
+    #[test]
+    fn recover_branch_after_switch_keeps_settings_and_parent_context() {
+        check_switched_recovery("recover-branch");
+    }
+
+    #[test]
+    fn edit_after_switch_keeps_settings_and_parent_context() {
+        check_switched_recovery("edit");
+    }
+
+    #[test]
+    fn retry_after_switch_keeps_settings_and_parent_context() {
+        check_switched_recovery("retry");
+    }
+
+    #[test]
+    fn select_after_switch_keeps_settings_and_parent_context() {
+        check_switched_recovery("select");
+    }
+
+    fn check_switched_recovery(action: &str) {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let host = Arc::new(test_host());
+                let store = Store::open().unwrap();
+                let mut project = TurnCtx::test_stub().project;
+                project.repo_path = crate::store::data_dir()
+                    .join("absent-project")
+                    .display()
+                    .to_string();
+                project.github_sync_enabled = false;
+                store.create_local_project(&project).unwrap();
+                let mut parent = bare_session();
+                parent.id = "parent-context".into();
+                parent.project_id = project.id.clone();
+                store.create_chat_session(&parent).unwrap();
+                store
+                    .upsert_chat_message_on_branch(&StoredChatMessage {
+                        id: "parent-message".into(),
+                        session_id: parent.id.clone(),
+                        role: "user".into(),
+                        parts_json: serde_json::to_string(&[WirePart::text(
+                            "parent",
+                            "FROZEN_PARENT_CONTEXT",
+                        )])
+                        .unwrap(),
+                        created_at: 1,
+                        completed_at: Some(1),
+                        parent_id: None,
+                        base_native_session_id: None,
+                        result_native_session_id: None,
+                        result_native_message_id: None,
+                        native_harness: None,
+                    })
+                    .unwrap();
+
+                let mut session = bare_session();
+                session.id = format!("chat_{action}");
+                session.project_id = project.id.clone();
+                session.title = Some("Test".into());
+                session.model = Some("old-model".into());
+                session.side_parent_session_id = Some(parent.id.clone());
+                session.side_parent_leaf_id = Some("parent-message".into());
+                store.create_chat_session(&session).unwrap();
+                let request = StoredChatMessage {
+                    id: format!("request_{action}"),
+                    session_id: session.id.clone(),
+                    role: "user".into(),
+                    parts_json: serde_json::to_string(&[WirePart::text(
+                        "request",
+                        "Original request.",
+                    )])
+                    .unwrap(),
+                    created_at: 1,
+                    completed_at: Some(1),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: Some(session.harness.clone()),
+                };
+                let turn = StoredChatTurn {
+                    id: format!("turn_{action}"),
+                    session_id: session.id.clone(),
+                    client_turn_id: format!("client_{action}"),
+                    request_hash: "hash".into(),
+                    user_message_id: Some(request.id.clone()),
+                    assistant_message_id: format!("answer_{action}"),
+                    prepared_input: "Original request.".into(),
+                    settings_json: r#"{"model":"old-model"}"#.into(),
+                    state: "preparing".into(),
+                    delivery_state: "not_sent".into(),
+                    attempt_count: 1,
+                    next_retry_at: None,
+                    error_kind: None,
+                    error_message: None,
+                    recovery_action: None,
+                    recovered_by_turn_id: None,
+                    created_at: 1,
+                    updated_at: 1,
+                };
+                store.admit_chat_turn(Some(&request), &turn).unwrap();
+                store
+                    .fail_chat_turn(
+                        &turn.id,
+                        "rejected",
+                        "test",
+                        "Failed request",
+                        Some("retry"),
+                    )
+                    .unwrap();
+                let reply = StoredChatMessage {
+                    id: turn.assistant_message_id.clone(),
+                    role: "assistant".into(),
+                    parts_json: serde_json::to_string(&[WirePart::text("reply", "Old answer.")])
+                        .unwrap(),
+                    ..request.clone()
+                };
+                store.upsert_chat_message_on_branch(&reply).unwrap();
+                let acp = crate::local::acp::presets().remove(0).launch;
+                let agent = crate::store::StoredAgentSelection {
+                    harness: if action == "select" {
+                        acp.id
+                    } else {
+                        "codex".into()
+                    },
+                    model: Some("selected-model".into()),
+                    service_tier: None,
+                    permission_mode: None,
+                    reasoning_level: None,
+                };
+                host.set_agent(&session.id, agent.clone(), None)
+                    .await
+                    .unwrap();
+                if action.starts_with("recover") {
+                    host.set_agent(
+                        &session.id,
+                        crate::store::StoredAgentSelection {
+                            harness: session.harness.clone(),
+                            ..agent
+                        },
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    if action == "recover-branch" {
+                        store
+                            .set_chat_session_active_leaf(&session.id, Some(&reply.id))
+                            .unwrap();
+                    }
+                    let recovered = host
+                        .recover_turn(&session.id, &turn.id, "retry", RecoveryOverrides::default())
+                        .await
+                        .unwrap();
+                    let stored = store
+                        .get_chat_turn(&session.id, &recovered.turn_id)
+                        .unwrap()
+                        .unwrap();
+                    let settings: TurnOverrides =
+                        serde_json::from_str(&stored.settings_json).unwrap();
+                    assert_eq!(settings.model.as_deref(), Some("selected-model"));
+                    assert_ne!(recovered.turn_id, turn.id);
+                } else if action == "select" {
+                    host.select_branch(&session.id, &reply.id).await.unwrap();
+                } else {
+                    let (id, kind) = if action == "edit" {
+                        (&request.id, ForkKind::Edit("Edited request.".into()))
+                    } else {
+                        (&reply.id, ForkKind::Retry)
+                    };
+                    assert!(host.fork_turn(&session.id, id, kind).await.unwrap());
+                }
+                // Abort admitted turns before this current-thread runtime polls a harness.
+                if let Some(TurnState::Active(active)) =
+                    host.turns.try_lock().unwrap().remove(&session.id)
+                {
+                    active.handle.abort();
+                }
+                let updated = store.get_chat_session(&session.id).unwrap().unwrap();
+                assert!(updated.bootstrap_context.is_none());
+                assert!(effective_bootstrap_context(&store, &updated)
+                    .unwrap()
+                    .unwrap()
+                    .contains("FROZEN_PARENT_CONTEXT"));
+                assert!(handoff::context(&store, &updated, None, None, None)
+                    .unwrap()
+                    .contains("FROZEN_PARENT_CONTEXT"));
+            });
     }
 
     #[tokio::test]
