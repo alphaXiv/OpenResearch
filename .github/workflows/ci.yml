@@ -415,7 +415,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(!inputs.release && '["lint", "test1", "test2", "test3", "test4", "integration", "demo", "chat"]' || '["all"]') }}
+        mode: ${{ fromJSON(!inputs.release && '["lint", "test", "integration", "demo", "chat"]' || '["all"]') }}
     runs-on: windows-latest
     env:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
@@ -444,7 +444,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}${{ matrix.mode == 'lint' && '-lint' || '' }}
-          save-if: ${{ matrix.mode == 'lint' || matrix.mode == 'test1' || matrix.mode == 'all' }}
+          save-if: ${{ matrix.mode == 'lint' || matrix.mode == 'test' || matrix.mode == 'all' }}
           cache-on-failure: true
           workspaces: |
             ${{ env.DEV_DRIVE_WORKSPACE }} -> target
@@ -480,7 +480,7 @@ jobs:
         run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Build tests
-        if: matrix.mode == 'all' || (matrix.mode == 'test1' && github.ref == 'refs/heads/main')
+        if: matrix.mode == 'all' || (matrix.mode == 'test' && github.ref == 'refs/heads/main')
         id: test-build
         env: &windows-test-env
           CARGO_INCREMENTAL: 1
@@ -490,7 +490,7 @@ jobs:
         run: cargo test --locked --no-run
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Install nextest
-        if: startsWith(matrix.mode, 'test') || matrix.mode == 'integration'
+        if: matrix.mode == 'integration'
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-nextest@0.9.151
@@ -519,26 +519,21 @@ jobs:
             demo = 'local::demo::tests::'
             chat = 'local::chat::'
           }
-          $partitions = @{
-            test1 = 'slice:1/4'
-            test2 = 'slice:2/4'
-            test3 = 'slice:3/4'
-            test4 = 'slice:4/4'
-          }
           $testArgs = @('--locked')
           if ($filters.ContainsKey($env:TEST_MODE)) {
             $testArgs += @('--bin', $binary, $filters[$env:TEST_MODE])
-          } elseif ($partitions.ContainsKey($env:TEST_MODE)) {
-            $excluded = ($filters.Values | ForEach-Object { "test($_)" }) -join ' | '
-            cargo nextest run --locked --profile ci --bin $binary --partition ($partitions[$env:TEST_MODE]) -E "not (kind(bin) & binary(=$binary) & ($excluded))"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            if ($env:TEST_MODE -ne 'test1') { exit 0 }
-            $testArgs += '--doc'
+          } elseif ($env:TEST_MODE -eq 'test') {
+            $testArgs += @('--bin', $binary, '--')
+            foreach ($filter in $filters.Values) {
+              $testArgs += @('--skip', $filter)
+            }
           }
           cargo test @testArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:TEST_MODE -eq 'test') { cargo test --locked --doc }
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Save incremental compilation
-        if: always() && github.ref == 'refs/heads/main' && (matrix.mode == 'test1' || matrix.mode == 'all') && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
+        if: always() && github.ref == 'refs/heads/main' && (matrix.mode == 'test' || matrix.mode == 'all') && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: *windows-incremental-path
