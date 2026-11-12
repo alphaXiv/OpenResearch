@@ -25,10 +25,9 @@ use crate::store;
 
 #[path = "opencode_runtime.rs"]
 mod runtime;
-#[cfg(all(test, unix))]
-pub(crate) use runtime::resolve_binary_at;
 pub(crate) use runtime::{
-    prepare_database, resolve_binary, start_server, AgentEndpoint, Protocol, ResolvedBinary,
+    prepare_database, resolve_binary, resolve_binary_at, start_server, user_binary, AgentEndpoint,
+    Protocol, ResolvedBinary,
 };
 
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
@@ -61,16 +60,16 @@ pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
 
 pub(crate) fn not_found() -> crate::error::Error {
     anyhow!(
-        "opencode not found (checked PATH and ~/.opencode/bin/opencode).\n\
-         Install it with: curl -fsSL https://opencode.ai/install | bash"
+        "opencode not found (checked PATH and ~/.opencode/bin/opencode). \
+         Install OpenCode from OpenResearch's coding agent settings."
     )
 }
 
-/// `opencode` on PATH, else the installer's default drop location.
+/// orx's own copy, else `opencode` on PATH, else the installer's default drop location.
 pub fn find_opencode() -> Result<PathBuf> {
-    opencode_candidates()
-        .into_iter()
-        .next()
+    crate::local::harness::managed::installed("opencode")
+        .map(|(bin, _)| bin)
+        .or_else(|| opencode_candidates().into_iter().next())
         .ok_or_else(not_found)
 }
 

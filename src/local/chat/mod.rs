@@ -9539,6 +9539,9 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
         }
     }
     crate::jobs::ssh::prepare_sharing_env(cmd);
+    // orx updates Claude Code itself (`harness::managed`), so a managed copy
+    // never runs the CLI's own updater against the user's install location.
+    cmd.env("DISABLE_AUTOUPDATER", "1");
 }
 
 /// Env var carrying the launching chat session's id into a harness child. The

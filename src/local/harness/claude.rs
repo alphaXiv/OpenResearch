@@ -64,9 +64,6 @@ const MIN_CLAUDE_VERSION: (u64, u64, u64) = (2, 1, 211);
 
 const AUTH_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Not `claude update` — that runs the very binary that is failing.
-const CLAUDE_REINSTALL: &str = "Reinstall it from claude.com/download";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthProbe {
     pub state: HarnessAuthState,
@@ -607,7 +604,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
 }
 
 /// Every `claude` install, in preference order.
-fn claude_candidates() -> Vec<PathBuf> {
+pub(super) fn claude_candidates() -> Vec<PathBuf> {
     let own = crate::config::home_dir().map(|home| home.join(".claude").join("local"));
     installs("claude", own)
 }
@@ -747,7 +744,7 @@ impl ClaudeCode {
             }
             info = info.with_models(models.unwrap_or_default());
         } else if info.install_broken {
-            info.agent_note = Some(info.broken_note(CLAUDE_REINSTALL));
+            info.agent_note = Some(info.broken_note("Reinstall it"));
         } else if info.auth_state == HarnessAuthState::Unsupported {
             info.agent_note = Some(
                 "Update Claude Code to 2.1.211 or newer, then re-check this harness.".to_string(),
@@ -765,10 +762,8 @@ impl ClaudeCode {
                 _ => auth_recovery_note(info.auth_method, info.auth_provider.as_deref()).to_string(),
             });
         } else {
-            info.agent_note = Some(
-                "Install Claude Code (claude.com/download), then sign in with `claude auth login`."
-                    .to_string(),
-            );
+            info.agent_note =
+                Some("Install Claude Code, then sign in with `claude auth login`.".to_string());
         }
         Some(info)
     }

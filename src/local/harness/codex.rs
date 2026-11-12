@@ -339,10 +339,6 @@ fn token_count_usage(info: &Value) -> (Option<u64>, Option<u64>) {
 
 const CODEX_REASONING_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
-/// Deliberately channel-neutral: `find_codex` takes whatever is on PATH, and
-/// naming one installer would send a brew or standalone install to npm.
-const CODEX_REINSTALL: &str = "Reinstall Codex (developers.openai.com/codex)";
-
 /// Query the app-server's `model/list` — codex's own catalog, the same data its
 /// TUI picker renders: every model with its `supportedReasoningEfforts` and
 /// default. The installed CLI owns its catalog and per-model effort choices.
@@ -559,7 +555,7 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
 
 /// Every `codex` install, in preference order, symlinks resolved — codex needs
 /// to find its `codex-code-mode-host` helper next to the real binary.
-fn codex_candidates() -> Vec<PathBuf> {
+pub(super) fn codex_candidates() -> Vec<PathBuf> {
     installs(
         "codex",
         codex_install_dirs(crate::config::home_dir().as_deref()),
@@ -874,17 +870,14 @@ impl Codex {
         } else if info.install_broken {
             // Outranks both notes below: neither signing in nor a provider key
             // helps a codex that can't start.
-            info.agent_note = Some(info.broken_note(CODEX_REINSTALL));
+            info.agent_note = Some(info.broken_note("Reinstall it"));
         } else if info.agent_note.is_some() {
             // A configured custom provider already said which env var to set;
             // `codex login` is the wrong instruction for it.
         } else if info.installed {
             info.agent_note = Some("Sign in with `codex login` to chat with it here.".to_string());
         } else {
-            info.agent_note = Some(
-                "Install Codex (developers.openai.com/codex), then sign in with `codex login`."
-                    .to_string(),
-            );
+            info.agent_note = Some("Install Codex, then sign in with `codex login`.".to_string());
         }
         Some(info)
     }

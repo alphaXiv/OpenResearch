@@ -16,11 +16,13 @@ A turn: persist the user message and reserve the turn → the adapter starts or 
 
 A harness is one integration behind the `Harness` trait (`src/local/harness/mod.rs`), offering any of detection, chat turns and skill installation. Adding one is one implementation and one registry entry. Detection runs in two passes because model catalogs are slow: the first answers installed and signed in, so the picker appears at once; the second fills in models in the background.
 
+**orx keeps Claude Code, Codex and OpenCode current.** Installing one from the dashboard downloads the vendor's release into orx's cache, checked against the SHA-256 the vendor publishes, and leaves the user's `PATH` and shell alone. Once a day, a user's own install that has fallen behind is updated with its own updater; when that cannot reach the newest release, orx's copy stands in. The newer of the two runs, a tie going to the user's install, and OpenCode's copy stays on the user's major version because each major speaks its own protocol. Agents orx starts run with Claude Code's updater off, so only this check changes an install. Cursor, Antigravity and ACP agents keep their vendors' installers.
+
 | Process model | Agents | A turn |
 | --- | --- | --- |
-| resident child per chat | Claude Code, Codex, ACP agents | one request over a stdio protocol; events stream back |
+| resident child per chat | Claude Code, Codex, Antigravity, ACP agents | one request over a stdio protocol; events stream back |
 | resident server per chat | OpenCode | posts to `opencode serve` in the chat's worktree; 1.x and 2.x have separate adapters |
-| child per turn | Cursor, Antigravity, older Codex (`codex exec`) | a print-mode process resuming the native session by id |
+| child per turn | Cursor, older Codex (`codex exec`) | a print-mode process resuming the native session by id |
 
 A resident agent restarts with its native session resumed when a setting it started with changes or when it crashes. Resident children also restart after an interrupt or a switch to another fork, and idle ones are released (`src/local/agent_lifecycle.rs`); the next message resumes them. A child with background tasks still running is not idle: Claude Code resumes on its own when one finishes, and orx records what it writes then as a turn with no user message. Until then orx refuses to switch, retry or edit a fork, which would stop the child and land its reply on the wrong branch. A task that never ends, such as a dev server, keeps its child until the chat stops or restarts it, on low-memory machines too, since releasing the child would kill the task.
 
@@ -72,7 +74,7 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 - **The playbook.** `SYSTEM_PROMPT.md`, rendered with the project's state in `src/local/opencode.rs` for every harness, travels through each agent's instruction channel: a system-prompt file, developer instructions, a config entry, or a worktree file the first turn points to.
 - **Skills.** Bundled (`agent-skills/`) and user-uploaded skills are written into the worktree's native skills folder before each turn, so they never drift from the binary; OpenCode gets them when its server starts. Skills the project or the user's agent already has are found by the agent itself.
 - **The `orx` CLI.** The running `orx`'s directory goes first on `PATH`, and on Unix shell hooks keep it first after the user's startup files, so the agent runs the dashboard's version. The environment names the chat, the dashboard's port and the server's bearer, which is how `orx exp run` records its chat.
-- **alphaXiv tools.** `orx alphaxiv-mcp` (`src/commands/alphaxiv_mcp.rs`) passes an allowlist of tools to Claude Code, Codex, OpenCode and ACP agents; Cursor and Antigravity use `orx alphaxiv library`. Tokens stay in orx ([storage](storage.md)); on an SSH host the attached laptop's sign-in counts ([remote](remote.md)). A sign-in change restarts a resident agent on its next turn with its session resumed. Write tools carry an ask rule, but ACP agents get no per-tool rule and `codex exec` cannot prompt, so there the agent's own policy decides.
+- **alphaXiv tools.** `orx alphaxiv-mcp` (`src/commands/alphaxiv_mcp.rs`) passes an allowlist of tools to Claude Code, Codex, OpenCode, Antigravity and ACP agents; Cursor uses `orx alphaxiv library`. Tokens stay in orx ([storage](storage.md)); on an SSH host the attached laptop's sign-in counts ([remote](remote.md)). A sign-in change restarts a resident agent on its next turn with its session resumed. Write tools carry an ask rule, but ACP agents get no per-tool rule and `codex exec` cannot prompt, so there the agent's own policy decides.
 - **Turn context.** Autonomy and the goal ride the turn as context blocks, so changing them never restarts the agent.
 
 ## Permissions
@@ -81,8 +83,8 @@ Each agent keeps its own permission modes, and orx exposes those the harness adv
 
 | Agents | How a request waits |
 | --- | --- |
-| Codex app server, OpenCode, ACP | held on the live connection |
-| Claude Code, Antigravity | headless, so a bridge relays to the owning dashboard and blocks: Claude's `approve` tool on `orx mcp`, Antigravity's `orx antigravity-gate` hook |
+| Codex app server, OpenCode, Antigravity, ACP | held on the live connection |
+| Claude Code | headless, so its `approve` tool on `orx mcp` relays to the owning dashboard and blocks |
 | Cursor, `codex exec` | nothing waits: print mode cannot prompt, so the mode maps to CLI flags |
 
 The bridge endpoint grants permissions, so it takes a per-child token that each respawn replaces. Plan mode puts a small policy in front of the bridge: read-only commands and web lookups pass, file edits are refused, and anything else asks. The read-only check is an allowlist (`src/local/harness/plan_gate.rs`), so a new read-only `orx` verb stays gated until added there.
