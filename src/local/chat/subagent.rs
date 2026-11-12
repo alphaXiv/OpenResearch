@@ -151,7 +151,7 @@ fn opencode_child(spawn: &WirePart) -> Option<String> {
 
 fn antigravity(spawn: &WirePart, id: &str, parent: Option<&str>) -> Result<WirePart> {
     let id = uuid::Uuid::parse_str(id)?;
-    let path = dirs::home_dir()
+    let path = crate::config::home_dir()
         .unwrap_or_default()
         .join(".gemini/antigravity-cli/brain")
         .join(id.to_string())

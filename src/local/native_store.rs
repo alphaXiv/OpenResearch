@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 
 #[path = "opencode_db.rs"]
 pub mod opencode_database;
@@ -36,7 +36,7 @@ fn user_env_path(key: &str) -> Option<PathBuf> {
 }
 
 fn home_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    crate::config::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 pub fn opencode_db(store: NativeStore) -> PathBuf {
@@ -46,7 +46,11 @@ pub fn opencode_db(store: NativeStore) -> PathBuf {
             let data = user_env_path("XDG_DATA_HOME")
                 .unwrap_or_else(|| home_dir().join(".local/share"))
                 .join("opencode");
-            data.join(user_env_path("OPENCODE_DB").unwrap_or_else(|| PathBuf::from("opencode.db")))
+            crate::config::test_contained(
+                data.join(
+                    user_env_path("OPENCODE_DB").unwrap_or_else(|| PathBuf::from("opencode.db")),
+                ),
+            )
         }
     }
 }
@@ -54,39 +58,51 @@ pub fn opencode_db(store: NativeStore) -> PathBuf {
 pub fn claude_home(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/claude"),
-        NativeStore::Legacy => {
-            user_env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"))
-        }
+        NativeStore::Legacy => crate::config::test_contained(
+            user_env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude")),
+        ),
     }
 }
 
 pub fn claude_secure_storage_config_dir() -> OsString {
+    let namespace =
+        user_env("CLAUDE_SECURESTORAGE_CONFIG_DIR").or_else(|| user_env("CLAUDE_CONFIG_DIR"));
+    if cfg!(test) {
+        // A test never reaches the user's Keychain namespace.
+        let namespace = namespace
+            .filter(|namespace| !namespace.is_empty())
+            .map_or_else(|| claude_home(NativeStore::Legacy), PathBuf::from);
+        return crate::config::test_contained(namespace).into_os_string();
+    }
     // Empty intentionally selects Claude's unsuffixed default Keychain namespace.
-    user_env("CLAUDE_SECURESTORAGE_CONFIG_DIR")
-        .or_else(|| user_env("CLAUDE_CONFIG_DIR"))
-        .unwrap_or_default()
+    namespace.unwrap_or_default()
 }
 
 pub fn codex_home(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/codex"),
-        NativeStore::Legacy => {
-            user_env_path("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex"))
-        }
+        NativeStore::Legacy => crate::config::test_contained(
+            user_env_path("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex")),
+        ),
     }
 }
 
 pub fn cursor_home(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/cursor"),
-        NativeStore::Legacy => user_env_path("CURSOR_CONFIG_DIR")
-            .or_else(|| user_env_path("XDG_CONFIG_HOME").map(|root| root.join("cursor")))
-            .unwrap_or_else(|| home_dir().join(".cursor")),
+        NativeStore::Legacy => crate::config::test_contained(
+            user_env_path("CURSOR_CONFIG_DIR")
+                .or_else(|| user_env_path("XDG_CONFIG_HOME").map(|root| root.join("cursor")))
+                .unwrap_or_else(|| home_dir().join(".cursor")),
+        ),
     }
 }
 
 pub fn cursor_skills_dir() -> PathBuf {
-    cursor_skills_dir_in(&home_dir(), user_env_path("CURSOR_CONFIG_DIR"))
+    crate::config::test_contained(cursor_skills_dir_in(
+        &home_dir(),
+        user_env_path("CURSOR_CONFIG_DIR"),
+    ))
 }
 
 fn cursor_skills_dir_in(home: &Path, config: Option<PathBuf>) -> PathBuf {
@@ -561,8 +577,14 @@ fn remove_session_path(path: &Path) -> Result<()> {
     }
 }
 
-pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {
-    (store == NativeStore::Isolated).then(|| format!("sqlite_home={}", toml_string(home)))
+pub fn codex_sqlite_override(store: NativeStore, home: &Path, profile: bool) -> Option<String> {
+    let home = if profile {
+        codex_home(NativeStore::Isolated)
+    } else {
+        home.to_path_buf()
+    };
+    (store == NativeStore::Isolated || profile)
+        .then(|| format!("sqlite_home={}", toml_string(&home)))
 }
 
 pub fn claude_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
@@ -645,11 +667,12 @@ fn session_location(
             continue;
         }
         for tree in trees {
-            let path = match tree_session_path(&root.join(tree), native_id) {
-                Ok(path) => path,
-                Err(_) if store == NativeStore::Legacy => continue,
-                Err(error) => return Err(error),
-            };
+            let path = tree_session_path(&root.join(tree), native_id).with_context(|| {
+                format!(
+                    "Could not read native sessions in {}",
+                    root.join(tree).display()
+                )
+            })?;
             if let Some(path) = path {
                 return Ok(Some(NativeSessionLocation { store, path }));
             }
@@ -710,20 +733,36 @@ pub fn prepare_claude(store: NativeStore) -> Result<PathBuf> {
         std::fs::create_dir_all(&root)?;
         return Ok(root);
     }
-    prepare_links(
-        &root,
-        &legacy,
-        &[
-            home_dir().join(".claude.json"),
-            legacy.join("settings.json"),
-            legacy.join("settings.local.json"),
-            legacy.join("CLAUDE.md"),
-            legacy.join(".credentials.json"),
-            legacy.join("plugins"),
-            legacy.join("skills"),
-        ],
-    )?;
+    prepare_claude_links(&root, &legacy, Some(&claude_config_file()))?;
     Ok(root)
+}
+
+pub(crate) fn claude_config_file() -> PathBuf {
+    if user_env_path("CLAUDE_CONFIG_DIR").is_some() {
+        claude_home(NativeStore::Legacy).join(".claude.json")
+    } else {
+        home_dir().join(".claude.json")
+    }
+}
+
+pub(crate) fn prepare_claude_links(
+    root: &Path,
+    legacy: &Path,
+    config: Option<&Path>,
+) -> Result<()> {
+    let mut sources = [
+        "settings.json",
+        "settings.local.json",
+        "CLAUDE.md",
+        "plugins",
+        "skills",
+    ]
+    .map(|name| legacy.join(name))
+    .to_vec();
+    if let Some(config) = config {
+        sources.extend([config.to_path_buf(), legacy.join(".credentials.json")]);
+    }
+    prepare_links(root, legacy, &sources)
 }
 
 pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
@@ -733,11 +772,11 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
         std::fs::create_dir_all(&root)?;
         return Ok(root);
     }
-    prepare_codex_links(&root, &legacy)?;
+    prepare_codex_links(&root, &legacy, true)?;
     Ok(crate::paths::canonicalize(&root).unwrap_or(root))
 }
 
-fn prepare_codex_links(root: &Path, legacy: &Path) -> Result<()> {
+pub(crate) fn prepare_codex_links(root: &Path, legacy: &Path, share_auth: bool) -> Result<()> {
     std::fs::create_dir_all(root)?;
     let isolated = crate::paths::canonicalize(root)?;
     let mut sources = child_paths(legacy)?;
@@ -786,7 +825,8 @@ fn prepare_codex_links(root: &Path, legacy: &Path) -> Result<()> {
             !metadata.is_file() && !metadata.is_dir() && !metadata.file_type().is_symlink()
         });
 
-        !private
+        (share_auth || name != "auth.json")
+            && !private
             && !special
             && !crate::paths::canonicalize(path).is_ok_and(|source| isolated.starts_with(source))
     });
@@ -815,7 +855,7 @@ pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
     Ok(root)
 }
 
-fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {
+pub(crate) fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {
     let _guard = LINK_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     std::fs::create_dir_all(root)?;
     let mut process_lock = sources
@@ -1117,7 +1157,7 @@ mod link_tests {
         let root = std::env::temp_dir().join(format!("orx-codex-config-{}", uuid::Uuid::new_v4()));
         let legacy = root.join("custom-codex-home");
         let isolated = root.join("isolated");
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert!(!legacy.exists());
 
         std::fs::create_dir_all(legacy.join("catalogs")).unwrap();
@@ -1133,7 +1173,7 @@ mod link_tests {
             std::fs::write(legacy.join(name), contents).unwrap();
         }
 
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
 
         let config: toml::Value = std::fs::read_to_string(isolated.join("config.toml"))
             .unwrap()
@@ -1165,7 +1205,7 @@ mod link_tests {
         std::fs::write(legacy.join("new-provider.json"), "another provider").unwrap();
         std::fs::remove_file(legacy.join("provider-models.json")).unwrap();
         std::fs::write(legacy.join("provider-models.json"), "replacement catalog").unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert_eq!(
             std::fs::read_to_string(&catalog).unwrap(),
             "replacement catalog"
@@ -1176,7 +1216,7 @@ mod link_tests {
         );
 
         std::fs::remove_file(legacy.join("provider-models.json")).unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert!(std::fs::symlink_metadata(catalog).is_err());
         assert!(!isolated
             .join("provider-models.json.orx-managed-link")
@@ -1238,8 +1278,8 @@ mod link_tests {
             socket
         };
 
-        prepare_codex_links(&isolated, &legacy).unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
 
         for name in private {
             assert_eq!(
@@ -1269,7 +1309,7 @@ mod link_tests {
         std::fs::write(legacy.join("config.toml"), "").unwrap();
         create_symlink(&legacy.join("orx"), &legacy.join("alias")).unwrap();
 
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
 
         assert!(isolated.join("config.toml").exists());
         assert!(!isolated.join("orx").exists());
@@ -1297,7 +1337,7 @@ mod link_tests {
         std::fs::remove_file(&source).unwrap();
         std::fs::write(&source, "replacement catalog").unwrap();
 
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
 
         assert!(same_file::is_same_file(&source, &destination).unwrap());
         assert_eq!(
@@ -1313,7 +1353,7 @@ mod link_tests {
         remove_link(&destination).unwrap();
         std::fs::hard_link(&source, &destination).unwrap();
         std::fs::remove_file(&source).unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert!(std::fs::symlink_metadata(&destination).is_err());
 
         std::fs::write(&source, "native catalog").unwrap();
@@ -1325,7 +1365,7 @@ mod link_tests {
         .unwrap();
         std::fs::remove_file(&source).unwrap();
         std::fs::write(&destination, "local edits").unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert!(!destination.exists());
         let conflict = child_paths(&isolated)
             .unwrap()
@@ -1487,6 +1527,139 @@ mod link_tests {
             "skill"
         );
         std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod home_guard_tests {
+    use super::*;
+
+    const OVERRIDES: [&str; 7] = [
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        "OPENCODE_DB",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "CURSOR_CONFIG_DIR",
+    ];
+
+    fn resolve_all() -> Vec<PathBuf> {
+        vec![
+            codex_home(NativeStore::Legacy),
+            claude_home(NativeStore::Legacy),
+            PathBuf::from(claude_secure_storage_config_dir()),
+            opencode_db(NativeStore::Legacy),
+            cursor_home(NativeStore::Legacy),
+            cursor_skills_dir(),
+            crate::local::harness::xdg_config_home(),
+        ]
+    }
+
+    /// A path outside every test root that this test never creates.
+    fn outside() -> PathBuf {
+        let temp = std::env::temp_dir();
+        let filesystem_root = temp.ancestors().last().unwrap();
+        filesystem_root.join(format!("orx-home-guard-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn assert_panics(what: &str, resolve: impl FnOnce() -> PathBuf) {
+        let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(resolve));
+        assert!(resolved.is_err(), "{what} resolved {:?}", resolved.unwrap());
+    }
+
+    #[test]
+    fn unset_and_empty_overrides_resolve_inside_the_test_home() {
+        if !crate::config::in_test_child(&OVERRIDES) {
+            return;
+        }
+        let home = crate::config::test_home();
+        for path in resolve_all() {
+            assert!(path.starts_with(&home), "{}", path.display());
+        }
+        for var in OVERRIDES {
+            std::env::set_var(var, "");
+        }
+        for path in resolve_all() {
+            assert!(path.starts_with(&home), "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn the_child_environment_already_points_inside_its_temp_dir() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let temp = std::env::temp_dir();
+        for var in OVERRIDES.iter().chain(&["HOME", "USERPROFILE"]) {
+            let value = std::env::var_os(var).unwrap_or_else(|| panic!("{var} is unset"));
+            assert!(PathBuf::from(value).starts_with(&temp), "{var}");
+        }
+        resolve_all();
+    }
+
+    #[test]
+    fn overrides_outside_the_test_root_panic() {
+        if !crate::config::in_test_child(&OVERRIDES) {
+            return;
+        }
+        let outside = outside();
+        for (var, resolve) in [
+            (
+                "CODEX_HOME",
+                (|| codex_home(NativeStore::Legacy)) as fn() -> PathBuf,
+            ),
+            ("CLAUDE_CONFIG_DIR", || claude_home(NativeStore::Legacy)),
+            ("CLAUDE_SECURESTORAGE_CONFIG_DIR", || {
+                claude_secure_storage_config_dir().into()
+            }),
+            ("XDG_DATA_HOME", || opencode_db(NativeStore::Legacy)),
+            ("OPENCODE_DB", || opencode_db(NativeStore::Legacy)),
+            ("CURSOR_CONFIG_DIR", cursor_skills_dir),
+            ("XDG_CONFIG_HOME", crate::local::harness::xdg_config_home),
+        ] {
+            std::env::set_var(var, &outside);
+            assert_panics(var, resolve);
+            std::env::remove_var(var);
+        }
+        std::env::set_var("OPENCODE_DB", "../../../../../../../../opencode.db");
+        assert_panics("a climbing OPENCODE_DB", || {
+            opencode_db(NativeStore::Legacy)
+        });
+        std::env::remove_var("OPENCODE_DB");
+
+        let synced = crate::config::test_home().join(".openresearch");
+        std::fs::create_dir_all(&synced).unwrap();
+        std::fs::write(
+            synced.join("env"),
+            format!("export CODEX_HOME='{}'\n", outside.display()),
+        )
+        .unwrap();
+        assert_panics("a synced CODEX_HOME", || codex_home(NativeStore::Legacy));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_the_test_root_panics() {
+        if !crate::config::in_test_child(&OVERRIDES) {
+            return;
+        }
+        let temp = std::env::temp_dir();
+        let escape = temp
+            .parent()
+            .unwrap()
+            .join(format!("orx-home-guard-escape-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&escape).unwrap();
+        let link = temp.join("codex-link");
+        std::os::unix::fs::symlink(&escape, &link).unwrap();
+        std::env::set_var("CODEX_HOME", link.join("home"));
+        let escaped = std::panic::catch_unwind(|| codex_home(NativeStore::Legacy)).is_err();
+        std::os::unix::fs::symlink(escape.join("gone"), temp.join("dangling")).unwrap();
+        std::env::set_var("CODEX_HOME", temp.join("dangling").join("home"));
+        let dangled = std::panic::catch_unwind(|| codex_home(NativeStore::Legacy)).is_err();
+        std::fs::remove_dir(&escape).unwrap();
+        assert!(escaped, "a symlinked CODEX_HOME escaped the test root");
+        assert!(dangled, "a dangling CODEX_HOME link escaped the test root");
     }
 }
 

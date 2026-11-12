@@ -1497,7 +1497,7 @@ fn box_run(engine: &Engine, fields: Value) -> WatchedRun {
 
 /// Makes `~/.ssh/id_ed25519` with `passphrase` and registers its public half on the fake account.
 fn local_key(root: &Path, passphrase: &str) {
-    let ssh = dirs::home_dir().unwrap().join(".ssh");
+    let ssh = crate::config::home_dir().unwrap().join(".ssh");
     std::fs::create_dir_all(&ssh).unwrap();
     let key = ssh.join("id_ed25519");
     for path in [key.clone(), key.with_extension("pub")] {
@@ -1884,7 +1884,7 @@ async fn openresearch_launch_checks_the_key_is_usable_without_a_prompt() {
     }
 
     // ssh offers the box a registered key from outside ~/.ssh, so the locked one doesn't matter.
-    let home = dirs::home_dir().unwrap();
+    let home = crate::config::home_dir().unwrap();
     let work = home.join("keys").join("work");
     std::fs::create_dir_all(work.parent().unwrap()).unwrap();
     assert!(crate::process::command("ssh-keygen")

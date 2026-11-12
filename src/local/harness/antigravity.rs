@@ -80,6 +80,13 @@ impl Antigravity {
                         info.authenticated = true;
                         info.auth_state = HarnessAuthState::Ready;
                         info.auth_method = Some("oauth");
+                        info.configured_model = crate::config::home_dir()
+                            .and_then(|home| {
+                                super::detect::read_json(
+                                    home.join(".gemini/antigravity-cli/settings.json"),
+                                )
+                            })
+                            .and_then(|settings| settings["model"].as_str().map(str::to_owned));
                         info = info.with_models(models);
                     }
                     Err(error) => {
@@ -101,8 +108,7 @@ impl Antigravity {
             info.agent_note = Some(info.broken_note(AGY_REINSTALL));
         } else if info.installed && info.agent_note.is_none() {
             info.agent_note = Some(
-                "Sign in by running `agy` in your terminal, then re-check this harness."
-                    .to_string(),
+                "Sign in by running `agy` in your terminal, then re-check this agent.".to_string(),
             );
         } else if !info.installed {
             info.agent_note = Some(
@@ -214,7 +220,11 @@ impl Harness for Antigravity {
     }
 
     fn config_home(&self) -> Option<PathBuf> {
-        Some(dirs::home_dir()?.join(".gemini").join("antigravity-cli"))
+        Some(
+            crate::config::home_dir()?
+                .join(".gemini")
+                .join("antigravity-cli"),
+        )
     }
 
     fn native_skill_roots(&self) -> Vec<PathBuf> {
@@ -245,8 +255,8 @@ fn permission_choice(prompt: &WirePrompt, approve: bool) -> Option<String> {
 
 /// Every `agy` install, in preference order: Antigravity's own locations are
 /// `~/.gemini/bin`, `~/.gemini/antigravity-cli/bin` and the local data dir.
-fn agy_candidates() -> Vec<PathBuf> {
-    let gemini = dirs::home_dir().map(|home| home.join(".gemini"));
+pub(crate) fn agy_candidates() -> Vec<PathBuf> {
+    let gemini = crate::config::home_dir().map(|home| home.join(".gemini"));
     let own = gemini
         .iter()
         .flat_map(|gemini| {
@@ -255,7 +265,7 @@ fn agy_candidates() -> Vec<PathBuf> {
                 gemini.join("antigravity-cli").join("bin"),
             ]
         })
-        .chain(dirs::data_local_dir().map(|dir| dir.join("agy").join("bin")))
+        .chain(crate::config::data_local_dir().map(|dir| dir.join("agy").join("bin")))
         .collect::<Vec<_>>();
     installs("agy", own)
         .into_iter()

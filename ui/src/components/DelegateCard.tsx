@@ -4,6 +4,7 @@ import type { ChatSession } from "../api";
 import { delegateModelLabel, type DelegateStatus } from "../delegates";
 import { m } from "../paraglide/messages.js";
 import { HarnessLogo } from "./HarnessLogo";
+import { useModelName } from "./pickerAgents";
 import { Spinner } from "./ui";
 
 export function delegateStatusLabel(status: DelegateStatus): string {
@@ -29,7 +30,7 @@ export function DelegateCard({ session, status, onOpen }: {
   status: DelegateStatus;
   onOpen: (sessionId: string) => void;
 }) {
-  const model = delegateModelLabel(session);
+  const model = delegateModelLabel(session, useModelName());
   const preview = status === "running" || status === "asking" || status === "approval"
     ? null
     : session.delegate?.answer || session.delegate?.error;

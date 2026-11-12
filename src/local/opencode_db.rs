@@ -445,6 +445,19 @@ impl std::fmt::Display for DatabaseBusy {
 
 impl std::error::Error for DatabaseBusy {}
 
+/// OpenCode 2 has started on this database, so OpenCode 1 must not open it; updating OpenCode
+/// is the way on.
+#[derive(Debug)]
+pub struct NeedsOpenCode2(String);
+
+impl std::fmt::Display for NeedsOpenCode2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NeedsOpenCode2 {}
+
 pub fn normalize_path(path: &Path) -> Result<PathBuf> {
     let parent = path
         .parent()
@@ -506,10 +519,12 @@ impl DatabaseLease {
         {
             if matches!(state, DatabaseState::V1 | DatabaseState::Empty) {
                 if let Some(journal) = journal {
-                    return Err(anyhow!("An OpenCode V2 upgrade was prepared for this database. Use OpenCode V2 to resume, or review the saved migration state before a deliberate rollback. {}", journal.recovery_details(&path)));
+                    return Err(anyhow::Error::new(NeedsOpenCode2(format!("An OpenCode V2 upgrade was prepared for this database. Use OpenCode V2 to resume, or review the saved migration state before a deliberate rollback. {}", journal.recovery_details(&path)))));
                 }
             }
-            return Err(anyhow!("This OpenCode database has begun upgrading to V2. Use OpenCode V2 to continue; downgrading would split its history."));
+            return Err(anyhow::Error::new(NeedsOpenCode2(
+                "This OpenCode database has begun upgrading to V2. Use OpenCode V2 to continue; downgrading would split its history.".into(),
+            )));
         }
         if major == 2 && !migration {
             if let Some(mut journal) = journal {
@@ -1151,6 +1166,10 @@ mod tests {
 
     #[test]
     fn fresh_database_and_incompatible_schema_never_bypass_gate() {
+        // Another test's forked child can hold an inherited lease descriptor, so this runs alone.
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
         let fixture = Fixture::new();
         let path = fixture.path();
         assert_eq!(inspect(&path).unwrap(), DatabaseState::Empty);
@@ -1166,6 +1185,9 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch(V2).unwrap();
         assert_eq!(inspect(&path).unwrap(), DatabaseState::V2Ready);
+        // OpenCode 1 is turned away in a way the agent list reads as "update OpenCode".
+        let refused = DatabaseLease::acquire(&path, 1).err().unwrap();
+        assert!(refused.downcast_ref::<NeedsOpenCode2>().is_some());
         connection.execute_batch("INSERT INTO kv VALUES ('migration.v1-v2', '{\"phase\":\"sessions\",\"cursor\":\"old\"}');").unwrap();
         assert_eq!(inspect(&path).unwrap(), DatabaseState::V2Pending);
         connection

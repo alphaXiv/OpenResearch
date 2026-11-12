@@ -135,6 +135,9 @@ export interface Run {
 
 export class RejectedResponseError extends Error {}
 
+/** OpenCode 1 can't do this; updating it or using OpenResearch's copy can. */
+export class OpenCode1Error extends RejectedResponseError {}
+
 /** A rejected save whose messages each belong to one form field, keyed as in the request body. */
 export class FieldErrors extends RejectedResponseError {
   constructor(message: string, readonly fields: Record<string, string[]>) {
@@ -155,6 +158,8 @@ export interface ProjectActivity {
 
 export interface OnboardingSelection {
   harness: HarnessId;
+  /** An account OpenResearch keeps for the agent; absent for the user's own sign-in. */
+  profile?: string | null;
   model: string | null;
   serviceTier?: string | null;
   permissionMode: string | null;
@@ -171,6 +176,28 @@ export interface UiState {
   preferredAutonomy: Autonomy | null;
   /** Whether sub-agents may start their own unless a delegation says otherwise. */
   nestedDelegation: boolean;
+  /** Whether OpenCode's free models are offered beside the user's own. */
+  opencodeFreeModels: boolean;
+  /** The model families the picker lists first. */
+  favoriteModels: string[];
+  /** Models turned off in Settings, by `canonical` (`:free` added for a free tier): the picker hides them and agents can't delegate to them. */
+  hiddenModels: string[];
+  /** Agents found on this computer that are turned off, by harness id; `opencode` stands for the sign-ins made in OpenCode itself. */
+  hiddenAgents: string[];
+  /** The picker's lab sections in the user's order; labs it doesn't name follow in the picker's own. */
+  modelSectionOrder: string[];
+  collapsedModelSections: string[];
+  modelSightings: ModelSightings | null;
+}
+
+/** What the model picker has seen, to tell a model an agent newly offers from one that came with a newly added agent. */
+export interface ModelSightings {
+  /** The agents whose models were seen, by `PickerAgent.key`. */
+  agents: string[];
+  /** Each model seen, by line key: when it first appeared as new, or 0 for one that was there already. */
+  models: Record<string, number>;
+  /** When the picker was last opened. */
+  openedAt: number;
 }
 
 /** How much of the research the agent owns before checking in. */
@@ -204,7 +231,7 @@ export interface NewProject {
   githubSyncEnabled?: boolean;
   /** UI locale for the starter prompts the server warms up on creation. */
   locale?: string;
-  starterAgent?: Pick<AgentSelection, "harness" | "model">;
+  starterAgent?: Pick<AgentSelection, "harness" | "model" | "profile">;
 }
 
 export interface CreateProjectResult {
@@ -1061,13 +1088,16 @@ export interface HarnessModel {
   serviceTiers?: OptionChoice[];
   /** Whether the model accepts images; absent when the catalog doesn't say. */
   imageInput?: boolean;
+  /** The provider-neutral id agents delegate to it by (`claude-opus-5.5`). */
+  canonical?: string;
+  /** Its id names a free tier. */
+  free?: boolean;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
  * else prettified from the id. */
 export function harnessModelLabel(model: HarnessModel): string {
-  if (model.id === "default" && !model.displayName) return m.model_picker_default_model();
-  if (!model.id.startsWith("orx-local-")) return model.displayName ?? modelLabel(model.id);
+  if (!model.id.startsWith("orx-local-")) return model.displayName ? tidyModelName(model.displayName) : modelLabel(model.id);
   const provider = model.displayName?.split(" · ").slice(1).join(" · ").replace(/ \(local\)$/, "");
   const endpoint = provider === "OpenAI-compatible server" || provider === "Custom endpoint" || provider === "Custom Endpoint"
     ? m.local_models_custom_endpoint()
@@ -1193,14 +1223,39 @@ export function reconcileReasoning(
   return current && choices.some((c) => c.id === current) ? current : defaultId;
 }
 
+export type AgentIconColor = "gray" | "red" | "orange" | "amber" | "green" | "teal" | "blue" | "indigo" | "purple" | "pink";
+
+/** An added agent's mark: its provider's logo, a glyph, an emoji or a small image, on its colour or in a plain outline. */
+export type AgentIcon = { color?: AgentIconColor } & (
+  | { brand: true }
+  | { glyph: string }
+  | { emoji: string }
+  | { image: { type: "image/webp" | "image/png"; data: string } }
+);
+
+/** An account OpenResearch signs an agent in to, beside the user's own. */
+export interface AgentProfile {
+  id: string;
+  name: string;
+  icon?: AgentIcon;
+}
+
 export interface Harness {
   id: HarnessId;
+  /** Set on the extra entry for each of OpenResearch's accounts; `id` stays the agent's. */
+  profile?: AgentProfile;
+  /** The name and icon the user gave an agent found on this computer; never on a profile's entry. */
+  label?: { name?: string; icon?: AgentIcon };
+  /** The user turned this found agent off in Settings; on OpenCode, only the providers it signed in to itself. */
+  off?: boolean;
   name: string;
   installed: boolean;
   /** On PATH, but `--version` failed — a broken install a reinstall repairs.
    * Never `agentReady`: spawning it just dumps the CLI's own crash into chat. */
   installBroken: boolean;
   binPath?: string;
+  /** `binPath` is OpenResearch's own copy, which it downloaded and keeps current. */
+  managed?: boolean;
   version?: string;
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
@@ -1233,14 +1288,20 @@ export interface Harness {
    * arrives and a plain re-read swaps in the real list. */
   catalogPending?: boolean;
   models: HarnessModel[];
+  /** The `models` id a new chat starts on, from the agent's own setting; set only when it's ready and lists a model. */
+  defaultModel?: string;
   options: HarnessOptions;
 }
 
 export interface HarnessSetupCommands {
+  /** Empty for an agent OpenResearch downloads itself (`managedFrom`). */
   install: string;
   /** The vendor bootstrap URL an install note quotes; `install` runs the
    * platform's own installer, which on Windows is a PowerShell script. */
   installUrl?: string;
+  /** The host OpenResearch downloads this agent from, when it installs it itself;
+   * absent from servers that predate it. */
+  managedFrom?: string | null;
   login: string;
   update: string;
   requiresNpm: boolean;
@@ -1297,21 +1358,43 @@ export interface SkillDiscovery {
   skipped: { path: string; reason: string }[];
 }
 
-/** "openai/gpt-5.5" → "GPT 5.5", "anthropic/claude-opus-4-8" → "Opus 4.8". */
+const MODEL_WORDS: Record<string, string> = { gpt: "GPT", glm: "GLM", oss: "OSS", deepseek: "DeepSeek", minimax: "MiniMax", longcat: "LongCat", mimo: "MiMo" };
+
+/** "openai/gpt-5.5" → "GPT-5.5", "anthropic/claude-opus-4-8" → "Opus 4.8", "deepseek-v4-flash" → "DeepSeek V4 Flash". */
 export function modelLabel(id: string): string {
   const last = (id.split("/").pop() ?? id).replace(/^~/, "").replace(/^claude-/, "");
   const words: string[] = [];
   const nums: string[] = [];
+  const version = () => {
+    if (!nums.length) return;
+    const number = nums.splice(0).join(".");
+    // GPT and GLM write their version on: "GPT-5.5".
+    if (words.at(-1) === "GPT" || words.at(-1) === "GLM") words.push(`${words.pop()}-${number}`);
+    else words.push(number);
+  };
   for (const part of last.split("-")) {
     if (/^\d+(\.\d+)?$/.test(part)) {
       nums.push(part);
     } else {
-      if (nums.length) words.push(nums.splice(0).join("."));
-      words.push(part === "gpt" ? "GPT" : part.charAt(0).toUpperCase() + part.slice(1));
+      version();
+      words.push(MODEL_WORDS[part] ?? (/^\d+b$/.test(part) ? part.toUpperCase() : /^o\d+$/.test(part) ? part : part.charAt(0).toUpperCase() + part.slice(1)));
     }
   }
-  if (nums.length) words.push(nums.join("."));
+  version();
   return words.join(" ");
+}
+
+/** Evens out the names catalogs send: a lowercase id standing in for one, hyphens
+ * between words ("DeepSeek-V4-Pro" → "DeepSeek V4 Pro", where "GPT-5.5" stays), lowercase
+ * words outside parentheses, and doubled or zero-width spaces. A name the user gave a
+ * second key, after " · ", stays as written. */
+export function tidyModelName(name: string): string {
+  const [model, ...owner] = name.replace(/[\u200B-\u200D\uFEFF]/g, "").split(" · ");
+  const clean = model.replace(/\s+/g, " ").trim();
+  if (!/[A-Z ]/.test(clean)) return [modelLabel(clean), ...owner].join(" · ");
+  return [clean.split(/(\([^)]*\))/).map((part, index) => index % 2 ? part : part
+    .replace(/(?<![A-Z]{2})-(?=[A-Z])|(?<=[a-z])-(?=\d)/g, " ")
+    .replace(/(?<![\w-])(?!(?:and|for|the|via|with)\b)[a-z]{3,}\b/g, (word) => MODEL_WORDS[word] ?? word[0].toUpperCase() + word.slice(1))).join(""), ...owner].join(" · ");
 }
 
 // --- chat (unified harness sessions) ------------------------------------------
@@ -1417,6 +1500,8 @@ export interface ChatSession {
   id: string;
   projectId: string;
   harness: HarnessId;
+  /** The account the chat runs on, when it's one OpenResearch keeps. */
+  profile?: string | null;
   harnessName?: string | null;
   nativeConfiguration?: unknown;
   title: string | null;
@@ -1639,9 +1724,53 @@ export function backendDetail(backend: Run["backend"]): string {
 export interface LocalModelConnection {
   id: string;
   name: string;
+  icon?: AgentIcon;
   baseUrl: string;
   hasApiKey: boolean;
   models: Record<string, number>;
+}
+
+/** A provider OpenResearch keeps for OpenCode: a key, or a sign-in made through OpenCode. */
+export interface OpenCodeProvider {
+  /** OpenCode's provider id; a second key for one provider gets its own, naming the provider in `canonical`. */
+  id: string;
+  kind: "key" | "oauth";
+  canonical?: string;
+  /** The key's last characters, to tell keys apart. */
+  keyEnding?: string;
+  name: string;
+  icon?: AgentIcon;
+}
+
+/** A provider OpenCode can sign in to, and how. */
+export interface OpenCodeIntegration {
+  id: string;
+  name: string;
+  methods: ({ type: "oauth"; id: string; label: string; form?: OpenCodeFormField[] } | { type: "key"; label?: string })[];
+  connected: boolean;
+}
+
+export type OpenCodeAnswer = string | number | boolean;
+
+/** A question OpenCode asks before a sign-in, shown only while every `when` holds. */
+export interface OpenCodeFormField {
+  key: string;
+  type: string;
+  title?: string;
+  description?: string;
+  placeholder?: string;
+  required?: boolean;
+  default?: OpenCodeAnswer;
+  options?: { value: string; label: string; description?: string }[];
+  when?: { key: string; op: "eq" | "neq"; value: OpenCodeAnswer }[];
+}
+
+/** `code` mode waits for a code the sign-in page shows; `auto` finishes on its own. */
+export interface OpenCodeSignIn {
+  attempt: string;
+  url: string;
+  mode: "auto" | "code";
+  instructions: string;
 }
 
 export type CitedMessage = { projectId: string | null; sessionId: string; messageId: string; harness: HarnessId | null; preview: string };
@@ -1732,11 +1861,12 @@ export function createApi(
                 : null;
             throw new FileChangedError(message, currentVersion, parsed.exists);
           }
+          if (res.status === 409 && "code" in parsed && parsed.code === "opencode1") throw new OpenCode1Error(message);
           if (res.status === 400 && "fields" in parsed && typeof parsed.fields === "object" && parsed.fields !== null)
             throw new FieldErrors(message, parsed.fields as Record<string, string[]>);
         }
       } catch (error) {
-        if (error instanceof FileChangedError || error instanceof FieldErrors) throw error;
+        if (error instanceof FileChangedError || error instanceof OpenCode1Error || error instanceof FieldErrors) throw error;
         // non-JSON body — show it raw
       }
       const ErrorType = res.status >= 400 && res.status < 500 ? RejectedResponseError : Error;
@@ -1849,6 +1979,13 @@ export function createApi(
     preferredAgent?: AgentSelection;
     preferredAutonomy?: Autonomy;
     nestedDelegation?: boolean;
+    opencodeFreeModels?: boolean;
+    favoriteModels?: string[];
+    hiddenModels?: string[];
+    hiddenAgents?: string[];
+    modelSectionOrder?: string[];
+    collapsedModelSections?: string[];
+    modelSightings?: ModelSightings;
   }) => post<UiState>("/api/settings/ui-state", body);
 
   const completeOnboarding = (selection: OnboardingSelection) =>
@@ -1904,7 +2041,7 @@ export function createApi(
     paperId?: string;
     path?: string;
     locale: string;
-    starterAgent?: Pick<AgentSelection, "harness" | "model">;
+    starterAgent?: Pick<AgentSelection, "harness" | "model" | "profile">;
   }) => post<{ ok: boolean }>("/api/projects/starter-prompts/prewarm", body);
 
   /** Slow on a cache miss (one headless model call over a brief of the project). */
@@ -1913,10 +2050,11 @@ export function createApi(
     harness: HarnessId,
     model: string | null,
     locale: string,
+    profile: string | null,
     signal?: AbortSignal,
   ) =>
     get<ProjectStarterPrompts>(
-      `/api/projects/${projectId}/starter-prompts?${new URLSearchParams({ harness, ...(model ? { model } : {}), locale })}`,
+      `/api/projects/${projectId}/starter-prompts?${new URLSearchParams({ harness, ...(model ? { model } : {}), ...(profile ? { profile } : {}), locale })}`,
       signal,
     );
 
@@ -2585,6 +2723,10 @@ export function createApi(
     ? put<AcpDefinition>(`/api/harnesses/acp/${encodeURIComponent(id)}`, definition)
     : post<AcpDefinition>("/api/harnesses/acp", definition);
   const removeAcpHarness = (id: string) => writeResponse(`/api/harnesses/acp/${encodeURIComponent(id)}`, { method: "DELETE" }).then((response) => json<{ ok: boolean }>(response));
+  /** Deletes OpenResearch's copy of an agent, and what it kept only for that copy. */
+  const removeHarnessInstall = (id: HarnessId) => writeResponse(`/api/harnesses/${encodeURIComponent(id)}/install`, { method: "DELETE" }).then(async (response) => {
+    if (!response.ok) await json(response);
+  });
   const testAcpHarness = (definition: Omit<AcpDefinition, "id">) => post<{ status: string; agentInfo?: { version?: string }; harnessId: AcpDefinition["id"] | null }>("/api/harnesses/acp/test", definition);
   const setChatConfiguration = (sessionId: string, optionId: string, value: string) => post<ChatSession>(`/api/chat/sessions/${sessionId}/configuration`, { optionId, value });
 
@@ -2677,7 +2819,7 @@ export function createApi(
   const createChatSession = (
     projectId: string,
     harness: HarnessId,
-    opts: TurnOptions & { autonomy?: Autonomy } = {},
+    opts: TurnOptions & { autonomy?: Autonomy; profile?: string | null } = {},
   ) =>
     post<{ session: ChatSession }>("/api/chat/sessions", { projectId, harness, ...opts }).then(
       (r) => r.session,
@@ -2794,9 +2936,30 @@ export function createApi(
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/respond`, answer);
   const getLocalModels = (signal?: AbortSignal) => get<LocalModelConnection[]>("/api/local-models", signal);
   const discoverLocalModels = (request: { baseUrl: string; apiKey: string }) => post<{ models: string[] }>("/api/local-models/discover", request);
-  const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string }>("/api/local-models", request);
+  const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string; created: boolean }>("/api/local-models", request);
   const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
-  const removeLocalModel = (id: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
+  /** Removes one model, or with none named the whole connection. */
+  const removeLocalModel = (id: string, model?: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}${model ? `?${new URLSearchParams({ model })}` : ""}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
+
+  const createAgentProfile = (body: { harness: "claude-code" | "codex"; name: string; icon?: AgentIcon }) => post<{ id: string }>("/api/agent-profiles", body);
+  /**
+   * Names a row of Settings → Agents, keyed as the picker keys it: an agent's or account's id, or `opencode:` and a
+   * provider's or endpoint's id. `null` clears the icon, and a found agent's name back to its own.
+   */
+  const updateAgent = (key: string, body: { name?: string | null; icon?: AgentIcon | null }) => patch<unknown>(`/api/agents/${encodeURIComponent(key)}`, body);
+  const removeAgentProfile = (id: string) => writeResponse(`/api/agent-profiles/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<unknown>(r));
+
+  const getOpenCodeProviders = (signal?: AbortSignal) => get<OpenCodeProvider[]>("/api/opencode/providers", signal);
+  /** A second key for a provider comes back under an id of its own. */
+  const addOpenCodeProvider = (body: { provider: string; apiKey: string; name: string; icon?: AgentIcon }) => post<{ id: string }>("/api/opencode/providers", body);
+  const replaceOpenCodeProviderKey = (id: string, apiKey: string) => put<unknown>(`/api/opencode/providers/${encodeURIComponent(id)}/key`, { apiKey });
+  const removeOpenCodeProvider = (id: string) => writeResponse(`/api/opencode/providers/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<unknown>(r));
+  const getOpenCodeIntegrations = (signal?: AbortSignal) => get<OpenCodeIntegration[]>("/api/opencode/integrations", signal);
+  const startOpenCodeSignIn = (body: { integration: string; method: string; name: string; icon?: AgentIcon; answer?: Record<string, OpenCodeAnswer> }) => post<OpenCodeSignIn>("/api/opencode/sign-in", body);
+  const getOpenCodeSignIn = (attempt: string, signal?: AbortSignal) =>
+    get<{ status: "pending" | "complete" | "failed" | "expired"; message?: string }>(`/api/opencode/sign-in/${encodeURIComponent(attempt)}`, signal);
+  const sendOpenCodeSignInCode = (attempt: string, code: string) => post<unknown>(`/api/opencode/sign-in/${encodeURIComponent(attempt)}/code`, { code });
+  const cancelOpenCodeSignIn = (attempt: string) => writeResponse(`/api/opencode/sign-in/${encodeURIComponent(attempt)}`, { method: "DELETE" }).then((r) => json<unknown>(r));
 
   const listChatActiveRuns = (signal?: AbortSignal) =>
     get<ChatActiveRun[]>("/api/chat/active-runs", signal);
@@ -2965,6 +3128,7 @@ export function createApi(
     listAcpPresets,
     saveAcpHarness,
     removeAcpHarness,
+    removeHarnessInstall,
     testAcpHarness,
     setChatConfiguration,
     getSkills,
@@ -3006,6 +3170,18 @@ export function createApi(
     connectLocalModel,
     checkLocalModel,
     removeLocalModel,
+    createAgentProfile,
+    updateAgent,
+    removeAgentProfile,
+    getOpenCodeProviders,
+    addOpenCodeProvider,
+    replaceOpenCodeProviderKey,
+    removeOpenCodeProvider,
+    getOpenCodeIntegrations,
+    startOpenCodeSignIn,
+    getOpenCodeSignIn,
+    sendOpenCodeSignInCode,
+    cancelOpenCodeSignIn,
     listChatActiveRuns,
     getSubagentTranscript,
   };

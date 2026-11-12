@@ -45,8 +45,7 @@ export function delegateLineage(sessions: ChatSession[], rootId: string): { sess
   return rows;
 }
 
-/** The model as a person would name it: no provider prefix or free-tier suffix. */
-export function delegateModelLabel(session: ChatSession): string {
-  const model = session.model?.split("/").pop() ?? "";
-  return model.replace(/-free$/, "");
+/** The model as the picker names it, else its id without a provider prefix or free-tier suffix. */
+export function delegateModelLabel(session: ChatSession, modelName: (session: ChatSession) => string | null): string {
+  return modelName(session) ?? (session.model?.split("/").pop() ?? "").replace(/-free$/, "");
 }

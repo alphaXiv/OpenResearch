@@ -96,7 +96,7 @@ export function Tooltip({
         ref={tooltipRef}
         popover="manual"
         role="tooltip"
-        className="pointer-events-none fixed inset-auto m-0 w-max max-w-64 whitespace-normal rounded-sm border-0 bg-text px-2 py-1.5 font-sans text-sm font-normal leading-snug text-background shadow-control-subtle"
+        className="pointer-events-none fixed inset-auto m-0 w-max max-w-64 whitespace-pre-line rounded-sm border-0 bg-text px-2 py-1.5 font-sans text-sm font-normal leading-snug text-background shadow-control-subtle"
       >
         {content}
       </span>

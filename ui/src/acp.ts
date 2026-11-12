@@ -69,7 +69,7 @@ export function sessionAcpHarness(session: ChatSession | null | undefined, catal
   return {
     id: session.harness, name: session.harnessName ?? catalog?.name ?? "ACP", installed: true,
     installBroken: false, authenticated: false, authState: "unknown", agentReady: true, supportsSteering: false, supportsCompaction: false,
-    models: model ? model.choices.map((choice) => ({ id: choice.id, displayName: choice.label, description: choice.description })) : catalog?.models ?? [{ id: "default" }],
+    models: model ? model.choices.map((choice) => ({ id: choice.id, displayName: choice.label, description: choice.description })) : catalog?.models ?? [],
     options: { permissionModes: [], reasoningLevels: [], defaultPermissionMode: null, defaultReasoningLevel: null },
   };
 }

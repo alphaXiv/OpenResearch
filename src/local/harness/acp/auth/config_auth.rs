@@ -27,8 +27,9 @@ impl Context {
             .get("HOME")
             .or_else(|| env.get("USERPROFILE"))
             .map(PathBuf::from)
-            .or_else(dirs::home_dir)
+            .or_else(crate::config::home_dir)
             .unwrap_or_default();
+        let home = crate::config::test_contained(home);
         Self { env, home }
     }
     pub fn env(&self, name: &str) -> Option<&str> {
@@ -38,11 +39,13 @@ impl Context {
             .filter(|value| !value.is_empty())
     }
     pub fn directory(&self, names: &[&str], fallback: &str) -> PathBuf {
-        names
-            .iter()
-            .find_map(|name| self.env(name))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.home.join(fallback))
+        crate::config::test_contained(
+            names
+                .iter()
+                .find_map(|name| self.env(name))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.home.join(fallback)),
+        )
     }
 }
 
@@ -313,10 +316,10 @@ pub(super) fn grok(context: &Context) -> Status {
 fn grok_checked(context: &Context) -> Result<Status, ()> {
     let directory = context.directory(&["GROK_HOME"], ".grok");
     let config = toml(&directory.join("config.toml"))?;
-    let auth_path = context
-        .env("GROK_AUTH_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| directory.join("auth.json"));
+    let auth_path = context.env("GROK_AUTH_PATH").map_or_else(
+        || directory.join("auth.json"),
+        |path| crate::config::test_contained(path.into()),
+    );
     let auth = json(&auth_path)?;
     if !auth.is_null() && !auth.is_object() {
         return Err(());
@@ -421,7 +424,8 @@ mod tests {
     struct Fixture(Context);
     impl Fixture {
         fn new() -> Self {
-            let home = std::env::temp_dir().join(format!("or-378-auth-{}", uuid::Uuid::new_v4()));
+            let home =
+                crate::config::test_home().join(format!("or-378-auth-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&home).unwrap();
             Self(Context {
                 env: HashMap::new(),
@@ -437,6 +441,24 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0.home);
+        }
+    }
+
+    #[test]
+    fn overrides_outside_the_test_root_panic() {
+        for (var, check) in [
+            ("KIMI_CODE_HOME", kimi as fn(&Context) -> Status),
+            ("KIMI_SHARE_DIR", kimi),
+            ("MINIMAX_DATA_DIR", minimax_login),
+            ("MAVIS_DATA_DIR", minimax_login),
+            ("ZCODE_HOME", zcode),
+            ("GROK_HOME", grok),
+            ("GROK_AUTH_PATH", grok),
+        ] {
+            let mut fixture = Fixture::new();
+            fixture.0.env.insert(var.into(), "/orx-not-a-home".into());
+            let resolved = std::panic::catch_unwind(|| check(&fixture.0));
+            assert!(resolved.is_err(), "{var} read {:?}", resolved.unwrap());
         }
     }
 

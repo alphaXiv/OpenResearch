@@ -1,4 +1,9 @@
 disallowed-methods = [
+  { path = "dirs::home_dir", reason = "use crate::config::home_dir(), which tests keep out of the user's home" },
+  { path = "dirs::cache_dir", reason = "use crate::config::cache_dir(), which tests keep out of the user's home" },
+  { path = "dirs::config_dir", reason = "use crate::config::roaming_config_dir(), which tests keep out of the user's home" },
+  { path = "dirs::data_dir", reason = "use crate::config::data_local_dir(), which tests keep out of the user's home" },
+  { path = "dirs::data_local_dir", reason = "use crate::config::data_local_dir(), which tests keep out of the user's home" },
   { path = "reqwest::Client::new", reason = "use crate::net::loopback_client() or remote_client()" },
   { path = "reqwest::Client::builder", reason = "use crate::net::loopback_client() or remote_client()" },
   { path = "reqwest::ClientBuilder::new", reason = "use crate::net::loopback_client() or remote_client()" },

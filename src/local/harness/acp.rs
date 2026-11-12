@@ -33,6 +33,10 @@ impl Acp {
         info.bin_path = crate::local::acp::executable_path(&self.0.executable)
             .map(|path| path.to_string_lossy().into_owned());
         info.installed = info.bin_path.is_some();
+        info.managed = info
+            .bin_path
+            .as_deref()
+            .is_some_and(|bin| super::managed::version_of(std::path::Path::new(bin)).is_some());
         if let Some(preset) = crate::local::acp::presets().into_iter().find(|preset| {
             preset.launch.id == self.0.id
                 || (std::path::Path::new(&self.0.executable)
@@ -47,10 +51,10 @@ impl Acp {
                 "pi-acp" => crate::local::acp::executable_path("pi").is_some(),
                 "zcode-acp-server" => {
                     crate::local::acp::executable_path("zcode").is_some()
-                        || dirs::home_dir()
+                        || crate::config::home_dir()
                             .is_some_and(|home| home.join("Applications/ZCode.app").is_dir())
                         || std::path::Path::new("/Applications/ZCode.app").is_dir()
-                        || dirs::data_local_dir()
+                        || crate::config::data_local_dir()
                             .is_some_and(|home| home.join("Programs/ZCode/ZCode.exe").is_file())
                 }
                 _ => false,
@@ -83,6 +87,7 @@ impl Harness for Acp {
     }
 
     async fn detect(&self) -> Option<HarnessInfo> {
+        super::managed::select(&self.0.id).await;
         let mut info = self.detection();
         if info.adapter_missing {
             auth::detect(&self.0, &mut info).await;
@@ -96,13 +101,20 @@ impl Harness for Acp {
             Ok(connection) => {
                 info.installed = true;
                 info.agent_ready = true;
-                info.version = connection["agentInfo"]["version"]
-                    .as_str()
-                    .map(str::to_owned);
-                info.models.push(super::ModelInfo::new("default"));
+                info.version = info
+                    .bin_path
+                    .as_deref()
+                    .and_then(|bin| super::managed::version_of(std::path::Path::new(bin)))
+                    .map(|version| version.to_string())
+                    .or_else(|| {
+                        connection["agentInfo"]["version"]
+                            .as_str()
+                            .map(str::to_owned)
+                    });
                 auth::detect(&self.0, &mut info).await;
                 match crate::local::acp::discover_models(&self.0).await {
                     Ok(configuration) => {
+                        info.configured_model = current_model(&configuration).map(str::to_owned);
                         let models = advertised_models(&configuration);
                         if !models.is_empty() {
                             info.models = models;
@@ -152,14 +164,77 @@ impl Harness for Acp {
     }
 }
 
-fn advertised_models(configuration: &Value) -> Vec<super::ModelInfo> {
-    fn choices(options: &Value, models: &mut Vec<super::ModelInfo>) {
+#[cfg(test)]
+#[test]
+fn deepseek_model_routes_are_deduplicated() {
+    let names = [
+        "deepseek-v4-flash",
+        "DeepSeek-V4.1-Flash",
+        "DeepSeek-V4-Pro",
+        "DeepSeek-V4.1-Flash",
+        "DeepSeek-V4-Pro",
+    ];
+    let options: Vec<Value> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| serde_json::json!({"value": i.to_string(), "name": name}))
+        .collect();
+    let models = advertised_models(
+        &serde_json::json!({"configOptions":[{"category":"model","type":"select","options":options}]}),
+    );
+    assert_eq!(models.len(), 3);
+    assert_eq!(models[1].id, "1");
+}
+
+#[test]
+fn current_models_are_native_and_missing_catalogs_stay_empty() {
+    let legacy = serde_json::json!({"models":{"currentModelId":"opus","availableModels":[{"modelId":"opus","name":"Opus"}]}});
+    assert_eq!(current_model(&legacy), Some("opus"));
+    let options = serde_json::json!({"configOptions":[{"category":"model","type":"select","currentValue":"42","options":[{"value":"42","name":"Custom"}]}]});
+    assert_eq!(current_model(&options), Some("42"));
+    assert_eq!(advertised_models(&options)[0].id, "42");
+    assert!(advertised_models(&serde_json::json!({})).is_empty());
+    assert!(advertised_models(
+        &serde_json::json!({"models":{"availableModels":[{"modelId":"default","name":"Default"}]}})
+    )
+    .is_empty());
+}
+
+pub(crate) fn current_model(configuration: &Value) -> Option<&str> {
+    configuration["configOptions"]
+        .as_array()
+        .and_then(|options| options.iter().find(|o| o["category"] == "model"))
+        .and_then(|o| o["currentValue"].as_str())
+        .or_else(|| configuration["models"]["currentModelId"].as_str())
+        .filter(|id| crate::local::harness::concrete_model(id))
+}
+
+pub(crate) fn advertised_models(configuration: &Value) -> Vec<super::ModelInfo> {
+    fn choices(options: &Value, models: &mut Vec<super::ModelInfo>, current: Option<&str>) {
         for option in options.as_array().into_iter().flatten() {
             if option["options"].is_array() {
-                choices(&option["options"], models);
+                choices(&option["options"], models, current);
             } else if let (Some(id), Some(name)) =
                 (option["value"].as_str(), option["name"].as_str())
             {
+                if !crate::local::harness::concrete_model(id) {
+                    continue;
+                }
+                let normalized = |name: &str| {
+                    name.chars()
+                        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
+                        .flat_map(char::to_lowercase)
+                        .collect::<String>()
+                };
+                if let Some(model) = models.iter_mut().find(|model| {
+                    normalized(model.display_name.as_deref().unwrap_or(&model.id))
+                        == normalized(name)
+                }) {
+                    if Some(id) == current {
+                        model.id = id.to_string();
+                    }
+                    continue;
+                }
                 models.push(
                     super::ModelInfo::new(id)
                         .with_label(Some(name), option["description"].as_str()),
@@ -173,7 +248,11 @@ fn advertised_models(configuration: &Value) -> Vec<super::ModelInfo> {
             .iter()
             .filter(|option| option["category"] == "model" && option["type"] == "select")
         {
-            choices(&option["options"], &mut models);
+            choices(
+                &option["options"],
+                &mut models,
+                current_model(configuration),
+            );
         }
         return models;
     }
@@ -182,8 +261,12 @@ fn advertised_models(configuration: &Value) -> Vec<super::ModelInfo> {
         .into_iter()
         .flatten()
         .filter_map(|model| {
+            let id = model["modelId"].as_str()?;
+            if !crate::local::harness::concrete_model(id) {
+                return None;
+            }
             Some(
-                super::ModelInfo::new(model["modelId"].as_str()?)
+                super::ModelInfo::new(id)
                     .with_label(model["name"].as_str(), model["description"].as_str()),
             )
         })
@@ -248,7 +331,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
     if let Some(model) = ctx
         .model
         .as_deref()
-        .filter(|model| apply_model && *model != "default")
+        .filter(|model| apply_model && crate::local::harness::concrete_model(model))
     {
         let configuration = Store::open()?
             .acp_session_state(&ctx.session_id)?

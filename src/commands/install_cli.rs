@@ -151,7 +151,7 @@ fn bundle_cli_path() -> Result<PathBuf> {
 }
 
 fn local_bin() -> PathBuf {
-    dirs::home_dir()
+    crate::config::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".local")
         .join("bin")

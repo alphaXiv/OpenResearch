@@ -16,7 +16,7 @@ afterEach(() => toast.dismiss());
 
 export const codex = {
   id: "codex", name: "Codex", installed: true, installBroken: false, authenticated: true, authState: "ready", agentReady: true,
-  supportsSteering: false, supportsCompaction: true, models: [{ id: "gpt-6.1-sol" }, { id: "gpt-6-astra" }],
+  supportsSteering: false, supportsCompaction: true, models: [{ id: "gpt-6.1-sol" }, { id: "gpt-6-astra" }], defaultModel: "gpt-6.1-sol",
   options: { permissionModes: [{ id: "auto", label: "Auto" }], defaultPermissionMode: "auto", planActivation: "command", reasoningLevels: [] },
 };
 
@@ -145,10 +145,10 @@ export function composer(index = 0) {
       await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
       await idle();
     },
-    /** Chooses `model` in this composer's model picker. */
-    async pick(model) {
+    /** Chooses the model the picker names `model` on `agent` in this composer's model picker. */
+    async pick(model, agent = "Codex") {
       await act(async () => box().querySelector('[data-onboarding="model-picker"] button').click());
-      await act(async () => document.querySelector(`button[aria-description="${model}"]`).click());
+      await act(async () => document.querySelector(`button[aria-label="${m.model_picker_model_on({ model, agent })}"]`).click());
       await settle();
     },
     async dismissWarning() {

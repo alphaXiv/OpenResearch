@@ -7,7 +7,10 @@ test('a first run connects an agent, creates a project and streams its first rep
 
   await test.step('onboarding connects the agent through ACP', async () => {
     await page.getByRole('button', { name: 'Continue' }).click()
-    await page.getByRole('button', { name: 'Connect a coding agent' }).click()
+    await page.getByRole('button', { name: 'Add agent' }).click()
+    const wizard = page.getByRole('dialog', { name: 'Add agent' })
+    await wizard.getByRole('button', { name: 'More providers and agents' }).click()
+    await wizard.getByRole('button', { name: 'Custom ACP agent' }).click()
     const dialog = page.getByRole('dialog', { name: 'Connect a coding agent' })
     await dialog.getByRole('button', { name: 'Coding agent' }).click()
     await dialog.getByRole('button', { name: 'Other (custom setup)', exact: true }).click()
@@ -16,7 +19,7 @@ test('a first run connects an agent, creates a project and streams its first rep
     await dialog.getByRole('button', { name: 'Test connection' }).click()
     await expect(dialog.getByRole('status')).toHaveText('Connected · 1.0.0')
     await dialog.getByRole('button', { name: 'Save' }).click()
-    await expect(page.getByRole('button', { name: /^E2E Agent via ACP/ })).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByRole('button', { name: /^E2E Agent/ })).toHaveAttribute('aria-pressed', 'true')
     await page.getByRole('button', { name: 'Continue', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Bring your alphaXiv library' })).toBeVisible()
     await page.getByRole('button', { name: 'Skip' }).click()

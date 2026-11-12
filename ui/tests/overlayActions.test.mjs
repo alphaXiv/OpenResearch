@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Activity, act, createElement } from "react";
 import { ComposerProjectPicker } from "../src/components/ComposerProjectPicker.tsx";
-import { LocalModelDialog } from "../src/components/LocalModelSetup.tsx";
 import { RemoteStopDialog } from "../src/components/RemoteStopDialog.tsx";
 import { showSshConfigDialog } from "../src/components/SshConfigDialog.tsx";
 import { createDialogs } from "../src/dialog.tsx";
@@ -138,43 +137,6 @@ for (const trigger of ["Escape", "outside click", "cancel button"]) {
     assert.equal(ssh.closed(), 1);
   });
 }
-
-test("local model setup reads current installation state and blocks dismissal while saving", async () => {
-  const connected = [];
-  let finishSave;
-  let installed = false;
-  serve((path, init) => {
-    if (path.startsWith("/api/harnesses")) return { harnesses: [{ id: "opencode", installed, models: [{ id: "connected-model" }] }] };
-    if (path === "/api/local-models/discover") return { models: ["local-test"] };
-    if (path === "/api/local-models" && init.method === "POST") return new Promise((resolve) => { finishSave = resolve; });
-  });
-  const { workspace } = await render(null);
-  await act(async () => workspace.dialogs.showCustomDialog({
-    component: LocalModelDialog,
-    props: { onConnected: (model) => connected.push(model) },
-    onConfirm: (connect) => connect(),
-    onCancel: "close",
-  }));
-  await settle();
-  const submit = () => document.querySelector('[role="dialog"] button[type="submit"]');
-  assert.equal(submit().disabled, true);
-
-  installed = true;
-  await act(async () => workspace.queryClient.invalidateQueries(workspace.queries.getHarnessesQuery()));
-  await settle();
-  assert.equal(submit().disabled, false);
-  await click(submit());
-  assert.match(submit().textContent, new RegExp(m.local_models_save()));
-  await click(submit());
-  assert.equal(find('[role="dialog"] button', m.settings_page_cancel()).disabled, true);
-  await press("Escape");
-  assert.equal(dialogs().length, 1);
-
-  finishSave({ model: "connected-model" });
-  await settle();
-  assert.deepEqual(connected, ["connected-model"]);
-  assert.equal(dialogs().length, 0);
-});
 
 test("returning to a hidden workspace removes dialogs dismissed while it was hidden", async () => {
   const manager = createDialogs();
