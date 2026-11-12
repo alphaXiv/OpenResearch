@@ -299,9 +299,6 @@ impl DeviceAuthorization {
         let mut interval = self.interval;
         loop {
             tokio::time::sleep(config::paced(interval)).await;
-            if tokio::time::Instant::now() >= deadline {
-                return Err(expired());
-            }
             let grant = [
                 ("grant_type", DEVICE_GRANT),
                 ("device_code", self.device_code.as_str()),
@@ -316,6 +313,12 @@ impl DeviceAuthorization {
                 Err(error) => error,
             };
             match refusal(&error) {
+                // alphaXiv rules on a late approval; the deadline only ends a code it never settles.
+                Some("authorization_pending" | "slow_down")
+                    if tokio::time::Instant::now() >= deadline =>
+                {
+                    return Err(expired())
+                }
                 Some("authorization_pending") => {}
                 Some("slow_down") => interval += SLOW_DOWN,
                 Some("access_denied") => {
