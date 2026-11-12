@@ -244,19 +244,12 @@ jobs:
           if [ -n "$PARTITION" ]; then
             args+=(--partition "$PARTITION")
           fi
-          cargo nextest run --locked --timings --profile ci "${args[@]}"
+          cargo nextest run --locked --profile ci "${args[@]}"
       - name: Doc-tests
         if: matrix.name != 'test2'
         env:
           CARGO_INCREMENTAL: 1
         run: cargo test --locked --doc
-      - name: Upload compilation timings
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: rust-${{ matrix.name }}-timings
-          path: target/cargo-timings/
-          retention-days: 1
       - name: Source builds disable production telemetry
         if: matrix.name != 'test2'
         shell: bash
@@ -493,7 +486,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: 0
           RUST_TEST_THREADS: 16
           TEST_MODE: ${{ matrix.mode }}
-        run: cargo test --locked --timings --no-run
+        run: cargo test --locked --no-run
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Install nextest
         if: startsWith(matrix.mode, 'test')
@@ -514,7 +507,7 @@ jobs:
             test3 = 'slice:3/4'
             test4 = 'slice:4/4'
           }
-          $testArgs = @('--locked', '--timings')
+          $testArgs = @('--locked')
           if ($filters.ContainsKey($env:TEST_MODE)) {
             $testArgs += $filters[$env:TEST_MODE]
           } elseif ($partitions.ContainsKey($env:TEST_MODE)) {
@@ -536,13 +529,6 @@ jobs:
         with:
           path: *windows-incremental-path
           key: ${{ steps.incremental.outputs.cache-primary-key }}
-      - name: Upload compilation timings
-        if: always() && matrix.mode != 'lint'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: windows-${{ matrix.mode }}-timings
-          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/cargo-timings/
-          retention-days: 1
 
   check:
     name: fmt, clippy, test
