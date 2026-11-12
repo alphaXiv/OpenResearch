@@ -168,6 +168,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
+        env:
+          RUST_TEST_THREADS: 16
         run: cargo test --locked
       - name: Source builds disable production telemetry
         shell: bash
@@ -288,6 +290,8 @@ jobs:
         run: cargo build --locked --features desktop
       - name: Test
         if: github.event_name != 'pull_request' || inputs.release
+        env:
+          RUST_TEST_THREADS: 16
         run: cargo test --locked --features desktop
 
   windows:
@@ -348,6 +352,8 @@ jobs:
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Test
         if: matrix.mode != 'lint'
+        env:
+          RUST_TEST_THREADS: 16
         run: cargo test --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
 
