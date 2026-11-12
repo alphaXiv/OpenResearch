@@ -247,7 +247,8 @@ async fn run(
     {
         run_command = false;
         attempt.record("command_started", "command", None, None, None);
-        command_failure = managed_setup(socket, request, attempt, size, follow_up).await?;
+        command_failure =
+            managed_setup(socket, request, attempt, size, follow_up, &state.agent).await?;
     }
     if run_command {
         let (program, mut args) = match request.action {
@@ -531,6 +532,7 @@ async fn managed_setup(
     attempt: &SetupAttempt,
     size: &mut PtySize,
     follow_up: &mut FollowUp,
+    opencode_host: &crate::local::opencode::AgentHost,
 ) -> Result<Option<CommandFailure>, String> {
     let _setup = managed::lock_installations().map_err(|error| error.to_string())?;
     let harness = request.harness.as_str();
@@ -595,7 +597,8 @@ async fn managed_setup(
             return Ok(None);
         }
     }
-    match install_with_progress(socket, harness, &release).await {
+    let host = (harness == "opencode").then_some(opencode_host);
+    match install_with_progress(socket, harness, &release, host).await {
         Some(Ok(_)) => {
             attempt.record("command_completed", "command", None, Some(0), None);
             Ok(None)
@@ -671,6 +674,7 @@ async fn install_with_progress(
     socket: &mut WebSocket,
     harness: &str,
     release: &managed::Release,
+    opencode_host: Option<&crate::local::opencode::AgentHost>,
 ) -> Option<crate::error::Result<std::path::PathBuf>> {
     let name = crate::local::harness::chat_harness(harness)
         .map_or_else(|| harness.to_string(), |h| h.name().to_string());
@@ -687,7 +691,7 @@ async fn install_with_progress(
     let mut progress = move |done: u64, total: Option<u64>| {
         let _ = sender.send((done, total));
     };
-    let install = managed::install(harness, release, &mut progress);
+    let install = managed::install(harness, release, &mut progress, opencode_host);
     tokio::pin!(install);
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
     let megabytes = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1e6);
@@ -749,7 +753,10 @@ const UPDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 
 /// is updated once it falls behind, and orx's copy stands in when that fails or
 /// the install doesn't run. An agent the user never installed is left alone.
 /// Returns whether the binary in use changed.
-pub(super) async fn keep_current(harness: &'static str) -> crate::error::Result<bool> {
+pub(super) async fn keep_current(
+    harness: &'static str,
+    opencode_host: &crate::local::opencode::AgentHost,
+) -> crate::error::Result<bool> {
     let _setup = managed::lock_installations()?;
     if !matches!(harness, "claude-code" | "codex" | "opencode")
         && managed::installed(harness).is_none()
@@ -759,6 +766,10 @@ pub(super) async fn keep_current(harness: &'static str) -> crate::error::Result<
     let user = managed::user_install(harness).await;
     let copy = managed::installed(harness);
     if user.is_none() && copy.is_none() && !managed::user_install_broken(harness).await {
+        return Ok(false);
+    }
+    // Not even the user's own updater may swap OpenCode under a running turn.
+    if harness == "opencode" && managed::OPENCODE_IN_USE.try_write().is_err() {
         return Ok(false);
     }
     let major = (harness == "opencode").then(|| {
@@ -811,7 +822,13 @@ pub(super) async fn keep_current(harness: &'static str) -> crate::error::Result<
             return Ok(false);
         }
     }
-    managed::install(harness, &release, &mut |_, _| {}).await?;
+    managed::install(
+        harness,
+        &release,
+        &mut |_, _| {},
+        (harness == "opencode").then_some(opencode_host),
+    )
+    .await?;
     Ok(true)
 }
 

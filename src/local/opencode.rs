@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::git;
 use crate::local::model::LocalProject;
 use crate::local::native_store::{self, NativeStore};
@@ -769,6 +769,19 @@ impl AgentHost {
         Ok(())
     }
 
+    pub(crate) async fn retire_idle_children(&self) -> Result<()> {
+        let mut children = self.inner.lock().await;
+        for session in children.keys().cloned().collect::<Vec<_>>() {
+            if let Some(agent) = children.get_mut(&session) {
+                agent.child.kill().await.with_context(|| {
+                    format!("Could not stop the idle OpenCode server for chat {session}")
+                })?;
+                children.remove(&session);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn compact(
         &self,
         project: &LocalProject,
@@ -777,6 +790,7 @@ impl AgentHost {
         model: Option<&str>,
     ) -> Result<()> {
         let operation = async {
+            let _in_use = crate::local::harness::managed::OPENCODE_IN_USE.read().await;
             match self.summarize(session_id, native_id, model).await? {
                 SummarizeOutcome::Compacted => return Ok(()),
                 SummarizeOutcome::NoModel => {

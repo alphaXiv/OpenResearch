@@ -552,7 +552,7 @@ mod tests {
         let _lock = super::super::lock_installations().unwrap();
         let agent = std::env::var("ORX_TEST_AGENT").expect("ORX_TEST_AGENT");
         let release = super::super::latest(&agent, None).await.unwrap();
-        let bin = super::super::install(&agent, &release, &mut |_, _| {})
+        let bin = super::super::install(&agent, &release, &mut |_, _| {}, None)
             .await
             .unwrap();
         let mut command = command(&bin);

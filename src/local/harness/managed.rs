@@ -35,6 +35,10 @@ const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases"
 const CODEX_CHANNEL: &str = "https://releases.openai.com/codex/channels/latest";
 const OPENCODE_RELEASES: &str = "https://api.github.com/repos/anomalyco/opencode/releases";
 
+/// Chats and compactions hold it shared; replacing OpenCode's binary takes it
+/// exclusively, so a new copy never retires a server that is mid-turn.
+pub(crate) static OPENCODE_IN_USE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
 /// The host a harness's releases come from, as the install dialog names it.
 pub(crate) fn source(harness: &str) -> Option<&'static str> {
     match key(harness).as_str() {
@@ -431,16 +435,17 @@ pub(crate) async fn install(
     harness: &str,
     release: &Release,
     progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    opencode_host: Option<&crate::local::opencode::AgentHost>,
 ) -> Result<PathBuf> {
     let harness = key(harness);
     let harness = harness.as_str();
     if matches!(release.format, Format::Npm) {
         let runtime = latest("node", None).await?;
-        Box::pin(install("node", &runtime, progress)).await?;
+        Box::pin(install("node", &runtime, progress, None)).await?;
     }
     if let Some(runtime) = runtime(harness) {
         let release = latest(runtime, None).await?;
-        Box::pin(install(runtime, &release, progress)).await?;
+        Box::pin(install(runtime, &release, progress, None)).await?;
     }
     let parent = root().join(harness);
     let target = parent.join(release.version.to_string());
@@ -473,10 +478,21 @@ pub(crate) async fn install(
             .await
             .map_err(|error| anyhow!("Unpacking failed: {error}"))??;
         verify(harness, &executable(harness, &unpacked), &release.version).await?;
+        let _activation = if harness == "opencode" {
+            let guard = OPENCODE_IN_USE.try_write().map_err(|_| {
+                anyhow!("OpenCode is in use. Retry the update after its active chats finish.")
+            })?;
+            Some(guard)
+        } else {
+            None
+        };
         if target.exists() {
             tokio::fs::remove_dir_all(&target).await.with_context(|| {
                 format!("Could not replace the broken copy at {}", target.display())
             })?;
+        }
+        if let Some(host) = opencode_host {
+            host.retire_idle_children().await?;
         }
         place(&unpacked, &target).await
     }
@@ -997,13 +1013,68 @@ mod tests {
                 crate::local::harness::detect::BinProbe::Answered(_)
             ));
             assert_eq!(
-                install("codex", &release, &mut |_, _| {}).await.unwrap(),
+                install("codex", &release, &mut |_, _| {}, None)
+                    .await
+                    .unwrap(),
                 bin
             );
             verify("codex", &bin, &version).await.unwrap();
             assert_eq!(std::fs::read(&bin).unwrap(), bytes);
         }
         std::fs::remove_dir_all(target).unwrap();
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_install_waits_for_active_turns() {
+        use axum::{routing::get, Router};
+
+        let version = semver::Version::new(2, 2, 7);
+        let bytes = b"#!/bin/sh\necho opencode v2.2.7\n";
+        let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "opencode", &bytes[..])
+            .unwrap();
+        let archive = archive.into_inner().unwrap().finish().unwrap();
+        let sha256 = format!("{:x}", Sha256::digest(&archive));
+        let app = Router::new().route(
+            "/archive",
+            get(move || {
+                let archive = archive.clone();
+                async move { archive }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/archive", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let release = Release {
+            version: version.clone(),
+            url,
+            sha256,
+            format: Format::TarGz,
+        };
+
+        let turn = OPENCODE_IN_USE.read().await;
+        let error = install("opencode", &release, &mut |_, _| {}, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("active chats"), "{error:#}");
+        assert!(installed("opencode").is_none());
+        drop(turn);
+
+        install("opencode", &release, &mut |_, _| {}, None)
+            .await
+            .unwrap();
+        assert_eq!(installed("opencode").unwrap().1, version);
+        remove_all("opencode").await;
         server.abort();
     }
 
