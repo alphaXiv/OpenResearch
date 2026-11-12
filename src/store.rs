@@ -978,7 +978,10 @@ impl Store {
                 || remaining.is_zero()
             {
                 return Err(error).with_context(|| {
-                    format!("Could not enable WAL for {}", dir.join("orx.db").display())
+                    format!(
+                        "Could not prepare the database at {}. Try again.",
+                        dir.join("orx.db").display()
+                    )
                 });
             }
             std::thread::sleep(delay.min(remaining));
