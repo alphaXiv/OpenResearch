@@ -193,17 +193,30 @@ jobs:
         with:
           node-version: 22
       - name: Install Rust toolchain
+        id: rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: check # Preserve the former Rust job's cache namespace.
+      - name: Cache incremental compilation
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env:
+          INCREMENTAL_KEY: incremental-linux-test-v1-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
+        with:
+          path: target/debug/incremental
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
+          restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Install nextest
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-nextest@0.9.151
       - name: Test
+        env:
+          CARGO_INCREMENTAL: 1
         run: cargo nextest run --locked --timings --profile ci
       - name: Doc-tests
+        env:
+          CARGO_INCREMENTAL: 1
         run: cargo test --locked --doc
       - name: Upload compilation timings
         if: always()
@@ -379,7 +392,7 @@ jobs:
           INCREMENTAL_KEY: incremental-windows-test-debug0-v1-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
         with:
           path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/debug/incremental
-          key: ${{ env.INCREMENTAL_KEY }}-${{ inputs.source-sha || github.event.pull_request.head.sha || github.sha }}
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
           restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Clippy
         if: matrix.mode != 'test'
@@ -394,38 +407,20 @@ jobs:
         run: cargo clippy --manifest-path windows/launcher/Cargo.toml --all-targets --locked -- -D warnings
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Build app launcher
-        if: matrix.mode != 'lint'
+        if: matrix.mode != 'test'
         run: cargo build --manifest-path windows/launcher/Cargo.toml --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Test app launcher
-        if: matrix.mode != 'lint'
+        if: matrix.mode != 'test'
         run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-      - name: Install nextest
-        if: matrix.mode != 'lint'
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
-        with:
-          tool: cargo-nextest@0.9.151
       - name: Test
         if: matrix.mode != 'lint'
         env:
           CARGO_INCREMENTAL: 1
           CARGO_PROFILE_TEST_DEBUG: 0
-        run: cargo nextest run --locked --timings --profile ci
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-      - name: Profile test setup
-        if: matrix.mode != 'lint'
-        env:
-          CARGO_INCREMENTAL: 1
-          CARGO_PROFILE_TEST_DEBUG: 0
-        run: cargo test --locked ci_profile_store_and_paths -- --ignored --nocapture
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-      - name: Doc-tests
-        if: matrix.mode != 'lint'
-        env:
-          CARGO_INCREMENTAL: 1
-          CARGO_PROFILE_TEST_DEBUG: 0
-        run: cargo test --locked --doc
+          RUST_TEST_THREADS: 16
+        run: cargo test --locked --timings
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Upload compilation timings
         if: always() && matrix.mode != 'lint'
