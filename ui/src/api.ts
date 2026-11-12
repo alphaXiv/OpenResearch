@@ -1,7 +1,7 @@
 import { LogPageUnavailable } from "./logWindow";
 // Typed client for the orx up local HTTP API (/api/*). All wire JSON is camelCase.
 
-import type { WorkspaceClient } from "./queries/client";
+import { ConnectionLostError, type WorkspaceClient } from "./queries/client";
 import type { WorkspaceInvalidation } from "./queries/invalidation";
 
 import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
@@ -2496,11 +2496,24 @@ export function createApi(
   /** Follows background work `started` until it finishes; an older orx up answers with the result itself. */
   async function followOperation<T extends object>(started: T | { operationId: string }, invalidates: string, onProgress?: (progress: OperationProgress) => void): Promise<T> {
     if (!("operationId" in started)) return started;
+    const scope = workspaceScope();
+    const path = `/api/operations/${encodeURIComponent(started.operationId)}`;
+    let missed = 0;
     for (;;) {
-      const status = await get<OperationStatus<T>>(`/api/operations/${encodeURIComponent(started.operationId)}`);
+      let status: OperationStatus<T>;
+      try {
+        status = await get<OperationStatus<T>>(path);
+        missed = 0;
+      } catch (error) {
+        // The work carries on in orx up, so a poll lost to the connection, even mid-body, is worth asking again.
+        if (!(error instanceof ConnectionLostError || error instanceof TypeError)) throw error;
+        if (++missed > 3) throw error instanceof TypeError ? new ConnectionLostError(m.request_connection_lost(), { cause: error }) : error;
+        await new Promise((resolve) => setTimeout(resolve, 1000 * missed));
+        continue;
+      }
       if (status.error !== null) throw new Error(status.error);
       if (status.result !== null) {
-        invalidateWrite(invalidates, workspaceScope());
+        invalidateWrite(invalidates, scope);
         return status.result;
       }
       onProgress?.(status);
@@ -2523,16 +2536,16 @@ export function createApi(
   const importSharedProject = async (path: string, source: SharedSource, onProgress?: (progress: OperationProgress) => void) => {
     const url = `/api/projects/import?path=${encodeURIComponent(path)}&background=true`;
     type Started = OpenedSharedProject | { operationId: string };
-    const started = typeof source === "string"
-      ? await post<Started>(`${url}&file=${encodeURIComponent(source)}`)
-      : !(source instanceof File)
-        ? await post<Started>(`${url}&shared=${encodeURIComponent(source.link)}`)
-        : await writeResponse(url, {
-          method: "POST",
-          headers: { "content-type": "application/octet-stream" },
-          body: source,
-        }).then((r) => json<Started>(r));
-    return followOperation(started, "/api/projects/import", onProgress);
+    const start = () => {
+      if (typeof source === "string") return post<Started>(`${url}&file=${encodeURIComponent(source)}`);
+      if (!(source instanceof File)) return post<Started>(`${url}&shared=${encodeURIComponent(source.link)}`);
+      return writeResponse(url, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: source,
+      }).then((r) => json<Started>(r));
+    };
+    return followOperation(await start(), "/api/projects/import", onProgress);
   };
 
   const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/api/settings/telemetry", signal);

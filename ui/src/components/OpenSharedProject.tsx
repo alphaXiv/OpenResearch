@@ -6,7 +6,7 @@ import { useId, useState } from "react";
 import type { OpenedSharedProject, OperationProgress, SharedSource } from "../api";
 import { m } from "../paraglide/messages.js";
 import { slugify } from "./NewProjectForm";
-import { OperationProgressBar } from "./ProgressBar";
+import { OperationProgressBar } from "./OperationProgressBar";
 import { useWorkspace } from "../workspace";
 import { mutImportSharedProject } from "../queries/projects";
 import { Button, Input, LoadingRow, Spinner, showAlert } from "./ui";
@@ -72,18 +72,13 @@ function PickFolder({ source, onCancel, onOpened, name, intro = m.open_shared_bo
     </div>
     {status?.resolvedPath && <p className="mt-1 break-all text-xs text-subtext">{status.resolvedPath}</p>}
     {occupied && <p id={problemId} className="mt-2 text-sm text-accent-red">{m.open_shared_folder_occupied()}</p>}
-    {pending && progress && <OperationProgressBar label={progressLabel(progress)} progress={progress} />}
+    {pending && <OperationProgressBar progress={progress} />}
     {error && <p role="alert" className="mt-3 whitespace-pre-line text-sm text-accent-red">{error}</p>}
     <div className="mt-6 flex justify-end gap-2">
       <Button type="button" variant="ghost" disabled={pending} onClick={onCancel}>{m.projects_home_cancel()}</Button>
       <Button type="submit" variant="primary" disabled={pending || !trimmed || occupied}>{open.isPending && <Spinner />}{m.open_shared_submit()}</Button>
     </div>
   </form>;
-}
-
-function progressLabel({ phase }: OperationProgress) {
-  if (phase === "downloading") return m.open_shared_downloading();
-  return phase === "unpacking" ? m.open_shared_unpacking() : m.open_shared_opening();
 }
 
 /** Tell the user about experiments that arrived without their code. */

@@ -1,9 +1,5 @@
 import type { ReactNode } from "react";
 
-import type { OperationProgress } from "../api";
-import { fmtBytes } from "../i18n";
-import { m } from "../paraglide/messages.js";
-
 export function ProgressBar({
   value,
   max = 100,
@@ -41,14 +37,4 @@ export function ProgressBar({
       )}
     </div>
   );
-}
-
-/** A background operation's phase, with its bytes when the phase counts them. */
-export function OperationProgressBar({ label, progress: { bytes, totalBytes } }: { label: string; progress: OperationProgress }) {
-  const caption = totalBytes !== null
-    ? m.operation_bytes({ done: fmtBytes(bytes), total: fmtBytes(totalBytes) })
-    : bytes > 0 ? fmtBytes(bytes) : undefined;
-  return <div role="status">
-    <ProgressBar label={label} value={totalBytes === null ? undefined : bytes} max={totalBytes ?? undefined} caption={caption} />
-  </div>;
 }

@@ -41,7 +41,7 @@ Credentials stack on top: `/api/internal/` needs a token issued to that agent ([
 
 Errors are JSON with a message the UI can show. The store is synchronous SQLite, so handlers move file walks, Git, archive building and other slow work onto blocking threads. Work a CLI command could race is coordinated through leases and claims in the store ([storage](storage.md)), because an in-memory lock stops at the process boundary.
 
-**No request waits on the network for long.** WebKit gives up on a response after a minute of silence, and a closed request must not cancel half-done work. Opening a shared project and publishing one run as operations: with `background=true` the request answers at once with an `operationId`, and the page polls `GET /api/operations/{id}` for the phase, bytes moved, and the result or error. Operations live in memory, so after a restart the poll's 404 tells the user to try again. Without `background`, an older page still waits for the result.
+**No request waits on the network for long.** WebKit gives up on a response after a minute of silence, and a closed request must not cancel half-done work. Opening a shared project and publishing one run as operations: with `background=true` the request answers at once with an `operationId`, and the page polls `GET /api/operations/{id}` for the phase, bytes moved, and the result or error. A finished operation stays readable for a few minutes, so a lost poll can ask again, and the work itself gives up on a connection that stops moving. Operations live in memory, so after a restart the poll's 404 tells the user to try again. Without `background`, an older page still waits for the result.
 
 ## Live state
 

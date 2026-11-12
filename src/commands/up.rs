@@ -2367,7 +2367,7 @@ async fn publish_project_link(
                 export_shared_project(&project, req)
             })
             .await
-            .map_err(|error| anyhow!("share task failed: {error}"))??;
+            .map_err(|error| anyhow!("Preparing the project stopped unexpectedly: {error}"))??;
             progress.phase("uploading");
             let reporter = progress.clone();
             let link =
@@ -2424,9 +2424,6 @@ struct ImportSharedProjectQuery {
     file: Option<String>,
     /// The slug of a published project link to download.
     shared: Option<String>,
-    /// Answer at once with an `operationId` to follow; without it the request waits for the project.
-    #[serde(default)]
-    background: bool,
 }
 
 #[derive(Deserialize)]
@@ -2446,7 +2443,12 @@ struct Operation {
     total_bytes: Option<u64>,
     result: Option<Value>,
     error: Option<String>,
+    #[serde(skip)]
+    finished: Option<std::time::Instant>,
 }
+
+/// How long a finished operation stays readable, so a lost poll can ask again.
+const FINISHED_OPERATION_KEPT: Duration = Duration::from_secs(5 * 60);
 
 type Operations = Arc<std::sync::Mutex<HashMap<String, Operation>>>;
 
@@ -2480,25 +2482,32 @@ impl Progress {
 }
 
 /// Runs `work` in its own task: with `background` answers 202 with its `operationId`, else waits for its result.
-fn run_operation<F>(
+async fn run_operation<F>(
     operations: &Operations,
     background: bool,
     phase: &'static str,
     work: impl FnOnce(Progress) -> F,
-) -> impl std::future::Future<Output = std::result::Result<Response, ApiError>>
+) -> std::result::Result<Response, ApiError>
 where
     F: std::future::Future<Output = Result<Value>> + Send + 'static,
 {
     let id = uuid::Uuid::new_v4().to_string();
     let progress = Progress(background.then(|| {
+        let mut running = operations.lock().unwrap();
+        running.retain(|_, operation| {
+            operation
+                .finished
+                .is_none_or(|finished| finished.elapsed() < FINISHED_OPERATION_KEPT)
+        });
         let operation = Operation {
             phase,
             bytes: 0,
             total_bytes: None,
             result: None,
             error: None,
+            finished: None,
         };
-        operations.lock().unwrap().insert(id.clone(), operation);
+        running.insert(id.clone(), operation);
         (operations.clone(), id.clone())
     }));
     let work = tokio::spawn(work(progress.clone()));
@@ -2507,42 +2516,41 @@ where
             .await
             .map_err(|error| anyhow!("The work stopped unexpectedly: {error}"))
             .and_then(|result| result);
-        match &result {
-            Ok(value) => progress.update(|operation| operation.result = Some(value.clone())),
-            Err(error) => progress.update(|operation| operation.error = Some(format!("{error:#}"))),
-        }
+        progress.update(|operation| {
+            match &result {
+                Ok(value) => operation.result = Some(value.clone()),
+                Err(error) => operation.error = Some(format!("{error:#}")),
+            }
+            operation.finished = Some(std::time::Instant::now());
+        });
         result
     });
-    async move {
-        if background {
-            return Ok((StatusCode::ACCEPTED, Json(json!({ "operationId": id }))).into_response());
-        }
-        let result = task
-            .await
-            .map_err(|error| ApiError::from(anyhow!("background task failed: {error}")))?
-            .map_err(bad_request)?;
-        Ok(Json(result).into_response())
+    if background {
+        return Ok((StatusCode::ACCEPTED, Json(json!({ "operationId": id }))).into_response());
     }
+    let result = task
+        .await
+        .map_err(|error| ApiError::from(anyhow!("The work stopped unexpectedly: {error}")))?
+        .map_err(bad_request)?;
+    Ok(Json(result).into_response())
 }
 
-/// How background work is going; a finished one is reported once, then forgotten.
+/// How background work is going; a finished one stays readable for a while.
 async fn get_operation(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    let mut operations = state.operations.lock().unwrap();
-    let operation = operations.get(&id).cloned().ok_or_else(|| {
+    let operation = state.operations.lock().unwrap().get(&id).cloned();
+    let operation = operation.ok_or_else(|| {
         ApiError(
             StatusCode::NOT_FOUND,
-            "This is no longer running; orx may have restarted. Try again.".into(),
+            "This is no longer running; OpenResearch may have restarted. Try again.".into(),
         )
     })?;
-    if operation.result.is_some() || operation.error.is_some() {
-        operations.remove(&id);
-    }
     Ok(Json(json!(operation)))
 }
 
 async fn import_shared_project(
     State(state): State<AppState>,
     Query(query): Query<ImportSharedProjectQuery>,
+    Query(BackgroundQuery { background }): Query<BackgroundQuery>,
     body: axum::body::Body,
 ) -> std::result::Result<Response, ApiError> {
     use futures::StreamExt;
@@ -2552,7 +2560,7 @@ async fn import_shared_project(
         .admit("__project_create__")
         .ok_or_else(|| bad_request("project creation is unavailable"))?;
     reject_if_moving(&state)?;
-    let (file, link, staged) = match (query.file, query.shared) {
+    let (file, slug, staged) = match (query.file, query.shared) {
         (Some(file), _) => (
             local::projects::expand_path(&file).map_err(bad_request)?,
             None,
@@ -2600,17 +2608,17 @@ async fn import_shared_project(
     };
     let creation_lock = state.project_creation_lock.clone();
     let target = query.path;
-    let phase = if link.is_some() {
+    let phase = if slug.is_some() {
         "downloading"
     } else {
         "unpacking"
     };
     run_operation(
         &state.operations,
-        query.background,
+        background,
         phase,
         move |progress| async move {
-            if let Some(slug) = &link {
+            if let Some(slug) = &slug {
                 crate::client::download_public_project(
                     &crate::config::openresearch_api_url().await,
                     slug,
@@ -2624,16 +2632,14 @@ async fn import_shared_project(
             tokio::task::spawn_blocking(move || -> Result<Value> {
                 let (_creation_guard, _admission, _staged) = (creation_guard, admission, staged);
                 let target = local::projects::expand_path(&target)?;
-                // Cloning and registering what was unpacked is quick next to the unpacking.
-                let mut on_unpack = |unpacked, total| {
-                    if unpacked < total {
-                        progress.bytes(unpacked, Some(total));
-                    } else {
-                        progress.phase("opening");
+                let mut on_progress = |step| match step {
+                    local::share::ImportProgress::Unpacking { done, total } => {
+                        progress.bytes(done, Some(total))
                     }
+                    local::share::ImportProgress::Opening => progress.phase("opening"),
                 };
                 let imported =
-                    local::share::import(&Store::open()?, &file, &target, &mut on_unpack)?;
+                    local::share::import(&Store::open()?, &file, &target, &mut on_progress)?;
                 Ok(json!({
                     "project": project_json(&imported.project),
                     "missingBranches": imported.missing_branches,
@@ -11406,108 +11412,100 @@ mod tests {
         }
     }
 
-    fn in_runtime(test: impl std::future::Future<Output = ()>) {
-        tokio::runtime::Runtime::new().unwrap().block_on(test);
-    }
-
-    #[test]
-    fn a_published_link_opens_in_the_background() {
+    #[tokio::test]
+    async fn a_published_link_opens_in_the_background() {
         if !crate::config::in_test_child(&["OPENRESEARCH_API_URL"]) {
             return;
         }
-        in_runtime(async {
-            let (address, root, _) = dashboard_with_fake_openresearch("abcdefghijkl").await;
-            let target = root.join("opened");
-            let path = format!(
-                "/api/projects/import?path={}&shared=abcdefghijkl&background=true",
-                target.display()
-            );
-            let id = operation_id(post_to(address, &path, None).await).await;
+        let (address, root, _) = dashboard_with_fake_openresearch("abcdefghijkl").await;
+        let target = root.join("opened");
+        let path = format!(
+            "/api/projects/import?path={}&shared=abcdefghijkl&background=true",
+            target.display()
+        );
+        let id = operation_id(post_to(address, &path, None).await).await;
 
-            let status = finish_operation(address, &id).await;
-            assert_eq!(status["result"]["project"]["name"], "Tiny LM", "{status}");
-            assert!(target.join(".git").exists());
-            let again = get_operation_status(address, &id).await;
-            assert_eq!(again.status(), StatusCode::NOT_FOUND);
-        });
-    }
-
-    #[test]
-    fn a_link_that_no_longer_downloads_says_why() {
-        if !crate::config::in_test_child(&["OPENRESEARCH_API_URL"]) {
-            return;
-        }
-        in_runtime(async {
-            let (address, root, _) = dashboard_with_fake_openresearch("abcdefghijkl").await;
-            let path = format!(
-                "/api/projects/import?path={}&shared=unpublished0&background=true",
-                root.join("opened").display()
-            );
-            let id = operation_id(post_to(address, &path, None).await).await;
-
-            let status = finish_operation(address, &id).await;
-            assert!(
-                status["error"].as_str().unwrap().contains("unpublished"),
-                "{status}"
-            );
-            assert!(!root.join("opened").exists());
-        });
-    }
-
-    #[test]
-    fn an_older_dashboard_still_waits_for_the_opened_project() {
-        if !crate::config::in_test_child(&["OPENRESEARCH_API_URL"]) {
-            return;
-        }
-        in_runtime(async {
-            let (address, root, _) = dashboard_with_fake_openresearch("abcdefghijkl").await;
-            let path = format!(
-                "/api/projects/import?path={}&shared=abcdefghijkl",
-                root.join("opened").display()
-            );
-            let opened = post_to(address, &path, None).await;
-            assert_eq!(opened.status(), StatusCode::OK);
-            let opened: Value = opened.json().await.unwrap();
-            assert_eq!(opened["project"]["name"], "Tiny LM", "{opened}");
-            assert!(opened["missingBranches"].is_array());
-        });
-    }
-
-    #[test]
-    fn a_project_publishes_in_the_background() {
-        if !crate::config::in_test_child(&["OPENRESEARCH_API_URL"]) {
-            return;
-        }
-        in_runtime(async {
-            let (address, _, project) = dashboard_with_fake_openresearch("a1B2c3D4e5F6").await;
-            let choice = json!({ "chats": [], "logs": false, "artifacts": false });
-            let path = format!("/api/projects/{project}/publish?background=true");
-            let signed_out = post_to(address, &path, Some(choice.clone())).await;
-            assert_eq!(signed_out.status(), StatusCode::UNAUTHORIZED);
-
-            crate::config::save_credentials(&crate::config::Credentials {
-                api_url: std::env::var("OPENRESEARCH_API_URL").unwrap(),
-                token: "pat".into(),
-            })
+        let status = finish_operation(address, &id).await;
+        assert_eq!(status["result"]["project"]["name"], "Tiny LM", "{status}");
+        assert!(target.join(".git").exists());
+        let again: Value = get_operation_status(address, &id)
+            .await
+            .json()
             .await
             .unwrap();
-            let id = operation_id(post_to(address, &path, Some(choice.clone())).await).await;
-            let status = finish_operation(address, &id).await;
-            assert_eq!(
-                status["result"]["sharedProject"]["slug"], "a1B2c3D4e5F6",
-                "{status}"
-            );
+        assert_eq!(again, status, "a lost poll can read the result again");
+    }
 
-            let waited = post_to(
-                address,
-                &format!("/api/projects/{project}/publish"),
-                Some(choice),
-            )
-            .await;
-            assert_eq!(waited.status(), StatusCode::OK);
-            let waited: Value = waited.json().await.unwrap();
-            assert_eq!(waited["sharedProject"]["slug"], "a1B2c3D4e5F6", "{waited}");
-        });
+    #[tokio::test]
+    async fn a_link_that_no_longer_downloads_says_why() {
+        if !crate::config::in_test_child(&["OPENRESEARCH_API_URL"]) {
+            return;
+        }
+        let (address, root, _) = dashboard_with_fake_openresearch("abcdefghijkl").await;
+        let path = format!(
+            "/api/projects/import?path={}&shared=unpublished0&background=true",
+            root.join("opened").display()
+        );
+        let id = operation_id(post_to(address, &path, None).await).await;
+
+        let status = finish_operation(address, &id).await;
+        assert!(
+            status["error"].as_str().unwrap().contains("unpublished"),
+            "{status}"
+        );
+        assert!(!root.join("opened").exists());
+    }
+
+    #[tokio::test]
+    async fn an_older_dashboard_still_waits_for_the_opened_project() {
+        if !crate::config::in_test_child(&["OPENRESEARCH_API_URL"]) {
+            return;
+        }
+        let (address, root, _) = dashboard_with_fake_openresearch("abcdefghijkl").await;
+        let path = format!(
+            "/api/projects/import?path={}&shared=abcdefghijkl",
+            root.join("opened").display()
+        );
+        let opened = post_to(address, &path, None).await;
+        assert_eq!(opened.status(), StatusCode::OK);
+        let opened: Value = opened.json().await.unwrap();
+        assert_eq!(opened["project"]["name"], "Tiny LM", "{opened}");
+        assert!(opened["missingBranches"].is_array());
+    }
+
+    #[tokio::test]
+    async fn a_project_publishes_in_the_background() {
+        if !crate::config::in_test_child(&["OPENRESEARCH_API_URL"]) {
+            return;
+        }
+        let (address, _, project) = dashboard_with_fake_openresearch("a1B2c3D4e5F6").await;
+        let choice = json!({ "chats": [], "logs": false, "artifacts": false });
+        let path = format!("/api/projects/{project}/publish?background=true");
+        let signed_out = post_to(address, &path, Some(choice.clone())).await;
+        assert_eq!(signed_out.status(), StatusCode::UNAUTHORIZED);
+
+        crate::config::save_credentials(&crate::config::Credentials {
+            api_url: std::env::var("OPENRESEARCH_API_URL").unwrap(),
+            token: "pat".into(),
+        })
+        .await
+        .unwrap();
+        let id = operation_id(post_to(address, &path, Some(choice.clone())).await).await;
+        let status = finish_operation(address, &id).await;
+        assert_eq!(
+            status["result"]["sharedProject"]["slug"], "a1B2c3D4e5F6",
+            "{status}"
+        );
+
+        let waited = post_to(
+            address,
+            &format!("/api/projects/{project}/publish"),
+            Some(choice),
+        )
+        .await;
+        assert_eq!(waited.status(), StatusCode::OK);
+        let waited: Value = waited.json().await.unwrap();
+        assert_eq!(waited["sharedProject"]["slug"], "a1B2c3D4e5F6", "{waited}");
     }
 
     /// The status of a request written byte for byte, so the test owns every header.

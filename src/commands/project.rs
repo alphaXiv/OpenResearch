@@ -124,7 +124,7 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
             };
             let folder = path.unwrap_or(default_folder);
             let store = crate::store::Store::open()?;
-            let imported = share::import(&store, &file, &expand_path(&folder)?, &mut |_, _| {})?;
+            let imported = share::import(&store, &file, &expand_path(&folder)?, &mut |_| {})?;
             println!(
                 "Opened {} ({}) at {}: {} experiments, {} runs, {} chats.",
                 imported.project.name,

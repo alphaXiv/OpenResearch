@@ -9,7 +9,7 @@ import { m } from "../paraglide/messages.js";
 import { useWorkspace } from "../workspace";
 import { mutPublishProject } from "../queries/projects";
 import { useSignIn } from "./AccountChip";
-import { OperationProgressBar } from "./ProgressBar";
+import { OperationProgressBar } from "./OperationProgressBar";
 import { Button, ButtonLink, DialogContent, DialogTitle, IconButton, Input, Spinner, showAlert } from "./ui";
 
 export function showShareExclusions(count: number) {
@@ -72,10 +72,7 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
         </div>
       </div>}
     </section>
-    {publish.isMutating && progress && <OperationProgressBar
-      label={progress.phase === "uploading" ? m.share_publish_uploading() : m.share_publish_preparing()}
-      progress={progress}
-    />}
+    {publish.isMutating && <OperationProgressBar progress={progress} />}
     {(publishError || errorMessage) && <p role="alert" className="mt-3 whitespace-pre-line break-words text-sm text-accent-red">{publishError ?? errorMessage}</p>}
     {!link && <div className="mt-4 flex flex-wrap justify-end gap-2">
       <Button ref={publishRef} type="button" disabled={busy || !ready || !linkQuery.data || (remote && !signedIn)} onClick={() => {
