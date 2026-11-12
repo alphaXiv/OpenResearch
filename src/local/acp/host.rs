@@ -869,7 +869,7 @@ mod tests {
         Definition {
             id: format!("acp:{}", uuid::Uuid::new_v4()),
             name: "Peer".into(),
-            executable: if cfg!(windows) { "python" } else { "python3" }.into(),
+            executable: crate::local::acp::fake_agent_interpreter("python3"),
             arguments: vec![
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
@@ -981,7 +981,7 @@ mod tests {
             let pids = std::env::temp_dir().join(format!("orx-acp-pids-{}", uuid::Uuid::new_v4()));
             let peer = definition("normal");
             let mut launch = peer.clone();
-            launch.executable = "sh".into();
+            launch.executable = crate::local::acp::fake_agent_interpreter("sh");
             launch.arguments = [
                 "-c".into(),
                 r#"python3 -c 'import os, time; os.setsid(); time.sleep(60)' & echo $! > "$0"

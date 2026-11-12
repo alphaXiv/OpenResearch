@@ -1879,7 +1879,7 @@ async fn dashboard_retry_returns_the_worst_root_state() {
 #[test]
 fn dashboard_connect_clears_the_engine_breaker_and_resumes_pending_runs() {
     let directory =
-        std::env::temp_dir().join(format!("orx-dashboard-host-{}", uuid::Uuid::new_v4()));
+        crate::config::test_home().join(format!("orx-dashboard-host-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
     let mut command = crate::process::command(std::env::current_exe().unwrap());
     command
@@ -1911,7 +1911,7 @@ async fn dashboard_host_lifecycle_child() {
     use crate::engine::transport::Status;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let server = orx_test_support::Sshd::start().unwrap();
-    let ssh_dir = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".ssh");
+    let ssh_dir = crate::config::home_dir().unwrap().join(".ssh");
     std::fs::create_dir_all(&ssh_dir).unwrap();
     std::fs::copy(server.config_path(), ssh_dir.join("config")).unwrap();
     let f = Fixture::new().await;

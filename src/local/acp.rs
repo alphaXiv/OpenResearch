@@ -236,9 +236,11 @@ pub fn same_launch(a: &Definition, b: &Definition) -> bool {
 pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
     let path = std::path::Path::new(executable);
     if path.is_absolute() {
+        #[cfg(test)]
+        let path = &fake_agent_or_contained(path.to_path_buf());
         return path.is_file().then(|| path.to_path_buf());
     }
-    let own = dirs::home_dir().into_iter().flat_map(|home| {
+    let own = crate::config::home_dir().into_iter().flat_map(|home| {
         [
             ".grok/bin",
             ".devin/bin",
@@ -250,6 +252,38 @@ pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
     crate::local::shell_env::installs(executable, own)
         .into_iter()
         .next()
+}
+
+/// The interpreters a test may run a fake agent script with.
+#[cfg(test)]
+const FAKE_AGENT_INTERPRETERS: [&str; 3] = ["python3", "python", "sh"];
+
+/// An absolute agent under test: one of [`fake_agent_interpreter`]'s, else a fake inside the test root.
+#[cfg(test)]
+fn fake_agent_or_contained(path: std::path::PathBuf) -> std::path::PathBuf {
+    let interpreter = FAKE_AGENT_INTERPRETERS
+        .iter()
+        .any(|name| crate::local::shell_env::find(name).as_deref() == Some(path.as_path()));
+    if interpreter {
+        return path;
+    }
+    crate::config::test_contained(path)
+}
+
+/// `program` by absolute path, to run a test's fake agent: a bare executable
+/// would be discovered as the user's own agent, which tests never reach.
+#[cfg(test)]
+pub(crate) fn fake_agent_interpreter(program: &str) -> String {
+    let program = if cfg!(windows) && program == "python3" {
+        "python"
+    } else {
+        program
+    };
+    assert!(FAKE_AGENT_INTERPRETERS.contains(&program), "{program}");
+    crate::local::shell_env::find(program)
+        .unwrap_or_else(|| panic!("{program} is not on PATH"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 pub fn save(definition: Definition, create: bool) -> Result<()> {
@@ -743,11 +777,20 @@ mod tests {
     use super::*;
     use crate::local::harness::{OneShot, OneShotQuality};
 
+    #[test]
+    fn an_absolute_agent_outside_the_test_root_is_refused() {
+        let outside = std::path::absolute("/orx-not-an-agent").unwrap();
+        let found = std::panic::catch_unwind(|| executable_path(&outside.to_string_lossy()));
+        assert!(found.is_err(), "resolved {:?}", found.unwrap());
+        let interpreter = fake_agent_interpreter("python3");
+        assert_eq!(executable_path(&interpreter), Some(interpreter.into()));
+    }
+
     fn peer(mode: &str, record: &std::path::Path) -> Definition {
         Definition {
             id: format!("acp:{}", uuid::Uuid::new_v4()),
             name: "Peer".into(),
-            executable: if cfg!(windows) { "python" } else { "python3" }.into(),
+            executable: crate::local::acp::fake_agent_interpreter("python3"),
             arguments: vec![
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
@@ -1093,7 +1136,7 @@ for line in sys.stdin:
         let definition = Definition {
             id: format!("acp:{}", uuid::Uuid::new_v4()),
             name: "Catalog peer".into(),
-            executable: if cfg!(windows) { "python" } else { "python3" }.into(),
+            executable: crate::local::acp::fake_agent_interpreter("python3"),
             arguments: vec!["-u".into(), "-c".into(), peer.into()],
             unknown: Default::default(),
         };
@@ -1145,7 +1188,8 @@ for line in sys.stdin:
             expected.push(("fx", "fx", vec!["acp"]));
         }
         assert_eq!(commands, expected);
-        let file = std::env::current_exe().unwrap();
+        let file = crate::config::test_home().join("popular-agent");
+        std::fs::write(&file, "").unwrap();
         assert_eq!(executable_path(file.to_str().unwrap()), Some(file));
         assert!(executable_path("missing-popular-agent-28e8c11").is_none());
     }
@@ -1210,7 +1254,7 @@ for line in sys.stdin:
         let definition = Definition {
             id: format!("acp:{}", uuid::Uuid::new_v4()),
             name: "Test".into(),
-            executable: if cfg!(windows) { "python" } else { "python3" }.into(),
+            executable: crate::local::acp::fake_agent_interpreter("python3"),
             arguments: vec![
                 "-u".into(),
                 "-c".into(),
@@ -1225,8 +1269,12 @@ for line in sys.stdin:
         assert_eq!(result["status"], "connected");
         assert_eq!(result["agentInfo"]["version"], "1.0");
         use crate::local::harness::Harness;
+        let preset = presets()
+            .into_iter()
+            .find(|preset| preset.launch.executable == "grok")
+            .unwrap();
         let mut detected = definition.clone();
-        detected.id = presets()[0].launch.id.clone();
+        detected.id = preset.launch.id.clone();
         let adapter = crate::local::harness::acp::Acp(detected);
         let snapshot = adapter.detect_snapshot().await.unwrap();
         assert!(snapshot.installed);
@@ -1234,7 +1282,7 @@ for line in sys.stdin:
         let connected = adapter.detect().await.unwrap();
         assert!(connected.agent_ready);
         assert_eq!(connected.version.as_deref(), Some("1.0"));
-        assert_eq!(connected.setup_url, Some(presets()[0].setup_url));
+        assert_eq!(connected.setup_url, Some(preset.setup_url));
         let mut missing = definition;
         missing.executable = format!("missing-acp-{}", uuid::Uuid::new_v4());
         assert!(test_connection(&missing)

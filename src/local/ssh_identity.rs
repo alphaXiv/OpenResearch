@@ -108,7 +108,7 @@ pub async fn local_keys() -> Vec<LocalKey> {
 
     // On-disk keys first, so a key the agent also holds keeps the `.pub` path
     // `preferred_local` needs.
-    if let Some(dir) = dirs::home_dir().map(|h| h.join(".ssh")) {
+    if let Some(dir) = crate::config::home_dir().map(|h| h.join(".ssh")) {
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
@@ -280,7 +280,7 @@ pub fn remediation(registered: &[String], local: &[LocalKey]) -> String {
 /// `~/…` for a path under the home dir, so a command stays copy-pasteable
 /// without overflowing the line.
 pub fn tilde(path: &std::path::Path) -> String {
-    dirs::home_dir()
+    crate::config::home_dir()
         .and_then(|home| path.strip_prefix(&home).ok())
         .map(|rel| format!("~/{}", rel.display()))
         .unwrap_or_else(|| path.display().to_string())
@@ -290,7 +290,7 @@ pub fn tilde(path: &std::path::Path) -> String {
 /// `ssh -G` resolves them. `None` when ssh can't say, or when what it offers depends on the box
 /// (`%h`, `%r`, …) or comes from an agent or token `ssh-add` doesn't reach.
 pub async fn offered_identities() -> Option<Vec<PathBuf>> {
-    let home = dirs::home_dir()?;
+    let home = crate::config::home_dir()?;
     let config = home.join(".ssh").join("config");
     let resolved = tokio::time::timeout(
         Duration::from_secs(5),

@@ -139,7 +139,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         engine.clone(),
         clock.clone(),
         crate::store::data_dir(),
-        std::env::var_os("ORX_SSH_CONFIG").map(Into::into),
+        crate::config::ssh_config(),
     );
     let instance = uuid::Uuid::new_v4().to_string();
     let project_lifecycle = Arc::new(ProjectLifecycle::default());
@@ -4725,7 +4725,7 @@ fn validated_absolute_file_path(
         return Err(bad_request("invalid path"));
     }
     let resolved = match trimmed.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => dirs::home_dir()
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => crate::config::home_dir()
             .ok_or_else(|| bad_request("no home directory"))?
             .join(rest.trim_start_matches('/')),
         _ => std::path::PathBuf::from(trimmed),
@@ -7231,13 +7231,13 @@ async fn run_settings_command(
     let mut env = Vec::new();
     let program = if argv[0] == "zcode" && local::acp::executable_path("zcode").is_none() {
         let mut candidates = Vec::new();
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::config::home_dir() {
             candidates.push(home.join("Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"));
         }
         candidates.push(std::path::PathBuf::from(
             "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
         ));
-        if let Some(data) = dirs::data_local_dir() {
+        if let Some(data) = crate::config::data_local_dir() {
             candidates.push(data.join("Programs/ZCode/resources/glm/zcode.cjs"));
         }
         match (
@@ -7251,7 +7251,9 @@ async fn run_settings_command(
                     })
                     .filter(|home| !home.is_empty())
                     .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".zcode"));
+                    .unwrap_or_else(|| {
+                        crate::config::home_dir().unwrap_or_default().join(".zcode")
+                    });
                 env = zcode_provider_env(&cli, &home);
                 env.push(("ZCODE_HOME", home.into_os_string()));
                 args.insert(0, cli.to_string_lossy().into_owned());
@@ -11797,7 +11799,7 @@ mod tests {
 
     #[test]
     fn absolute_file_paths_expand_a_leading_tilde() {
-        let home = dirs::home_dir().expect("home dir");
+        let home = crate::config::home_dir().expect("home dir");
         // `~/x` and bare `~` resolve under home; the display stays as typed.
         assert_eq!(
             abs_path("~/.ssh/config"),

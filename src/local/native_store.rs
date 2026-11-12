@@ -36,7 +36,7 @@ fn user_env_path(key: &str) -> Option<PathBuf> {
 }
 
 fn home_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    crate::config::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 pub fn opencode_db(store: NativeStore) -> PathBuf {
@@ -46,7 +46,11 @@ pub fn opencode_db(store: NativeStore) -> PathBuf {
             let data = user_env_path("XDG_DATA_HOME")
                 .unwrap_or_else(|| home_dir().join(".local/share"))
                 .join("opencode");
-            data.join(user_env_path("OPENCODE_DB").unwrap_or_else(|| PathBuf::from("opencode.db")))
+            crate::config::test_contained(
+                data.join(
+                    user_env_path("OPENCODE_DB").unwrap_or_else(|| PathBuf::from("opencode.db")),
+                ),
+            )
         }
     }
 }
@@ -54,39 +58,51 @@ pub fn opencode_db(store: NativeStore) -> PathBuf {
 pub fn claude_home(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/claude"),
-        NativeStore::Legacy => {
-            user_env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"))
-        }
+        NativeStore::Legacy => crate::config::test_contained(
+            user_env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude")),
+        ),
     }
 }
 
 pub fn claude_secure_storage_config_dir() -> OsString {
+    let namespace =
+        user_env("CLAUDE_SECURESTORAGE_CONFIG_DIR").or_else(|| user_env("CLAUDE_CONFIG_DIR"));
+    if cfg!(test) {
+        // A test never reaches the user's Keychain namespace.
+        let namespace = namespace
+            .filter(|namespace| !namespace.is_empty())
+            .map_or_else(|| claude_home(NativeStore::Legacy), PathBuf::from);
+        return crate::config::test_contained(namespace).into_os_string();
+    }
     // Empty intentionally selects Claude's unsuffixed default Keychain namespace.
-    user_env("CLAUDE_SECURESTORAGE_CONFIG_DIR")
-        .or_else(|| user_env("CLAUDE_CONFIG_DIR"))
-        .unwrap_or_default()
+    namespace.unwrap_or_default()
 }
 
 pub fn codex_home(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/codex"),
-        NativeStore::Legacy => {
-            user_env_path("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex"))
-        }
+        NativeStore::Legacy => crate::config::test_contained(
+            user_env_path("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex")),
+        ),
     }
 }
 
 pub fn cursor_home(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/cursor"),
-        NativeStore::Legacy => user_env_path("CURSOR_CONFIG_DIR")
-            .or_else(|| user_env_path("XDG_CONFIG_HOME").map(|root| root.join("cursor")))
-            .unwrap_or_else(|| home_dir().join(".cursor")),
+        NativeStore::Legacy => crate::config::test_contained(
+            user_env_path("CURSOR_CONFIG_DIR")
+                .or_else(|| user_env_path("XDG_CONFIG_HOME").map(|root| root.join("cursor")))
+                .unwrap_or_else(|| home_dir().join(".cursor")),
+        ),
     }
 }
 
 pub fn cursor_skills_dir() -> PathBuf {
-    cursor_skills_dir_in(&home_dir(), user_env_path("CURSOR_CONFIG_DIR"))
+    crate::config::test_contained(cursor_skills_dir_in(
+        &home_dir(),
+        user_env_path("CURSOR_CONFIG_DIR"),
+    ))
 }
 
 fn cursor_skills_dir_in(home: &Path, config: Option<PathBuf>) -> PathBuf {
@@ -1487,6 +1503,139 @@ mod link_tests {
             "skill"
         );
         std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod home_guard_tests {
+    use super::*;
+
+    const OVERRIDES: [&str; 7] = [
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        "OPENCODE_DB",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "CURSOR_CONFIG_DIR",
+    ];
+
+    fn resolve_all() -> Vec<PathBuf> {
+        vec![
+            codex_home(NativeStore::Legacy),
+            claude_home(NativeStore::Legacy),
+            PathBuf::from(claude_secure_storage_config_dir()),
+            opencode_db(NativeStore::Legacy),
+            cursor_home(NativeStore::Legacy),
+            cursor_skills_dir(),
+            crate::local::harness::xdg_config_home(),
+        ]
+    }
+
+    /// A path outside every test root that this test never creates.
+    fn outside() -> PathBuf {
+        let temp = std::env::temp_dir();
+        let filesystem_root = temp.ancestors().last().unwrap();
+        filesystem_root.join(format!("orx-home-guard-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn assert_panics(what: &str, resolve: impl FnOnce() -> PathBuf) {
+        let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(resolve));
+        assert!(resolved.is_err(), "{what} resolved {:?}", resolved.unwrap());
+    }
+
+    #[test]
+    fn unset_and_empty_overrides_resolve_inside_the_test_home() {
+        if !crate::config::in_test_child(&OVERRIDES) {
+            return;
+        }
+        let home = crate::config::test_home();
+        for path in resolve_all() {
+            assert!(path.starts_with(&home), "{}", path.display());
+        }
+        for var in OVERRIDES {
+            std::env::set_var(var, "");
+        }
+        for path in resolve_all() {
+            assert!(path.starts_with(&home), "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn the_child_environment_already_points_inside_its_temp_dir() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let temp = std::env::temp_dir();
+        for var in OVERRIDES.iter().chain(&["HOME", "USERPROFILE"]) {
+            let value = std::env::var_os(var).unwrap_or_else(|| panic!("{var} is unset"));
+            assert!(PathBuf::from(value).starts_with(&temp), "{var}");
+        }
+        resolve_all();
+    }
+
+    #[test]
+    fn overrides_outside_the_test_root_panic() {
+        if !crate::config::in_test_child(&OVERRIDES) {
+            return;
+        }
+        let outside = outside();
+        for (var, resolve) in [
+            (
+                "CODEX_HOME",
+                (|| codex_home(NativeStore::Legacy)) as fn() -> PathBuf,
+            ),
+            ("CLAUDE_CONFIG_DIR", || claude_home(NativeStore::Legacy)),
+            ("CLAUDE_SECURESTORAGE_CONFIG_DIR", || {
+                claude_secure_storage_config_dir().into()
+            }),
+            ("XDG_DATA_HOME", || opencode_db(NativeStore::Legacy)),
+            ("OPENCODE_DB", || opencode_db(NativeStore::Legacy)),
+            ("CURSOR_CONFIG_DIR", cursor_skills_dir),
+            ("XDG_CONFIG_HOME", crate::local::harness::xdg_config_home),
+        ] {
+            std::env::set_var(var, &outside);
+            assert_panics(var, resolve);
+            std::env::remove_var(var);
+        }
+        std::env::set_var("OPENCODE_DB", "../../../../../../../../opencode.db");
+        assert_panics("a climbing OPENCODE_DB", || {
+            opencode_db(NativeStore::Legacy)
+        });
+        std::env::remove_var("OPENCODE_DB");
+
+        let synced = crate::config::test_home().join(".openresearch");
+        std::fs::create_dir_all(&synced).unwrap();
+        std::fs::write(
+            synced.join("env"),
+            format!("export CODEX_HOME='{}'\n", outside.display()),
+        )
+        .unwrap();
+        assert_panics("a synced CODEX_HOME", || codex_home(NativeStore::Legacy));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_the_test_root_panics() {
+        if !crate::config::in_test_child(&OVERRIDES) {
+            return;
+        }
+        let temp = std::env::temp_dir();
+        let escape = temp
+            .parent()
+            .unwrap()
+            .join(format!("orx-home-guard-escape-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&escape).unwrap();
+        let link = temp.join("codex-link");
+        std::os::unix::fs::symlink(&escape, &link).unwrap();
+        std::env::set_var("CODEX_HOME", link.join("home"));
+        let escaped = std::panic::catch_unwind(|| codex_home(NativeStore::Legacy)).is_err();
+        std::os::unix::fs::symlink(escape.join("gone"), temp.join("dangling")).unwrap();
+        std::env::set_var("CODEX_HOME", temp.join("dangling").join("home"));
+        let dangled = std::panic::catch_unwind(|| codex_home(NativeStore::Legacy)).is_err();
+        std::fs::remove_dir(&escape).unwrap();
+        assert!(escaped, "a symlinked CODEX_HOME escaped the test root");
+        assert!(dangled, "a dangling CODEX_HOME link escaped the test root");
     }
 }
 

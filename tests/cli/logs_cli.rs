@@ -13,8 +13,7 @@ impl Sandbox {
     }
     fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_orx"));
-        cmd.env("HOME", &self.0)
-            .env("USERPROFILE", &self.0)
+        crate::home::isolate_home(&mut cmd, &self.0)
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             .env("ORX_DATA_DIR", self.data_dir())
             .env("ORX_NO_UPDATE_CHECK", "1")

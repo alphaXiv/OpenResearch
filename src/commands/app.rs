@@ -107,8 +107,10 @@ fn app_link(arg: &str) -> Option<String> {
 /// Rewritten whenever it points elsewhere; `TryExec` hides it once the file goes.
 #[cfg(all(desktop_app, target_os = "linux"))]
 fn install_desktop_entry() {
-    let (Some(appimage), Some(data)) = (crate::updates::running_appimage(), dirs::data_dir())
-    else {
+    let (Some(appimage), Some(data)) = (
+        crate::updates::running_appimage(),
+        crate::config::data_local_dir(),
+    ) else {
         return;
     };
     let icon = data.join("icons/hicolor/256x256/apps/openresearch.png");
@@ -641,7 +643,7 @@ mod instance {
     /// Claims the app for this process. `None` means another instance has it
     /// and was asked to come forward, opening `link`.
     pub(super) fn claim(link: Option<&str>) -> Option<FocusRequests> {
-        let link_dir = dirs::data_local_dir().map(|dir| dir.join("OpenResearch"));
+        let link_dir = crate::config::data_local_dir().map(|dir| dir.join("OpenResearch"));
         // SAFETY: plain syscalls on NUL-terminated names. The handles stay open
         // on purpose: the claim lasts until the process exits.
         // Bound before the calls, so no drop runs between CreateMutexW and GetLastError.
@@ -720,7 +722,7 @@ mod instance {
         }
         // A home on NFS is shared across machines, and so would be a lock in it.
         let host = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
-        let dir = dirs::cache_dir()?.join("openresearch");
+        let dir = crate::config::cache_dir()?.join("openresearch");
         Some((dir, format!("openresearch-app-{}", host.trim())))
     }
 

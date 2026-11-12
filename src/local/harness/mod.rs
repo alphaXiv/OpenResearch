@@ -670,14 +670,16 @@ async fn detect_all(snapshot: bool) -> Vec<HarnessInfo> {
 pub(crate) fn xdg_config_home() -> PathBuf {
     // Ignore an unset *or* empty value — a set-but-empty XDG_CONFIG_HOME would
     // otherwise resolve to a relative `opencode/` path under the cwd.
-    crate::local::shell_env::var("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".config")
-        })
+    crate::config::test_contained(
+        crate::local::shell_env::var("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                crate::config::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".config")
+            }),
+    )
 }
 
 // --- skill shims --------------------------------------------------------------

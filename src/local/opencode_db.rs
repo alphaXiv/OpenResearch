@@ -1151,6 +1151,10 @@ mod tests {
 
     #[test]
     fn fresh_database_and_incompatible_schema_never_bypass_gate() {
+        // Another test's forked child can hold an inherited lease descriptor, so this runs alone.
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
         let fixture = Fixture::new();
         let path = fixture.path();
         assert_eq!(inspect(&path).unwrap(), DatabaseState::Empty);

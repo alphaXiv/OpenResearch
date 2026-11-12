@@ -90,7 +90,7 @@ pub fn resolve_token_with_source() -> Result<(String, TokenSource)> {
     if let Some(tok) = crate::config::synced_env_var("HF_TOKEN") {
         return Ok((tok, TokenSource::OpenresearchEnv));
     }
-    let path = dirs::home_dir()
+    let path = crate::config::home_dir()
         .unwrap_or_default()
         .join(".cache")
         .join("huggingface")

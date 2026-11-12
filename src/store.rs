@@ -165,23 +165,8 @@ pub(crate) fn acquire_data_dir_read_lock() -> Result<DataDirMoveLock> {
     acquire_data_dir_lock(data_dir_move_lock_path(), false)
 }
 
-/// Read an env var as a path, treating unset **and empty** the same (an empty
-/// `export ORX_DATA_DIR=` is a shell footgun that must not resolve to `""`).
-fn env_path(key: &str) -> Option<PathBuf> {
-    crate::local::shell_env::var(key)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-}
-
-/// `$ORX_DATA_DIR`. Under test only a fixture in the temp dir counts: one
-/// inherited from the developer's shell points at their real data.
 fn data_dir_override() -> Option<PathBuf> {
-    let dir = env_path("ORX_DATA_DIR")?;
-    #[cfg(test)]
-    if !dir.starts_with(std::env::temp_dir()) {
-        return None;
-    }
-    Some(dir)
+    crate::config::env_path("ORX_DATA_DIR")
 }
 
 /// `$XDG_DATA_HOME/openresearch` else `~/.local/share/openresearch` — the tail
@@ -190,8 +175,8 @@ fn xdg_default_data_dir() -> PathBuf {
     #[cfg(test)]
     let base = crate::config::test_home().join(".local").join("share");
     #[cfg(not(test))]
-    let base = env_path("XDG_DATA_HOME").unwrap_or_else(|| {
-        dirs::home_dir()
+    let base = crate::config::env_path("XDG_DATA_HOME").unwrap_or_else(|| {
+        crate::config::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".local")
             .join("share")
@@ -233,7 +218,7 @@ pub fn data_dir_source() -> DataDirSource {
     if crate::config::settings_data_dir().is_some() {
         return DataDirSource::Config;
     }
-    if env_path("XDG_DATA_HOME").is_some() {
+    if crate::config::env_path("XDG_DATA_HOME").is_some() {
         return DataDirSource::Xdg;
     }
     DataDirSource::Default

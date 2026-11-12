@@ -535,7 +535,7 @@ pub fn resolve_token() -> Result<Option<ModalToken>> {
         .ok()
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".modal.toml")))
+        .or_else(|| crate::config::home_dir().map(|home| home.join(".modal.toml")))
         .ok_or_else(|| anyhow!("Could not locate the Modal configuration."))?;
     let config = match std::fs::read_to_string(path) {
         Ok(body) => body.parse::<toml::Table>().map_err(|_| {

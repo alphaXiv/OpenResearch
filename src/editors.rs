@@ -111,9 +111,8 @@ pub fn file_manager_name(_locale: &str) -> Option<String> {
         if id.is_empty() || id.contains(['/', '\\']) {
             return None;
         }
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let data_home = std::env::var_os("XDG_DATA_HOME")
-            .map(std::path::PathBuf::from)
+        let home = crate::config::home_dir();
+        let data_home = crate::config::env_path("XDG_DATA_HOME")
             .or_else(|| home.map(|path| path.join(".local/share")));
         let dirs = crate::local::shell_env::host_gui_env()
             .into_iter()

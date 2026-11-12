@@ -12184,7 +12184,8 @@ mod run_wakeup_tests {
     async fn outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle() {
         const CHILD: &str = "ORX_TEST_CHAT_OUTBOX";
         if std::env::var_os(CHILD).is_none() {
-            let dir = std::env::temp_dir().join(format!("orx-outbox-{}", uuid::Uuid::new_v4()));
+            let dir =
+                crate::config::test_home().join(format!("orx-outbox-{}", uuid::Uuid::new_v4()));
             for phase in ["send", "restart"] {
                 let output = crate::process::command(std::env::current_exe().unwrap())
                     .args([
@@ -12425,8 +12426,8 @@ mod run_wakeup_tests {
     async fn outbox_wakes_on_idle_and_bus_and_retires_or_retries_delivery_failures() {
         const CHILD: &str = "ORX_TEST_OUTBOX_EVENTS";
         if std::env::var_os(CHILD).is_none() {
-            let dir =
-                std::env::temp_dir().join(format!("orx-outbox-events-{}", uuid::Uuid::new_v4()));
+            let dir = crate::config::test_home()
+                .join(format!("orx-outbox-events-{}", uuid::Uuid::new_v4()));
             let output = crate::process::command(std::env::current_exe().unwrap())
                 .args(["--exact", "local::chat::run_wakeup_tests::outbox_wakes_on_idle_and_bus_and_retires_or_retries_delivery_failures", "--nocapture"])
                 .env(CHILD, "1").env("ORX_DATA_DIR", &dir).env("ORX_NO_TELEMETRY", "1")
@@ -12492,7 +12493,7 @@ mod run_wakeup_tests {
         store.upsert_run(&run("done")).unwrap();
         notice_harness(&store);
         let mut launch = store.acp_session_state("other").unwrap().unwrap().launch;
-        launch.executable = if cfg!(windows) { "python" } else { "python3" }.into();
+        launch.executable = crate::local::acp::fake_agent_interpreter("python3");
         launch.arguments = vec![
             "-u".into(),
             "-c".into(),

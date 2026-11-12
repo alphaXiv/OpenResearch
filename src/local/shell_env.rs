@@ -43,10 +43,18 @@ static OVERRIDE: OnceLock<HashMap<&'static str, OsString>> = OnceLock::new();
 
 /// Like `env::var_os`, but preferring what the user's shell reported.
 pub fn var(key: &str) -> Option<OsString> {
-    OVERRIDE
+    let value = OVERRIDE
         .get()
         .and_then(|vars| vars.get(key).cloned())
-        .or_else(|| std::env::var_os(key))
+        .or_else(|| std::env::var_os(key));
+    #[cfg(test)]
+    if value
+        .as_deref()
+        .is_some_and(|value| crate::config::developers_home(key, value))
+    {
+        return None;
+    }
+    value
 }
 
 /// The PATH to search for the binaries orx spawns, and to hand its children.
@@ -165,20 +173,31 @@ pub const PATH_LIST_SEPARATOR: &str = ";";
 /// Where `binary` lives: what detection reports and what [`crate::process`]
 /// runs for a bare name.
 pub fn find(binary: &str) -> Option<PathBuf> {
-    installs(binary, []).into_iter().next()
+    every_install(binary, []).into_iter().next()
 }
 
-/// Every copy of `binary` worth trying, best first: the one on PATH, then the
-/// directories installers drop CLIs into without putting them on PATH, then the
-/// tool's `own` install locations. Only when none has it, `npx`'s cache. The path
-/// is returned as it sits in its directory; a caller that needs the real binary
-/// behind a symlink composes with `resolve_symlinks`.
+/// Every copy of the agent `binary` worth trying, best first: the one on PATH,
+/// then the directories installers drop CLIs into without putting them on PATH,
+/// then the agent's `own` install locations. Only when none has it, `npx`'s
+/// cache. The path is returned as it sits in its directory; a caller that needs
+/// the real binary behind a symlink composes with `resolve_symlinks`. Under test
+/// a copy outside the test's temp root is the developer's own and stays unseen.
 pub fn installs(binary: &str, own: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = dirs::home_dir()
+    let found = every_install(binary, own);
+    #[cfg(test)]
+    let found = found
+        .into_iter()
+        .filter(|path| crate::config::contained(path))
+        .collect();
+    found
+}
+
+fn every_install(binary: &str, own: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = crate::config::home_dir()
         .map(|home| vec![home.join(".local/bin"), home.join(".npm-global/bin")])
         .unwrap_or_default();
     #[cfg(windows)]
-    dirs.extend(dirs::config_dir().map(|roaming| roaming.join("npm")));
+    dirs.extend(crate::config::roaming_config_dir().map(|roaming| roaming.join("npm")));
     dirs.extend(own);
     let found: Vec<PathBuf> = find_on_path(binary)
         .into_iter()
@@ -196,8 +215,8 @@ pub fn installs(binary: &str, own: impl IntoIterator<Item = PathBuf>) -> Vec<Pat
 
 /// Where npm keeps `npx` runs by default.
 fn npx_roots() -> Vec<PathBuf> {
-    let windows_cache = cfg!(windows).then(dirs::cache_dir).flatten();
-    dirs::home_dir()
+    let windows_cache = cfg!(windows).then(crate::config::cache_dir).flatten();
+    crate::config::home_dir()
         .map(|home| home.join(".npm/_npx"))
         .into_iter()
         .chain(windows_cache.map(|cache| cache.join("npm-cache/_npx")))
@@ -390,6 +409,36 @@ pub fn parse_probe(stdout: &str, marker: &str) -> Option<HashMap<&'static str, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_on_path_outside_the_test_root_is_never_resolved() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let root = std::env::temp_dir();
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("orx-agent-outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&outside).unwrap();
+        let agent = outside.join(if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        });
+        std::fs::write(&agent, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::env::set_var("PATH", &outside);
+
+        let found = installs("claude", []);
+        std::fs::remove_dir_all(&outside).unwrap();
+
+        assert!(!found.contains(&agent), "{found:?}");
+    }
 
     #[test]
     fn a_tool_off_path_is_found_in_its_own_install_dir() {

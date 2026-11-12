@@ -48,7 +48,7 @@ pub(crate) struct ResolvedRuntime {
 /// `~/.opencode/bin`, which a stale npm-style `opencode` shim earlier on PATH
 /// otherwise hides.
 pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
-    let own = dirs::home_dir().map(|home| home.join(".opencode").join("bin"));
+    let own = crate::config::home_dir().map(|home| home.join(".opencode").join("bin"));
     // Resolved and de-duplicated: the native install is both on PATH and in its
     // drop directory, and probing that one binary twice costs a 15s timeout.
     crate::local::harness::unique_bins(

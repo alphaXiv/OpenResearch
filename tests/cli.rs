@@ -1,6 +1,9 @@
 // Out of the crate, so `crate::process` is unreachable; tests run from a terminal anyway.
 #![allow(clippy::disallowed_methods)]
 
+#[path = "common/home.rs"]
+mod home;
+
 #[path = "cli/antigravity_gate_cli.rs"]
 mod antigravity_gate_cli;
 #[path = "cli/compute_cli.rs"]
