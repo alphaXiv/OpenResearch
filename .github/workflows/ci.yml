@@ -349,18 +349,30 @@ jobs:
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev openssh-server zsh
           sudo mkdir -p /run/sshd
       - name: Install Rust toolchain
+        id: rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: linux-app
-          save-if: ${{ matrix.mode == 'all' }}
+          shared-key: linux-app-dev
+          save-if: ${{ !inputs.release && matrix.mode != 'lint' }}
+      - name: Cache incremental compilation
+        if: ${{ !inputs.release && matrix.mode != 'lint' }}
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env:
+          INCREMENTAL_KEY: incremental-linux-desktop-dev-v1-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
+        with:
+          path: target/debug/incremental
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
+          restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Clippy
         if: matrix.mode != 'build'
         run: cargo clippy --all-targets --locked --features desktop -- -D warnings
       - name: Build
-        if: github.event_name == 'pull_request' && !inputs.release && matrix.mode != 'lint'
+        if: ${{ !inputs.release && matrix.mode != 'lint' }}
+        env:
+          CARGO_INCREMENTAL: 1
         run: cargo build --locked --features desktop
       - name: Test
         if: github.event_name != 'pull_request' || inputs.release
