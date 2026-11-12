@@ -28,8 +28,7 @@ pub(crate) fn harnesses() -> impl Iterator<Item = &'static str> {
 
 const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
 const CODEX_CHANNEL: &str = "https://releases.openai.com/codex/channels/latest";
-const OPENCODE_RELEASES: &str =
-    "https://api.github.com/repos/anomalyco/opencode/releases?per_page=40";
+const OPENCODE_RELEASES: &str = "https://api.github.com/repos/anomalyco/opencode/releases";
 
 /// The host a harness's releases come from, as the install dialog names it.
 pub(crate) fn source(harness: &str) -> Option<&'static str> {
@@ -79,6 +78,13 @@ fn executable(harness: &str, release: &Path) -> PathBuf {
 
 /// The newest copy on disk: its executable and version.
 pub(crate) fn installed(harness: &str) -> Option<(PathBuf, semver::Version)> {
+    installed_for_major(harness, None)
+}
+
+pub(crate) fn installed_for_major(
+    harness: &str,
+    major: Option<u64>,
+) -> Option<(PathBuf, semver::Version)> {
     let harness = key(harness);
     let harness = harness.as_str();
     source(harness)?;
@@ -87,6 +93,9 @@ pub(crate) fn installed(harness: &str) -> Option<(PathBuf, semver::Version)> {
         .flatten()
         .filter_map(|entry| {
             let version = semver::Version::parse(entry.file_name().to_str()?).ok()?;
+            if major.is_some_and(|major| version.major != major) {
+                return None;
+            }
             let bin = executable(harness, &entry.path());
             bin.is_file().then_some((bin, version))
         })
@@ -218,33 +227,51 @@ pub(crate) async fn latest(harness: &str, major: Option<u64>) -> Result<Release>
             published_asset(&release, &asset, version, Format::TarGz)
         }
         "opencode" => {
-            let releases = get_json(&client, OPENCODE_RELEASES).await?;
-            opencode_release(&releases, &asset, major)
+            opencode_release(&client, OPENCODE_RELEASES, &asset, major.unwrap_or(2)).await
         }
         _ => bail!("orx does not install {harness}."),
     }
 }
 
-fn opencode_release(releases: &Value, asset: &str, major: Option<u64>) -> Result<Release> {
-    let major = major.unwrap_or(2);
+async fn opencode_release(
+    client: &reqwest::Client,
+    url: &str,
+    asset: &str,
+    major: u64,
+) -> Result<Release> {
+    let mut page = 1;
+    loop {
+        let releases = get_json(client, &format!("{url}?per_page=40&page={page}")).await?;
+        let releases = releases
+            .as_array()
+            .ok_or_else(|| anyhow!("GitHub returned an invalid OpenCode release list."))?;
+        if let Some(release) = newest_opencode(releases, asset, major) {
+            return release;
+        }
+        if releases.len() < 40 {
+            bail!("GitHub lists no OpenCode {major}.x release.");
+        }
+        page += 1;
+    }
+}
+
+/// The newest stable `major` release on one page of OpenCode's releases.
+fn newest_opencode(releases: &[Value], asset: &str, major: u64) -> Option<Result<Release>> {
     let (version, release) = releases
-        .as_array()
-        .into_iter()
-        .flatten()
+        .iter()
         .filter(|release| release["draft"] != true && release["prerelease"] != true)
         .filter_map(|release| {
             let tag = release["tag_name"].as_str()?.strip_prefix('v')?;
             Some((semver::Version::parse(tag).ok()?, release))
         })
         .filter(|(version, _)| version.major == major && version.pre.is_empty())
-        .max_by(|a, b| a.0.cmp(&b.0))
-        .ok_or_else(|| anyhow!("GitHub lists no OpenCode {major}.x release."))?;
+        .max_by(|a, b| a.0.cmp(&b.0))?;
     let format = if asset.ends_with(".zip") {
         Format::Zip
     } else {
         Format::TarGz
     };
-    published_asset(release, asset, version, format)
+    Some(published_asset(release, asset, version, format))
 }
 
 /// Claude Code's own updater follows `autoUpdatesChannel`, so the copy follows it too.
@@ -413,7 +440,7 @@ pub(crate) async fn install(
     let parent = root().join(harness);
     let target = parent.join(release.version.to_string());
     let bin = executable(harness, &target);
-    if bin.is_file() {
+    if bin.is_file() && verify(harness, &bin, &release.version).await.is_ok() {
         return Ok(bin);
     }
     tokio::fs::create_dir_all(&parent)
@@ -441,6 +468,11 @@ pub(crate) async fn install(
             .await
             .map_err(|error| anyhow!("Unpacking failed: {error}"))??;
         verify(harness, &executable(harness, &unpacked), &release.version).await?;
+        if target.exists() {
+            tokio::fs::remove_dir_all(&target).await.with_context(|| {
+                format!("Could not replace the broken copy at {}", target.display())
+            })?;
+        }
         place(&unpacked, &target).await
     }
     .await;
@@ -660,7 +692,7 @@ fn unpack(harness: &str, format: &Format, archive: &Path, into: &Path) -> Result
 }
 
 /// Runs the unpacked executable, which must name the version it was downloaded as.
-async fn verify(harness: &str, bin: &Path, version: &semver::Version) -> Result<()> {
+pub(crate) async fn verify(harness: &str, bin: &Path, version: &semver::Version) -> Result<()> {
     let reported = if harness == "opencode" {
         // OpenCode writes state on any run, so it answers in a scratch home.
         crate::local::opencode::resolve_binary_at(bin.to_path_buf())
@@ -689,6 +721,12 @@ async fn verify(harness: &str, bin: &Path, version: &semver::Version) -> Result<
             .await
             .map_err(|_| anyhow!("The downloaded {harness} did not answer `--version`."))?
             .with_context(|| format!("Could not run the downloaded {harness}"))?;
+        if !output.status.success() {
+            bail!(
+                "The downloaded {harness} failed `--version`: {}",
+                output.status
+            );
+        }
         String::from_utf8_lossy(&output.stdout).into_owned()
     };
     if parse(&reported).as_ref() != Some(version) {
@@ -858,6 +896,113 @@ mod tests {
     }
 
     #[test]
+    fn managed_opencode_selection_respects_the_users_major() {
+        let base = root().join("opencode");
+        for version in ["1.99.0", "2.99.0"] {
+            let dir = base.join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(executable("opencode", &dir), "fixture").unwrap();
+        }
+        assert_eq!(installed_for_major("opencode", Some(1)).unwrap().1.major, 1);
+        assert_eq!(installed_for_major("opencode", Some(2)).unwrap().1.major, 2);
+        assert_eq!(installed_for_major("opencode", Some(3)), None);
+        for version in ["1.99.0", "2.99.0"] {
+            std::fs::remove_dir_all(base.join(version)).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_release_follows_pages_for_older_majors() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        let app = Router::new().route("/releases", get(|Query(query): Query<std::collections::HashMap<String, String>>| async move {
+            let version = if query["page"] == "1" { "2.0.0" } else { "1.99.0" };
+            let release = serde_json::json!({
+                "tag_name": format!("v{version}"),
+                "assets": [{"name":"opencode.zip", "browser_download_url":"https://example.test/asset", "digest":"sha256:abc"}]
+            });
+            Json(if query["page"] == "1" { serde_json::json!(vec![release;40]) } else { serde_json::json!([release]) })
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/releases", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let release = opencode_release(&client().unwrap(), &url, "opencode.zip", 1)
+            .await
+            .unwrap();
+        assert_eq!(release.version, semver::Version::new(1, 99, 0));
+        assert!(
+            opencode_release(&client().unwrap(), &url, "opencode.zip", 3)
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_repairs_damaged_and_nonexecutable_current_copies() {
+        use axum::{routing::get, Router};
+        use std::os::unix::fs::PermissionsExt;
+        let version = semver::Version::new(0, 0, 978);
+        let bytes = b"#!/bin/sh\necho codex-cli 0.0.978\n";
+        let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "bin/codex", &bytes[..])
+            .unwrap();
+        let archive = archive.into_inner().unwrap().finish().unwrap();
+        let sha256 = format!("{:x}", Sha256::digest(&archive));
+        let app = Router::new().route(
+            "/archive",
+            get(move || {
+                let archive = archive.clone();
+                async move { archive }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/archive", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let release = Release {
+            version: version.clone(),
+            url,
+            sha256,
+            format: Format::TarGz,
+        };
+        let target = root().join("codex").join(version.to_string());
+        let bin = executable("codex", &target);
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        for (content, mode) in [
+            (b"damaged".as_slice(), 0o755),
+            (&bytes[..], 0o644),
+            (
+                b"#!/bin/sh\necho codex-cli 0.0.978\nexit 1\n".as_slice(),
+                0o755,
+            ),
+        ] {
+            std::fs::write(&bin, content).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(verify("codex", &bin, &version).await.is_err());
+            assert!(!matches!(
+                crate::local::harness::detect::probe_bin(&bin).await,
+                crate::local::harness::detect::BinProbe::Answered(_)
+            ));
+            assert_eq!(
+                install("codex", &release, &mut |_, _| {}).await.unwrap(),
+                bin
+            );
+            verify("codex", &bin, &version).await.unwrap();
+            assert_eq!(std::fs::read(&bin).unwrap(), bytes);
+        }
+        std::fs::remove_dir_all(target).unwrap();
+        server.abort();
+    }
+
+    #[test]
     fn versions_read_from_cli_banners() {
         assert_eq!(
             parse("2.1.318 (Claude Code)"),
@@ -915,18 +1060,20 @@ mod tests {
             "assets":[{"name":"opencode.zip","browser_download_url":"https://example.test/asset","digest":"sha256:abc"}]
         })));
         assert_eq!(
-            opencode_release(&releases, "opencode.zip", None)
+            newest_opencode(releases.as_array().unwrap(), "opencode.zip", 2)
+                .unwrap()
                 .unwrap()
                 .version,
             semver::Version::new(2, 2, 5)
         );
         assert_eq!(
-            opencode_release(&releases, "opencode.zip", Some(1))
+            newest_opencode(releases.as_array().unwrap(), "opencode.zip", 1)
+                .unwrap()
                 .unwrap()
                 .version,
             semver::Version::new(1, 19, 5)
         );
-        assert!(opencode_release(&releases, "opencode.zip", Some(4)).is_err());
+        assert!(newest_opencode(releases.as_array().unwrap(), "opencode.zip", 4).is_none());
     }
 
     #[test]
