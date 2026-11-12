@@ -450,7 +450,7 @@ async fn prepare_database_waiting(
         ));
     }
     let mut cmd = crate::process::tokio_command(&binary.path);
-    crate::local::local_models::prepare_env(&mut cmd, None)?;
+    crate::local::local_models::prepare_env(&mut cmd, None, binary.protocol)?;
     cmd.current_dir(
         lease
             .path()

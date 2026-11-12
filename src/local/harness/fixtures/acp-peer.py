@@ -96,6 +96,12 @@ for line in sys.stdin:
         if mode == "legacy-models":
             reply(request, dict(sessionId=session, models=dict(currentModelId="first", availableModels=[
                 dict(modelId="first", name="First"), dict(modelId="second", name="Second")])))
+        elif mode == "no-models":
+            reply(request, dict(sessionId=session))
+        elif mode == "other-options":
+            reply(request, dict(sessionId=session, configOptions=config()[1:]))
+        elif mode == "empty-models":
+            reply(request, dict(sessionId=session, models=dict(availableModels=[])))
         elif mode in ["startup", "startup-other"]:
             reply(request, dict(sessionId=session, configOptions=config(), _meta=dict(piAcp=dict(startupInfo=startup))))
             pending = startup if mode == "startup" else "Update available\n"

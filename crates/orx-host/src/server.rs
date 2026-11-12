@@ -227,44 +227,23 @@ impl Host {
                 })
             }
             Request::HasBlob { sha, len } => Ok(Response::HasBlob {
-                present: self.has_blob(&sha, len)?,
+                present: self.has_blob(&sha, len).map_err(|error| {
+                    staging(error, "checking the source in", &self.root.join("sources"))
+                })?,
             }),
             Request::PinSource { run, sha } => {
                 check_sha(&sha)?;
                 let dir = run_dir(&self.root, &run)?;
-                fs::create_dir_all(&dir)?;
-                let mutex = crate::run_mutex(&dir)?;
-                let _local = mutex
-                    .lock()
-                    .map_err(|_| io::Error::other("run lock poisoned"))?;
-                let Some(_ownership) = lock(&dir.join("launch.lock"))? else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "launch is being staged",
-                    ));
-                };
-                fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-                crate::slow_request();
-                let cross_device = crate::cross_device();
                 Ok(Response::PinSource {
-                    pinned: pin_source(
-                        &self.root.join("sources"),
-                        &sha,
-                        &dir,
-                        |blob, target| match cross_device {
-                            true => Err(io::Error::from_raw_os_error(libc::EXDEV)),
-                            false => fs::hard_link(blob, target),
-                        },
-                        if cross_device {
-                            Duration::ZERO
-                        } else {
-                            PIN_SLICE
-                        },
-                    )?,
+                    pinned: self
+                        .pin(&dir, &sha)
+                        .map_err(|error| staging(error, "copying the source into", &dir))?,
                 })
             }
             Request::PutBlob { sha, offset, bytes } => Ok(Response::PutBlob {
-                len: self.put_blob(&sha, offset, &bytes)?,
+                len: self.put_blob(&sha, offset, &bytes).map_err(|error| {
+                    staging(error, "writing the source to", &self.root.join("sources"))
+                })?,
             }),
             Request::SlurmSubmit { intent, directives } => {
                 let run = intent.run.clone();
@@ -655,6 +634,37 @@ impl Host {
         Ok(true)
     }
 
+    fn pin(&self, dir: &Path, sha: &str) -> io::Result<bool> {
+        fs::create_dir_all(dir)?;
+        let mutex = crate::run_mutex(dir)?;
+        let _local = mutex
+            .lock()
+            .map_err(|_| io::Error::other("run lock poisoned"))?;
+        let Some(_ownership) = lock(&dir.join("launch.lock"))? else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "launch is being staged",
+            ));
+        };
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        crate::slow_request();
+        let cross_device = crate::cross_device();
+        pin_source(
+            &self.root.join("sources"),
+            sha,
+            dir,
+            |blob, target| match cross_device {
+                true => Err(io::Error::from_raw_os_error(libc::EXDEV)),
+                false => fs::hard_link(blob, target),
+            },
+            if cross_device {
+                Duration::ZERO
+            } else {
+                PIN_SLICE
+            },
+        )
+    }
+
     fn put_blob(&self, hash: &str, offset: u64, bytes: &[u8]) -> io::Result<u64> {
         check_sha(hash)?;
         if bytes.len() > 256 * 1024 || offset.checked_add(bytes.len() as u64).is_none() {
@@ -819,8 +829,11 @@ impl Host {
                         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                         Err(error) => return Err(error),
                     };
-                    let fact = match previous {
-                        Some(fact) if fact.job == job && fact.state == state => fact,
+                    match previous {
+                        Some(fact) if fact.job == job && fact.state == state => {
+                            Ok(fact.since.elapsed().unwrap_or_default())
+                        }
+                        // A slow fsync must not count toward the grace of a state first seen now.
                         _ => {
                             let fact = SchedulerTerminal {
                                 job: job.into(),
@@ -828,10 +841,9 @@ impl Host {
                                 since: SystemTime::now(),
                             };
                             publish(&path, &fact)?;
-                            return Ok(Duration::ZERO);
+                            Ok(Duration::ZERO)
                         }
-                    };
-                    Ok(fact.since.elapsed().unwrap_or_default())
+                    }
                 }
                 _ => Ok(Duration::ZERO),
             }
@@ -1055,6 +1067,32 @@ impl Host {
             jobs: jobs.into_values().collect(),
         })
     }
+}
+
+/// An OS error while staging a source, naming the step and directory, with the fix for a cause
+/// the user can clear.
+fn staging(error: io::Error, step: &str, dir: &Path) -> io::Error {
+    if error.raw_os_error().is_none() {
+        return error;
+    }
+    let fix = match error.kind() {
+        io::ErrorKind::QuotaExceeded => {
+            " Free space within your disk quota (`quota -s` shows it), then run the experiment again.".into()
+        }
+        io::ErrorKind::StorageFull => format!(
+            " Free space on its disk (`df -h {}`), then run the experiment again.",
+            quote(dir)
+        ),
+        io::ErrorKind::PermissionDenied => format!(
+            " Make it writable by you (`ls -ld {}`), then run the experiment again.",
+            quote(dir)
+        ),
+        _ => String::new(),
+    };
+    io::Error::new(
+        error.kind(),
+        format!("{error} {step} {}.{fix}", dir.display()),
+    )
 }
 
 fn invalid<T>(message: &str) -> io::Result<T> {

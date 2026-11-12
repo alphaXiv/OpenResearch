@@ -35,7 +35,7 @@ impl Engine {
                     Err(error) => return Err(error.into()),
                 };
                 match file.try_lock() {
-                    Ok(()) => {}
+                    Ok(()) => drop(crate::file_lock::FileLock::new(file)),
                     Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
                     Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
                 }

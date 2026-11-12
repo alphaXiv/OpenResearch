@@ -41,7 +41,7 @@ use crate::{browser, UpArgs};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub(crate) const DASHBOARD_PROTOCOL: u32 = 5;
+pub(crate) const DASHBOARD_PROTOCOL: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3260,15 +3260,15 @@ mod tests {
         let flag = base.join("ran");
         for dir in [&trusted_dir, &refused_dir] {
             let binary = dir.join("orx");
-            std::fs::write(
+            orx_test_support::write_executable(
                 &binary,
                 format!(
                     "#!/bin/sh\ntouch {}\necho 'orx 9.9.9'\n",
                     crate::jobs::ssh::sh_quote(flag.to_str().unwrap())
                 ),
+                0o755,
             )
             .unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
         let run_probe = |binary: &std::path::Path| -> String {
@@ -3317,8 +3317,8 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
         let binary = dir.join("orx");
-        std::fs::write(&binary, "#!/bin/sh\necho 'orx 9.9.9'\n").unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        orx_test_support::write_executable(&binary, "#!/bin/sh\necho 'orx 9.9.9'\n", 0o755)
+            .unwrap();
 
         let probe = remote_orx_probe(&format!(
             "p={};",

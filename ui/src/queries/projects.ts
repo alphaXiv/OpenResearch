@@ -75,9 +75,9 @@ export function createProjectQueries(client: WorkspaceClient, api: Api) {
     staleTime: 3_600_000,
   });
 
-  const getProjectStarterPromptsQuery = (projectId: string, harness: api.HarnessId, model: string | null, locale: string) => queryOptions({
-    queryKey: workspaceKey("getProjectStarterPrompts", projectId, harness, model, locale),
-    queryFn: ({ signal }) => api.getProjectStarterPrompts(projectId, harness, model, locale, signal),
+  const getProjectStarterPromptsQuery = (projectId: string, harness: api.HarnessId, model: string | null, locale: string, profile: string | null) => queryOptions({
+    queryKey: workspaceKey("getProjectStarterPrompts", projectId, harness, model, locale, profile),
+    queryFn: ({ signal }) => api.getProjectStarterPrompts(projectId, harness, model, locale, profile, signal),
     staleTime: 300_000,
     refetchOnWindowFocus: false,
     retryOnMount: false,
@@ -138,7 +138,8 @@ export const mutCreateProject = mutations.define({
 
 export const mutImportSharedProject = mutations.define({
   id: "projects/import",
-  mutate: (ws: Workspace, path: string, source: api.SharedSource) => ws.api.importSharedProject(path, source),
+  mutate: (ws: Workspace, path: string, source: api.SharedSource, onProgress: (progress: api.OperationProgress) => void) =>
+    ws.api.importSharedProject(path, source, onProgress),
   optimistic({ args: [ws], onSuccess }) {
     onSuccess(({ project }) => showProject(ws, project));
   },
@@ -180,7 +181,8 @@ export const mutDeleteProject = mutations.define({
 
 export const mutPublishProject = mutations.define({
   id: "projects/publish",
-  mutate: (ws: Workspace, projectId: string, choice: api.ShareChoice) => ws.api.publishProject(projectId, choice),
+  mutate: (ws: Workspace, projectId: string, choice: api.ShareChoice, onProgress: (progress: api.OperationProgress) => void) =>
+    ws.api.publishProject(projectId, choice, onProgress),
   optimistic({ args: [ws, projectId], onSuccess }) {
     onSuccess(({ sharedProject }) =>
       ws.setScopedQueryData(ws.queries.getProjectLinkQuery(projectId).queryKey, { signedIn: true, sharedProject }));

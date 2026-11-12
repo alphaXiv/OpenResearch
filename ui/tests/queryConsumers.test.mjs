@@ -6,6 +6,7 @@ import { TARGET_LABELS } from "../src/computeTargets.ts";
 import { m } from "../src/paraglide/messages.js";
 import { assistantMessage, codex, composer, deferred, emit, renderChat, session, userMessage } from "./chat.mjs";
 import { clients, find, press, render, renderApp, serve, serveApp, settle, type } from "./render.mjs";
+import { model } from "./models.mjs";
 
 const click = async (element) => {
   await act(async () => element.click());
@@ -21,7 +22,7 @@ const field = (label) => [...document.querySelectorAll("label")].find((element) 
 const targets = {
   k8s: {
     fields: { namespace: () => m.settings_page_namespace() },
-    reply: (value) => ({ configured: true, contexts: [], currentContext: null, context: null, namespace: value, preflight: { kubectlFound: true, reachable: true, canCreateJobs: true } }),
+    reply: (value) => ({ configured: true, contexts: [], currentContext: null, context: null, namespace: value, preflight: { kubectlFound: true, reachable: true, canCreateJobs: true, canPatchJobs: true } }),
   },
   slurm: {
     fields: { partition: () => m.settings_page_partition(), account: () => m.settings_page_account(), timeLimit: () => m.settings_page_time_limit() },
@@ -58,18 +59,40 @@ for (const [id, { fields, reply }] of Object.entries(targets)) {
   });
 }
 
-test("harness settings list installed harnesses and saved custom agents, but not presets", async () => {
-  const harness = (id, installed) => ({ ...codex, id, name: id, installed, agentReady: true });
+test("agent settings list what works, OpenResearch's accounts and installs, and saved custom agents", async () => {
+  const harness = (id, fields = {}) => ({ ...codex, id, name: id, installed: true, agentReady: true, ...fields });
+  const work = harness("claude-code", { profile: { id: "claude-0123456789", name: "Work" } });
+  let harnesses = [
+    harness("opencode", { agentReady: false }), work, harness("codex", { installed: false, agentReady: false }), harness("claude-code", { agentReady: false }),
+    harness("acp:custom", { installed: false, agentReady: false }), harness("acp:preset", { installed: false, agentReady: false }),
+    // A program that only shares an agent's name: found, but never working.
+    harness("acp:fx", { agentReady: false, authState: "unknown" }),
+  ];
   serveApp({
     "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
-    "GET /api/harnesses": () => ({ harnesses: [harness("opencode", true), { ...harness("codex", false), agentReady: false }, harness("claude-code", true), harness("acp:custom", false), harness("acp:preset", false)] }),
+    "GET /api/settings/ui-state": () => ({ onboardingCompleted: true, hiddenAgents: [], hiddenModels: [], modelSectionOrder: [] }),
+    "GET /api/harnesses": () => ({ harnesses }),
     "GET /api/harnesses/acp": () => [{ id: "acp:custom", name: "acp:custom", executable: "custom", arguments: [] }],
     "GET /api/harnesses/acp/presets": () => [],
     "GET /api/harnesses/setup/commands": () => ({}),
+    "GET /api/opencode/providers": () => [],
+    "GET /api/local-models": () => [],
   });
   await renderApp("/projects/p/settings/harnesses");
-  const rows = [...document.querySelectorAll('button[aria-controls*="harness-details-"]')].map((row) => row.getAttribute("aria-controls").split("harness-details-")[1]);
-  assert.deepEqual(rows, ["claude-code", "opencode", "acp:custom"]);
+  const rows = () => [...document.querySelectorAll('button[aria-controls*="agent-details-"]')].map((row) => row.getAttribute("aria-controls").split("agent-details-")[1]);
+  // An agent found on this computer shows once it works; what was added here always shows.
+  assert.deepEqual(rows(), ["claude-0123456789", "acp:custom"]);
+
+  harnesses = harnesses.map((h) => h.id === "claude-code" && !h.profile ? { ...h, agentReady: true } : h);
+  await refresh();
+  // What OpenResearch keeps lists first, then what it found.
+  assert.deepEqual(rows(), ["claude-0123456789", "acp:custom", "claude-code"]);
+
+  // An agent OpenResearch installed for itself is kept, signed in or not; its copy of Codex stands in for the user's.
+  harnesses = [...harnesses.filter((h) => h.id !== "codex"), harness("antigravity", { managed: true, agentReady: false }), harness("codex", { managed: true, agentReady: false })];
+  await refresh();
+  assert.ok(rows().includes("antigravity"));
+  assert.ok(!rows().includes("codex"));
 });
 
 test("queued chat writes stop when their captured workspace retires", async () => {
@@ -195,7 +218,7 @@ test("an edit typed while the send prepares survives the send", async () => {
 
 test("a late agent switch cannot replace a newer chat's selection or draft settings", async () => {
   const claude = {
-    ...codex, id: "claude-code", name: "Claude Code", models: [{ id: "target-model" }, { id: "newer-model" }],
+    ...codex, id: "claude-code", name: "Claude Code", models: [model("target-model"), model("newer-model")],
     options: { ...codex.options, permissionModes: [{ id: "auto", label: "Auto" }, { id: "plan", label: "Plan" }] },
   };
   const switched = deferred();
@@ -206,12 +229,12 @@ test("a late agent switch cannot replace a newer chat's selection or draft setti
   });
   const picker = (index = 0) => [...document.querySelectorAll('[data-onboarding="composer"]')[index].querySelectorAll('[data-onboarding="model-picker"] button')]
     .map((button) => button.getAttribute("aria-label"));
-  await composer().pick("target-model");
+  await composer().pick("Target Model", "Claude Code");
 
   await chat.navigate(`/projects/p/tasks/new?pane=${encodeURIComponent(JSON.stringify({ kind: "side", sessionId: "side" }))}`);
   await composer().type("/plan");
   await press("Enter", composer().field());
-  await composer(1).pick("newer-model");
+  await composer(1).pick("Newer Model", "Claude Code");
   const newer = picker();
   assert.deepEqual(newer, [m.a11y_chat_model({ label: "Newer Model" }), `${m.model_picker_permissions()}: Plan, ${m.model_picker_autonomy_agentic()}`]);
 

@@ -84,6 +84,7 @@ const ENTRYPOINT_PREFIXES: &[&str] = &[
 /// The chat harness that writes the prompts, and the model it runs on.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Agent {
+    pub profile: Option<String>,
     pub harness: String,
     pub model: Option<String>,
 }
@@ -217,10 +218,15 @@ async fn generate(
     match lock_map(cache()).get(&key) {
         Some(Cached::Prompts(prompts)) => return Some(prompts.clone()),
         // Only the agent that failed is held back; another may still answer.
-        Some(Cached::Failed { at, harness, model })
-            if at.elapsed() < FAILURE_TTL
-                && *harness == agent.harness
-                && model.as_deref() == agent.effective_model() =>
+        Some(Cached::Failed {
+            at,
+            harness,
+            model,
+            profile,
+        }) if at.elapsed() < FAILURE_TTL
+            && *harness == agent.harness
+            && *profile == agent.profile
+            && model.as_deref() == agent.effective_model() =>
         {
             return None;
         }
@@ -239,6 +245,7 @@ async fn generate(
         None => Cached::Failed {
             at: Instant::now(),
             harness: agent.harness.clone(),
+            profile: agent.profile.clone(),
             model: agent.effective_model().map(String::from),
         },
     };
@@ -271,6 +278,7 @@ async fn generate_uncached(
         .ok()?;
     let raw = harness
         .one_shot(OneShot {
+            profile: agent.profile.as_deref(),
             system: SYSTEM_PROMPT,
             prompt: &prompt,
             quality: OneShotQuality::Standard,
@@ -289,6 +297,7 @@ pub(crate) fn preferred_agent() -> Option<Agent> {
         .ok()
         .and_then(|state| state.preferred_agent)
         .map(|agent| Agent {
+            profile: agent.profile,
             harness: agent.harness,
             model: agent.model,
         })
@@ -297,25 +306,50 @@ pub(crate) fn preferred_agent() -> Option<Agent> {
 
 /// The user's preferred chat agent, else the first harness that is ready.
 pub(crate) async fn resolve_agent(selection: Option<Agent>) -> Option<Agent> {
-    if let Some(agent) = selection.filter(|agent| agent.harness == "opencode") {
-        return Some(agent);
+    if let Some(agent) = selection {
+        return (super::harness::is_chat_harness(&agent.harness)
+            && agent
+                .model
+                .as_deref()
+                .is_some_and(super::harness::concrete_model))
+        .then_some(agent);
     }
-    let preferred = tokio::task::spawn_blocking(preferred_agent)
+    let agent = tokio::task::spawn_blocking(preferred_agent)
         .await
         .ok()
         .flatten();
-    match preferred {
-        Some(agent) => Some(agent),
-        None => super::harness::detect_harnesses()
-            .await
-            .into_iter()
-            .find(|info| info.agent_ready)
-            .map(|info| Agent {
-                harness: info.id.to_string(),
-                // What the composer seeds a fresh session with.
-                model: info.models.first().map(|m| m.id.clone()),
-            }),
+    if let Some(mut agent) = agent {
+        if !super::harness::is_chat_harness(&agent.harness) {
+            return None;
+        }
+        if agent
+            .model
+            .as_deref()
+            .is_some_and(super::harness::concrete_model)
+        {
+            return Some(agent);
+        }
+        let info = super::harness::detect_harness(&agent.harness).await?;
+        let mut entries = vec![serde_json::to_value(info).ok()?];
+        entries.extend(crate::local::agent_profiles::entries(&entries).await.ok()?);
+        agent.model = super::harness::selected_model(
+            &serde_json::json!({"harnesses":entries}),
+            &agent.harness,
+            agent.profile.as_deref(),
+            None,
+        )
+        .ok()?;
+        return agent.model.is_some().then_some(agent);
     }
+    super::harness::detect_harnesses()
+        .await
+        .into_iter()
+        .find(|info| info.default_model.is_some())
+        .map(|info| Agent {
+            profile: None,
+            harness: info.id,
+            model: info.default_model,
+        })
 }
 
 /// Generate in the background for a just-created project, so the first open
@@ -338,6 +372,7 @@ enum Cached {
     Failed {
         at: Instant,
         harness: String,
+        profile: Option<String>,
         model: Option<String>,
     },
 }
@@ -761,6 +796,7 @@ mod tests {
         let key = fingerprint(&brief(&project, &list_files(&root)), "en");
         for model in [None, Some("  ".to_string())] {
             let agent = Agent {
+                profile: None,
                 harness: "opencode".into(),
                 model,
             };
@@ -781,6 +817,7 @@ mod tests {
         lock_map(cache()).insert(key.clone(), Cached::Prompts(cached.clone()));
         for model in [Some("provider/a".into()), Some("provider/b".into()), None] {
             let agent = Agent {
+                profile: None,
                 harness: "opencode".into(),
                 model,
             };
@@ -793,24 +830,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supplied_selection_keeps_custom_and_missing_models() {
-        for (harness, model) in [
-            ("opencode", Some("custom/private-model".into())),
-            ("opencode", None),
-        ] {
-            let agent = Agent {
-                harness: harness.into(),
-                model,
-            };
-            assert_eq!(
-                resolve_agent(Some(agent.clone())).await,
-                Some(agent.clone())
-            );
-            assert_eq!(
-                agent.missing_opencode_model(),
-                harness == "opencode" && agent.model.is_none()
-            );
-        }
+    async fn supplied_selection_keeps_custom_models_and_requires_a_known_choice() {
+        let agent = Agent {
+            profile: None,
+            harness: "opencode".into(),
+            model: Some("custom/private-model".into()),
+        };
+        assert_eq!(
+            resolve_agent(Some(agent.clone())).await,
+            Some(agent.clone())
+        );
+        let missing = Agent {
+            model: None,
+            ..agent
+        };
+        assert_eq!(resolve_agent(Some(missing)).await, None);
     }
 
     #[test]

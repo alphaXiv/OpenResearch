@@ -88,7 +88,7 @@ pub(super) async fn detect(definition: &Definition, info: &mut HarnessInfo) {
     match status {
         Status::Configured => {
             info.auth_state = HarnessAuthState::Ready;
-            info.agent_note = Some("Provider credentials or model configuration found. Provider acceptance and available credits have not been checked.".into());
+            info.agent_note = None;
         }
         Status::Missing | Status::Expired | Status::Blocked => {
             info.agent_ready = false;
@@ -109,9 +109,8 @@ pub(super) async fn detect(definition: &Definition, info: &mut HarnessInfo) {
 }
 
 async fn native_output(executable: &str, args: &[&str]) -> Option<std::process::Output> {
-    let mut command = crate::process::tokio_command(executable_path(executable)?);
+    let mut command = super::super::managed::command(&executable_path(executable)?);
     command.args(args).stdin(std::process::Stdio::null());
-    crate::local::chat::prepare_env(&mut command);
     command.env("NO_COLOR", "1");
     let output = detect_spawn_output_timed(command, Duration::from_secs(20))
         .await?
@@ -120,7 +119,7 @@ async fn native_output(executable: &str, args: &[&str]) -> Option<std::process::
 }
 
 async fn deepseek(definition: &Definition) -> Status {
-    let Some(node) = executable_path("node") else {
+    let Some(node) = super::super::managed::node().or_else(|| executable_path("node")) else {
         return Status::Unknown;
     };
     let Some(executable) = executable_path(&definition.executable) else {
@@ -129,10 +128,11 @@ async fn deepseek(definition: &Definition) -> Status {
     let mut command = crate::process::tokio_command(node);
     command.args(["-e", include_str!("deepseek-auth.cjs")]);
     command
-        .arg(executable)
+        .arg(&executable)
         .arg(serde_json::to_string(&definition.arguments).unwrap_or_default());
     command.stdin(std::process::Stdio::null());
     crate::local::chat::prepare_env(&mut command);
+    super::super::managed::environment(&mut command, &executable);
     match detect_spawn_output_timed(command, Duration::from_secs(15)).await {
         Some(Ok(output)) if output.status.success() => match output.stdout.as_slice() {
             b"configured" => Status::Configured,
@@ -144,7 +144,7 @@ async fn deepseek(definition: &Definition) -> Status {
 }
 
 async fn zcode(definition: &Definition) -> Status {
-    let Some(node) = executable_path("node") else {
+    let Some(node) = super::super::managed::node().or_else(|| executable_path("node")) else {
         return Status::Unknown;
     };
     let Some(executable) = executable_path(&definition.executable) else {
@@ -156,9 +156,10 @@ async fn zcode(definition: &Definition) -> Status {
         include_str!("../../acp/zcode-runtime.cjs"),
         include_str!("zcode-auth.cjs")
     );
-    command.args(["-e", &script]).arg(executable);
+    command.args(["-e", &script]).arg(&executable);
     command.stdin(std::process::Stdio::null());
     crate::local::chat::prepare_env(&mut command);
+    super::super::managed::environment(&mut command, &executable);
     match detect_spawn_output_timed(command, Duration::from_secs(10)).await {
         Some(Ok(output)) if output.status.success() => match output.stdout.as_slice() {
             b"configured" => Status::Configured,

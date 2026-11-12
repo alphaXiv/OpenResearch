@@ -161,10 +161,8 @@ impl Fixture {
     }
 
     fn shim(&self, name: &str, script: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let path = self.server.directory().join("shims").join(name);
-        fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        orx_test_support::write_executable(path, format!("#!/bin/sh\n{script}\n"), 0o700).unwrap();
     }
 }
 
@@ -1453,8 +1451,40 @@ async fn interrupted_blob_upload_recovers_without_failing_the_run() {
     assert_eq!(fs::read(f.dir("upload").join("executions")).unwrap(), b"x");
 }
 
-/// A source sweep can remove a blob between `HasBlob` and its pin: the launch fails rather
-/// than leaving the run staging forever, and the next attempt stages the source again.
+/// The host refusing the source upload fails the run with that cause, its host and its
+/// directory, since no launch was sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_refusing_the_source_upload_fails_the_run_naming_host_and_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new().await;
+    let archive = f.server.directory().join("refused.tar");
+    fs::write(&archive, "source").unwrap();
+    let digest = orx_host::sha(b"source");
+    let mut intent = f.intent("refused", "true", "ssh_job");
+    intent.run.backend_json =
+        json!({"kind":"ssh_job", "sourceDigest":digest,"sourcePath":archive,"sourceSize":6})
+            .to_string();
+    let metadata = crate::jobs::BackendDescriptor::parse(&intent.run.backend_json).unwrap();
+    let mut row = submitting(&intent);
+    row.metadata = &metadata;
+    let sources = f.server.home().join("engine-root/sources");
+    fs::set_permissions(&sources, fs::Permissions::from_mode(0o500)).unwrap();
+    let submitted = f.engine.submit(f.ssh.as_ref(), row).await;
+    fs::set_permissions(&sources, fs::Permissions::from_mode(0o700)).unwrap();
+    submitted.unwrap();
+
+    let run = f.store().get_run("refused").unwrap().unwrap();
+    let reason = run.result_markdown.unwrap_or_default();
+    assert_eq!(run.status, "failed", "{reason}");
+    assert!(reason.contains(f.server.alias()), "{reason}");
+    assert!(reason.contains("engine-root/sources"), "{reason}");
+    assert!(!reason.contains("Interrupted"), "{reason}");
+    let state = f.store().engine_run_state("refused").unwrap().unwrap();
+    assert_eq!(state.contact, crate::store::Contact::Live);
+}
+
+/// A source sweep can remove a blob between `HasBlob` and its pin: the attempt ends unsent
+/// rather than leaving the run staging forever, and the next attempt stages the source again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_source_swept_before_launch_is_restaged_and_runs() {
     let f = Fixture::new().await;
@@ -1483,7 +1513,9 @@ async fn a_source_swept_before_launch_is_restaged_and_runs() {
     fs::remove_file(&blob).unwrap();
     assert!(matches!(
         f.ssh.pin_source("swept", &digest, &|| false).await,
-        Err(LaunchError::Interrupted { .. })
+        Err(LaunchError::Blocked {
+            contact: crate::store::Contact::Live
+        })
     ));
     assert!(matches!(f.ssh.recover(&intent).await, Recovery::Absent));
     let metadata = crate::jobs::BackendDescriptor::parse(&intent.run.backend_json).unwrap();

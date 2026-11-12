@@ -46,7 +46,7 @@ pub struct Definition {
 impl Definition {
     pub fn validate(&self) -> Result<()> {
         let Some(id) = self.id.strip_prefix("acp:") else {
-            bail!("ACP harness IDs must start with acp:");
+            bail!("ACP agent IDs must start with acp:");
         };
         uuid::Uuid::parse_str(id)?;
         self.validate_launch()
@@ -56,7 +56,7 @@ impl Definition {
     /// user definitions while keeping their own harness IDs.
     pub fn validate_launch(&self) -> Result<()> {
         if self.name.trim().is_empty() || self.name.contains('\0') {
-            bail!("Enter a name for the ACP harness");
+            bail!("Enter a name for the ACP agent");
         }
         if self.executable.trim().is_empty() || self.executable.contains('\0') {
             bail!("Enter an executable command or absolute path");
@@ -211,36 +211,33 @@ pub fn registered_definitions() -> Vec<Definition> {
     register_definitions(definitions())
 }
 
-fn register_definitions(mut definitions: Vec<Definition>) -> Vec<Definition> {
-    let mut launches = definitions
-        .iter()
-        .map(launch_key)
-        .collect::<std::collections::HashSet<_>>();
-
-    for preset in presets() {
-        let mut launch = preset.launch;
-        let key = launch_key(&launch);
-        launch.executable.clone_from(&key.0);
-        if launches.insert(key) {
-            definitions.push(launch);
-        }
-    }
-    definitions
+fn register_definitions(saved: Vec<Definition>) -> Vec<Definition> {
+    let presets: Vec<Definition> = presets()
+        .into_iter()
+        .map(|preset| preset.launch)
+        .filter(|launch| !saved.iter().any(|saved| same_launch(saved, launch)))
+        .collect();
+    saved.into_iter().chain(presets).collect()
 }
 
 pub fn same_launch(a: &Definition, b: &Definition) -> bool {
-    a.arguments == b.arguments && launch_key(a).0 == launch_key(b).0
-}
-
-fn launch_key(definition: &Definition) -> (String, Vec<String>) {
-    let executable = executable_path(&definition.executable)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| definition.executable.clone());
-
-    (executable, definition.arguments.clone())
+    let executable = |definition: &Definition| {
+        executable_path(&definition.executable)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| definition.executable.clone())
+    };
+    a.arguments == b.arguments && executable(a) == executable(b)
 }
 
 pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
+    let own = user_executable_path(executable);
+    if std::path::Path::new(executable).is_absolute() {
+        return own;
+    }
+    crate::local::harness::managed::preferred(executable, own)
+}
+
+pub(crate) fn user_executable_path(executable: &str) -> Option<std::path::PathBuf> {
     let path = std::path::Path::new(executable);
     if path.is_absolute() {
         #[cfg(test)]
@@ -321,10 +318,10 @@ pub fn save(definition: Definition, create: bool) -> Result<()> {
         }
     })?;
     if create && found {
-        bail!("An ACP harness with this ID already exists");
+        bail!("An ACP agent with this ID already exists");
     }
     if !create && !found {
-        bail!("This ACP harness no longer exists");
+        bail!("This ACP agent no longer exists");
     }
     Ok(())
 }
@@ -344,21 +341,20 @@ pub async fn test_connection(definition: &Definition) -> Result<serde_json::Valu
     definition.validate()?;
     let executable = executable_path(&definition.executable)
         .unwrap_or_else(|| std::path::PathBuf::from(&definition.executable));
-    let mut command = crate::process::tokio_command(executable);
+    let mut command = crate::local::harness::managed::command(&executable);
     command
         .args(&definition.arguments)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    crate::local::chat::prepare_env(&mut command);
     #[cfg(unix)]
     command.process_group(0);
     let child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            crate::error::anyhow!("Executable not found. Install the harness on the backend machine or provide its absolute path.")
+            crate::error::anyhow!("Executable not found. Install the agent on the machine running OpenResearch, or enter its absolute path.")
         } else {
-            crate::error::anyhow!("Could not start ACP harness: {error}")
+            crate::error::anyhow!("Could not start the ACP agent: {error}")
         }
     })?;
     let mut process = OwnedProcess {
@@ -638,8 +634,24 @@ async fn prompt_once(
         .as_str()
         .ok_or_else(|| anyhow!("{name} did not return a session ID"))?;
     client.set_native_id(native_id);
-    if let Some(model) = model.filter(|model| !model.is_empty() && *model != "default") {
-        select_model(client, &session, native_id, name, model).await;
+    let has_model_selection = session["models"].is_object()
+        || session["configOptions"]
+            .as_array()
+            .is_some_and(|options| options.iter().any(|option| option["category"] == "model"));
+    let model = model
+        .filter(|model| crate::local::harness::concrete_model(model))
+        .map(str::to_owned)
+        .or_else(|| {
+            crate::local::harness::resolve_models(
+                "",
+                &mut crate::local::harness::acp::advertised_models(&session),
+                crate::local::harness::acp::current_model(&session),
+            )
+        });
+    if has_model_selection {
+        let model = model
+            .ok_or_else(|| anyhow!("{name} advertised model selection without a usable model"))?;
+        select_model(client, &session, native_id, name, &model).await?;
     }
     // pi-acp announces its startup banner in this `_meta` and also sends it as a message
     // chunk right after `session/new`, which can arrive once the turn has begun.
@@ -688,25 +700,23 @@ async fn prompt_once(
     Ok(answer)
 }
 
-/// Switches to `model` when the session advertises it. Best effort: titles and starter
-/// prompts still work on the agent's default model.
 async fn select_model(
     client: &host::Client,
     session: &serde_json::Value,
     native_id: &str,
     name: &str,
     model: &str,
-) {
+) -> Result<()> {
     use serde_json::json;
     let (method, params) = if let Some(options) = session["configOptions"].as_array() {
         let Some(option) = options
             .iter()
             .find(|option| option["category"] == "model" && host::select_has_value(option, model))
         else {
-            return;
+            bail!("{name} does not offer model {model}. Re-check it in Settings → Agents.");
         };
         if option["currentValue"].as_str() == Some(model) {
-            return;
+            return Ok(());
         }
         (
             "session/set_config_option",
@@ -719,17 +729,22 @@ async fn select_model(
             .into_iter()
             .flatten()
             .any(|option| option["modelId"].as_str() == Some(model));
-        if !advertised || models["currentModelId"].as_str() == Some(model) {
-            return;
+        if models["currentModelId"].as_str() == Some(model) {
+            return Ok(());
+        }
+        if !advertised {
+            bail!("{name} does not offer model {model}. Re-check it in Settings → Agents.");
         }
         (
             "session/set_model",
             json!({"sessionId": native_id, "modelId": model}),
         )
     };
-    if let Err(error) = client.request(method, params).await {
-        eprintln!("orx up: {name} kept its default model for a one-shot request; {method} failed: {error}");
-    }
+    client
+        .request(method, params)
+        .await
+        .map_err(|error| crate::error::anyhow!("{name} could not select model {model}: {error}"))?;
+    Ok(())
 }
 
 /// Adds a message chunk to `answer`, except a first chunk that equals the announced `startup` text.
@@ -787,10 +802,10 @@ mod tests {
     #[test]
     fn an_absolute_agent_outside_the_test_root_is_refused() {
         let outside = std::path::absolute("/orx-not-an-agent").unwrap();
-        let found = std::panic::catch_unwind(|| executable_path(&outside.to_string_lossy()));
+        let found = std::panic::catch_unwind(|| user_executable_path(&outside.to_string_lossy()));
         assert!(found.is_err(), "resolved {:?}", found.unwrap());
         let interpreter = fake_agent_interpreter("python3");
-        assert_eq!(executable_path(&interpreter), Some(interpreter.into()));
+        assert_eq!(user_executable_path(&interpreter), Some(interpreter.into()));
     }
 
     fn peer(mode: &str, record: &std::path::Path) -> Definition {
@@ -813,6 +828,7 @@ mod tests {
 
     fn request<'a>(prompt: &'a str, model: Option<&'a str>, timeout: u64) -> OneShot<'a> {
         OneShot {
+            profile: None,
             system: "SYSTEM TEXT",
             prompt,
             quality: OneShotQuality::Cheap,
@@ -954,16 +970,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_shot_selects_an_advertised_model_and_otherwise_keeps_the_default() {
+    async fn one_shot_selects_a_concrete_model_before_prompting() {
         for (mode, model, method) in [
             ("normal", Some("second"), Some("session/set_config_option")),
-            ("normal", Some("reject"), Some("session/set_config_option")),
             ("legacy-models", Some("second"), Some("session/set_model")),
             ("normal", Some("first"), None),
             ("normal", Some("default"), None),
-            ("normal", Some("unknown"), None),
             ("normal", None, None),
-            ("legacy-models", Some("unknown"), None),
         ] {
             let (answer, received) = run(mode, request("ACP_TEST:hello", model, 20)).await;
             assert_eq!(answer.unwrap(), "turn 1", "{mode} {model:?}");
@@ -979,6 +992,39 @@ mod tests {
                 assert_eq!(value.as_str(), model);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn one_shot_refuses_unavailable_or_rejected_models_before_prompting() {
+        for (mode, model) in [
+            ("normal", "reject"),
+            ("normal", "unknown"),
+            ("legacy-models", "unknown"),
+        ] {
+            let (answer, received) = run(mode, request("ACP_TEST:hello", Some(model), 20)).await;
+            assert!(answer.unwrap_err().to_string().contains(model));
+            assert!(position(&received, "session/prompt").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn one_shot_inherits_the_agents_selection_without_a_model_api() {
+        for mode in ["no-models", "other-options"] {
+            for model in [None, Some("second")] {
+                let (answer, received) = run(mode, request("ACP_TEST:hello", model, 20)).await;
+                assert_eq!(answer.unwrap(), "turn 1");
+                assert!(position(&received, "session/prompt").is_some());
+                assert!(!received
+                    .iter()
+                    .any(|(method, _)| method.starts_with("session/set_")));
+            }
+        }
+        let (answer, received) = run("empty-models", request("ACP_TEST:hello", None, 20)).await;
+        assert!(answer
+            .unwrap_err()
+            .to_string()
+            .contains("without a usable model"));
+        assert!(position(&received, "session/prompt").is_none());
     }
 
     #[tokio::test]

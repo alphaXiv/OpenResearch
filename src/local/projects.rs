@@ -969,8 +969,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn managed_initial_commit_bypasses_signing_and_hooks() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = root();
         let project_path = root.join("project");
         std::fs::create_dir_all(&project_path).unwrap();
@@ -979,10 +977,7 @@ mod tests {
         run_git(&project_path, &["config", "gpg.program", "false"]);
         std::fs::write(project_path.join("README.md"), "# test\n").unwrap();
         let hook = project_path.join(".git/hooks/post-commit");
-        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
-        let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&hook, permissions).unwrap();
+        orx_test_support::write_executable(&hook, "#!/bin/sh\nexit 1\n", 0o755).unwrap();
         let store = Store::open_at(root.join("data")).unwrap();
 
         create_project(

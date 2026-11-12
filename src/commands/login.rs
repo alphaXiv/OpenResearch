@@ -666,14 +666,13 @@ mod tests {
         assert_eq!(load_credentials().await.unwrap().unwrap().token, "pat-1");
     }
 
-    const DEVICE_CODE_LIFETIME: Duration = Duration::from_secs(600);
-
     /// A fake alphaXiv's device authorization (RFC 8628): the token endpoint
     /// answers each poll with the next of `answers`, then issues tokens.
     #[derive(Default)]
     struct Device {
         unsupported: bool,
         link: Option<String>,
+        expires_in: u64,
         code_requests: Vec<HashMap<String, String>>,
         answers: std::collections::VecDeque<&'static str>,
         polls: Vec<std::time::Instant>,
@@ -699,7 +698,7 @@ mod tests {
             "user_code": "ABCD-EFGH",
             "verification_uri": format!("{site}/device"),
             "verification_uri_complete": device.link.clone().unwrap_or(format!("{site}/device?user_code=ABCD-EFGH")),
-            "expires_in": DEVICE_CODE_LIFETIME.as_secs(),
+            "expires_in": device.expires_in,
             "interval": 1,
         }))
         .into_response()
@@ -751,7 +750,10 @@ mod tests {
         }
         std::env::set_var("ORX_TEST_SPEEDUP", "100");
 
-        let device = Arc::new(Mutex::new(Device::default()));
+        let device = Arc::new(Mutex::new(Device {
+            expires_in: 600,
+            ..Default::default()
+        }));
         let upstream = Arc::new(Mutex::new(Upstream::default()));
         let app = Router::new()
             .route("/auth/device/code", post(device_code))
@@ -831,7 +833,14 @@ mod tests {
         assert!(refused.unwrap_err().to_string().contains("invalid_client"));
         assert_eq!(stored_refresh_token(), "device-refresh-1");
 
+        // A wait that overruns the code's life still asks once before calling it expired.
+        device.lock().unwrap().expires_in = 0;
+        let (expired, _) = connect(&["authorization_pending"]).await;
+        assert!(expired.unwrap_err().to_string().contains("expired"));
+        assert_eq!(device.lock().unwrap().polls.len(), 1);
+
         // Expire an unanswered code after its first poll.
+        device.lock().unwrap().expires_in = 600;
         let polled = Arc::new(tokio::sync::Notify::new());
         device.lock().unwrap().polled = Some(polled.clone());
         let (expired, _) = {
@@ -842,7 +851,7 @@ mod tests {
                 _ = &mut pending => panic!("device authorization ended before its first poll"),
             }
             tokio::time::pause();
-            tokio::time::advance(crate::config::paced(DEVICE_CODE_LIFETIME)).await;
+            tokio::time::advance(crate::config::paced(Duration::from_secs(600))).await;
             tokio::time::resume();
             pending.await
         };

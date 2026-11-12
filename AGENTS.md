@@ -97,4 +97,4 @@ CI runs what the changed files need: `cargo fmt --all`, `cargo clippy --all-targ
 
 ## Commits, issues and pull requests
 
-Before you commit, open an issue or pull request, or comment on GitHub, it's required for you to follow the rules in [arc/contributing.md](arc/contributing.md).
+Before you commit, open an issue or pull request, or comment on GitHub, it's required for you to follow the rules in [arc/contributing.md](arc/contributing.md). For example, you MUST NOT add `Co-authored-by` to your commits, instead following the rules in that document.

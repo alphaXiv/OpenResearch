@@ -189,6 +189,11 @@ pub fn delegate_session(
 ) -> StoredChatSession {
     let now = now_ms();
     StoredChatSession {
+        profile_id: route.profile.clone().or_else(|| {
+            (route.harness == parent.harness)
+                .then(|| parent.profile_id.clone())
+                .flatten()
+        }),
         id,
         project_id: parent.project_id.clone(),
         harness: route.harness.clone(),
@@ -684,8 +689,37 @@ mod tests {
     use crate::local::chat::news::{chat_news, News};
     use crate::store::StoredChatTurn;
 
+    #[test]
+    fn delegates_inherit_the_profile_or_use_the_explicit_route_profile() {
+        let mut parent = chat("claude-code", "auto");
+        parent.profile_id = Some("claude-012345abcd".into());
+        let mut route = Route {
+            profile: None,
+            name: "claude-code".into(),
+            harness: "claude-code".into(),
+            model: "sonnet".into(),
+            free: false,
+            efforts: Vec::new(),
+        };
+        let child = delegate_session("child".into(), &parent, &route, None, None, None, false);
+        assert_eq!(child.profile_id, parent.profile_id);
+        route.profile = Some("claude-abcdefghij".into());
+        assert_eq!(
+            delegate_session("child".into(), &parent, &route, None, None, None, false).profile_id,
+            route.profile
+        );
+        route.harness = "codex".into();
+        route.profile = None;
+        assert!(
+            delegate_session("child".into(), &parent, &route, None, None, None, false)
+                .profile_id
+                .is_none()
+        );
+    }
+
     fn chat(harness: &str, permission_mode: &str) -> StoredChatSession {
         let route = Route {
+            profile: None,
             name: harness.into(),
             harness: harness.into(),
             model: "m".into(),
@@ -693,6 +727,7 @@ mod tests {
             efforts: Vec::new(),
         };
         let root = StoredChatSession {
+            profile_id: None,
             id: "chat_root".into(),
             project_id: "proj".into(),
             harness: harness.into(),

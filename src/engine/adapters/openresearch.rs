@@ -500,7 +500,7 @@ impl OpenResearch {
                         .map_or(true, |(_, state)| state.cancel_accepted_at.is_some())
                 })
                 .await
-                .map_err(|error| anyhow!("Box staging: {error:?}"))?;
+                .map_err(|error| anyhow!("Box staging: {error}"))?;
             let rental = descriptor
                 .rental_lease
                 .as_ref()
@@ -732,8 +732,10 @@ impl Backend for OpenResearch {
         )
         .await
         .map_err(|error| {
-            // A 4xx answer to the create request proves no box exists.
-            if error.to_string().contains(" failed (4") {
+            let refused = error
+                .downcast_ref::<crate::client::ApiResponseError>()
+                .is_some_and(|response| super::api::refuses(response.0));
+            if refused {
                 super::api::rejected(crate::local::openresearch::billing_friendly(error))
             } else {
                 super::api::interrupted(error)

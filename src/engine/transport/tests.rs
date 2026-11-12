@@ -49,6 +49,13 @@ fn paced_child() -> bool {
 }
 
 fn config(server: &Sshd) -> Config {
+    let test = std::env::current_exe().unwrap();
+    // Cargo nests unit-test binaries at a varying depth below the profile directory holding `orx`.
+    let orx = test
+        .ancestors()
+        .map(|dir| dir.join("orx"))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no orx binary in any directory above {}", test.display()));
     Config {
         alias: server.alias().into(),
         root: "~/engine-root".into(),
@@ -57,13 +64,7 @@ fn config(server: &Sshd) -> Config {
         binary_dir: Some(binaries()),
         #[cfg(unix)]
         sharing_home: None,
-        askpass_executable: std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("orx"),
+        askpass_executable: orx,
     }
 }
 
@@ -1140,6 +1141,54 @@ async fn key_retry_cannot_approve_a_changed_route() {
         Some("SSH route changed; press Connect to approve it")
     );
     assert_eq!(auth_attempts(&server), attempts);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_during_an_attempt_approves_a_route_changed_after_it_began() {
+    let server = Sshd::start().unwrap();
+    server
+        .proxy()
+        .set(Faults {
+            paused: true,
+            ..Faults::default()
+        })
+        .unwrap();
+    let conn = start(&server, TestClock::new());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while ssh_pids(&server).is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let old = fs::read_to_string(server.config_path()).unwrap();
+    fs::write(
+        server.config_path(),
+        old.replace("HostName 127.0.0.1", "HostName localhost"),
+    )
+    .unwrap();
+    let key = fs::read_to_string(server.directory().join("host_key.pub")).unwrap();
+    let mut known = fs::read_to_string(server.directory().join("known_hosts")).unwrap();
+    known.push_str(&format!("[localhost]:{} {key}", server.port()));
+    fs::write(server.directory().join("known_hosts"), known).unwrap();
+    let (reply, connected) = oneshot::channel();
+    conn.actions
+        .send(Action {
+            key_only: false,
+            keep_master: false,
+            prompt: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    server.proxy().clear().unwrap();
+    connected.await.unwrap().unwrap();
+    assert_eq!(conn.state().borrow().status, Status::Live);
+    assert!(alias_auth(&server)
+        .route
+        .unwrap()
+        .lines()
+        .any(|line| line == "hostname localhost"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

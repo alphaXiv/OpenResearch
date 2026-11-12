@@ -36,7 +36,8 @@ use crate::error::{anyhow, Result};
 ///   cancel <name>         stop the sandbox (the job dies with it)
 ///   finish <name>         stop and destroy the sandbox once the run is over
 ///
-/// Exit 3 = the `vercel` package isn't importable (surfaced as a friendly hint).
+/// Exit 3 = the `vercel` package isn't importable (surfaced as a friendly hint),
+/// 6 = submit created nothing that still runs (`jobs::Refused` on stderr).
 /// `@@LOG_FOLLOW@@` is replaced with [`LOG_FOLLOW_SH`] before the launcher runs.
 const LAUNCHER: &str = r#"
 import sys, json, shlex, subprocess
@@ -44,6 +45,7 @@ import sys, json, shlex, subprocess
 LOG = "/tmp/orx-run.log"
 PID = "/tmp/orx-run.pid"
 ENV = "/tmp/orx-env.sh"
+SCRIPT = "/tmp/orx-run.sh"
 EXIT_TAG = "orx_exit"
 
 def _sdk():
@@ -67,6 +69,10 @@ def _emit_exit(code):
     out["exitCode"] = code
     print(json.dumps(out))
 
+def _refuse(status, message):
+    sys.stderr.write(json.dumps({"status": status, "message": message}))
+    sys.exit(6)
+
 def submit():
     sandbox, types = _sdk()
     spec = json.load(sys.stdin)
@@ -84,7 +90,19 @@ def submit():
         kwargs["region"] = spec["region"]
     if spec.get("tags"):
         kwargs["tags"] = spec["tags"]
-    box = sandbox.create_sandbox(**kwargs)
+    try:
+        box = sandbox.create_sandbox(**kwargs)
+    except Exception as error:
+        status = getattr(error, "status_code", None)
+        if not isinstance(status, int):
+            raise
+        # create_sandbox also polls the new box, so only a box that doesn't exist was refused.
+        try:
+            sandbox.get_sandbox(name=spec["name"])
+        except types.SandboxApiError as missing:
+            if getattr(missing, "status_code", None) == 404:
+                _refuse(status, "Vercel didn't create the sandbox (HTTP %d): %s" % (status, error))
+        raise error
     try:
         # Secrets ride a 0600 file the job sources, never the sandbox or process
         # env config, which the Sandbox API and dashboard expose.
@@ -100,10 +118,12 @@ def submit():
                         break
                     dst.write(chunk)
             box.fs.write_text("/tmp/orx-source.tar.ready", "")
+        # A script of its own, so even a parse error in it is logged after the pid is written.
+        box.fs.write_text(SCRIPT, spec["script"], mode=0o600)
         wrapper = (
             "echo $$ > %s; set -a; . %s; set +a; rm -f %s; "
-            "( %s ) > %s 2>&1"
-        ) % (PID, ENV, ENV, spec["script"], LOG)
+            "exec bash %s > %s 2>&1"
+        ) % (PID, ENV, ENV, SCRIPT, LOG)
         kill_after = spec.get("killAfter")
         proc = box.create_process(
             "bash", ["-c", wrapper],
@@ -111,13 +131,22 @@ def submit():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except BaseException:
+        # Status reads a missing pid file as a wrapper that never started.
+        started = box.run_process(
+            "bash", ["-c", "for _ in $(seq 300); do [ -s %s ] && exit 0; sleep 0.1; done; exit 1" % PID],
+        )
+        if started.returncode != 0:
+            raise RuntimeError("its wrapper never wrote %s" % PID)
+    except BaseException as error:
         try:
             box.stop()
             box.destroy(delete_orphan_snapshots=True)
         except Exception:
-            pass
-        raise
+            raise error
+        if not isinstance(error, Exception):
+            raise
+        _refuse(None, "Could not start the run in Vercel sandbox %s, so orx deleted it: %s"
+                % (box.name, str(error) or type(error).__name__))
     print(json.dumps({"sandboxName": box.name, "processId": proc.id}))
 
 def status(name, pid):
@@ -154,12 +183,18 @@ def status(name, pid):
         return
     # The API only records a process's exit once a client waits on it, and a
     # wait blocks while it runs, so check the wrapper's pid inside the sandbox
-    # first. No pid file yet means the wrapper hasn't started.
+    # first. Submit waits for the pid file, so a missing one means the wrapper never started.
     probe = box.run_process(
         "bash",
-        ["-c", "[ ! -s %s ] || kill -0 \"$(cat %s)\" 2>/dev/null && echo running || echo exited" % (PID, PID)],
+        ["-c", "if [ ! -s %s ]; then echo missing; elif kill -0 \"$(cat %s)\" 2>/dev/null; then echo running; else echo exited; fi" % (PID, PID)],
         capture_output=True,
     )
+    if probe.stdout.strip() == "missing":
+        print(json.dumps({
+            "stage": "ERROR",
+            "message": "the run never started in sandbox %s: %s is missing" % (name, PID),
+        }))
+        return
     if probe.stdout.strip() != "exited":
         print(json.dumps({"stage": "RUNNING"}))
         return
@@ -314,13 +349,14 @@ fn launcher() -> &'static str {
 }
 
 /// The sync API with `SandboxResources` and process handles is in vercel 0.12.
-const VERCEL_ENV: ManagedEnv = ManagedEnv {
+pub(crate) const VERCEL_ENV: ManagedEnv = ManagedEnv {
     name: "vercel",
     label: "Vercel Sandbox",
     min_python: (3, 10),
     requirement: "vercel>=0.12",
     ready_check: "from vercel.sandbox import sync, SandboxResources; \
                   assert hasattr(sync, 'create_sandbox') and hasattr(sync, 'get_sandbox')",
+    override_var: Some("ORX_VERCEL_PYTHON"),
 };
 
 /// Credentials the Sandbox SDK reads from its environment.
@@ -690,24 +726,11 @@ pub fn check_vcpus(vcpus: Option<u32>, limits: &LaunchLimits) -> Result<()> {
     })
 }
 
-fn python_bin() -> String {
-    if let Ok(p) = std::env::var("ORX_VERCEL_PYTHON") {
-        if !p.trim().is_empty() {
-            return p;
-        }
-    }
-    let managed = VERCEL_ENV.python();
-    if managed.exists() {
-        return managed.to_string_lossy().into_owned();
-    }
-    "python3".to_string()
-}
-
 /// Ensure a usable interpreter exists, provisioning the orx-managed venv on
-/// first use. A no-op when `$ORX_VERCEL_PYTHON` is set. Only the launch path
+/// first use. A no-op when `ORX_VERCEL_PYTHON` is set. Only the launch path
 /// calls this — the supervisor relies on the env already being there.
 pub async fn ensure_env() -> Result<()> {
-    if std::env::var("ORX_VERCEL_PYTHON").is_ok_and(|p| !p.trim().is_empty()) {
+    if VERCEL_ENV.override_python().is_some() {
         return Ok(());
     }
     VERCEL_ENV.ensure().await.map_err(|e| {
@@ -795,10 +818,10 @@ fn missing_python_hint(e: &std::io::Error) -> crate::error::Error {
         anyhow!(
             "{} not found on PATH — Vercel Sandbox is driven through its Python SDK. Install \
              Python 3.10+, or point orx at an interpreter with `vercel` via ORX_VERCEL_PYTHON.",
-            python_bin()
+            VERCEL_ENV.interpreter()
         )
     } else {
-        anyhow!("Could not run {}: {}", python_bin(), e)
+        anyhow!("Could not run {}: {}", VERCEL_ENV.interpreter(), e)
     }
 }
 
@@ -808,13 +831,17 @@ fn launcher_error(what: &str, code: Option<i32>, stderr: &str) -> crate::error::
         return anyhow!(
             "The `vercel` Python package isn't importable by {}. Remove {} to force a rebuild, \
              or set ORX_VERCEL_PYTHON to an interpreter that has it.",
-            python_bin(),
+            VERCEL_ENV.interpreter(),
             VERCEL_ENV.dir().display()
         );
     }
+    let hint = plan_limit_hint(stderr);
+    if let Some(mut refused) = super::launcher_refusal(code, stderr) {
+        refused.message.push_str(hint.unwrap_or(""));
+        return refused.into();
+    }
     // The SDK's traceback ends with the useful line.
     let detail = stderr.lines().last().unwrap_or("no stderr");
-    let hint = plan_limit_hint(stderr);
     anyhow!(
         "vercel sandbox {} failed{}: {}{}",
         what,
@@ -849,7 +876,7 @@ fn plan_limit_hint(stderr: &str) -> Option<&'static str> {
 }
 
 async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>> {
-    let mut cmd = crate::process::tokio_command(python_bin());
+    let mut cmd = crate::process::tokio_command(VERCEL_ENV.interpreter());
     cmd.arg("-c")
         .arg(launcher())
         .args(args)
@@ -873,7 +900,7 @@ async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>>
     let out = child
         .wait_with_output()
         .await
-        .map_err(|e| anyhow!("Could not run {}: {}", python_bin(), e))?;
+        .map_err(|e| anyhow!("Could not run {}: {}", VERCEL_ENV.interpreter(), e))?;
     if !out.status.success() {
         return Err(launcher_error(
             args.first().copied().unwrap_or("?"),
@@ -994,7 +1021,7 @@ pub fn session_limit(timeout_seconds: u64, session_cap: u64) -> u64 {
         .min(session_cap)
 }
 
-/// Sandbox state in the shared stage vocabulary (see `jobs::is_terminal_stage`).
+/// Sandbox state in the shared stage vocabulary.
 #[derive(Debug, Clone)]
 pub struct JobState {
     pub stage: String,
@@ -1044,7 +1071,7 @@ pub async fn stream_logs(
 ) -> Result<u64> {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-    let mut child = crate::process::tokio_command(python_bin())
+    let mut child = crate::process::tokio_command(VERCEL_ENV.interpreter())
         .arg("-c")
         .arg(launcher())
         .args(["logs", sandbox_name])
@@ -1104,8 +1131,12 @@ pub async fn stream_logs(
 }
 
 /// Fail fast before source staging or submission if Vercel Sandbox isn't
-/// usable, provisioning the orx-managed env on first use.
-pub async fn preflight() -> Result<()> {
+/// usable, provisioning the orx-managed env on first use. `caller_overrides`
+/// come from the calling shell.
+pub async fn preflight(
+    caller_overrides: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    VERCEL_ENV.require_caller_override(caller_overrides)?;
     ensure_env().await?;
     if token_source().is_none() {
         return Err(anyhow!(
@@ -1114,7 +1145,7 @@ pub async fn preflight() -> Result<()> {
              `vercel env pull`) in the environment."
         ));
     }
-    let probe = crate::process::tokio_command(python_bin())
+    let probe = crate::process::tokio_command(VERCEL_ENV.interpreter())
         .args(["-c", VERCEL_ENV.ready_check])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1438,6 +1469,10 @@ mod tests {
                 "exited",
                 json!({"stage": "ERROR", "message": "exited with code 7", "exitCode": 7}),
             ),
+            (
+                "missing",
+                json!({"stage": "ERROR", "message": "the run never started in sandbox orx-run-1: /tmp/orx-run.pid is missing"}),
+            ),
         ] {
             let dir = std::env::temp_dir().join(format!("orx-vercel-{}", uuid::Uuid::new_v4()));
             let pkg = dir.join("vercel").join("sandbox");
@@ -1512,12 +1547,14 @@ class FS:
         sys.stderr.write(json.dumps({"write": path, "mode": mode, "text": text}) + "\n")
 class Proc:
     id = "cmd_1"
+    returncode = 0
 class Box:
     name = "orx-run-1"
     fs = FS()
     def create_process(self, cmd, args, **kw):
         sys.stderr.write(json.dumps({"process": args[1]}) + "\n")
         return Proc()
+    def run_process(self, cmd, args, **kw): return Proc()
 def create_sandbox(**kw):
     sys.stderr.write(json.dumps({"create": {k: v for k, v in kw.items() if k != "resources"},
                                  "vcpus": kw["resources"].vcpus}) + "\n")
@@ -1564,8 +1601,95 @@ def get_sandbox(**kw): return Box()
         let env_file = &events[1];
         assert_eq!(env_file["mode"], 0o600);
         assert_eq!(env_file["text"], "export HF_TOKEN='s3cr'\"'\"'et'\n");
-        let process = events[2]["process"].as_str().unwrap();
-        assert!(process.contains("( python train.py ) > /tmp/orx-run.log 2>&1"));
+        assert_eq!(events[2]["text"], "python train.py");
+        let process = events[3]["process"].as_str().unwrap();
+        assert!(process.contains("bash /tmp/orx-run.sh > /tmp/orx-run.log 2>&1"));
+    }
+
+    /// Runs the launcher's real wrapper in bash, with the sandbox's `/tmp` mapped to a temp dir.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_script_that_does_not_parse_fails_the_run_with_bash_error_in_the_log() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(VERCEL_ENV.min_python, VERCEL_ENV.label).await
+        else {
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-vercel-{}", uuid::Uuid::new_v4()));
+        let pkg = dir.join("vercel").join("sandbox");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::create_dir_all(dir.join("box")).unwrap();
+        std::fs::write(dir.join("vercel").join("__init__.py"), "").unwrap();
+        std::fs::write(
+            pkg.join("__init__.py"),
+            "class SandboxResources:\n    def __init__(self, vcpus=None, memory=None): self.vcpus = vcpus\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("sync.py"),
+            r#"import os, subprocess, time
+ROOT = os.path.join(os.environ["PYTHONPATH"], "box")
+def local(text): return text.replace("/tmp/", ROOT + "/")
+class FS:
+    def write_text(self, path, text, mode=None): open(local(path), "w").write(text)
+class Done:
+    def __init__(self, ran): self.returncode, self.stdout = ran.returncode, ran.stdout
+class Proc:
+    id = "cmd_1"
+    @property
+    def returncode(self): return int(open(ROOT + "/exit").read())
+class Box:
+    name = "orx-run-1"
+    status = "running"
+    tags = {}
+    fs = FS()
+    def create_process(self, cmd, args, **kw):
+        subprocess.Popen([cmd, "-c", 'bash -c "$1"; echo $? > "$2"', "-", local(args[1]), ROOT + "/exit"])
+        return Proc()
+    def run_process(self, cmd, args, **kw):
+        return Done(subprocess.run([cmd, "-c", local(args[1])], capture_output=True, text=True))
+    def get_process(self, pid, wait=False):
+        for _ in range(100 if wait else 0):
+            if os.path.exists(ROOT + "/exit"): break
+            time.sleep(0.1)
+        return Proc()
+    def update(self, tags): pass
+def create_sandbox(**kw): return Box()
+def get_sandbox(**kw): return Box()
+"#,
+        )
+        .unwrap();
+        let launch = |args: &[&str], stdin: &[u8]| {
+            let mut child = crate::process::command(python)
+                .arg("-c")
+                .arg(launcher())
+                .args(args)
+                .env("PYTHONPATH", &dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(stdin).unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()
+        };
+        launch(
+            &["submit"],
+            br#"{"name": "orx-run-1", "script": "echo (", "vcpus": 1, "executionTimeLimit": 60}"#,
+        );
+        let status = launch(&["status", "orx-run-1", "cmd_1"], b"");
+        let log = std::fs::read_to_string(dir.join("box").join("orx-run.log")).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(status["stage"], "ERROR", "{status}");
+        assert_eq!(status["exitCode"], 2, "{status}");
+        assert!(log.contains("syntax error"), "{log}");
     }
 
     /// A missing sandbox is terminal. Raising would make the engine retry forever
@@ -1700,16 +1824,14 @@ def get_sandbox(**kw):
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("tail");
-        std::fs::write(
+        orx_test_support::write_executable(
             &stub,
             format!(
                 "#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --pid|--pid=*) echo unrecognized >&2; exit 1 ;;\n  esac\ndone\nexec {real_tail} \"$@\"\n"
             ),
+            0o755,
         )
         .unwrap();
-        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&stub, perms).unwrap();
         let output = follow_log(Some(&bin), &dir);
         let _ = std::fs::remove_dir_all(&dir);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1730,10 +1852,12 @@ def get_sandbox(**kw):
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("tail");
-        std::fs::write(&stub, "#!/bin/sh\necho 'tail: not available' >&2\nexit 1\n").unwrap();
-        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&stub, perms).unwrap();
+        orx_test_support::write_executable(
+            &stub,
+            "#!/bin/sh\necho 'tail: not available' >&2\nexit 1\n",
+            0o755,
+        )
+        .unwrap();
         let output = follow_log(Some(&bin), &dir);
         let _ = std::fs::remove_dir_all(&dir);
         let stdout = String::from_utf8_lossy(&output.stdout);

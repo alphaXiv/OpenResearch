@@ -24,7 +24,7 @@ impl Api for RayAccount {
         spec.env.extend(crate::config::launch_env(&intent.run.id));
         ray::run_job(&self.address, &spec)
             .await
-            .map_err(api::interrupted)?;
+            .map_err(api::launch_error)?;
         Ok(api::handle(intent, vec![intent.run.id.clone()]))
     }
     async fn recover(&self, intent: &RunIntent) -> Recovery {
@@ -47,7 +47,7 @@ impl Api for RayAccount {
         run: &WatchedRun,
         cursor: &mut usize,
         _window: std::time::Duration,
-        sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+        sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c usize>) + Send),
     ) -> Result<bool> {
         let bytes = ray::fetch_logs(&self.address, self.id(run)?)
             .await?
@@ -55,7 +55,7 @@ impl Api for RayAccount {
         if *cursor > bytes.len() {
             return Err(anyhow!("Provider log was truncated"));
         }
-        sink(&bytes[*cursor..]);
+        sink(&bytes[*cursor..], None);
         *cursor = bytes.len();
         Ok(true)
     }

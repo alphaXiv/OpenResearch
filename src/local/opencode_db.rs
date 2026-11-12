@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -326,7 +326,11 @@ pub(super) fn compact(path: &Path) -> Result<()> {
         .open(sidecar(&path, ".orx-lock"))?;
     // Windows' exclusive-open check would see this process's own connection as another user.
     drop(connection);
-    if lock.try_lock().is_err() || ensure_no_external_users(&path).is_err() {
+    if lock.try_lock().is_err() {
+        return Ok(());
+    }
+    let _lock = crate::file_lock::FileLock::new(lock);
+    if ensure_no_external_users(&path).is_err() {
         return Ok(());
     }
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -418,7 +422,7 @@ fn write_journal(path: &Path, journal: &MigrationJournal) -> Result<()> {
 fn sync_parent(path: &Path) -> Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
+        std::fs::File::open(parent)?.sync_all()?;
     }
     #[cfg(not(unix))]
     let _ = path;
@@ -427,7 +431,7 @@ fn sync_parent(path: &Path) -> Result<()> {
 
 pub struct DatabaseLease {
     path: PathBuf,
-    lock: File,
+    lock: crate::file_lock::FileLock,
     state: DatabaseState,
     migration: bool,
 }
@@ -444,6 +448,19 @@ impl std::fmt::Display for DatabaseBusy {
 }
 
 impl std::error::Error for DatabaseBusy {}
+
+/// OpenCode 2 has started on this database, so OpenCode 1 must not open it; updating OpenCode
+/// is the way on.
+#[derive(Debug)]
+pub struct NeedsOpenCode2(String);
+
+impl std::fmt::Display for NeedsOpenCode2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NeedsOpenCode2 {}
 
 pub fn normalize_path(path: &Path) -> Result<PathBuf> {
     let parent = path
@@ -491,6 +508,7 @@ impl DatabaseLease {
                 path.display()
             ),
         })?;
+        let lock = crate::file_lock::FileLock::new(lock);
         let current = inspect(&path)?;
         let journal = read_journal(&path)?;
         if current != state
@@ -506,10 +524,12 @@ impl DatabaseLease {
         {
             if matches!(state, DatabaseState::V1 | DatabaseState::Empty) {
                 if let Some(journal) = journal {
-                    return Err(anyhow!("An OpenCode V2 upgrade was prepared for this database. Use OpenCode V2 to resume, or review the saved migration state before a deliberate rollback. {}", journal.recovery_details(&path)));
+                    return Err(anyhow::Error::new(NeedsOpenCode2(format!("An OpenCode V2 upgrade was prepared for this database. Use OpenCode V2 to resume, or review the saved migration state before a deliberate rollback. {}", journal.recovery_details(&path)))));
                 }
             }
-            return Err(anyhow!("This OpenCode database has begun upgrading to V2. Use OpenCode V2 to continue; downgrading would split its history."));
+            return Err(anyhow::Error::new(NeedsOpenCode2(
+                "This OpenCode database has begun upgrading to V2. Use OpenCode V2 to continue; downgrading would split its history.".into(),
+            )));
         }
         if major == 2 && !migration {
             if let Some(mut journal) = journal {
@@ -779,19 +799,6 @@ fn referenced_sessions(database: &Path) -> Result<BTreeSet<String>> {
 mod tests {
     use super::*;
 
-    /// A lease just dropped lingers in any child a parallel test forked meanwhile, until that
-    /// child execs.
-    fn reacquire(path: &Path, major: u64) -> DatabaseLease {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            match DatabaseLease::acquire(path, major) {
-                Ok(lease) => return lease,
-                Err(error) => assert!(std::time::Instant::now() < deadline, "{error}"),
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    }
-
     const V1: &str = "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);
         CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);
         CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);
@@ -962,7 +969,7 @@ mod tests {
         assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
         connection.execute_batch(V2).unwrap();
         assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
-        let lease = reacquire(&path, 2);
+        let lease = DatabaseLease::acquire(&path, 2).unwrap();
         lease.prepare_with_sessions(ids).unwrap();
         assert!(table_has_session(&connection, "session", "history").unwrap());
     }
@@ -1018,7 +1025,7 @@ mod tests {
         assert!(has_session(&path, "history").unwrap());
         drop(lease);
 
-        let mut resumed = reacquire(&path, 2);
+        let mut resumed = DatabaseLease::acquire(&path, 2).unwrap();
         assert_eq!(
             resumed.prepare_with_sessions(expected).unwrap(),
             Some(backup.clone())
@@ -1088,7 +1095,9 @@ mod tests {
                 std::fs::remove_file(&backup).unwrap();
             }
             drop(lease);
-            assert!(!reacquire(&path, 2).requires_migration());
+            assert!(!DatabaseLease::acquire(&path, 2)
+                .unwrap()
+                .requires_migration());
             for suffix in ["", "-wal", "-shm"] {
                 assert!(!sidecar(&backup, suffix).exists());
             }
@@ -1170,6 +1179,9 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch(V2).unwrap();
         assert_eq!(inspect(&path).unwrap(), DatabaseState::V2Ready);
+        // OpenCode 1 is turned away in a way the agent list reads as "update OpenCode".
+        let refused = DatabaseLease::acquire(&path, 1).err().unwrap();
+        assert!(refused.downcast_ref::<NeedsOpenCode2>().is_some());
         connection.execute_batch("INSERT INTO kv VALUES ('migration.v1-v2', '{\"phase\":\"sessions\",\"cursor\":\"old\"}');").unwrap();
         assert_eq!(inspect(&path).unwrap(), DatabaseState::V2Pending);
         connection
@@ -1195,7 +1207,7 @@ mod tests {
         let busy = DatabaseLease::acquire(&path, 2).err().unwrap();
         assert!(busy.downcast_ref::<DatabaseBusy>().is_some());
         drop((first, second));
-        reacquire(&path, 2);
+        DatabaseLease::acquire(&path, 2).unwrap();
     }
 
     #[test]
@@ -1217,7 +1229,7 @@ mod tests {
             .unwrap();
         let moved = fixture.0.path().join("moved");
         std::fs::rename(&old, &moved).unwrap();
-        let lease = reacquire(&moved.join("opencode.db"), 2);
+        let lease = DatabaseLease::acquire(&moved.join("opencode.db"), 2).unwrap();
         let old_backup = crate::paths::canonicalize(&moved)
             .unwrap()
             .join(backup.file_name().unwrap());

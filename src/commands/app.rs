@@ -811,11 +811,11 @@ mod instance {
         socket: &Path,
         wait: Duration,
         link: Option<&str>,
-    ) -> std::io::Result<Option<File>> {
+    ) -> std::io::Result<Option<crate::file_lock::FileLock>> {
         let deadline = Instant::now() + wait;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(Some(file)),
+                Ok(()) => return Ok(Some(crate::file_lock::FileLock::new(file))),
                 Err(TryLockError::Error(error)) => return Err(error),
                 Err(TryLockError::WouldBlock) => {}
             }

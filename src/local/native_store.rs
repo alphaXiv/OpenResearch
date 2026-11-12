@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 
 #[path = "opencode_db.rs"]
 pub mod opencode_database;
@@ -577,8 +577,14 @@ fn remove_session_path(path: &Path) -> Result<()> {
     }
 }
 
-pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {
-    (store == NativeStore::Isolated).then(|| format!("sqlite_home={}", toml_string(home)))
+pub fn codex_sqlite_override(store: NativeStore, home: &Path, profile: bool) -> Option<String> {
+    let home = if profile {
+        codex_home(NativeStore::Isolated)
+    } else {
+        home.to_path_buf()
+    };
+    (store == NativeStore::Isolated || profile)
+        .then(|| format!("sqlite_home={}", toml_string(&home)))
 }
 
 pub fn claude_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
@@ -661,11 +667,12 @@ fn session_location(
             continue;
         }
         for tree in trees {
-            let path = match tree_session_path(&root.join(tree), native_id) {
-                Ok(path) => path,
-                Err(_) if store == NativeStore::Legacy => continue,
-                Err(error) => return Err(error),
-            };
+            let path = tree_session_path(&root.join(tree), native_id).with_context(|| {
+                format!(
+                    "Could not read native sessions in {}",
+                    root.join(tree).display()
+                )
+            })?;
             if let Some(path) = path {
                 return Ok(Some(NativeSessionLocation { store, path }));
             }
@@ -726,20 +733,36 @@ pub fn prepare_claude(store: NativeStore) -> Result<PathBuf> {
         std::fs::create_dir_all(&root)?;
         return Ok(root);
     }
-    prepare_links(
-        &root,
-        &legacy,
-        &[
-            home_dir().join(".claude.json"),
-            legacy.join("settings.json"),
-            legacy.join("settings.local.json"),
-            legacy.join("CLAUDE.md"),
-            legacy.join(".credentials.json"),
-            legacy.join("plugins"),
-            legacy.join("skills"),
-        ],
-    )?;
+    prepare_claude_links(&root, &legacy, Some(&claude_config_file()))?;
     Ok(root)
+}
+
+pub(crate) fn claude_config_file() -> PathBuf {
+    if user_env_path("CLAUDE_CONFIG_DIR").is_some() {
+        claude_home(NativeStore::Legacy).join(".claude.json")
+    } else {
+        home_dir().join(".claude.json")
+    }
+}
+
+pub(crate) fn prepare_claude_links(
+    root: &Path,
+    legacy: &Path,
+    config: Option<&Path>,
+) -> Result<()> {
+    let mut sources = [
+        "settings.json",
+        "settings.local.json",
+        "CLAUDE.md",
+        "plugins",
+        "skills",
+    ]
+    .map(|name| legacy.join(name))
+    .to_vec();
+    if let Some(config) = config {
+        sources.extend([config.to_path_buf(), legacy.join(".credentials.json")]);
+    }
+    prepare_links(root, legacy, &sources)
 }
 
 pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
@@ -749,11 +772,11 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
         std::fs::create_dir_all(&root)?;
         return Ok(root);
     }
-    prepare_codex_links(&root, &legacy)?;
+    prepare_codex_links(&root, &legacy, true)?;
     Ok(crate::paths::canonicalize(&root).unwrap_or(root))
 }
 
-fn prepare_codex_links(root: &Path, legacy: &Path) -> Result<()> {
+pub(crate) fn prepare_codex_links(root: &Path, legacy: &Path, share_auth: bool) -> Result<()> {
     std::fs::create_dir_all(root)?;
     let isolated = crate::paths::canonicalize(root)?;
     let mut sources = child_paths(legacy)?;
@@ -802,7 +825,8 @@ fn prepare_codex_links(root: &Path, legacy: &Path) -> Result<()> {
             !metadata.is_file() && !metadata.is_dir() && !metadata.file_type().is_symlink()
         });
 
-        !private
+        (share_auth || name != "auth.json")
+            && !private
             && !special
             && !crate::paths::canonicalize(path).is_ok_and(|source| isolated.starts_with(source))
     });
@@ -831,7 +855,7 @@ pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
     Ok(root)
 }
 
-fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {
+pub(crate) fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {
     let _guard = LINK_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     std::fs::create_dir_all(root)?;
     let mut process_lock = sources
@@ -1133,7 +1157,7 @@ mod link_tests {
         let root = std::env::temp_dir().join(format!("orx-codex-config-{}", uuid::Uuid::new_v4()));
         let legacy = root.join("custom-codex-home");
         let isolated = root.join("isolated");
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert!(!legacy.exists());
 
         std::fs::create_dir_all(legacy.join("catalogs")).unwrap();
@@ -1149,7 +1173,7 @@ mod link_tests {
             std::fs::write(legacy.join(name), contents).unwrap();
         }
 
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
 
         let config: toml::Value = std::fs::read_to_string(isolated.join("config.toml"))
             .unwrap()
@@ -1181,7 +1205,7 @@ mod link_tests {
         std::fs::write(legacy.join("new-provider.json"), "another provider").unwrap();
         std::fs::remove_file(legacy.join("provider-models.json")).unwrap();
         std::fs::write(legacy.join("provider-models.json"), "replacement catalog").unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert_eq!(
             std::fs::read_to_string(&catalog).unwrap(),
             "replacement catalog"
@@ -1192,7 +1216,7 @@ mod link_tests {
         );
 
         std::fs::remove_file(legacy.join("provider-models.json")).unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert!(std::fs::symlink_metadata(catalog).is_err());
         assert!(!isolated
             .join("provider-models.json.orx-managed-link")
@@ -1254,8 +1278,8 @@ mod link_tests {
             socket
         };
 
-        prepare_codex_links(&isolated, &legacy).unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
 
         for name in private {
             assert_eq!(
@@ -1285,7 +1309,7 @@ mod link_tests {
         std::fs::write(legacy.join("config.toml"), "").unwrap();
         create_symlink(&legacy.join("orx"), &legacy.join("alias")).unwrap();
 
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
 
         assert!(isolated.join("config.toml").exists());
         assert!(!isolated.join("orx").exists());
@@ -1313,7 +1337,7 @@ mod link_tests {
         std::fs::remove_file(&source).unwrap();
         std::fs::write(&source, "replacement catalog").unwrap();
 
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
 
         assert!(same_file::is_same_file(&source, &destination).unwrap());
         assert_eq!(
@@ -1329,7 +1353,7 @@ mod link_tests {
         remove_link(&destination).unwrap();
         std::fs::hard_link(&source, &destination).unwrap();
         std::fs::remove_file(&source).unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert!(std::fs::symlink_metadata(&destination).is_err());
 
         std::fs::write(&source, "native catalog").unwrap();
@@ -1341,7 +1365,7 @@ mod link_tests {
         .unwrap();
         std::fs::remove_file(&source).unwrap();
         std::fs::write(&destination, "local edits").unwrap();
-        prepare_codex_links(&isolated, &legacy).unwrap();
+        prepare_codex_links(&isolated, &legacy, true).unwrap();
         assert!(!destination.exists());
         let conflict = child_paths(&isolated)
             .unwrap()

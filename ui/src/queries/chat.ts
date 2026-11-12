@@ -1,5 +1,5 @@
 import type { WorkspaceEvents } from "../workspace";
-import type { Api, Autonomy, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarChatPage, TurnOptions } from "../api";
+import type { Api, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarChatPage, TurnOptions } from "../api";
 import type { WorkspaceClient } from "./client";
 
 import { readLiveSnapshot, mergeLiveList, markLiveUpdate } from "./live";
@@ -228,7 +228,7 @@ export const mutDeleteChatSession = mutations.define({
 
 export const mutCreateChatSession = mutations.define({
   id: "chat/session/create",
-  mutate: (ws: Workspace, projectId: string, harness: HarnessId, options: TurnOptions & { autonomy?: Autonomy }) =>
+  mutate: (ws: Workspace, projectId: string, harness: HarnessId, options: NonNullable<Parameters<Api["createChatSession"]>[2]>) =>
     ws.api.createChatSession(projectId, harness, options),
   optimistic: () => {},
   key: ({ args: [ws, projectId] }) => [ws.identity, projectId],

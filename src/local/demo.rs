@@ -179,6 +179,7 @@ const BOTTLENECK_REPORT: &str =
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DemoSelection {
+    pub profile: Option<String>,
     pub harness: String,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
@@ -393,6 +394,7 @@ fn seed_at(
             newly_created: false,
             selection: stored
                 .map(|session| DemoSelection {
+                    profile: session.profile_id,
                     harness: session.harness,
                     model: session.model,
                     permission_mode: session.permission_mode,
@@ -548,6 +550,7 @@ fn seed_at(
         chat_session_id: None,
     };
     let session = StoredChatSession {
+        profile_id: selection.profile.clone(),
         id: SESSION_ID.into(),
         project_id: PROJECT_ID.into(),
         harness: selection.harness.clone(),
@@ -600,6 +603,7 @@ fn seed_at(
         native_harness: None,
     };
     let figure_session = StoredChatSession {
+        profile_id: selection.profile.clone(),
         id: FIGURE_SESSION_ID.into(),
         project_id: PROJECT_ID.into(),
         harness: selection.harness.clone(),
@@ -654,6 +658,7 @@ fn seed_at(
         native_harness: None,
     };
     let literature_session = StoredChatSession {
+        profile_id: selection.profile.clone(),
         id: LITERATURE_SESSION_ID.into(),
         project_id: PROJECT_ID.into(),
         harness: selection.harness.clone(),
@@ -841,6 +846,7 @@ fn validate_snapshot(store: &Store, repo: &Path, newly_created: bool) -> Result<
         project,
         newly_created,
         selection: DemoSelection {
+            profile: stored.profile_id.clone(),
             harness: stored.harness.clone(),
             model: stored.model.clone(),
             permission_mode: stored.permission_mode.clone(),
@@ -1986,6 +1992,7 @@ mod tests {
                 &data,
                 &repo,
                 DemoSelection {
+                    profile: None,
                     harness: harness.into(),
                     model: None,
                     permission_mode: None,
@@ -2029,6 +2036,7 @@ mod tests {
         prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         let selection = DemoSelection {
+            profile: None,
             harness: "codex".into(),
             model: None,
             permission_mode: None,
@@ -2052,6 +2060,7 @@ mod tests {
             &data,
             &reuse_path,
             DemoSelection {
+                profile: None,
                 harness: "claude-code".into(),
                 ..selection
             },
@@ -2281,6 +2290,7 @@ mod tests {
             &data,
             &repo,
             DemoSelection {
+                profile: None,
                 harness: "codex".into(),
                 model: None,
                 permission_mode: None,
@@ -2346,6 +2356,7 @@ mod tests {
             &data,
             &repo,
             DemoSelection {
+                profile: None,
                 harness: "codex".into(),
                 model: None,
                 permission_mode: None,
@@ -2381,6 +2392,7 @@ mod tests {
             &data,
             &repo,
             DemoSelection {
+                profile: None,
                 harness: "codex".into(),
                 model: None,
                 permission_mode: None,
@@ -2446,6 +2458,7 @@ mod tests {
         let repo = data.join("repos").join(OWNER).join(REPO);
         prepare_origin(&demo_bare_path_in(&data));
         let selection = DemoSelection {
+            profile: None,
             harness: "codex".into(),
             model: None,
             permission_mode: None,

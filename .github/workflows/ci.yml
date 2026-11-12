@@ -242,11 +242,13 @@ jobs:
             args+=(--partition "$PARTITION")
           fi
           cargo nextest run --locked --profile ci "${args[@]}"
+        timeout-minutes: 30
       - name: Doc-tests
         if: matrix.name != 'test2'
         env:
           CARGO_INCREMENTAL: 1
         run: cargo test --locked --doc
+        timeout-minutes: 30
       - name: Source builds disable production telemetry
         if: matrix.name != 'test2'
         shell: bash
@@ -404,6 +406,7 @@ jobs:
         env:
           RUST_TEST_THREADS: 16
         run: cargo test --locked --features desktop
+        timeout-minutes: 30
 
   windows:
     name: windows (${{ matrix.mode }})
@@ -544,6 +547,7 @@ jobs:
           }
           cargo test @testArgs
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        timeout-minutes: 30
       - name: Save incremental compilation
         if: always() && github.ref == 'refs/heads/main' && (matrix.mode == 'test1' || matrix.mode == 'all') && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

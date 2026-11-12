@@ -1,4 +1,4 @@
-//! Releases of Claude Code, Codex and OpenCode that orx keeps in its cache.
+//! Vendor releases and agent runtimes that orx keeps in its cache.
 //! The user's own install runs whenever it is at least as new; a copy here
 //! stands in when that install is missing or cannot update itself. This module
 //! fetches and places copies; `orx up`'s harness setup decides when.
@@ -14,7 +14,22 @@ use tokio::io::AsyncWriteExt;
 
 use crate::error::{anyhow, bail, Context, Result};
 
-pub(crate) const HARNESSES: [&str; 3] = ["claude-code", "codex", "opencode"];
+mod catalog;
+pub(crate) use catalog::{command, environment, key, node, preferred, select, supported};
+
+pub(crate) fn harnesses() -> impl Iterator<Item = &'static str> {
+    ["claude-code", "codex", "opencode"].into_iter().chain(
+        catalog::AGENTS
+            .iter()
+            .map(|(id, _, _)| *id)
+            .filter(|id| *id != "node"),
+    )
+}
+
+/// The agent `harness` installs as its runtime, which comes and goes with it.
+pub(crate) fn runtime(harness: &str) -> Option<&'static str> {
+    (harness == "pi-acp").then_some("pi")
+}
 
 const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
 const CODEX_CHANNEL: &str = "https://releases.openai.com/codex/channels/latest";
@@ -22,11 +37,14 @@ const OPENCODE_RELEASES: &str = "https://api.github.com/repos/anomalyco/opencode
 
 /// The host a harness's releases come from, as the install dialog names it.
 pub(crate) fn source(harness: &str) -> Option<&'static str> {
-    match harness {
+    match key(harness).as_str() {
         "claude-code" => Some("downloads.claude.ai"),
         "codex" => Some("releases.openai.com"),
         "opencode" => Some("github.com"),
-        _ => None,
+        other => catalog::AGENTS
+            .iter()
+            .find(|(id, _, _)| *id == other)
+            .map(|(_, host, _)| *host),
     }
 }
 
@@ -35,12 +53,31 @@ fn root() -> PathBuf {
     crate::local::git::cache_root().join("managed-agents")
 }
 
+/// Hold across install decisions and removal so dashboards cannot race shared runtime cleanup.
+pub(crate) fn lock_installations() -> Result<crate::file_lock::FileLock> {
+    let root = crate::config::config_dir();
+    std::fs::create_dir_all(&root)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("managed-agents.lock"))?;
+    lock.try_lock().map_err(|error| {
+        anyhow!(
+            "Another agent install or removal is in progress. Try again when it finishes: {error}"
+        )
+    })?;
+    Ok(crate::file_lock::FileLock::new(lock))
+}
+
 fn executable(harness: &str, release: &Path) -> PathBuf {
     let exe = |name: &str| format!("{name}{}", std::env::consts::EXE_SUFFIX);
     match harness {
         "codex" => release.join("bin").join(exe("codex")),
         "opencode" => release.join(exe("opencode")),
-        _ => release.join(exe("claude")),
+        "claude-code" => release.join(exe("claude")),
+        other => catalog::executable(other, release),
     }
 }
 
@@ -53,9 +90,9 @@ pub(crate) fn installed_for_major(
     harness: &str,
     major: Option<u64>,
 ) -> Option<(PathBuf, semver::Version)> {
-    if !HARNESSES.contains(&harness) {
-        return None;
-    }
+    let harness = key(harness);
+    let harness = harness.as_str();
+    source(harness)?;
     std::fs::read_dir(root().join(harness))
         .ok()?
         .flatten()
@@ -82,31 +119,73 @@ pub(crate) fn version_of(bin: &Path) -> Option<semver::Version> {
     let harness = parts.next()?.as_os_str().to_str()?;
     let release = parts.next()?.as_os_str().to_str()?;
     let version = semver::Version::parse(release).ok()?;
-    let expected = executable(harness, &Path::new(harness).join(release));
-    (HARNESSES.contains(&harness) && relative == expected.as_path()).then_some(version)
+    let expected = executable(harness, &root.join(harness).join(release));
+    (source(harness).is_some() && relative == expected.strip_prefix(&root).ok()?).then_some(version)
 }
 
 /// The first token of a `--version` line that reads as a version, `v` prefix allowed.
 pub(crate) fn parse(line: &str) -> Option<semver::Version> {
     line.split_whitespace()
-        .find_map(|token| semver::Version::parse(token.trim_start_matches('v')).ok())
+        .find_map(|token| catalog_version(token.rsplit('/').next()?))
+}
+
+fn catalog_version(token: &str) -> Option<semver::Version> {
+    semver::Version::parse(token.trim_start_matches('v'))
+        .ok()
+        .or_else(|| {
+            let (date, suffix) = token.split_once('-')?;
+            let parts = date
+                .split('.')
+                .map(str::parse::<u64>)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .ok()?;
+            (parts.len() == 3)
+                .then(|| {
+                    semver::Version::parse(&format!(
+                        "{}.{}.{}-{suffix}",
+                        parts[0], parts[1], parts[2]
+                    ))
+                    .ok()
+                })
+                .flatten()
+        })
 }
 
 /// The user's own working install and its version, leaving orx's copies out.
 pub(crate) async fn user_install(harness: &str) -> Option<(PathBuf, semver::Version)> {
+    let harness = key(harness);
     if harness == "opencode" {
         let binary = crate::local::opencode::user_binary().await.ok()?;
         return Some((binary.path.clone(), parse(&binary.version)?));
     }
-    let candidates = match harness {
-        "claude-code" => super::claude::claude_candidates(),
-        "codex" => super::codex::codex_candidates(),
-        _ => return None,
-    };
-    match super::detect::select_working_from(candidates, None, None).await? {
+    match user_probe(&harness).await? {
         (bin, super::detect::BinProbe::Answered(Some(line))) => Some((bin, parse(&line)?)),
         _ => None,
     }
+}
+
+/// An install of the user's that is there but fails to run, which only orx's copy can stand in for.
+pub(crate) async fn user_install_broken(harness: &str) -> bool {
+    let harness = key(harness);
+    // OpenCode's lookup does not tell a broken install from a missing one.
+    harness != "opencode"
+        && matches!(
+            user_probe(&harness).await,
+            Some((_, super::detect::BinProbe::Broken(_)))
+        )
+}
+
+async fn user_probe(harness: &str) -> Option<(PathBuf, super::detect::BinProbe)> {
+    let candidates = match harness {
+        "claude-code" => super::claude::claude_candidates(),
+        "codex" => super::codex::codex_candidates(),
+        "cursor" => super::cursor::cursor_candidates(),
+        "antigravity" => super::antigravity::agy_candidates(),
+        other => crate::local::acp::user_executable_path(other)
+            .into_iter()
+            .collect(),
+    };
+    super::detect::select_working_from(candidates, None, None).await
 }
 
 /// A release built for this computer.
@@ -123,12 +202,19 @@ enum Format {
     Zstd(String),
     TarGz,
     Zip,
+    Raw,
+    Npm,
 }
 
 /// The newest release for this computer. `major` holds OpenCode to one major
 /// version, since its majors speak different protocols.
 pub(crate) async fn latest(harness: &str, major: Option<u64>) -> Result<Release> {
     let client = client()?;
+    let harness = key(harness);
+    let harness = harness.as_str();
+    if catalog::AGENTS.iter().any(|(id, _, _)| *id == harness) {
+        return catalog::latest(&client, harness).await;
+    }
     let asset = asset(harness).ok_or_else(|| {
         anyhow!(
             "There is no {harness} release for {} on {}.",
@@ -146,7 +232,7 @@ pub(crate) async fn latest(harness: &str, major: Option<u64>) -> Result<Release>
             published_asset(&release, &asset, version, Format::TarGz)
         }
         "opencode" => {
-            opencode_release(&client, OPENCODE_RELEASES, &asset, major.unwrap_or(1)).await
+            opencode_release(&client, OPENCODE_RELEASES, &asset, major.unwrap_or(2)).await
         }
         _ => bail!("orx does not install {harness}."),
     }
@@ -164,28 +250,33 @@ async fn opencode_release(
         let releases = releases
             .as_array()
             .ok_or_else(|| anyhow!("GitHub returned an invalid OpenCode release list."))?;
-        let found = releases
-            .iter()
-            .filter(|release| release["draft"] != true && release["prerelease"] != true)
-            .filter_map(|release| {
-                let tag = release["tag_name"].as_str()?.strip_prefix('v')?;
-                Some((semver::Version::parse(tag).ok()?, release))
-            })
-            .filter(|(version, _)| version.major == major && version.pre.is_empty())
-            .max_by(|a, b| a.0.cmp(&b.0));
-        if let Some((version, release)) = found {
-            let format = if asset.ends_with(".zip") {
-                Format::Zip
-            } else {
-                Format::TarGz
-            };
-            return published_asset(release, asset, version, format);
+        if let Some(release) = newest_opencode(releases, asset, major) {
+            return release;
         }
         if releases.len() < 40 {
             bail!("GitHub lists no OpenCode {major}.x release.");
         }
         page += 1;
     }
+}
+
+/// The newest stable `major` release on one page of OpenCode's releases.
+fn newest_opencode(releases: &[Value], asset: &str, major: u64) -> Option<Result<Release>> {
+    let (version, release) = releases
+        .iter()
+        .filter(|release| release["draft"] != true && release["prerelease"] != true)
+        .filter_map(|release| {
+            let tag = release["tag_name"].as_str()?.strip_prefix('v')?;
+            Some((semver::Version::parse(tag).ok()?, release))
+        })
+        .filter(|(version, _)| version.major == major && version.pre.is_empty())
+        .max_by(|a, b| a.0.cmp(&b.0))?;
+    let format = if asset.ends_with(".zip") {
+        Format::Zip
+    } else {
+        Format::TarGz
+    };
+    Some(published_asset(release, asset, version, format))
 }
 
 /// Claude Code's own updater follows `autoUpdatesChannel`, so the copy follows it too.
@@ -341,8 +432,16 @@ pub(crate) async fn install(
     release: &Release,
     progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
 ) -> Result<PathBuf> {
-    static INSTALLING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _guard = INSTALLING.lock().await;
+    let harness = key(harness);
+    let harness = harness.as_str();
+    if matches!(release.format, Format::Npm) {
+        let runtime = latest("node", None).await?;
+        Box::pin(install("node", &runtime, progress)).await?;
+    }
+    if let Some(runtime) = runtime(harness) {
+        let release = latest(runtime, None).await?;
+        Box::pin(install(runtime, &release, progress)).await?;
+    }
     let parent = root().join(harness);
     let target = parent.join(release.version.to_string());
     let bin = executable(harness, &target);
@@ -357,8 +456,17 @@ pub(crate) async fn install(
     let result = async {
         tokio::fs::create_dir_all(&staging).await?;
         let download = staging.join("download");
-        fetch(release, &download, progress).await?;
         let unpacked = staging.join("release");
+        if matches!(release.format, Format::Npm) {
+            progress(0, None);
+            tokio::fs::create_dir_all(&unpacked).await?;
+            catalog::npm_install(harness, release, &unpacked, progress).await?;
+            if !executable(harness, &unpacked).is_file() {
+                bail!("The package has no {harness} executable.");
+            }
+            return place(&unpacked, &target).await;
+        }
+        fetch(release, &download, progress).await?;
         let (from, into, format) = (download.clone(), unpacked.clone(), release.format.clone());
         let name = harness.to_string();
         tokio::task::spawn_blocking(move || unpack(&name, &format, &from, &into))
@@ -386,7 +494,7 @@ pub(crate) async fn install(
             let _ = tokio::fs::remove_dir_all(path).await;
         }
     }
-    Ok(bin)
+    Ok(executable(harness, &target))
 }
 
 /// Delete every copy, once the user's own install is current. One a running
@@ -395,6 +503,56 @@ pub(crate) async fn remove_all(harness: &str) {
     for (_, path) in copies(harness).await {
         let _ = tokio::fs::remove_dir_all(path).await;
     }
+}
+
+pub(crate) fn removable_key(harness: &str) -> Result<String> {
+    let key = key(harness);
+    if matches!(key.as_str(), "claude-code" | "codex" | "opencode") {
+        bail!("This agent supports other accounts and providers. Turn it off in Settings → Agents instead.");
+    }
+    let runtime_only = key == "node"
+        || catalog::AGENTS
+            .iter()
+            .any(|(id, _, _)| runtime(id) == Some(key.as_str()));
+    if runtime_only || !catalog::AGENTS.iter().any(|(id, _, _)| *id == key) {
+        bail!("Choose an agent installed by OpenResearch to remove.");
+    }
+    Ok(key)
+}
+
+pub(crate) async fn uninstall(harness: &str) -> Result<()> {
+    uninstall_at(&root(), harness).await
+}
+
+async fn uninstall_at(root: &Path, harness: &str) -> Result<()> {
+    let key = removable_key(harness)?;
+    if std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        bail!("The managed agent directory is a link. Restore it before removing an agent.");
+    }
+    let keys: Vec<&str> = std::iter::once(key.as_str()).chain(runtime(&key)).collect();
+    for key in &keys {
+        let path = root.join(key);
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            bail!("The managed {key} directory is a link. Restore it before removing the agent.");
+        }
+    }
+    for key in keys {
+        let path = root.join(key);
+        match tokio::fs::remove_dir_all(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Could not remove {}. Close other apps using this agent and try again.",
+                        path.display()
+                    )
+                })
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Release directories on disk, newest first.
@@ -455,17 +613,24 @@ async fn fetch(
         .await
         .with_context(|| format!("Could not create {}", path.display()))?;
     let mut hasher = Sha256::new();
+    let mut sha512 = sha2::Sha512::new();
     let mut received = 0;
     let mut body = response.bytes_stream();
     while let Some(chunk) = body.next().await {
         let chunk = chunk.context("The download was interrupted")?;
         hasher.update(&chunk);
+        sha512.update(&chunk);
         file.write_all(&chunk).await?;
         received += chunk.len() as u64;
         progress(received, total);
     }
     file.flush().await?;
-    if format!("{:x}", hasher.finalize()) != release.sha256 {
+    let actual = if release.sha256.starts_with("sha512:") {
+        format!("sha512:{:x}", sha512.finalize())
+    } else {
+        format!("{:x}", hasher.finalize())
+    };
+    if !release.sha256.is_empty() && actual != release.sha256 {
         bail!("The download does not match its published SHA-256.");
     }
     Ok(())
@@ -476,6 +641,10 @@ fn unpack(harness: &str, format: &Format, archive: &Path, into: &Path) -> Result
     let file = std::io::BufReader::new(std::fs::File::open(archive)?);
     let bin = executable(harness, into);
     match format {
+        Format::Npm => bail!("npm packages require the managed runtime"),
+        Format::Raw => {
+            std::fs::copy(archive, &bin)?;
+        }
         Format::Zstd(sha256) => {
             let mut decoder = ruzstd::decoding::StreamingDecoder::new(file)
                 .map_err(|error| anyhow!("The download is not zstd: {error}"))?;
@@ -503,6 +672,20 @@ fn unpack(harness: &str, format: &Format, archive: &Path, into: &Path) -> Result
             .context("Could not unpack the download")?,
     }
     if !bin.is_file() {
+        let entries = std::fs::read_dir(into)?.collect::<std::io::Result<Vec<_>>>()?;
+        if entries.len() == 1 && entries[0].path().is_dir() {
+            let nested = entries[0].path();
+            for entry in std::fs::read_dir(&nested)? {
+                let entry = entry?;
+                std::fs::rename(entry.path(), into.join(entry.file_name()))?;
+            }
+            std::fs::remove_dir(nested)?;
+        }
+        if harness == "antigravity" && into.join("antigravity").is_file() {
+            std::fs::rename(into.join("antigravity"), &bin)?;
+        }
+    }
+    if !bin.is_file() {
         bail!("The download has no {}.", bin.display());
     }
     #[cfg(unix)]
@@ -521,7 +704,19 @@ pub(crate) async fn verify(harness: &str, bin: &Path, version: &semver::Version)
             .await?
             .version
     } else {
+        let home = crate::local::git::TemporaryDirectory::new("orx-agent-verify")?;
         let mut command = crate::process::tokio_command(bin);
+        command
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path());
+        for name in [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+        ] {
+            command.env(name, home.path().join(name));
+        }
         command
             .arg("--version")
             .env("NO_COLOR", "1")
@@ -595,6 +790,115 @@ fn client() -> Result<reqwest::Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Directory(PathBuf);
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn uninstall_validates_before_touching_any_path() {
+        let directory =
+            Directory(std::env::temp_dir().join(format!("orx-remove-{}", uuid::Uuid::new_v4())));
+        let root = directory.0.join("managed-agents");
+        std::fs::create_dir_all(root.join("cursor/1.0.0")).unwrap();
+        let sentinel = directory.0.join("outside");
+        std::fs::write(&sentinel, "keep").unwrap();
+        for id in [
+            "../x",
+            "cursor/..",
+            "/tmp/x",
+            "",
+            "unknown",
+            "acp:unknown",
+            "node",
+            "pi",
+            "claude-code",
+            "codex",
+            "opencode",
+        ] {
+            assert!(uninstall_at(&root, id).await.is_err(), "{id}");
+            assert!(root.join("cursor/1.0.0").is_dir());
+            assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep");
+        }
+    }
+
+    #[tokio::test]
+    async fn uninstall_removes_all_copies_and_pi_but_keeps_shared_node() {
+        let directory =
+            Directory(std::env::temp_dir().join(format!("orx-remove-{}", uuid::Uuid::new_v4())));
+        let root = directory.0.join("managed-agents");
+        for path in [
+            "cursor/1.0.0",
+            "cursor/2.0.0",
+            "cursor/.staging-partial",
+            "dsh/1.0.0",
+            "mcode/1.0.0",
+            "pi-acp/1.0.0",
+            "pi/1.0.0",
+            "node/24.0.0",
+        ] {
+            std::fs::create_dir_all(root.join(path)).unwrap();
+        }
+        let credentials = directory.0.join("env");
+        let saved = "export DEEPSEEK_API_KEY='shared'\nexport OTHER_KEY='keep'\n";
+        std::fs::write(&credentials, saved).unwrap();
+        let history = directory.0.join("chat-history");
+        std::fs::write(&history, "transcript").unwrap();
+        let own = directory.0.join("user-bin");
+        std::fs::write(&own, "user install").unwrap();
+        uninstall_at(&root, "cursor").await.unwrap();
+        assert!(!root.join("cursor").exists());
+        assert!(root.join("dsh").is_dir());
+        let deepseek = crate::local::acp::presets()
+            .into_iter()
+            .find(|preset| preset.launch.executable == "dsh")
+            .unwrap();
+        uninstall_at(&root, &deepseek.launch.id).await.unwrap();
+        assert!(!root.join("dsh").exists());
+        assert!(root.join("node/24.0.0").is_dir());
+        assert!(root.join("mcode/1.0.0").is_dir());
+        uninstall_at(&root, "mcode").await.unwrap();
+        assert!(root.join("node/24.0.0").is_dir());
+        uninstall_at(&root, "pi-acp").await.unwrap();
+        assert!(!root.join("pi-acp").exists());
+        assert!(!root.join("pi").exists());
+        assert!(root.join("node/24.0.0").is_dir());
+        assert_eq!(std::fs::read_to_string(credentials).unwrap(), saved);
+        assert_eq!(std::fs::read_to_string(history).unwrap(), "transcript");
+        assert_eq!(std::fs::read_to_string(own).unwrap(), "user install");
+        uninstall_at(&root, "cursor").await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uninstall_never_follows_links_outside_managed_root() {
+        let directory =
+            Directory(std::env::temp_dir().join(format!("orx-remove-{}", uuid::Uuid::new_v4())));
+        let root = directory.0.join("managed-agents");
+        let outside = directory.0.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("cursor")).unwrap();
+        assert!(uninstall_at(&root, "cursor").await.is_err());
+        std::fs::remove_file(root.join("cursor")).unwrap();
+        std::fs::create_dir_all(root.join("cursor/1.0.0")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("cursor/1.0.0/link")).unwrap();
+        uninstall_at(&root, "cursor").await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(outside.join("keep")).unwrap(),
+            "keep"
+        );
+        std::os::unix::fs::symlink(&outside, directory.0.join("linked-root")).unwrap();
+        assert!(uninstall_at(&directory.0.join("linked-root"), "cursor")
+            .await
+            .is_err());
+        assert!(outside.join("keep").is_file());
+    }
 
     #[test]
     fn managed_opencode_selection_respects_the_users_major() {
@@ -721,6 +1025,7 @@ mod tests {
             parse("codex-cli 0.167.0-alpha.1"),
             semver::Version::parse("0.167.0-alpha.1").ok()
         );
+        assert_eq!(parse("omp/18.18.5"), Some(semver::Version::new(18, 18, 5)));
         assert_eq!(parse("not installed"), None);
     }
 
@@ -751,6 +1056,29 @@ mod tests {
         assert_eq!(opencode.ends_with(".tar.gz"), cfg!(target_os = "linux"));
         assert!(!asset("claude-code").unwrap().contains('.'));
         assert_eq!(asset("cursor"), None);
+    }
+
+    #[test]
+    fn opencode_defaults_to_newest_stable_v2_and_allows_explicit_v1() {
+        let releases = serde_json::json!(["1.19.5", "2.1.0", "2.2.5", "2.3.0-beta.1", "3.0.0"].map(|version| serde_json::json!({
+            "tag_name":format!("v{version}"),
+            "assets":[{"name":"opencode.zip","browser_download_url":"https://example.test/asset","digest":"sha256:abc"}]
+        })));
+        assert_eq!(
+            newest_opencode(releases.as_array().unwrap(), "opencode.zip", 2)
+                .unwrap()
+                .unwrap()
+                .version,
+            semver::Version::new(2, 2, 5)
+        );
+        assert_eq!(
+            newest_opencode(releases.as_array().unwrap(), "opencode.zip", 1)
+                .unwrap()
+                .unwrap()
+                .version,
+            semver::Version::new(1, 19, 5)
+        );
+        assert!(newest_opencode(releases.as_array().unwrap(), "opencode.zip", 4).is_none());
     }
 
     #[test]
