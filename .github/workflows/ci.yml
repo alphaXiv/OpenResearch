@@ -428,7 +428,7 @@ jobs:
         id: rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          components: clippy, rustfmt
+          components: ${{ (matrix.mode == 'lint' || matrix.mode == 'all') && 'clippy, rustfmt' || '' }}
       # Tests create their git repositories under TEMP, so it moves to the Dev Drive too.
       - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
         with:

@@ -44,8 +44,10 @@ const rebuildUi = newest(UI) > newest(path.join(UI, 'dist'))
 if (rebuildUi && !statSync(path.join(UI, 'node_modules'), { throwIfNoEntry: false })) {
   await run('pnpm', ['install', '--frozen-lockfile'], UI)
 }
+
 const builds = [run('cargo', ['build', '--locked'])]
 if (rebuildUi) builds.push(run('pnpm', ['exec', 'vite', 'build'], UI))
+
 const results = await Promise.allSettled(builds)
 for (const result of results) {
   if (result.status === 'rejected') throw result.reason
