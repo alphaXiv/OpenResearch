@@ -143,40 +143,68 @@ impl ProcessTable {
             tags: BTreeMap::new(),
             unreadable: vec![],
         };
-        let uid = unsafe { libc::getuid() };
-        for pid in pids {
-            let process = match process(pid) {
-                Ok(process) => process,
-                Err(error) if vanished(&error) => continue,
-                Err(_) => {
-                    match process_uid(pid) {
-                        Ok(owner) if owner != uid => {}
-                        Err(error) if vanished(&error) => {}
-                        _ => table.unreadable.push(pid),
-                    }
-                    continue;
-                }
-            };
-            if process.uid == uid && process.live() {
-                match environment(pid) {
-                    Ok(env) => {
-                        for entry in env.split(|&byte| byte == 0) {
-                            if let Some(tag) = entry
-                                .strip_prefix(b"ORX_RUN_TAG=")
-                                .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                            {
-                                table.tags.entry(tag.to_owned()).or_default().insert(pid);
-                            }
-                        }
-                    }
-                    Err(error) if vanished(&error) => continue,
-                    Err(_) if openssh_session(pid) => {}
-                    Err(_) => table.unreadable.push(pid),
+        let unreadable: Vec<_> = pids
+            .into_iter()
+            .filter(|&pid| !table.inspect(pid, &process, &process_uid))
+            .collect();
+        if !unreadable.is_empty() {
+            // A process that is exec'ing or exiting is unreadable for a moment.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            for pid in unreadable {
+                let first = table.processes.remove(&pid);
+                if !table.inspect(pid, &process, &process_uid) {
+                    table.unreadable.push(pid);
+                } else if let Some(mut exited) =
+                    first.filter(|_| !table.processes.contains_key(&pid))
+                {
+                    exited.state = "X".into();
+                    table.processes.insert(pid, exited);
                 }
             }
-            table.processes.insert(pid, process);
         }
         table
+    }
+
+    /// Records `pid` unless it is gone; false when it could not be read.
+    fn inspect(
+        &mut self,
+        pid: u32,
+        process: &impl Fn(u32) -> io::Result<Process>,
+        process_uid: &impl Fn(u32) -> io::Result<u32>,
+    ) -> bool {
+        let uid = unsafe { libc::getuid() };
+        let mut process = match process(pid) {
+            Ok(process) => process,
+            Err(error) if vanished(&error) => return true,
+            Err(_) => {
+                return match process_uid(pid) {
+                    Ok(owner) if owner != uid => true,
+                    Err(error) if vanished(&error) => true,
+                    _ => false,
+                };
+            }
+        };
+        let mut readable = true;
+        if process.uid == uid && process.live() {
+            match environment(pid) {
+                Ok(env) => {
+                    for entry in env.split(|&byte| byte == 0) {
+                        if let Some(tag) = entry
+                            .strip_prefix(b"ORX_RUN_TAG=")
+                            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        {
+                            self.tags.entry(tag.to_owned()).or_default().insert(pid);
+                        }
+                    }
+                }
+                // Kept as an ancestor, so a child it leaves behind stays a descendant.
+                Err(error) if vanished(&error) => process.state = "X".into(),
+                Err(_) if openssh_session(pid) => {}
+                Err(_) => readable = false,
+            }
+        }
+        self.processes.insert(pid, process);
+        readable
     }
 
     fn select(&self, wrapper: Option<&ProcessIdentity>, tag: &str, subreaper: bool) -> Scan {
@@ -618,6 +646,38 @@ mod tests {
                 CancelOutcome::Verified
             );
         }
+    }
+
+    #[test]
+    fn a_process_that_exits_mid_scan_is_gone_but_keeps_its_child() {
+        let wrapper = identity(std::process::id()).unwrap();
+        let uid = unsafe { libc::getuid() };
+        let mut exiting = std::process::Command::new("true").spawn().unwrap();
+        let parent = exiting.id();
+        exiting.wait().unwrap();
+        let child = u32::MAX;
+        let exited = std::cell::Cell::new(false);
+        let table = ProcessTable::from_pids(
+            vec![parent, child],
+            |pid| {
+                if pid == parent && exited.replace(true) {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(Process {
+                    pid,
+                    ppid: if pid == parent { wrapper.pid } else { parent },
+                    // Another owner, so no environment read stands in the way.
+                    uid: if pid == parent { uid } else { uid + 1 },
+                    starttime: wrapper.starttime,
+                    state: "R".into(),
+                })
+            },
+            |_| Err(io::Error::from_raw_os_error(libc::ESRCH)),
+        );
+        let scan = table.select(Some(&wrapper), "tag", true);
+        assert!(scan.unreadable.is_empty(), "{:?}", scan.unreadable);
+        let survivors: Vec<_> = scan.processes.iter().map(|process| process.pid).collect();
+        assert_eq!(survivors, [child]);
     }
 
     #[test]

@@ -13,6 +13,13 @@ use std::time::Duration;
 // An unreadable environment makes every concurrent same-UID scan incomplete.
 static CANCELLATIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// One failed cancellation test must not fail the rest on a poisoned lock.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    CANCELLATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[test]
 fn cancellation_before_started_never_spawns_the_payload() {
     let mut run = Run::new("touch should-not-run\n");
@@ -60,7 +67,7 @@ fn process_group_leader_can_be_a_wrapper() {
 
 #[test]
 fn term_is_delivered_once_and_checkpoint_completion_returns_before_the_grace_deadline() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new(
         r#"exec python3 - <<'PY'
 import signal, time
@@ -219,7 +226,7 @@ fn duplicate_wrapper_loser_writes_nothing() {
 
 #[test]
 fn crash_windows_never_reexecute_after_started() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("printf once >> count\n");
     assert_eq!(
         wrapper::state(&run.directory.0).unwrap(),
@@ -264,7 +271,7 @@ fn malformed_receipts_remain_unreconciled() {
 
 #[test]
 fn wrapper_gone_with_a_complete_empty_tag_scan_is_lost() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let dir = Directory::new();
     fs::write(dir.0.join("started"), "test:nonexistent").unwrap();
     let mut identity = platform::identity(std::process::id()).unwrap();
@@ -278,7 +285,7 @@ fn wrapper_gone_with_a_complete_empty_tag_scan_is_lost() {
 
 #[test]
 fn payload_exiting_during_cancel_publishes_one_receipt() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("touch ready\ntrap 'exit 0' TERM\nwhile :; do sleep 0.1; done\n");
     run.spawn();
     run.ready();
@@ -326,7 +333,7 @@ fn payload_exiting_during_cancel_publishes_one_receipt() {
 
 #[test]
 fn detached_double_fork_and_nohup_children_are_killed() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new(
         r#"python3 - <<'PY'
 import os, time
@@ -405,7 +412,7 @@ fn real_crashes_before_and_after_exactly_once_marker() {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_older_nondumpable_same_uid_process_does_not_block_verified_cancellation() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let dir = Directory::new();
     let old = common::Group(Command::new("python3")
         .arg("-c")
@@ -442,7 +449,7 @@ fn an_older_nondumpable_same_uid_process_does_not_block_verified_cancellation() 
 #[cfg(target_os = "linux")]
 #[test]
 fn unreadable_environment_requires_a_fresh_scan_after_proven_death() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("touch ready; exec sleep 60");
     run.spawn();
     run.ready();
@@ -515,7 +522,7 @@ fn reboot_only_loses_a_run_after_the_exactly_once_marker() {
 
 #[test]
 fn killed_wrapper_with_scrubbed_orphan_remains_unreconciled() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new(
         r#"python3 - <<'PY'
 import os, sys, time
@@ -564,7 +571,7 @@ PY
 
 #[test]
 fn direct_exit_is_published_before_lingering_daemon_cleanup() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new(
         r#"python3 - <<'PY'
 import os, sys, time
@@ -641,7 +648,7 @@ fn natural_daemon_exit_reaps_and_resolves_lingering_without_changing_the_result(
 
 #[test]
 fn a_timed_out_hook_retries_before_the_receipt_then_recovers() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("touch ready; sleep 60\n");
     fs::write(
         run.directory.0.join("cancel.sh"),
@@ -676,7 +683,7 @@ fn a_timed_out_hook_retries_before_the_receipt_then_recovers() {
 
 #[test]
 fn a_hook_prevents_lingering_from_upgrading_to_verified() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("bash -c 'touch ready; while [ ! -f release ]; do sleep .01; done' &\nwhile [ ! -f ready ]; do sleep .01; done\n");
     fs::write(run.directory.0.join("cancel.sh"), "true").unwrap();
     run.spawn();
@@ -830,7 +837,7 @@ fn wrapper_receipt_records_completion_time() {
 
 #[test]
 fn cancellation_waits_for_a_slow_survivor_inside_the_kill_window() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("touch ready; exec sleep 60");
     let hold = run.directory.0.join("hold");
     fs::write(&hold, "once").unwrap();
@@ -856,7 +863,7 @@ fn cancellation_waits_for_a_slow_survivor_inside_the_kill_window() {
 
 #[test]
 fn survivors_after_the_window_are_rekilled_and_the_proof_is_renewed() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     for slurm in [false, true] {
         let mut run = Run::new("touch ready; exec sleep 60");
         let hold = run.directory.0.join("hold");
@@ -972,7 +979,7 @@ fn cancellation_never_replaces_a_receipt_even_without_started() {
 
 #[test]
 fn dead_wrapper_cleanup_renews_proof_without_changing_the_receipt() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     for reboot in [false, true] {
         let run = Run::new("true");
         let mut worker = common::Group(
@@ -1041,7 +1048,7 @@ fn rentals_release_after_receipts_with_or_without_a_collector_and_retry_release(
         Arc, Mutex,
     };
 
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     for (code, acknowledge, cancel) in [
         (0, true, false),
         (7, true, false),

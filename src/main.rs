@@ -20,6 +20,7 @@ mod compute;
 mod config;
 mod engine;
 mod error;
+mod file_lock;
 mod folder_picker;
 mod invocation;
 mod jobs;

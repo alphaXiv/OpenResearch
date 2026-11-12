@@ -307,6 +307,7 @@ async fn ensure() -> Result<Endpoint> {
     if !locked {
         return Err(anyhow!("SSH service startup is busy; retry shortly."));
     }
+    let _lock = crate::file_lock::FileLock::new(lock);
     if let Ok(endpoint) = endpoint() {
         if exchange(&endpoint, None, json!({"op":"hello"}))
             .await
@@ -778,6 +779,7 @@ pub(crate) async fn run() -> Result<()> {
     if lock.try_lock().is_err() {
         return Ok(());
     }
+    let _lock = crate::file_lock::FileLock::new(lock);
     state::database()?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let endpoint = Endpoint {

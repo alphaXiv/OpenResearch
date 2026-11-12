@@ -161,10 +161,8 @@ impl Fixture {
     }
 
     fn shim(&self, name: &str, script: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let path = self.server.directory().join("shims").join(name);
-        fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        orx_test_support::write_executable(path, format!("#!/bin/sh\n{script}\n"), 0o700).unwrap();
     }
 }
 

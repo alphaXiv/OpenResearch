@@ -2255,12 +2255,10 @@ mod tests {
         let script = "@echo off\r\necho %*>>\"%ORX_TEST_OPENCODE_LOG%\"\r\nif \"%1\"==\"--version\" (echo 1.18.35& exit /b 0)\r\nif \"%1\"==\"models\" (echo openrouter/paid& exit /b 0)\r\nexit /b 0\r\n";
         #[cfg(not(windows))]
         let script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ORX_TEST_OPENCODE_LOG\"\ncase \"$1\" in\n--version) echo 1.18.35;;\nmodels) echo openrouter/paid;;\nesac\n";
-        std::fs::write(&cli, script).unwrap();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
+        orx_test_support::write_executable(&cli, script, 0o700).unwrap();
+        #[cfg(windows)]
+        std::fs::write(&cli, script).unwrap();
         let log = root.join("calls.log");
         std::env::set_var("ORX_TEST_OPENCODE_LOG", &log);
         std::env::set_var("PATH", &bin);
@@ -3048,8 +3046,6 @@ opencode/unknown
     /// A `#!/bin/sh` stand-in for the opencode CLI, as in `detect.rs`.
     #[cfg(unix)]
     fn sh_script(name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir =
             std::env::temp_dir().join(format!("orx-opencode-capture-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3059,8 +3055,7 @@ opencode/unknown
             "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.18.31; exit 0; fi\n",
             1,
         );
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        orx_test_support::write_executable(&path, body, 0o755).unwrap();
         path
     }
 

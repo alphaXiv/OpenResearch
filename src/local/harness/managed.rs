@@ -54,7 +54,7 @@ fn root() -> PathBuf {
 }
 
 /// Hold across install decisions and removal so dashboards cannot race shared runtime cleanup.
-pub(crate) fn lock_installations() -> Result<std::fs::File> {
+pub(crate) fn lock_installations() -> Result<crate::file_lock::FileLock> {
     let root = crate::config::config_dir();
     std::fs::create_dir_all(&root)?;
     let lock = std::fs::OpenOptions::new()
@@ -68,7 +68,7 @@ pub(crate) fn lock_installations() -> Result<std::fs::File> {
             "Another agent install or removal is in progress. Try again when it finishes: {error}"
         )
     })?;
-    Ok(lock)
+    Ok(crate::file_lock::FileLock::new(lock))
 }
 
 fn executable(harness: &str, release: &Path) -> PathBuf {

@@ -299,9 +299,6 @@ impl DeviceAuthorization {
         let mut interval = self.interval;
         loop {
             tokio::time::sleep(config::paced(interval)).await;
-            if tokio::time::Instant::now() >= deadline {
-                return Err(expired());
-            }
             let grant = [
                 ("grant_type", DEVICE_GRANT),
                 ("device_code", self.device_code.as_str()),
@@ -316,6 +313,12 @@ impl DeviceAuthorization {
                 Err(error) => error,
             };
             match refusal(&error) {
+                // alphaXiv rules on a late approval; the deadline only ends a code it never settles.
+                Some("authorization_pending" | "slow_down")
+                    if tokio::time::Instant::now() >= deadline =>
+                {
+                    return Err(expired())
+                }
                 Some("authorization_pending") => {}
                 Some("slow_down") => interval += SLOW_DOWN,
                 Some("access_denied") => {
@@ -407,14 +410,17 @@ fn remove(path: PathBuf) -> Result<()> {
 
 /// Held until dropped, across threads and processes: reusing a rotated refresh
 /// token makes alphaXiv revoke this user's desktop sign-ins everywhere.
-async fn lock() -> Result<std::fs::File> {
+async fn lock() -> Result<crate::file_lock::FileLock> {
     std::fs::create_dir_all(config::config_dir())?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(config::config_dir().join("alphaxiv.lock"))?;
-    Ok(tokio::task::spawn_blocking(move || file.lock().map(|()| file)).await??)
+    Ok(tokio::task::spawn_blocking(move || {
+        file.lock().map(|()| crate::file_lock::FileLock::new(file))
+    })
+    .await??)
 }
 
 /// Keeps `tokens`, and the OpenResearch `credentials` they signed in with, in

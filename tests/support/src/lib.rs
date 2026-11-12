@@ -135,6 +135,35 @@ fn start_stamp(pid: libc::pid_t) -> Option<u64> {
     Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
+/// Writes an executable that a test runs. A file this process holds open for writing passes to
+/// every child another test thread forks meanwhile, and running it fails with "Text file busy"
+/// until those children exec, so a child process writes it instead.
+pub fn write_executable(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+    mode: u32,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let path = path.as_ref();
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", "exec cat > \"$1\"", "sh"])
+        .arg(path)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    let written = writer.stdin.take().unwrap().write_all(contents.as_ref());
+    let status = writer.wait()?;
+    written?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "Could not write {}: sh {status}",
+            path.display()
+        )));
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
 pub fn host_binaries() -> PathBuf {
     use std::hash::{Hash, Hasher};
     static BINARIES: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -242,7 +271,7 @@ impl SshdBuilder {
         }
         fs::write(root.join("authorized_keys"), authorized_keys)?;
         let wrapper = root.join("command");
-        fs::write(
+        write_executable(
             &wrapper,
             format!(
                 r#"#!/bin/sh
@@ -257,8 +286,8 @@ fi
 "#,
                 home.display()
             ),
+            0o700,
         )?;
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
         let config = root.join("sshd_config");
         let deadline = Instant::now() + Duration::from_secs(8);
         let mut attempts = 0;
@@ -444,7 +473,7 @@ impl Sshd {
         fs::set_permissions(&answer, fs::Permissions::from_mode(0o600))?;
         fs::write(root.join("askpass-prompts"), "")?;
         let script = root.join("askpass");
-        fs::write(
+        write_executable(
             &script,
             format!(
                 r#"#!/bin/sh
@@ -454,8 +483,8 @@ printf '\n'
 "#,
                 root = root.display(),
             ),
+            0o700,
         )?;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
         Ok(script)
     }
 

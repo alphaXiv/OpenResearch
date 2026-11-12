@@ -169,6 +169,8 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --locked
+        # libtest names any test still running after 60s, so a hang fails here with its name.
+        timeout-minutes: 30
       - name: Source builds disable production telemetry
         shell: bash
         run: test "$(target/debug/orx --no-telemetry version --build-channel)" = "development"
@@ -289,6 +291,7 @@ jobs:
       - name: Test
         if: github.event_name != 'pull_request' || inputs.release
         run: cargo test --locked --features desktop
+        timeout-minutes: 30
 
   windows:
     name: windows (${{ matrix.mode }})
@@ -350,6 +353,7 @@ jobs:
         if: matrix.mode != 'lint'
         run: cargo test --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        timeout-minutes: 30
 
   check:
     name: fmt, clippy, test
