@@ -214,6 +214,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
 
     spawn_agent_preflight(state.clone());
+    spawn_agent_updates(state.clone());
     search::spawn_backfill(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.
@@ -5292,6 +5293,29 @@ async fn begin_restart(state: &AppState, own_requests: usize, stop_agents: bool)
     }
     DRAINING.store(false, Ordering::SeqCst);
     false
+}
+
+/// Once a day, keep each agent orx can install current: through the user's own
+/// updater, else with orx's copy (`harness_setup::keep_current`).
+fn spawn_agent_updates(state: AppState) {
+    tokio::spawn(async move {
+        // Startup detection's probes go first.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            for harness in local::harness::managed::HARNESSES {
+                match harness_setup::keep_current(harness).await {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        if let Some(info) = local::harness::detect_harness(harness).await {
+                            publish_harness(&state, &info).await;
+                        }
+                    }
+                    Err(error) => eprintln!("orx up: could not update {harness}: {error:#}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
 }
 
 /// Startup summary of detected coding agents. Never blocks. It goes through

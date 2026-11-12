@@ -30,7 +30,9 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
   const [needsRepair, setNeedsRepair] = useState(harness.needsConfigRepair);
   const [error, setError] = useState<string | null>(harness.needsConfigRepair ? harness.agentNote ?? null : null);
   const busy = phase === "running" || phase === "checking";
-  const command = commands[action].includes("\n") ? undefined : commands[action];
+  const shown = commands[action];
+  const command = shown && !shown.includes("\n") ? shown : undefined;
+  const managedFrom = action === "install" ? commands.managedFrom : null;
 
   useEffect(() => {
     cancelled.current = false;
@@ -91,18 +93,25 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
         </DialogTitle>
       </div>
       {phase === "preview" ? (
-        <div className="my-4">
-          <p className="mb-2 text-sm text-subtext">
-            {action === "install" ? m.harness_setup_install_question({ agent: harness.name }) : m.harness_setup_update_preview({ agent: harness.name })}
-          </p>
-          <pre
-            tabIndex={0}
-            dir="ltr"
-            className="max-h-48 overflow-auto rounded-md border border-border bg-surface p-3 text-start font-mono text-xs text-text whitespace-pre-wrap wrap-anywhere"
-          >
-            <code>{commands[action]}</code>
-          </pre>
-        </div>
+        managedFrom ? (
+          <p className="my-4 text-sm text-subtext">{m.harness_setup_managed_install({ agent: harness.name, source: managedFrom })}</p>
+        ) : (
+          <div className="my-4">
+            <p className="mb-2 text-sm text-subtext">
+              {action === "install" ? m.harness_setup_install_question({ agent: harness.name }) : m.harness_setup_update_preview({ agent: harness.name })}
+            </p>
+            <pre
+              tabIndex={0}
+              dir="ltr"
+              className="max-h-48 overflow-auto rounded-md border border-border bg-surface p-3 text-start font-mono text-xs text-text whitespace-pre-wrap wrap-anywhere"
+            >
+              <code>{shown}</code>
+            </pre>
+            {action === "update" && commands.managedFrom && (
+              <p className="mt-2 text-sm text-subtext">{m.harness_setup_update_fallback({ agent: harness.name })}</p>
+            )}
+          </div>
+        )
       ) : command && started ? (
         <p className="my-4 text-sm text-subtext [&_.cmd-inline]:mx-2 [&_.cmd-inline]:gap-2">
           {renderNote(m.harness_setup_started_command({ command }))}
@@ -149,7 +158,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
         </Button>
         {phase === "preview" && (
           <Button variant="primary" onClick={() => { setStarted(true); setPhase("running"); }}>
-            {m.harness_setup_approve_run()}
+            {managedFrom ? m.harness_setup_install() : m.harness_setup_approve_run()}
           </Button>
         )}
       </div>

@@ -58,6 +58,12 @@ once_cell = "1"
 # Uploaded skills (.zip of a SKILL.md folder) and shared projects (.orx). Lean:
 # deflate only, no bzip2/zstd/time/aes.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Unpack the agent releases orx manages (src/local/harness/managed.rs): Codex
+# and Linux OpenCode ship as .tar.gz, Claude Code as zstd. flate2 is already in
+# the tree via zip; ruzstd decodes in pure Rust, so the musl builds stay C-free.
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+ruzstd = "0.9"
 # `orx up` dashboard: axum for routing/SSE, rust-embed for the SPA, futures for
 # the stream plumbing. TLS-free, so the rustls-only musl build stays intact.
 axum = { version = "0.8", features = ["ws"] }

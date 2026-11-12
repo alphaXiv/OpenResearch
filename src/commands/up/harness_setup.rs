@@ -9,15 +9,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{bad_request, AppState};
+use crate::local::harness::managed;
 use crate::telemetry::harness::SetupAttempt;
 
 /// URL and interpreter, kept apart from the rendered command so the runner can
 /// fetch to a file: piping the script in makes stdin a pipe and codex exits 1.
 fn unix_bootstrap(harness: &str) -> Option<(&'static str, &'static str)> {
     match harness {
-        "claude-code" => Some(("https://claude.ai/install.sh", "bash")),
-        "codex" => Some(("https://chatgpt.com/codex/install.sh", "sh")),
-        "opencode" => Some(("https://opencode.ai/install", "bash")),
         "antigravity" => Some(("https://antigravity.google/cli/install.sh", "bash")),
         "cursor" => Some(("https://cursor.com/install", "bash")),
         _ => match acp_executable(harness)?.as_str() {
@@ -35,9 +33,6 @@ fn unix_bootstrap(harness: &str) -> Option<(&'static str, &'static str)> {
 /// The Windows command, run through PowerShell as written.
 fn windows_install_command(harness: &str) -> Option<&'static str> {
     match harness {
-        "claude-code" => Some("irm https://claude.ai/install.ps1 | iex"),
-        "codex" => Some("irm https://chatgpt.com/codex/install.ps1 | iex"),
-        "opencode" => Some(include_str!("install_opencode.ps1")),
         "antigravity" => Some("irm https://antigravity.google/cli/install.ps1 | iex"),
         "cursor" => Some("irm 'https://cursor.com/install?win32=true' | iex"),
         _ => match acp_executable(harness)?.as_str() {
@@ -170,28 +165,38 @@ fn update_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
 pub(super) async fn commands() -> Json<Value> {
     let mut result = serde_json::Map::new();
     for harness in crate::telemetry::harness::IDS {
-        if let (Some(install), Some((login, _)), Some((update, _))) = (
-            install_command(harness, cfg!(windows)),
-            login_command(harness),
-            update_command(harness),
-        ) {
-            result.insert(
-                harness.into(),
-                json!({
-                    "install": install,
-                    // The vendor bootstrap URL, so the UI can recognise an
-                    // install note that quotes the one-liner form of it. Unix
-                    // only: on Windows `install` is the PowerShell form, so a
-                    // note quoting this URL would run a different command.
-                    "installUrl": (!cfg!(windows))
-                        .then(|| unix_bootstrap(harness).map(|(url, _)| url))
-                        .flatten(),
-                    "login": login,
-                    "update": update,
-                    "requiresNpm": cfg!(windows) && install.starts_with("npm "),
-                }),
-            );
+        let (Some((login, _)), Some((update, _))) =
+            (login_command(harness), update_command(harness))
+        else {
+            continue;
+        };
+        let install = install_command(harness, cfg!(windows));
+        let managed_from = managed::source(harness);
+        if install.is_none() && managed_from.is_none() {
+            continue;
         }
+        let npm = install
+            .as_deref()
+            .is_some_and(|command| command.starts_with("npm "));
+        result.insert(
+            harness.into(),
+            json!({
+                // Empty for an agent orx downloads itself: dashboards that
+                // predate `managedFrom` still read a string here.
+                "install": install.as_deref().unwrap_or_default(),
+                // The vendor bootstrap URL, so the UI can recognise an
+                // install note that quotes the one-liner form of it. Unix
+                // only: on Windows `install` is the PowerShell form, so a
+                // note quoting this URL would run a different command.
+                "installUrl": (!cfg!(windows))
+                    .then(|| unix_bootstrap(harness).map(|(url, _)| url))
+                    .flatten(),
+                "managedFrom": managed_from,
+                "login": login,
+                "update": update,
+                "requiresNpm": cfg!(windows) && npm,
+            }),
+        );
     }
     for definition in crate::local::acp::registered_definitions() {
         if let Some(install) = install_command(&definition.id, cfg!(windows)) {
@@ -253,7 +258,9 @@ pub(super) async fn connect(
     }
     // On Unix this also rejects anything `unix_bootstrap` does not know, since
     // that is the table it renders from.
-    if install_command(&request.harness, cfg!(windows)).is_none() {
+    if install_command(&request.harness, cfg!(windows)).is_none()
+        && managed::source(&request.harness).is_none()
+    {
         return bad_request("Unknown coding agent").into_response();
     }
     if request.harness.starts_with("acp:") && !matches!(request.action, Action::Install) {
@@ -322,7 +329,7 @@ async fn run(
     attempt: &SetupAttempt,
     size: &mut PtySize,
     // Set once a command actually ran: the env its follow-up shell must share.
-    follow_up: &mut Option<Vec<(&'static str, std::ffi::OsString)>>,
+    follow_up: &mut FollowUp,
 ) -> Result<crate::local::harness::HarnessInfo, String> {
     let mut run_command = true;
     // Held, not terminal: an install whose optional launch failed still counts,
@@ -351,6 +358,14 @@ async fn run(
             return Err("Another coding agent is installed. Re-check your coding agents.".into());
         };
         run_command = install;
+    }
+    if run_command
+        && managed::source(&request.harness).is_some()
+        && !matches!(request.action, Action::Login)
+    {
+        run_command = false;
+        attempt.record("command_started", "command", None, None, None);
+        command_failure = managed_setup(socket, request, attempt, size, follow_up).await?;
     }
     if run_command {
         let (program, args) = match request.action {
@@ -450,74 +465,31 @@ async fn run(
             None
         };
         // The lease ends with `run`; the follow-up shell only inherits the path.
-        let env: Vec<_> = lease
+        let mut env: Vec<_> = lease
             .as_ref()
             .map(|lease| vec![("OPENCODE_DB", lease.path().as_os_str().to_owned())])
             .unwrap_or_default();
+        if managed::version_of(std::path::Path::new(&program)).is_some() {
+            env.extend(MANAGED_ENV.map(|(key, value)| (key, value.into())));
+        }
         attempt.record("command_started", "command", None, None, None);
-        let pty_size = *size;
-        let shell_env = env.clone();
-        let session = match tokio::task::spawn_blocking(move || {
-            super::start_pty_with_env(&program, args, &env, pty_size, None)
-        })
-        .await
-        .map_err(|error| error.to_string())
-        .and_then(|result| result.map_err(|error| error.to_string()))
-        {
-            Ok(session) => session,
-            Err(error) => {
-                // The error embeds the whole script; scanning it would report
-                // phrases from branches that never ran.
-                attempt.record(
-                    "failed",
-                    "command",
-                    Some("spawn_failed"),
-                    None,
-                    Some(&spawn_failure_cause(&error)),
-                );
-                return Err(error);
-            }
-        };
-        *follow_up = Some(shell_env);
-        let mut output = String::new();
         let completed =
             if request.harness == "antigravity" && matches!(request.action, Action::Login) {
                 Some(antigravity_prompt_ready as fn(&str) -> bool)
             } else {
                 None
             };
-        match super::relay_pty(socket, session, Some(&mut output), size, completed).await {
-            Some(Ok(status)) if status.success() => attempt.record(
-                "command_completed",
-                "command",
-                None,
-                Some(status.exit_code()),
-                None,
-            ),
-            // Not recorded here: one attempt must not emit both `failed` and
-            // `succeeded`, and what it achieved is only known below.
-            Some(Ok(status)) => {
-                command_failure = Some(CommandFailure {
-                    message: format!("Command exited with code {}", status.exit_code()),
-                    exit_code: status.exit_code(),
-                    output: std::mem::take(&mut output),
-                });
-            }
-            Some(Err(error)) => {
-                attempt.record(
-                    "failed",
-                    "command",
-                    Some("terminal_error"),
-                    None,
-                    Some(&output),
-                );
-                return Err(error);
-            }
-            None => {
-                attempt.record("interrupted", "command", Some("disconnected"), None, None);
-                return Err("Terminal disconnected".into());
-            }
-        }
+        let (status, output) = run_in_terminal(
+            socket,
+            attempt,
+            size,
+            follow_up,
+            (program, args),
+            env,
+            completed,
+        )
+        .await?;
+        command_failure = completed_or_failure(attempt, status, output);
     }
     let mut harness = crate::local::harness::detect_harness(&request.harness).await;
     let verified = setup_verified(request, harness.as_ref());
@@ -563,6 +535,305 @@ struct CommandFailure {
     message: String,
     exit_code: u32,
     output: String,
+}
+
+type FollowUp = Option<Vec<(&'static str, std::ffi::OsString)>>;
+
+/// Run `(program, args)` in the setup terminal. A fault in the terminal itself
+/// ends the attempt; the exit status and output are the caller's to judge.
+async fn run_in_terminal(
+    socket: &mut WebSocket,
+    attempt: &SetupAttempt,
+    size: &mut PtySize,
+    follow_up: &mut FollowUp,
+    (program, args): (String, Vec<String>),
+    env: Vec<(&'static str, std::ffi::OsString)>,
+    completed: Option<fn(&str) -> bool>,
+) -> Result<(portable_pty::ExitStatus, String), String> {
+    let pty_size = *size;
+    let shell_env = env.clone();
+    let session = match tokio::task::spawn_blocking(move || {
+        super::start_pty_with_env(&program, args, &env, pty_size, None)
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result.map_err(|error| error.to_string()))
+    {
+        Ok(session) => session,
+        Err(error) => {
+            // The error embeds the whole script; scanning it would report
+            // phrases from branches that never ran.
+            attempt.record(
+                "failed",
+                "command",
+                Some("spawn_failed"),
+                None,
+                Some(&spawn_failure_cause(&error)),
+            );
+            return Err(error);
+        }
+    };
+    *follow_up = Some(shell_env);
+    let mut output = String::new();
+    match super::relay_pty(socket, session, Some(&mut output), size, completed).await {
+        Some(Ok(status)) => Ok((status, output)),
+        Some(Err(error)) => {
+            attempt.record(
+                "failed",
+                "command",
+                Some("terminal_error"),
+                None,
+                Some(&output),
+            );
+            Err(error)
+        }
+        None => {
+            attempt.record("interrupted", "command", Some("disconnected"), None, None);
+            Err("Terminal disconnected".into())
+        }
+    }
+}
+
+/// A clean exit is recorded now; a nonzero one is held, since one attempt must
+/// not emit both `failed` and `succeeded` and what it achieved is only known after.
+fn completed_or_failure(
+    attempt: &SetupAttempt,
+    status: portable_pty::ExitStatus,
+    output: String,
+) -> Option<CommandFailure> {
+    if status.success() {
+        attempt.record(
+            "command_completed",
+            "command",
+            None,
+            Some(status.exit_code()),
+            None,
+        );
+        return None;
+    }
+    Some(CommandFailure {
+        message: format!("Command exited with code {}", status.exit_code()),
+        exit_code: status.exit_code(),
+        output,
+    })
+}
+
+/// Claude Code's and OpenCode's own updaters, which orx's copies never run.
+const MANAGED_ENV: [(&str, &str); 2] = [
+    ("DISABLE_AUTOUPDATER", "1"),
+    ("OPENCODE_DISABLE_AUTOUPDATE", "1"),
+];
+
+/// Install and Update for the harnesses orx keeps copies of. An update goes
+/// through the user's own updater first; an install, or an update that cannot
+/// reach the newest release, becomes orx's copy in the cache.
+async fn managed_setup(
+    socket: &mut WebSocket,
+    request: &SetupRequest,
+    attempt: &SetupAttempt,
+    size: &mut PtySize,
+    follow_up: &mut FollowUp,
+) -> Result<Option<CommandFailure>, String> {
+    let harness = request.harness.as_str();
+    let user = managed::user_install(harness).await;
+    let copy = managed::installed(harness);
+    let major = user
+        .as_ref()
+        .or(copy.as_ref())
+        .map_or(1, |(_, version)| version.major);
+    let release = managed::latest(harness, (harness == "opencode").then_some(major)).await;
+    if let (Some((_, version)), Ok(release)) = (&user, &release) {
+        if *version >= release.version {
+            attempt.record("command_completed", "command", None, Some(0), None);
+            return Ok(None);
+        }
+    }
+    if let (Action::Update, Some((bin, _))) = (request.action, &user) {
+        let (_, args) = update_command(harness).expect("every managed harness can update");
+        let program = bin.to_string_lossy().into_owned();
+        let (status, output) = run_in_terminal(
+            socket,
+            attempt,
+            size,
+            follow_up,
+            (program, args),
+            Vec::new(),
+            None,
+        )
+        .await?;
+        let Ok(release) = &release else {
+            // No release list: the user's updater is the only update there is.
+            return Ok(completed_or_failure(attempt, status, output));
+        };
+        let current = managed::user_install(harness)
+            .await
+            .is_some_and(|(_, version)| version >= release.version);
+        if current {
+            return Ok(completed_or_failure(attempt, status, output));
+        }
+    }
+    let release = match release {
+        Ok(release) => release,
+        Err(error) => return Ok(Some(install_failure(error))),
+    };
+    if let Some((bin, version)) = &copy {
+        if current_copy(version, &release) && managed::verify(harness, bin, version).await.is_ok() {
+            attempt.record("command_completed", "command", None, Some(0), None);
+            return Ok(None);
+        }
+    }
+    match install_with_progress(socket, harness, &release).await {
+        Some(Ok(_)) => {
+            attempt.record("command_completed", "command", None, Some(0), None);
+            Ok(None)
+        }
+        Some(Err(error)) => Ok(Some(install_failure(error))),
+        None => {
+            attempt.record("interrupted", "command", Some("disconnected"), None, None);
+            Err("Terminal disconnected".into())
+        }
+    }
+}
+
+/// The terminal prints the attempt's error itself, once the attempt ends.
+fn install_failure(error: crate::error::Error) -> CommandFailure {
+    let message = format!("{error:#}");
+    CommandFailure {
+        exit_code: 1,
+        output: message.clone(),
+        message,
+    }
+}
+
+/// Download and place `release`, drawing its progress in the terminal. `None`
+/// when the client went away, which abandons the download.
+async fn install_with_progress(
+    socket: &mut WebSocket,
+    harness: &str,
+    release: &managed::Release,
+) -> Option<crate::error::Result<std::path::PathBuf>> {
+    let name = crate::local::harness::chat_harness(harness)
+        .map_or_else(|| harness.to_string(), |h| h.name().to_string());
+    let source = managed::source(harness).unwrap_or_default();
+    let version = &release.version;
+    write_terminal(
+        socket,
+        &format!("Downloading {name} {version} from {source}…\r\n"),
+    )
+    .await
+    .ok()?;
+    let (sender, mut received) = tokio::sync::watch::channel((0, None));
+    let mut progress = move |done: u64, total: Option<u64>| {
+        let _ = sender.send((done, total));
+    };
+    let install = managed::install(harness, release, &mut progress);
+    tokio::pin!(install);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    let megabytes = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1e6);
+    loop {
+        tokio::select! {
+            result = &mut install => {
+                let line = match &result {
+                    Ok(_) => format!("\r\x1b[2KInstalled {name} {version}.\r\n"),
+                    Err(_) => "\r\x1b[2K".to_string(),
+                };
+                write_terminal(socket, &line).await.ok()?;
+                return Some(result);
+            }
+            _ = tick.tick() => {
+                if !received.has_changed().unwrap_or(false) {
+                    continue;
+                }
+                let (done, total) = *received.borrow_and_update();
+                let line = match total {
+                    Some(total) if done >= total => "Checking and unpacking…".to_string(),
+                    Some(total) => format!("{} of {}", megabytes(done), megabytes(total)),
+                    None => megabytes(done),
+                };
+                write_terminal(socket, &format!("\r\x1b[2K{line}")).await.ok()?;
+            }
+            message = socket.recv() => {
+                if matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+async fn write_terminal(socket: &mut WebSocket, text: &str) -> Result<(), axum::Error> {
+    socket
+        .send(Message::Binary(text.as_bytes().to_vec().into()))
+        .await
+}
+
+/// Releases whose update through the user's own updater failed in this process,
+/// so a broken updater is not rerun every day for the same release.
+static FAILED_UPDATES: std::sync::Mutex<Vec<(&str, semver::Version)>> =
+    std::sync::Mutex::new(Vec::new());
+const UPDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The background half of what the Update button does: the user's own install
+/// is updated once it falls behind, and orx's copy stands in when that fails.
+/// A harness with neither is left alone. Returns whether the binary in use changed.
+pub(super) async fn keep_current(harness: &'static str) -> crate::error::Result<bool> {
+    let user = managed::user_install(harness).await;
+    let copy = managed::installed(harness);
+    let Some(major) = user
+        .as_ref()
+        .or(copy.as_ref())
+        .map(|(_, version)| version.major)
+    else {
+        return Ok(false);
+    };
+    let release = managed::latest(harness, (harness == "opencode").then_some(major)).await?;
+    if let Some((bin, version)) = &user {
+        if *version >= release.version {
+            managed::remove_all(harness).await;
+            return Ok(copy.is_some());
+        }
+        let attempted = FAILED_UPDATES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&(harness, release.version.clone()));
+        if !attempted {
+            let (_, args) = update_command(harness).expect("every managed harness can update");
+            let mut command = crate::process::tokio_command(bin);
+            command
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
+            crate::local::chat::prepare_env(&mut command);
+            // This is the user's own updater, which that variable would switch off.
+            command.env_remove("DISABLE_AUTOUPDATER");
+            let _ = tokio::time::timeout(UPDATE_TIMEOUT, command.status()).await;
+            let updated = managed::user_install(harness)
+                .await
+                .is_some_and(|(_, version)| version >= release.version);
+            if updated {
+                managed::remove_all(harness).await;
+                return Ok(true);
+            }
+            FAILED_UPDATES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((harness, release.version.clone()));
+        }
+    }
+    if let Some((bin, version)) = &copy {
+        if current_copy(version, &release) && managed::verify(harness, bin, version).await.is_ok() {
+            return Ok(false);
+        }
+    }
+    managed::install(harness, &release, &mut |_, _| {}).await?;
+    Ok(true)
+}
+
+/// A copy of another major is no stand-in: OpenCode's majors speak different protocols.
+fn current_copy(copy: &semver::Version, release: &managed::Release) -> bool {
+    copy.major == release.version.major && *copy >= release.version
 }
 
 /// An install that produced an executable where there was none, and that
@@ -784,6 +1055,7 @@ mod tests {
             installed: false,
             install_broken: false,
             bin_path: None,
+            managed: false,
             version: None,
             authenticated: false,
             auth_state: crate::local::harness::HarnessAuthState::Unknown,
@@ -909,10 +1181,8 @@ mod tests {
 
     #[test]
     fn the_windows_install_command_line_carries_none_of_its_phrases() {
-        let script = windows_install_script(windows_install_command("opencode").unwrap());
-        assert!(script.contains("GitHub download failed"));
-        // Nothing the script prints on failure may quote its own text either.
-        assert!(!script.contains("Write-Error"));
+        let script = windows_install_script("throw 'Unsupported architecture'");
+        assert!(crate::telemetry::harness::excerpt_for_test(&script).is_some());
         let encoded = encoded_command(&script);
         assert_eq!(crate::telemetry::harness::excerpt_for_test(&encoded), None);
         assert_eq!(
@@ -951,19 +1221,19 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn unix_install_fetches_to_a_file_so_the_installer_owns_the_terminal() {
-        let (url, interpreter) = unix_bootstrap("codex").unwrap();
+        let (url, interpreter) = unix_bootstrap("antigravity").unwrap();
         let script = unix_install_script(url, interpreter);
         // Piping into the interpreter is what gave the launched codex a pipe
         // for stdin ("stdin is not a terminal", exit 1).
         assert!(!script.contains("| sh"));
         assert!(script.contains("-o \"$script\""));
-        assert!(script.contains("sh \"$script\""));
+        assert!(script.contains("bash \"$script\""));
         // curl's own exit code must survive the wrapper.
         assert!(script.contains("|| exit $?"));
         // Bounded transient retries, with an explicit ceiling.
         assert!(script.contains("--retry 2") && script.contains("--max-time 300"));
         assert!(script.contains("trap 'rm -f \"$script\"' EXIT"));
-        for harness in crate::telemetry::harness::IDS {
+        for harness in ["antigravity", "cursor"] {
             let (url, interpreter) = unix_bootstrap(harness).expect(harness);
             // The approved command must describe the one that runs: same URL,
             // same interpreter, and no pipeline we no longer use.
@@ -997,13 +1267,24 @@ mod tests {
     #[test]
     fn setup_accepts_only_known_agents_and_actions() {
         for harness in crate::telemetry::harness::IDS {
-            assert!(install_command(harness, false).is_some());
-            assert!(install_command(harness, true).is_some());
+            // orx downloads the agents it manages; the rest keep their vendor installer.
+            let managed = managed::source(harness).is_some();
+            assert_eq!(
+                install_command(harness, false).is_none(),
+                managed,
+                "{harness}"
+            );
+            assert_eq!(
+                install_command(harness, true).is_none(),
+                managed,
+                "{harness}"
+            );
             assert!(login_command(harness).is_some());
             assert!(update_command(harness).is_some());
         }
         assert!(install_command("codex; touch /tmp/injected", false).is_none());
-        assert!(!install_command("codex", true).unwrap().starts_with("npm "));
+        assert!(managed::source("codex; touch /tmp/injected").is_none());
+        assert!(!install_command("cursor", true).unwrap().starts_with("npm "));
         assert!(login_command("sh").is_none());
         assert!(update_command("sh").is_none());
         assert_eq!(update_command("opencode").unwrap().1, vec!["upgrade"]);

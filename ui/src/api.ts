@@ -1201,6 +1201,8 @@ export interface Harness {
    * Never `agentReady`: spawning it just dumps the CLI's own crash into chat. */
   installBroken: boolean;
   binPath?: string;
+  /** `binPath` is OpenResearch's own copy, which it downloaded and keeps current. */
+  managed?: boolean;
   version?: string;
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
@@ -1237,10 +1239,14 @@ export interface Harness {
 }
 
 export interface HarnessSetupCommands {
+  /** Empty for an agent OpenResearch downloads itself (`managedFrom`). */
   install: string;
   /** The vendor bootstrap URL an install note quotes; `install` runs the
    * platform's own installer, which on Windows is a PowerShell script. */
   installUrl?: string;
+  /** The host OpenResearch downloads this agent from, when it installs it itself;
+   * absent from servers that predate it. */
+  managedFrom?: string | null;
   login: string;
   update: string;
   requiresNpm: boolean;
