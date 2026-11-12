@@ -6471,31 +6471,10 @@ enum PtyEvent {
 }
 
 struct PtySession {
-    master: PtyMaster,
+    master: Box<dyn MasterPty + Send>,
     input: std::sync::mpsc::Sender<Vec<u8>>,
     events: mpsc::Receiver<PtyEvent>,
     kill: std::sync::mpsc::Sender<()>,
-}
-
-/// Closes the PTY on its own thread: closing a ConPTY blocks until conhost
-/// exits, which it never does while waiting on a cursor report from a client
-/// that left, and a blocked runtime worker stalls the whole server.
-struct PtyMaster(Option<Box<dyn MasterPty + Send>>);
-
-impl std::ops::Deref for PtyMaster {
-    type Target = dyn MasterPty + Send;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_deref().expect("taken only on drop")
-    }
-}
-
-impl Drop for PtyMaster {
-    fn drop(&mut self) {
-        if let Some(master) = self.0.take() {
-            std::thread::spawn(move || drop(master));
-        }
-    }
 }
 
 struct PtyChildGuard {
@@ -6665,6 +6644,10 @@ fn start_pty_with_env(
     let (kill_tx, kill_rx) = std::sync::mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel(64);
 
+    // ConPTY asks where the cursor is and holds the child's output, and its own
+    // exit, until a terminal answers; a client that leaves first is answered here.
+    let cursor_query_pending = Arc::new(AtomicBool::new(false));
+    let query_seen = cursor_query_pending.clone();
     let output_tx = event_tx.clone();
     std::thread::spawn(move || {
         let mut buf = [0; 8192];
@@ -6672,6 +6655,9 @@ fn start_pty_with_env(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if buf[..n].windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                        query_seen.store(true, Ordering::SeqCst);
+                    }
                     if output_tx
                         .blocking_send(PtyEvent::Output(buf[..n].to_vec()))
                         .is_err()
@@ -6686,13 +6672,17 @@ fn start_pty_with_env(
     });
     std::thread::spawn(move || {
         while let Ok(bytes) = input_rx.recv() {
+            cursor_query_pending.store(false, Ordering::SeqCst);
             if writer
                 .write_all(&bytes)
                 .and_then(|_| writer.flush())
                 .is_err()
             {
-                break;
+                return;
             }
+        }
+        if cursor_query_pending.load(Ordering::SeqCst) {
+            let _ = writer.write_all(b"\x1b[1;1R").and_then(|_| writer.flush());
         }
     });
     std::thread::spawn(move || loop {
@@ -6721,7 +6711,7 @@ fn start_pty_with_env(
     });
 
     Ok(PtySession {
-        master: PtyMaster(Some(pair.master)),
+        master: pair.master,
         input: input_tx,
         events: event_rx,
         kill: kill_tx,
@@ -10543,9 +10533,9 @@ mod tests {
         assert!(test.tested_at > 0);
     }
 
-    /// A client that leaves before answering ConPTY's cursor query leaves conhost waiting on it.
-    #[test]
-    fn closing_a_pty_whose_client_left_returns_promptly() {
+    /// ConPTY waits on its cursor query until answered, and closing it waits on that.
+    #[tokio::test]
+    async fn closing_a_pty_whose_client_left_returns_promptly() {
         let (program, args) = if cfg!(windows) {
             ("cmd", vec!["/c".into(), "echo ready & pause".into()])
         } else {
@@ -10557,7 +10547,8 @@ mod tests {
             mut events,
             kill,
         } = start_pty(program, args).unwrap();
-        assert!(matches!(events.blocking_recv(), Some(PtyEvent::Output(_))));
+        let first = tokio::time::timeout(Duration::from_secs(10), events.recv()).await;
+        assert!(matches!(first, Ok(Some(PtyEvent::Output(_)))));
 
         // The order `relay_pty` tears down in when its socket closes.
         let _ = kill.send(());
