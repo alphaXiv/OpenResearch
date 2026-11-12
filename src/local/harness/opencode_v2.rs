@@ -1368,17 +1368,17 @@ mod tests {
             let (endpoint, server) = catalog_server(app, false).await;
             let timeout = Duration::from_secs(30);
             let discover = discover_models_within(&endpoint, timeout, RETRY);
-            let expire = async {
-                if plugins_reload {
-                    reloaded.notified().await;
-                    tokio::time::pause();
-                    tokio::time::advance(timeout).await;
-                }
-            };
-            let (result, ()) = tokio::join!(discover, expire);
+            tokio::pin!(discover);
             if plugins_reload {
+                tokio::select! {
+                    _ = reloaded.notified() => {}
+                    result = &mut discover => panic!("discovery ended before its reload: {result:?}"),
+                }
+                tokio::time::pause();
+                tokio::time::advance(timeout).await;
                 tokio::time::resume();
             }
+            let result = discover.await;
             server.abort();
             let (models, integrations) = result.unwrap();
             let expected = if plugins_reload {
