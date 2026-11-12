@@ -170,7 +170,14 @@ jobs:
       - name: Test
         env:
           RUST_TEST_THREADS: 16
-        run: cargo test --locked
+        run: cargo test --locked --timings
+      - name: Upload compilation timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-timings
+          path: target/cargo-timings/
+          retention-days: 1
       - name: Source builds disable production telemetry
         shell: bash
         run: test "$(target/debug/orx --no-telemetry version --build-channel)" = "development"
@@ -354,8 +361,16 @@ jobs:
         if: matrix.mode != 'lint'
         env:
           RUST_TEST_THREADS: 16
-        run: cargo test --locked
+          CARGO_PROFILE_TEST_DEBUG: 0
+        run: cargo test --locked --timings
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Upload compilation timings
+        if: always() && matrix.mode != 'lint'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-timings
+          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/cargo-timings/
+          retention-days: 1
 
   check:
     name: fmt, clippy, test
