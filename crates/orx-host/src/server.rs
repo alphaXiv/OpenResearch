@@ -828,7 +828,7 @@ impl Host {
                                 since: SystemTime::now(),
                             };
                             publish(&path, &fact)?;
-                            fact
+                            return Ok(Duration::ZERO);
                         }
                     };
                     Ok(fact.since.elapsed().unwrap_or_default())

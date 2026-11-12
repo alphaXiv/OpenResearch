@@ -811,13 +811,19 @@ printf '123\n'"#);
         f.store().get_run("forgotten").unwrap().unwrap().status,
         "starting"
     );
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    f.clock.advance(Duration::from_secs(31));
-    f.poll(&slurm, &["forgotten"], Duration::ZERO).await;
-    assert_eq!(
-        f.store().get_run("forgotten").unwrap().unwrap().status,
-        "failed"
-    );
+    let run = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            f.clock.advance(Duration::from_secs(31));
+            f.poll(&slurm, &["forgotten"], Duration::ZERO).await;
+            let run = f.store().get_run("forgotten").unwrap().unwrap();
+            if Phase::parse(&run.status).unwrap().is_terminal() {
+                break run;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(run.status, "failed");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
