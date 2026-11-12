@@ -303,6 +303,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
                     hostname: crate::commands::remote_host::hostname(),
                     port: actual_port,
                     version: env!("CARGO_PKG_VERSION").into(),
+                    build_id: Some(crate::updates::current_build_id().into()),
                     dashboard_protocol: crate::commands::up_remote::DASHBOARD_PROTOCOL,
                     control_protocol: crate::commands::remote_host::CONTROL_PROTOCOL,
                 },

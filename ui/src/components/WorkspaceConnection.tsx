@@ -7,16 +7,22 @@ import { RemoteHostDialog } from "./RemoteHostDialog";
 import { showSshConfigDialog } from "./SshConfigDialog";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 
-import { Check, Info } from "lucide-react";
-import { type RuntimeInfo } from "../api";
-import { ltr } from "../i18n";
+import { Check, ChevronsUpDown, Info, Unplug } from "lucide-react";
+import { type RemoteSessionStatus, type RuntimeInfo } from "../api";
+import { autoDir, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { mutDisconnectRemote, mutStopRemoteHost } from "../queries/settings";
 import { Menu } from "@base-ui/react/menu";
 import { RemoteIcon } from "./RemoteIcon";
 
 import { RemoteStopDialog } from "./RemoteStopDialog";
-import { Button, MenuItem, showAlert, Tooltip } from "./ui";
+import { MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+
+function connection(status: RemoteSessionStatus) {
+  if (status === "connected") return { state: "connected", label: m.remote_machine_connected() } as const;
+  if (status === "connecting" || status === "reconnecting" || status === "applying") return { state: "connecting", label: m.remote_machine_connecting() } as const;
+  return { state: "disconnected", label: m.remote_machine_disconnected() } as const;
+}
 
 export function WorkspaceConnection({
   runtime,
@@ -42,6 +48,17 @@ export function WorkspaceConnection({
     });
   const label =
     runtime.kind === "local" ? m.projects_local() : runtime.session.host;
+  const activeSession = machines.sessions.find((session) => session.id === machines.activeId);
+  const current = runtime.kind === "ssh" ? connection(activeSession?.status ?? runtime.session.status) : null;
+  const machine = runtime.kind === "ssh" ? autoDir(label) : label;
+  const caption = current?.state === "connected" ? null : current?.label;
+  const triggerName = caption
+    ? m.remote_machine_switcher_status({ machine, status: caption })
+    : m.remote_machine_switcher({ machine });
+  const triggerShape = corner ? "rounded-none px-2.5 py-1.5" : "min-h-9 rounded-md px-2 py-1";
+  const triggerTone = current
+    ? "border-accent-blue-border bg-accent-blue-subtle text-accent-blue-strong hover:border-accent-blue"
+    : "border-border bg-background text-text hover:bg-surface";
 
   const { getRemoteStopPreview } = workspace.api;
 
@@ -72,7 +89,7 @@ export function WorkspaceConnection({
             className={
               corner
                 ? "workspace-connection-corner fixed bottom-0 start-0 z-30"
-                : "relative shrink-0"
+                : "relative flex min-w-0 max-w-full"
             }
           >
             <Menu.Portal container={portalContainer}>
@@ -129,13 +146,7 @@ export function WorkspaceConnection({
                               {session.host}
                             </span>
                             <span className="text-xs text-subtext">
-                              {session.status === "connected"
-                                ? m.remote_machine_connected()
-                                : session.status === "connecting" ||
-                                    session.status === "reconnecting" ||
-                                    session.status === "applying"
-                                  ? m.remote_machine_connecting()
-                                  : m.remote_machine_disconnected()}
+                              {connection(session.status).label}
                             </span>
                             <Menu.RadioItemIndicator>
                               <Check size={14} />
@@ -159,14 +170,17 @@ export function WorkspaceConnection({
                     <>
                       <div className="border-b border-border-variant px-2 pt-1 pb-2">
                         <div className="text-sm font-medium text-text">
-                          {m.remote_connected_as({
-                            host: ltr(runtime.session.host),
-                            user: ltr(runtime.session.user ?? ""),
-                          })}
+                          {current?.state === "connected"
+                            ? m.remote_connected_as({
+                              host: ltr(runtime.session.host),
+                              user: ltr(runtime.session.user ?? ""),
+                            })
+                            : ltr(runtime.session.host)}
                         </div>
                         <div className="mt-0.5 text-xs text-subtext">
+                          {current && current.state !== "connected" && <>{current.label} · </>}
                           OpenResearch{" "}
-                          {ltr(runtime.session.version ?? runtime.version)}
+                          {ltr(runtime.session.buildId ?? runtime.session.version ?? runtime.version)}
                         </div>
                       </div>
                       <div className="flex items-center rounded-sm hover:bg-surface">
@@ -240,29 +254,22 @@ export function WorkspaceConnection({
                 </Menu.Popup>
               </Menu.Positioner>
             </Menu.Portal>
-            {corner ? (
+            <Tooltip interactive content={triggerName} className={corner ? "max-w-56" : "min-w-0 max-w-full"}>
               <Menu.Trigger
                 data-machine-switcher
-                aria-label={m.remote_machine_switcher({ machine: label })}
-                render={<Button variant="default" />}
-                className={`h-auto w-auto max-w-48 justify-start rounded-none px-2.5 py-1.5 font-normal ${runtime.kind === "ssh" ? "border-accent-blue bg-accent-blue text-white [&:hover:not(:disabled)]:border-accent-blue [&:hover:not(:disabled)]:bg-accent-blue/90" : "border-border bg-background text-text"}`}
+                aria-label={triggerName}
+                className={`flex min-w-0 items-center gap-1.5 border text-start transition-[background,border-color] duration-120 ease-standard focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2 ${triggerShape} ${triggerTone}`}
               >
-                <RemoteIcon size={14} className="shrink-0" />
-                <span className="min-w-0 truncate text-sm leading-tight">
-                  {label}
+                {current?.state === "connecting" ? <Spinner className="size-3.5 border-accent-blue-border border-t-accent-blue-strong" />
+                  : current?.state === "disconnected" ? <Unplug size={14} className="shrink-0" aria-hidden="true" />
+                    : <RemoteIcon size={14} className={`shrink-0 ${current ? "" : "text-subtext"}`} />}
+                <span className="flex min-w-0 flex-col">
+                  <span dir="auto" className="truncate text-sm leading-tight">{label}</span>
+                  {caption && <span className="truncate text-xs leading-tight">{caption}</span>}
                 </span>
+                {!corner && <ChevronsUpDown size={14} className="ms-auto shrink-0 opacity-70" aria-hidden="true" />}
               </Menu.Trigger>
-            ) : (
-              <Tooltip interactive content={label}>
-                <Menu.Trigger
-                  data-machine-switcher
-                  aria-label={m.remote_machine_switcher({ machine: label })}
-                  className="flex size-9 shrink-0 items-center justify-center rounded-md text-subtext hover:bg-surface focus-visible:outline-2 focus-visible:outline-focus"
-                >
-                  <RemoteIcon size={16} aria-hidden="true" />
-                </Menu.Trigger>
-              </Tooltip>
-            )}
+            </Tooltip>
           </div>
         </Menu.Root>
       </DirectionProvider>

@@ -78,8 +78,8 @@ export function AccountChip({ onDetails }: { onDetails: () => void }) {
   const reason = accountErrorMessage(accountQuery.error);
   const stateLabel = accountQuery.error instanceof OpenResearchAccountError && accountQuery.error.kind === "offline" ? m.account_offline_label() : m.account_error_label();
   const label = user ? name : reason ? stateLabel : accountQuery.isLoading ? m.common_checking() : m.account_sign_in_alphaxiv();
-  const chipClass = "flex min-h-[44.5px] min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1.5 text-start hover:bg-surface focus-visible:outline-2 focus-visible:outline-focus";
-  const contents = <><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-panel text-sm font-medium text-text" aria-hidden="true">{user ? name.trim().charAt(0).toLocaleUpperCase() : <UserRound size={16} />}</span><span className="flex min-w-0 flex-col"><span dir="auto" className="truncate text-sm leading-tight">{label}</span>{user && <span className="truncate text-xs leading-tight text-subtext">{reason ? stateLabel : user.alphaxivUrl ? "alphaXiv" : "OpenResearch"}</span>}</span></>;
+  const chipClass = "flex min-h-[44.5px] min-w-0 grow basis-36 items-center gap-2 rounded-md px-1.5 py-1.5 text-start hover:bg-surface focus-visible:outline-2 focus-visible:outline-focus";
+  const contents = <><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-panel text-sm font-medium text-text" aria-hidden="true">{user ? name.trim().charAt(0).toLocaleUpperCase() : <UserRound size={16} />}</span><span className="flex min-w-0 flex-col"><span dir="auto" className={`text-sm leading-tight ${user ? "truncate" : "line-clamp-2"}`}>{label}</span>{user && <span className="truncate text-xs leading-tight text-subtext">{reason ? stateLabel : user.alphaxivUrl ? "alphaXiv" : "OpenResearch"}</span>}</span></>;
 
   return user || reason ? <Menu.Root modal={false} loopFocus>
       <Menu.Trigger ref={chipRef} aria-label={`${label}${user && reason ? ` · ${stateLabel}` : ""} · ${m.account_menu()}`} className={chipClass}>{contents}</Menu.Trigger>

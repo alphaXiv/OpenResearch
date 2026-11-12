@@ -237,10 +237,11 @@ function RemoteSetup({
     retriedInteractiveError !== session.error &&
     !session.canStartNewHost;
   const showRepair = session.status === "disconnected" && session.repairCommand !== null;
+  const remoteNewer = session.dashboardProtocol !== null && session.dashboardProtocol > runtime.dashboardProtocol;
   const title = needsInstall
     ? m.remote_install_title()
     : needsUpdate
-      ? m.remote_update_title()
+      ? remoteNewer ? m.remote_update_local_title() : m.remote_update_title()
       : session.status === "applying"
         ? m.remote_applying_title({ host: ltr(session.host) })
         : session.status === "reconnecting"

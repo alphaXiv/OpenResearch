@@ -44,6 +44,9 @@ pub(crate) struct HostDescriptor {
     pub hostname: String,
     pub port: u16,
     pub version: String,
+    /// Absent from hosts that predate it.
+    #[serde(default)]
+    pub build_id: Option<String>,
     pub dashboard_protocol: u32,
     pub control_protocol: u32,
 }
@@ -1159,9 +1162,25 @@ mod tests {
             hostname: "box".into(),
             port: 1,
             version: "0".into(),
+            build_id: None,
             dashboard_protocol: 0,
             control_protocol: CONTROL_PROTOCOL,
         }
+    }
+
+    #[test]
+    fn a_descriptor_from_a_host_without_build_ids_still_reads() {
+        let old = r#"{"instanceId":"i","hostname":"box","port":1,"version":"0.2.26","dashboardProtocol":5,"controlProtocol":1}"#;
+        let descriptor: HostDescriptor = serde_json::from_str(old).unwrap();
+        assert_eq!(descriptor.build_id, None);
+        assert_eq!(descriptor.dashboard_protocol, 5);
+
+        let current = HostDescriptor {
+            build_id: Some("canary-20261112.3".into()),
+            ..descriptor
+        };
+        let written = serde_json::to_value(&current).unwrap();
+        assert_eq!(written["buildId"], "canary-20261112.3");
     }
 
     #[cfg(unix)]

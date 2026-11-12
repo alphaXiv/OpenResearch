@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
 import { ProgressBar } from "../src/components/ProgressBar.tsx";
+import { autoDir } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
 import { find, press, render, renderApp, serveApp, settle } from "./render.mjs";
 
@@ -79,6 +80,24 @@ for (const [place, path] of [["home", "/projects"], ["sidebar", "/projects/p/tas
   });
 }
 
+for (const [status, shown] of [["connected", null], ["reconnecting", m.remote_machine_connecting()], ["disconnected", m.remote_machine_disconnected()]]) {
+  test(`the sidebar names the machine it shows, ${status}`, async () => {
+    await laptop("/projects/p/tasks/new", { "GET /api/remote/sessions": () => ({ sessions: [{ ...server, status }] }) });
+    assert.match(switcher().textContent, new RegExp(m.projects_local()));
+    assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: m.projects_local() }));
+
+    await click(switcher());
+    await click(menuItem("research"));
+    assert.match(switcher().textContent, /research/);
+    if (shown) {
+      assert.match(switcher().textContent, new RegExp(shown));
+      assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher_status({ machine: autoDir("research"), status: shown }));
+    } else {
+      assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: autoDir("research") }));
+    }
+  });
+}
+
 for (const kind of ["local", "ssh"]) {
   for (const scenario of ["loading", "error", "onboarding", "no-projects", "projects"]) {
     test(`${kind} project home always offers machine selection during ${scenario}`, async () => {
@@ -94,7 +113,7 @@ for (const kind of ["local", "ssh"]) {
         "GET /api/remote/sessions": () => ({ sessions: [session] }),
       });
       await renderApp("/projects");
-      assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: kind === "ssh" ? "research" : m.projects_local() }));
+      assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: kind === "ssh" ? autoDir("research") : m.projects_local() }));
     });
   }
 }

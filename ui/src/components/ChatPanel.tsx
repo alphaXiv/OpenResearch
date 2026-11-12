@@ -7562,7 +7562,7 @@ export function ChatPanel({
         <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
       </>}
       </div>
-      <div className="flex shrink-0 items-center gap-1 border-t border-border px-1 py-1"><AccountChip onDetails={() => onSelectMainView("openresearch")} /><WorkspaceConnection runtime={runtime} /></div>
+      <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-border px-1 py-1"><AccountChip onDetails={() => onSelectMainView("openresearch")} /><WorkspaceConnection runtime={runtime} /></div>
     </aside>
   );
 
