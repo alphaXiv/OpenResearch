@@ -419,6 +419,9 @@ export function ModelPicker({
     : loading
       ? value?.model ? modelLabel(value.model) : m.model_picker_model()
       : m.model_picker_choose_model();
+  // A model only one agent offers names no agent.
+  const agentShown = selectedAgent && new Set(selectedLine?.offers.map((offer) => offer.tile)).size > 1 ? selectedAgent : undefined;
+  const hint = agentShown ? `${label} — ${agentShown.name}` : label;
 
   // Cursor and Antigravity list each effort, speed and thinking mode as a model, and Claude
   // Code its long context: the Effort menu moves between the siblings of the picked one.
@@ -496,13 +499,13 @@ export function ModelPicker({
             if (open && sightings && unseen.length) mutUpdateUiState.run(workspace, { modelSightings: { ...sightings, openedAt: Date.now() } });
           }}
         >
-          <Tooltip interactive content={label} className="min-w-0 max-w-full rounded-md">
+          <Tooltip interactive content={hint} className="min-w-0 max-w-full rounded-md">
             <Popover.Trigger
               ref={modelTriggerRef}
               type="button"
               disabled={disabled}
               className={cn(PILL, "max-w-full", className)}
-              aria-label={[m.a11y_chat_model({ label }), unseen.length ? m.model_picker_new_model() : null].filter(Boolean).join(", ")}
+              aria-label={[m.a11y_chat_model({ label: hint }), unseen.length ? m.model_picker_new_model() : null].filter(Boolean).join(", ")}
               onKeyDown={(event) => {
                 if (event.key === "ArrowDown") {
                   event.preventDefault();
@@ -512,9 +515,9 @@ export function ModelPicker({
                 }
               }}
             >
-              {selectedAgent ? (
-                <AgentIconTile icon={selectedAgent.icon} brand={selectedAgent.brand} size="xs" />
-              ) : value?.harness ? (
+              {agentShown ? (
+                <AgentIconTile icon={agentShown.icon} brand={agentShown.brand} size="xs" />
+              ) : selectedAgent ? null : value?.harness ? (
                 <HarnessLogo harness={value.harness} logo={selectedHarness?.logo} size={14} />
               ) : null}
               {selectedOffer && <ModelMark model={selectedOffer.model} harness={selectedOffer.tile.harness.id} size={14} />}
