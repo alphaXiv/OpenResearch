@@ -1700,16 +1700,14 @@ def get_sandbox(**kw):
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("tail");
-        std::fs::write(
+        orx_test_support::write_executable(
             &stub,
             format!(
                 "#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --pid|--pid=*) echo unrecognized >&2; exit 1 ;;\n  esac\ndone\nexec {real_tail} \"$@\"\n"
             ),
+            0o755,
         )
         .unwrap();
-        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&stub, perms).unwrap();
         let output = follow_log(Some(&bin), &dir);
         let _ = std::fs::remove_dir_all(&dir);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1730,10 +1728,12 @@ def get_sandbox(**kw):
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("tail");
-        std::fs::write(&stub, "#!/bin/sh\necho 'tail: not available' >&2\nexit 1\n").unwrap();
-        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&stub, perms).unwrap();
+        orx_test_support::write_executable(
+            &stub,
+            "#!/bin/sh\necho 'tail: not available' >&2\nexit 1\n",
+            0o755,
+        )
+        .unwrap();
         let output = follow_log(Some(&bin), &dir);
         let _ = std::fs::remove_dir_all(&dir);
         let stdout = String::from_utf8_lossy(&output.stdout);

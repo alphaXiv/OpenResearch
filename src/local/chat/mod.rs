@@ -10079,11 +10079,13 @@ mod cap_tests {
 
     #[cfg(unix)]
     fn write_orx_stub(dir: &std::path::Path, marker: &str) {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir).unwrap();
-        let bin = dir.join("orx");
-        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s' {marker}\n")).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        orx_test_support::write_executable(
+            dir.join("orx"),
+            format!("#!/bin/sh\nprintf '%s' {marker}\n"),
+            0o755,
+        )
+        .unwrap();
     }
 
     /// A stale `orx` on a directory a user startup file prepends, ahead of the
@@ -13789,8 +13791,6 @@ for line in sys.stdin:
     #[cfg(unix)]
     #[test]
     fn claude_fork_switches_branch_the_native_session() {
-        use std::os::unix::fs::PermissionsExt;
-
         async fn finished(
             chat: &ChatHost,
             events: &mut broadcast::Receiver<(&'static str, Value)>,
@@ -13837,7 +13837,7 @@ for line in sys.stdin:
             let args = root.join("claude-args");
             let prompts = root.join("claude-prompts");
             std::fs::create_dir_all(&bin).unwrap();
-            std::fs::write(
+            orx_test_support::write_executable(
                 bin.join("claude"),
                 format!(
                     r#"#!/bin/sh
@@ -13872,10 +13872,9 @@ done
                     args = args.display(),
                     prompts = prompts.display()
                 ),
+                0o755,
             )
             .unwrap();
-            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
             let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
                 &std::env::var_os("PATH").unwrap_or_default(),
             )))

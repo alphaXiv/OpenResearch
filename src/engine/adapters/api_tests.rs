@@ -14,10 +14,8 @@ use crate::local::model::LocalExperiment;
 use crate::store::{LaunchSpec, Store, SubmittingRun};
 
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    orx_test_support::write_executable(path, body, 0o700).unwrap();
 }
 
 pub(super) fn engine(root: &Path) -> Engine {

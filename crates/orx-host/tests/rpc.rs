@@ -169,11 +169,10 @@ fn change_feed_isolates_unreadable_intent() {
 
 #[test]
 fn starting_run_recovery_backs_off_and_preserves_the_staged_script() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = Directory::new();
     let binary = dir.0.join("fake-host");
-    fs::write(&binary, "#!/bin/sh\nprintf x >> \"$2/attempts\"\n").unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    orx_test_support::write_executable(&binary, "#!/bin/sh\nprintf x >> \"$2/attempts\"\n", 0o700)
+        .unwrap();
     let host = Host::new(dir.0.clone(), binary).unwrap();
     let intent = LaunchIntent {
         run: "retry".into(),
