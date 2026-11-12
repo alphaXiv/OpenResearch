@@ -45,7 +45,9 @@ A window opened on another process's server just closes.
 
 ## The window and the page
 
-The page reaches the window through a small message bridge: zoom; on macOS and Windows, a titlebar the page draws; on macOS, the appearance and a native menu the page specifies. The window never runs commands on the page's behalf.
+The page reaches the window through a small message bridge: zoom; on macOS and Windows, a titlebar the page draws and the appearance; on macOS, a native menu the page specifies. The window never runs commands on the page's behalf.
+
+The sidebar is transparent over the window's material, the sidebar blur on macOS and Mica on Windows 11 22H2 and later. Linux and older Windows have none, and the page stays opaque.
 
 - `http:`, `https:` and `mailto:` pop-ups go to the system browser; any other scheme is dropped, because the browser would ask before launching another app and a direct open would not.
 - `openresearch:` links become in-page navigation, so the page's guards against losing unsaved work still apply. A published project's link carries only its slug, and the app downloads the file from its own API, so a link can never make it fetch from anywhere else.
