@@ -9,7 +9,7 @@ import { createWorkspaceRouter } from "./router";
 import { MachineSelectionContext } from "./machineSelection";
 import { askBeforeClosing } from "./closeDialog";
 import { QueryDevtools } from "./components/QueryDevtools";
-import { Button, Spinner } from "./components/ui";
+import { Button, showAlert, Spinner } from "./components/ui";
 import { m } from "./paraglide/messages.js";
 
 function createMachine(queryClient: QueryClient, id: string, initialLocation = "/") {
@@ -176,6 +176,11 @@ function MachineWorkspaces({
   workspacesRef.current = workspaces;
 
   function selectRemote(session: RemoteSessionInfo) {
+    if (session.status === "disconnected" && session.error === null && !session.canStartNewHost) {
+      void owner.api.reconnectRemoteSession(session.id).catch((error: unknown) =>
+        showAlert(error instanceof Error ? error.message : String(error), "error"),
+      );
+    }
     setWorkspaces((current) =>
       current.has(session.id)
         ? current
