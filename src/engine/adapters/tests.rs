@@ -603,6 +603,13 @@ async fn fifty_runs_share_one_ssh_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gigabyte_random_pages_survive_one_hundred_reconnects() {
+    {
+        use sha2::Digest as _;
+        let bytes = vec![17; 4 * 1024 * 1024];
+        let started = Instant::now();
+        std::hint::black_box(sha2::Sha256::digest(&bytes));
+        eprintln!("CI 4 MiB SHA-256: {:?}", started.elapsed());
+    }
     let f = Fixture::new().await;
     let dir = f.dir("large");
     fs::create_dir_all(&dir).unwrap();
@@ -639,7 +646,11 @@ async fn gigabyte_random_pages_survive_one_hundred_reconnects() {
             .unwrap(),
     );
     let identity = first.0;
+    let mut disconnected = Duration::ZERO;
+    let mut reconnected = Duration::ZERO;
+    let mut read = Duration::ZERO;
     for offset in offsets {
+        let started = Instant::now();
         f.server.proxy().reset().unwrap();
         let mut state = f.ssh.conn.state();
         tokio::time::timeout(
@@ -649,7 +660,11 @@ async fn gigabyte_random_pages_survive_one_hundred_reconnects() {
         .await
         .unwrap()
         .unwrap();
+        disconnected += started.elapsed();
+        let started = Instant::now();
         f.ssh.conn.retry().await.unwrap();
+        reconnected += started.elapsed();
+        let started = Instant::now();
         let mut expected = vec![0; 8192];
         local.seek(SeekFrom::Start(offset)).unwrap();
         local.read_exact(&mut expected).unwrap();
@@ -668,7 +683,11 @@ async fn gigabyte_random_pages_survive_one_hundred_reconnects() {
                 .unwrap(),
         );
         assert_eq!(page.1, expected);
+        read += started.elapsed();
     }
+    eprintln!(
+        "CI reconnect phases: disconnect={disconnected:?}, connect={reconnected:?}, read={read:?}"
+    );
     let (_, final_bytes, eof) = data(
         f.ssh
             .read_log(
