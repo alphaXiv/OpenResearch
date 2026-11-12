@@ -1716,7 +1716,7 @@ fn is_experiment_supervisor(command: &str, supervisor_exe: Option<&std::path::Pa
 fn stop_process_tree(pid: u32) {
     let script = r#"
 $ErrorActionPreference = 'Stop'
-$processes = @(Get-CimInstance Win32_Process)
+$processes = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine)
 function Stop-TurnProcess([uint32] $processId) {
     $children = @($processes | Where-Object { $_.ParentProcessId -eq $processId })
     Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
