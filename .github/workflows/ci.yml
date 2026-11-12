@@ -49,9 +49,6 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
           fetch-depth: 2
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
       - name: Select checks for changed files
         id: changes
         env:
@@ -561,9 +558,6 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
       - name: Verify all selected checks passed
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
