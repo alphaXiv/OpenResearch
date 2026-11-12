@@ -853,7 +853,13 @@ mod tests {
         let signaled_mode = listener
             .as_ref()
             .map(|listener| format!("{mode}:{}", listener.local_addr().unwrap().port()));
-        let advance = request.timeout + std::time::Duration::from_secs(16);
+        // Only to just past the stall's deadline: cleanup bounds its own waits with Tokio timers.
+        let stall = if mode == "stalled-init" {
+            super::host::INITIALIZATION_BOUND
+        } else {
+            request.timeout
+        };
+        let advance = stall + std::time::Duration::from_secs(1);
         let record =
             std::env::temp_dir().join(format!("acp-oneshot-record-{}", uuid::Uuid::new_v4()));
         let (mut answer, cleanup) = spawn_one_shot(
