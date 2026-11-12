@@ -1627,11 +1627,17 @@ pub(crate) fn kill_shell_group(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
-    let _ = crate::process::command("taskkill")
+    let result = crate::process::command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .spawn()
+        .and_then(|mut child| {
+            crate::process::wait_with_timeout(&mut child, Duration::from_secs(5))
+        });
+    if let Err(error) = result {
+        eprintln!("orx up: could not stop command group {pid}: {error}");
+    }
 }
 
 /// Kill an agent and every command it started. Agents such as `agy` start each
@@ -1725,9 +1731,18 @@ Stop-TurnProcess ([uint32] $env:ORX_STOP_PID)
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("ORX_STOP_PID", pid.to_string())
         .stdout(std::process::Stdio::null())
-        .status();
-    if !result.is_ok_and(|status| status.success()) {
-        eprintln!("orx up: could not inspect agent descendants of {pid} while stopping it");
+        .spawn()
+        .and_then(|mut child| {
+            crate::process::wait_with_timeout(&mut child, Duration::from_secs(5))
+        });
+    match result {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("orx up: process-tree inspection for {pid} exited with {status}"),
+        Err(error) => {
+            eprintln!(
+                "orx up: could not inspect agent descendants of {pid} while stopping it: {error}"
+            )
+        }
     }
 }
 
