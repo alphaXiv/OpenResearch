@@ -4,9 +4,10 @@ import { act } from "react";
 import { m } from "../src/paraglide/messages.js";
 import { codex, composer, renderChat, session } from "./chat.mjs";
 import { settle } from "./render.mjs";
+import { model } from "./models.mjs";
 
 const claude = {
-  ...codex, id: "claude-code", name: "Claude Code", models: [{ id: "opus", displayName: "Opus 5.5" }],
+  ...codex, id: "claude-code", name: "Claude Code", models: [model("opus", "Opus 5.5")],
   options: { permissionModes: [{ id: "auto", label: "Auto" }], defaultPermissionMode: "auto", planActivation: "permission", reasoningLevels: [] },
 };
 const sideTab = (sessionId) => `?pane=${encodeURIComponent(JSON.stringify({ kind: "side", sessionId }))}`;

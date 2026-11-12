@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { NewProjectForm } from "../src/components/NewProjectForm.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { find, render, serve } from "./render.mjs";
+import { model } from "./models.mjs";
 
 const { setImmediate: realSetImmediate } = globalThis;
 
@@ -26,7 +27,7 @@ test("project creation and debounced prewarm use the current selection, else the
     if (path === "/api/harnesses") return { harnesses: [
       { id: "claude-code", agentReady: false, models: [] },
       { id: "acp:kimi", agentReady: true, models: [] },
-      { id: "codex", agentReady: true, models: [{ id: "gpt-6.1-sol" }, { id: "catalog-default" }], defaultModel: "catalog-default" },
+      { id: "codex", agentReady: true, models: [model("gpt-6.1-sol"), model("catalog-default")], defaultModel: "catalog-default" },
     ] };
     if (path.startsWith("/api/project-path/status?")) {
       return { gitVersion: "2.50.0", resolvedPath: "/project", exists: true, directory: true, empty: false, initialized: true, gitState: "ready" };

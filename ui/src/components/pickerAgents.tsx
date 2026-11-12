@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { AgentIcon, AgentSelection, Harness, LocalModelConnection, OpenCodeProvider } from "../api";
 import { m } from "../paraglide/messages.js";
-import { groupModelLines, hideId, parseModel, type ModelOffer } from "../modelLines";
+import { groupModelLines, type ModelOffer } from "../modelLines";
 import { harnessDisplayName, harnessKey, selectionHarness } from "../modelSelection";
 import { useWorkspace } from "../workspace";
 import { BRAND_ICON, type Logo } from "./AgentIcon";
@@ -86,7 +86,7 @@ function agentFor(agents: PickerAgent[], h: Harness, model: string | null): Pick
 export function agentOffers(agent: PickerAgent): ModelOffer<PickerAgent>[] {
   const h = agent.harness;
   const models = agent.provider ? h.models.filter((model) => model.id.startsWith(`${agent.provider}/`)) : h.models;
-  return models.map((model) => ({ tile: agent, model, parsed: parseModel(h.id, model) }));
+  return models.map((model) => ({ tile: agent, model }));
 }
 
 interface PickerCatalog {
@@ -115,7 +115,7 @@ export function pickerLines({ catalog, providers, endpoints, hiddenModels }: Pic
   const selectedAgent = selectedHarness ? agentFor(agents, selectedHarness, selectedModel) : undefined;
 
   const hidden = new Set(hiddenModels);
-  const lines = groupModelLines(offers.filter((offer) => !hidden.has(hideId(offer.model) ?? "") || (offer.tile === selectedAgent && offer.model.id === selectedModel)));
+  const lines = groupModelLines(offers.filter((offer) => !hidden.has(offer.model.parsed.key) || (offer.tile === selectedAgent && offer.model.id === selectedModel)));
   const selectedLine = lines.find((line) => offerOn(line, selectedAgent, selectedModel));
   return { harnesses, agents, offers, selectedHarness, selectedModel, selectedAgent, lines, selectedLine };
 }

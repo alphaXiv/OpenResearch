@@ -1333,6 +1333,13 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         .as_deref()
         .and_then(|j| serde_json::from_str::<Value>(j).ok());
     let native_model = native_configuration.and_then(crate::local::harness::acp::current_model);
+    let native_models = native_configuration
+        .map(|configuration| {
+            let mut models = json!(crate::local::harness::acp::advertised_models(configuration));
+            crate::local::model_routes::name_models(&s.harness, &mut models);
+            models
+        })
+        .filter(|models| models.as_array().is_some_and(|models| !models.is_empty()));
     json!({
         "id": s.id,
         "projectId": s.project_id,
@@ -1340,6 +1347,7 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         "profile": s.profile_id,
         "harnessName": acp.as_ref().map(|state| state.launch.name.as_str()),
         "nativeConfiguration": native_configuration,
+        "nativeModels": native_models,
         "title": s.title,
         // The UI animates the reveal of a harness-generated title, so it needs
         // to tell one from a placeholder or a user rename.
@@ -12377,6 +12385,29 @@ mod bridge_tests {
         let value = session_json(&with_usage, false);
         assert_eq!(value["contextUsage"]["usedTokens"], 27564);
         assert_eq!(value["contextUsage"]["contextWindow"], 200000);
+    }
+
+    #[test]
+    fn session_json_names_the_models_an_acp_chat_offers() {
+        let store = Store::open().unwrap();
+        let mut session = bare_session();
+        session.id = format!("chat_{}", uuid::Uuid::new_v4());
+        session.harness = crate::local::acp::presets().remove(0).launch.id;
+        store.create_chat_session(&session).unwrap();
+        let options = json!({"configOptions":[{"id":"model", "type":"select", "category":"model", "currentValue":"a", "options":[{"value":"a", "name":"GPT-6.1-Sol"}]}]});
+        store.set_acp_configuration(&session.id, &options).unwrap();
+        let wire = session_json_with(Some(&store), &session, false);
+        assert_eq!(wire["nativeModels"][0]["id"], "a");
+        assert_eq!(wire["nativeModels"][0]["parsed"]["key"], "gpt sol@6.1");
+
+        store
+            .set_acp_configuration(&session.id, &json!({"configOptions": []}))
+            .unwrap();
+        let wire = session_json_with(Some(&store), &session, false);
+        assert!(
+            wire["nativeModels"].is_null(),
+            "the agent's catalog stands in"
+        );
     }
 
     #[test]

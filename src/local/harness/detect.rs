@@ -169,20 +169,17 @@ pub struct ModelInfo {
     pub resolved_model: Option<String>,
 }
 
-/// The wire form adds the ids the picker and delegate routing share.
+/// The wire form adds whether the id names a free tier.
 impl Serialize for ModelInfo {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         struct Wire<'a> {
             #[serde(flatten, with = "ModelInfo")]
             info: &'a ModelInfo,
-            canonical: String,
             free: bool,
         }
-        let routed = self.resolved_model.as_deref().unwrap_or(&self.id);
         Wire {
             info: self,
-            canonical: crate::local::model_routes::canonical(routed),
             free: crate::local::model_routes::free(&self.id),
         }
         .serialize(serializer)
@@ -978,7 +975,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_entries_carry_their_routing_ids() {
+    fn model_entries_say_when_they_are_free() {
         let mut alias = ModelInfo::new("opus[1m]").with_label(Some("Opus"), None);
         alias.resolved_model = Some("claude-opus-5-5".into());
         assert_eq!(
@@ -987,9 +984,8 @@ mod tests {
                 ModelInfo::new("openrouter/deepseek/deepseek-r1:free")
             ]),
             serde_json::json!([
-                {"id": "opus[1m]", "displayName": "Opus", "resolvedModel": "claude-opus-5-5",
-                 "canonical": "claude-opus-5.5", "free": false},
-                {"id": "openrouter/deepseek/deepseek-r1:free", "canonical": "deepseek-r1", "free": true},
+                {"id": "opus[1m]", "displayName": "Opus", "resolvedModel": "claude-opus-5-5", "free": false},
+                {"id": "openrouter/deepseek/deepseek-r1:free", "free": true},
             ])
         );
     }

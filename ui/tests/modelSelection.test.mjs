@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { tidyModelName as tidy } from "../src/api.ts";
 import { deriveComposerSelection as derive, harnessDisplayName, selectionHarness } from "../src/modelSelection.ts";
+import { model } from "./models.mjs";
 
 const selection = (model) => ({
   harness: "codex",
@@ -14,7 +15,7 @@ const selection = (model) => ({
 const harness = (...models) => ({
   id: "codex",
   agentReady: true,
-  models: models.map((id) => ({ id })),
+  models: models.map((id) => model(id)),
   options: { reasoningLevels: [{ id: "default", label: "Default" }, { id: "high", label: "High" }] },
 });
 
@@ -37,7 +38,7 @@ test("catalog refreshes do not replace a saved model", () => {
 
 test("a missing model is never inferred from the catalog", () => {
   assert.equal(derive(selection(null), harness("gpt-6.10-sol")).model, null);
-  const claude = { id: "claude-code", agentReady: true, models: [{ id: "opus", displayName: "Opus 5.5" }] };
+  const claude = { id: "claude-code", agentReady: true, models: [model("opus", "Opus 5.5")] };
   assert.equal(derive({ ...selection(null), harness: "claude-code" }, claude).model, null);
 });
 

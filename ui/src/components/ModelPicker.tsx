@@ -30,6 +30,7 @@ import {
   type Harness,
   type HarnessId,
   type LocalModelConnection,
+  type ModelVariant,
   type OpenCodeProvider,
   type OptionChoice,
   type AgentSelection,
@@ -43,7 +44,7 @@ import { IconButton, MenuItem, SwitchIndicator, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
 import { harnessKey, selectionHarness } from "../modelSelection";
-import { defaultOffer, groupModelLines, NEW_FOR, sight, VARIANT_EFFORTS, variantOffer, type ModelVariant } from "../modelLines";
+import { defaultOffer, groupModelLines, NEW_FOR, sight, VARIANT_EFFORTS, variantOffer } from "../modelLines";
 import { AgentIconTile } from "./AgentIcon";
 import { lineName, ModelList, offerOn, type PickerLine } from "./ModelList";
 import { pickerLines, type PickerAgent } from "./pickerAgents";
@@ -422,12 +423,12 @@ export function ModelPicker({
   // Cursor and Antigravity list each effort, speed and thinking mode as a model, and Claude
   // Code its long context: the Effort menu moves between the siblings of the picked one.
   const siblings = selectedLine?.offers.filter((offer) => offer.tile === selectedAgent) ?? [];
-  const variant = selectedOffer?.parsed.variant;
-  const varies = (field: keyof ModelVariant) => new Set(siblings.map((offer) => offer.parsed.variant[field])).size > 1;
+  const variant = selectedOffer?.model.parsed.variant;
+  const varies = (field: keyof ModelVariant) => new Set(siblings.map((offer) => offer.model.parsed.variant[field])).size > 1;
   const variantEfforts = varies("effort")
-    ? [...new Set(siblings.map((offer) => offer.parsed.variant.effort))].sort((a, b) => VARIANT_EFFORTS.indexOf(a as never) - VARIANT_EFFORTS.indexOf(b as never))
+    ? [...new Set(siblings.map((offer) => offer.model.parsed.variant.effort))].sort((a, b) => VARIANT_EFFORTS.indexOf(a as never) - VARIANT_EFFORTS.indexOf(b as never))
     : [];
-  const variantContext = varies("context") ? siblings.find((offer) => offer.parsed.variant.context)?.parsed.variant.context : undefined;
+  const variantContext = varies("context") ? siblings.find((offer) => offer.model.parsed.variant.context)?.model.parsed.variant.context : undefined;
   const pickVariant = (change: Partial<ModelVariant>) => {
     const offer = variant && variantOffer(siblings, variant, change);
     if (!offer || !value || !selectedHarness) return;
