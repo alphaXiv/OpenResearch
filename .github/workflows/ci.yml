@@ -412,7 +412,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(!inputs.release && '["lint", "test1", "test2", "test3", "test4", "integration", "demo", "onboarding", "chat"]' || '["all"]') }}
+        mode: ${{ fromJSON(!inputs.release && '["lint", "test1", "test2", "test3", "test4", "test5", "test6", "integration", "demo", "onboarding", "chat"]' || '["all"]') }}
     runs-on: windows-latest
     env:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
@@ -518,10 +518,12 @@ jobs:
             chat = 'local::chat::'
           }
           $partitions = @{
-            test1 = 'slice:1/4'
-            test2 = 'slice:2/4'
-            test3 = 'slice:3/4'
-            test4 = 'slice:4/4'
+            test1 = 1
+            test2 = 2
+            test3 = 3
+            test4 = 4
+            test5 = 5
+            test6 = 6
           }
           $testArgs = @('--locked')
           if ($filters.ContainsKey($env:TEST_MODE)) {
@@ -534,7 +536,8 @@ jobs:
             }
           } elseif ($partitions.ContainsKey($env:TEST_MODE)) {
             $excluded = ($filters.Values | ForEach-Object { "test($_)" }) -join ' | '
-            cargo nextest run --locked --profile ci --bin $binary --partition ($partitions[$env:TEST_MODE]) -E "not (kind(bin) & binary(=$binary) & ($excluded))"
+            $partition = "slice:$($partitions[$env:TEST_MODE])/$($partitions.Count)"
+            cargo nextest run --locked --profile ci --bin $binary --partition $partition -E "not (kind(bin) & binary(=$binary) & ($excluded))"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             if ($env:TEST_MODE -ne 'test1') { exit 0 }
             $testArgs += '--doc'
