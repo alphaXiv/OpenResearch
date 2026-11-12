@@ -2511,7 +2511,10 @@ where
         (operations.clone(), id.clone())
     }));
     let work = tokio::spawn(work(progress.clone()));
+    // The page's request ends at once, so the work itself holds off a restart.
+    let active = Active::new();
     let task = tokio::spawn(async move {
+        let _active = active;
         let result = work
             .await
             .map_err(|error| anyhow!("The work stopped unexpectedly: {error}"))
@@ -5174,7 +5177,7 @@ fn spawn_background_tasks(check_updates: bool) {
 
 #[cfg(test)]
 static ACTIVE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-/// Requests and terminals in flight, which an automatic restart would cut off.
+/// Requests, terminals and background operations in flight, which an automatic restart would cut off.
 static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// An automatic restart is checking for idleness; new requests wait it out.
 static DRAINING: AtomicBool = AtomicBool::new(false);
@@ -10531,6 +10534,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_background_operation_holds_off_a_restart_until_it_finishes() {
+        let _guard = ACTIVE_TEST_LOCK.lock().await;
+        let operations = Operations::default();
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let started = run_operation(&operations, true, "uploading", |_| async move {
+            finished.await.ok();
+            Ok(json!({}))
+        })
+        .await
+        .unwrap();
+        assert_eq!(started.status(), StatusCode::ACCEPTED);
+        assert_eq!(ACTIVE.load(Ordering::SeqCst), 1);
+
+        finish.send(()).unwrap();
+        for _ in 0..100 {
+            if ACTIVE.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("a finished operation stayed active");
+    }
+
+    #[tokio::test]
     async fn lagged_chat_stream_requests_resync_and_continues() {
         use axum::response::IntoResponse;
         let (sender, receiver) = tokio::sync::broadcast::channel(1);
@@ -11349,7 +11376,11 @@ mod tests {
                     }))
                 }),
             )
-            .route("/blob", put(|| async { StatusCode::OK }))
+            // Reads the upload first; answering before it resets the connection on Windows.
+            .route(
+                "/blob",
+                put(|_: axum::body::Bytes| async { StatusCode::OK }),
+            )
             .route(
                 "/shared-projects/{id}/publish",
                 post(move || {
