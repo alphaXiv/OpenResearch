@@ -5492,6 +5492,17 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets every root's connection state and the auth state of a host no run uses.
+    pub(crate) fn forget_engine_host(&self, alias: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM engine_hosts WHERE alias = ?1", params![alias])?;
+        self.conn.execute(
+            "DELETE FROM engine_host_auth WHERE alias = ?1",
+            params![alias],
+        )?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_engine_host(
         &self,

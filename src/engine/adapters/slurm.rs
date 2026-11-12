@@ -20,6 +20,9 @@ use crate::error::{bail, Result};
 struct Options {
     #[serde(default)]
     directives: BTreeMap<String, String>,
+    /// The user's own `#SBATCH` arguments, written verbatim after `directives`.
+    #[serde(default)]
+    sbatch_args: Vec<String>,
 }
 
 #[derive(Default)]
@@ -94,6 +97,9 @@ impl Slurm {
                     | "mem"
                     | "time"
                     | "nodes"
+                    | "nodelist"
+                    | "constraint"
+                    | "exclude"
             ) || value.is_empty()
                 || value.contains(['\r', '\n', '\0'])
             {
@@ -102,6 +108,14 @@ impl Slurm {
                 });
             }
             directives.push_str(&format!("#SBATCH --{name}={value}\n"));
+        }
+        for arg in options.sbatch_args {
+            if !arg.starts_with('-') || arg.contains(['\r', '\n', '\0']) {
+                return Err(LaunchError::Rejected {
+                    reason: format!("Invalid Slurm argument {arg:?}"),
+                });
+            }
+            directives.push_str(&format!("#SBATCH {arg}\n"));
         }
         match self
             .ssh

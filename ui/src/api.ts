@@ -138,6 +138,13 @@ export class RejectedResponseError extends Error {}
 /** OpenCode 1 can't do this; updating it or using OpenResearch's copy can. */
 export class OpenCode1Error extends RejectedResponseError {}
 
+/** A rejected save whose messages each belong to one form field, keyed as in the request body. */
+export class FieldErrors extends RejectedResponseError {
+  constructor(message: string, readonly fields: Record<string, string[]>) {
+    super(message);
+  }
+}
+
 export interface ProjectActivity {
   projectId: string;
   activeAgents: number;
@@ -766,11 +773,17 @@ export interface SlurmSettings {
   /** Cluster defaults; null = the cluster decides. */
   partition: string | null;
   account: string | null;
+  /** The launch options below are absent from an older orx, which can't apply them. */
+  qos?: string | null;
   timeLimit: string | null;
   /** `--cpus-per-task` default; null = the partition decides (often one core). */
   cpusPerTask: number | null;
   /** `--mem` default in Slurm syntax ("64G"); null = the partition decides. */
   mem: string | null;
+  /** Extra `#SBATCH` arguments written into every job, after orx's own lines. */
+  sbatchArgs?: string[];
+  /** Whether every job carries `#SBATCH --ntasks=1`. */
+  requestOneTask?: boolean;
   /** Login-node candidates, from ~/.ssh/config (same source as SSH). */
   hosts: SshHost[];
 }
@@ -1837,9 +1850,11 @@ export function createApi(
             throw new FileChangedError(message, currentVersion, parsed.exists);
           }
           if (res.status === 409 && "code" in parsed && parsed.code === "opencode1") throw new OpenCode1Error(message);
+          if (res.status === 400 && "fields" in parsed && typeof parsed.fields === "object" && parsed.fields !== null)
+            throw new FieldErrors(message, parsed.fields as Record<string, string[]>);
         }
       } catch (error) {
-        if (error instanceof FileChangedError || error instanceof OpenCode1Error) throw error;
+        if (error instanceof FileChangedError || error instanceof OpenCode1Error || error instanceof FieldErrors) throw error;
         // non-JSON body — show it raw
       }
       const ErrorType = res.status >= 400 && res.status < 500 ? RejectedResponseError : Error;
@@ -2423,10 +2438,14 @@ export function createApi(
     host?: string;
     partition?: string;
     account?: string;
+    qos?: string;
     timeLimit?: string;
     /** 0 clears it back to the partition default. */
     cpusPerTask?: number;
     mem?: string;
+    /** Replaces the saved list. */
+    sbatchArgs?: string[];
+    requestOneTask?: boolean;
   }) => post<SlurmSettings>("/api/settings/slurm", body);
 
   const getRaySettings = (signal?: AbortSignal) => get<RaySettings>("/api/settings/ray", signal);
