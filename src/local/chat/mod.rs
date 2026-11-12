@@ -4078,6 +4078,14 @@ impl ChatHost {
         }
     }
 
+    /// Stop every active turn for server shutdown without marking it cancelled,
+    /// so lease reconciliation on the next startup still offers Continue/Retry.
+    pub async fn stop_for_shutdown(self: &Arc<Self>) {
+        for session_id in self.busy_sessions().await {
+            let _ = self.stop_turn(&session_id, false).await;
+        }
+    }
+
     pub async fn is_busy(&self, session_id: &str) -> bool {
         self.turns.lock().await.contains_key(session_id)
     }
@@ -8300,6 +8308,9 @@ impl TurnCtx {
     }
 
     pub fn schedule_orx_retry(&mut self, explicit: Option<Duration>) -> Option<(u32, Duration)> {
+        if self.host.exiting.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         let started = *self.orx_retry_started.get_or_insert_with(Instant::now);
         let retry_number = self.orx_retry_count + 1;
         let Some(delay) =
@@ -13720,6 +13731,91 @@ done
                 assert_eq!(stored.recovery_action.as_deref(), Some("continue"));
                 assert!(!host.is_busy(&session_id).await);
             }
+        });
+    }
+
+    #[test]
+    fn stop_for_shutdown_stops_active_and_retrying_turns_while_preserving_continue_recovery() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            let host = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let session_id = "retrying-chat";
+            session(&store, session_id);
+            assert!(host.claim_durable_turn(session_id));
+            let turn = crate::store::StoredChatTurn {
+                id: "turn-retrying".into(),
+                session_id: session_id.into(),
+                user_message_id: None,
+                assistant_message_id: "answer-retrying".into(),
+                client_turn_id: "client-retrying".into(),
+                request_hash: "task".into(),
+                prepared_input: "task".into(),
+                settings_json: "{}".into(),
+                state: "retrying".into(),
+                delivery_state: "accepted".into(),
+                attempt_count: 2,
+                next_retry_at: Some(now_ms() + 42_354_000),
+                error_kind: None,
+                error_message: None,
+                recovery_action: None,
+                recovered_by_turn_id: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            };
+            store.admit_chat_turn(None, &turn).unwrap();
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: turn.assistant_message_id.clone(),
+                    session_id: session_id.into(),
+                    role: "assistant".into(),
+                    parts_json: serde_json::to_string(&vec![
+                        WirePart::text("text-1", "Partial answer."),
+                        WirePart::tool("turn-retry", "retry", "running", None),
+                    ])
+                    .unwrap(),
+                    created_at: now_ms(),
+                    completed_at: None,
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: None,
+                })
+                .unwrap();
+            host.turns.lock().await.insert(
+                session_id.into(),
+                TurnState::Active(ActiveTurn {
+                    handle: tokio::spawn(std::future::pending()),
+                    message_id: turn.assistant_message_id.clone(),
+                    turn_id: turn.id.clone(),
+                }),
+            );
+
+            host.stop_admitting();
+            host.stop_for_shutdown().await;
+            host.release_turn_leases();
+
+            assert!(!host.is_busy(session_id).await);
+            assert!(!store.chat_turn_leased(session_id).unwrap());
+
+            reconcile_unfinished_turns(&store).unwrap();
+            let stored = store.get_chat_turn(session_id, &turn.id).unwrap().unwrap();
+            assert_eq!(stored.state, "failed");
+            assert_eq!(stored.recovery_action.as_deref(), Some("continue"));
+            let message = store
+                .get_chat_message(&turn.assistant_message_id)
+                .unwrap()
+                .unwrap();
+            let wire = stored_to_wire(&message);
+            assert!(!wire.parts.iter().any(|part| part.id == "turn-retry"));
+            assert!(wire.parts.iter().any(|part| part.id == "turn-recovery"));
         });
     }
 

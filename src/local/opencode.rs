@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use crate::error::{anyhow, Result};
@@ -27,7 +26,7 @@ use crate::store;
 mod runtime;
 pub(crate) use runtime::{
     prepare_database, resolve_binary, resolve_binary_at, start_server, user_binary, AgentEndpoint,
-    Protocol, ResolvedBinary,
+    Protocol, ResolvedBinary, ServerChild,
 };
 
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
@@ -439,7 +438,7 @@ pub struct AgentStatus {
 }
 
 struct AgentChild {
-    child: Child,
+    child: ServerChild,
     port: u16,
     project_id: String,
     session_id: String,
@@ -751,6 +750,7 @@ impl AgentHost {
         endpoint
             .client
             .post(format!("{}{path}", endpoint.base_url))
+            .timeout(Duration::from_secs(2))
             .json(&json!({}))
             .send()
             .await?
@@ -1118,11 +1118,13 @@ mod tests {
             legacy_v2_api: false,
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let child = crate::process::tokio_command("sleep")
-            .arg("60")
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let child = ServerChild::new(
+            crate::process::tokio_command("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap(),
+        );
         let pid = child.id();
         let project = sample_project();
         let mut host = AgentHost::new(Some("host/default".into()));
@@ -1413,6 +1415,45 @@ mod tests {
             .await
             .unwrap();
         assert!(host.stopping.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_and_drop_kill_descendants_in_the_server_process_group() {
+        use tokio::io::AsyncBufReadExt as _;
+
+        for via_shutdown in [true, false] {
+            let mut cmd = crate::process::tokio_command("sh");
+            cmd.args(["-c", "sleep 60 & echo $!; wait"])
+                .stdout(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .process_group(0);
+            let mut spawned = cmd.spawn().unwrap();
+            let mut lines = tokio::io::BufReader::new(spawned.stdout.take().unwrap()).lines();
+            let descendant_pid: libc::pid_t =
+                lines.next_line().await.unwrap().unwrap().parse().unwrap();
+            assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+
+            let mut child = ServerChild::new(spawned);
+            if via_shutdown {
+                child.kill().await.unwrap();
+            } else {
+                drop(child);
+            }
+
+            let mut exited = false;
+            for _ in 0..100 {
+                if unsafe { libc::kill(descendant_pid, 0) } != 0 {
+                    exited = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                exited,
+                "descendant {descendant_pid} survived server cleanup (via_shutdown={via_shutdown})"
+            );
+        }
     }
 
     #[test]

@@ -290,10 +290,49 @@ impl AgentEndpoint {
     }
 }
 
+const TERMINATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Owns a spawned `opencode serve` process and its process group. Stopping or
+/// dropping it kills the process group and any MCP/tool children it started.
+pub(crate) struct ServerChild(Child);
+
+impl ServerChild {
+    #[cfg(test)]
+    pub(crate) fn new(child: Child) -> Self {
+        Self(child)
+    }
+
+    pub(crate) fn id(&self) -> Option<u32> {
+        self.0.id()
+    }
+
+    pub(crate) fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.0.try_wait()
+    }
+
+    pub(crate) async fn kill(&mut self) -> std::io::Result<()> {
+        crate::local::chat::kill_agent_tree(self.0.id());
+        let _ = self.0.start_kill();
+        if tokio::time::timeout(TERMINATION_TIMEOUT, self.0.wait())
+            .await
+            .is_err()
+        {
+            eprintln!("orx up: timed out reaping OpenCode server");
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ServerChild {
+    fn drop(&mut self) {
+        crate::local::chat::kill_shell_group(self.0.id());
+    }
+}
+
 pub(crate) async fn start_server(
     binary: &ResolvedBinary,
     mut cmd: Command,
-) -> Result<(Child, AgentEndpoint)> {
+) -> Result<(ServerChild, AgentEndpoint)> {
     if let Some(parent) = super::agent_log_path().parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -334,8 +373,24 @@ pub(crate) async fn start_server(
     }
     #[cfg(unix)]
     cmd.process_group(0);
+    #[cfg(target_os = "linux")]
+    {
+        let parent_pid = unsafe { libc::getpid() };
+        // SAFETY: async-signal-safe syscalls after fork; terminates the server if orx dies abruptly.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent_pid {
+                    libc::raise(libc::SIGTERM);
+                }
+                Ok(())
+            });
+        }
+    }
     binary.check_unchanged()?;
-    let mut child = crate::local::harness::spawn_retrying_busy(|| cmd.spawn())?;
+    let mut child = ServerChild(crate::local::harness::spawn_retrying_busy(|| cmd.spawn())?);
     let client = crate::net::loopback_client()
         .default_headers(headers)
         .build()?;
@@ -344,6 +399,7 @@ pub(crate) async fn start_server(
             format!("http://127.0.0.1:{port}")
         } else {
             let stdout = child
+                .0
                 .stdout
                 .take()
                 .ok_or_else(|| anyhow!("OpenCode readiness pipe missing"))?;
@@ -461,7 +517,7 @@ async fn prepare_database_waiting(
     .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1");
     let result = async {
         let (mut child, endpoint) = start_server(binary, cmd).await?;
-        let migrated = wait_migration(&mut child, &endpoint, &mut progress).await;
+        let migrated = wait_migration(&mut child.0, &endpoint, &mut progress).await;
         let stopped = child.kill().await;
         migrated?;
         stopped?;
