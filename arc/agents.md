@@ -34,7 +34,9 @@ and shell alone. Once a day, Claude Code, Codex (0.126 and later; older ones
 have no updater) and OpenCode try their own updaters; when those cannot reach
 the newest release, or the user's install fails to run, orx's copy stands in.
 The newer of the two runs, a tie going to the user's install, and a chat's
-running agent moves over at its next turn. New OpenCode installs
+running agent moves over at its next turn. An agent signed out on every
+account is skipped until a sign-in shows it in use; one whose sign-in could
+not be checked is still kept current. New OpenCode installs
 use major 2; an existing major 1 still runs chats and offers an explicit upgrade
 or OpenResearch's own copy before provider changes.
 Agents orx starts run with Claude Code's updater off, so only this check

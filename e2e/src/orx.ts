@@ -30,8 +30,9 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
   // step to install OpenCode. Linux runners ship a gh that would reach GitHub's API.
   const bin = path.join(root, 'bin')
   mkdirSync(bin)
-  for (const [name, version] of [['claude', '2.1.0 (Claude Code)'], ['gh', 'gh version 2.80.0']]) {
-    writeFileSync(path.join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && echo "${version}" && exit 0\nexit 1\n`, { mode: 0o755 })
+  for (const [name, version, status] of [['claude', '2.1.0 (Claude Code)', '{"loggedIn":false}'], ['gh', 'gh version 2.80.0']]) {
+    const auth = status ? `[ "$1" = auth ] && echo '${status}'\n` : ''
+    writeFileSync(path.join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && echo "${version}" && exit 0\n${auth}exit 1\n`, { mode: 0o755 })
   }
   const log = path.join(root, 'orx.log')
   const env = {
