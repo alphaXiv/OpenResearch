@@ -500,7 +500,7 @@ impl OpenResearch {
                         .map_or(true, |(_, state)| state.cancel_accepted_at.is_some())
                 })
                 .await
-                .map_err(|error| anyhow!("Box staging: {error:?}"))?;
+                .map_err(|error| anyhow!("Box staging: {error}"))?;
             let rental = descriptor
                 .rental_lease
                 .as_ref()

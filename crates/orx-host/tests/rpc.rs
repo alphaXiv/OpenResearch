@@ -329,6 +329,32 @@ fn blob_retries_are_checked_and_only_verified_blobs_are_published() {
 }
 
 #[test]
+fn a_staging_write_the_host_refuses_names_its_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Directory::new();
+    let host = host(&dir);
+    let sources = dir.0.join("sources");
+    fs::set_permissions(&sources, fs::Permissions::from_mode(0o500)).unwrap();
+    let response = host.handle(Request::PutBlob {
+        sha: sha(b"x"),
+        offset: 0,
+        bytes: b"x".to_vec(),
+    });
+    fs::set_permissions(&sources, fs::Permissions::from_mode(0o700)).unwrap();
+    let Response::Error {
+        code: ErrorCode::Io,
+        message,
+    } = response
+    else {
+        panic!("unexpected reply: {response:?}");
+    };
+    assert!(
+        message.contains(&sources.display().to_string()),
+        "{message}"
+    );
+}
+
+#[test]
 fn legacy_paths_are_validated_and_dir_pages_use_the_same_identity() {
     for path in ["/scratch/user/orx", "~/orx/runs/a", "$HOME/.orx/runs/a"] {
         assert!(legacy::directory(path).unwrap().is_absolute());

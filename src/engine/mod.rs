@@ -185,6 +185,21 @@ pub enum LaunchError {
     Interrupted { detail: String },
 }
 
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::store::Contact;
+        match self {
+            Self::Rejected { reason: text } | Self::Interrupted { detail: text } => {
+                f.write_str(text)
+            }
+            Self::Blocked {
+                contact: Contact::Unreachable { cause, .. } | Contact::NeedsAuth { cause, .. },
+            } => f.write_str(cause),
+            Self::Blocked { .. } => f.write_str("The launch was not sent; it is retried."),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RunIntent {
     pub run: StoredRun,
