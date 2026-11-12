@@ -951,6 +951,7 @@ impl Store {
         std::fs::create_dir_all(dir.join("run-logs"))
             .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
         let conn = Connection::open(dir.join("orx.db"))?;
+        conn.busy_timeout(busy_timeout)?;
         let has_floor: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata')",
             [],
@@ -969,7 +970,6 @@ impl Store {
             }
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
         let schema =
             rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
         schema.execute_batch(
@@ -6233,6 +6233,37 @@ fn real_path_under<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_busy_timeout_applies_before_schema_reads() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        drop(Store::open().unwrap());
+        let locked = Connection::open(data_dir().join("orx.db")).unwrap();
+        locked
+            .execute_batch(
+                "PRAGMA locking_mode = EXCLUSIVE;
+                 BEGIN EXCLUSIVE;
+                 UPDATE store_metadata SET value = value;",
+            )
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let error = Store::open_with_busy_timeout(Duration::ZERO)
+            .err()
+            .expect("the other connection holds the database exclusively");
+        let elapsed = start.elapsed();
+        assert_eq!(
+            error
+                .downcast_ref::<rusqlite::Error>()
+                .unwrap()
+                .sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    }
 
     #[test]
     fn schema_setup_rolls_back_when_a_later_statement_fails() {

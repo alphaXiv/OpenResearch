@@ -51,7 +51,7 @@ test('unavailable comparisons and forced runs select everything', () => {
   }
 })
 const flags = Object.fromEntries(Object.entries(classifyChanges(['ui/src/App.tsx'])).map(([key, value]) => [key, String(value)]))
-const needs = { changes: { result: 'success' }, frontend: { result: 'success' }, e2e: { result: 'success' }, rust: { result: 'skipped' }, 'rust-lint': { result: 'skipped' }, windows: { result: 'skipped' }, 'linux-app': { result: 'skipped' }, helpers: { result: 'skipped' } }
+const needs = { changes: { result: 'success' }, 'workflow-lint': { result: 'success' }, frontend: { result: 'success' }, e2e: { result: 'success' }, rust: { result: 'skipped' }, 'rust-lint': { result: 'skipped' }, windows: { result: 'skipped' }, 'linux-app': { result: 'skipped' }, helpers: { result: 'skipped' } }
 test('aggregate accepts intentional skips and successful selected jobs', () => checkResults(needs, flags))
 test('aggregate rejects failures, cancellations, missing and unexpectedly skipped jobs', () => {
   for (const result of ['failure', 'cancelled', 'skipped', undefined]) assert.throws(() => checkResults({ ...needs, frontend: { result } }, flags))
@@ -59,6 +59,15 @@ test('aggregate rejects failures, cancellations, missing and unexpectedly skippe
   assert.throws(() => checkResults({ ...needs, e2e: { result: 'skipped' } }, flags))
   assert.throws(() => checkResults({ ...needs, changes: { result: 'failure' } }, flags))
   assert.throws(() => checkResults(needs, { ...flags, rust: undefined }))
+})
+
+test('workflow lint remains required when changes skip builds', () => {
+  const docsFlags = Object.fromEntries(Object.entries(classifyChanges(['README.md'])).map(([key, value]) => [key, String(value)]))
+  const docsNeeds = { ...needs, frontend: { result: 'skipped' }, e2e: { result: 'skipped' } }
+  checkResults(docsNeeds, docsFlags)
+  for (const result of ['failure', 'cancelled', 'skipped', undefined]) {
+    assert.throws(() => checkResults({ ...docsNeeds, 'workflow-lint': { result } }, docsFlags))
+  }
 })
 
 test('Rust changes require lint, tests and helper protocols', () => {

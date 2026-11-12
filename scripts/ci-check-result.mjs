@@ -8,6 +8,7 @@ export function checkResults(needs, flags) {
     return flags[name] === 'true'
   }
   const expected = {
+    'workflow-lint': true,
     frontend: selected('frontend'),
     rust: selected('rust'),
     'rust-lint': selected('rust'),

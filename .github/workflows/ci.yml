@@ -54,10 +54,6 @@ jobs:
           node-version: 22
       - name: Script tests
         run: node --test 'scripts/*.test.mjs'
-      - name: Workflow lint
-        run: |
-          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
-          pipx run zizmor==1.31.1 --offline --format github .github
       - name: Select checks for changed files
         id: changes
         env:
@@ -65,6 +61,19 @@ jobs:
           HEAD_SHA: ${{ inputs.source-sha || github.sha }}
           FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' || inputs.release || inputs.plan != '' }}
         run: node scripts/ci-changes.mjs
+
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
+      - name: Workflow lint
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
+          pipx run zizmor==1.31.1 --offline --format github .github
 
   frontend:
     name: Frontend (${{ matrix.check }})
@@ -430,24 +439,9 @@ jobs:
         env:
           CARGO_INCREMENTAL: 1
           CARGO_PROFILE_TEST_DEBUG: 0
-          RUST_TEST_THREADS: 16
+          RUST_TEST_THREADS: 32
         run: cargo test --locked --timings
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-      - name: Measure compiler cache
-        if: matrix.mode != 'lint'
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-        run: |
-          Get-ChildItem target/debug/incremental -Directory | ForEach-Object {
-            $crate = $_.Name
-            Get-ChildItem $_.FullName -Directory | ForEach-Object {
-              [pscustomobject]@{
-                crate = $crate
-                session = $_.Name
-                bytes = (Get-ChildItem $_.FullName -Recurse -File | Measure-Object Length -Sum).Sum
-                modified = $_.LastWriteTimeUtc
-              }
-            }
-          } | ConvertTo-Json -Compress
       - name: Upload compilation timings
         if: always() && matrix.mode != 'lint'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -459,7 +453,7 @@ jobs:
   check:
     name: fmt, clippy, test
     if: always()
-    needs: [changes, frontend, helpers, rust-lint, rust, e2e, linux-app, windows]
+    needs: [changes, workflow-lint, frontend, helpers, rust-lint, rust, e2e, linux-app, windows]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
