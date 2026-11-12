@@ -11551,21 +11551,23 @@ mod tests {
         session.input.send(b"hello\n".to_vec()).unwrap();
 
         let mut output = Vec::new();
+        let mut exit = None;
+        // Exit and the last output come from different threads; the channel closes after both.
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(event) = session.events.recv().await {
                 match event {
                     PtyEvent::Output(bytes) => output.extend(bytes),
-                    PtyEvent::Exit(Ok(status)) => {
-                        assert!(status.success());
-                        break;
-                    }
-                    PtyEvent::Exit(Err(error)) => panic!("PTY wait failed: {error}"),
+                    PtyEvent::Exit(status) => exit = Some(status),
                     PtyEvent::Eof => {}
                 }
             }
         })
         .await
         .expect("PTY did not exit");
+        let status = exit
+            .expect("PTY ended without an exit status")
+            .unwrap_or_else(|error| panic!("PTY wait failed: {error}"));
+        assert!(status.success());
         assert!(String::from_utf8_lossy(&output).contains("reply:hello"));
 
         let mut cancelled =

@@ -819,8 +819,11 @@ impl Host {
                         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                         Err(error) => return Err(error),
                     };
-                    let fact = match previous {
-                        Some(fact) if fact.job == job && fact.state == state => fact,
+                    match previous {
+                        Some(fact) if fact.job == job && fact.state == state => {
+                            Ok(fact.since.elapsed().unwrap_or_default())
+                        }
+                        // A slow fsync must not count toward the grace of a state first seen now.
                         _ => {
                             let fact = SchedulerTerminal {
                                 job: job.into(),
@@ -828,10 +831,9 @@ impl Host {
                                 since: SystemTime::now(),
                             };
                             publish(&path, &fact)?;
-                            fact
+                            Ok(Duration::ZERO)
                         }
-                    };
-                    Ok(fact.since.elapsed().unwrap_or_default())
+                    }
                 }
                 _ => Ok(Duration::ZERO),
             }
