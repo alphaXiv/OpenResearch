@@ -19,7 +19,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::autonomy::Autonomy;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
@@ -969,7 +969,28 @@ impl Store {
                 return Err(anyhow!("This database requires a newer OpenResearch reader (min_reader_version {}). Update orx before opening it.", floor));
             }
         }
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        // WAL conversion can return SQLITE_BUSY without invoking SQLite's busy handler.
+        let wal_start = std::time::Instant::now();
+        let mut delay = Duration::from_millis(1);
+        loop {
+            conn.busy_timeout(busy_timeout.saturating_sub(wal_start.elapsed()))?;
+            match conn.pragma_update(None, "journal_mode", "WAL") {
+                Ok(()) => break,
+                Err(error) => {
+                    let remaining = busy_timeout.saturating_sub(wal_start.elapsed());
+                    if error.sqlite_error_code() != Some(rusqlite::ErrorCode::DatabaseBusy)
+                        || remaining.is_zero()
+                    {
+                        return Err(error).with_context(|| {
+                            format!("Could not enable WAL for {}", dir.join("orx.db").display())
+                        });
+                    }
+                    std::thread::sleep(delay.min(remaining));
+                    delay = (delay * 2).min(Duration::from_millis(50));
+                }
+            }
+        }
+        conn.busy_timeout(busy_timeout)?;
         let schema =
             rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
         schema.execute_batch(
@@ -6263,6 +6284,49 @@ mod tests {
             Some(rusqlite::ErrorCode::DatabaseBusy)
         );
         assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    }
+
+    #[test]
+    fn wal_setup_honors_the_lock_timeout() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        std::fs::create_dir_all(data_dir()).unwrap();
+        let locked = Connection::open(data_dir().join("orx.db")).unwrap();
+        locked
+            .execute_batch(
+                "CREATE TABLE preserved (value TEXT);
+                 INSERT INTO preserved VALUES ('kept');
+                 BEGIN;
+                 SELECT * FROM preserved;",
+            )
+            .unwrap();
+
+        for timeout in [Duration::ZERO, Duration::from_millis(50)] {
+            let start = std::time::Instant::now();
+            let error = Store::open_with_busy_timeout(timeout)
+                .err()
+                .expect("the reader blocks the journal mode change");
+            let elapsed = start.elapsed();
+            assert_eq!(
+                error
+                    .downcast_ref::<rusqlite::Error>()
+                    .unwrap()
+                    .sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            assert!(elapsed >= timeout, "{elapsed:?}");
+            assert!(elapsed < timeout + Duration::from_secs(1), "{elapsed:?}");
+        }
+
+        locked.execute_batch("ROLLBACK").unwrap();
+        let store = Store::open().unwrap();
+        let mode: String = store
+            .conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
     }
 
     #[test]
