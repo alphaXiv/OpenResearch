@@ -10,12 +10,14 @@ import { OptionPicker } from "./ModelPicker";
 import lmStudioLogo from "../assets/lm-studio-logo.svg";
 import ollamaLogo from "../assets/ollama-logo.png";
 import omlxLogo from "../assets/omlx-logo.svg";
+import rapidMlxLogo from "../assets/rapid-mlx-logo.svg";
 import { Button, Input, Spinner } from "./ui";
 
 const LM_STUDIO = { id: "lmstudio", label: "LM Studio", icon: lmStudioLogo, url: "http://127.0.0.1:1234/v1" };
 const SERVERS = [
   LM_STUDIO,
   { id: "omlx", label: "oMLX", icon: omlxLogo, url: "http://127.0.0.1:8000/v1" },
+  { id: "rapid-mlx", label: "Rapid-MLX", icon: rapidMlxLogo, url: "http://127.0.0.1:8000/v1" },
   { id: "ollama", label: "Ollama", icon: ollamaLogo, url: "http://127.0.0.1:11434/v1" },
   { id: "openai-compatible", label: "Custom Endpoint", icon: null, url: "http://127.0.0.1:8000/v1" },
 ];
@@ -31,7 +33,7 @@ export function endpointServer(connection: Pick<LocalModelConnection, "name" | "
 
 export function EndpointMark({ server, size }: { server: Server | undefined; size: number }) {
   if (!server?.icon) return <Link2 size={size} className="shrink-0" aria-hidden="true" />;
-  return <img src={server.icon} alt="" width={size} height={size} className={`shrink-0 object-contain${server.id === "ollama" ? " dark:invert" : ""}`} style={{ width: size, height: size }} />;
+  return <img src={server.icon} alt="" width={size} height={size} className={`shrink-0 object-contain${server.id === "ollama" || server.id === "rapid-mlx" ? " dark:invert" : ""}`} style={{ width: size, height: size }} />;
 }
 
 const CUSTOM = SERVERS[SERVERS.length - 1];
