@@ -51,7 +51,7 @@ test('unavailable comparisons and forced runs select everything', () => {
   }
 })
 const flags = Object.fromEntries(Object.entries(classifyChanges(['ui/src/App.tsx'])).map(([key, value]) => [key, String(value)]))
-const needs = { changes: { result: 'success' }, frontend: { result: 'success' }, e2e: { result: 'success' }, rust: { result: 'skipped' }, windows: { result: 'skipped' }, 'linux-app': { result: 'skipped' }, helpers: { result: 'skipped' } }
+const needs = { changes: { result: 'success' }, frontend: { result: 'success' }, e2e: { result: 'success' }, rust: { result: 'skipped' }, 'rust-lint': { result: 'skipped' }, windows: { result: 'skipped' }, 'linux-app': { result: 'skipped' }, helpers: { result: 'skipped' } }
 test('aggregate accepts intentional skips and successful selected jobs', () => checkResults(needs, flags))
 test('aggregate rejects failures, cancellations, missing and unexpectedly skipped jobs', () => {
   for (const result of ['failure', 'cancelled', 'skipped', undefined]) assert.throws(() => checkResults({ ...needs, frontend: { result } }, flags))
@@ -59,6 +59,15 @@ test('aggregate rejects failures, cancellations, missing and unexpectedly skippe
   assert.throws(() => checkResults({ ...needs, e2e: { result: 'skipped' } }, flags))
   assert.throws(() => checkResults({ ...needs, changes: { result: 'failure' } }, flags))
   assert.throws(() => checkResults(needs, { ...flags, rust: undefined }))
+})
+
+test('Rust changes require both lint and tests', () => {
+  const rustFlags = Object.fromEntries(Object.entries(classifyChanges(['src/main.rs'])).map(([key, value]) => [key, String(value)]))
+  const passed = { ...needs, frontend: { result: 'skipped' }, rust: { result: 'success' }, 'rust-lint': { result: 'success' }, windows: { result: 'success' }, 'linux-app': { result: 'success' } }
+  checkResults(passed, rustFlags)
+  for (const job of ['rust', 'rust-lint']) {
+    for (const result of ['failure', 'cancelled', 'skipped', undefined]) assert.throws(() => checkResults({ ...passed, [job]: { result } }, rustFlags))
+  }
 })
 
 test('embedded JavaScript selects the Rust job that runs its tests, without a frontend build', () => {

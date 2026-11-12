@@ -10,6 +10,7 @@ export function checkResults(needs, flags) {
   const expected = {
     frontend: selected('frontend'),
     rust: selected('rust'),
+    'rust-lint': selected('rust'),
     e2e: selected('rust') || selected('frontend'),
     windows: selected('windows'),
     'linux-app': selected('linux'),

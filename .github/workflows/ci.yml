@@ -135,6 +135,30 @@ jobs:
         if: needs.changes.outputs.release_notes == 'true'
         run: python3 scripts/test_release_notes.py
 
+  rust-lint:
+    name: Rust lint
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: rust-lint
+      - name: Format
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path windows/launcher/Cargo.toml --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
   rust:
     name: Rust
     needs: changes
@@ -168,17 +192,9 @@ jobs:
         run: node --test 'src/**/*.test.mjs'
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: check # Preserve the former Rust job's cache namespace.
-      - name: Format
-        run: |
-          cargo fmt --all --check
-          cargo fmt --manifest-path windows/launcher/Cargo.toml --check
-      - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         env:
           RUST_TEST_THREADS: 16
@@ -281,7 +297,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"lint"},{"arch":"aarch64","mode":"build"}]' || '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"all"}]') }}
+        include: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '[{"arch":"x86_64","mode":"lint"},{"arch":"x86_64","mode":"build"},{"arch":"aarch64","mode":"lint"},{"arch":"aarch64","mode":"build"}]' || '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"all"}]') }}
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -378,9 +394,19 @@ jobs:
         if: matrix.mode != 'lint'
         env:
           CARGO_PROFILE_TEST_DEBUG: 0
-        run: |
-          cargo nextest run --locked --timings --test-threads 16 --retries 0 --no-fail-fast
-          cargo test --locked --doc
+        run: cargo nextest run --locked --timings --test-threads 16 --retries 0 --no-fail-fast
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Profile test setup
+        if: matrix.mode != 'lint'
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
+        run: cargo test --locked ci_profile_store_and_paths -- --ignored --nocapture
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Doc-tests
+        if: matrix.mode != 'lint'
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
+        run: cargo test --locked --doc
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Upload compilation timings
         if: always() && matrix.mode != 'lint'
@@ -393,7 +419,7 @@ jobs:
   check:
     name: fmt, clippy, test
     if: always()
-    needs: [changes, frontend, helpers, rust, e2e, linux-app, windows]
+    needs: [changes, frontend, helpers, rust-lint, rust, e2e, linux-app, windows]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
