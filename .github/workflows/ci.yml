@@ -387,7 +387,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(!inputs.release && '["lint", "test", "demo"]' || '["all"]') }}
+        mode: ${{ fromJSON(!inputs.release && '["lint", "test", "demo", "chat"]' || '["all"]') }}
     runs-on: windows-latest
     env:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
@@ -415,7 +415,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}${{ matrix.mode == 'lint' && '-lint' || '' }}
-          save-if: ${{ matrix.mode != 'demo' }}
+          save-if: ${{ matrix.mode == 'lint' || matrix.mode == 'test' || matrix.mode == 'all' }}
           cache-on-failure: true
           workspaces: |
             ${{ env.DEV_DRIVE_WORKSPACE }} -> target
@@ -467,23 +467,29 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: 0
           RUST_TEST_THREADS: 16
           TEST_MODE: ${{ matrix.mode }}
-          DEMO_TEST_FILTER: 'local::demo::tests::'
         run: cargo test --locked --timings --no-run
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Test
         if: matrix.mode != 'lint'
         env: *windows-test-env
         run: |
+          $filters = @{
+            demo = 'local::demo::tests::'
+            chat = 'local::chat::'
+          }
           $testArgs = @('--locked', '--timings')
-          if ($env:TEST_MODE -eq 'demo') {
-            $testArgs += $env:DEMO_TEST_FILTER
+          if ($filters.ContainsKey($env:TEST_MODE)) {
+            $testArgs += $filters[$env:TEST_MODE]
           } elseif ($env:TEST_MODE -eq 'test') {
-            $testArgs += @('--', '--skip', $env:DEMO_TEST_FILTER)
+            $testArgs += '--'
+            foreach ($filter in $filters.Values) {
+              $testArgs += @('--skip', $filter)
+            }
           }
           cargo test @testArgs
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Save incremental compilation
-        if: always() && matrix.mode != 'demo' && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
+        if: always() && (matrix.mode == 'test' || matrix.mode == 'all') && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: *windows-incremental-path
