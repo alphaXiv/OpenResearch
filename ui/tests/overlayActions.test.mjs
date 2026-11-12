@@ -141,12 +141,19 @@ for (const trigger of ["Escape", "outside click", "cancel button"]) {
 
 test("local model setup reads current installation state and blocks dismissal while saving", async () => {
   const connected = [];
+  const requests = [];
   let finishSave;
   let installed = false;
   serve((path, init) => {
     if (path.startsWith("/api/harnesses")) return { harnesses: [{ id: "opencode", installed, models: [{ id: "connected-model" }] }] };
-    if (path === "/api/local-models/discover") return { models: ["local-test"] };
-    if (path === "/api/local-models" && init.method === "POST") return new Promise((resolve) => { finishSave = resolve; });
+    if (path === "/api/local-models/discover") {
+      requests.push(JSON.parse(init.body));
+      return { models: ["local-test"] };
+    }
+    if (path === "/api/local-models" && init.method === "POST") {
+      requests.push(JSON.parse(init.body));
+      return new Promise((resolve) => { finishSave = resolve; });
+    }
   });
   const { workspace } = await render(null);
   await act(async () => workspace.dialogs.showCustomDialog({
@@ -163,9 +170,17 @@ test("local model setup reads current installation state and blocks dismissal wh
   await act(async () => workspace.queryClient.invalidateQueries(workspace.queries.getHarnessesQuery()));
   await settle();
   assert.equal(submit().disabled, false);
+  await click(find('button[aria-haspopup="menu"]', "LM Studio"));
+  await click(find("button", "Rapid-MLX"));
+  assert.equal(document.activeElement, find('button[aria-haspopup="menu"]', "Rapid-MLX"));
+  assert.equal(document.querySelector('[role="dialog"] input').value, "http://127.0.0.1:8000/v1");
   await click(submit());
+  assert.deepEqual(requests, [{ baseUrl: "http://127.0.0.1:8000/v1", apiKey: "" }]);
   assert.match(submit().textContent, new RegExp(m.local_models_save()));
   await click(submit());
+  assert.deepEqual(requests[1], {
+    name: "Rapid-MLX", baseUrl: "http://127.0.0.1:8000/v1", apiKey: "", model: "local-test", contextWindow: 32768,
+  });
   assert.equal(find('[role="dialog"] button', m.settings_page_cancel()).disabled, true);
   await press("Escape");
   assert.equal(dialogs().length, 1);

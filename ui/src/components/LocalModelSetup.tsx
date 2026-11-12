@@ -11,12 +11,14 @@ import { OptionPicker } from "./ModelPicker";
 import lmStudioLogo from "../assets/lm-studio-logo.svg";
 import ollamaLogo from "../assets/ollama-logo.png";
 import omlxLogo from "../assets/omlx-logo.svg";
+import rapidMlxLogo from "../assets/rapid-mlx-logo.svg";
 import { DialogContent, DialogTitle, Badge, Button, ButtonLink, IconButton, Input, Spinner } from "./ui";
 
 const LM_STUDIO = { id: "lmstudio", label: "LM Studio", icon: lmStudioLogo, url: "http://127.0.0.1:1234/v1" };
 const SERVERS = [
   LM_STUDIO,
   { id: "omlx", label: "oMLX", icon: omlxLogo, url: "http://127.0.0.1:8000/v1" },
+  { id: "rapid-mlx", label: "Rapid-MLX", icon: rapidMlxLogo, url: "http://127.0.0.1:8000/v1" },
   { id: "ollama", label: "Ollama", icon: ollamaLogo, url: "http://127.0.0.1:11434/v1" },
   { id: "openai-compatible", label: "Custom Endpoint", icon: null, url: "http://127.0.0.1:8000/v1" },
 ];
@@ -134,7 +136,7 @@ export function LocalModelDialog({ confirm, cancel, isDisabled, errorMessage, on
             renderLabel={(choice) => <>{choice.id === "openai-compatible" ? m.local_models_custom_endpoint() : choice.label}{choice.id === "openai-compatible" && <span className="ml-1 text-xs font-normal text-subtext">{m.local_models_compatible_api()}</span>}</>}
             renderIcon={(choice) => {
               const icon = SERVERS.find((server) => server.id === choice.id)?.icon;
-              return icon ? <img src={icon} alt="" width={14} height={14} className={`size-3.5 shrink-0 object-contain${choice.id === "ollama" ? " dark:invert" : ""}`} /> : <Link2 size={14} className="shrink-0" />;
+              return icon ? <img src={icon} alt="" width={14} height={14} className={`size-3.5 shrink-0 object-contain${(choice.id === "ollama" || choice.id === "rapid-mlx") ? " dark:invert" : ""}`} /> : <Link2 size={14} className="shrink-0" />;
             }}
             onSelect={setServerId} />
           <label className="block space-y-1 text-sm text-subtext">
@@ -196,7 +198,7 @@ function SavedLocalModel({ connection, harnessReady, availableModels, checking, 
     <div className="@container min-w-0 px-4 py-4">
       <div className="flex flex-col items-stretch gap-3 @sm:flex-row @sm:items-center @sm:justify-between">
         <div className="flex min-w-0 flex-1 items-start gap-3">
-          {provider?.icon ? <img src={provider.icon} alt="" width={20} height={20} className={`mt-0.5 size-5 shrink-0 object-contain${provider.id === "ollama" ? " dark:invert" : ""}`} /> : <Link2 size={20} className="mt-0.5 shrink-0" />}
+          {provider?.icon ? <img src={provider.icon} alt="" width={20} height={20} className={`mt-0.5 size-5 shrink-0 object-contain${(provider.id === "ollama" || provider.id === "rapid-mlx") ? " dark:invert" : ""}`} /> : <Link2 size={20} className="mt-0.5 shrink-0" />}
           <div className="min-w-0 space-y-1">
             <div className="text-base font-medium break-words">{modelIds.join(", ")}</div>
             <div className="text-sm text-subtext break-all">{provider?.id === "openai-compatible" ? m.local_models_custom_endpoint() : provider?.label ?? connection.name}{provider?.id === "openai-compatible" && <span className="ml-1 text-xs font-normal text-subtext">{m.local_models_compatible_api()}</span>} · {connection.baseUrl}</div>
