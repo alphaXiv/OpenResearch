@@ -4,10 +4,13 @@ const MAC_TITLEBAR = "__ORX_MAC_TITLEBAR__" in window;
 // Windows has no native titlebar; the page draws it (WindowControls).
 export const WINDOWS_TITLEBAR = "__ORX_WIN_TITLEBAR__" in window;
 
-/** The macOS app gives its window, and so the sidebar material, this appearance. */
+/** The desktop app gives its window, and so the sidebar material, this appearance. */
 export function syncDesktopAppearance(preference: ThemePreference): void {
-  if (MAC_TITLEBAR) window.ipc?.postMessage(`appearance:${preference}`);
+  if (MAC_TITLEBAR || WINDOWS_TITLEBAR) window.ipc?.postMessage(`appearance:${preference}`);
 }
+
+// The app sets this when the window has a material (src/commands/app.rs) for the sidebar to show.
+if ("__ORX_WINDOW_MATERIAL__" in window) document.documentElement.classList.add("window-material");
 
 const INTERACTIVE =
   "a, button, input, select, textarea, label, summary, [role='button'], [role='tab'], [role='menuitem'], [role='option'], [role='switch'], [role='checkbox'], [contenteditable]:not([contenteditable='false']), [tabindex]:not([tabindex='-1'])";

@@ -4680,9 +4680,11 @@ impl ChatHost {
         Ok(true)
     }
 
-    /// Drain the oldest parked message once the current turn finishes. Each
-    /// queued request keeps its browser idempotency key and becomes one durable
-    /// turn in original order. Boxed return: `drain_queue` →
+    /// Dispatch the oldest parked message into a slot its releaser left
+    /// `Draining`. An idle slot is left alone: claiming it just to look would
+    /// refuse a fork or send that lands in between. Each queued request keeps
+    /// its browser idempotency key and becomes one durable turn in original
+    /// order. Boxed return: `drain_queue` →
     /// `send_message_showing` → (spawned) `drain_queue` is an async recursion
     /// cycle the auto-`Send` solver can't close on its own, so we assert the
     /// boxed future is `Send` to break it.
@@ -4691,30 +4693,17 @@ impl ChatHost {
         session_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let turn_state = {
+            {
                 let mut turns = self.turns.lock().await;
-                match turns.get(session_id) {
-                    Some(TurnState::Draining) => {
-                        turns.insert(
-                            session_id.to_string(),
-                            TurnState::Reserved { turn_id: None },
-                        );
-                        Some(true)
-                    }
-                    Some(_) => None,
-                    None => Some(false),
+                if !matches!(turns.get(session_id), Some(TurnState::Draining)) {
+                    return;
                 }
-            };
-            let mut guard = match turn_state {
-                Some(true) => TurnGuard::adopt(self, session_id),
-                None => return,
-                Some(false) => {
-                    let Some(guard) = TurnGuard::claim(self, session_id, None).await else {
-                        return;
-                    };
-                    guard
-                }
-            };
+                turns.insert(
+                    session_id.to_string(),
+                    TurnState::Reserved { turn_id: None },
+                );
+            }
+            let mut guard = TurnGuard::adopt(self, session_id);
             if self.refresh_persisted_queue(session_id).is_err() {
                 guard.release().await;
                 return;
