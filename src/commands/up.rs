@@ -7054,6 +7054,10 @@ fn start_pty_with_env(
     let (kill_tx, kill_rx) = std::sync::mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel(64);
 
+    // ConPTY asks where the cursor is and holds the child's output, and its own
+    // exit, until a terminal answers; a client that leaves first is answered here.
+    let cursor_query_pending = Arc::new(AtomicBool::new(false));
+    let query_seen = cursor_query_pending.clone();
     let output_tx = event_tx.clone();
     std::thread::spawn(move || {
         let mut buf = [0; 8192];
@@ -7061,6 +7065,9 @@ fn start_pty_with_env(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if buf[..n].windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                        query_seen.store(true, Ordering::SeqCst);
+                    }
                     if output_tx
                         .blocking_send(PtyEvent::Output(buf[..n].to_vec()))
                         .is_err()
@@ -7075,13 +7082,17 @@ fn start_pty_with_env(
     });
     std::thread::spawn(move || {
         while let Ok(bytes) = input_rx.recv() {
+            cursor_query_pending.store(false, Ordering::SeqCst);
             if writer
                 .write_all(&bytes)
                 .and_then(|_| writer.flush())
                 .is_err()
             {
-                break;
+                return;
             }
+        }
+        if cursor_query_pending.load(Ordering::SeqCst) {
+            let _ = writer.write_all(b"\x1b[1;1R").and_then(|_| writer.flush());
         }
     });
     std::thread::spawn(move || loop {
@@ -11569,6 +11580,35 @@ mod tests {
         assert!(!test.tools_found);
         assert_eq!(test.error.as_deref(), Some("authentication failed"));
         assert!(test.tested_at > 0);
+    }
+
+    /// ConPTY waits on its cursor query until answered, and closing it waits on that.
+    #[tokio::test]
+    async fn closing_a_pty_whose_client_left_returns_promptly() {
+        let (program, args) = if cfg!(windows) {
+            ("cmd", vec!["/c".into(), "echo ready & pause".into()])
+        } else {
+            ("sh", vec!["-c".into(), "echo ready; read _".into()])
+        };
+        let PtySession {
+            master,
+            input,
+            mut events,
+            kill,
+        } = start_pty(program, args).unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(10), events.recv()).await;
+        assert!(matches!(first, Ok(Some(PtyEvent::Output(_)))));
+
+        // The order `relay_pty` tears down in when its socket closes.
+        let _ = kill.send(());
+        drop((events, input));
+        let (dropped, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(master);
+            let _ = dropped.send(());
+        });
+        done.recv_timeout(Duration::from_secs(10))
+            .expect("closing the PTY blocked its caller");
     }
 
     #[cfg(unix)]
