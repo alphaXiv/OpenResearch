@@ -439,6 +439,7 @@ jobs:
         env:
           CARGO_INCREMENTAL: 1
           CARGO_PROFILE_TEST_DEBUG: 0
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
           RUST_TEST_THREADS: 32
         run: cargo test --locked --timings
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
