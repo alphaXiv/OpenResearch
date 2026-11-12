@@ -938,7 +938,7 @@ mod imp {
     use tao::dpi::LogicalSize;
     use tao::event::{Event, StartCause, WindowEvent};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     use tao::window::Theme;
     use tao::window::{Window, WindowBuilder};
     use wry::{NewWindowResponse, PageLoadEvent, WebView, WebViewBuilder};
@@ -1195,13 +1195,20 @@ mod imp {
             }
         };
 
+        // The page leaves the sidebar transparent over the window's material where there is one.
+        #[cfg(target_os = "macos")]
+        let material = true;
+        #[cfg(windows)]
+        let material = add_window_material(&window);
+        #[cfg(target_os = "linux")]
+        let material = false;
+
         let shown = Rc::new(Cell::new(false));
         let page_ready = Rc::new(Cell::new(false));
         let replaced = Rc::new(RefCell::new(HashMap::new()));
         let builder = WebViewBuilder::new()
             .with_accept_first_mouse(true)
-            // Shows the window material (`add_window_material`) where the page is transparent.
-            .with_transparent(cfg!(target_os = "macos"))
+            .with_transparent(material)
             // Lets the dashboard tell it is in the app, where pop-ups open in the browser.
             .with_initialization_script("window.__ORX_DESKTOP__ = true;")
             .with_initialization_script_for_main_only(
@@ -1331,12 +1338,12 @@ mod imp {
                     }
                     #[cfg(not(target_os = "linux"))]
                     "titlebar:zoom" => window.set_maximized(!window.is_maximized()),
-                    // The window material and traffic lights follow the page's theme preference.
-                    #[cfg(target_os = "macos")]
+                    // The window material and macOS traffic lights follow the page's theme preference.
+                    #[cfg(not(target_os = "linux"))]
                     "appearance:system" => window.set_theme(None),
-                    #[cfg(target_os = "macos")]
+                    #[cfg(not(target_os = "linux"))]
                     "appearance:light" => window.set_theme(Some(Theme::Light)),
-                    #[cfg(target_os = "macos")]
+                    #[cfg(not(target_os = "linux"))]
                     "appearance:dark" => window.set_theme(Some(Theme::Dark)),
                     #[cfg(windows)]
                     "titlebar:minimize" => window.set_minimized(true),
@@ -1398,6 +1405,11 @@ mod imp {
         };
         #[cfg(windows)]
         let builder = builder.with_initialization_script("window.__ORX_WIN_TITLEBAR__ = true;");
+        let builder = if material {
+            builder.with_initialization_script("window.__ORX_WINDOW_MATERIAL__ = true;")
+        } else {
+            builder
+        };
         #[cfg(not(target_os = "linux"))]
         let webview = builder.build(&*window);
         // `build` supports only X11 on Linux.
@@ -2332,6 +2344,48 @@ mod imp {
         material.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
         material.setState(NSVisualEffectState::FollowsWindowActiveState);
         parent.addSubview_positioned_relativeTo(&material, NSWindowOrderingMode::Below, Some(&wk));
+    }
+
+    /// Mica behind the whole window, so it shows wherever the page is transparent.
+    /// False before Windows 11 22H2, which has no system backdrop.
+    #[cfg(windows)]
+    fn add_window_material(window: &Window) -> bool {
+        use tao::platform::windows::WindowExtWindows;
+        use windows_sys::Win32::Graphics::Dwm::{
+            DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+        };
+        use windows_sys::Win32::UI::Controls::MARGINS;
+
+        let hwnd = window.hwnd() as _;
+        let backdrop = DWMSBT_MAINWINDOW;
+        // SAFETY: the window is alive and the attribute points at a value of its size.
+        let set = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE as u32,
+                (&raw const backdrop).cast(),
+                size_of_val(&backdrop) as u32,
+            )
+        };
+        if set < 0 {
+            return false;
+        }
+
+        // DWM draws the backdrop only under the frame, so the frame takes the whole client area.
+        let whole = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        // SAFETY: as above.
+        if unsafe { DwmExtendFrameIntoClientArea(hwnd, &whole) } < 0 {
+            return false;
+        }
+        // Over an extended frame DWM shows the backdrop through black, not the default white.
+        window.set_background_color(Some((0, 0, 0, 0)));
+        true
     }
 
     /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
