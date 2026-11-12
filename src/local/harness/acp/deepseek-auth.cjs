@@ -15,7 +15,7 @@ async function check() {
   const [executable, argumentsJson] = process.argv.slice(1);
   const vendor = createRequire(realpathSync(executable));
   const { parse } = vendor('yaml');
-  const profile = parse(execFileSync(executable, [...JSON.parse(argumentsJson), '--dump-config'], {
+  const profile = parse(execFileSync(process.execPath, [executable, ...JSON.parse(argumentsJson), '--dump-config'], {
     encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'],
   }), { logLevel: 'silent' });
   if (!Array.isArray(profile)) return 'unknown';

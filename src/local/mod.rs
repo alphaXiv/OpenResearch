@@ -9,6 +9,7 @@
 
 pub mod acp;
 pub mod agent_lifecycle;
+pub mod agent_profiles;
 pub mod agent_skills;
 #[cfg(test)]
 mod agent_text;
@@ -37,6 +38,7 @@ pub mod model_routes;
 pub mod native_chats;
 pub mod native_store;
 pub mod opencode;
+pub mod opencode_signin;
 pub mod openresearch;
 pub mod overleaf;
 pub mod overleaf_live;

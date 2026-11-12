@@ -37,6 +37,7 @@
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "@xyflow/react": "^12.6.0",
+    "gemoji": "^8.1.0",
     "katex": "^0.16.22",
     "lucide-react": "^1.23.0",
     "pdfjs-dist": "6.3.289",

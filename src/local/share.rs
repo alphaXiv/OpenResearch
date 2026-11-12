@@ -865,6 +865,7 @@ fn shared_session(
     );
     let same_harness = harness == shared.harness;
     let session = StoredChatSession {
+        profile_id: None,
         id: id.to_string(),
         project_id: project_id.to_string(),
         harness: harness.to_string(),
@@ -1003,6 +1004,7 @@ mod tests {
 
     fn chat_session(id: &str, project_id: &str) -> StoredChatSession {
         StoredChatSession {
+            profile_id: None,
             id: id.into(),
             project_id: project_id.into(),
             harness: "claude-code".into(),

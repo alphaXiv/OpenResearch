@@ -434,6 +434,7 @@ mod tests {
 
     fn session() -> StoredChatSession {
         StoredChatSession {
+            profile_id: None,
             id: "chat_test".into(),
             project_id: "project_test".into(),
             harness: "claude-code".into(),

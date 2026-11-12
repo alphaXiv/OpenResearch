@@ -7,7 +7,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
-import type { Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import type { Agent } from './agent.ts'
 import type { Outside } from './outside.ts'
 
@@ -107,7 +107,18 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     async onboard() {
       const agent = { name: 'E2E Agent', executable: process.execPath, arguments: [FAKE_AGENT] }
       const { id: harness } = await api<{ id: string }>('/api/harnesses/acp', agent)
-      await api('/api/onboarding/complete', { harness })
+      let model: string | undefined
+      await expect
+        .poll(
+          async () => {
+            const { harnesses } = await api<{ harnesses: { id: string; defaultModel?: string }[] }>('/api/harnesses')
+            model = harnesses.find((h) => h.id === harness)?.defaultModel
+            return model
+          },
+          { message: `${agent.name} reports its default model`, timeout: 30_000 },
+        )
+        .toBeTruthy()
+      await api('/api/onboarding/complete', { harness, model })
       await api('/api/settings/ui-state', { tourCompleted: true })
     },
     /** A blank project, as the New project dialog creates one. */

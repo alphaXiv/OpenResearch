@@ -27,6 +27,7 @@ pub(crate) mod managed;
 pub(crate) mod opencode;
 mod options;
 mod plan_gate;
+mod selection;
 pub(crate) mod title;
 
 use std::hash::{Hash, Hasher};
@@ -54,6 +55,10 @@ pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
 pub use options::{HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
 pub use plan_gate::command_is_readonly;
 pub use plan_gate::decide as plan_gate_decide;
+pub(crate) use selection::{
+    catalog_default, catalog_entry, concrete_model, resolve_entry, resolve_model, resolve_models,
+    selected_model, ModelSelectionError,
+};
 
 /// A turn with NO events for this long is treated as wedged and interrupted
 /// rather than held busy forever. Known false positive: a command that is
@@ -259,7 +264,12 @@ pub trait Harness: Send + Sync {
     /// Default: the shared title one-shot, sanitized; a harness without
     /// `one_shot` gets none. OpenCode also adopts native session titles through
     /// `TurnCtx::set_title` when its server provides them.
-    async fn generate_title(&self, first_message: &str, model: Option<&str>) -> Option<String> {
+    async fn generate_title(
+        &self,
+        first_message: &str,
+        model: Option<&str>,
+        profile: Option<&str>,
+    ) -> Option<String> {
         let model = if self.id() == "opencode" {
             Some(model.filter(|model| !model.trim().is_empty())?)
         } else {
@@ -267,6 +277,7 @@ pub trait Harness: Send + Sync {
         };
         let prompt = title::title_prompt(first_message);
         let request = OneShot {
+            profile,
             model,
             ..title::title_request(&prompt)
         };
@@ -464,6 +475,7 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
 /// A single self-contained request for [`Harness::one_shot`].
 #[derive(Debug, Clone, Copy)]
 pub struct OneShot<'a> {
+    pub profile: Option<&'a str>,
     /// Replaces the harness's agent system prompt where the CLI allows it;
     /// otherwise it is folded into the message.
     pub system: &'a str,
@@ -512,6 +524,7 @@ pub(crate) fn compaction_snapshot(session_id: &str) -> Result<String> {
 
 /// What a session needs to compact, without the machinery of a live turn.
 pub struct CompactCtx {
+    pub profile: Option<String>,
     pub host: Arc<crate::local::chat::ChatHost>,
     pub session_id: String,
     pub native_session_id: Option<String>,
@@ -607,6 +620,8 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
         // whose run path can't steer. A steering harness whose `detect` forgets
         // to set it reports false and silently queues every send.
         info.supports_steering &= harness.supports_steering();
+        let configured = info.configured_model.take();
+        resolve_model(&mut info, configured.as_deref());
         info
     })
 }
@@ -833,7 +848,7 @@ mod tests {
             calls: Default::default(),
         };
         for model in [None, Some(""), Some(" \t")] {
-            assert!(harness.generate_title("hello", model).await.is_none());
+            assert!(harness.generate_title("hello", model, None).await.is_none());
         }
         assert!(harness.calls.lock().unwrap().is_empty());
         for model in [
@@ -843,7 +858,7 @@ mod tests {
         ] {
             assert_eq!(
                 harness
-                    .generate_title("hello", Some(model))
+                    .generate_title("hello", Some(model), None)
                     .await
                     .as_deref(),
                 Some("A test title")
@@ -859,7 +874,7 @@ mod tests {
                 calls: Default::default(),
             };
             harness
-                .generate_title("hello", Some("selected/model"))
+                .generate_title("hello", Some("selected/model"), None)
                 .await
                 .unwrap();
             assert_eq!(*harness.calls.lock().unwrap(), vec![None]);

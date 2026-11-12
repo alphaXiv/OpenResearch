@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::native_store::{self, NativeStore};
 
 /// How much of a transcript is read to name it: the head carries the working
@@ -67,6 +67,61 @@ pub fn list(owned: &HashSet<String>, limit: usize) -> Vec<NativeChat> {
         .collect();
     chats.truncate(limit);
     chats
+}
+
+pub(crate) fn selection_model(
+    catalog: &Value,
+    harness: &str,
+    profile: Option<&str>,
+    native_id: &str,
+) -> Result<Option<String>> {
+    if harness == "claude-code" {
+        return Ok(crate::local::harness::catalog_default(
+            catalog, harness, profile,
+        ));
+    }
+    if harness != "codex" {
+        return Ok(None);
+    }
+    let Some(location) = native_store::codex_session(native_id)? else {
+        return Ok(None);
+    };
+    let path = location.path;
+    let file = std::io::BufReader::new(
+        std::fs::File::open(&path)
+            .with_context(|| format!("Could not open Codex rollout {}", path.display()))?,
+    );
+    let mut native = None;
+    for line in std::io::BufRead::lines(file) {
+        let line =
+            line.with_context(|| format!("Could not read Codex rollout {}", path.display()))?;
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if record["type"] != "turn_context" {
+            continue;
+        }
+        if let Some(model) = record["payload"]["model"]
+            .as_str()
+            .filter(|model| crate::local::harness::concrete_model(model) && *model != "<synthetic>")
+        {
+            native = Some(model.to_owned());
+        }
+    }
+    let Some(native) = native else {
+        return Ok(None);
+    };
+    let models = crate::local::harness::catalog_entry(catalog, harness, profile)
+        .and_then(|entry| entry["models"].as_array());
+    let mut matches = models
+        .into_iter()
+        .flatten()
+        .filter(|model| model["id"] == native || model["resolvedModel"] == native);
+    let mapped = matches.next().and_then(|model| model["id"].as_str());
+    Ok(match (mapped, matches.next()) {
+        (Some(model), None) => Some(model.to_owned()),
+        _ => Some(native),
+    })
 }
 
 /// The transcript of one adopted chat: the text of each side's messages. Tool
@@ -442,6 +497,91 @@ fn read_window(path: &Path, tail: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_selection_uses_the_configured_context_variant_without_a_transcript() {
+        let catalog = serde_json::json!({"harnesses":[{"id":"claude-code","agentReady":true,"defaultModel":"opus[1m]","models":[{"id":"opus[1m]","resolvedModel":"claude-opus-5-5"}]}]});
+        assert_eq!(
+            selection_model(&catalog, "claude-code", None, "missing-transcript")
+                .unwrap()
+                .as_deref(),
+            Some("opus[1m]")
+        );
+    }
+
+    #[test]
+    fn codex_selection_uses_the_last_turn_and_maps_only_unambiguous_ids() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let root = native_store::codex_home(NativeStore::Isolated).join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let native_id = uuid::Uuid::new_v4().to_string();
+        let records = [
+            serde_json::json!({"type":"turn_context","payload":{"model":"old-model"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"api-model"}}),
+            serde_json::json!({"type":"response_item","payload":{"model":"unrelated-model"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"<synthetic>"}}),
+        ];
+        std::fs::write(
+            root.join(format!("{native_id}.jsonl")),
+            records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut catalog = serde_json::json!({"harnesses":[{"id":"codex","models":[{"id":"selection-id","resolvedModel":"api-model"}]}]});
+        assert_eq!(
+            selection_model(&catalog, "codex", None, &native_id)
+                .unwrap()
+                .as_deref(),
+            Some("selection-id")
+        );
+        catalog["harnesses"][0]["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id":"other-selection","resolvedModel":"api-model"}));
+        assert_eq!(
+            selection_model(&catalog, "codex", None, &native_id)
+                .unwrap()
+                .as_deref(),
+            Some("api-model")
+        );
+    }
+
+    #[test]
+    fn codex_selection_reports_read_errors_and_can_retry() {
+        if !crate::config::in_test_child(&["CODEX_HOME"]) {
+            return;
+        }
+        let home = crate::local::git::TemporaryDirectory::new("orx-codex-home").unwrap();
+        std::env::set_var("CODEX_HOME", home.path());
+        let root = home.path().join("sessions");
+        std::fs::create_dir(&root).unwrap();
+        let native_id = uuid::Uuid::new_v4().to_string();
+        let path = root.join(format!("{native_id}.jsonl"));
+        let record = b"{\"type\":\"turn_context\",\"payload\":{\"model\":\"recovered\"}}\n";
+        let mut unreadable = record.to_vec();
+        unreadable.push(0xff);
+        std::fs::write(&path, unreadable).unwrap();
+        let catalog = serde_json::json!({"harnesses":[]});
+        let error = selection_model(&catalog, "codex", None, &native_id).unwrap_err();
+        assert!(error.to_string().contains(path.to_str().unwrap()));
+        std::fs::write(&path, record).unwrap();
+        assert_eq!(
+            selection_model(&catalog, "codex", None, &native_id)
+                .unwrap()
+                .as_deref(),
+            Some("recovered")
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+        std::fs::write(&root, "not a directory").unwrap();
+        let error = selection_model(&catalog, "codex", None, &native_id).unwrap_err();
+        assert!(error.to_string().contains(root.to_str().unwrap()));
+    }
 
     fn text_of(message: Option<NativeMessage>) -> Option<(&'static str, String)> {
         message.map(|message| (message.role, message.text))
