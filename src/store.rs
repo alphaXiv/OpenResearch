@@ -3735,12 +3735,21 @@ impl Store {
             .read(true)
             .write(true)
             .open(Path::new(path).with_extension("native-deletion.lock"))?;
-        lock.try_lock().map_err(|error| {
-            anyhow!(
-                "Could not lock native chat deletion; retry when other deletions finish: {error}"
-            )
-        })?;
-        Ok(lock)
+        // A released lock lingers in children forked meanwhile, until they exec.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(lock),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Err(anyhow!(
+                        "Could not lock native chat deletion; retry when other deletions finish: {error}"
+                    ))
+                }
+            }
+        }
     }
 
     pub fn native_sessions_for_deletion(
@@ -10467,16 +10476,7 @@ mod tests {
             if std::env::var(CHILD_PHASE).unwrap() == "blocked" {
                 assert!(store.lock_native_deletion().is_err());
             } else {
-                // A released lock lingers in children the parent's other tests forked, until
-                // they exec.
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                let _lock = loop {
-                    match store.lock_native_deletion() {
-                        Ok(lock) => break lock,
-                        Err(error) => assert!(std::time::Instant::now() < deadline, "{error}"),
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                };
+                let _lock = store.lock_native_deletion().unwrap();
                 let (deleting, retained) = store
                     .native_sessions_for_deletion(&["second".into()], &["opencode", "claude-code"])
                     .unwrap();
