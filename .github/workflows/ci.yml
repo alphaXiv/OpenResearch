@@ -219,7 +219,7 @@ jobs:
           shared-key: check
           save-if: ${{ matrix.name != 'test2' }}
       - name: Cache incremental compilation
-        if: github.ref == 'refs/heads/main'
+        if: (github.ref == 'refs/heads/main' || github.head_ref == 'clo/ci-three-minutes')
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         env: &linux-incremental-key
           INCREMENTAL_KEY: incremental-linux-test-v1-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
@@ -228,7 +228,7 @@ jobs:
           key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
           restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Restore incremental compilation
-        if: github.ref != 'refs/heads/main'
+        if: github.ref != 'refs/heads/main' && github.head_ref != 'clo/ci-three-minutes'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         env: *linux-incremental-key
         with: *linux-incremental-cache
@@ -325,7 +325,7 @@ jobs:
         with:
           shared-key: e2e
       - name: Cache incremental compilation
-        if: github.ref == 'refs/heads/main'
+        if: (github.ref == 'refs/heads/main' || github.head_ref == 'clo/ci-three-minutes')
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         env: &e2e-incremental-key
           INCREMENTAL_KEY: incremental-linux-e2e-v1-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
@@ -334,7 +334,7 @@ jobs:
           key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
           restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Restore incremental compilation
-        if: github.ref != 'refs/heads/main'
+        if: github.ref != 'refs/heads/main' && github.head_ref != 'clo/ci-three-minutes'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         env: *e2e-incremental-key
         with: *e2e-incremental-cache
@@ -395,7 +395,7 @@ jobs:
           shared-key: linux-app-dev
           save-if: ${{ !inputs.release && matrix.mode != 'lint' }}
       - name: Cache incremental compilation
-        if: ${{ !inputs.release && matrix.mode != 'lint' && github.ref == 'refs/heads/main' }}
+        if: ${{ !inputs.release && matrix.mode != 'lint' && (github.ref == 'refs/heads/main' || github.head_ref == 'clo/ci-three-minutes') }}
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         env: &desktop-incremental-key
           INCREMENTAL_KEY: incremental-linux-desktop-dev-v1-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
@@ -404,7 +404,7 @@ jobs:
           key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
           restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Restore incremental compilation
-        if: ${{ !inputs.release && matrix.mode != 'lint' && github.ref != 'refs/heads/main' }}
+        if: ${{ !inputs.release && matrix.mode != 'lint' && github.ref != 'refs/heads/main' && github.head_ref != 'clo/ci-three-minutes' }}
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         env: *desktop-incremental-key
         with: *desktop-incremental-cache
@@ -501,7 +501,7 @@ jobs:
         run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Build tests
-        if: matrix.mode == 'all' || (matrix.mode == 'test1' && github.ref == 'refs/heads/main')
+        if: matrix.mode == 'all' || (matrix.mode == 'test1' && (github.ref == 'refs/heads/main' || (github.head_ref == 'clo/ci-three-minutes' && steps.incremental.outputs.cache-hit != 'true')))
         id: test-build
         env: &windows-test-env
           CARGO_INCREMENTAL: 1
@@ -570,7 +570,7 @@ jobs:
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         timeout-minutes: 30
       - name: Save incremental compilation
-        if: always() && github.ref == 'refs/heads/main' && (matrix.mode == 'test1' || matrix.mode == 'all') && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
+        if: always() && (github.ref == 'refs/heads/main' || github.head_ref == 'clo/ci-three-minutes') && (matrix.mode == 'test1' || matrix.mode == 'all') && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: *windows-incremental-path
