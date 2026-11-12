@@ -114,8 +114,8 @@ the same canonical document.
 
 For Slurm, `--cpus` and `--mem` request `#SBATCH --cpus-per-task` and
 `#SBATCH --mem`; omitting either uses the configured Slurm default, then the
-partition default. Read
-`references/slurm.md` before choosing values.
+partition default. `--flavor cpu` requests no GPU even when the default flavor
+is one. Read `references/slurm.md` before choosing values.
 
 ## Who watches a run
 

@@ -602,7 +602,8 @@ pub struct ExpRunArgs {
     /// h200, … With `--backend modal`: a Modal GPU (t4, l4, a10g, a100,
     /// a100-80gb, l40s, h100, h200, or e.g. h100:2) or cpu/cpu-large. With
     /// `--backend slurm`: a GPU request as a GRES spec (h100:2 → --gres=gpu:h100:2;
-    /// plain `gpu` → one GPU; omit for CPU-only). With `--backend ray`: optional
+    /// plain `gpu` → one GPU; `cpu` → none; omitted uses the default flavor, if
+    /// the default backend is slurm, else none). With `--backend ray`: optional
     /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
     /// nothing). With `--backend vercel`: optional vCPUs (cpu = 2, cpu-<n> or
     /// <n>: 1 or an even number up to 32; 2 GB memory each; plans cap this at
@@ -667,6 +668,23 @@ pub struct ExpRunArgs {
     /// Slurm partition for this run; overrides the saved default. Accepts comma-separated names.
     #[arg(long)]
     pub partition: Option<String>,
+    /// Slurm quality of service for this run (`#SBATCH --qos=`); overrides the saved default.
+    #[arg(long)]
+    pub qos: Option<String>,
+    /// Slurm nodes to run on (`#SBATCH --nodelist=`), e.g. node[01-04].
+    #[arg(long)]
+    pub nodelist: Option<String>,
+    /// Slurm node features to require (`#SBATCH --constraint=`), e.g. a100&ib.
+    #[arg(long)]
+    pub constraint: Option<String>,
+    /// Slurm nodes to avoid (`#SBATCH --exclude=`), e.g. node07.
+    #[arg(long)]
+    pub exclude: Option<String>,
+    /// An extra `#SBATCH` line for this run, such as --sbatch-arg='--rsc g=1'; repeatable,
+    /// written after the saved ones. Options orx writes itself are refused.
+    #[arg(long = "sbatch-arg", value_name = "ARG", allow_hyphen_values = true)]
+    #[serde(default)]
+    pub sbatch_args: Vec<String>,
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
