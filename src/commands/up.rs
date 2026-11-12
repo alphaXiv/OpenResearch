@@ -5366,12 +5366,23 @@ fn spawn_agent_updates(state: AppState) {
 
 /// One pass of [`spawn_agent_updates`]. An agent signed out on every account
 /// is left alone, so its vendor's release feed hears only from agents in use;
-/// one whose sign-in is unknown is still kept current.
+/// one whose sign-in is unknown is still kept current. A runtime follows the
+/// agent that installs it.
 async fn update_agents<F>(state: &AppState, keep_current: impl Fn(&'static str) -> F)
 where
     F: std::future::Future<Output = crate::error::Result<bool>>,
 {
-    let payload = harnesses_payload(state, &HarnessQuery::default()).await;
+    let fresh = state
+        .harnesses
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|(at, _)| at.elapsed() < HARNESS_CACHE_TTL);
+    let query = HarnessQuery {
+        refresh: (!fresh).then_some(1),
+        ..Default::default()
+    };
+    let payload = harnesses_payload(state, &query).await;
     let entries = payload["harnesses"]
         .as_array()
         .map(Vec::as_slice)
@@ -5381,9 +5392,10 @@ where
         let auth_states: Vec<&Value> = entries
             .iter()
             .filter(|entry| {
-                entry["id"]
-                    .as_str()
-                    .is_some_and(|id| local::harness::managed::key(id) == harness)
+                entry["id"].as_str().is_some_and(|id| {
+                    let agent = local::harness::managed::key(id);
+                    agent == harness || local::harness::managed::runtime(&agent) == Some(harness)
+                })
             })
             .map(|entry| &entry["authState"])
             .collect();
@@ -11930,15 +11942,20 @@ mod tests {
         }
         let state = test_state();
         let work = local::agent_profiles::create("codex", "Work", None).unwrap();
-        let deepseek = local::acp::presets()
-            .into_iter()
-            .find(|preset| preset.launch.executable == "dsh")
-            .unwrap();
+        let preset = |executable: &str| {
+            local::acp::presets()
+                .into_iter()
+                .find(|preset| preset.launch.executable == executable)
+                .unwrap()
+                .launch
+                .id
+        };
         *state.harnesses.lock().await = Some((
             std::time::Instant::now(),
             json!({"harnesses":[
                 {"id":"opencode","authState":"needsLogin"},
-                {"id":deepseek.launch.id,"authState":"needsLogin"},
+                {"id":preset("dsh"),"authState":"needsLogin"},
+                {"id":preset("pi-acp"),"authState":"needsLogin"},
                 {"id":"codex","authState":"needsLogin"},
                 {"id":"codex","profile":{"id":work},"authState":"ready"},
                 {"id":"cursor","authState":"ready"},
@@ -11954,9 +11971,36 @@ mod tests {
         .await;
 
         let expected: Vec<_> = local::harness::managed::harnesses()
-            .filter(|harness| !["opencode", "dsh"].contains(harness))
+            .filter(|harness| !["opencode", "dsh", "pi-acp", "pi"].contains(harness))
             .collect();
         assert_eq!(checked.into_inner().unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn daily_update_pass_rechecks_an_expired_sign_in() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let empty = std::env::temp_dir().join("bin");
+        std::fs::create_dir(&empty).unwrap();
+        std::env::set_var("PATH", &empty);
+        let state = test_state();
+        let expired = std::time::Instant::now()
+            .checked_sub(HARNESS_CACHE_TTL)
+            .unwrap();
+        *state.harnesses.lock().await = Some((
+            expired,
+            json!({"harnesses":[{"id":"opencode","authState":"needsLogin"}]}),
+        ));
+        let checked = std::sync::Mutex::new(Vec::new());
+
+        update_agents(&state, |harness| {
+            checked.lock().unwrap().push(harness);
+            async { Ok(false) }
+        })
+        .await;
+
+        assert!(checked.into_inner().unwrap().contains(&"opencode"));
     }
 
     #[tokio::test]

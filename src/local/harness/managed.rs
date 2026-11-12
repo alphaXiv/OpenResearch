@@ -26,6 +26,11 @@ pub(crate) fn harnesses() -> impl Iterator<Item = &'static str> {
     )
 }
 
+/// The agent `harness` installs as its runtime, which comes and goes with it.
+pub(crate) fn runtime(harness: &str) -> Option<&'static str> {
+    (harness == "pi-acp").then_some("pi")
+}
+
 const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
 const CODEX_CHANNEL: &str = "https://releases.openai.com/codex/channels/latest";
 const OPENCODE_RELEASES: &str = "https://api.github.com/repos/anomalyco/opencode/releases";
@@ -433,9 +438,9 @@ pub(crate) async fn install(
         let runtime = latest("node", None).await?;
         Box::pin(install("node", &runtime, progress)).await?;
     }
-    if harness == "pi-acp" {
-        let pi = latest("pi", None).await?;
-        Box::pin(install("pi", &pi, progress)).await?;
+    if let Some(runtime) = runtime(harness) {
+        let release = latest(runtime, None).await?;
+        Box::pin(install(runtime, &release, progress)).await?;
     }
     let parent = root().join(harness);
     let target = parent.join(release.version.to_string());
@@ -505,8 +510,11 @@ pub(crate) fn removable_key(harness: &str) -> Result<String> {
     if matches!(key.as_str(), "claude-code" | "codex" | "opencode") {
         bail!("This agent supports other accounts and providers. Turn it off in Settings → Agents instead.");
     }
-    if matches!(key.as_str(), "node" | "pi") || !catalog::AGENTS.iter().any(|(id, _, _)| *id == key)
-    {
+    let runtime_only = key == "node"
+        || catalog::AGENTS
+            .iter()
+            .any(|(id, _, _)| runtime(id) == Some(key.as_str()));
+    if runtime_only || !catalog::AGENTS.iter().any(|(id, _, _)| *id == key) {
         bail!("Choose an agent installed by OpenResearch to remove.");
     }
     Ok(key)
@@ -521,10 +529,7 @@ async fn uninstall_at(root: &Path, harness: &str) -> Result<()> {
     if std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         bail!("The managed agent directory is a link. Restore it before removing an agent.");
     }
-    let mut keys = vec![key.as_str()];
-    if key == "pi-acp" {
-        keys.push("pi");
-    }
+    let keys: Vec<&str> = std::iter::once(key.as_str()).chain(runtime(&key)).collect();
     for key in &keys {
         let path = root.join(key);
         if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink())
