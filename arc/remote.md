@@ -85,10 +85,11 @@ Jobs are submitted with `--no-requeue`, named by the run ID so a lost submission
 
 - Idle → Connecting → Live.
 - Connecting → Backoff on a network failure.
-- Connecting → NeedsAuth on an authentication or host-key failure, a changed route or a dead master.
+- Connecting → NeedsAuth on an authentication or host-key failure, a changed route or a dead master. A managed rental host's key refusals back off for two minutes first, since sshd and the key sync can lag a fresh box, which has no Connect.
 - Live → Backoff on EOF, a missed reply deadline or a clock jump.
 - Backoff → Connecting when the jittered retry, persisted per root, comes due. Managed rental hosts cap the delay at a minute, so an outage still leaves collection attempts within the rental's grace.
 - Any state → NeedsAuth when the alias's breaker opens; only Connect clears it.
+- A managed rental host is forgotten, connection and state, once no unfinished run or pending log collection uses it.
 
 **After an authentication failure, no automatic login.** Repeated logins lock accounts and trip MFA, so the breaker is one per SSH alias, shared by its roots and kept in the store. Only the user's Connect closes it; a retry resets a key host's backoff and nothing more.
 

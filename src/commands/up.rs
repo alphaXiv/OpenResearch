@@ -2810,6 +2810,12 @@ struct CreateRunReq {
     cpus: Option<u32>,
     mem: Option<String>,
     partition: Option<String>,
+    qos: Option<String>,
+    nodelist: Option<String>,
+    constraint: Option<String>,
+    exclude: Option<String>,
+    #[serde(default)]
+    sbatch_args: Vec<String>,
     flavor: Option<String>,
     host: Option<String>,
     container: Option<String>,
@@ -2852,6 +2858,11 @@ impl CreateRunReq {
             cpus: self.cpus,
             mem: self.mem,
             partition: self.partition,
+            qos: self.qos,
+            nodelist: self.nodelist,
+            constraint: self.constraint,
+            exclude: self.exclude,
+            sbatch_args: self.sbatch_args,
             force: self.force,
             chat_session_id: self.chat_session_id,
             agent_origin: self.agent_origin,
@@ -10777,6 +10788,11 @@ mod tests {
             "cpus": 8,
             "mem": "64G",
             "partition": "gpu",
+            "qos": "acc_ehpc",
+            "nodelist": "node[01-02]",
+            "constraint": "a100",
+            "exclude": "node07",
+            "sbatchArgs": ["--rsc g=1"],
             "chatSessionId": "session-1",
             "telemetrySuppressed": true,
             "force": true,
@@ -10788,6 +10804,11 @@ mod tests {
         assert_eq!(forwarded.cpus, Some(8));
         assert_eq!(forwarded.mem.as_deref(), Some("64G"));
         assert_eq!(forwarded.partition.as_deref(), Some("gpu"));
+        assert_eq!(forwarded.qos.as_deref(), Some("acc_ehpc"));
+        assert_eq!(forwarded.nodelist.as_deref(), Some("node[01-02]"));
+        assert_eq!(forwarded.constraint.as_deref(), Some("a100"));
+        assert_eq!(forwarded.exclude.as_deref(), Some("node07"));
+        assert_eq!(forwarded.sbatch_args, ["--rsc g=1"]);
         assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
         assert!(forwarded.forwarded);
         assert!(forwarded.telemetry_suppressed);

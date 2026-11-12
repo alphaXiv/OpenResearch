@@ -24,6 +24,22 @@ fn deadline() -> Duration {
 }
 const CHUNK: usize = 256 * 1024;
 
+/// sshd and the org key sync can lag a freshly online box, so its key refusals back off this
+/// long before they open the breaker.
+const KEY_SYNC_GRACE_MS: i64 = 2 * 60 * 1000;
+
+/// An OpenResearch box: a key-only host orx rents, with no Connect to close a breaker.
+pub(crate) fn managed(alias: &str) -> bool {
+    alias.starts_with("orx-box-")
+}
+
+/// The host refused every key ssh offered.
+pub(crate) fn key_refused(cause: &str) -> bool {
+    cause
+        .to_ascii_lowercase()
+        .starts_with("permission denied (publickey")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostClass {
     Key,
@@ -191,7 +207,7 @@ impl HostConn {
             .engine_root(&config.alias, &config.root)?
             .unwrap_or_default();
         let class = auth.state.borrow().class;
-        if state.status == Status::Connecting && class.is_none() {
+        if state.status == Status::Connecting && class.is_none() && !managed(&config.alias) {
             state.status = Status::NeedsAuth;
             state.cause = Some("First SSH attempt was interrupted; press Connect".into());
             if let Err(error) = auth.block(
@@ -375,12 +391,18 @@ impl Actor {
     }
 
     fn failed(&mut self, breaker: bool, cause: String) {
-        if breaker && self.auth.state.borrow().class.is_none() {
-            self.classify(HostClass::Interactive);
-        }
+        let managed = managed(&self.config.alias);
         let now = self.clock.wall_ms();
-        if self.state.cause.is_none() {
+        let refusing = self.state.cause.as_deref().is_some_and(key_refused);
+        if self.state.cause.is_none() || managed && key_refused(&cause) && !refusing {
             self.state.since_ms = now;
+        }
+        let breaker = breaker
+            && !(managed
+                && key_refused(&cause)
+                && now.saturating_sub(self.state.since_ms) < KEY_SYNC_GRACE_MS);
+        if breaker && !managed && self.auth.state.borrow().class.is_none() {
+            self.classify(HostClass::Interactive);
         }
         self.state.cause = Some(cause);
         if breaker {
@@ -407,11 +429,7 @@ impl Actor {
             let base = steps[self.state.failures.min(steps.len() - 1)];
             let noise =
                 u16::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..2].try_into().unwrap()) as i64;
-            let max_delay = if self.config.alias.starts_with("orx-box-") {
-                60_000
-            } else {
-                900_000
-            };
+            let max_delay = if managed { 60_000 } else { 900_000 };
             let delay = (base * (800 + noise % 401) / 1000).min(max_delay);
             self.state.failures = self.state.failures.saturating_add(1);
             self.state.next_retry_ms = Some(now.saturating_add(delay));

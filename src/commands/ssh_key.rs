@@ -320,7 +320,7 @@ mod setup_tests {
         );
         assert!(matches!(
             ssh_identity::check(&creds).await,
-            KeyStatus::Matched
+            KeyStatus::Matched { .. }
         ));
         assert_eq!(
             default_key_fingerprint().await,

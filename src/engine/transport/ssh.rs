@@ -205,7 +205,8 @@ pub(super) async fn master(config: &Config, path: &Path, askpass: &Askpass) -> R
     let output =
         tokio::time::timeout(std::time::Duration::from_secs(300), command.output()).await??;
     if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("{}", diagnostics(&stderr).collect::<Vec<_>>().join("\n"));
     }
     Ok(true)
 }
@@ -736,6 +737,25 @@ pub(super) async fn read(reader: &mut (impl AsyncRead + Unpin)) -> Result<Messag
     orx_host_proto::read_frame(&mut bytes.as_slice())?.ok_or_else(|| anyhow!("orx-host EOF"))
 }
 
+/// The stderr lines that say what went wrong, without ssh's routine notices.
+fn diagnostics(stderr: &str) -> impl Iterator<Item = &str> {
+    stderr.lines().map(str::trim).filter(|line| {
+        !line.is_empty()
+            && ![
+                "Authenticated to ",
+                "Transferred: ",
+                "Bytes per second: ",
+                "Killed by signal ",
+                "Warning: Permanently added ",
+                "Pseudo-terminal will not be allocated",
+                // OpenSSH's post-quantum key exchange notice.
+                "** ",
+            ]
+            .iter()
+            .any(|notice| line.starts_with(notice))
+    })
+}
+
 pub(super) struct Failure {
     pub cause: String,
     pub breaker: bool,
@@ -747,17 +767,7 @@ pub(super) fn failure(
     code: Option<i32>,
     retry_closure: bool,
 ) -> Failure {
-    let lines: Vec<_> = stderr
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && !line.starts_with("Authenticated to ")
-                && !line.starts_with("Transferred: ")
-                && !line.starts_with("Bytes per second: ")
-                && !line.starts_with("Killed by signal ")
-        })
-        .collect();
+    let lines: Vec<_> = diagnostics(stderr).collect();
     let clean = |mut line: &str| {
         while let Some((head, rest)) = line.split_once(": ") {
             if head.chars().any(char::is_whitespace)

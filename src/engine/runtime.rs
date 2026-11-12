@@ -51,6 +51,18 @@ fn box_alias(target: &SshTarget) -> Result<String> {
     Ok(format!("orx-box-{}", &hex(&Sha256::digest(identity))[..16]))
 }
 
+/// The alias an OpenResearch run's box is reached through, once the box has an endpoint.
+fn box_of(run: &StoredRun) -> Option<String> {
+    match handle_of(run)? {
+        Handle::OpenResearch { descriptor } | Handle::Legacy { descriptor }
+            if descriptor.kind == "openresearch_job" =>
+        {
+            box_alias(&descriptor.openresearch_ssh_target()?).ok()
+        }
+        _ => None,
+    }
+}
+
 /// What one adapter instance serves.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Key {
@@ -503,7 +515,44 @@ impl Runtime {
         }
 
         drop(senders);
+        self.retire_boxes()?;
         self.engine.store().migrate_run_wakeups()
+    }
+
+    /// Stops dialing a box no unfinished run or pending log collection needs, and forgets its
+    /// connection state.
+    fn retire_boxes(&self) -> Result<()> {
+        // Taken before reading runs: a box connection exists only once its run's endpoint is stored.
+        let open: Vec<String> = lock(&self.conns)
+            .keys()
+            .map(|(alias, _)| alias.clone())
+            .collect();
+        let store = self.store()?;
+        let mut needed = std::collections::HashSet::new();
+        for run in store.list_engine_runs()? {
+            needed.extend(box_of(&run));
+        }
+        for run_id in store.pending_log_collections()? {
+            needed.extend(store.get_run(&run_id)?.as_ref().and_then(box_of));
+        }
+        let retired: std::collections::HashSet<String> = open
+            .into_iter()
+            .chain(store.engine_hosts()?.into_iter().map(|(alias, ..)| alias))
+            .filter(|alias| super::transport::managed(alias) && !needed.contains(alias))
+            .collect();
+        drop(store);
+        if retired.is_empty() {
+            return Ok(());
+        }
+        lock(&self.boxes).retain(|alias, _| !retired.contains(alias));
+        lock(&self.conns).retain(|(alias, _), _| !retired.contains(alias));
+        lock(&self.auth).retain(|alias, _| !retired.contains(alias));
+        // A closing connection may save once more; the next tick forgets it again.
+        let store = self.store()?;
+        for alias in &retired {
+            store.forget_engine_host(alias)?;
+        }
+        Ok(())
     }
 
     /// One loop per adapter. A changed watch set interrupts a pending long poll.
@@ -688,22 +737,14 @@ impl Runtime {
         for run_id in store.pending_log_collections()? {
             let on_host = store
                 .get_run(&run_id)?
-                .and_then(|run| handle_of(&run))
-                .and_then(|handle| match &handle {
-                    Handle::OpenResearch { descriptor } | Handle::Legacy { descriptor }
-                        if descriptor.kind == "openresearch_job" =>
-                    {
-                        let target = descriptor.openresearch_ssh_target()?;
-                        Some(Key::Ssh {
-                            host: box_alias(&target).ok()?,
-                            root: DEFAULT_ROOT.into(),
-                        })
-                    }
-                    _ => Key::of_handle(&handle).ok(),
-                })
-                .is_some_and(|key| {
-                    matches!(&key, Key::Ssh { host, root: r } | Key::Slurm { host, root: r }
-                        if host == alias && r == root)
+                .is_some_and(|run| match box_of(&run) {
+                    Some(host) => host == alias && root == DEFAULT_ROOT,
+                    None => handle_of(&run)
+                        .and_then(|handle| Key::of_handle(&handle).ok())
+                        .is_some_and(|key| {
+                            matches!(&key, Key::Ssh { host, root: r } | Key::Slurm { host, root: r }
+                            if host == alias && r == root)
+                        }),
                 });
             if on_host {
                 store.retry_log_collections_now(Some(&run_id))?;
@@ -1429,6 +1470,110 @@ mod tests {
         assert!(!lock(&runtime.backends).contains_key(&key));
         assert!(weak.upgrade().is_none());
         drop(runtime);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A box stays dialed while a run or its log collection needs it; then orx stops dialing it
+    /// and forgets its connection state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_box_no_run_needs_is_no_longer_dialed_or_listed() {
+        let dir = std::env::temp_dir().join(format!("orx-retired-box-{}", uuid::Uuid::new_v4()));
+        let runtime = collector(&dir);
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut boxes = Vec::new();
+        for (port, id, status) in [
+            (1, "running", "running"),
+            (2, "collecting", "done"),
+            (3, "finished", "done"),
+        ] {
+            let descriptor = crate::jobs::BackendDescriptor::parse(
+                &json!({
+                    "kind":"openresearch_job", "namespace":"org", "jobId":id,
+                    "sshHost":"127.0.0.1", "sshPort":port, "sshUser":"root"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let target = descriptor.openresearch_ssh_target().unwrap();
+            let handle = Handle::OpenResearch {
+                descriptor: Box::new(descriptor),
+            };
+            lock(&runtime.backends)
+                .entry(Key::of_handle(&handle).unwrap())
+                .or_insert_with(|| Arc::new(FakeBackend::default()));
+            store
+                .upsert_run(&StoredRun {
+                    id: id.into(),
+                    experiment_id: "exp".into(),
+                    project_id: "project".into(),
+                    status: status.into(),
+                    backend_json: json!({"kind":"engine","handle":handle}).to_string(),
+                    command: "train".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                    ended_at: None,
+                    exit_code: None,
+                    commit_sha: None,
+                    result_markdown: None,
+                    cancel_requested: false,
+                    cancel_reason: None,
+                    chat_session_id: None,
+                })
+                .unwrap();
+            let transport = runtime.box_transport(&target).unwrap();
+            boxes.push((box_alias(&target).unwrap(), transport.ssh.conn.state()));
+        }
+        store.queue_log_collection("collecting").unwrap();
+        let hosts = || {
+            store
+                .engine_hosts()
+                .unwrap()
+                .into_iter()
+                .map(|(alias, ..)| alias)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let stopped = |state: &watch::Receiver<crate::engine::transport::HostState>| {
+            let mut state = state.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while state.changed().await.is_ok() {}
+                })
+                .await
+                .is_ok()
+            }
+        };
+        assert_eq!(hosts().len(), 3);
+
+        runtime.tick().unwrap();
+        assert!(
+            stopped(&boxes[2].1).await,
+            "a finished run's box is still dialed"
+        );
+        runtime.tick().unwrap();
+        assert_eq!(hosts(), [boxes[0].0.clone(), boxes[1].0.clone()].into());
+        assert!(
+            boxes[1].1.has_changed().is_ok(),
+            "a box with pending collection was dropped"
+        );
+
+        store.finish_log_collection("collecting").unwrap();
+        runtime.tick().unwrap();
+        assert!(
+            stopped(&boxes[1].1).await,
+            "a collected run's box is still dialed"
+        );
+        runtime.tick().unwrap();
+        assert_eq!(hosts(), [boxes[0].0.clone()].into());
+        assert!(
+            boxes[0].1.has_changed().is_ok(),
+            "a running run's box was dropped"
+        );
+        for (_, sender) in lock(&runtime.watched).drain() {
+            sender.send_replace(Vec::new());
+        }
+        let events = runtime.engine.bus.subscribe();
+        drop((runtime, store));
+        engine_released(events).await;
         std::fs::remove_dir_all(dir).unwrap();
     }
 
