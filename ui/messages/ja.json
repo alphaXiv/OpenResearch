@@ -440,6 +440,7 @@
   "settings_page_no_code_prompts_file_contents_or_account_identifiers": "コード、プロンプト、ファイルの内容、アカウント識別情報は送信されません。",
   "settings_page_no_hosts_found_in_ssh_config": "~/.ssh/config にホストが見つかりません。",
   "settings_page_no_job_create_permission": "ジョブ作成権限がありません",
+  "settings_page_no_job_patch_permission": "ジョブ変更権限がありません",
   "settings_page_no_job_write_permission": "書き込み権限がありません",
   "settings_hf_write_permission_help": "このトークンは有効ですが、Hugging Face Jobs にジョブを送信できません。Hugging Face のトークン設定で Jobs の書き込み権限を持つトークンを作成し、ここで置き換えてください。",
   "settings_page_no_bucket_permission": "バケットの権限なし",

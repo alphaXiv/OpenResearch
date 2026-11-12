@@ -440,6 +440,7 @@
   "settings_page_no_code_prompts_file_contents_or_account_identifiers": "No se envía código, prompts, contenido de archivos ni identificadores de cuenta.",
   "settings_page_no_hosts_found_in_ssh_config": "No se encontraron hosts en ~/.ssh/config.",
   "settings_page_no_job_create_permission": "Sin permiso para crear jobs",
+  "settings_page_no_job_patch_permission": "Sin permiso para modificar jobs",
   "settings_page_no_job_write_permission": "Sin permisos de escritura",
   "settings_hf_write_permission_help": "Este token es válido, pero no puede enviar Hugging Face Jobs. Crea un token con permiso de escritura en Jobs desde la configuración de tokens de Hugging Face y reemplázalo aquí.",
   "settings_page_no_bucket_permission": "Sin permisos de bucket",

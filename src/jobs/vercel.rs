@@ -1021,7 +1021,7 @@ pub fn session_limit(timeout_seconds: u64, session_cap: u64) -> u64 {
         .min(session_cap)
 }
 
-/// Sandbox state in the shared stage vocabulary (see `jobs::is_terminal_stage`).
+/// Sandbox state in the shared stage vocabulary.
 #[derive(Debug, Clone)]
 pub struct JobState {
     pub stage: String,

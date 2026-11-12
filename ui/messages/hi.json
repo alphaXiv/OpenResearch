@@ -440,6 +440,7 @@
   "settings_page_no_code_prompts_file_contents_or_account_identifiers": "कोई कोड, प्रॉम्प्ट, फ़ाइल सामग्री, या खाता पहचानकर्ता नहीं भेजे जाते।",
   "settings_page_no_hosts_found_in_ssh_config": "~/.ssh/config में कोई होस्ट नहीं मिला।",
   "settings_page_no_job_create_permission": "जॉब बनाने की अनुमति नहीं",
+  "settings_page_no_job_patch_permission": "जॉब बदलने की अनुमति नहीं",
   "settings_page_no_job_write_permission": "लिखने की अनुमति नहीं",
   "settings_hf_write_permission_help": "यह टोकन मान्य है, पर Hugging Face Jobs सबमिट नहीं कर सकता। Hugging Face टोकन सेटिंग्स में Jobs राइट अनुमति वाला टोकन बनाएं, फिर इसे यहाँ बदलें।",
   "settings_page_no_bucket_permission": "बकेट अनुमति नहीं",

@@ -440,6 +440,7 @@
   "settings_page_no_code_prompts_file_contents_or_account_identifiers": "Kod, prompt, dosya içeriği veya hesap tanımlayıcısı gönderilmez.",
   "settings_page_no_hosts_found_in_ssh_config": "~/.ssh/config içinde host bulunamadı.",
   "settings_page_no_job_create_permission": "İş oluşturma izni yok",
+  "settings_page_no_job_patch_permission": "İş değiştirme izni yok",
   "settings_page_no_job_write_permission": "Yazma izni yok",
   "settings_hf_write_permission_help": "Bu token geçerli ancak Hugging Face Jobs'a iş gönderemiyor. Hugging Face token ayarlarında Jobs yazma izni olan bir token oluşturun, ardından buradaki token'ı değiştirin.",
   "settings_page_no_bucket_permission": "Bucket izni yok",

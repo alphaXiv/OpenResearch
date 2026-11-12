@@ -249,10 +249,6 @@ impl BackendDescriptor {
     }
 }
 
-pub fn is_terminal_stage(stage: &str) -> bool {
-    matches!(stage, "COMPLETED" | "CANCELED" | "ERROR" | "DELETED")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

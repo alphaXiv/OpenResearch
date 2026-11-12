@@ -512,6 +512,13 @@ backend_adapter!(
                 "kubectl cannot reach the cluster or create Jobs in the namespace.",
             )));
         }
+        if !check.can_patch_jobs {
+            return Ok(not_ready(format!(
+                "kubectl can create Jobs in namespace {} but not patch them, and orx patches a \
+                 run's Job to start its timeout. Allow patching Jobs there, then run again.",
+                settings.namespace
+            )));
+        }
         ready()
     },
     prepare | args,
