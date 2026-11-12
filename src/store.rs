@@ -972,23 +972,18 @@ impl Store {
         // WAL conversion can return SQLITE_BUSY without invoking SQLite's busy handler.
         let wal_start = std::time::Instant::now();
         let mut delay = Duration::from_millis(1);
-        loop {
-            conn.busy_timeout(busy_timeout.saturating_sub(wal_start.elapsed()))?;
-            match conn.pragma_update(None, "journal_mode", "WAL") {
-                Ok(()) => break,
-                Err(error) => {
-                    let remaining = busy_timeout.saturating_sub(wal_start.elapsed());
-                    if error.sqlite_error_code() != Some(rusqlite::ErrorCode::DatabaseBusy)
-                        || remaining.is_zero()
-                    {
-                        return Err(error).with_context(|| {
-                            format!("Could not enable WAL for {}", dir.join("orx.db").display())
-                        });
-                    }
-                    std::thread::sleep(delay.min(remaining));
-                    delay = (delay * 2).min(Duration::from_millis(50));
-                }
+        while let Err(error) = conn.pragma_update(None, "journal_mode", "WAL") {
+            let remaining = busy_timeout.saturating_sub(wal_start.elapsed());
+            if error.sqlite_error_code() != Some(rusqlite::ErrorCode::DatabaseBusy)
+                || remaining.is_zero()
+            {
+                return Err(error).with_context(|| {
+                    format!("Could not enable WAL for {}", dir.join("orx.db").display())
+                });
             }
+            std::thread::sleep(delay.min(remaining));
+            conn.busy_timeout(busy_timeout.saturating_sub(wal_start.elapsed()))?;
+            delay = (delay * 2).min(Duration::from_millis(50));
         }
         conn.busy_timeout(busy_timeout)?;
         let schema =
