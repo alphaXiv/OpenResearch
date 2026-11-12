@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CStr, OsString};
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
@@ -170,16 +170,13 @@ pub fn write_executable(
 pub fn agentless_path(root: &Path) -> String {
     let bin = root.join("agent-stand-ins");
     fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
     // Written once: a server may be running it, and rewriting a running file fails on Linux.
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o755)
-        .open(bin.join("codex"))
-    {
-        std::io::Write::write_all(
-            &mut file,
-            b"#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli 0.200.0' && exit 0\nexit 1\n",
+    if !codex.exists() {
+        write_executable(
+            codex,
+            "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli 0.200.0' && exit 0\nexit 1\n",
+            0o755,
         )
         .unwrap();
     }
