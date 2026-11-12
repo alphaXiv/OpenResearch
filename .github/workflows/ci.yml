@@ -497,11 +497,23 @@ jobs:
         if: matrix.mode != 'lint'
         env: *windows-test-env
         run: |
+          $binary = 'orx'
           if ($env:TEST_MODE -eq 'integration') {
-            cargo nextest run --locked --profile ci --lib --test '*'
+            $metadataJson = cargo metadata --locked --no-deps --format-version 1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $metadata = $metadataJson | ConvertFrom-Json
+            $targetArgs = @('--lib', '--test', '*')
+            foreach ($package in $metadata.packages) {
+              if ($package.id -notin $metadata.workspace_default_members) { continue }
+              foreach ($target in $package.targets) {
+                if ($target.test -and 'bin' -in $target.kind -and $target.name -cne $binary) {
+                  $targetArgs += @('--bin', $target.name)
+                }
+              }
+            }
+            cargo nextest run --locked --profile ci @targetArgs
             exit $LASTEXITCODE
           }
-          $binary = 'orx'
           $filters = @{
             demo = 'local::demo::tests::'
             chat = 'local::chat::'
@@ -517,7 +529,7 @@ jobs:
             $testArgs += @('--bin', $binary, $filters[$env:TEST_MODE])
           } elseif ($partitions.ContainsKey($env:TEST_MODE)) {
             $excluded = ($filters.Values | ForEach-Object { "test($_)" }) -join ' | '
-            cargo nextest run --locked --profile ci --bins --partition ($partitions[$env:TEST_MODE]) -E "not (kind(bin) & binary(=$binary) & ($excluded))"
+            cargo nextest run --locked --profile ci --bin $binary --partition ($partitions[$env:TEST_MODE]) -E "not (kind(bin) & binary(=$binary) & ($excluded))"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             if ($env:TEST_MODE -ne 'test1') { exit 0 }
             $testArgs += '--doc'
