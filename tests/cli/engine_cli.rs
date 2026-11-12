@@ -35,6 +35,7 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("ORX_DATA_DIR", self.data())
             .env("ORX_NO_UPDATE_CHECK", "1")
+            .env("PATH", orx_test_support::agentless_path(&self.root))
             .env("ORX_SSH_CONFIG", self.server.config_path())
             .env("ORX_HOST_BIN_DIR", orx_test_support::host_binaries())
             .env("ORX_CHAT_SESSION_ID", "chat")

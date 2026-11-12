@@ -22,6 +22,8 @@ impl Sandbox {
             .env_remove("MODAL_TOKEN_ID")
             .env_remove("MODAL_TOKEN_SECRET")
             .arg("--no-telemetry");
+        #[cfg(unix)]
+        cmd.env("PATH", orx_test_support::agentless_path(&self.0));
         cmd
     }
     fn run(&self, args: &[&str]) -> Output {
