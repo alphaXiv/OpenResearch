@@ -859,7 +859,6 @@ class Sandbox:
     /// Points `ORX_MODAL_PYTHON` at a real interpreter that imports `module` as `modal`.
     #[cfg(not(windows))]
     fn fake_modal(python: &str, module: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("orx-modal-sdk-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("modal")).unwrap();
         std::fs::write(dir.join("modal").join("__init__.py"), module).unwrap();
@@ -869,15 +868,15 @@ class Sandbox:
         )
         .unwrap();
         let wrapper = dir.join("python");
-        std::fs::write(
+        orx_test_support::write_executable(
             &wrapper,
             format!(
                 "#!/bin/sh\nPYTHONPATH={} exec {python} \"$@\"\n",
                 dir.display()
             ),
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("ORX_MODAL_PYTHON", &wrapper);
         dir
     }

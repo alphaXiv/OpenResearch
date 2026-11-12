@@ -362,7 +362,6 @@ mod tests {
     /// nothing else on PATH. Returns the bin dir.
     #[cfg(not(windows))]
     async fn without_ensurepip(with_uv: bool) -> Option<PathBuf> {
-        use std::os::unix::fs::PermissionsExt as _;
         let host = base_python((3, 0), "Test").await.ok()?;
         let host = crate::process::command(host)
             .args(["-c", "import sys; print(sys.executable)"])
@@ -389,9 +388,7 @@ mod tests {
             ));
         }
         for (name, body) in scripts {
-            std::fs::write(bin.join(name), body).unwrap();
-            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
+            orx_test_support::write_executable(bin.join(name), body, 0o755).unwrap();
         }
         std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
         Some(bin)
