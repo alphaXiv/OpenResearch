@@ -166,21 +166,47 @@ async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> 
     ))
 }
 
-/// The token's account name — the default jobs namespace. whoami-v2 is heavily
-/// rate-limited upstream, so call once per command, not per poll.
-pub async fn whoami(token: &str) -> Result<String> {
-    #[derive(Deserialize)]
-    struct WhoAmI {
-        name: String,
-    }
+#[derive(Deserialize)]
+struct WhoAmI {
+    name: String,
+    #[serde(default)]
+    orgs: Vec<Org>,
+}
+
+#[derive(Deserialize)]
+struct Org {
+    name: String,
+}
+
+/// whoami-v2 is heavily rate-limited upstream, so call once per command, not per poll.
+async fn who(token: &str) -> Result<WhoAmI> {
     let res = http()
         .get(format!("{}/api/whoami-v2", endpoint()))
         .bearer_auth(token)
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach Hugging Face: {}", e))?;
-    let who: WhoAmI = check(res, "whoami").await?.json().await?;
-    Ok(who.name)
+    Ok(check(res, "whoami").await?.json().await?)
+}
+
+/// The token's account name — the default jobs namespace.
+pub async fn whoami(token: &str) -> Result<String> {
+    Ok(who(token).await?.name)
+}
+
+/// After a 404 for job `job_id` in `namespace`: `None` when the token's account is `namespace`
+/// or a member of it, so the job is gone; otherwise why the 404 proves nothing.
+pub async fn unseen(token: &str, namespace: &str, job_id: &str) -> Result<Option<String>> {
+    let who = who(token).await?;
+    if who.name == namespace || who.orgs.iter().any(|org| org.name == namespace) {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "Hugging Face can't show job {job_id} to the token's account {}, which isn't \
+         {namespace} or a member of it, so orx can't tell whether the job still runs. Set \
+         HF_TOKEN to a token of {namespace} or one of its members, then run `orx compute test hf`.",
+        who.name
+    )))
 }
 
 /// whoami-v2 details for the settings UI.
@@ -336,16 +362,7 @@ pub async fn run_job_with_source(
         .stderr(Stdio::piped())
         .spawn()?;
     if let Some(fence) = fence {
-        let recorded = fence.record_submitter(
-            child
-                .id()
-                .ok_or_else(|| anyhow!("HF launcher exited before fencing"))?,
-        );
-        if let Err(error) = recorded {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(error);
-        }
+        fence.record_child(&mut child).await?;
     }
     use tokio::io::AsyncWriteExt as _;
     child
@@ -420,18 +437,24 @@ fn launch_failure(namespace: &str, failure: LaunchFailure) -> crate::error::Erro
     }
 }
 
-pub async fn inspect_job(token: &str, namespace: &str, job_id: &str) -> Result<JobInfo> {
+/// `None` when HF answers 404, as it does both for a deleted job and for a namespace the token
+/// can't see; [`unseen`] tells them apart.
+pub async fn inspect_job(token: &str, namespace: &str, job_id: &str) -> Result<Option<JobInfo>> {
     let res = http()
         .get(format!("{}/api/jobs/{}/{}", endpoint(), namespace, job_id))
         .bearer_auth(token)
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach Hugging Face: {}", e))?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
     let job: JobInfo = check(res, "job inspect").await?.json().await?;
-    Ok(job)
+    Ok(Some(job))
 }
 
-pub async fn cancel_job(token: &str, namespace: &str, job_id: &str) -> Result<()> {
+/// False when HF answers 404, as for [`inspect_job`].
+pub async fn cancel_job(token: &str, namespace: &str, job_id: &str) -> Result<bool> {
     let res = http()
         .post(format!(
             "{}/api/jobs/{}/{}/cancel",
@@ -443,8 +466,11 @@ pub async fn cancel_job(token: &str, namespace: &str, job_id: &str) -> Result<()
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach Hugging Face: {}", e))?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
     check(res, "job cancel").await?;
-    Ok(())
+    Ok(true)
 }
 
 /// HF serves a line longer than this as several events of exactly this many bytes, with no

@@ -732,6 +732,7 @@ fn jittered_cadence_is_persisted_and_capped_at_fifteen_minutes() {
         state,
         publish,
         incoming,
+        unsupported: None,
     };
     actor.classify(HostClass::Key);
     let mut since = None;
@@ -2275,4 +2276,73 @@ fi
     let mut cfg = config(&server);
     cfg.sharing_home = Some(home);
     ssh::stop_master(&cfg, &pin).await.unwrap();
+}
+
+/// Pinning a source can take longer than a reply deadline: the pin and the launch are still
+/// answered, and the session every other run shares stays up meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_source_pin_is_answered_without_dropping_the_session() {
+    if !paced_child() {
+        return;
+    }
+    let server = Sshd::start().unwrap();
+    let command = server.directory().join("command");
+    let text = fs::read_to_string(&command).unwrap();
+    // Paced, the reply deadline is 3.5 s, and pinning takes 5 s.
+    fs::write(
+        &command,
+        text.replace("export HOME", "export HOME\nexport ORX_TEST_SLOW_RPC=5000"),
+    )
+    .unwrap();
+    let conn = start(&server, TestClock::new());
+    status(&conn, Status::Live).await;
+    let sessions = ssh_pids(&server);
+    let source = server.directory().join("slow-source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("train"), "x").unwrap();
+    let archive = server.directory().join("slow.tar");
+    assert!(crate::process::command("tar")
+        .arg("-cf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&source)
+        .arg(".")
+        .status()
+        .unwrap()
+        .success());
+    let bytes = fs::read(&archive).unwrap();
+    let sha = orx_host::sha(&bytes);
+    let len = bytes.len() as u64;
+    for request in [
+        Request::PutBlob {
+            sha: sha.clone(),
+            offset: 0,
+            bytes,
+        },
+        Request::HasBlob {
+            sha: sha.clone(),
+            len,
+        },
+        Request::PinSource {
+            run: "slow".into(),
+            sha: sha.clone(),
+        },
+    ] {
+        let response = conn.request(request).await.unwrap();
+        assert!(!matches!(response, Response::Error { .. }), "{response:?}");
+    }
+    let launched = conn
+        .request(Request::Launch(orx_host_proto::LaunchIntent {
+            run: "slow".into(),
+            digest: orx_host::sha(b"slow"),
+            run_sh: "cat repo/train > ran".into(),
+            env: Default::default(),
+            source: Some(sha),
+            cancel_sh: None,
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(launched, Response::Launch { .. }), "{launched:?}");
+    assert_eq!(conn.state.borrow().status, Status::Live);
+    assert_eq!(ssh_pids(&server), sessions);
 }

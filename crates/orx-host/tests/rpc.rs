@@ -663,6 +663,7 @@ fn receipt_read_errors_keep_their_type_and_recover() {
         reason: ExitReason::Exited,
         processes: vec![],
         outcome: CancelOutcome::Verified,
+        detail: None,
     };
     orx_host::publish(&path, &receipt).unwrap();
     assert_eq!(

@@ -147,16 +147,7 @@ async fn kubectl_fenced(
         }
     })?;
     if let Some(fence) = fence {
-        let recorded = fence.record_submitter(
-            child
-                .id()
-                .ok_or_else(|| anyhow!("kubectl exited before fencing"))?,
-        );
-        if let Err(error) = recorded {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(error);
-        }
+        fence.record_child(&mut child).await?;
     }
     if let Some(body) = stdin {
         let mut pipe = child.stdin.take().expect("piped stdin");
@@ -1115,14 +1106,16 @@ async fn unpullable(
     )))
 }
 
-/// Cancel/cleanup = delete the run's recorded resources (`kind/name` handles,
-/// newest-first so dependents go before the Job). Missing → already gone.
+/// Cancel/cleanup = delete the run's recorded resources (`kind/name` handles),
+/// newest first and the Job last: recovery reads resources left without their
+/// Job as a run that may have completed. Missing → already gone.
 pub async fn delete_resources(
     context: Option<&str>,
     namespace: &str,
     resources: &[String],
 ) -> Result<()> {
-    for r in resources.iter().rev() {
+    let (jobs, others): (Vec<_>, Vec<_>) = resources.iter().partition(|r| r.starts_with("job/"));
+    for r in others.into_iter().rev().chain(jobs) {
         match kubectl(
             context,
             &[

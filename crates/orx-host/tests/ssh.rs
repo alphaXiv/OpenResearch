@@ -453,6 +453,7 @@ fn fake_slurm_uses_receipts_and_keeps_unknown_jobs_unreconciled() {
         reason: ExitReason::Exited,
         processes: vec![],
         outcome: CancelOutcome::Verified,
+        detail: None,
     };
     orx_host::publish(&remote.root().join("runs/job/exit.json"), &receipt).unwrap();
     remote.shim("squeue", "echo 'controller down' >&2; exit 1");
@@ -883,6 +884,7 @@ fn cancelled_slurm_receipts_keep_querying_until_scheduler_proves_teardown() {
                 state: "D".into(),
             }],
             outcome: CancelOutcome::Survivors,
+            detail: None,
         },
     )
     .unwrap();
