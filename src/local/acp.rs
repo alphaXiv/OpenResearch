@@ -229,7 +229,7 @@ fn register_definitions(mut definitions: Vec<Definition>) -> Vec<Definition> {
 }
 
 pub fn same_launch(a: &Definition, b: &Definition) -> bool {
-    launch_key(a) == launch_key(b)
+    a.arguments == b.arguments && launch_key(a).0 == launch_key(b).0
 }
 
 fn launch_key(definition: &Definition) -> (String, Vec<String>) {
