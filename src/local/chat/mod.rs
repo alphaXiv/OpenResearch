@@ -1237,6 +1237,7 @@ pub fn import_native_chat(
     harness: &str,
     native_id: &str,
     title: Option<String>,
+    model: Option<String>,
 ) -> Result<StoredChatSession> {
     if let Some(existing) = store.chat_session_for_native_id(native_id)? {
         return Ok(existing);
@@ -1249,6 +1250,7 @@ pub fn import_native_chat(
         .map(|title| title.trim().to_string())
         .filter(|title| !title.is_empty());
     let session = StoredChatSession {
+        profile_id: None,
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         project_id: project.id.clone(),
         harness: harness.to_string(),
@@ -1258,7 +1260,7 @@ pub fn import_native_chat(
         // not be replaced by the auto-titler on the first turn.
         title_source: title.is_some().then(|| "user".to_string()),
         title,
-        model: None,
+        model,
         service_tier: None,
         permission_mode: None,
         plan_mode: false,
@@ -1330,24 +1332,27 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         .context_usage_json
         .as_deref()
         .and_then(|j| serde_json::from_str::<Value>(j).ok());
-    let native_model = native_configuration.and_then(|configuration| {
-        configuration["configOptions"]
-            .as_array()
-            .and_then(|options| options.iter().find(|option| option["category"] == "model"))
-            .and_then(|option| option["currentValue"].as_str())
-            .or_else(|| configuration["models"]["currentModelId"].as_str())
-    });
+    let native_model = native_configuration.and_then(crate::local::harness::acp::current_model);
+    let native_models = native_configuration
+        .map(|configuration| {
+            let mut models = json!(crate::local::harness::acp::advertised_models(configuration));
+            crate::local::model_routes::name_models(&s.harness, &mut models);
+            models
+        })
+        .filter(|models| models.as_array().is_some_and(|models| !models.is_empty()));
     json!({
         "id": s.id,
         "projectId": s.project_id,
         "harness": s.harness,
+        "profile": s.profile_id,
         "harnessName": acp.as_ref().map(|state| state.launch.name.as_str()),
         "nativeConfiguration": native_configuration,
+        "nativeModels": native_models,
         "title": s.title,
         // The UI animates the reveal of a harness-generated title, so it needs
         // to tell one from a placeholder or a user rename.
         "titleSource": s.title_source,
-        "model": native_model.or(s.model.as_deref()),
+        "model": native_model.or(s.model.as_deref().filter(|m| crate::local::harness::concrete_model(m))),
         "serviceTier": s.service_tier,
         "permissionMode": crate::local::harness::effective_permission_id(
             &s.harness,
@@ -1366,6 +1371,20 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         "goal": s.goal,
         "autonomy": Autonomy::from_stored(s.autonomy.as_deref()).id(),
     })
+}
+
+pub(crate) fn project_model(value: &mut Value, session: &StoredChatSession, catalog: &Value) {
+    if value["model"]
+        .as_str()
+        .is_some_and(crate::local::harness::concrete_model)
+    {
+        return;
+    }
+    value["model"] = json!(crate::local::harness::catalog_default(
+        catalog,
+        &session.harness,
+        session.profile_id.as_deref()
+    ));
 }
 
 fn message_json(m: &WireMessage, session_id: &str) -> Value {
@@ -1828,7 +1847,7 @@ impl ChatHost {
         let session = store
             .get_chat_session(session_id)?
             .ok_or_else(|| anyhow!("chat session not found"))?;
-        if session.harness == agent.harness {
+        if session.harness == agent.harness && session.profile_id == agent.profile {
             if session.model == agent.model {
                 guard.release().await;
                 return Ok(session);
@@ -1874,22 +1893,27 @@ impl ChatHost {
                 .as_deref()
                 .map(|leaf| active_path(&messages, Some(leaf)))
                 .unwrap_or_default();
-            let resume = path
-                .iter()
-                .rev()
-                .find(|message| message.native_harness.as_deref() == Some(&agent.harness))
-                .and_then(|message| {
-                    message
-                        .result_native_session_id
-                        .clone()
-                        .or(message.base_native_session_id.clone())
-                });
+            let resume = if session.harness == agent.harness {
+                session.native_session_id.clone()
+            } else {
+                path.iter()
+                    .rev()
+                    .find(|message| message.native_harness.as_deref() == Some(&agent.harness))
+                    .and_then(|message| {
+                        message
+                            .result_native_session_id
+                            .clone()
+                            .or(message.base_native_session_id.clone())
+                    })
+            };
             (resume, None)
         };
         let mut part = WirePart::tool("provider_switch", handoff::SWITCH_TOOL, "completed", None);
         part.state.as_mut().unwrap().input = Some(json!({
             "fromHarness": session.harness,
             "fromModel": session.model,
+            "fromProfile": session.profile_id,
+            "profile": agent.profile,
             "harness": agent.harness,
             "name": target.name(),
             "model": agent.model,
@@ -1951,7 +1975,7 @@ impl ChatHost {
                 .ok_or_else(|| anyhow!("chat session is gone"))?
         };
         let harness = crate::local::harness::session_harness(&session.harness, session_id)
-            .ok_or_else(|| anyhow!("unknown harness `{}`", session.harness))?;
+            .ok_or_else(|| anyhow!("unknown agent `{}`", session.harness))?;
         if !harness.supports_compaction() {
             return Err(anyhow!("Compaction is not supported by {}", harness.name()));
         }
@@ -2055,8 +2079,12 @@ impl ChatHost {
         snapshot: &str,
     ) -> Result<Option<String>> {
         let harness = crate::local::harness::session_harness(&session.harness, session_id)
-            .ok_or_else(|| anyhow!("unknown harness `{}`", session.harness))?;
+            .ok_or_else(|| anyhow!("unknown agent `{}`", session.harness))?;
+        if let Some(profile) = &session.profile_id {
+            crate::local::agent_profiles::home(profile, &session.harness)?;
+        }
         let ctx = crate::local::harness::CompactCtx {
+            profile: session.profile_id.clone(),
             host: self.clone(),
             session_id: session_id.to_string(),
             // A pending fork's native session holds other forks' turns, so
@@ -2132,6 +2160,7 @@ impl ChatHost {
         let prompt = format!("<orx-transcript>\n{snapshot}\n</orx-transcript>");
         let summary = harness
             .one_shot(crate::local::harness::OneShot {
+                profile: session.profile_id.as_deref(),
                 system: COMPACT_SYSTEM_PROMPT,
                 prompt: &prompt,
                 quality: crate::local::harness::OneShotQuality::Standard,
@@ -2672,6 +2701,7 @@ impl Drop for PendingGuard {
 
 /// Owns turn tasks and the chat event stream. One per `orx up` process.
 pub struct ChatHost {
+    pub(crate) harnesses: Arc<Mutex<Option<(std::time::Instant, Value)>>>,
     /// Lazy opencode serve manager (only the opencode adapter spawns it).
     pub opencode: Arc<AgentHost>,
     /// Lazy codex app-server manager (only the codex adapter spawns it).
@@ -3685,6 +3715,7 @@ impl ChatHost {
             }
         }
         Self {
+            harnesses: Arc::new(Mutex::new(None)),
             opencode,
             codex,
             claude,
@@ -4053,6 +4084,27 @@ impl ChatHost {
         self.codex.shutdown().await;
         self.claude.shutdown().await;
         self.acp.shutdown().await;
+    }
+
+    pub async fn remove_harness_install(
+        &self,
+        store: Store,
+        harness: &str,
+        removal: impl std::future::Future<Output = Result<()>>,
+    ) -> Result<bool> {
+        let key = crate::local::harness::managed::removable_key(harness)?;
+        let turns = self.turns.lock().await;
+        let sessions = store.chat_session_ids_for_agent(harness, &key)?;
+        for session in &sessions {
+            if turns.contains_key(session) || store.chat_turn_leased(session)? {
+                return Ok(false);
+            }
+        }
+        for session in &sessions {
+            self.acp.stop(session).await;
+        }
+        removal.await?;
+        Ok(true)
     }
 
     pub async fn busy_sessions(&self) -> Vec<String> {
@@ -4680,9 +4732,11 @@ impl ChatHost {
         Ok(true)
     }
 
-    /// Drain the oldest parked message once the current turn finishes. Each
-    /// queued request keeps its browser idempotency key and becomes one durable
-    /// turn in original order. Boxed return: `drain_queue` →
+    /// Dispatch the oldest parked message into a slot its releaser left
+    /// `Draining`. An idle slot is left alone: claiming it just to look would
+    /// refuse a fork or send that lands in between. Each queued request keeps
+    /// its browser idempotency key and becomes one durable turn in original
+    /// order. Boxed return: `drain_queue` →
     /// `send_message_showing` → (spawned) `drain_queue` is an async recursion
     /// cycle the auto-`Send` solver can't close on its own, so we assert the
     /// boxed future is `Send` to break it.
@@ -4691,30 +4745,17 @@ impl ChatHost {
         session_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let turn_state = {
+            {
                 let mut turns = self.turns.lock().await;
-                match turns.get(session_id) {
-                    Some(TurnState::Draining) => {
-                        turns.insert(
-                            session_id.to_string(),
-                            TurnState::Reserved { turn_id: None },
-                        );
-                        Some(true)
-                    }
-                    Some(_) => None,
-                    None => Some(false),
+                if !matches!(turns.get(session_id), Some(TurnState::Draining)) {
+                    return;
                 }
-            };
-            let mut guard = match turn_state {
-                Some(true) => TurnGuard::adopt(self, session_id),
-                None => return,
-                Some(false) => {
-                    let Some(guard) = TurnGuard::claim(self, session_id, None).await else {
-                        return;
-                    };
-                    guard
-                }
-            };
+                turns.insert(
+                    session_id.to_string(),
+                    TurnState::Reserved { turn_id: None },
+                );
+            }
+            let mut guard = TurnGuard::adopt(self, session_id);
             if self.refresh_persisted_queue(session_id).is_err() {
                 guard.release().await;
                 return;
@@ -5246,18 +5287,18 @@ impl ChatHost {
         if !supports_command_plan {
             settings.plan_mode = None;
             if explicit_overrides.plan_mode.is_some() {
-                return Err(anyhow!("this harness activates Plan through permissions"));
+                return Err(anyhow!("this agent activates Plan through permissions"));
             }
         }
         explicit_overrides.apply_to(&mut settings);
         if let Some(mode) = settings.permission_mode.as_deref() {
             if crate::local::harness::permission_mode_for(&session.harness, mode).is_none() {
-                return Err(anyhow!("invalid permission mode for selected harness"));
+                return Err(anyhow!("invalid permission mode for the selected agent"));
             }
         }
         if let Some(tier) = settings.service_tier.as_deref() {
             if crate::local::harness::service_tier_for(&session.harness, tier).is_none() {
-                return Err(anyhow!("invalid speed for selected harness"));
+                return Err(anyhow!("invalid speed for the selected agent"));
             }
         }
         match action {
@@ -5814,7 +5855,7 @@ impl ChatHost {
             .filter(|m| !m.is_empty())
         {
             if crate::local::harness::permission_mode_for(&session.harness, mode).is_none() {
-                return Err(anyhow!("invalid permission mode for selected harness"));
+                return Err(anyhow!("invalid permission mode for the selected agent"));
             }
         }
         if let Some(tier) = overrides
@@ -5823,13 +5864,13 @@ impl ChatHost {
             .filter(|tier| !tier.is_empty())
         {
             if crate::local::harness::service_tier_for(&session.harness, tier).is_none() {
-                return Err(anyhow!("invalid speed for selected harness"));
+                return Err(anyhow!("invalid speed for the selected agent"));
             }
         }
         if overrides.plan_mode.is_some()
             && !crate::local::harness::supports_command_plan(&session.harness)
         {
-            return Err(anyhow!("this harness activates Plan through permissions"));
+            return Err(anyhow!("this agent activates Plan through permissions"));
         }
         // Atomically claim the session's turn slot: the busy-check and the
         // reservation happen under one lock so two concurrent sends (or a
@@ -6024,6 +6065,9 @@ impl ChatHost {
                 )
             }
         };
+        session = store
+            .get_chat_session(session_id)?
+            .ok_or_else(|| anyhow!("chat session not found"))?;
         let reset_codex_model = if overrides.clear_model && session.harness == "codex" {
             match session.native_session_id.as_deref() {
                 Some(native_id) => {
@@ -6070,6 +6114,46 @@ impl ChatHost {
                 store.set_chat_session_model(&session.id, &model)?;
                 session.model = Some(model);
             }
+        }
+        if session
+            .model
+            .as_deref()
+            .is_none_or(|model| !crate::local::harness::concrete_model(model))
+            && !overrides.clear_model
+        {
+            let catalog = self.harnesses.lock().await.clone();
+            let payload = catalog.as_ref().map(|(_, payload)| payload);
+            let native = store
+                .acp_session_state(&session.id)?
+                .as_ref()
+                .filter(|state| state.launch.id == session.harness)
+                .and_then(|state| {
+                    crate::local::harness::acp::current_model(&state.configuration)
+                        .filter(|model| crate::local::harness::concrete_model(model))
+                        .map(str::to_owned)
+                });
+            let recovered = match (payload, session.native_session_id.as_deref()) {
+                (Some(payload), Some(id)) if native.is_none() => {
+                    crate::local::native_chats::selection_model(
+                        payload,
+                        &session.harness,
+                        session.profile_id.as_deref(),
+                        id,
+                    )?
+                }
+                _ => None,
+            };
+            let model = native.or(recovered).or_else(|| {
+                payload.and_then(|payload| {
+                    crate::local::harness::catalog_default(
+                        payload,
+                        &session.harness,
+                        session.profile_id.as_deref(),
+                    )
+                })
+            });
+            store.set_chat_session_model_value(&session.id, model.as_deref())?;
+            session.model = model;
         }
         if let Some(tier) = overrides.service_tier.filter(|tier| !tier.is_empty()) {
             if session.service_tier.as_deref() != Some(tier.as_str()) {
@@ -6421,6 +6505,7 @@ impl ChatHost {
         let turn_id = ctx.turn_id.clone();
         let harness = ctx.harness.clone();
         let model = ctx.model.clone();
+        let profile = ctx.profile.clone();
         let (target_path, target_event_offset) = target_event_start(&sid, &ctx.assistant.id);
         ctx.target_event_path = Some(target_path);
         ctx.target_event_offset = target_event_offset;
@@ -6447,14 +6532,27 @@ impl ChatHost {
                     None,
                 )
             });
-            let result = match crate::local::harness::session_harness(&ctx.harness, &ctx.session_id)
-            {
-                Some(harness) => harness.run_turn(&mut ctx).await,
-                None => Err(crate::local::harness::TurnFailure {
-                    kind: "unknown_harness",
-                    message: format!("unknown harness: {}", ctx.harness),
-                    delivery: DeliveryState::Rejected,
+            let profile = ctx
+                .profile
+                .as_deref()
+                .map(|id| crate::local::agent_profiles::home(id, &ctx.harness))
+                .transpose();
+            let result = match profile {
+                Err(error) => Err(crate::local::harness::TurnFailure {
+                    kind: "profile_removed",
+                    message: error.to_string(),
+                    delivery: DeliveryState::NotSent,
                 }),
+                Ok(_) => {
+                    match crate::local::harness::session_harness(&ctx.harness, &ctx.session_id) {
+                        Some(harness) => harness.run_turn(&mut ctx).await,
+                        None => Err(crate::local::harness::TurnFailure {
+                            kind: "unknown_harness",
+                            message: format!("unknown agent: {}", ctx.harness),
+                            delivery: DeliveryState::Rejected,
+                        }),
+                    }
+                }
             };
             drop(steer_route);
             if let Some(mut steering) = ctx.steering.take() {
@@ -6552,7 +6650,7 @@ impl ChatHost {
             }),
         );
         if let Some(seed) = title_seed {
-            self.spawn_title_generation(sid, harness, seed, model);
+            self.spawn_title_generation(sid, harness, seed, model, profile);
         }
         guard.defuse();
         Ok(TurnSubmission::Started(turn_id))
@@ -6929,11 +7027,11 @@ impl ChatHost {
         }
         if let Some(mode) = req.resume_mode.as_deref() {
             if crate::local::harness::permission_mode_for(&session.harness, mode).is_none() {
-                return Err(anyhow!("invalid resume mode for selected harness"));
+                return Err(anyhow!("invalid resume mode for the selected agent"));
             }
         }
         let harness = crate::local::harness::session_harness(&session.harness, &session.id)
-            .ok_or_else(|| anyhow!("unknown harness: {}", session.harness))?;
+            .ok_or_else(|| anyhow!("unknown agent: {}", session.harness))?;
 
         // Ask the harness how the answer resumes. Inline harnesses deliver the
         // reply to their live process here and return `Handled`; end-turn
@@ -7113,6 +7211,14 @@ impl ChatHost {
         }
     }
 
+    pub(crate) async fn session_json(&self, session: &StoredChatSession, busy: bool) -> Value {
+        let mut value = session_json(session, busy);
+        if let Some((_, payload)) = self.harnesses.lock().await.as_ref() {
+            project_model(&mut value, session, payload);
+        }
+        value
+    }
+
     /// Broadcast a freshly re-read session row, resolving `busy` live from the
     /// turn map.
     ///
@@ -7139,7 +7245,7 @@ impl ChatHost {
         let busy = self.is_busy(&session.id).await;
         self.emit(
             "chat.session",
-            json!({ "session": session_json(&session, busy) }),
+            json!({ "session": self.session_json(&session, busy).await }),
         );
         Some(session)
     }
@@ -7159,13 +7265,22 @@ impl ChatHost {
     /// Branch a side chat off `parent`, seeded with a snapshot of the parent's
     /// live branch as it is right now.
     pub async fn open_side_chat(&self, parent: &StoredChatSession) -> Result<StoredChatSession> {
+        let catalog = self.harnesses.lock().await.clone();
         let store = Store::open()?;
         let transaction = store.begin_immediate()?;
         let parent = store
             .get_chat_session(&parent.id)?
             .ok_or_else(|| anyhow!("chat session is gone"))?;
         let messages = store.list_chat_messages(&parent.id)?;
-        let session = side_chat_session(&parent, &messages);
+        let mut session = side_chat_session(&parent, &messages);
+        if let Some((_, payload)) = catalog.as_ref() {
+            session.model = crate::local::harness::selected_model(
+                payload,
+                &session.harness,
+                session.profile_id.as_deref(),
+                session.model.as_deref(),
+            )?;
+        }
         store.create_chat_session(&session)?;
         transaction.commit()?;
         // Checked after the insert: a parent delete that began earlier has
@@ -7214,7 +7329,7 @@ impl ChatHost {
             return Ok(None);
         };
         if !crate::local::harness::supports_command_plan(&session.harness) {
-            return Err(anyhow!("this harness activates Plan through permissions"));
+            return Err(anyhow!("this agent activates Plan through permissions"));
         }
         {
             let mut changes = self.plan_changes.lock().unwrap();
@@ -7295,7 +7410,7 @@ impl ChatHost {
             return Ok(None);
         };
         if crate::local::harness::permission_mode_for(&session.harness, permission_mode).is_none() {
-            return Err(anyhow!("invalid permission mode for selected harness"));
+            return Err(anyhow!("invalid permission mode for the selected agent"));
         }
         {
             let mut changes = self.permission_changes.lock().unwrap();
@@ -7324,6 +7439,7 @@ impl ChatHost {
         harness_id: String,
         first_message: String,
         model: Option<String>,
+        profile: Option<String>,
     ) {
         let host = self.clone();
         tokio::spawn(async move {
@@ -7331,7 +7447,7 @@ impl ChatHost {
                 return;
             };
             let Some(title) = harness
-                .generate_title(&first_message, model.as_deref())
+                .generate_title(&first_message, model.as_deref(), profile.as_deref())
                 .await
             else {
                 return;
@@ -7982,6 +8098,7 @@ fn resolve_permission_change(
 }
 
 pub struct TurnCtx {
+    pub profile: Option<String>,
     pub host: Arc<ChatHost>,
     pub turn_id: String,
     /// What the turn's message last showed it waiting on, so the session
@@ -8074,6 +8191,7 @@ fn turn_ctx_from_stored(
     }
 
     Ok(TurnCtx {
+        profile: session.profile_id.clone(),
         host,
         turn_id: turn.id.clone(),
         durable: true,
@@ -8464,6 +8582,7 @@ impl TurnCtx {
     #[cfg(test)]
     pub fn test_stub() -> Self {
         Self {
+            profile: None,
             host: Arc::new(ChatHost::new(
                 Arc::new(AgentHost::new(None)),
                 Arc::new(crate::local::codex::CodexHost::new()),
@@ -9092,6 +9211,7 @@ fn side_chat_session(
     };
     let now = now_ms();
     StoredChatSession {
+        profile_id: parent.profile_id.clone(),
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         project_id: parent.project_id.clone(),
         harness: parent.harness.clone(),
@@ -9550,6 +9670,9 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
         }
     }
     crate::jobs::ssh::prepare_sharing_env(cmd);
+    // orx updates Claude Code itself (`harness::managed`), so a managed copy
+    // never runs the CLI's own updater against the user's install location.
+    cmd.env("DISABLE_AUTOUPDATER", "1");
 }
 
 /// Env var carrying the launching chat session's id into a harness child. The
@@ -9673,8 +9796,15 @@ fn bash_env_hook(original: Option<String>) -> String {
     ) + PATH_GUARD
 }
 
+/// The user's shell setup a harness child inherits. Never the developer's under
+/// test, whose startup files a tool shell would otherwise run.
 fn child_env_value(key: &str) -> Option<std::ffi::OsString> {
-    std::env::var_os(key).or_else(|| {
+    let inherited = if cfg!(test) {
+        None
+    } else {
+        std::env::var_os(key)
+    };
+    inherited.or_else(|| {
         crate::config::list_synced_env()
             .into_iter()
             .find_map(|(candidate, value)| (candidate == key).then(|| value.into()))
@@ -9737,7 +9867,7 @@ pub fn set_chat_session_env(
     }
     let original_zdotdir = child_env_value("ZDOTDIR")
         .map(PathBuf::from)
-        .or_else(|| child_env_value("HOME").map(PathBuf::from));
+        .or_else(crate::config::home_dir);
     let Some(original_zdotdir) = original_zdotdir else {
         return;
     };
@@ -10111,6 +10241,7 @@ mod cap_tests {
         let store = Store::open_at(dir.clone()).unwrap();
         store
             .create_chat_session(&StoredChatSession {
+                profile_id: None,
                 id: "session".into(),
                 project_id: "proj_1".into(),
                 harness: "claude-code".into(),
@@ -10217,10 +10348,11 @@ mod cap_tests {
             .unwrap();
 
         // No transcript on disk: the marker-only shape an emptied rollout gives.
-        let session = import_native_chat(&store, "proj_1", "claude-code", "native-1", None);
+        let session = import_native_chat(&store, "proj_1", "claude-code", "native-1", None, None);
         assert!(session.is_err(), "a chat orx cannot read is not adopted");
 
         let adopted = StoredChatSession {
+            profile_id: None,
             id: "chat_1".into(),
             project_id: "proj_1".into(),
             harness: "claude-code".into(),
@@ -10265,7 +10397,8 @@ mod cap_tests {
         assert!(store.native_ids_outside(&[]).unwrap().contains("native-1"));
         // Adopting the same chat again returns the session that already owns
         // it — two sessions driving one native chat would split the history.
-        let again = import_native_chat(&store, "proj_1", "claude-code", "native-1", None).unwrap();
+        let again =
+            import_native_chat(&store, "proj_1", "claude-code", "native-1", None, None).unwrap();
         assert_eq!(again.id, "chat_1");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -10297,6 +10430,7 @@ mod cap_tests {
         let dir = std::env::temp_dir().join(format!("orx-compact-reseed-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         let mut session = StoredChatSession {
+            profile_id: None,
             id: "session".into(),
             project_id: "proj_1".into(),
             harness: "cursor".into(),
@@ -11247,6 +11381,7 @@ mod bridge_tests {
 
     fn bare_session() -> StoredChatSession {
         StoredChatSession {
+            profile_id: None,
             id: "chat_1".into(),
             project_id: "proj_1".into(),
             harness: "claude-code".into(),
@@ -11271,6 +11406,214 @@ mod bridge_tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_codex_reads_use_cached_defaults_and_failed_recovery_retries() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = Arc::new(test_host());
+        let store = Store::open().unwrap();
+        let project = TurnCtx::test_stub().project;
+        store.create_local_project(&project).unwrap();
+        let mut session = bare_session();
+        session.project_id = project.id;
+        session.harness = "codex".into();
+        session.title = Some("Test".into());
+        session.model = None;
+        session.native_session_id = Some("legacy-codex".into());
+        store.create_chat_session(&session).unwrap();
+        *host.harnesses.lock().await = Some((
+            std::time::Instant::now(),
+            json!({"harnesses":[{"id":"codex","agentReady":true,"defaultModel":"cached-default"}]}),
+        ));
+        let root = crate::local::native_store::codex_home(
+            crate::local::native_store::NativeStore::Isolated,
+        )
+        .join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("legacy-codex.jsonl");
+        std::fs::write(&path, [0xff]).unwrap();
+        assert_eq!(
+            host.session_json(&session, false).await["model"],
+            "cached-default"
+        );
+        let error = host
+            .send_message(
+                &session.id,
+                "Continue".into(),
+                TurnOverrides::default(),
+                vec![],
+                vec![],
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(path.to_str().unwrap()));
+        assert!(store
+            .get_chat_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .model
+            .is_none());
+        assert!(host.harnesses.try_lock().is_ok());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.is_busy(&session.id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed preparation must release its turn reservation");
+        std::fs::write(
+            &path,
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"recovered-model\"}}\n",
+        )
+        .unwrap();
+        host.send_message(
+            &session.id,
+            "Continue".into(),
+            TurnOverrides::default(),
+            vec![],
+            vec![],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let session = store.get_chat_session(&session.id).unwrap().unwrap();
+        assert_eq!(session.model.as_deref(), Some("recovered-model"));
+        std::fs::write(&path, [0xff]).unwrap();
+        assert_eq!(
+            host.session_json(&session, true).await["model"],
+            "recovered-model"
+        );
+        if let Some(TurnState::Active(active)) = host.turns.try_lock().unwrap().remove(&session.id)
+        {
+            active.handle.abort();
+        };
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn saved_opusplan_is_replaced_by_the_resolved_model_before_a_turn() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = Arc::new(test_host());
+        let store = Store::open().unwrap();
+        let project = TurnCtx::test_stub().project;
+        store.create_local_project(&project).unwrap();
+        for configured in ["opusplan", "configured-opus"] {
+            let mut entry = json!({"id":"claude-code","agentReady":true,"models":[
+                {"id":"claude-opus-5-4"},{"id":"claude-opus-5-5"},{"id":"opusplan"}
+            ]});
+            crate::local::harness::resolve_entry(&mut entry, Some(configured)).unwrap();
+            *host.harnesses.lock().await =
+                Some((std::time::Instant::now(), json!({"harnesses":[entry]})));
+            let expected = if configured == "opusplan" {
+                "claude-opus-5-5"
+            } else {
+                configured
+            };
+            let mut session = bare_session();
+            session.id = format!("chat_{configured}");
+            session.project_id = project.id.clone();
+            session.title = Some("Test".into());
+            session.model = Some("opusplan".into());
+            store.create_chat_session(&session).unwrap();
+            host.send_message(
+                &session.id,
+                "Continue".into(),
+                TurnOverrides::default(),
+                vec![],
+                vec![],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let session = store.get_chat_session(&session.id).unwrap().unwrap();
+            assert_eq!(session.model.as_deref(), Some(expected));
+            assert_eq!(host.session_json(&session, true).await["model"], expected);
+            if let Some(TurnState::Active(active)) =
+                host.turns.try_lock().unwrap().remove(&session.id)
+            {
+                active.handle.abort();
+            };
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_model_resolution_ignores_the_previous_agents_saved_acp_state() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = Arc::new(test_host());
+        let store = Store::open().unwrap();
+        let project = TurnCtx::test_stub().project;
+        store.create_local_project(&project).unwrap();
+        let mut session = bare_session();
+        session.project_id = project.id;
+        session.harness = crate::local::acp::presets().remove(0).launch.id;
+        session.title = Some("Test".into());
+        store.create_chat_session(&session).unwrap();
+        store
+            .set_acp_configuration(
+                &session.id,
+                &json!({"models":{"currentModelId":"stale-acp-model"}}),
+            )
+            .unwrap();
+        host.set_agent(
+            &session.id,
+            crate::store::StoredAgentSelection {
+                harness: "claude-code".into(),
+                profile: None,
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                reasoning_level: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(store
+            .get_chat_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .model
+            .is_none());
+        *host.harnesses.lock().await = Some((
+            std::time::Instant::now(),
+            json!({"harnesses":[{
+                "id":"claude-code", "agentReady":true, "defaultModel":"selected-claude-model", "models":[{"id":"selected-claude-model"}]
+            }]}),
+        ));
+        host.send_message(
+            &session.id,
+            "Continue".into(),
+            TurnOverrides::default(),
+            vec![],
+            vec![],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .get_chat_session(&session.id)
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("selected-claude-model")
+        );
+        if let Some(TurnState::Active(active)) = host.turns.try_lock().unwrap().remove(&session.id)
+        {
+            active.handle.abort();
+        };
     }
 
     #[test]
@@ -11329,6 +11672,7 @@ mod bridge_tests {
                         };
                         store.upsert_chat_message_on_branch(&original).unwrap();
                         let agent = crate::store::StoredAgentSelection {
+                            profile: None,
                             harness: target.into(),
                             model: Some("target-model".into()),
                             service_tier: None,
@@ -11419,6 +11763,7 @@ mod bridge_tests {
                             )
                             .unwrap();
                         let source_agent = crate::store::StoredAgentSelection {
+                            profile: None,
                             harness: source.into(),
                             model: session.model.clone(),
                             service_tier: None,
@@ -11687,6 +12032,7 @@ mod bridge_tests {
                         store.upsert_chat_message_on_branch(&reply).unwrap();
                         let acp = crate::local::acp::presets().remove(0).launch;
                         let agent = crate::store::StoredAgentSelection {
+                            profile: None,
                             harness: if action == "select" {
                                 acp.id
                             } else {
@@ -11773,6 +12119,71 @@ mod bridge_tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[tokio::test]
+    async fn removal_refuses_running_and_leased_side_chats() {
+        let directory =
+            std::env::temp_dir().join(format!("orx-remove-busy-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(directory.clone()).unwrap();
+        let mut session = bare_session();
+        session.harness = "cursor".into();
+        session.side_parent_session_id = Some("parent".into());
+        store.create_chat_session(&session).unwrap();
+        assert!(store.list_all_chat_sessions().unwrap().is_empty());
+        let host = test_host();
+        let removal = || std::future::ready(Err(anyhow!("Removal must not run during a turn")));
+        host.turns
+            .lock()
+            .await
+            .insert(session.id.clone(), TurnState::Reserved { turn_id: None });
+        assert!(!host
+            .remove_harness_install(store, "cursor", removal())
+            .await
+            .unwrap());
+        host.turns.lock().await.clear();
+        let store = Store::open_at(directory.clone()).unwrap();
+        assert!(store
+            .claim_chat_turn(&session.id, "another-dashboard", &[])
+            .unwrap());
+        assert!(!host
+            .remove_harness_install(store, "cursor", removal())
+            .await
+            .unwrap());
+        let store = Store::open_at(directory.clone()).unwrap();
+        let preset = crate::local::acp::presets()
+            .into_iter()
+            .find(|preset| preset.launch.executable == "dsh")
+            .unwrap();
+        session.id = "acp-side-chat".into();
+        session.harness = preset.launch.id;
+        store.create_chat_session(&session).unwrap();
+        assert_eq!(
+            store.chat_session_ids_for_agent("dsh", "dsh").unwrap(),
+            [session.id.clone()]
+        );
+        host.turns
+            .lock()
+            .await
+            .insert(session.id.clone(), TurnState::Reserved { turn_id: None });
+        assert!(!host
+            .remove_harness_install(store, "dsh", removal())
+            .await
+            .unwrap());
+        let store = Store::open_at(directory.clone()).unwrap();
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_sessions SET harness = 'cursor' WHERE id = ?1",
+            [&session.id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert!(store
+            .chat_session_ids_for_agent("dsh", "dsh")
+            .unwrap()
+            .is_empty());
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
@@ -11977,6 +12388,29 @@ mod bridge_tests {
     }
 
     #[test]
+    fn session_json_names_the_models_an_acp_chat_offers() {
+        let store = Store::open().unwrap();
+        let mut session = bare_session();
+        session.id = format!("chat_{}", uuid::Uuid::new_v4());
+        session.harness = crate::local::acp::presets().remove(0).launch.id;
+        store.create_chat_session(&session).unwrap();
+        let options = json!({"configOptions":[{"id":"model", "type":"select", "category":"model", "currentValue":"a", "options":[{"value":"a", "name":"GPT-6.1-Sol"}]}]});
+        store.set_acp_configuration(&session.id, &options).unwrap();
+        let wire = session_json_with(Some(&store), &session, false);
+        assert_eq!(wire["nativeModels"][0]["id"], "a");
+        assert_eq!(wire["nativeModels"][0]["parsed"]["key"], "gpt sol@6.1");
+
+        store
+            .set_acp_configuration(&session.id, &json!({"configOptions": []}))
+            .unwrap();
+        let wire = session_json_with(Some(&store), &session, false);
+        assert!(
+            wire["nativeModels"].is_null(),
+            "the agent's catalog stands in"
+        );
+    }
+
+    #[test]
     fn session_json_carries_title_source() {
         // The UI keys its title-reveal animation off this field, so it has to
         // survive to the wire — null on a legacy row, verbatim otherwise.
@@ -12097,6 +12531,7 @@ mod run_wakeup_tests {
     fn session_on(store: &Store, id: &str, harness: &str) {
         store
             .create_chat_session(&StoredChatSession {
+                profile_id: None,
                 id: id.into(),
                 project_id: "p1".into(),
                 harness: harness.into(),
@@ -12169,8 +12604,11 @@ mod run_wakeup_tests {
             unknown: Default::default(),
         };
         let tx = store.begin().unwrap();
-        tx.execute("UPDATE chat_sessions SET harness = ?1", [&launch.id])
-            .unwrap();
+        tx.execute(
+            "UPDATE chat_sessions SET harness = ?1, model = 'fixture-model'",
+            [&launch.id],
+        )
+        .unwrap();
         tx.execute(
             "INSERT OR IGNORE INTO acp_sessions (session_id, launch_json, configuration_json)
              SELECT id, ?1, '[]' FROM chat_sessions",
@@ -12184,7 +12622,8 @@ mod run_wakeup_tests {
     async fn outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle() {
         const CHILD: &str = "ORX_TEST_CHAT_OUTBOX";
         if std::env::var_os(CHILD).is_none() {
-            let dir = std::env::temp_dir().join(format!("orx-outbox-{}", uuid::Uuid::new_v4()));
+            let dir =
+                crate::config::test_home().join(format!("orx-outbox-{}", uuid::Uuid::new_v4()));
             for phase in ["send", "restart"] {
                 let output = crate::process::command(std::env::current_exe().unwrap())
                     .args([
@@ -12425,8 +12864,8 @@ mod run_wakeup_tests {
     async fn outbox_wakes_on_idle_and_bus_and_retires_or_retries_delivery_failures() {
         const CHILD: &str = "ORX_TEST_OUTBOX_EVENTS";
         if std::env::var_os(CHILD).is_none() {
-            let dir =
-                std::env::temp_dir().join(format!("orx-outbox-events-{}", uuid::Uuid::new_v4()));
+            let dir = crate::config::test_home()
+                .join(format!("orx-outbox-events-{}", uuid::Uuid::new_v4()));
             let output = crate::process::command(std::env::current_exe().unwrap())
                 .args(["--exact", "local::chat::run_wakeup_tests::outbox_wakes_on_idle_and_bus_and_retires_or_retries_delivery_failures", "--nocapture"])
                 .env(CHILD, "1").env("ORX_DATA_DIR", &dir).env("ORX_NO_TELEMETRY", "1")
@@ -12492,7 +12931,7 @@ mod run_wakeup_tests {
         store.upsert_run(&run("done")).unwrap();
         notice_harness(&store);
         let mut launch = store.acp_session_state("other").unwrap().unwrap().launch;
-        launch.executable = if cfg!(windows) { "python" } else { "python3" }.into();
+        launch.executable = crate::local::acp::fake_agent_interpreter("python3");
         launch.arguments = vec![
             "-u".into(),
             "-c".into(),
@@ -13612,6 +14051,7 @@ done
 
             // Coming back from another agent branches where Claude last ended.
             let agent = |harness: &str| crate::store::StoredAgentSelection {
+                profile: None,
                 harness: harness.into(),
                 model: None,
                 service_tier: None,
@@ -13929,6 +14369,7 @@ mod transcript_tree_tests {
 
     fn parent_session(harness: &str) -> StoredChatSession {
         StoredChatSession {
+            profile_id: None,
             id: "chat_parent".into(),
             project_id: "proj_1".into(),
             harness: harness.into(),
@@ -14179,6 +14620,7 @@ mod steering_tests {
     fn add_test_session(store: &Store) {
         store
             .create_chat_session(&StoredChatSession {
+                profile_id: None,
                 id: "owner".into(),
                 project_id: "p1".into(),
                 harness: "codex".into(),

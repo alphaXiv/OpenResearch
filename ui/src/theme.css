@@ -25,6 +25,8 @@
   --color-accent-amber: var(--accent-amber);
   --color-accent-green: var(--accent-green);
   --color-accent-purple: var(--accent-purple);
+  --color-accent-indigo: var(--accent-indigo);
+  --color-accent-pink: var(--accent-pink);
   --color-accent-green-subtle: var(--accent-green-subtle);
   --color-accent-amber-subtle: var(--accent-amber-subtle);
   --color-accent-red-subtle: var(--accent-red-subtle);
@@ -139,7 +141,7 @@
   --panel: #ededed;
   --surface: #f5f5f5;
   --surface-bright: #ffffff;
-  /* Fills over the macOS sidebar material (app.css). Literal rgb, not color-mix: macOS 11 WebKit. */
+  /* Fills over the sidebar material (app.css). Literal rgb, not color-mix: macOS 11 WebKit. */
   --material-veil: rgb(255 255 255 / 40%);
   --material-hover: color-mix(in srgb, var(--text) 6%, transparent);
   --material-selected: color-mix(in srgb, var(--text) 11%, transparent);
@@ -163,6 +165,8 @@
   --accent-amber: #da9100;
   --accent-green: #5eb64c;
   --accent-purple: #9c5cff;
+  --accent-indigo: #5b5bd6;
+  --accent-pink: #d6409f;
 
   --accent-green-subtle: #e7f4e5;
   --accent-amber-subtle: #fff8cc;

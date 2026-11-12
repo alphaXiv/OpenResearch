@@ -124,8 +124,8 @@ pub enum HarnessAuthState {
     Unsupported,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(remote = "Self", rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,6 +167,29 @@ pub struct ModelInfo {
     /// `opus[1m]` → `claude-opus-5-5`), which model routing joins on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_model: Option<String>,
+}
+
+/// The wire form adds whether the id names a free tier.
+impl Serialize for ModelInfo {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            #[serde(flatten, with = "ModelInfo")]
+            info: &'a ModelInfo,
+            free: bool,
+        }
+        Wire {
+            info: self,
+            free: crate::local::model_routes::free(&self.id),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ModelInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ModelInfo::deserialize(deserializer)
+    }
 }
 
 impl ModelInfo {
@@ -241,6 +264,9 @@ pub struct HarnessInfo {
     pub install_broken: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bin_path: Option<String>,
+    /// `bin_path` is orx's own copy rather than the user's install.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub managed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// A signed-in setup was found (auth file / OAuth account).
@@ -298,6 +324,10 @@ pub struct HarnessInfo {
     /// entry. Everything on the card is provisional until the flag clears.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub catalog_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    #[serde(skip)]
+    pub configured_model: Option<String>,
     pub models: Vec<ModelInfo>,
     /// Composer toggle vocabulary (permission modes, reasoning levels).
     pub options: super::HarnessOptions,
@@ -311,6 +341,7 @@ impl HarnessInfo {
             installed: false,
             install_broken: false,
             bin_path: None,
+            managed: false,
             version: None,
             authenticated: false,
             auth_state: HarnessAuthState::Unknown,
@@ -335,6 +366,8 @@ impl HarnessInfo {
             supports_steering: false,
             supports_compaction: false,
             catalog_pending: false,
+            default_model: None,
+            configured_model: None,
             models: Vec::new(),
             options: super::HarnessOptions::none(),
         }
@@ -350,6 +383,7 @@ impl HarnessInfo {
     pub(super) fn record_bin(&mut self, bin: &Path, probe: BinProbe) {
         self.installed = true;
         self.bin_path = Some(bin.to_string_lossy().into_owned());
+        self.managed = super::managed::version_of(bin).is_some();
         match probe {
             BinProbe::Answered(version) => self.version = version,
             // The evidence never reaches `agent_note` — that stays a clean
@@ -368,7 +402,7 @@ impl HarnessInfo {
 
     pub(super) fn broken_note(&self, fix: &str) -> String {
         format!(
-            "{} is installed but failed to run. {fix}, then re-check this harness.",
+            "{} is installed but failed to run. {fix}, then re-check this agent.",
             self.name
         )
     }
@@ -386,15 +420,16 @@ pub(super) fn resolve_symlinks(path: PathBuf) -> PathBuf {
 }
 
 /// The first candidate that runs, in discovery order, with its `--version`
-/// answer. `minimum` is only for a harness that rejects old versions (Claude's
-/// OAuth gate); all-broken returns the first, so the caller says
-/// installed-but-broken rather than "not found".
+/// answer, unless orx's own copy of the harness is newer. `minimum` is only
+/// for a harness that rejects old versions (Claude's OAuth gate); all-broken
+/// returns the first, so the caller says installed-but-broken rather than
+/// "not found".
 pub(super) async fn select_working(
     key: &'static str,
     candidates: Vec<PathBuf>,
     minimum: Option<(u64, u64, u64)>,
 ) -> Option<(PathBuf, BinProbe)> {
-    let selected = select_working_from(candidates, minimum).await;
+    let selected = select_working_from(candidates, minimum, super::managed::installed(key)).await;
     // The sync `find_*` callers cannot probe; publishing the choice keeps them
     // on the verified binary instead of the first PATH hit it skipped.
     if let Some((path, _)) = &selected {
@@ -411,12 +446,14 @@ pub(super) fn remember_selected(key: &'static str, path: &Path) {
         .insert(key, path.to_path_buf());
 }
 
-/// The executable the last detection pass selected for `key`, else the first
-/// candidate. A selection that no longer exists or has dropped out of discovery
-/// is stale and ignored.
+/// The executable the last detection pass selected for `key`, else orx's own
+/// copy, else the first candidate. A selection that no longer exists or has
+/// dropped out of discovery is stale and ignored.
 pub(super) fn selected_bin(key: &str, candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    let managed = super::managed::installed(key).map(|(bin, _)| bin);
     remembered_bin(key)
-        .filter(|path| candidates.contains(path))
+        .filter(|path| candidates.contains(path) || managed.as_ref() == Some(path))
+        .or(managed)
         .or_else(|| candidates.into_iter().next())
 }
 
@@ -439,9 +476,12 @@ fn selected_bins() -> &'static std::sync::Mutex<std::collections::HashMap<&'stat
     SELECTED.get_or_init(Default::default)
 }
 
-async fn select_working_from(
+/// `managed` is orx's own copy, which wins over the user's working install only
+/// when it is newer, and over a broken or missing one always.
+pub(super) async fn select_working_from(
     candidates: Vec<PathBuf>,
     minimum: Option<(u64, u64, u64)>,
+    managed: Option<(PathBuf, semver::Version)>,
 ) -> Option<(PathBuf, BinProbe)> {
     // Probe candidates in parallel: a node CLI's `--version` can take seconds
     // (cold start, AV scan). The pick still walks results in discovery order;
@@ -450,6 +490,7 @@ async fn select_working_from(
     let candidates = unique(candidates);
     let probes = futures::future::join_all(candidates.iter().map(|c| probe_bin(c))).await;
     let mut fallback: Option<(PathBuf, BinProbe)> = None;
+    let mut working = None;
     for (candidate, probe) in candidates.into_iter().zip(probes) {
         let version = match &probe {
             BinProbe::Answered(version) => version.as_deref().and_then(parse_version),
@@ -466,9 +507,24 @@ async fn select_working_from(
             }
             continue;
         }
-        return Some((candidate, probe));
+        working = Some((candidate, probe));
+        break;
     }
-    fallback
+    let Some((copy, version)) = managed else {
+        return working.or(fallback);
+    };
+    let own = working.as_ref().and_then(|(_, probe)| match probe {
+        BinProbe::Answered(Some(line)) => super::managed::parse(line),
+        _ => None,
+    });
+    if own.is_some_and(|own| own >= version) {
+        return working;
+    }
+    let probe = probe_bin(&copy).await;
+    match probe {
+        BinProbe::Answered(_) => Some((copy, probe)),
+        _ => working.or(fallback).or(Some((copy, probe))),
+    }
 }
 
 /// Discovery order, one entry per path. `Vec::dedup` drops only *adjacent*
@@ -787,8 +843,11 @@ fn pe_version(_bin: &Path) -> Option<String> {
 
 /// `<bin> --version`, with a timeout (node CLIs can be slow).
 pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
-    if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
-        return BinProbe::Answered(Some(version));
+    let managed = super::managed::version_of(bin).is_some();
+    if !managed {
+        if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
+            return BinProbe::Answered(Some(version));
+        }
     }
     let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("--version").stdin(std::process::Stdio::null());
@@ -810,6 +869,9 @@ pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
             }
         }
     };
+    if managed && !out.status.success() {
+        return broken(&String::from_utf8_lossy(&out.stderr));
+    }
     // A version has a digit in it; anything else is the CLI complaining, and
     // must not reach the `Version` row as though it were one.
     let version = String::from_utf8_lossy(&out.stdout)
@@ -911,6 +973,22 @@ pub(super) fn title_case(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_entries_say_when_they_are_free() {
+        let mut alias = ModelInfo::new("opus[1m]").with_label(Some("Opus"), None);
+        alias.resolved_model = Some("claude-opus-5-5".into());
+        assert_eq!(
+            serde_json::json!([
+                alias,
+                ModelInfo::new("openrouter/deepseek/deepseek-r1:free")
+            ]),
+            serde_json::json!([
+                {"id": "opus[1m]", "displayName": "Opus", "resolvedModel": "claude-opus-5-5", "free": false},
+                {"id": "openrouter/deepseek/deepseek-r1:free", "free": true},
+            ])
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1045,7 +1123,7 @@ mod tests {
         // and the healthy native binary the installer just wrote.
         let stale = script("stale", "#!/bin/sh\necho 'spawn ENOENT' >&2\nexit 1\n");
         let fresh = script("fresh", "#!/bin/sh\necho '1.18.31'\n");
-        let (picked, _) = select_working_from(vec![stale.clone(), fresh.clone()], None)
+        let (picked, _) = select_working_from(vec![stale.clone(), fresh.clone()], None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1057,7 +1135,7 @@ mod tests {
         let old = script("old", "#!/bin/sh\necho '2.1.210 (Claude Code)'\n");
         let new = script("new", "#!/bin/sh\necho '2.1.277 (Claude Code)'\n");
         assert_eq!(
-            select_working_from(vec![old.clone(), new.clone()], None)
+            select_working_from(vec![old.clone(), new.clone()], None, None)
                 .await
                 .unwrap()
                 .0,
@@ -1065,14 +1143,14 @@ mod tests {
         );
         // Only a version the harness actually rejects makes it look further.
         let (picked, probe) =
-            select_working_from(vec![old.clone(), new.clone()], Some((2, 1, 211)))
+            select_working_from(vec![old.clone(), new.clone()], Some((2, 1, 211)), None)
                 .await
                 .unwrap();
         assert_eq!(picked, new);
         assert!(matches!(probe, BinProbe::Answered(Some(v)) if v.starts_with("2.1.277")));
         // No candidate clears the bar: the one that runs is still reported.
         assert_eq!(
-            select_working_from(vec![old.clone()], Some((2, 1, 211)))
+            select_working_from(vec![old.clone()], Some((2, 1, 211)), None)
                 .await
                 .unwrap()
                 .0,
@@ -1082,7 +1160,7 @@ mod tests {
         // Every candidate broken still reports an install (the first), so the
         // UI says "installed but failed to run", not "not found".
         let also_stale = script("also-stale", "#!/bin/sh\nexit 1\n");
-        let (picked, probe) = select_working_from(vec![stale.clone(), also_stale], None)
+        let (picked, probe) = select_working_from(vec![stale.clone(), also_stale], None, None)
             .await
             .unwrap();
         assert_eq!(picked, stale);
@@ -1091,7 +1169,7 @@ mod tests {
         // Answered-but-unversioned is a working install, and wins outright.
         let quiet = script("quiet", "#!/bin/sh\nexit 0\n");
         assert_eq!(
-            select_working_from(vec![quiet.clone(), fresh.clone()], None)
+            select_working_from(vec![quiet.clone(), fresh.clone()], None, None)
                 .await
                 .unwrap()
                 .0,
@@ -1099,13 +1177,38 @@ mod tests {
         );
         // ...but it cannot clear a minimum, so the versioned one wins there.
         assert_eq!(
-            select_working_from(vec![quiet, fresh.clone()], Some((1, 0, 0)))
+            select_working_from(vec![quiet, fresh.clone()], Some((1, 0, 0)), None)
                 .await
                 .unwrap()
                 .0,
             fresh
         );
-        assert!(select_working_from(Vec::new(), None).await.is_none());
+        assert!(select_working_from(Vec::new(), None, None).await.is_none());
+
+        // orx's own copy runs when it is newer than the working install, or
+        // nothing else works; a tie keeps the user's.
+        script("managed", "#!/bin/sh\necho 2.1.300\n");
+        let copy = || (dir.join("managed"), semver::Version::new(2, 1, 300));
+        let pick = |candidates, managed| async move {
+            select_working_from(candidates, None, managed)
+                .await
+                .unwrap()
+                .0
+        };
+        assert_eq!(pick(vec![old.clone()], Some(copy())).await, copy().0);
+        assert_eq!(pick(vec![stale.clone()], Some(copy())).await, copy().0);
+        assert_eq!(pick(Vec::new(), Some(copy())).await, copy().0);
+        let tie = (dir.join("managed"), semver::Version::new(2, 1, 210));
+        assert_eq!(pick(vec![old.clone()], Some(tie)).await, old);
+        script("managed", "#!/bin/sh\nexit 1\n");
+        assert_eq!(pick(vec![old.clone()], Some(copy())).await, old);
+        assert!(matches!(
+            select_working_from(Vec::new(), None, Some(copy()))
+                .await
+                .unwrap()
+                .1,
+            BinProbe::Broken(_)
+        ));
 
         // Non-adjacent repeats are one candidate, so the same binary is never
         // probed twice at `VERSION_TIMEOUT`.

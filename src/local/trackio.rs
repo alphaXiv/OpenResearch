@@ -86,16 +86,16 @@ pub fn is_local_only(url: &str) -> bool {
 pub fn local_dir() -> Option<PathBuf> {
     let saved_or_env = |key: &str| {
         synced_env_var(key)
-            .or_else(|| std::env::var(key).ok())
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
+            .or_else(|| crate::config::env_path(key))
     };
     if let Some(dir) = saved_or_env(DIR) {
         return Some(dir);
     }
     let hf_home = saved_or_env("HF_HOME").or_else(|| {
         saved_or_env("XDG_CACHE_HOME")
-            .or_else(|| dirs::home_dir().map(|home| home.join(".cache")))
+            .or_else(|| crate::config::home_dir().map(|home| home.join(".cache")))
             .map(|cache| cache.join("huggingface"))
     })?;
     Some(hf_home.join("trackio"))

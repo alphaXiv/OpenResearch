@@ -26,6 +26,7 @@ const TITLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// no tools, one short system line. The caller supplies its session model.
 pub(crate) fn title_request(prompt: &str) -> super::OneShot<'_> {
     super::OneShot {
+        profile: None,
         system: "You generate short chat titles.",
         prompt,
         quality: super::OneShotQuality::Cheap,

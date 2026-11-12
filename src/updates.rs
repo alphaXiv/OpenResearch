@@ -332,18 +332,16 @@ pub struct Receipt {
 pub fn receipt_path() -> PathBuf {
     // Through `shell_env`, like `config::config_dir()`: in macOS app mode the
     // user's real XDG_CONFIG_HOME lives only in this process.
-    let base = crate::local::shell_env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            // Where the PowerShell installer writes it.
-            #[cfg(windows)]
-            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                return PathBuf::from(local);
-            }
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".config")
-        });
+    let base = crate::config::env_path("XDG_CONFIG_HOME").unwrap_or_else(|| {
+        // Where the PowerShell installer writes it.
+        #[cfg(windows)]
+        if let Some(local) = crate::config::env_path("LOCALAPPDATA") {
+            return local;
+        }
+        crate::config::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config")
+    });
     base.join(APP_NAME)
         .join(format!("{}-receipt.json", APP_NAME))
 }

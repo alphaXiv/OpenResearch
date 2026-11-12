@@ -11,7 +11,8 @@ use crate::local::shell_env;
 
 /// `program` as the user's terminal would start it: a bare name found where
 /// detection looks ([`shell_env::find`]), and the child given the shell's PATH
-/// and the directory overrides app mode imported.
+/// and the directory overrides app mode imported. Under test every home the
+/// child could resolve is inside the temp root unless the caller sets it.
 #[allow(clippy::disallowed_methods)]
 pub fn command(program: impl AsRef<OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(resolve(program.as_ref()));
@@ -21,6 +22,25 @@ pub fn command(program: impl AsRef<OsStr>) -> std::process::Command {
     shell_env::export_to(|key, value| {
         command.env(key, value);
     });
+    #[cfg(test)]
+    {
+        command.env(crate::config::PARENT_TEST_ROOT, crate::config::test_root());
+        for (var, path) in crate::config::home_vars(&crate::config::test_home()) {
+            if crate::config::env_path(var).is_none() {
+                command.env(var, path);
+            }
+        }
+        for var in crate::config::REDIRECT_VARS {
+            if crate::config::env_path(var).is_none() {
+                command.env_remove(var);
+            }
+        }
+        if std::env::var_os(crate::config::TEST_CHILD).is_none() {
+            for var in crate::config::PROVIDER_VARS {
+                command.env_remove(var);
+            }
+        }
+    }
     command
 }
 
@@ -61,6 +81,59 @@ mod tests {
 
         let exe = std::env::current_exe().unwrap();
         assert_eq!(command(&exe).get_program(), exe.as_os_str());
+    }
+
+    #[test]
+    fn a_child_of_the_test_process_never_sees_the_developers_keys() {
+        let child = command("orx-surely-not-installed");
+        let removed: Vec<_> = child
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_owned())
+            .collect();
+        for var in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
+            assert!(
+                removed.iter().any(|key| key == var),
+                "{var} reaches the child"
+            );
+        }
+    }
+
+    #[test]
+    fn a_child_never_inherits_the_developers_homes() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        for var in ["HOME", "CODEX_HOME"] {
+            std::env::set_var(var, "/orx-not-a-home");
+        }
+        let mut child = if cfg!(windows) {
+            let mut child = command("cmd");
+            child.args(["/C", "set"]);
+            child
+        } else {
+            command("env")
+        };
+        let output = child
+            .env("CLAUDE_CONFIG_DIR", "/orx-chosen")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let seen = |var: &str| {
+            stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{var}=")))
+                .map(PathBuf::from)
+        };
+        let home = crate::config::test_home();
+        assert_eq!(seen("HOME"), Some(home.clone()));
+        assert_eq!(seen("CODEX_HOME"), Some(home.join(".codex")));
+        assert_eq!(
+            seen("CLAUDE_CONFIG_DIR"),
+            Some(PathBuf::from("/orx-chosen"))
+        );
     }
 
     /// The child's PATH, not this lookup, picks what runs, so a caller's own PATH still applies.

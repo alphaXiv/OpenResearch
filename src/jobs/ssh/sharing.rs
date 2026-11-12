@@ -320,7 +320,8 @@ pub(crate) async fn withdraw_engine(home: &Path, path: &Path) -> Result<()> {
 
 pub(super) async fn setup(target: &SshTarget) -> Result<()> {
     require_sharing().await?;
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("could not locate your home directory"))?;
+    let home =
+        crate::config::home_dir().ok_or_else(|| anyhow!("could not locate your home directory"))?;
     let ssh_dir = home.join(".ssh");
     let default_dir = control_dir_for(&home.join(".config/openresearch"));
     let publication = super::prepared::prepare(target, false).await?.publication;

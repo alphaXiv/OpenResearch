@@ -43,7 +43,7 @@ pub(crate) fn expand_path(path: &str) -> Result<PathBuf> {
         return Err(crate::error::anyhow!("project path is required"));
     }
     if trimmed == "~" || trimmed.starts_with("~/") {
-        let home = dirs::home_dir()
+        let home = crate::config::home_dir()
             .ok_or_else(|| crate::error::anyhow!("Could not resolve the home directory"))?;
         return Ok(if trimmed == "~" {
             home
@@ -64,7 +64,7 @@ pub(crate) fn expand_path(path: &str) -> Result<PathBuf> {
 pub fn relative_base() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let in_image = crate::paths::in_appimage_mount(&cwd, std::env::var_os("APPDIR").as_deref());
-    Ok(match dirs::home_dir() {
+    Ok(match crate::config::home_dir() {
         Some(home) if in_image => home,
         _ => cwd,
     })

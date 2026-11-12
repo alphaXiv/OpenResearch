@@ -695,6 +695,25 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
             ));
         }
     }
+    let slurm_values = [
+        ("--qos", &args.qos),
+        ("--nodelist", &args.nodelist),
+        ("--constraint", &args.constraint),
+        ("--exclude", &args.exclude),
+    ];
+    for (flag, value) in slurm_values {
+        let Some(value) = value else { continue };
+        if args.backend.as_deref() != Some("slurm") {
+            return Err(anyhow!("{flag} only applies with --backend slurm."));
+        }
+        crate::jobs::slurm::parse_value(flag, value)?;
+    }
+    if !args.sbatch_args.is_empty() && args.backend.as_deref() != Some("slurm") {
+        return Err(anyhow!("--sbatch-arg only applies with --backend slurm."));
+    }
+    for arg in &args.sbatch_args {
+        crate::jobs::slurm::parse_sbatch_arg(arg)?;
+    }
     if args.cpus == Some(0) {
         return Err(anyhow!("--cpus must be at least 1."));
     }
@@ -1136,6 +1155,11 @@ echo ok
             cpus: None,
             mem: None,
             partition: None,
+            qos: None,
+            nodelist: None,
+            constraint: None,
+            exclude: None,
+            sbatch_args: Vec::new(),
             force: false,
             chat_session_id: None,
             invocation_context: None,

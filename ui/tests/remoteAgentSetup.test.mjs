@@ -5,6 +5,7 @@ import { Onboarding } from "../src/components/Onboarding.tsx";
 import { ltr } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
 import { find, navigate, render, renderApp, serve, serveApp, settle } from "./render.mjs";
+import { model } from "./models.mjs";
 
 /** The page's sockets; a test plays the server's side on them. */
 const sockets = [];
@@ -24,7 +25,7 @@ const runtime = {
   kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1,
   session: { id: "gpu", host: "gpu-lab", user: "me", status: "connected", version: "test", dashboardProtocol: 1, gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null, uiPreferences: { theme: null, locale: null }, canStartNewHost: true },
 };
-const codex = { id: "codex", name: "Codex", installed: true, agentReady: true, models: [], options: {} };
+const codex = { id: "codex", name: "Codex", installed: true, agentReady: true, models: [model("gpt-6.1-sol")], defaultModel: "gpt-6.1-sol", options: {} };
 const claude = () => ({ id: "claude-code", name: "Claude Code", installed: false, agentReady: false, models: [], options: {} });
 const datacenter = () => ({ ip: "192.0.2.1", isDatacenter: true });
 
@@ -70,6 +71,7 @@ test("remote setup starts at agents and saves only the machine's preferred agent
   assert.equal(writes.length, 1);
   assert.deepEqual(Object.keys(writes[0]), ["preferredAgent"]);
   assert.equal(writes[0].preferredAgent.harness, "codex");
+  assert.equal(writes[0].preferredAgent.model, "gpt-6.1-sol");
   assert.equal(setup.requests("POST /api/onboarding/complete").length, 0);
   assert.ok(!document.body.textContent.includes(m.remote_agents_title({ host: ltr("gpu-lab") })));
 });
@@ -121,7 +123,7 @@ test("leaving agent setup cancels a delayed Claude install prompt", async () => 
 });
 
 test("Continue explains when the chosen agent is still loading", async () => {
-  const setup = await remoteSetup({ harnesses: [{ ...codex, catalogPending: true }, { ...codex, id: "opencode", name: "OpenCode" }] });
+  const setup = await remoteSetup({ harnesses: [{ ...codex, catalogPending: true, models: [], defaultModel: undefined }, { ...codex, id: "opencode", name: "OpenCode", models: [model("opencode/free")], defaultModel: "opencode/free" }] });
   await click(button("Codex"));
   await click(button(m.onboarding_continue()));
   assert.equal(document.querySelector('[role="alert"]')?.textContent, m.harness_setup_not_ready());

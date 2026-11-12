@@ -184,7 +184,7 @@ fn matches_agent(harness: &dyn Harness, name: &str) -> bool {
 /// A path with the home directory shortened to `~`, for prompt readability.
 fn tilde(path: &Path) -> String {
     let s = path.to_string_lossy();
-    match dirs::home_dir() {
+    match crate::config::home_dir() {
         Some(home) => match path.strip_prefix(&home) {
             Ok(rel) => format!("~/{}", rel.display()),
             Err(_) => s.into_owned(),
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn tilde_shortens_home() {
-        let home = dirs::home_dir().unwrap();
+        let home = crate::config::home_dir().unwrap();
         assert_eq!(tilde(&home.join(".claude")), "~/.claude");
         assert_eq!(tilde(std::path::Path::new("/etc/hosts")), "/etc/hosts");
     }

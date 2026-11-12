@@ -196,7 +196,7 @@ async fn call(
 ) -> Result<String> {
     match name {
         "models" => {
-            let models = model_routes::models(&catalog(state).await);
+            let models = models(state, None).await?;
             if models.is_empty() {
                 bail!("No agent is ready to run a delegate. The user can sign in to one in OpenResearch.");
             }
@@ -428,7 +428,7 @@ async fn delegate(state: &AppState, caller: &StoredChatSession, args: &Value) ->
         &caller.id,
         notify.then_some((delegation.depth + 1, may_delegate)),
     );
-    let models = model_routes::models(&catalog(state).await);
+    let models = models(state, optional_text(args, "route")).await?;
     let route = model_routes::resolve(&models, text(args, "model")?, optional_text(args, "route"))
         .map_err(|e| anyhow!(e))?;
     let effort = optional_text(args, "effort");
@@ -659,13 +659,31 @@ async fn wait(state: &AppState, caller: &StoredChatSession, args: &Value) -> Res
     }
 }
 
-async fn catalog(state: &AppState) -> Value {
+async fn models(state: &AppState, requested: Option<&str>) -> Result<Vec<model_routes::Model>> {
+    let preferences = Store::open()?.ui_state()?;
+    let owned_providers: Vec<String> =
+        if preferences.hidden_agents.iter().any(|id| id == "opencode") {
+            crate::local::local_models::providers()?
+                .into_keys()
+                .chain(crate::local::local_models::read()?.into_keys())
+                .collect()
+        } else {
+            Vec::new()
+        };
     let query = HarnessQuery {
         refresh: None,
         retry: None,
         harness: None,
     };
-    harnesses_payload(state, &query).await
+    let mut catalog = harnesses_payload(state, &query).await;
+    model_routes::filter_agents(
+        &mut catalog,
+        &preferences.hidden_agents,
+        &owned_providers,
+        requested,
+    )
+    .map_err(|error| anyhow!(error))?;
+    Ok(model_routes::models(&catalog, &preferences.hidden_models))
 }
 
 fn optional_text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {

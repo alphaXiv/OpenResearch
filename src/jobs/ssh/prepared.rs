@@ -265,7 +265,7 @@ pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepare
             return Ok(connection);
         }
     }
-    let config = std::env::var_os("ORX_SSH_CONFIG").map(PathBuf::from);
+    let config = crate::config::ssh_config();
     let connection = resolve_with_agent(
         &target.dest,
         config.as_deref(),
@@ -346,8 +346,8 @@ where
         Err(error)
             if prefix.is_empty() && error.to_string().contains("Bad owner or permissions") =>
         {
-            let home =
-                dirs::home_dir().ok_or_else(|| anyhow!("Could not locate your home directory"))?;
+            let home = crate::config::home_dir()
+                .ok_or_else(|| anyhow!("Could not locate your home directory"))?;
             let fallback = user_or_empty_config(&home)?;
             prefix = vec!["-F".into(), fallback.to_string_lossy().into_owned()];
             let mut retry = prefix.clone();
@@ -414,7 +414,7 @@ where
     let config = match (config, snapshot_config) {
         (Some(path), _) => path.to_path_buf(),
         (None, Some(fallback)) => fallback,
-        (None, None) => dirs::home_dir()
+        (None, None) => crate::config::home_dir()
             .ok_or_else(|| anyhow!("Could not locate your home directory"))?
             .join(".ssh/config"),
     };
@@ -585,7 +585,7 @@ mod tests {
         let calls = calls.into_inner().unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0], vec!["--", "lab"]);
-        let home = dirs::home_dir().unwrap();
+        let home = crate::config::home_dir().unwrap();
         let fallback = user_or_empty_config(&home).unwrap();
         assert_eq!(
             calls[1],

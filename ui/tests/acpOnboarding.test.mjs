@@ -3,10 +3,11 @@ import test from "node:test";
 import { act } from "react";
 import { m } from "../src/paraglide/messages.js";
 import { find, renderApp, serveApp, settle, type } from "./render.mjs";
+import { model } from "./models.mjs";
 
 const preset = { id: "acp:preset", name: "Kimi Code", executable: "kimi", arguments: ["acp"], setupUrl: "https://example.com", needsConnectionAdapter: false };
 const harness = (id, name, extra = {}) => ({
-  id, name, installed: true, installBroken: false, authenticated: true, authState: "ready", agentReady: true, models: [], ...extra,
+  id, name, installed: true, installBroken: false, authenticated: true, authState: "ready", agentReady: true, models: [model("model")], defaultModel: "model", ...extra,
 });
 const codex = harness("codex", "Codex");
 const saved = (extra) => harness("acp:saved", "Saved ACP", extra);
@@ -17,7 +18,7 @@ const click = async (element) => {
 };
 
 test("onboarding selects the registered profile after a preset connects and refreshes", async () => {
-  let harnesses = [codex, saved({ catalogPending: true })];
+  let harnesses = [codex, saved({ catalogPending: true, models: [], defaultModel: undefined })];
   let tested;
   const refreshes = [];
   const saves = [];
@@ -28,6 +29,7 @@ test("onboarding selects the registered profile after a preset connects and refr
       return { harnesses };
     },
     "GET /api/project-path/status": () => ({ gitVersion: "2.50.0", resolvedPath: null, exists: null, directory: null, empty: null, initialized: null }),
+    "GET /api/harnesses/acp": () => [],
     "GET /api/harnesses/acp/presets": () => [preset],
     "POST /api/harnesses/acp/test": () => ({ status: "ok", harnessId: tested }),
     "POST /api/harnesses/acp": (init) => {
@@ -48,7 +50,9 @@ test("onboarding selects the registered profile after a preset connects and refr
   const connect = async (harnessId, name = preset.name) => {
     tested = harnessId;
     const before = refreshes.length;
-    await click(find("button", m.acp_add()));
+    await click(find("button", m.harness_add()));
+    await click(find('[role="dialog"] button', m.add_agent_more()));
+    await click(find('[role="dialog"] button', m.harness_custom_acp()));
     if (name !== preset.name) await type(find('[role="dialog"] label', m.acp_name()).querySelector("input"), name);
     await click(find('[role="dialog"] button', m.settings_connect()));
     assert.equal(dialogs(), 0);

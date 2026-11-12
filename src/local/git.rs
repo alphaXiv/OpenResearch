@@ -54,13 +54,13 @@ pub fn clone_path(owner: &str, repo: &str) -> PathBuf {
     clones_root().join(owner).join(repo)
 }
 
-pub(crate) fn legacy_cache_root() -> PathBuf {
+pub(crate) fn cache_root() -> PathBuf {
     crate::local::shell_env::var("ORX_CACHE_DIR")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .or_else(crate::config::settings_cache_dir)
         .unwrap_or_else(|| {
-            dirs::home_dir()
+            crate::config::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".cache")
                 .join("openresearch")
@@ -282,7 +282,11 @@ pub(crate) struct TemporaryDirectory(PathBuf);
 
 impl TemporaryDirectory {
     pub(crate) fn new(prefix: &str) -> Result<Self> {
-        let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        #[cfg(test)]
+        let base = crate::config::test_home();
+        #[cfg(not(test))]
+        let base = std::env::temp_dir();
+        let path = base.join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path)?;
         Ok(Self(path))
     }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveComposerSelection as derive, formatCodexModel, groupModels, resolveHarnessDefaultModel } from "../src/modelSelection.ts";
+import { tidyModelName as tidy } from "../src/api.ts";
+import { deriveComposerSelection as derive, harnessDisplayName, selectionHarness } from "../src/modelSelection.ts";
+import { model } from "./models.mjs";
 
 const selection = (model) => ({
   harness: "codex",
@@ -13,59 +15,31 @@ const selection = (model) => ({
 const harness = (...models) => ({
   id: "codex",
   agentReady: true,
-  models: models.map((id) => ({ id })),
+  models: models.map((id) => model(id)),
   options: { reasoningLevels: [{ id: "default", label: "Default" }, { id: "high", label: "High" }] },
 });
 
-test("an explicitly entered model id survives composer reconciliation and send", () => {
-  const customId = "gpt-6-preview";
-  const result = derive(selection(customId), harness("gpt-5.5", "gpt-5.6-sol"));
+test("a saved model the catalog doesn't list survives composer reconciliation and send", () => {
+  const saved = "gpt-6-preview";
+  const result = derive(selection(saved), harness("gpt-5.5", "gpt-5.6-sol"));
 
-  assert.equal(result.model, customId);
+  assert.equal(result.model, saved);
   // Both new-session creation and turn sends consume this derived selection.
   const outgoing = { model: result.model, reasoningLevel: result.reasoningLevel };
-  assert.deepEqual(outgoing, { model: customId, reasoningLevel: "high" });
+  assert.deepEqual(outgoing, { model: saved, reasoningLevel: "high" });
 });
 
-test("catalog refreshes do not replace an explicitly entered model id", () => {
-  const custom = selection("provider/new-model");
-  assert.equal(derive(custom, harness("old-model")).model, custom.model);
-  assert.equal(derive(custom, harness("different-model", "new-default")).model, custom.model);
+test("catalog refreshes do not replace a saved model", () => {
+  const saved = selection("provider/new-model");
+  assert.equal(derive(saved, harness("old-model")).model, saved.model);
+  assert.equal(derive(saved, harness("different-model", "new-default")).model, saved.model);
+  assert.equal(derive(saved, harness()).model, saved.model);
 });
 
-test("an empty catalog leaves CLI default and manual IDs selectable", () => {
-  assert.equal(derive(selection(null), harness()).model, null);
-  assert.equal(derive(selection("provider/new-model"), harness()).model, "provider/new-model");
-});
-
-test("Codex legacy defaults resolve to the catalog's newest GPT-Sol", () => {
-  const catalog = harness("gpt-6.9-sol", "gpt-6.10-sol", "gpt-6-astra");
-  assert.equal(derive(selection(null), catalog).model, "gpt-6.10-sol");
-  assert.equal(derive(selection("default"), catalog).model, "gpt-6.10-sol");
-  assert.equal(derive(selection(null), { ...catalog, catalogPending: true }).model, null);
-  assert.equal(derive(selection(null), harness("gpt-6-astra", "other")).model, "gpt-6-astra");
-});
-
-test("an unready Codex catalog does not resolve a legacy default or replace an explicit model", () => {
-  const catalog = { ...harness("gpt-6.10-sol"), agentReady: false, catalogPending: false };
-  assert.equal(resolveHarnessDefaultModel(catalog), null);
-  assert.equal(derive(selection(null), catalog).model, null);
-  assert.equal(derive(selection("default"), catalog).model, "default");
-  assert.equal(derive(selection("my-model"), catalog).model, "my-model");
-  assert.equal(derive(selection(null), { ...catalog, agentReady: true }).model, "gpt-6.10-sol");
-});
-
-test("default resolution uses labels and preserves other harness semantics", () => {
-  assert.equal(resolveHarnessDefaultModel({ id: "codex", agentReady: true, models: [
-    { id: "a", displayName: "GPT 6.9 Sol" },
-    { id: "b", displayName: "gPt 6.10 sOl" },
-  ] }), "b");
-  for (const id of ["cursor", "antigravity", "acp:example"]) {
-    assert.equal(resolveHarnessDefaultModel({ id, models: [{ id: "first" }] }), null);
-    assert.equal(derive({ ...selection(null), harness: id }, { id, models: [{ id: "first" }] }).model, null);
-  }
-  assert.equal(resolveHarnessDefaultModel({ id: "opencode", models: [{ id: "configured" }] }), "configured");
-  assert.equal(resolveHarnessDefaultModel({ id: "opencode", models: [] }), null);
+test("a missing model is never inferred from the catalog", () => {
+  assert.equal(derive(selection(null), harness("gpt-6.10-sol")).model, null);
+  const claude = { id: "claude-code", agentReady: true, models: [model("opus", "Opus 5.5")] };
+  assert.equal(derive({ ...selection(null), harness: "claude-code" }, claude).model, null);
 });
 
 test("catalog models still reconcile their model-specific settings", () => {
@@ -82,23 +56,36 @@ test("catalog models still reconcile their model-specific settings", () => {
   assert.equal(result.reasoningLevel, "medium");
 });
 
-test("model families show newest first and keep older versions searchable", () => {
-  const models = ["Haiku 4.5", "Sonnet 5", "Opus 5.5", "Fable 5.1", "Haiku 5.5", "Opus 4.8", "Mythos 6"].map((name) => ({ id: name, displayName: name }));
-  const grouped = groupModels("claude-code", models);
-  assert.deepEqual(grouped.current.map((m) => m.id), ["Mythos 6", "Fable 5.1", "Opus 5.5", "Sonnet 5", "Haiku 5.5"]);
-  assert.deepEqual(grouped.legacy.map((m) => m.id), ["Opus 4.8", "Haiku 4.5"]);
-  const codex = groupModels("codex", ["gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra", "gpt-6-astra", "gpt-6.1-sol"].map((id) => ({ id })));
-  assert.deepEqual(codex.current.map((m) => m.id), ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]);
-  assert.deepEqual(codex.legacy.map((m) => m.id), ["gpt-6-sol"]);
-  assert.equal(formatCodexModel("GPT-6.1-Sol"), "GPT-6.1 Sol");
+test("a selection finds its agent's entry, and its account's when it names one", () => {
+  const own = { id: "claude-code", name: "Claude Code" };
+  const work = { id: "claude-code", name: "Claude Code", profile: { id: "claude-0123456789", name: "Work" } };
+  const second = { id: "claude-code", name: "Claude Code", profile: { id: "claude-abcdefghij", name: "Claude Code 2" } };
+  const harnesses = [work, own, second];
+  assert.equal(selectionHarness(harnesses, { harness: "claude-code", profile: null }), own);
+  assert.equal(selectionHarness(harnesses, { harness: "claude-code" }), own);
+  assert.equal(selectionHarness(harnesses, { harness: "claude-code", profile: "claude-0123456789" }), work);
+  // A removed account matches nothing rather than the user's own sign-in.
+  assert.equal(selectionHarness(harnesses, { harness: "claude-code", profile: "claude-removed000" }), undefined);
+  assert.equal(selectionHarness(harnesses, null), undefined);
+  assert.equal(harnessDisplayName(own), "Claude Code");
+  assert.equal(harnessDisplayName(work), "Claude Code · Work");
+  assert.equal(harnessDisplayName(second), "Claude Code 2");
 });
 
-
-test("Claude defaults to the latest available Opus", () => {
-  const catalog = { id: "claude-code", agentReady: true, models: [
-    { id: "old", displayName: "Opus 5" }, { id: "opus", displayName: "Opus 5.5" }, { id: "fable", displayName: "Fable 6" },
-  ] };
-  assert.equal(resolveHarnessDefaultModel(catalog), "opus");
-  assert.equal(derive({ ...selection(null), harness: "claude-code" }, catalog).model, "opus");
-  assert.equal(resolveHarnessDefaultModel({ ...catalog, agentReady: false }), null);
+test("model names read the same across catalogs", () => {
+  // DeepSeek Harness names one model by its id and the rest with hyphens; OpenCode's catalog spaces them.
+  assert.equal(tidy("deepseek-v4-flash"), "DeepSeek V4 Flash");
+  assert.equal(tidy("DeepSeek-V4.1-Flash"), "DeepSeek V4.1 Flash");
+  assert.equal(tidy("MiMo-V2.6-Pro"), "MiMo V2.6 Pro");
+  assert.equal(tidy("LongCat-2.0"), "LongCat 2.0");
+  assert.equal(tidy("Hy4 preview"), "Hy4 Preview");
+  // Labs that write their version on keep it.
+  assert.equal(tidy("GLM-5.3-Flash"), "GLM-5.3 Flash");
+  assert.equal(tidy("GPT-6.1-Sol"), "GPT-6.1 Sol");
+  assert.equal(tidy("GPT-OSS 120B (Medium)"), "GPT-OSS 120B (Medium)");
+  // Cursor pads some names with doubled and zero-width spaces.
+  assert.equal(tidy("Grok 4.7  Low Fast\u200b\u200b"), "Grok 4.7 Low Fast");
+  assert.equal(tidy("Default (recommended)"), "Default (recommended)");
+  // A second key's name is the user's own.
+  assert.equal(tidy("Kimi-K3 · my work key"), "Kimi K3 · my work key");
 });

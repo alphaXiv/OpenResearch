@@ -11,8 +11,7 @@ impl Sandbox {
     }
     fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_orx"));
-        cmd.env("HOME", &self.0)
-            .env("USERPROFILE", &self.0)
+        crate::home::isolate_home(&mut cmd, &self.0)
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             .env("ORX_DATA_DIR", self.0.join("data"))
             .env("ORX_NO_UPDATE_CHECK", "1")
@@ -24,9 +23,7 @@ impl Sandbox {
         cmd
     }
     fn stop_service(&self, data: &std::path::Path) {
-        let _ = Command::new(env!("CARGO_BIN_EXE_orx"))
-            .env("HOME", &self.0)
-            .env("USERPROFILE", &self.0)
+        let _ = crate::home::isolate_home(&mut Command::new(env!("CARGO_BIN_EXE_orx")), &self.0)
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             .env("ORX_DATA_DIR", data)
             .args(["ssh-service", "stop"])
@@ -534,9 +531,6 @@ fn custom_instructions_survive_reinstall_and_harness_switches_across_projects() 
         let output = sandbox
             .command()
             .current_dir(&cwd)
-            .env_remove("CODEX_HOME")
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CURSOR_CONFIG_DIR")
             .args(["install-skills", "--agent", "all", "--full"])
             .output()
             .unwrap();

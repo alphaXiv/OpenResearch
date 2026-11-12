@@ -613,16 +613,19 @@ pub(super) async fn spawn(
         .is_some_and(|name| name == "zcode-acp-server")
         && definition.arguments.is_empty();
     let mut command = if zcode {
-        let node = super::executable_path("node")
+        let node = crate::local::harness::managed::node()
+            .or_else(|| super::executable_path("node"))
             .ok_or_else(|| anyhow!("ZCode ACP requires Node.js on PATH"))?;
         let mut command = crate::process::tokio_command(node);
         command
             .args(["-e", include_str!("zcode-runtime.cjs")])
-            .arg(executable)
+            .arg(&executable)
             .arg("--orx-launch");
+        crate::local::chat::prepare_env(&mut command);
+        crate::local::harness::managed::environment(&mut command, &executable);
         command
     } else {
-        crate::process::tokio_command(executable)
+        crate::local::harness::managed::command(&executable)
     };
     command
         .args(&definition.arguments)
@@ -631,7 +634,6 @@ pub(super) async fn spawn(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    crate::local::chat::prepare_env(&mut command);
     if up_port.is_some() {
         crate::local::chat::set_chat_session_env(&mut command, session_id, &definition.id, up_port);
     }
@@ -869,7 +871,7 @@ mod tests {
         Definition {
             id: format!("acp:{}", uuid::Uuid::new_v4()),
             name: "Peer".into(),
-            executable: if cfg!(windows) { "python" } else { "python3" }.into(),
+            executable: crate::local::acp::fake_agent_interpreter("python3"),
             arguments: vec![
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
@@ -981,7 +983,7 @@ mod tests {
             let pids = std::env::temp_dir().join(format!("orx-acp-pids-{}", uuid::Uuid::new_v4()));
             let peer = definition("normal");
             let mut launch = peer.clone();
-            launch.executable = "sh".into();
+            launch.executable = crate::local::acp::fake_agent_interpreter("sh");
             launch.arguments = [
                 "-c".into(),
                 r#"python3 -c 'import os, time; os.setsid(); time.sleep(60)' & echo $! > "$0"
@@ -1224,6 +1226,7 @@ exec "$@""#
         let id = format!("chat_{}", uuid::Uuid::new_v4());
         store
             .create_chat_session(&crate::store::StoredChatSession {
+                profile_id: None,
                 id: id.clone(),
                 project_id: "proj_1".into(),
                 harness: super::super::presets().remove(0).launch.id,

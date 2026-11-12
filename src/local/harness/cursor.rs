@@ -75,20 +75,24 @@ impl Cursor {
             // scan itself costs seconds under load, so the pick the snapshot
             // pass remembered is tried before `cursor_candidates()` runs.
             let mut candidates: Option<Vec<PathBuf>> = None;
-            let shim_pick = super::detect::remembered_bin("cursor")
-                .and_then(|b| bundled_launch(&b).map(|l| (b, l)))
-                .or_else(|| {
-                    let discovered = cursor_candidates();
-                    let pick = super::detect::selected_bin("cursor", discovered.clone())
-                        .and_then(|b| bundled_launch(&b).map(|l| (b, l)))
-                        .or_else(|| {
-                            discovered
-                                .iter()
-                                .find_map(|c| bundled_launch(c).map(|l| (c.clone(), l)))
-                        });
-                    candidates = Some(discovered);
-                    pick
-                });
+            let shim_pick = if super::managed::installed("cursor").is_some() {
+                None
+            } else {
+                super::detect::remembered_bin("cursor")
+                    .and_then(|b| bundled_launch(&b).map(|l| (b, l)))
+                    .or_else(|| {
+                        let discovered = cursor_candidates();
+                        let pick = super::detect::selected_bin("cursor", discovered.clone())
+                            .and_then(|b| bundled_launch(&b).map(|l| (b, l)))
+                            .or_else(|| {
+                                discovered
+                                    .iter()
+                                    .find_map(|c| bundled_launch(c).map(|l| (c.clone(), l)))
+                            });
+                        candidates = Some(discovered);
+                        pick
+                    })
+            };
             let (selected, probes) = match shim_pick {
                 Some((bin, launch)) => {
                     super::detect::remember_selected("cursor", &bin);
@@ -124,14 +128,23 @@ impl Cursor {
         info.agent_ready = info.ready();
         if info.agent_ready {
             if models.is_none() && !snapshot {
-                info.agent_note = Some("Could not load Cursor models. Re-check this harness or update Cursor; the CLI default model is still available.".to_string());
+                info.agent_note = Some(
+                    "Could not load Cursor models. Re-check this agent or update Cursor."
+                        .to_string(),
+                );
             }
-            info = info.with_models(models.unwrap_or_default());
+            let (models, default) = models.unwrap_or_default();
+            info.configured_model =
+                read_json(native_store::cursor_home(NativeStore::Legacy).join("cli-config.json"))
+                    .as_ref()
+                    .and_then(cursor_configured_model)
+                    .or(default);
+            info = info.with_models(models);
         } else if info.install_broken {
             info.agent_note = Some(info.broken_note(CURSOR_REINSTALL));
         } else if info.installed {
             info.agent_note =
-                Some("Sign in with `agent login`, then re-check this harness.".to_string());
+                Some("Sign in with `agent login`, then re-check this agent.".to_string());
         } else {
             info.agent_note = Some(
                 "Install Cursor CLI with `curl https://cursor.com/install -fsS | bash`, then sign in with `agent login`."
@@ -246,10 +259,10 @@ impl Harness for Cursor {
 /// Every `cursor-agent` install, then every `agent` that is actually Cursor, in
 /// preference order. `agent` is a generic name, so a hit is only accepted when
 /// the path (or the symlink it resolves to) names Cursor.
-fn cursor_candidates() -> Vec<PathBuf> {
+pub(crate) fn cursor_candidates() -> Vec<PathBuf> {
     let own = || {
         cfg!(windows)
-            .then(dirs::data_local_dir)
+            .then(crate::config::data_local_dir)
             .flatten()
             .map(|dir| dir.join("cursor-agent"))
     };
@@ -386,7 +399,7 @@ fn cursor_command(bin: &Path) -> Command {
         if let Some(name) = bin.file_name() {
             cmd.env("CURSOR_INVOKED_AS", name);
         }
-        if let Some(local) = dirs::data_local_dir() {
+        if let Some(local) = crate::config::data_local_dir() {
             cmd.env("NODE_COMPILE_CACHE", local.join("cursor-compile-cache"));
         }
         return cmd;
@@ -455,7 +468,9 @@ async fn cursor_command_json(bin: &Path, args: &[&str]) -> Option<Value> {
 /// Without one, `status` is the auth oracle and `models` only runs on a
 /// logged-in verdict — racing it would spend a spawn the other harnesses'
 /// probes need the CPU for.
-async fn cursor_spec_probes(bin: PathBuf) -> (Option<Value>, Option<Vec<ModelInfo>>) {
+async fn cursor_spec_probes(
+    bin: PathBuf,
+) -> (Option<Value>, Option<(Vec<ModelInfo>, Option<String>)>) {
     let status_probe = || {
         super::detect::timed_probe(
             "cursor",
@@ -479,7 +494,35 @@ async fn cursor_spec_probes(bin: PathBuf) -> (Option<Value>, Option<Vec<ModelInf
     (status, models)
 }
 
-async fn cursor_model_list(bin: PathBuf) -> Option<Vec<ModelInfo>> {
+fn cursor_configured_model(config: &Value) -> Option<String> {
+    config["model"]["displayModelId"]
+        .as_str()
+        .filter(|model| super::concrete_model(model))
+        .or_else(|| {
+            config["model"]["modelId"]
+                .as_str()
+                .filter(|model| super::concrete_model(model))
+        })
+        .map(str::to_owned)
+}
+
+#[test]
+fn selected_cursor_config_model_preserves_custom_and_auto_ids() {
+    for id in ["auto", "claude-opus-5-5-high", "custom-route"] {
+        assert_eq!(
+            cursor_configured_model(&serde_json::json!({"model":{"modelId":"provider-model","displayModelId":id,"displayName":"Selected"}}))
+                .as_deref(),
+            Some(id)
+        );
+    }
+    assert_eq!(
+        cursor_configured_model(&serde_json::json!({"model":{"modelId":"auto"}})).as_deref(),
+        Some("auto")
+    );
+    assert_eq!(cursor_configured_model(&serde_json::json!({})), None);
+}
+
+async fn cursor_model_list(bin: PathBuf) -> Option<(Vec<ModelInfo>, Option<String>)> {
     let mut cmd = cursor_command(&bin);
     cmd.args(["models"])
         .stdin(Stdio::null())
@@ -496,7 +539,14 @@ async fn cursor_model_list(bin: PathBuf) -> Option<Vec<ModelInfo>> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let parsed = parse_cursor_model_list(&text);
-    (!parsed.is_empty()).then_some(parsed)
+    let default = text.lines().find_map(|line| {
+        let (id, label) = line.trim().split_once(" - ")?;
+        (label.ends_with(" (current, default)")
+            || label.ends_with(" (current)")
+            || label.ends_with(" (default)"))
+        .then(|| id.to_string())
+    });
+    (!parsed.is_empty()).then_some((parsed, default))
 }
 
 // `agent models` lists `id - display name`, followed by a usage tip.

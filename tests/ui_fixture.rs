@@ -2,6 +2,9 @@
 #![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
+#[path = "common/home.rs"]
+mod home;
+
 use anyhow::{bail, ensure, Context, Result};
 use orx_test_support::{Faults, Process, Sshd, SshdBuilder};
 use serde_json::{json, Value};
@@ -57,13 +60,11 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_orx"));
         let root = self.root.as_path();
-        cmd.env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CODEX_HOME")
+        home::isolate_home(&mut cmd, root)
             .env_remove("ORX_LOCAL_SESSION")
             .env_remove("ORX_UP_AUTH_TOKEN")
             .env_remove("ORX_UP_PORT")
             .env_remove("SSH_AUTH_SOCK")
-            .env("HOME", root)
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("xdg-data"))
             .env("XDG_CACHE_HOME", root.join("cache"))

@@ -2,6 +2,9 @@
 #![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
+#[path = "common/home.rs"]
+mod home;
+
 use orx_host::{platform, read_json, wrapper};
 use orx_host_proto::ProcessIdentity;
 use orx_test_support::Process;
@@ -21,15 +24,11 @@ async fn local_cancel_and_observe_survive_an_orx_up_exec_restart() {
     fs::write(root.join(".ssh/config"), "").unwrap();
     let command = || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_orx"));
-        command
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CODEX_HOME")
+        home::isolate_home(&mut command, &root)
             .env_remove("ORX_LOCAL_SESSION")
             .env_remove("ORX_UP_PORT")
             .env_remove("ORX_UP_AUTH_TOKEN")
             .env_remove("SSH_AUTH_SOCK")
-            .env("HOME", &root)
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_CACHE_HOME", root.join("cache"))
             .env("XDG_DATA_HOME", root.join("xdg-data"))

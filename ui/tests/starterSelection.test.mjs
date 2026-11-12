@@ -4,10 +4,11 @@ import { act, createElement } from "react";
 import { NewProjectForm } from "../src/components/NewProjectForm.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { find, render, serve } from "./render.mjs";
+import { model } from "./models.mjs";
 
 const { setImmediate: realSetImmediate } = globalThis;
 
-test("project creation and debounced prewarm use the current selection, including custom and null OpenCode models", async (t) => {
+test("project creation and debounced prewarm use the current selection, else the first agent's default model", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   /** Runs `ms` of timers, then the requests and renders they start; query notifications also wait on a zero timeout. */
   const advance = async (ms = 0) => {
@@ -23,7 +24,11 @@ test("project creation and debounced prewarm use the current selection, includin
   const created = [];
   const warmed = [];
   serve((path, init) => {
-    if (path === "/api/harnesses") return { harnesses: [{ id: "codex", agentReady: true, models: [{ id: "catalog-default" }] }] };
+    if (path === "/api/harnesses") return { harnesses: [
+      { id: "claude-code", agentReady: false, models: [] },
+      { id: "acp:kimi", agentReady: true, models: [] },
+      { id: "codex", agentReady: true, models: [model("gpt-6.1-sol"), model("catalog-default")], defaultModel: "catalog-default" },
+    ] };
     if (path.startsWith("/api/project-path/status?")) {
       return { gitVersion: "2.50.0", resolvedPath: "/project", exists: true, directory: true, empty: false, initialized: true, gitState: "ready" };
     }
@@ -48,23 +53,23 @@ test("project creation and debounced prewarm use the current selection, includin
   const custom = { harness: "opencode", model: "my-provider/custom-model", permissionMode: null, reasoningLevel: null };
   await view.rerender(form(custom));
   await advance(1200);
-  assert.deepEqual(warmed, [{ harness: "opencode", model: "my-provider/custom-model" }], "changing selection replaces the pending prewarm");
+  assert.deepEqual(warmed, [{ harness: "opencode", model: "my-provider/custom-model", profile: null }], "changing selection replaces the pending prewarm");
 
   const other = { harness: "codex", model: "other" };
   await view.rerender(form(other));
   await advance(600);
   await view.rerender(form({ ...other }));
   await advance(600);
-  assert.deepEqual(warmed.at(-1), other, "an equivalent selection does not restart the debounce");
+  assert.deepEqual(warmed.at(-1), { ...other, profile: null }, "an equivalent selection does not restart the debounce");
 
-  for (const selection of [custom, { harness: "opencode", model: null }, { harness: "claude-code", model: null }, null]) {
+  for (const selection of [custom, null]) {
     await view.rerender(form(selection));
     await advance(1200);
     await act(async () => find("button", m.new_project_use_folder()).click());
     await advance();
-    const agent = selection ? { harness: selection.harness, model: selection.model } : { harness: "codex", model: "catalog-default" };
+    const agent = selection ? { harness: selection.harness, model: selection.model, profile: null } : { harness: "codex", model: "catalog-default", profile: null };
     assert.deepEqual(created.at(-1), agent);
     assert.deepEqual(warmed.at(-1), agent);
   }
-  assert.equal(created.length, 4);
+  assert.equal(created.length, 2);
 });

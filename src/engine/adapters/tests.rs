@@ -1126,20 +1126,10 @@ async fn submission_child() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_engine_at_each_submission_boundary_then_restart_executes_once() {
-    if std::env::var_os("ORX_ADAPTER_CRASH_PARENT").is_none() {
-        let output = crate::process::tokio_command(std::env::current_exe().unwrap())
-            .args(["--exact", "engine::adapters::tests::kill_engine_at_each_submission_boundary_then_restart_executes_once", "--nocapture"])
-            .env("ORX_ADAPTER_CRASH_PARENT", "1")
-            .env(crate::jobs::tinker::API_KEY_ENV, "test-only-tinker-key")
-            .output().await.unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if !crate::config::in_test_child(&[]) {
         return;
     }
+    std::env::set_var(crate::jobs::tinker::API_KEY_ENV, "test-only-tinker-key");
 
     let mut f = Fixture::new().await;
     let local = Local::new(f.server.directory().join("local-runs"));
@@ -1547,6 +1537,40 @@ async fn a_cancel_accepted_while_pinning_stops_before_launch() {
     for never in ["source.tar", "launch.json", "started", "ran"] {
         assert!(!f.dir("pinning").join(never).exists(), "{never}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slurm_script_carries_placement_and_the_users_own_arguments() {
+    let f = Fixture::new().await;
+    f.shim("sbatch", "cat >/dev/null; printf '321\\n'");
+    f.shim("squeue", "exit 0");
+    let slurm = Slurm::new(f.ssh.clone(), f.clock.clone());
+    let mut intent = f.intent("placed", "true", "slurm_job");
+    intent.launch.options = json!({
+        "directives": {
+            "qos": "acc_ehpc",
+            "nodelist": "node[01-02]",
+            "constraint": "a100&ib",
+            "exclude": "node07",
+        },
+        "sbatch_args": ["--rsc p=1:g=1", "--mail-type=END"],
+    });
+    f.submit(&slurm, &intent).await;
+    let script = fs::read_to_string(f.dir("placed").join("job.sbatch")).unwrap();
+    assert!(script.starts_with(
+        "#!/bin/bash\n#SBATCH --constraint=a100&ib\n#SBATCH --exclude=node07\n\
+         #SBATCH --nodelist=node[01-02]\n#SBATCH --qos=acc_ehpc\n\
+         #SBATCH --rsc p=1:g=1\n#SBATCH --mail-type=END\nexec "
+    ));
+
+    let mut split = f.intent("split-argument", "true", "slurm_job");
+    split.launch.options = json!({"sbatch_args": ["--rsc g=1\n#SBATCH --output=elsewhere"]});
+    f.submit(&slurm, &split).await;
+    assert_eq!(
+        f.store().get_run("split-argument").unwrap().unwrap().status,
+        "failed"
+    );
+    assert!(!f.dir("split-argument").exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

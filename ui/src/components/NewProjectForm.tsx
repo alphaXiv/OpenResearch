@@ -93,7 +93,8 @@ export function NewProjectForm({
   const starterSelection = preferredAgent ?? defaultSelection(harnesses);
   const starterHarness = starterSelection?.harness;
   const starterModel = starterSelection?.model ?? null;
-  const starterAgent = starterHarness ? { harness: starterHarness, model: starterModel } : undefined;
+  const starterProfile = starterSelection?.profile ?? null;
+  const starterAgent = starterHarness ? { harness: starterHarness, model: starterModel, profile: starterProfile } : undefined;
   const [mode, setMode] = useState<Mode>(initialPaperId ? "paper" : "blank");
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -300,11 +301,11 @@ export function NewProjectForm({
         paperId: prewarmPaperId ?? undefined,
         path: prewarmPath ?? undefined,
         locale: getLocale(),
-        starterAgent: starterHarness ? { harness: starterHarness, model: starterModel } : undefined,
+        starterAgent,
       }).catch(() => {});
     }, 1200);
     return () => window.clearTimeout(timer);
-  }, [prewarmReady, prewarmName, prewarmPaperId, prewarmPath, starterHarness, starterModel]);
+  }, [prewarmReady, prewarmName, prewarmPaperId, prewarmPath, starterHarness, starterModel, starterProfile]);
 
   const gitMissing = pathStatus?.gitVersion === null;
   const missingLocalFolder =

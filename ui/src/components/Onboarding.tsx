@@ -18,6 +18,7 @@ import { AlertCircle, ArrowLeft, ArrowRight, Plus, RefreshCw, Terminal, Triangle
 import { Wordmark } from "./Wordmark";
 
 import {
+  type AcpDefinition,
   type HarnessSetupCommands,
   reasoningFor,
   type AgentSelection,
@@ -34,6 +35,8 @@ import { claudeProviderLabel } from "./claudeProvider";
 import { HarnessLogo } from "./HarnessLogo";
 import { AcpAuthDialog } from "./AcpAuthDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
+import { AddAgentDialog } from "./AddAgentDialog";
+import { harnessDisplayName, harnessKey, selectionHarness } from "../modelSelection";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 
 import { Hyperspace } from "./Hyperspace";
@@ -120,7 +123,8 @@ export function Onboarding(props: OnboardingProps) {
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
   const [finishErrorDetails, setFinishErrorDetails] = useState("");
-  const [preferredHarness, setPreferredHarness] = useState<HarnessId | null>(null);
+  /** The chosen entry's `harnessKey`: its agent, or its account. */
+  const [preferredHarness, setPreferredHarness] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   // Per-probe, not one shared flag: a git failure must not put a connectivity
   // error on the harness gate it has nothing to do with — or worse, hide the
@@ -131,7 +135,7 @@ export function Onboarding(props: OnboardingProps) {
   // Step 1 requires one genuinely usable harness and local Git. Failed or
   // inconclusive detection never bypasses either gate — and a harness whose
   // snapshot is still being filled in is inconclusive, not ready.
-  const anyAgentReady = harnesses?.some((h) => h.agentReady && !h.catalogPending) ?? false;
+  const anyAgentReady = harnesses?.some((h) => h.defaultModel) ?? false;
   const anyPending = harnesses?.some((h) => h.catalogPending) ?? false;
   const gitReady = remote || gitVersion != null;
 
@@ -170,7 +174,7 @@ export function Onboarding(props: OnboardingProps) {
   );
   useEffect(() => {
     if (harnesses === null) return;
-    const ready = harnesses.filter((h) => h.agentReady && !h.catalogPending);
+    const ready = harnesses.filter((h) => h.defaultModel);
     const added = ready.find((h) => h.id === addedAcpHarness.current);
     if (added) {
       addedAcpHarness.current = null;
@@ -178,9 +182,9 @@ export function Onboarding(props: OnboardingProps) {
       return;
     }
     setPreferredHarness((current) => {
-      if (current && ready.some((h) => h.id === current)) return current;
-      const saved = preferredAgent && ready.find((h) => h.id === preferredAgent.harness);
-      return saved?.id ?? ready[0]?.id ?? null;
+      if (current && ready.some((h) => harnessKey(h) === current)) return current;
+      const saved = selectionHarness(ready, preferredAgent) ?? ready[0];
+      return saved ? harnessKey(saved) : null;
     });
   }, [harnesses, preferredAgent]);
   useEffect(() => setHarnessError(harnessQuery.isError), [harnessQuery.isError, harnessQuery.dataUpdatedAt]);
@@ -230,7 +234,7 @@ export function Onboarding(props: OnboardingProps) {
         };
       });
       const detected = await refreshHarnesses(true, true);
-      const opencode = detected.find((h) => h.id === "opencode" && h.agentReady);
+      const opencode = detected.find((h) => h.id === "opencode" && h.defaultModel);
       if (!opencode) throw new Error(m.onboarding_opencode_not_ready());
       setPreferredHarness("opencode");
       return opencode;
@@ -264,10 +268,10 @@ export function Onboarding(props: OnboardingProps) {
     try {
       const harness = automaticSetup
         ? await startAutomaticSetup()
-        : harnesses?.find((item) => item.id === preferredHarness && item.agentReady && !item.catalogPending);
-      if (!harness) throw new Error(m.harness_setup_not_ready());
+        : harnesses?.find((item) => harnessKey(item) === preferredHarness && item.defaultModel);
+      if (!harness?.defaultModel) throw new Error(m.harness_setup_not_ready());
       if (mode === "setup") return;
-      const selection = selectionFor(harness, harness.models[0]?.id ?? null);
+      const selection = selectionFor(harness, harness.defaultModel);
       const completion = await mutCompleteOnboarding.runAsHeadlessPromise(workspace, selection, {});
       props.onDone(completion.project, completion.selection);
     } catch (error) {
@@ -286,7 +290,7 @@ export function Onboarding(props: OnboardingProps) {
 
   const openAuth = (harness: Harness) => showCustomDialog({
     component: AcpAuthDialog,
-    props: { remote, harness, onReady: (ready) => setPreferredHarness(ready.id) },
+    props: { remote, harness, onReady: (ready) => setPreferredHarness(harnessKey(ready)) },
     onConfirm: () => {},
     onCancel: "close",
   });
@@ -295,7 +299,7 @@ export function Onboarding(props: OnboardingProps) {
     if (!commands) return;
     const open = () => showCustomDialog({
       component: HarnessSetupDialog,
-      props: { harness, commands, onReady: (ready) => setPreferredHarness(ready.id), onAuth: openAuth },
+      props: { harness, commands, profile: harness.profile?.id, onReady: (ready) => setPreferredHarness(harnessKey(ready)), onAuth: openAuth },
       onConfirm: () => {},
       onCancel: "close",
     });
@@ -320,13 +324,13 @@ export function Onboarding(props: OnboardingProps) {
   };
   const continueFromAgents = async () => {
     if (!props.remote) { setStep(2); return; }
-    const harness = harnesses?.find((h) => h.id === preferredHarness && h.agentReady && !h.catalogPending);
+    const harness = harnesses?.find((h) => harnessKey(h) === preferredHarness && h.defaultModel);
     if (finishing) return;
-    if (!harness) { setFinishError(m.harness_setup_not_ready()); return; }
+    if (!harness?.defaultModel) { setFinishError(m.harness_setup_not_ready()); return; }
     setFinishing(true);
     setFinishError(null);
     try {
-      const selection = selectionFor(harness, harness.models[0]?.id ?? null);
+      const selection = selectionFor(harness, harness.defaultModel);
       props.onDone(await mutUpdateUiState.runAsHeadlessPromise(workspace, { preferredAgent: selection }, {}));
     } catch (error) {
       setFinishError(error instanceof Error ? error.message : String(error));
@@ -334,11 +338,12 @@ export function Onboarding(props: OnboardingProps) {
       setFinishing(false);
     }
   };
-  const openAcp = () => showCustomDialog({
+  const openAcp = (definition?: AcpDefinition) => showCustomDialog({
     component: AcpHarnessDialog,
     props: {
+      definition,
       onSaved: (id) => {
-        const ready = queryClient.getQueryData(getHarnessesQuery().queryKey)?.find((h) => h.id === id && h.agentReady && !h.catalogPending);
+        const ready = queryClient.getQueryData(getHarnessesQuery().queryKey)?.find((h) => h.id === id && h.defaultModel);
         addedAcpHarness.current = ready ? null : id;
         if (ready) setPreferredHarness(ready.id);
         load(true, true);
@@ -346,6 +351,14 @@ export function Onboarding(props: OnboardingProps) {
     },
     onConfirm: (save) => save(),
     onCancel: "close",
+  });
+  // The wizard leaves its agent ready, so it becomes the choice. Leaving goes only through
+  // its Cancel button, so a stray Escape or click loses no sign-in.
+  const openAdd = () => showCustomDialog({
+    component: AddAgentDialog,
+    props: { remote: false, onCustomAcp: () => openAcp(), onEditAcp: openAcp },
+    onConfirm: (added) => setPreferredHarness(added.profile ?? added.harness),
+    onCancel: "disable",
   });
 
   const continueHint = checking || (!anyAgentReady && anyPending)
@@ -429,12 +442,13 @@ export function Onboarding(props: OnboardingProps) {
             )}
             <div className="onb-cards flex flex-col gap-3.5">
               {harnesses !== null ? (
-                harnesses.filter((h) => !h.id.startsWith("acp:") || h.installed).map((h) => (
+                // An agent's own sign-in steps aside while it's signed out and an account OpenResearch keeps stands in.
+                harnesses.filter((h) => (["claude-code", "codex", "opencode"].includes(h.id) || h.installed) && (h.profile || h.agentReady || !harnesses.some((other) => other.profile && other.id === h.id))).map((h) => (
                   <AgentCard
-                    key={h.id}
+                    key={harnessKey(h)}
                     h={h}
-                    selected={preferredHarness === h.id}
-                    onSelect={() => { addedAcpHarness.current = null; setPreferredHarness(h.id); }}
+                    selected={preferredHarness === harnessKey(h)}
+                    onSelect={() => { addedAcpHarness.current = null; setPreferredHarness(harnessKey(h)); }}
                     commands={setupCommands.data?.[h.id]}
                     setupPending={h.id === "claude-code" && checkingNetwork}
                     onSetup={() => void openSetup(h)}
@@ -449,7 +463,7 @@ export function Onboarding(props: OnboardingProps) {
                   <Spinner /> {m.onboarding_detecting_claude_code_codex_open_code()}
                 </LoadingRow>
               )}
-              <Button variant="ghost" className="self-start" onClick={() => openAcp()} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
+              <Button variant="ghost" className="self-start" onClick={openAdd} aria-haspopup="dialog"><Plus size={14} />{m.harness_add()}</Button>
             </div>
             {setupCommands.isError && <p className={ONB_CARD_META_CLASS_NAME}>
               {m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => void setupCommands.refetch()}>{m.app_retry()}</Button>
@@ -564,7 +578,8 @@ function agentBadge(h: Harness): { tone: StatusTone; label: string } {
   if (h.catalogPending) return { tone: "warning", label: m.onboarding_checking() };
   if (h.id.startsWith("acp:") && h.authState === "needsLogin") return { tone: "warning", label: m.acp_auth_setup_needed() };
   if (h.authCheckFailed) return { tone: "warning", label: m.onboarding_unable_to_verify() };
-  if (h.id.startsWith("acp:") && h.authState === "ready") return { tone: "success", label: m.acp_credentials_configured() };
+  if (h.agentReady && !h.defaultModel) return { tone: "warning", label: m.settings_no_models() };
+  if (h.id.startsWith("acp:") && h.authState === "ready") return { tone: "success", label: h.authEnvKey ? m.onboarding_api_key() : m.settings_page_ready_to_use() };
   if (h.agentReady) return { tone: "success", label: h.authMethod === "thirdParty" || claudeProviderLabel(h) ? m.settings_page_ready_to_use() : h.authMethod === "local" || !h.authenticated ? m.onboarding_ready() : m.onboarding_signed_in() };
   if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
   if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
@@ -578,9 +593,10 @@ function agentBadge(h: Harness): { tone: StatusTone; label: string } {
   return { tone: "neutral", label: m.onboarding_not_detected() };
 }
 
-function selectionFor(harness: Harness, model: string | null): AgentSelection {
+function selectionFor(harness: Harness, model: string): AgentSelection {
   return {
     harness: harness.id,
+    profile: harness.profile?.id ?? null,
     model,
     permissionMode: harness.options?.defaultPermissionMode ?? null,
     reasoningLevel: reasoningFor(harness, model).defaultId,
@@ -633,8 +649,7 @@ function AgentCard({
         <AgentLogo harness={h.id} logo={h.logo} />
         <span className="flex flex-col gap-1">
           <span className="onb-card-name flex flex-wrap items-center gap-2 text-base font-semibold tracking-tight">
-            {h.name}
-            {h.id.startsWith("acp:") && !h.adapterMissing && <span className="text-sm font-normal text-subtext">{m.acp_via()}</span>}
+            {harnessDisplayName(h)}
             {showStatusDot && (
               <StatusIndicator tone={badge.tone} className="font-normal">{badge.label}</StatusIndicator>
             )}
