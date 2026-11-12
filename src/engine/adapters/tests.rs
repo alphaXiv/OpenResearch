@@ -646,11 +646,7 @@ async fn gigabyte_random_pages_survive_one_hundred_reconnects() {
             .unwrap(),
     );
     let identity = first.0;
-    let mut disconnected = Duration::ZERO;
-    let mut reconnected = Duration::ZERO;
-    let mut read = Duration::ZERO;
     for offset in offsets {
-        let started = Instant::now();
         f.server.proxy().reset().unwrap();
         let mut state = f.ssh.conn.state();
         tokio::time::timeout(
@@ -660,11 +656,7 @@ async fn gigabyte_random_pages_survive_one_hundred_reconnects() {
         .await
         .unwrap()
         .unwrap();
-        disconnected += started.elapsed();
-        let started = Instant::now();
         f.ssh.conn.retry().await.unwrap();
-        reconnected += started.elapsed();
-        let started = Instant::now();
         let mut expected = vec![0; 8192];
         local.seek(SeekFrom::Start(offset)).unwrap();
         local.read_exact(&mut expected).unwrap();
@@ -683,11 +675,7 @@ async fn gigabyte_random_pages_survive_one_hundred_reconnects() {
                 .unwrap(),
         );
         assert_eq!(page.1, expected);
-        read += started.elapsed();
     }
-    eprintln!(
-        "CI reconnect phases: disconnect={disconnected:?}, connect={reconnected:?}, read={read:?}"
-    );
     let (_, final_bytes, eof) = data(
         f.ssh
             .read_log(
