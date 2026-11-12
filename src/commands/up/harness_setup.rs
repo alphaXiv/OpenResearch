@@ -155,7 +155,7 @@ fn update_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
     match harness {
         "claude-code" => Some(("claude update", vec!["update".into()])),
         "codex" => Some(("codex update", vec!["update".into()])),
-        "opencode" => Some(("opencode upgrade", vec!["upgrade".into()])),
+        "opencode" => Some(("", vec![])),
         "antigravity" => Some(("agy update", vec!["update".into()])),
         "cursor" => Some(("agent update", vec!["update".into()])),
         _ => None,
@@ -365,7 +365,8 @@ async fn run(
     {
         run_command = false;
         attempt.record("command_started", "command", None, None, None);
-        command_failure = managed_setup(socket, request, attempt, size, follow_up).await?;
+        command_failure =
+            managed_setup(socket, request, attempt, size, follow_up, &state.agent).await?;
     }
     if run_command {
         let (program, args) = match request.action {
@@ -624,31 +625,28 @@ const MANAGED_ENV: [(&str, &str); 2] = [
     ("OPENCODE_DISABLE_AUTOUPDATE", "1"),
 ];
 
-/// Install and Update for the harnesses orx keeps copies of. An update goes
-/// through the user's own updater first; an install, or an update that cannot
-/// reach the newest release, becomes orx's copy in the cache.
+/// Install or update a managed harness. OpenCode updates are side by side
+/// because its own updater can stay on the installed major.
 async fn managed_setup(
     socket: &mut WebSocket,
     request: &SetupRequest,
     attempt: &SetupAttempt,
     size: &mut PtySize,
     follow_up: &mut FollowUp,
+    opencode_host: &crate::local::opencode::AgentHost,
 ) -> Result<Option<CommandFailure>, String> {
     let harness = request.harness.as_str();
     let user = managed::user_install(harness).await;
     let copy = managed::installed(harness);
-    let major = user
-        .as_ref()
-        .or(copy.as_ref())
-        .map_or(1, |(_, version)| version.major);
-    let release = managed::latest(harness, (harness == "opencode").then_some(major)).await;
+    let release = managed::latest(harness).await;
     if let (Some((_, version)), Ok(release)) = (&user, &release) {
         if *version >= release.version {
             attempt.record("command_completed", "command", None, Some(0), None);
             return Ok(None);
         }
     }
-    if let (Action::Update, Some((bin, _))) = (request.action, &user) {
+    if let (false, Action::Update, Some((bin, _))) = (harness == "opencode", request.action, &user)
+    {
         let (_, args) = update_command(harness).expect("every managed harness can update");
         let program = bin.to_string_lossy().into_owned();
         let (status, output) = run_in_terminal(
@@ -677,12 +675,13 @@ async fn managed_setup(
         Err(error) => return Ok(Some(install_failure(error))),
     };
     if let Some((bin, version)) = &copy {
-        if current_copy(version, &release) && managed::verify(harness, bin, version).await.is_ok() {
+        if *version >= release.version && managed::verify(harness, bin, version).await.is_ok() {
             attempt.record("command_completed", "command", None, Some(0), None);
             return Ok(None);
         }
     }
-    match install_with_progress(socket, harness, &release).await {
+    let host = (harness == "opencode").then_some(opencode_host);
+    match install_with_progress(socket, harness, &release, host).await {
         Some(Ok(_)) => {
             attempt.record("command_completed", "command", None, Some(0), None);
             Ok(None)
@@ -711,6 +710,7 @@ async fn install_with_progress(
     socket: &mut WebSocket,
     harness: &str,
     release: &managed::Release,
+    opencode_host: Option<&crate::local::opencode::AgentHost>,
 ) -> Option<crate::error::Result<std::path::PathBuf>> {
     let name = crate::local::harness::chat_harness(harness)
         .map_or_else(|| harness.to_string(), |h| h.name().to_string());
@@ -726,7 +726,7 @@ async fn install_with_progress(
     let mut progress = move |done: u64, total: Option<u64>| {
         let _ = sender.send((done, total));
     };
-    let install = managed::install(harness, release, &mut progress);
+    let install = managed::install(harness, release, &mut progress, opencode_host);
     tokio::pin!(install);
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
     let megabytes = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1e6);
@@ -773,21 +773,33 @@ static FAILED_UPDATES: std::sync::Mutex<Vec<(&str, semver::Version)>> =
     std::sync::Mutex::new(Vec::new());
 const UPDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
-/// The background half of what the Update button does: the user's own install
-/// is updated once it falls behind, and orx's copy stands in when that fails.
-/// A harness with neither is left alone. Returns whether the binary in use changed.
-pub(super) async fn keep_current(harness: &'static str) -> crate::error::Result<bool> {
+/// Apply the same update policy in the background to harnesses already on disk.
+/// Returns whether the binary in use changed.
+pub(super) async fn keep_current(
+    harness: &'static str,
+    opencode_host: &crate::local::opencode::AgentHost,
+) -> crate::error::Result<bool> {
     let user = managed::user_install(harness).await;
     let copy = managed::installed(harness);
-    let Some(major) = user
-        .as_ref()
-        .or(copy.as_ref())
-        .map(|(_, version)| version.major)
-    else {
+    let opencode = harness == "opencode";
+    if user.is_none()
+        && copy.is_none()
+        && (!opencode || crate::local::opencode::opencode_candidates().is_empty())
+    {
         return Ok(false);
-    };
-    let release = managed::latest(harness, (harness == "opencode").then_some(major)).await?;
-    if let Some((bin, version)) = &user {
+    }
+    if opencode && managed::OPENCODE_IN_USE.try_write().is_err() {
+        return Ok(false);
+    }
+    let release = managed::latest(harness).await?;
+    if opencode
+        && user
+            .as_ref()
+            .is_some_and(|(_, version)| *version >= release.version)
+    {
+        return Ok(false);
+    }
+    if let (false, Some((bin, version))) = (opencode, &user) {
         if *version >= release.version {
             managed::remove_all(harness).await;
             return Ok(copy.is_some());
@@ -823,17 +835,18 @@ pub(super) async fn keep_current(harness: &'static str) -> crate::error::Result<
         }
     }
     if let Some((bin, version)) = &copy {
-        if current_copy(version, &release) && managed::verify(harness, bin, version).await.is_ok() {
+        if *version >= release.version && managed::verify(harness, bin, version).await.is_ok() {
             return Ok(false);
         }
     }
-    managed::install(harness, &release, &mut |_, _| {}).await?;
+    managed::install(
+        harness,
+        &release,
+        &mut |_, _| {},
+        opencode.then_some(opencode_host),
+    )
+    .await?;
     Ok(true)
-}
-
-/// A copy of another major is no stand-in: OpenCode's majors speak different protocols.
-fn current_copy(copy: &semver::Version, release: &managed::Release) -> bool {
-    copy.major == release.version.major && *copy >= release.version
 }
 
 /// An install that produced an executable where there was none, and that
@@ -1287,7 +1300,7 @@ mod tests {
         assert!(!install_command("cursor", true).unwrap().starts_with("npm "));
         assert!(login_command("sh").is_none());
         assert!(update_command("sh").is_none());
-        assert_eq!(update_command("opencode").unwrap().1, vec!["upgrade"]);
+        assert_eq!(update_command("opencode").unwrap().0, "");
         assert!(matches!(
             serde_json::from_value::<SetupRequest>(json!({
                 "harness": "codex", "action": "update"

@@ -18,6 +18,14 @@ pub(crate) enum Protocol {
 }
 
 impl Protocol {
+    pub(crate) fn for_major(major: u64) -> Option<Self> {
+        match major {
+            1 => Some(Self::V1),
+            2 => Some(Self::V2),
+            _ => None,
+        }
+    }
+
     pub fn major(self) -> u64 {
         match self {
             Self::V1 => 1,
@@ -85,10 +93,7 @@ impl ProbeEnvironment {
 /// The user's opencode, unless orx's own copy is newer.
 pub(crate) async fn resolve_binary() -> Result<ResolvedBinary> {
     let user = user_binary().await;
-    let major = user.as_ref().ok().map(|binary| binary.protocol.major());
-    let Some((path, version)) =
-        crate::local::harness::managed::installed_for_major("opencode", major)
-    else {
+    let Some((path, version)) = crate::local::harness::managed::installed("opencode") else {
         return user;
     };
     let current = user.as_ref().is_ok_and(|binary| {
@@ -210,13 +215,8 @@ fn protocol_for_version(version: &str) -> Result<Protocol> {
         .split_whitespace()
         .find_map(|part| semver::Version::parse(part.trim_start_matches('v')).ok())
         .ok_or_else(|| anyhow!("Unrecognized OpenCode version: {version}"))?;
-    match semver.major {
-        1 => Ok(Protocol::V1),
-        2 => Ok(Protocol::V2),
-        _ => Err(anyhow!(
-            "OpenCode {version} is unsupported. Install a V1 or V2 release."
-        )),
-    }
+    Protocol::for_major(semver.major)
+        .ok_or_else(|| anyhow!("OpenCode {version} is unsupported. Install a V1 or V2 release."))
 }
 
 #[derive(Clone)]

@@ -758,6 +758,12 @@ impl AgentHost {
         Ok(())
     }
 
+    pub(crate) async fn retire_idle_children(&self) {
+        for (_, mut agent) in self.inner.lock().await.drain() {
+            let _ = agent.child.kill().await;
+        }
+    }
+
     pub(crate) async fn compact(
         &self,
         project: &LocalProject,
@@ -766,6 +772,7 @@ impl AgentHost {
         model: Option<&str>,
     ) -> Result<()> {
         let operation = async {
+            let _in_use = crate::local::harness::managed::OPENCODE_IN_USE.read().await;
             match self.summarize(session_id, native_id, model).await? {
                 SummarizeOutcome::Compacted => return Ok(()),
                 SummarizeOutcome::NoModel => {

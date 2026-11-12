@@ -32,7 +32,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
   const busy = phase === "running" || phase === "checking";
   const shown = commands[action];
   const command = shown && !shown.includes("\n") ? shown : undefined;
-  const managedFrom = action === "install" ? commands.managedFrom : null;
+  const managedFrom = action !== "login" && !shown ? commands.managedFrom : null;
 
   useEffect(() => {
     cancelled.current = false;
@@ -158,7 +158,9 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
         </Button>
         {phase === "preview" && (
           <Button variant="primary" onClick={() => { setStarted(true); setPhase("running"); }}>
-            {managedFrom ? m.harness_setup_install() : m.harness_setup_approve_run()}
+            {managedFrom
+              ? action === "update" ? m.harness_setup_update() : m.harness_setup_install()
+              : m.harness_setup_approve_run()}
           </Button>
         )}
       </div>

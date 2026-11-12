@@ -5295,15 +5295,14 @@ async fn begin_restart(state: &AppState, own_requests: usize, stop_agents: bool)
     false
 }
 
-/// Once a day, keep each agent orx can install current: through the user's own
-/// updater, else with orx's copy (`harness_setup::keep_current`).
+/// Once a day, check for updates to managed agents already on disk.
 fn spawn_agent_updates(state: AppState) {
     tokio::spawn(async move {
         // Startup detection's probes go first.
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
             for harness in local::harness::managed::HARNESSES {
-                match harness_setup::keep_current(harness).await {
+                match harness_setup::keep_current(harness, &state.agent).await {
                     Ok(false) => {}
                     Ok(true) => {
                         if let Some(info) = local::harness::detect_harness(harness).await {

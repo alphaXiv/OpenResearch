@@ -236,14 +236,22 @@ export function Onboarding(props: OnboardingProps) {
       return opencode;
     })();
     setupTask.current = task;
-    void task.catch(() => {});
+    void task.catch(async () => {
+      const detected = await refreshHarnesses(true, true).catch(() => []);
+      // Installation can succeed before OpenCode has a usable provider.
+      if (detected.some((h) => h.id === "opencode" && h.installed && !h.installBroken)) {
+        setAutomaticSetup(false);
+        setStep((current) => current === 2 ? 1 : current);
+      }
+    });
     return task;
   };
 
   useEffect(() => {
     // Wait out a pending snapshot: an install detection still in flight must
     // not read as "nothing installed" and trigger an unattended setup.
-    if (remote || automaticSetupStarted.current || !harnesses?.length || harnesses.some((h) => h.catalogPending) || !harnesses.every((h) => !h.installed && !h.installBroken)) return;
+    if (remote || automaticSetupStarted.current || !harnesses?.length || harnesses.some((h) => h.catalogPending)) return;
+    if (!harnesses.every((h) => (!h.installed && !h.installBroken) || (h.id === "opencode" && h.installBroken))) return;
     void startAutomaticSetup();
   }, [harnesses, remote]);
 
