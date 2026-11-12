@@ -214,13 +214,13 @@ for (const update of ["event", "refresh"]) {
       if (update === "refresh") await emit("resync.required", {});
       assert.ok(document.querySelector('[data-message-id="accepted"]'));
       assert.equal(input.draft, chat.original);
-      assert.match(input.warning, /Failed to fetch/);
+      assert.ok(input.warning.includes(m.request_connection_lost()), input.warning);
 
       await input.type("edited");
       await chat.unmount();
       input = await chat.reopen();
       assert.equal(input.draft, `${chat.original}edited`);
-      assert.match(input.warning, /Failed to fetch/);
+      assert.ok(input.warning.includes(m.request_connection_lost()), input.warning);
 
       await input.dismissWarning();
       await chat.unmount();
@@ -312,8 +312,8 @@ for (const busy of [false, true]) {
     await chat.reply.reject(lost());
     const input = await chat.reopen();
     assert.equal(input.draft, chat.original);
-    assert.match(input.warning, /Failed to fetch/);
-    assert.equal(reported("Failed to fetch"), false);
+    assert.ok(input.warning.includes(m.request_connection_lost()), input.warning);
+    assert.equal(reported(m.request_connection_lost()), false);
   });
 }
 
@@ -347,7 +347,7 @@ test("an unchanged retry in the same composer keeps its client ID and clears the
   const chat = await compose();
   await chat.input.send();
   await chat.reply.reject(lost());
-  assert.match(chat.input.warning, /Failed to fetch/);
+  assert.ok(chat.input.warning.includes(m.request_connection_lost()), chat.input.warning);
   await chat.input.send();
   const [first, retry] = chat.chat.sent();
   assert.equal(retry.clientTurnId, first.clientTurnId);
@@ -361,7 +361,7 @@ test("sending a different message keeps the warning about an earlier uncertain o
   await chat.input.type("something else");
   await chat.input.send();
   assert.notEqual(chat.chat.sent()[1].clientTurnId, chat.chat.sent()[0].clientTurnId);
-  assert.match(chat.input.warning, /Failed to fetch/);
+  assert.ok(chat.input.warning.includes(m.request_connection_lost()), chat.input.warning);
 });
 
 test("an accepted send leaves the composer empty", async () => {
@@ -422,7 +422,7 @@ test("editing a recovered draft sends it as a new message and keeps the warning"
   await chat.input.send();
   const [first, next] = chat.chat.sent();
   assert.notEqual(next.clientTurnId, first.clientTurnId);
-  assert.match(chat.input.warning, /Failed to fetch/);
+  assert.ok(chat.input.warning.includes(m.request_connection_lost()), chat.input.warning);
 });
 
 test("a session settings refresh does not change the recovered request", async () => {
@@ -445,7 +445,7 @@ for (const [model, name] of [["gpt-6.1-sol", "GPT-6.1 Sol"], ["gpt-6-astra", "GP
     await chat.input.send();
     await chat.reply.reject(lost());
     await chat.input.pick(name);
-    assert.match(chat.input.warning, /Failed to fetch/);
+    assert.ok(chat.input.warning.includes(m.request_connection_lost()), chat.input.warning);
     await chat.input.send();
     const [first, retry] = chat.chat.sent();
     assert.equal(retry.clientTurnId === first.clientTurnId, !changed);
@@ -460,7 +460,7 @@ test("a model change while a send is in flight is not undone by its late failure
   await chat.unmount();
   await chat.reply.reject(lost());
   const input = await chat.reopen();
-  assert.match(input.warning, /Failed to fetch/);
+  assert.ok(input.warning.includes(m.request_connection_lost()), input.warning);
   await input.send();
   const [first, retry] = chat.chat.sent();
   assert.notEqual(retry.clientTurnId, first.clientTurnId);

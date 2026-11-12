@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::git;
 use super::model::{LocalExperiment, LocalProject};
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::store::{log_path, now_ms, Store, StoredChatMessage, StoredChatSession, StoredRun};
 
 pub const EXTENSION: &str = "orx";
@@ -427,6 +427,18 @@ fn copy_into(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Moves a file out of the discarded staging folder, copying when it can't be renamed, as across filesystems.
+fn move_into(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Could not create {}", parent.display()))?;
+    }
+    if std::fs::rename(from, to).is_err() {
+        std::fs::copy(from, to).with_context(|| format!("Could not write {}", to.display()))?;
+    }
+    Ok(())
+}
+
 /// Regular files under `root` as `/`-separated relative paths, hidden the way
 /// the Artifacts tab hides them. Symlinks are skipped so a share never reaches outside the folder.
 fn files_under(root: &Path) -> Result<Vec<String>> {
@@ -511,8 +523,22 @@ pub struct Imported {
     pub missing_branches: Vec<String>,
 }
 
+/// How far an import has got.
+#[derive(Debug, PartialEq)]
+pub enum ImportProgress {
+    /// Bytes unpacked so far of the file's unpacked size, the slow part of a large import.
+    Unpacking { done: u64, total: u64 },
+    /// Cloning the code and adding the experiments, runs and chats.
+    Opening,
+}
+
 /// Open the `.orx` file `file` as a new project cloned into `target`.
-pub fn import(store: &Store, file: &Path, target: &Path) -> Result<Imported> {
+pub fn import(
+    store: &Store,
+    file: &Path,
+    target: &Path,
+    on_progress: &mut dyn FnMut(ImportProgress),
+) -> Result<Imported> {
     // Resolving it first migrates a legacy artifacts folder into place.
     let artifacts_root = super::files::files_root();
     import_into(
@@ -521,6 +547,7 @@ pub fn import(store: &Store, file: &Path, target: &Path) -> Result<Imported> {
         &artifacts_root,
         file,
         target,
+        on_progress,
     )
 }
 
@@ -530,6 +557,7 @@ fn import_into(
     artifacts_root: &Path,
     file: &Path,
     target: &Path,
+    on_progress: &mut dyn FnMut(ImportProgress),
 ) -> Result<Imported> {
     let existed = target.exists();
     if existed && std::fs::read_dir(target)?.next().is_some() {
@@ -539,8 +567,13 @@ fn import_into(
         ));
     }
     let staging = git::TemporaryDirectory::new("orx-share-import")?;
-    let imported = extract(file, staging.path())
-        .and_then(|()| import_staged(store, data_root, artifacts_root, staging.path(), target));
+    let imported = extract(file, staging.path(), &mut |done, total| {
+        on_progress(ImportProgress::Unpacking { done, total })
+    })
+    .and_then(|()| {
+        on_progress(ImportProgress::Opening);
+        import_staged(store, data_root, artifacts_root, staging.path(), target)
+    });
     // Stored paths are Git's resolved top level, so compare resolved paths.
     let registered = || {
         let target = crate::paths::canonicalize(target).ok();
@@ -560,12 +593,17 @@ fn import_into(
     imported
 }
 
-fn extract(file: &Path, to: &Path) -> Result<()> {
+fn extract(file: &Path, to: &Path, on_unpack: &mut dyn FnMut(u64, u64)) -> Result<()> {
     // Uploads arrive as a temp file, so the message names no path.
     let not_a_share = |error: &dyn std::fmt::Display| {
         anyhow!("This is not an OpenResearch project file: {error}")
     };
     let mut zip = zip::ZipArchive::new(std::fs::File::open(file)?).map_err(|e| not_a_share(&e))?;
+    // Declared sizes, only for progress: what is written is bounded by MAX_EXTRACTED_BYTES.
+    let declared = (0..zip.len())
+        .filter_map(|index| zip.by_index_raw(index).ok().map(|entry| entry.size()))
+        .fold(0u64, u64::saturating_add);
+    on_unpack(0, declared);
     let mut total: u64 = 0;
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index).map_err(|e| not_a_share(&e))?;
@@ -581,15 +619,39 @@ fn extract(file: &Path, to: &Path) -> Result<()> {
         }
         // Bounded by the remaining budget, since an entry's declared size can't be trusted.
         let room = MAX_EXTRACTED_BYTES.saturating_sub(total);
-        total += std::io::copy(
-            &mut (&mut entry).take(room + 1),
-            &mut std::fs::File::create(&path)?,
-        )?;
+        let mut out = Unpacking {
+            file: std::fs::File::create(&path)?,
+            written: total,
+            total: declared,
+            on_unpack: &mut *on_unpack,
+        };
+        total += std::io::copy(&mut (&mut entry).take(room + 1), &mut out)?;
         if total > MAX_EXTRACTED_BYTES {
             return Err(not_a_share(&"it is too large once extracted"));
         }
     }
     Ok(())
+}
+
+/// A file being unpacked, reporting the bytes written across the whole archive.
+struct Unpacking<'a> {
+    file: std::fs::File,
+    written: u64,
+    total: u64,
+    on_unpack: &'a mut dyn FnMut(u64, u64),
+}
+
+impl std::io::Write for Unpacking<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.file.write(bytes)?;
+        self.written += written as u64;
+        (self.on_unpack)(self.written, self.total.max(self.written));
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 fn import_staged(
@@ -669,7 +731,7 @@ fn import_staged(
         .filter(|harness| known(harness))
         .unwrap_or_else(|| "claude-code".to_string());
 
-    // Rows go in one short transaction; files are copied once they are committed.
+    // Rows go in one short transaction; files are moved once they are committed.
     let tx = store.begin_immediate()?;
     let mut project = super::projects::create_project(
         store,
@@ -763,17 +825,17 @@ fn import_staged(
     tx.commit()?;
 
     let artifacts_existed = artifacts.exists();
-    let mut copied = Vec::new();
-    let files = copy_shared_files(
+    let mut placed = Vec::new();
+    let files = move_shared_files(
         staging,
         &artifacts,
         data_root,
         &manifest,
         &run_ids,
-        &mut copied,
+        &mut placed,
     );
     if let Err(error) = files {
-        for path in &copied {
+        for path in &placed {
             let _ = std::fs::remove_file(path);
         }
         if !artifacts_existed {
@@ -895,15 +957,15 @@ fn shared_session(
     Ok(Some((session, messages)))
 }
 
-/// Copy the share's artifacts and run logs into place, recording each file written.
+/// Move the share's artifacts and run logs into place, recording each file placed.
 /// Files already in the artifacts folder (kept from a deleted project with this slug) are left alone.
-fn copy_shared_files(
+fn move_shared_files(
     staging: &Path,
     artifacts: &Path,
     data_root: &Path,
     manifest: &Manifest,
     run_ids: &HashMap<&str, String>,
-    copied: &mut Vec<PathBuf>,
+    placed: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let shared_artifacts = staging.join("artifacts");
     if shared_artifacts.is_dir() {
@@ -913,8 +975,8 @@ fn copy_shared_files(
             if to.exists() {
                 continue;
             }
-            copy_into(&shared_artifacts.join(&relative), &to)?;
-            copied.push(to);
+            move_into(&shared_artifacts.join(&relative), &to)?;
+            placed.push(to);
         }
     }
     for run in manifest.runs.iter().filter(|run| run.log) {
@@ -924,8 +986,8 @@ fn copy_shared_files(
         let shared_log = staging.join(format!("logs/{name}.log"));
         if shared_log.is_file() {
             let to = log_path(data_root, id);
-            copy_into(&shared_log, &to)?;
-            copied.push(to);
+            move_into(&shared_log, &to)?;
+            placed.push(to);
         }
     }
     Ok(())
@@ -1149,7 +1211,7 @@ mod tests {
             .unwrap();
         zip.write_all(b"x").unwrap();
         zip.finish().unwrap();
-        let error = extract(&file, &root.join("out")).unwrap_err();
+        let error = extract(&file, &root.join("out"), &mut |_, _| {}).unwrap_err();
         assert!(error.to_string().contains("unsafe path"), "{error}");
         assert!(!root.join("escaped.txt").exists());
         assert!(safe_name("../x").is_none());
@@ -1298,7 +1360,7 @@ mod tests {
 
         // The sharer's ACP agent is one this machine has never configured.
         let unpacked = root.join("unpacked");
-        extract(&file, &unpacked).unwrap();
+        extract(&file, &unpacked, &mut |_, _| {}).unwrap();
         let mut edited: serde_json::Value =
             serde_json::from_slice(&std::fs::read(unpacked.join(MANIFEST)).unwrap()).unwrap();
         edited["chats"][0]["harness"] = "acp:not-on-this-machine".into();
@@ -1308,14 +1370,27 @@ mod tests {
         let recipient_data = root.join("recipient-data");
         let recipient = Store::open_at(recipient_data.clone()).unwrap();
         let target = root.join("copy");
+        let mut steps = Vec::new();
         let imported = import_into(
             &recipient,
             &recipient_data,
             &recipient_data.join("files"),
             &file,
             &target,
+            &mut |step| steps.push(step),
         )
         .unwrap();
+        assert_eq!(steps.pop(), Some(ImportProgress::Opening));
+        let unpacked: Vec<_> = steps
+            .iter()
+            .map(|step| match step {
+                ImportProgress::Unpacking { done, total } => (*done, *total),
+                ImportProgress::Opening => panic!("opened before unpacking finished: {steps:?}"),
+            })
+            .collect();
+        let (done, total) = *unpacked.last().unwrap();
+        assert!(total > 0 && done == total, "{unpacked:?}");
+        assert!(unpacked.windows(2).all(|pair| pair[0].0 <= pair[1].0));
 
         assert_eq!(
             imported.missing_branches,
@@ -1409,6 +1484,7 @@ mod tests {
             &recipient_data.join("files"),
             &file,
             &target,
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(occupied.to_string().contains("not empty"), "{occupied}");
@@ -1419,7 +1495,8 @@ mod tests {
             &recipient_data,
             &recipient_data.join("files"),
             &not_a_share,
-            &root.join("absent")
+            &root.join("absent"),
+            &mut |_| {}
         )
         .is_err());
         assert!(!root.join("absent").exists());
@@ -1436,7 +1513,8 @@ mod tests {
             &blocked_data,
             &blocked_files,
             &file,
-            &blocked_target
+            &blocked_target,
+            &mut |_| {}
         )
         .is_err());
         assert!(blocked.list_local_projects().unwrap().is_empty());
