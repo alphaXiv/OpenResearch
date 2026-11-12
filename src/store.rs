@@ -970,7 +970,9 @@ impl Store {
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
-        conn.execute_batch(
+        let schema =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+        schema.execute_batch(
             "CREATE TABLE IF NOT EXISTS store_metadata (
                 key TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
@@ -1336,9 +1338,9 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN notify_cursor TEXT",
             "ALTER TABLE runs ADD COLUMN started_at INTEGER",
         ] {
-            let _ = conn.execute(ddl, []);
+            let _ = schema.execute(ddl, []);
         }
-        conn.execute_batch(
+        schema.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS delete_run_outbox AFTER DELETE ON runs BEGIN
                  DELETE FROM run_notices WHERE run_id = OLD.id;
                  DELETE FROM run_subscriptions WHERE run_id = OLD.id;
@@ -1349,17 +1351,18 @@ impl Store {
              END;",
         )?;
         // Covers the periodic native-id scan so it never reads the large parts_json.
-        conn.execute_batch(
+        schema.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
              ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
         // A delegate that outlives its delegator, in a worktree of its own, stands as the user's.
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_delegates AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_delegates WHERE session_id = OLD.id OR parent_session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_delegates AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_delegates WHERE session_id = OLD.id OR parent_session_id = OLD.id; END;")?;
+        schema.commit()?;
         conn.execute(
             "DELETE FROM native_invocation_identities WHERE session_id IS NULL AND created_at < ?1",
             [now_ms() - 7 * 24 * 60 * 60 * 1000],
@@ -6230,6 +6233,56 @@ fn real_path_under<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_setup_rolls_back_when_a_later_statement_fails() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-schema-rollback").unwrap();
+        let conn = Connection::open(dir.path().join("orx.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE preserved (value TEXT);
+             INSERT INTO preserved VALUES ('kept');
+             CREATE VIEW runs AS SELECT 'id' AS id;",
+        )
+        .unwrap();
+
+        assert!(Store::open_at(dir.path().to_path_buf()).is_err());
+        let schema_created: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'store_metadata')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!schema_created);
+
+        conn.execute_batch("DROP VIEW runs").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        let preserved: String = store
+            .conn
+            .query_row("SELECT value FROM preserved", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(preserved, "kept");
+    }
+
+    #[test]
+    fn concurrent_opens_apply_the_schema_without_partial_state() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-schema-concurrent").unwrap();
+        let ready = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        ready.wait();
+                        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+                        assert!(!store.ui_state().unwrap().onboarding_completed);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+    }
 
     #[test]
     fn min_reader_version_refuses_before_migrations_on_every_open() {
