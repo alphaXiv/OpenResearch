@@ -5523,20 +5523,63 @@ fn spawn_agent_updates(state: AppState) {
         // Startup detection's probes go first.
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
-            for harness in local::harness::managed::harnesses() {
-                match harness_setup::keep_current(harness).await {
-                    Ok(false) => {}
-                    Ok(true) => {
-                        if let Some(info) = local::harness::detect_harness(harness).await {
-                            publish_harness(&state, &info).await;
-                        }
-                    }
-                    Err(error) => eprintln!("orx up: could not update {harness}: {error:#}"),
-                }
-            }
+            update_agents(&state, harness_setup::keep_current).await;
             tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
         }
     });
+}
+
+/// One pass of [`spawn_agent_updates`]. An agent signed out on every account
+/// is left alone, so its vendor's release feed hears only from agents in use;
+/// one whose sign-in is unknown is still kept current. A runtime follows the
+/// agent that installs it.
+async fn update_agents<F>(state: &AppState, keep_current: impl Fn(&'static str) -> F)
+where
+    F: std::future::Future<Output = crate::error::Result<bool>>,
+{
+    let fresh = state
+        .harnesses
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|(at, _)| at.elapsed() < HARNESS_CACHE_TTL);
+    let query = HarnessQuery {
+        refresh: (!fresh).then_some(1),
+        ..Default::default()
+    };
+    let payload = harnesses_payload(state, &query).await;
+    let entries = payload["harnesses"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    for harness in local::harness::managed::harnesses() {
+        let auth_states: Vec<&Value> = entries
+            .iter()
+            .filter(|entry| {
+                entry["id"].as_str().is_some_and(|id| {
+                    let agent = local::harness::managed::key(id);
+                    agent == harness || local::harness::managed::runtime(&agent) == Some(harness)
+                })
+            })
+            .map(|entry| &entry["authState"])
+            .collect();
+        let signed_out =
+            !auth_states.is_empty() && auth_states.iter().all(|state| *state == "needsLogin");
+        if signed_out {
+            continue;
+        }
+
+        match keep_current(harness).await {
+            Ok(false) => {}
+            Ok(true) => {
+                if let Some(info) = local::harness::detect_harness(harness).await {
+                    publish_harness(state, &info).await;
+                }
+            }
+            Err(error) => eprintln!("orx up: could not update {harness}: {error:#}"),
+        }
+    }
 }
 
 /// Startup summary of detected coding agents. Never blocks. It goes through
@@ -12081,6 +12124,74 @@ mod tests {
         assert_eq!(body["code"], "opencode1");
         assert!(body["error"].as_str().unwrap().contains("Update OpenCode"));
         assert!(opencode_v2(local::opencode::Protocol::V2).is_ok());
+    }
+
+    #[tokio::test]
+    async fn daily_update_pass_skips_agents_signed_out_on_every_account() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = test_state();
+        let work = local::agent_profiles::create("codex", "Work", None).unwrap();
+        let preset = |executable: &str| {
+            local::acp::presets()
+                .into_iter()
+                .find(|preset| preset.launch.executable == executable)
+                .unwrap()
+                .launch
+                .id
+        };
+        *state.harnesses.lock().await = Some((
+            std::time::Instant::now(),
+            json!({"harnesses":[
+                {"id":"opencode","authState":"needsLogin"},
+                {"id":preset("dsh"),"authState":"needsLogin"},
+                {"id":preset("pi-acp"),"authState":"needsLogin"},
+                {"id":"codex","authState":"needsLogin"},
+                {"id":"codex","profile":{"id":work},"authState":"ready"},
+                {"id":"cursor","authState":"ready"},
+                {"id":"antigravity","authState":"unknown"},
+            ]}),
+        ));
+        let checked = std::sync::Mutex::new(Vec::new());
+
+        update_agents(&state, |harness| {
+            checked.lock().unwrap().push(harness);
+            async { Ok(false) }
+        })
+        .await;
+
+        let expected: Vec<_> = local::harness::managed::harnesses()
+            .filter(|harness| !["opencode", "dsh", "pi-acp", "pi"].contains(harness))
+            .collect();
+        assert_eq!(checked.into_inner().unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn daily_update_pass_rechecks_an_expired_sign_in() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let empty = std::env::temp_dir().join("bin");
+        std::fs::create_dir(&empty).unwrap();
+        std::env::set_var("PATH", &empty);
+        let state = test_state();
+        let expired = std::time::Instant::now()
+            .checked_sub(HARNESS_CACHE_TTL)
+            .unwrap();
+        *state.harnesses.lock().await = Some((
+            expired,
+            json!({"harnesses":[{"id":"opencode","authState":"needsLogin"}]}),
+        ));
+        let checked = std::sync::Mutex::new(Vec::new());
+
+        update_agents(&state, |harness| {
+            checked.lock().unwrap().push(harness);
+            async { Ok(false) }
+        })
+        .await;
+
+        assert!(checked.into_inner().unwrap().contains(&"opencode"));
     }
 
     #[tokio::test]

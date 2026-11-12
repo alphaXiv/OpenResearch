@@ -10,13 +10,9 @@ export type Request = { service: 'openresearch' | 'refused'; method: string; tar
 
 export type Outside = Awaited<ReturnType<typeof startOutside>>
 
-/**
- * Traffic arc/storage.md's "What leaves the machine" lists for what the specs do: the release check,
- * and a minute after start the daily agent release check for the installed `claude`, and on macOS
- * ChatGPT.app's Codex.
- */
+/** Traffic arc/storage.md's "What leaves the machine" lists for what the specs do: the release check. */
 export function listedEgress({ method, target }: Request) {
-  return method === 'CONNECT' && ['github.com:443', 'downloads.claude.ai:443', 'releases.openai.com:443'].includes(target)
+  return method === 'CONNECT' && target === 'github.com:443'
 }
 
 export async function startOutside() {
