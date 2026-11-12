@@ -137,7 +137,7 @@ pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence:
         .and_then(Value::as_str);
     let method = reported_method.and_then(|method| match method.to_ascii_lowercase().as_str() {
         "oauth" | "claude.ai" => Some("oauth"),
-        "api-key" | "api_key" | "apikey" => Some("apiKey"),
+        "api-key" | "api_key" | "apikey" | "api_key_helper" => Some("apiKey"),
         "third_party" | "third-party" => Some("thirdParty"),
         _ => None,
     });
@@ -4400,6 +4400,16 @@ mod tests {
         );
         assert_eq!(key.method, Some("apiKey"));
         assert_eq!(key.provider.as_deref(), Some("bedrock"));
+        let helper = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"api_key_helper","apiProvider":"firstParty","apiKeySource":"ANTHROPIC_API_KEY"}"#,
+            2,
+        );
+        assert_eq!(helper.method, Some("apiKey"));
+        assert_eq!(
+            gate_oauth_version(helper, None).state,
+            HarnessAuthState::Ready
+        );
 
         let signed_out = parse_auth_status(
             Some(1),

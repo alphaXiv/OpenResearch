@@ -686,7 +686,7 @@ fn read_auth(home: &Path, info: &mut HarnessInfo) {
 /// A profile's sign-in, and with `models` its own catalog, for when the user's
 /// own Codex is signed out and has none to share.
 pub(crate) async fn profile_auth(bin: Option<&Path>, home: &Path, version: Option<&str>) -> Value {
-    let mut info = HarnessInfo::new("codex", "Codex");
+    let mut info = HarnessInfo::new("codex", "OpenAI Codex");
     read_auth(home, &mut info);
     let state = if info.authenticated {
         super::HarnessAuthState::Ready
@@ -1020,7 +1020,7 @@ impl Harness for Codex {
     }
 
     fn name(&self) -> &'static str {
-        "Codex"
+        "OpenAI Codex"
     }
 
     fn supports_chat(&self) -> bool {

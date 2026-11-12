@@ -138,6 +138,9 @@ export class RejectedResponseError extends Error {}
 /** OpenCode 1 can't do this; updating it or using OpenResearch's copy can. */
 export class OpenCode1Error extends RejectedResponseError {}
 
+/** A model server that takes an API key was asked without one. */
+export class NeedsKeyError extends RejectedResponseError {}
+
 /** A rejected save whose messages each belong to one form field, keyed as in the request body. */
 export class FieldErrors extends RejectedResponseError {
   constructor(message: string, readonly fields: Record<string, string[]>) {
@@ -1887,11 +1890,12 @@ export function createApi(
             throw new FileChangedError(message, currentVersion, parsed.exists);
           }
           if (res.status === 409 && "code" in parsed && parsed.code === "opencode1") throw new OpenCode1Error(message);
+          if (res.status === 400 && "code" in parsed && parsed.code === "needsKey") throw new NeedsKeyError(message);
           if (res.status === 400 && "fields" in parsed && typeof parsed.fields === "object" && parsed.fields !== null)
             throw new FieldErrors(message, parsed.fields as Record<string, string[]>);
         }
       } catch (error) {
-        if (error instanceof FileChangedError || error instanceof OpenCode1Error || error instanceof FieldErrors) throw error;
+        if (error instanceof FileChangedError || error instanceof RejectedResponseError) throw error;
         // non-JSON body — show it raw
       }
       const ErrorType = res.status >= 400 && res.status < 500 ? RejectedResponseError : Error;

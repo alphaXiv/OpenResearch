@@ -407,6 +407,18 @@ pub fn is_loopback_url(value: &str) -> bool {
         })
 }
 
+/// The server answered that it takes an API key, and none was sent.
+#[derive(Debug)]
+pub struct NeedsKey;
+
+impl std::fmt::Display for NeedsKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The server requires an API key. Enter its key and try again.")
+    }
+}
+
+impl std::error::Error for NeedsKey {}
+
 pub async fn discover(req: &Probe) -> Result<Vec<String>> {
     let local = is_loopback_url(&req.base_url);
     if !local && !is_remote_url(&req.base_url) {
@@ -433,10 +445,15 @@ pub async fn discover(req: &Probe) -> Result<Vec<String>> {
             anyhow!("Cannot reach the server. Check the address and try again.")
         }
     })?;
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(anyhow!(
-            "The server requires an API key. Enter its key and try again."
-        ));
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return Err(if req.api_key.is_empty() {
+            NeedsKey.into()
+        } else {
+            anyhow!("The server didn't accept this key. Check the key and try again.")
+        });
     }
     let response = response.error_for_status().map_err(|e| {
         anyhow!(
@@ -794,6 +811,36 @@ mod tests {
         )
         .is_err());
         assert_eq!(config["agents"]["title"], "invalid");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_takes_a_key_asks_for_one_then_judges_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/v1/models",
+                    axum::routing::get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let probe = |api_key: &str| Probe {
+            base_url: base.clone(),
+            api_key: api_key.into(),
+        };
+        let error = discover(&probe("")).await.unwrap_err();
+        assert!(error.downcast_ref::<NeedsKey>().is_some(), "{error}");
+        let error = discover(&probe("wrong")).await.unwrap_err();
+        assert!(error.downcast_ref::<NeedsKey>().is_none());
+        assert!(
+            error.to_string().contains("didn't accept this key"),
+            "{error}"
+        );
+        server.abort();
     }
 
     #[tokio::test]

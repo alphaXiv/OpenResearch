@@ -216,6 +216,7 @@ export function HarnessLogo({ harness, logo, size = 16 }: { harness: HarnessId; 
     return (
       <svg className={cls} width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
         <path d="M22 24H2V0h20zM17 4.8H7v14.4h10z" />
+        <path d="M17 9.6H7v9.6h10z" fillOpacity={0.3} />
       </svg>
     );
   }
