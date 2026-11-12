@@ -8,7 +8,7 @@ pub struct ModalAccount;
 
 #[async_trait]
 impl Api for ModalAccount {
-    type Cursor = u64;
+    type Cursor = modal::LogResume;
 
     async fn launch(&self, intent: &RunIntent, _fence: &Fence<'_>) -> Result<Handle, LaunchError> {
         let mut spec: modal::ModalJobSpec =
@@ -36,23 +36,29 @@ impl Api for ModalAccount {
     async fn logs(
         &self,
         run: &WatchedRun,
-        cursor: &mut u64,
+        cursor: &mut modal::LogResume,
         window: std::time::Duration,
-        sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+        sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c modal::LogResume>) + Send),
     ) -> Result<bool> {
+        let id = api::id(run, "modal_job", None, None)?;
+        let idle = crate::config::paced(api::STREAM_IDLE);
         let mut received = 0;
         let outcome = {
-            let mut lines = api::lines(sink, &mut received);
-            let pass = modal::stream_logs(
-                api::id(run, "modal_job", None, None)?,
-                *cursor,
-                None,
-                &mut lines,
-            );
-            tokio::time::timeout(window, pass).await
+            let mut counted = |bytes: &[u8]| {
+                received += bytes.len() as u64;
+                sink(bytes, None);
+            };
+            let follow = async {
+                while !modal::stream_logs(id, cursor, idle, &mut counted).await? {}
+                Ok(())
+            };
+            tokio::time::timeout(window, follow).await
         };
-        let closed = api::closed(outcome, received)?;
-        *cursor += received;
-        Ok(closed.is_some())
+        Ok(api::closed(outcome, received)?.is_some())
+    }
+
+    /// The launcher replays the whole log from its start, so the spool's length is the cursor.
+    fn resume(len: u64) -> Option<modal::LogResume> {
+        Some(modal::LogResume::from_start(len))
     }
 }

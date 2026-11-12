@@ -779,10 +779,12 @@ const SHARED_SSH_LOCK: (&str, &str) = ("run-logs", ".supervisor.shared-ssh.lock"
 /// The kept end of an engine run's log too large to keep whole.
 const TAIL_LOG: (&str, &str) = ("run-logs", ".tail.log");
 /// Per-run files as (data-dir root, name suffix); the supervisor lock goes last so it excludes until the end.
-const RUN_ARTIFACTS: [(&str, &str); 18] = [
+const RUN_ARTIFACTS: [(&str, &str); 20] = [
     ("local-runs", ""),
     ("run-logs", ".log"),
     ("run-logs", ".spool.log"),
+    ("run-logs", ".spool.json"),
+    ("run-logs", ".spool.json.part"),
     ("run-logs", ".log.part"),
     ("run-logs", ".log.part.json"),
     TAIL_LOG,

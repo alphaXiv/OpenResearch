@@ -3,12 +3,13 @@
 //! Paths and body shapes mirror huggingface_hub's `hf_api.py`/`_jobs_api.py`:
 //!   POST {endpoint}/api/jobs/{namespace}            run a job
 //!   GET  {endpoint}/api/jobs/{namespace}/{id}       inspect
-//!   GET  {endpoint}/api/jobs/{namespace}/{id}/logs  SSE log stream
+//!   GET  {endpoint}/api/jobs/{namespace}/{id}/logs  SSE log stream, `?tail=N` for the last N lines
 //!   POST {endpoint}/api/jobs/{namespace}/{id}/cancel
 //!   GET  {endpoint}/api/whoami-v2                   token → namespace
 //! Wire fields are camelCase; `timeoutSeconds` is integer seconds; auth is a
 //! plain `Bearer` header on every call including the log stream.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
@@ -16,7 +17,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::managed_env::ManagedEnv;
@@ -446,74 +447,204 @@ pub async fn cancel_job(token: &str, namespace: &str, job_id: &str) -> Result<()
     Ok(())
 }
 
-/// One pass over the job's SSE log stream, invoking `sink` per log line.
+/// HF serves a line longer than this as several events of exactly this many bytes, with no
+/// marker on the pieces; a replay may split a line that the live stream sent whole.
+const PARTIAL_EVENT: usize = 16 * 1024;
+
+/// Lines a reconnect asks for first. A tail that does not reach back past what was kept may
+/// have skipped output, so the reconnect falls back to the whole replay.
+const RESUME_TAIL: usize = 100;
+
+/// Where the run log left off: the timestamp of the newest line kept, and how many bytes of
+/// lines carrying it were written, so a replay chunked differently resumes at the same byte.
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LogResume {
+    key: String,
+    tied: u64,
+}
+
+/// One connection's progress through the events HF replays.
+struct Pass {
+    /// Bytes of lines at the resume timestamp this replay has yet to repeat.
+    tied: u64,
+    caught_up: bool,
+    /// The previous event was a piece of a longer line, so this one continues it.
+    continues: bool,
+    line: Line,
+}
+
+/// What a replayed line is to the resume point; a continuation inherits its line's.
+#[derive(Clone, Copy, PartialEq)]
+enum Line {
+    Kept,
+    Tied,
+    Skipped,
+    /// Kept without moving the resume point: unstamped, or stamped earlier after catching up.
+    Untracked,
+}
+
+impl LogResume {
+    /// The part of `event` not yet written, judged by the timestamp of the line it belongs to.
+    /// Only the replay is filtered, as for [`crate::jobs::kubernetes::LogResume`].
+    fn admit<'a>(&mut self, pass: &mut Pass, key: Option<String>, event: &'a [u8]) -> &'a [u8] {
+        if !pass.continues {
+            pass.line = match key {
+                None => Line::Untracked,
+                Some(key) => match key.cmp(&self.key) {
+                    Ordering::Less if pass.caught_up => Line::Untracked,
+                    Ordering::Less => Line::Skipped,
+                    Ordering::Equal if !pass.caught_up => Line::Tied,
+                    Ordering::Equal => Line::Kept,
+                    Ordering::Greater => {
+                        self.key = key;
+                        self.tied = 0;
+                        Line::Kept
+                    }
+                },
+            };
+        }
+        let fresh = match pass.line {
+            Line::Skipped => &event[..0],
+            Line::Tied => {
+                let seen = pass.tied.min(event.len() as u64);
+                pass.tied -= seen;
+                &event[seen as usize..]
+            }
+            Line::Kept | Line::Untracked => event,
+        };
+        if !fresh.is_empty() && pass.line != Line::Untracked {
+            pass.caught_up = true;
+            self.tied += fresh.len() as u64;
+        }
+        fresh
+    }
+}
+
+/// How one connection to the log stream ended.
+enum Ended {
+    Closed,
+    Idle,
+    /// The tail began after what was kept.
+    Gap,
+}
+
+/// Follows the job's SSE log stream from `resume`, handing `sink` new lines' bytes with the
+/// resume point past them. A line gets back the newline the stream strips, unless it continues
+/// in the next event.
 ///
-/// `skip` dedups replayed history on reconnect: the server replays the stream
-/// from the start each time, so the caller passes how many data events it has
-/// already consumed. Returns the new total. Ends when the server closes the
-/// stream or nothing arrives for `idle_timeout` (the supervisor then re-checks
-/// job state and reconnects if it's still live).
+/// The server replays its retained history on every connection, so a reconnect asks for a
+/// short tail and drops what `resume` says was written. True when the server closed the stream;
+/// false after `idle` without log data, which keep-alive comments do not count as.
 pub async fn stream_logs(
     token: &str,
     namespace: &str,
     job_id: &str,
-    skip: u64,
-    idle_timeout: Option<Duration>,
-    sink: &mut (dyn FnMut(&str) + Send),
-) -> Result<u64> {
+    resume: &mut LogResume,
+    idle: Duration,
+    sink: &mut (dyn FnMut(&[u8], &LogResume) + Send),
+) -> Result<bool> {
+    let mut tail = (!resume.key.is_empty()).then_some(RESUME_TAIL);
+    loop {
+        match stream_once(token, namespace, job_id, resume, tail, idle, sink).await? {
+            Ended::Closed => return Ok(true),
+            Ended::Idle => return Ok(false),
+            Ended::Gap => tail = None,
+        }
+    }
+}
+
+async fn stream_once(
+    token: &str,
+    namespace: &str,
+    job_id: &str,
+    resume: &mut LogResume,
+    tail: Option<usize>,
+    idle: Duration,
+    sink: &mut (dyn FnMut(&[u8], &LogResume) + Send),
+) -> Result<Ended> {
     #[derive(Deserialize)]
     struct LogEvent {
         data: String,
+        timestamp: Option<String>,
     }
-    let res = http()
+    let mut request = http()
         .get(format!(
             "{}/api/jobs/{}/{}/logs",
             endpoint(),
             namespace,
             job_id
         ))
-        .bearer_auth(token)
+        .bearer_auth(token);
+    if let Some(tail) = tail {
+        request = request.query(&[("tail", tail)]);
+    }
+    let res = request
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach Hugging Face: {}", e))?;
     let mut res = check(res, "log stream").await?;
 
-    let mut seen = 0u64;
+    let mut pass = Pass {
+        tied: resume.tied,
+        caught_up: false,
+        continues: false,
+        line: Line::Kept,
+    };
+    let mut first = true;
+    let mut deadline = tokio::time::Instant::now() + idle;
     let mut buf: Vec<u8> = Vec::new();
     loop {
-        let next = match idle_timeout {
-            Some(idle) => tokio::time::timeout(idle, res.chunk()).await,
-            None => Ok(res.chunk().await),
-        };
-        let chunk = match next {
-            Err(_) => break, // idle — likely end of buffered history
+        let chunk = match tokio::time::timeout_at(deadline, res.chunk()).await {
+            Err(_) => return Ok(Ended::Idle),
             Ok(Err(e)) => return Err(anyhow!("Hugging Face log stream failed: {}", e)),
-            Ok(Ok(None)) => break, // server closed
+            Ok(Ok(None)) => return Ok(Ended::Closed),
             Ok(Ok(Some(c))) => c,
         };
         buf.extend_from_slice(&chunk);
+        // One hand-off per chunk, since each moves the resume point the caller saves.
+        let mut batch = Vec::new();
         // SSE frames are newline-delimited; process complete lines only.
         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = buf.drain(..=pos).collect();
             let line = String::from_utf8_lossy(&line);
-            let line = line.trim_end();
-            let Some(json_part) = line.strip_prefix("data: {") else {
+            let Some(json) = line.trim_end().strip_prefix("data: ") else {
                 continue; // keep-alive comments, event: lines, blanks
             };
-            let Ok(event) = serde_json::from_str::<LogEvent>(&format!("{{{json_part}")) else {
+            let Ok(event) = serde_json::from_str::<LogEvent>(json) else {
                 continue;
             };
+            deadline = tokio::time::Instant::now() + idle;
             if event.data.starts_with("===== Job started") {
                 continue;
             }
-            seen += 1;
-            if seen <= skip {
-                continue;
+            let key = event
+                .timestamp
+                .as_deref()
+                .and_then(super::kubernetes::sort_key);
+            if std::mem::take(&mut first) && !resume.key.is_empty() {
+                let reaches_back = key.as_ref().is_some_and(|key| *key < resume.key);
+                if tail.is_some() && !reaches_back {
+                    return Ok(Ended::Gap);
+                }
+                if key.as_ref().is_some_and(|key| *key > resume.key) {
+                    eprintln!(
+                        "orx up: Hugging Face job {job_id}: the log replay starts after the \
+                         output already kept, so the lines between are missing"
+                    );
+                }
             }
-            sink(&event.data);
+            let mut bytes = event.data.into_bytes();
+            let continued = bytes.len() == PARTIAL_EVENT;
+            if !continued {
+                bytes.push(b'\n');
+            }
+            batch.extend_from_slice(resume.admit(&mut pass, key, &bytes));
+            pass.continues = continued;
+        }
+        if !batch.is_empty() {
+            sink(&batch, resume);
         }
     }
-    Ok(seen.max(skip))
 }
 
 /// Parse a human duration ("90s", "30m", "4h", "1d", or bare seconds).

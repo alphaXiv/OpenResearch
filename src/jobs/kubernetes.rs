@@ -1188,7 +1188,7 @@ pub(crate) async fn leader_pod(
 
 /// RFC3339Nano with trailing zeros trimmed doesn't sort as text; pad the
 /// fraction to 9 digits. Assumes a fixed offset (nodes log in UTC).
-fn sort_key(ts: &str) -> Option<String> {
+pub(crate) fn sort_key(ts: &str) -> Option<String> {
     let secs = ts.get(..19)?;
     if secs.as_bytes()[10] != b'T' {
         return None;
@@ -1206,7 +1206,7 @@ fn sort_key(ts: &str) -> Option<String> {
 
 /// Where the run log left off: the newest kubelet timestamp written and the
 /// lines that carried it, so a reconnect resumes there even after log rotation.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct LogResume {
     key: String,
     tied: Vec<String>,

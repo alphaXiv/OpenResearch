@@ -63,7 +63,7 @@ impl Api for VercelAccount {
         run: &WatchedRun,
         cursor: &mut u64,
         window: std::time::Duration,
-        sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+        sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c u64>) + Send),
     ) -> Result<bool> {
         let mut received = 0;
         let outcome = {

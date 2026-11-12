@@ -16,7 +16,7 @@ impl HfAccount {
 
 #[async_trait]
 impl Api for HfAccount {
-    type Cursor = u64;
+    type Cursor = hf::LogResume;
 
     async fn launch(&self, intent: &RunIntent, fence: &Fence<'_>) -> Result<Handle, LaunchError> {
         let mut spec: hf::JobSubmission =
@@ -80,26 +80,27 @@ impl Api for HfAccount {
     async fn logs(
         &self,
         run: &WatchedRun,
-        cursor: &mut u64,
+        cursor: &mut hf::LogResume,
         window: std::time::Duration,
-        sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+        sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c hf::LogResume>) + Send),
     ) -> Result<bool> {
         let token = hf::resolve_token()?;
+        let id = self.id(run)?;
+        let idle = crate::config::paced(api::STREAM_IDLE);
         let mut received = 0;
         let outcome = {
-            let mut lines = api::lines(sink, &mut received);
-            let pass = hf::stream_logs(
-                &token,
-                &self.namespace,
-                self.id(run)?,
-                *cursor,
-                None,
-                &mut lines,
-            );
-            tokio::time::timeout(window, pass).await
+            let mut counted = |bytes: &[u8], resume: &hf::LogResume| {
+                received += bytes.len() as u64;
+                sink(bytes, Some(resume));
+            };
+            let follow = async {
+                while !hf::stream_logs(&token, &self.namespace, id, cursor, idle, &mut counted)
+                    .await?
+                {}
+                Ok(())
+            };
+            tokio::time::timeout(window, follow).await
         };
-        let closed = api::closed(outcome, received)?;
-        *cursor += received;
-        Ok(closed.is_some())
+        Ok(api::closed(outcome, received)?.is_some())
     }
 }

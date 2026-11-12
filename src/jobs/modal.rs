@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::managed_env::ManagedEnv;
@@ -26,7 +27,8 @@ use crate::error::{anyhow, Result};
 /// Bundled Python launcher. Subcommands (argv[1]):
 ///   submit          spec JSON on stdin -> prints {"sandboxId": "sb-..."}
 ///   status <id>     -> prints {"stage": "...", "message": "..."?}
-///   logs   <id>     streams the sandbox's merged stdout/stderr, line per line
+///   logs <id> <from>  streams the sandbox's merged stdout/stderr from a resume point, as
+///                     frames: a JSON `[from, length]` line, then that many raw bytes
 ///   cancel <id>     terminate the sandbox
 ///   auth            one authenticated call that checks the configured token
 ///
@@ -124,15 +126,34 @@ def status(sid):
     out["exitCode"] = code
     print(json.dumps(out))
 
-def logs(sid):
+async def _positioned(reader, start):
+    # Each chunk comes with the point a reconnect passes to replay from that chunk's first byte.
+    from modal import io_streams
+    impl = getattr(reader, "_impl", None)
+    server = getattr(io_streams, "_StreamReaderThroughServer", ())
+    router = getattr(io_streams, "_stdio_stream_from_command_router", None)
+    if isinstance(impl, server) and hasattr(impl, "_last_entry_id"):
+        # An entry id names a batch; reading from it resumes after the whole batch.
+        impl._last_entry_id = group = point = start
+        async for data in impl._get_logs():
+            if impl._last_entry_id != group:
+                point, group = group, impl._last_entry_id
+            yield point, data
+    elif router is not None and hasattr(impl, "_params"):
+        async for data, end in router(impl._params, int(start or 0)):
+            yield str(end - len(data)), data
+    else:
+        async for text in reader:
+            yield "", text.encode()
+
+def logs(sid, start):
     modal = _modal()
-    sb = modal.Sandbox.from_id(sid)
-    # StreamReader replays from the start on each (re)connect, like HF's SSE.
-    for line in sb.stdout:
-        if not line.endswith("\n"):
-            line += "\n"
-        sys.stdout.write(line)
-        sys.stdout.flush()
+    from modal._utils.async_utils import synchronizer
+    reader = modal.Sandbox.from_id(sid).stdout
+    out = sys.stdout.buffer
+    for point, data in synchronizer.create_blocking(_positioned)(reader, start):
+        out.write(json.dumps([point, len(data)]).encode() + b"\n" + data)
+        out.flush()
 
 def cancel(sid):
     modal = _modal()
@@ -156,7 +177,7 @@ if cmd == "submit":
 elif cmd == "status":
     status(sys.argv[2])
 elif cmd == "logs":
-    logs(sys.argv[2])
+    logs(sys.argv[2], sys.argv[3])
 elif cmd == "cancel":
     cancel(sys.argv[2])
 elif cmd == "auth":
@@ -456,68 +477,104 @@ pub async fn cancel_job(sandbox_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// One pass over the sandbox's log stream, invoking `sink` per line past `skip`.
-///
-/// Same replay/dedup contract as `hf::stream_logs`: the launcher replays the
-/// whole stdout from the start on each connect, so the caller passes how many
-/// lines it has consumed and gets the new total back.
-/// Ends when the launcher exits (sandbox finished) or after `idle` silence.
+/// Where the sandbox log left off: the provider position a reconnect replays from, and how
+/// many bytes past it were already written. Modal names positions by log batch on V1 sandboxes
+/// and by byte offset on V2; an SDK without either replays from the start.
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LogResume {
+    from: String,
+    kept: u64,
+}
+
+impl LogResume {
+    /// Past the first `kept` bytes of the whole log.
+    pub fn from_start(kept: u64) -> Self {
+        Self {
+            from: String::new(),
+            kept,
+        }
+    }
+}
+
+/// Follows the sandbox's log stream from `resume`, handing `sink` its bytes as Modal sent
+/// them. True when the stream reached the sandbox's end; false after `idle` without output.
 pub async fn stream_logs(
     sandbox_id: &str,
-    skip: u64,
-    idle: Option<Duration>,
-    sink: &mut (dyn FnMut(&str) + Send),
-) -> Result<u64> {
-    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    resume: &mut LogResume,
+    idle: Duration,
+    sink: &mut (dyn FnMut(&[u8]) + Send),
+) -> Result<bool> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
 
     let mut child = crate::process::tokio_command(MODAL_ENV.interpreter())
         .arg("-c")
         .arg(LAUNCHER)
-        .args(["logs", sandbox_id])
-        // Unbuffer the launcher's own stdout: we read it line-by-line, so block
-        // buffering (stdout is a pipe here, not a TTY) would stall log streaming.
-        .env(super::PYTHONUNBUFFERED, "1")
+        .args(["logs", sandbox_id, &resume.from])
         .envs(modal_auth_env())
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null()) // startup noise; state comes from inspect
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| missing_python_hint(&e))?;
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let stderr = tokio::spawn(async move {
+        let mut text = Vec::new();
+        let _ = stderr.read_to_end(&mut text).await;
+        text
+    });
 
-    let stdout = child.stdout.take().expect("piped stdout");
-    let mut lines = BufReader::new(stdout).lines();
-    let mut seen = 0u64;
+    let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
+    // Bytes the replay resends before any new ones, which may span several positions.
+    let mut replayed = resume.kept;
+    let (mut point, mut past) = (resume.from.clone(), 0u64);
     loop {
-        let next = match idle {
-            Some(idle) => tokio::time::timeout(idle, lines.next_line()).await,
-            None => Ok(lines.next_line().await),
+        let mut header = Vec::new();
+        let frame = async {
+            if stdout.read_until(b'\n', &mut header).await? == 0 {
+                return Ok(None);
+            }
+            let (from, len): (String, usize) = serde_json::from_slice(&header)?;
+            let mut data = vec![0; len];
+            stdout.read_exact(&mut data).await?;
+            Ok::<_, crate::error::Error>(Some((from, data)))
         };
-        match next {
-            Err(_) => break, // idle — let the caller re-check state
+        let (from, data) = match tokio::time::timeout(idle, frame).await {
+            Err(_) => return Ok(false),
             Ok(Err(e)) => {
                 return Err(anyhow!(
                     "Could not read the Modal log launcher output: {}",
                     e
                 ))
             }
+            Ok(Ok(Some(frame))) => frame,
             Ok(Ok(None)) => {
                 let status = child.wait().await?;
                 if !status.success() {
-                    return Err(anyhow!("the Modal log launcher exited with {}", status));
+                    let stderr = stderr.await.unwrap_or_default();
+                    return Err(launcher_error(
+                        "logs",
+                        status.code(),
+                        &String::from_utf8_lossy(&stderr),
+                    ));
                 }
-                break;
+                return Ok(true);
             }
-            Ok(Ok(Some(line))) => {
-                seen += 1;
-                if seen > skip {
-                    sink(&line);
-                }
-            }
+        };
+        if from != point {
+            point = from;
+            past = 0;
+        }
+        past += data.len() as u64;
+        let seen = replayed.min(data.len() as u64);
+        replayed -= seen;
+        let fresh = &data[seen as usize..];
+        if !fresh.is_empty() {
+            sink(fresh);
+            resume.from.clone_from(&point);
+            resume.kept = past;
         }
     }
-    let _ = child.kill().await;
-    Ok(seen.max(skip))
 }
 
 /// Modal's client keeps retrying an unreachable server for about a minute.
@@ -723,6 +780,116 @@ mod credential_tests {
             assert_eq!(state["stage"], stage);
             assert_eq!(state["exitCode"].as_i64(), code.parse::<i64>().ok());
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A fake of the SDK pieces the launcher reads positions from: entry-id batches on V1
+    /// sandboxes, byte offsets on V2.
+    const FAKE_SDK: &[(&str, &str)] = &[
+        (
+            "modal/__init__.py",
+            r#"from . import io_streams
+class Sandbox:
+    @staticmethod
+    def from_id(sid):
+        sandbox = Sandbox()
+        sandbox.stdout = type("Reader", (), {})()
+        sandbox.stdout._impl = io_streams._StreamReaderThroughServer() if sid == "v1" else io_streams.Router()
+        return sandbox
+"#,
+        ),
+        (
+            "modal/io_streams.py",
+            r#"BATCHES = [("1", [b"A\n"]), ("2", [b"BIG1", b"BIG2\n"]), ("3", [b"B"])]
+OUTPUT = b"hello \xe2\x9c\x93\n"
+class _StreamReaderThroughServer:
+    _last_entry_id = ""
+    async def _get_logs(self):
+        ids = [batch for batch, _ in BATCHES]
+        start = ids.index(self._last_entry_id) + 1 if self._last_entry_id else 0
+        for batch, items in BATCHES[start:]:
+            for item in items:
+                self._last_entry_id = batch
+                yield item
+class Router:
+    _params = None
+async def _stdio_stream_from_command_router(params, offset):
+    while offset < len(OUTPUT):
+        data = OUTPUT[offset:offset + 4]
+        offset += len(data)
+        yield data, offset
+"#,
+        ),
+        ("modal/_utils/__init__.py", ""),
+        (
+            "modal/_utils/async_utils.py",
+            r#"import asyncio
+class Synchronizer:
+    def create_blocking(self, function):
+        def blocking(*args):
+            loop, items = asyncio.new_event_loop(), function(*args)
+            while True:
+                try:
+                    yield loop.run_until_complete(items.__anext__())
+                except StopAsyncIteration:
+                    return
+        return blocking
+synchronizer = Synchronizer()
+"#,
+        ),
+    ];
+
+    #[tokio::test]
+    async fn logs_frames_carry_the_point_each_chunk_replays_from() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            crate::config::skip_without_tool("Python 3.10+");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-modal-logs-{}", uuid::Uuid::new_v4()));
+        for (path, body) in FAKE_SDK {
+            std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(path), body).unwrap();
+        }
+        let frames = |sandbox: &str, from: &str| {
+            let output = crate::process::command(python)
+                .args(["-B", "-c", LAUNCHER, "logs", sandbox, from])
+                .env("PYTHONPATH", &dir)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut stdout = output.stdout.as_slice();
+            let mut frames = Vec::new();
+            while let Some(end) = stdout.iter().position(|b| *b == b'\n') {
+                let (from, len): (String, usize) = serde_json::from_slice(&stdout[..end]).unwrap();
+                frames.push((from, stdout[end + 1..end + 1 + len].to_vec()));
+                stdout = &stdout[end + 1 + len..];
+            }
+            frames
+        };
+        let owned = |frames: &[(&str, &[u8])]| -> Vec<(String, Vec<u8>)> {
+            frames
+                .iter()
+                .map(|(from, data)| (from.to_string(), data.to_vec()))
+                .collect()
+        };
+        assert_eq!(
+            frames("v1", ""),
+            owned(&[("", b"A\n"), ("1", b"BIG1"), ("1", b"BIG2\n"), ("2", b"B")])
+        );
+        assert_eq!(
+            frames("v1", "1"),
+            owned(&[("1", b"BIG1"), ("1", b"BIG2\n"), ("2", b"B")])
+        );
+        assert_eq!(
+            frames("v2", "4"),
+            owned(&[("4", b"o \xe2\x9c"), ("8", b"\x93\n")])
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
