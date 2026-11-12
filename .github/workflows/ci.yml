@@ -456,7 +456,7 @@ jobs:
         env: &windows-test-env
           CARGO_INCREMENTAL: 1
           CARGO_PROFILE_TEST_DEBUG: 0
-          RUST_TEST_THREADS: 32
+          RUST_TEST_THREADS: 16
           TEST_MODE: ${{ matrix.mode }}
           DEMO_TEST_FILTER: 'local::demo::tests::'
         run: cargo test --locked --timings --no-run
