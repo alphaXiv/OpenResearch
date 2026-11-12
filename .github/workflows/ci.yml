@@ -52,8 +52,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Script tests
-        run: node --test 'scripts/*.test.mjs'
       - name: Select checks for changed files
         id: changes
         env:
@@ -70,6 +68,11 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Script tests
+        run: node --test 'scripts/*.test.mjs'
       - name: Workflow lint
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
@@ -206,7 +209,7 @@ jobs:
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: check # Preserve the former Rust job's cache namespace.
+          shared-key: check
       - name: Cache incremental compilation
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         env:
@@ -387,7 +390,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(!inputs.release && '["lint", "test", "demo", "chat"]' || '["all"]') }}
+        mode: ${{ fromJSON(!inputs.release && '["lint", "test1", "test2", "demo", "chat"]' || '["all"]') }}
     runs-on: windows-latest
     env:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
@@ -415,7 +418,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}${{ matrix.mode == 'lint' && '-lint' || '' }}
-          save-if: ${{ matrix.mode == 'lint' || matrix.mode == 'test' || matrix.mode == 'all' }}
+          save-if: ${{ matrix.mode == 'lint' || matrix.mode == 'test1' || matrix.mode == 'all' }}
           cache-on-failure: true
           workspaces: |
             ${{ env.DEV_DRIVE_WORKSPACE }} -> target
@@ -461,7 +464,7 @@ jobs:
         run: cargo test --locked --timings --no-run
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Install nextest
-        if: matrix.mode == 'test'
+        if: startsWith(matrix.mode, 'test')
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-nextest@0.9.151
@@ -473,22 +476,28 @@ jobs:
             demo = 'local::demo::tests::'
             chat = 'local::chat::'
           }
+          $partitions = @{
+            test1 = 'slice:1/2'
+            test2 = 'slice:2/2'
+          }
           $testArgs = @('--locked', '--timings')
           if ($filters.ContainsKey($env:TEST_MODE)) {
             $testArgs += $filters[$env:TEST_MODE]
-          } elseif ($env:TEST_MODE -eq 'test') {
-            $expression = ($filters.Values | ForEach-Object { '!test({0})' -f $_ }) -join ' & '
-            cargo nextest run --locked --profile ci -E $expression
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $testArgs += @('--doc', '--')
+          } elseif ($partitions.ContainsKey($env:TEST_MODE)) {
+            $skipArgs = @('--')
             foreach ($filter in $filters.Values) {
-              $testArgs += @('--skip', $filter)
+              $skipArgs += @('--skip', $filter)
             }
+            cargo nextest run --locked --profile ci --partition ($partitions[$env:TEST_MODE]) @skipArgs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($env:TEST_MODE -eq 'test2') { exit 0 }
+            $testArgs += '--doc'
+            $testArgs += $skipArgs
           }
           cargo test @testArgs
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Save incremental compilation
-        if: always() && (matrix.mode == 'test' || matrix.mode == 'all') && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
+        if: always() && (matrix.mode == 'test1' || matrix.mode == 'all') && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: *windows-incremental-path
