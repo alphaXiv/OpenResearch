@@ -450,6 +450,15 @@ jobs:
         if: matrix.mode == 'lint' || matrix.mode == 'all'
         run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Measure process inspection
+        if: matrix.mode == 'lint'
+        run: |
+          foreach ($sample in 1..3) {
+            $timer = [System.Diagnostics.Stopwatch]::StartNew()
+            & powershell.exe -NoProfile -NonInteractive -Command '$null = @(Get-CimInstance Win32_Process)'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Host ('CIM inventory {0}: {1:N3}s' -f $sample, $timer.Elapsed.TotalSeconds)
+          }
       - name: Build tests
         if: matrix.mode != 'lint'
         id: test-build
