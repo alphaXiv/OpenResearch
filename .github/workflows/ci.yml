@@ -115,7 +115,7 @@ jobs:
   helpers:
     name: Helper tests
     needs: changes
-    if: needs.changes.outputs.dev == 'true' || needs.changes.outputs.chart == 'true' || needs.changes.outputs.release_notes == 'true'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.dev == 'true' || needs.changes.outputs.chart == 'true' || needs.changes.outputs.release_notes == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -125,6 +125,21 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - name: Shared SSH helper protocol tests
+        if: needs.changes.outputs.rust == 'true'
+        run: |
+          python3 scripts/test_ssh_helper.py
+          for image in \
+            python:3.6.15-slim-buster@sha256:e10aa83604948c6d8d9f72a9a20193d84bb2dbe550b725eb5208387117fde065 \
+            python:3.7.17-slim-bullseye@sha256:603879aeff06df23f0d392a19f7ce02aa85e14e6b4d25fd9647b116e0cb93467 \
+            python:3.8.20-slim-bookworm@sha256:1d52838af602b4b5a831beb13a0e4d073280665ea7be7f69ce2382f29c5a613f; do
+            docker run --rm --network none \
+              -v "$GITHUB_WORKSPACE:/work:ro" -w /work \
+              "$image" python scripts/test_ssh_helper.py
+          done
+      - name: Embedded JavaScript tests
+        if: needs.changes.outputs.rust == 'true'
+        run: node --test 'src/**/*.test.mjs'
       - name: Dev script tests
         if: needs.changes.outputs.dev == 'true'
         run: node --test --experimental-strip-types scripts/dev.test.ts
@@ -174,31 +189,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends openssh-server zsh
           sudo mkdir -p /run/sshd
-      - name: Shared SSH helper protocol tests
-        run: |
-          python3 scripts/test_ssh_helper.py
-          for image in \
-            python:3.6.15-slim-buster@sha256:e10aa83604948c6d8d9f72a9a20193d84bb2dbe550b725eb5208387117fde065 \
-            python:3.7.17-slim-bullseye@sha256:603879aeff06df23f0d392a19f7ce02aa85e14e6b4d25fd9647b116e0cb93467 \
-            python:3.8.20-slim-bookworm@sha256:1d52838af602b4b5a831beb13a0e4d073280665ea7be7f69ce2382f29c5a613f; do
-            docker run --rm --network none \
-              -v "$GITHUB_WORKSPACE:/work:ro" -w /work \
-              "$image" python scripts/test_ssh_helper.py
-          done
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Embedded JavaScript tests
-        run: node --test 'src/**/*.test.mjs'
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: check # Preserve the former Rust job's cache namespace.
+      - name: Install nextest
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-nextest@0.9.151
       - name: Test
-        env:
-          RUST_TEST_THREADS: 16
-        run: cargo test --locked --timings
+        run: cargo nextest run --locked --timings --profile ci
+      - name: Doc-tests
+        run: cargo test --locked --doc
       - name: Upload compilation timings
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -344,6 +350,7 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
       - name: Install Rust toolchain
+        id: rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
@@ -365,6 +372,15 @@ jobs:
           workspaces: |
             ${{ env.DEV_DRIVE_WORKSPACE }} -> target
             ${{ env.DEV_DRIVE_WORKSPACE }}/windows/launcher -> target
+      - name: Cache incremental compilation
+        if: matrix.mode != 'lint'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env:
+          INCREMENTAL_KEY: incremental-windows-test-debug0-v1-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
+        with:
+          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/debug/incremental
+          key: ${{ env.INCREMENTAL_KEY }}-${{ inputs.source-sha || github.event.pull_request.head.sha || github.sha }}
+          restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Clippy
         if: matrix.mode != 'test'
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -393,18 +409,21 @@ jobs:
       - name: Test
         if: matrix.mode != 'lint'
         env:
+          CARGO_INCREMENTAL: 1
           CARGO_PROFILE_TEST_DEBUG: 0
-        run: cargo nextest run --locked --timings --test-threads 16 --retries 0 --no-fail-fast
+        run: cargo nextest run --locked --timings --profile ci
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Profile test setup
         if: matrix.mode != 'lint'
         env:
+          CARGO_INCREMENTAL: 1
           CARGO_PROFILE_TEST_DEBUG: 0
         run: cargo test --locked ci_profile_store_and_paths -- --ignored --nocapture
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Doc-tests
         if: matrix.mode != 'lint'
         env:
+          CARGO_INCREMENTAL: 1
           CARGO_PROFILE_TEST_DEBUG: 0
         run: cargo test --locked --doc
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}

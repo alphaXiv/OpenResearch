@@ -61,16 +61,16 @@ test('aggregate rejects failures, cancellations, missing and unexpectedly skippe
   assert.throws(() => checkResults(needs, { ...flags, rust: undefined }))
 })
 
-test('Rust changes require both lint and tests', () => {
+test('Rust changes require lint, tests and helper protocols', () => {
   const rustFlags = Object.fromEntries(Object.entries(classifyChanges(['src/main.rs'])).map(([key, value]) => [key, String(value)]))
-  const passed = { ...needs, frontend: { result: 'skipped' }, rust: { result: 'success' }, 'rust-lint': { result: 'success' }, windows: { result: 'success' }, 'linux-app': { result: 'success' } }
+  const passed = { ...needs, frontend: { result: 'skipped' }, rust: { result: 'success' }, 'rust-lint': { result: 'success' }, helpers: { result: 'success' }, windows: { result: 'success' }, 'linux-app': { result: 'success' } }
   checkResults(passed, rustFlags)
-  for (const job of ['rust', 'rust-lint']) {
+  for (const job of ['rust', 'rust-lint', 'helpers']) {
     for (const result of ['failure', 'cancelled', 'skipped', undefined]) assert.throws(() => checkResults({ ...passed, [job]: { result } }, rustFlags))
   }
 })
 
-test('embedded JavaScript selects the Rust job that runs its tests, without a frontend build', () => {
+test('embedded JavaScript selects Rust checks without a frontend build', () => {
   for (const path of ['src/commands/desktop_zoom.js', 'src/commands/macos_escape.js', 'src/local/acp/zcode-runtime.cjs']) {
     assert.deepEqual(enabled([path]), ['rust', 'windows', 'linux', 'macos'], path)
   }
