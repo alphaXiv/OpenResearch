@@ -212,12 +212,16 @@ pub fn registered_definitions() -> Vec<Definition> {
 }
 
 fn register_definitions(mut definitions: Vec<Definition>) -> Vec<Definition> {
+    let mut launches = definitions
+        .iter()
+        .map(launch_key)
+        .collect::<std::collections::HashSet<_>>();
+
     for preset in presets() {
         let mut launch = preset.launch;
-        if let Some(path) = executable_path(&launch.executable) {
-            launch.executable = path.to_string_lossy().into_owned();
-        }
-        if !definitions.iter().any(|saved| same_launch(saved, &launch)) {
+        let key = launch_key(&launch);
+        launch.executable.clone_from(&key.0);
+        if launches.insert(key) {
             definitions.push(launch);
         }
     }
@@ -225,12 +229,15 @@ fn register_definitions(mut definitions: Vec<Definition>) -> Vec<Definition> {
 }
 
 pub fn same_launch(a: &Definition, b: &Definition) -> bool {
-    let executable = |definition: &Definition| {
-        executable_path(&definition.executable)
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(|| definition.executable.clone())
-    };
-    executable(a) == executable(b) && a.arguments == b.arguments
+    launch_key(a) == launch_key(b)
+}
+
+fn launch_key(definition: &Definition) -> (String, Vec<String>) {
+    let executable = executable_path(&definition.executable)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| definition.executable.clone());
+
+    (executable, definition.arguments.clone())
 }
 
 pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
@@ -1204,7 +1211,11 @@ for line in sys.stdin:
             saved.executable = path.to_string_lossy().into_owned();
         }
 
-        let registered = register_definitions(vec![saved.clone()]);
+        let mut second = saved.clone();
+        second.id = format!("acp:{}", uuid::Uuid::new_v4());
+        second.name = "Another DeepSeek".into();
+        let registered = register_definitions(vec![saved.clone(), second.clone()]);
+        assert_eq!(&registered[..2], &[saved.clone(), second]);
         let matched = registered
             .iter()
             .find(|item| same_launch(item, &preset))
@@ -1231,6 +1242,45 @@ for line in sys.stdin:
                 .id,
             preset.id
         );
+    }
+
+    #[test]
+    fn preset_registration_refreshes_executable_paths() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        let root = crate::local::git::TemporaryDirectory::new("orx-preset-path").unwrap();
+        let preset = presets().remove(0).launch;
+        let binary = root
+            .path()
+            .join(if cfg!(windows) { "dsh.cmd" } else { "dsh" });
+        let mut saved = preset.clone();
+        saved.id = format!("acp:{}", uuid::Uuid::new_v4());
+        saved.executable = binary.to_string_lossy().into_owned();
+        std::env::set_var("PATH", root.path());
+
+        assert!(register_definitions(vec![saved.clone()])
+            .iter()
+            .any(|definition| definition.id == preset.id));
+
+        std::fs::write(&binary, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let registered = register_definitions(vec![saved.clone()]);
+        assert_eq!(registered.first(), Some(&saved));
+        assert!(!registered
+            .iter()
+            .any(|definition| definition.id == preset.id));
+
+        std::fs::remove_file(binary).unwrap();
+        assert!(register_definitions(vec![saved])
+            .iter()
+            .any(|definition| definition.id == preset.id));
     }
 
     #[tokio::test]
