@@ -387,7 +387,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '["lint", "test", "demo"]' || '["all"]') }}
+        mode: ${{ fromJSON(!inputs.release && '["lint", "test", "demo"]' || '["all"]') }}
     runs-on: windows-latest
     env:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
@@ -414,8 +414,8 @@ jobs:
       - run: New-Item -ItemType Directory -Force $env:TMP | Out-Null
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: windows-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}
-          save-if: ${{ matrix.mode == 'test' || matrix.mode == 'all' }}
+          shared-key: windows-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}${{ matrix.mode == 'lint' && '-lint' || '' }}
+          save-if: ${{ matrix.mode != 'demo' }}
           workspaces: |
             ${{ env.DEV_DRIVE_WORKSPACE }} -> target
             ${{ env.DEV_DRIVE_WORKSPACE }}/windows/launcher -> target
