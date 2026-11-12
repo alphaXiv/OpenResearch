@@ -376,7 +376,7 @@ pub(crate) async fn install(
             })?;
         }
         if let Some(host) = opencode_host {
-            host.retire_idle_children().await;
+            host.retire_idle_children().await?;
         }
         place(&unpacked, &target).await
     }
