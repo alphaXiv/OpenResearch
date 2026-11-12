@@ -827,9 +827,38 @@ mod tests {
         mode: &str,
         request: OneShot<'_>,
     ) -> (Result<String>, Vec<(String, serde_json::Value)>) {
+        let stalled =
+            matches!(mode, "stalled-init" | "stalled-setup") || request.prompt == "ACP_TEST:hang";
+        let listener = if stalled {
+            Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap())
+        } else {
+            None
+        };
+        let signaled_mode = listener
+            .as_ref()
+            .map(|listener| format!("{mode}:{}", listener.local_addr().unwrap().port()));
+        let advance = request.timeout + std::time::Duration::from_secs(16);
         let record =
             std::env::temp_dir().join(format!("acp-oneshot-record-{}", uuid::Uuid::new_v4()));
-        let (answer, cleanup) = spawn_one_shot(&peer(mode, &record), request);
+        let (mut answer, cleanup) = spawn_one_shot(
+            &peer(signaled_mode.as_deref().unwrap_or(mode), &record),
+            request,
+        );
+
+        if let Some(listener) = listener {
+            let reached_stall =
+                tokio::time::timeout(std::time::Duration::from_secs(30), listener.accept());
+            tokio::select! {
+                result = &mut answer => panic!("the peer never stalled: {result:?}"),
+                connected = reached_stall => {
+                    connected.expect("the peer never reached its stall").unwrap();
+                }
+            }
+            tokio::time::pause();
+            tokio::time::advance(advance).await;
+            tokio::time::resume();
+        }
+
         let answer = answer.await.unwrap();
         finish(cleanup).await;
         (answer, received(record))
