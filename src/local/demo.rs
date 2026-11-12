@@ -552,6 +552,7 @@ fn seed_at(
         project_id: PROJECT_ID.into(),
         harness: selection.harness.clone(),
         native_session_id: None,
+        native_fork_at: None,
         title: Some("Run Nanochat CPU Pipeline End-to-End".into()),
         title_source: Some("generated".into()),
         model: selection.model.clone(),
@@ -582,6 +583,7 @@ fn seed_at(
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
+        result_native_message_id: None,
         native_harness: None,
     };
     let assistant = StoredChatMessage {
@@ -594,6 +596,7 @@ fn seed_at(
         parent_id: Some(USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
+        result_native_message_id: None,
         native_harness: None,
     };
     let figure_session = StoredChatSession {
@@ -601,6 +604,7 @@ fn seed_at(
         project_id: PROJECT_ID.into(),
         harness: selection.harness.clone(),
         native_session_id: None,
+        native_fork_at: None,
         title: Some("Visualize Nanochat Training Results".into()),
         title_source: Some("generated".into()),
         model: selection.model.clone(),
@@ -633,6 +637,7 @@ fn seed_at(
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
+        result_native_message_id: None,
         native_harness: None,
     };
     let figure_assistant = StoredChatMessage {
@@ -645,6 +650,7 @@ fn seed_at(
         parent_id: Some(FIGURE_USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
+        result_native_message_id: None,
         native_harness: None,
     };
     let literature_session = StoredChatSession {
@@ -652,6 +658,7 @@ fn seed_at(
         project_id: PROJECT_ID.into(),
         harness: selection.harness.clone(),
         native_session_id: None,
+        native_fork_at: None,
         title: Some("Diagnosing Nanochat Training Bottlenecks".into()),
         title_source: Some("generated".into()),
         model: selection.model,
@@ -684,6 +691,7 @@ fn seed_at(
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
+        result_native_message_id: None,
         native_harness: None,
     };
     let literature_assistant = StoredChatMessage {
@@ -696,6 +704,7 @@ fn seed_at(
         parent_id: Some(LITERATURE_USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
+        result_native_message_id: None,
         native_harness: None,
     };
     let worktree = data_root

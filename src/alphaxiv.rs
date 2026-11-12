@@ -1,6 +1,8 @@
 //! The signed-in user's alphaXiv library, read with this computer's own alphaXiv
-//! tokens: `orx login` signs in at alphaXiv as a native app (RFC 8252) and keeps
-//! them owner-only in the config directory.
+//! tokens: `orx login` signs in at alphaXiv as a native app (RFC 8252), or with a
+//! code approved on another device (RFC 8628), and keeps them owner-only in the
+//! config directory. A host without its own reads with the access token an
+//! attached laptop forwards.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,16 +17,30 @@ use crate::error::{anyhow, Result};
 
 /// alphaXiv's public OAuth client for OpenResearch on the desktop.
 const CLIENT_ID: &str = "openresearch-desktop";
+const SCOPE: &str = "openid email profile";
+const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// RFC 8628 §3.5: each `slow_down` lengthens the polling interval by this much.
+const SLOW_DOWN: Duration = Duration::from_secs(5);
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROFILE_TTL: Duration = Duration::from_secs(600);
 const MAX_PROFILE_AREAS: usize = 20;
+/// A laptop renews the access token it forwards below this much life, so a
+/// host's copy lasts at least this long after the laptop goes offline.
+const FORWARDED_MIN_LIFE: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug)]
-pub struct NotConnected;
+pub enum NotConnected {
+    SignedOut,
+    /// The access token an attached laptop forwarded expired or was refused.
+    ForwardedLapsed,
+}
 impl std::fmt::Display for NotConnected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("alphaXiv isn't connected. Run `orx login --alphaxiv` to connect it.")
+        f.write_str(match self {
+            Self::SignedOut => "alphaXiv isn't connected. Run `orx login --alphaxiv` to connect it.",
+            Self::ForwardedLapsed => "The alphaXiv sign-in your laptop shared with this computer has expired. Reconnect to this computer from OpenResearch on your laptop, with the laptop online, or run `orx login --alphaxiv` here.",
+        })
     }
 }
 impl std::error::Error for NotConnected {}
@@ -41,14 +57,26 @@ impl std::fmt::Display for HttpFailure {
 }
 impl std::error::Error for HttpFailure {}
 
+/// alphaXiv's token endpoint refused a grant, with its OAuth error code (RFC 6749 §5.2).
 #[derive(Debug)]
-struct InvalidGrant;
-impl std::fmt::Display for InvalidGrant {
+struct Refused {
+    status: reqwest::StatusCode,
+    error: Option<String>,
+}
+impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("alphaXiv didn't accept the sign-in. Try again.")
+        match self.error.as_deref() {
+            Some("invalid_grant") => f.write_str("alphaXiv didn't accept the sign-in. Try again."),
+            Some(error) => write!(f, "alphaXiv sign-in failed ({}: {error}).", self.status),
+            None => write!(f, "alphaXiv sign-in failed ({}).", self.status),
+        }
     }
 }
-impl std::error::Error for InvalidGrant {}
+impl std::error::Error for Refused {}
+
+fn refusal(error: &crate::error::Error) -> Option<&str> {
+    error.downcast_ref::<Refused>()?.error.as_deref()
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +94,26 @@ struct TokenResponse {
     refresh_token: String,
     expires_in: i64,
     id_token: Option<String>,
+}
+
+/// An access token without the refresh token that renews it: what a laptop
+/// forwards to a host it is attached to, which never refreshes it.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Access {
+    api_url: String,
+    access_token: String,
+    expires_at_ms: i64,
+}
+
+impl From<Tokens> for Access {
+    fn from(tokens: Tokens) -> Self {
+        Self {
+            api_url: tokens.api_url,
+            access_token: tokens.access_token,
+            expires_at_ms: tokens.expires_at_ms,
+        }
+    }
 }
 
 impl Tokens {
@@ -109,7 +157,7 @@ impl Authorization {
                 ("response_type", "code"),
                 ("client_id", CLIENT_ID),
                 ("redirect_uri", redirect_uri.as_str()),
-                ("scope", "openid email profile"),
+                ("scope", SCOPE),
                 ("state", state.as_str()),
                 ("nonce", nonce.as_str()),
                 ("code_challenge", challenge.as_str()),
@@ -147,6 +195,138 @@ impl Authorization {
             .filter(|token| id_token_nonce(token).as_deref() == Some(self.nonce.as_str()))
             .ok_or_else(|| anyhow!("alphaXiv's sign-in didn't match this request. Try again."))?;
         Ok((Tokens::issued(&self.api_url, response), id_token))
+    }
+}
+
+/// A sign-in approved in a browser on any device (RFC 8628), for a computer that
+/// alphaXiv can't send a browser back to.
+pub struct DeviceAuthorization {
+    /// alphaXiv's page that approves it, with the code filled in.
+    pub url: String,
+    /// What that page shows, so the user can tell it is this sign-in.
+    pub code: String,
+    api_url: String,
+    device_code: String,
+    interval: Duration,
+    expires_in: Duration,
+}
+
+#[derive(Deserialize)]
+struct DeviceCode {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    verification_uri_complete: Option<String>,
+    expires_in: u64,
+    interval: Option<u64>,
+}
+
+impl DeviceAuthorization {
+    pub async fn start() -> Result<Self> {
+        let api_url = config::alphaxiv_api_url();
+        let resource = format!("{api_url}/mcp/v1");
+        let response = crate::client::http()
+            .post(format!("{api_url}/auth/device/code"))
+            .form(&[
+                ("client_id", CLIENT_ID),
+                ("scope", SCOPE),
+                ("resource", resource.as_str()),
+            ])
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| crate::client::transport_error(&api_url, e.without_url()))?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(anyhow!(
+                "alphaXiv at {api_url} doesn't support signing in from another device yet. Sign in with a browser on the computer running orx."
+            ));
+        }
+        if !status.is_success() {
+            let error = response
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|body| body.get("error")?.as_str().map(str::to_owned));
+            return Err(Refused { status, error }.into());
+        }
+        let issued = response
+            .json::<DeviceCode>()
+            .await
+            .ok()
+            .filter(|issued| {
+                !issued.user_code.is_empty()
+                    && issued
+                        .user_code
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+            .ok_or_else(|| anyhow!("alphaXiv returned an incorrect sign-in code."))?;
+
+        // The link is shown to the user and opened by the dashboard, so it must lead to alphaXiv.
+        let site = url::Url::parse(&config::alphaxiv_web_url())?;
+        let bare = |url: &url::Url| {
+            url.host_str()
+                .map(|host| host.trim_start_matches("www.").to_owned())
+        };
+        let link = issued
+            .verification_uri_complete
+            .as_deref()
+            .unwrap_or(&issued.verification_uri);
+        let url = url::Url::parse(link)
+            .ok()
+            .filter(|url| url.scheme() == site.scheme() && bare(url) == bare(&site))
+            .ok_or_else(|| anyhow!("alphaXiv sent a sign-in link that isn't on {site}."))?;
+
+        Ok(Self {
+            url: url.to_string(),
+            code: issued.user_code,
+            api_url,
+            device_code: issued.device_code,
+            interval: Duration::from_secs(issued.interval.unwrap_or(5)),
+            expires_in: Duration::from_secs(issued.expires_in),
+        })
+    }
+
+    /// Waits for the user to approve the sign-in, then returns the tokens to keep
+    /// and the id_token OpenResearch signs in with.
+    pub async fn redeem(&self) -> Result<(Tokens, String)> {
+        let expired = || {
+            anyhow!("The sign-in code expired before it was approved. Try again for a new code.")
+        };
+        let deadline = tokio::time::Instant::now() + config::paced(self.expires_in);
+        let mut interval = self.interval;
+        loop {
+            tokio::time::sleep(config::paced(interval)).await;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(expired());
+            }
+            let grant = [
+                ("grant_type", DEVICE_GRANT),
+                ("device_code", self.device_code.as_str()),
+            ];
+            let error = match token_request(&self.api_url, &grant).await {
+                Ok(mut response) => {
+                    let id_token = response.id_token.take().ok_or_else(|| {
+                        anyhow!("alphaXiv's sign-in didn't say who signed in. Try again.")
+                    })?;
+                    return Ok((Tokens::issued(&self.api_url, response), id_token));
+                }
+                Err(error) => error,
+            };
+            match refusal(&error) {
+                Some("authorization_pending") => {}
+                Some("slow_down") => interval += SLOW_DOWN,
+                Some("access_denied") => {
+                    return Err(anyhow!(
+                        "The sign-in was denied on alphaXiv. Try again to sign in."
+                    ))
+                }
+                Some("expired_token") => return Err(expired()),
+                _ => return Err(error),
+            }
+        }
     }
 }
 
@@ -191,21 +371,21 @@ async fn token_request(api_url: &str, grant: &[(&str, &str)]) -> Result<TokenRes
         .await
         .ok()
         .and_then(|body| body.get("error")?.as_str().map(str::to_owned));
-    if error.as_deref() == Some("invalid_grant") {
-        return Err(InvalidGrant.into());
-    }
-    Err(anyhow!(
-        "alphaXiv sign-in failed ({status}{}).",
-        error.map(|e| format!(": {e}")).unwrap_or_default()
-    ))
+    Err(Refused { status, error }.into())
 }
 
 fn tokens_path() -> PathBuf {
     config::config_dir().join("alphaxiv.json")
 }
 
+fn forwarded_path() -> PathBuf {
+    config::config_dir().join("alphaxiv-forwarded.json")
+}
+
+/// Own or forwarded; a forwarded token that lapsed still counts, so agents
+/// don't restart each time a laptop goes offline.
 pub fn signed_in() -> bool {
-    tokens_path().exists()
+    tokens_path().exists() || forwarded_path().exists()
 }
 
 fn load() -> Option<Tokens> {
@@ -218,8 +398,8 @@ fn save(tokens: &Tokens) -> Result<()> {
     crate::local::git::atomic_write_with_mode(&tokens_path(), body.as_bytes(), Some(0o600))
 }
 
-fn remove() -> Result<()> {
-    match std::fs::remove_file(tokens_path()) {
+fn remove(path: PathBuf) -> Result<()> {
+    match std::fs::remove_file(path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
     }
@@ -246,7 +426,9 @@ pub async fn store(tokens: &Tokens, credentials: Option<&config::Credentials>) -
     save(tokens)?;
     if let Some(credentials) = credentials {
         if let Err(error) = config::save_credentials(credentials).await {
-            let _ = previous.as_ref().map_or_else(remove, save);
+            let _ = previous
+                .as_ref()
+                .map_or_else(|| remove(tokens_path()), save);
             return Err(error);
         }
     }
@@ -281,27 +463,98 @@ pub async fn sign_out() -> Result<()> {
     if let Some(tokens) = load() {
         revoke(&tokens).await;
     }
-    remove()
+    remove(tokens_path())
 }
 
-/// The stored tokens, refreshed when the access token is within a minute of
-/// expiring or is the one alphaXiv just `rejected`.
-async fn fresh_tokens(rejected: Option<String>) -> Result<Tokens> {
+/// Keeps the access token an attached laptop forwarded, as sent, so fields a
+/// newer laptop adds survive. It is only ever sent to this computer's alphaXiv.
+pub fn keep_forwarded(body: &[u8]) -> Result<()> {
+    let rejected = |message: String| HttpFailure {
+        status: reqwest::StatusCode::BAD_REQUEST,
+        message,
+    };
+    let access = serde_json::from_slice::<Access>(body)
+        .ok()
+        .filter(|access| {
+            !access.access_token.is_empty()
+                && access.access_token.bytes().all(|b| b.is_ascii_graphic())
+        })
+        .ok_or_else(|| rejected("The forwarded alphaXiv sign-in is malformed.".into()))?;
+    let here = config::alphaxiv_api_url();
+    if access.api_url != here {
+        return Err(rejected(format!(
+            "This computer uses alphaXiv at {here}, not {}.",
+            access.api_url
+        ))
+        .into());
+    }
+    std::fs::create_dir_all(config::config_dir())?;
+    crate::local::git::atomic_write_with_mode(&forwarded_path(), body, Some(0o600))
+}
+
+pub fn forget_forwarded() -> Result<()> {
+    remove(forwarded_path())
+}
+
+/// This computer's own access token for a host it is attached to, renewed
+/// early; `None` while signed out.
+pub async fn forwardable() -> Result<Option<Access>> {
+    let min_life_ms = config::paced(FORWARDED_MIN_LIFE).as_millis() as i64;
+    match fresh_tokens(None, min_life_ms).await {
+        Ok(tokens) => Ok(Some(tokens.into())),
+        Err(error) if error.is::<NotConnected>() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// This computer's own sign-in, else the access token an attached laptop
+/// forwarded, which only that laptop renews.
+async fn access(rejected: Option<String>) -> Result<Access> {
+    if tokens_path().exists() {
+        return Ok(fresh_tokens(rejected, 60_000).await?.into());
+    }
+    let path = forwarded_path();
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(NotConnected::SignedOut.into())
+        }
+        Err(error) => {
+            return Err(anyhow!("Could not read {}: {error}", path.display()));
+        }
+    };
+    let forwarded: Access = serde_json::from_slice(&body).map_err(|error| {
+        anyhow!(
+            "{} is damaged ({error}). Delete it, or run `orx login --alphaxiv` here.",
+            path.display()
+        )
+    })?;
+    if Some(&forwarded.access_token) == rejected.as_ref()
+        || forwarded.expires_at_ms <= crate::store::now_ms()
+    {
+        return Err(NotConnected::ForwardedLapsed.into());
+    }
+    Ok(forwarded)
+}
+
+/// The stored tokens, refreshed when the access token has under `min_life_ms`
+/// left or is the one alphaXiv just `rejected`.
+async fn fresh_tokens(rejected: Option<String>, min_life_ms: i64) -> Result<Tokens> {
     // A task of its own, so a caller that gives up mid-refresh can't drop the
     // rotated refresh token before it is saved.
     tokio::spawn(async move {
         let fresh = |tokens: &Tokens| {
             Some(&tokens.access_token) != rejected.as_ref()
-                && tokens.expires_at_ms > crate::store::now_ms() + 60_000
+                && tokens.expires_at_ms > crate::store::now_ms() + min_life_ms
         };
-        let tokens = load().ok_or(NotConnected)?;
+        let tokens = load().ok_or(NotConnected::SignedOut)?;
         if fresh(&tokens) {
             return Ok(tokens);
         }
 
         let _lock = lock().await?;
         // Another process may have refreshed them while this one waited.
-        let tokens = load().ok_or(NotConnected)?;
+        let tokens = load().ok_or(NotConnected::SignedOut)?;
         if fresh(&tokens) {
             return Ok(tokens);
         }
@@ -311,9 +564,9 @@ async fn fresh_tokens(rejected: Option<String>) -> Result<Tokens> {
         ];
         let refreshed = match token_request(&tokens.api_url, &grant).await {
             Ok(response) => Tokens::issued(&tokens.api_url, response),
-            Err(error) if error.is::<InvalidGrant>() => {
-                remove()?;
-                return Err(NotConnected.into());
+            Err(error) if refusal(&error) == Some("invalid_grant") => {
+                remove(tokens_path())?;
+                return Err(NotConnected::SignedOut.into());
             }
             Err(error) => return Err(error),
         };
@@ -324,24 +577,23 @@ async fn fresh_tokens(rejected: Option<String>) -> Result<Tokens> {
 }
 
 pub async fn send(request: impl Fn(&str) -> reqwest::RequestBuilder) -> Result<reqwest::Response> {
-    let attempt = |tokens: &Tokens| {
-        let api_url = tokens.api_url.clone();
-        let sent = request(&api_url).bearer_auth(&tokens.access_token).send();
+    let attempt = |access: &Access| {
+        let api_url = access.api_url.clone();
+        let sent = request(&api_url).bearer_auth(&access.access_token).send();
         async move {
             sent.await
                 .map_err(|e| crate::client::transport_error(&api_url, e.without_url()))
         }
     };
-    let tokens = fresh_tokens(None).await?;
-    let mut response = attempt(&tokens).await?;
+    let first = access(None).await?;
+    let mut response = attempt(&first).await?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let tokens = fresh_tokens(Some(tokens.access_token)).await?;
-        response = attempt(&tokens).await?;
+        response = attempt(&access(Some(first.access_token)).await?).await?;
     }
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(NotConnected.into());
+        return Err(NotConnected::SignedOut.into());
     }
     if status == reqwest::StatusCode::FORBIDDEN {
         return Err(HttpFailure {
@@ -433,8 +685,8 @@ pub async fn papers(
 }
 
 async fn user_id() -> Result<String> {
-    let tokens = fresh_tokens(None).await?;
-    jwt_claim(&tokens.access_token, "sub")
+    let access = access(None).await?;
+    jwt_claim(&access.access_token, "sub")
         .ok_or_else(|| anyhow!("alphaXiv sent an access token without a user."))
 }
 
@@ -736,7 +988,9 @@ mod tests {
 
         // Concurrent callers refresh once; the rest wait and use the result.
         save(&stored("access-1", "refresh-1", -1)).unwrap();
-        let callers: Vec<_> = (0..8).map(|_| tokio::spawn(fresh_tokens(None))).collect();
+        let callers: Vec<_> = (0..8)
+            .map(|_| tokio::spawn(fresh_tokens(None, 60_000)))
+            .collect();
         for caller in callers {
             assert_eq!(caller.await.unwrap().unwrap().access_token, "access-2");
         }
@@ -797,5 +1051,146 @@ mod tests {
         assert_eq!(revoked[0]["token_type_hint"], "refresh_token");
         assert_eq!(revoked[0]["client_id"], CLIENT_ID);
         assert!(!upstream.lock().unwrap().reused);
+    }
+
+    #[test]
+    fn forwarded_access_matches_its_contract() {
+        let stored: Vec<Value> =
+            serde_json::from_str(include_str!("../tests/contracts/alphaxiv-forwarded.json"))
+                .unwrap();
+        for row in stored {
+            let access: Access = serde_json::from_value(row.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&access).unwrap(), row);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_forwarded_token_is_used_until_it_lapses_and_never_refreshed() {
+        if !crate::config::in_test_child(&["ALPHAXIV_API_URL", "ORX_TEST_SPEEDUP"]) {
+            return;
+        }
+
+        let upstream = Arc::new(Mutex::new(Upstream {
+            live_refresh: "refresh-0".into(),
+            accepted: "forwarded-1".into(),
+            ..Default::default()
+        }));
+        let app = Router::new()
+            .route("/auth/oauth2/token", post(token))
+            .route("/folders/v3", get(folders))
+            .with_state(upstream.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        std::env::set_var("ALPHAXIV_API_URL", &api);
+        let forwarded = |access: &str, expires_in_ms: i64| {
+            json!({
+                "apiUrl": api,
+                "accessToken": access,
+                "expiresAtMs": crate::store::now_ms() + expires_in_ms,
+                "addedByANewerLaptop": true,
+            })
+            .to_string()
+        };
+        let refused = |body: String| {
+            let error = keep_forwarded(body.as_bytes()).unwrap_err();
+            error.downcast_ref::<HttpFailure>().unwrap().status
+        };
+
+        // A laptop's token reads the library on a host with no sign-in of its own.
+        assert!(!signed_in());
+        assert!(super::get("/folders/v3", &[])
+            .await
+            .unwrap_err()
+            .is::<NotConnected>());
+        let body = forwarded("forwarded-1", 3_600_000);
+        keep_forwarded(body.as_bytes()).unwrap();
+        assert!(signed_in());
+        assert_eq!(std::fs::read_to_string(forwarded_path()).unwrap(), body);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(forwarded_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(super::get("/folders/v3", &[]).await.unwrap(), json!([]));
+
+        // Another laptop's push replaces it; a token for another alphaXiv, or
+        // one that can't be a header, is refused and changes nothing.
+        upstream.lock().unwrap().accepted = "forwarded-2".into();
+        keep_forwarded(forwarded("forwarded-2", 3_600_000).as_bytes()).unwrap();
+        assert_eq!(super::get("/folders/v3", &[]).await.unwrap(), json!([]));
+        let elsewhere = forwarded("x", 3_600_000).replace(&api, "https://alphaxiv.invalid");
+        assert_eq!(refused(elsewhere), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refused(forwarded("two words", 3_600_000)),
+            reqwest::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(refused("{}".into()), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(super::get("/folders/v3", &[]).await.unwrap(), json!([]));
+
+        // This computer's own sign-in wins.
+        save(&Tokens {
+            api_url: api.clone(),
+            access_token: "own".into(),
+            refresh_token: "refresh-0".into(),
+            expires_at_ms: crate::store::now_ms() + 3_600_000,
+        })
+        .unwrap();
+        upstream.lock().unwrap().accepted = "own".into();
+        assert_eq!(super::get("/folders/v3", &[]).await.unwrap(), json!([]));
+        remove(tokens_path()).unwrap();
+
+        // Expired or refused, it asks for the laptop, and nothing is refreshed,
+        // created or forgotten: agents keep their tools until the laptop returns.
+        keep_forwarded(forwarded("forwarded-3", -1).as_bytes()).unwrap();
+        let lapsed = super::get("/folders/v3", &[]).await.unwrap_err();
+        assert!(matches!(
+            lapsed.downcast_ref::<NotConnected>(),
+            Some(NotConnected::ForwardedLapsed)
+        ));
+        assert!(lapsed.to_string().contains("laptop"));
+        keep_forwarded(forwarded("forwarded-4", 3_600_000).as_bytes()).unwrap();
+        assert!(matches!(
+            super::get("/folders/v3", &[])
+                .await
+                .unwrap_err()
+                .downcast_ref::<NotConnected>(),
+            Some(NotConnected::ForwardedLapsed)
+        ));
+        assert_eq!(upstream.lock().unwrap().refreshes, 0);
+        assert!(!tokens_path().exists());
+        assert!(signed_in());
+
+        // A laptop forwards only its own sign-in, renewed while under ten minutes remain.
+        assert!(forwardable().await.unwrap().is_none());
+        save(&Tokens {
+            api_url: api.clone(),
+            access_token: "access-0".into(),
+            refresh_token: "refresh-0".into(),
+            expires_at_ms: crate::store::now_ms() + 5 * 60_000,
+        })
+        .unwrap();
+        let renewed = forwardable().await.unwrap().unwrap();
+        assert_eq!(renewed.access_token, "access-1");
+        assert_eq!(
+            forwardable().await.unwrap().unwrap().access_token,
+            "access-1"
+        );
+        assert_eq!(upstream.lock().unwrap().refreshes, 1);
+
+        forget_forwarded().unwrap();
+        forget_forwarded().unwrap();
+        remove(tokens_path()).unwrap();
+        assert!(!signed_in());
+
+        // A file that can't be read is reported with its path, not as signed out.
+        std::fs::write(forwarded_path(), "{").unwrap();
+        let damaged = super::get("/folders/v3", &[]).await.unwrap_err();
+        assert!(!damaged.is::<NotConnected>());
+        assert!(damaged.to_string().contains("alphaxiv-forwarded.json"));
     }
 }

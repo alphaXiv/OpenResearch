@@ -13,3 +13,5 @@ mod invocation_gate_cli;
 mod logs_cli;
 #[path = "cli/up_auto_restart.rs"]
 mod up_auto_restart;
+#[path = "cli/up_sign_in.rs"]
+mod up_sign_in;

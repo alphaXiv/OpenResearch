@@ -68,7 +68,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 ### Auth
 | Command | What it does |
 |---|---|
-| `orx login [--api-url <url>]` | Open a browser, do loopback OAuth, store a token. |
+| `orx login [--api-url <url>] [--device]` | Open a browser, do loopback OAuth, store a token. `--device` (the default over SSH) prints a link and code to approve on any device. |
 | `orx logout` | Remove the stored token. |
 
 ### Discover (project- and experiment-scoped)

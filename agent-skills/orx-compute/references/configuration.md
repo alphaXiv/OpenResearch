@@ -22,6 +22,10 @@ orx compute configure slurm --clear cpus-per-task --clear mem
 orx compute configure slurm --clear time-limit     # cluster chooses
 orx compute configure slurm --remote-root /scratch/me/orx   # shared FS; --clear remote-root for ~/.orx
 orx compute configure slurm --keep-remote-runs true          # keep every finished run dir on the cluster
+orx compute configure slurm --qos acc_ehpc                   # default; exp run --qos overrides
+orx compute configure slurm --sbatch-arg='--rsc p=1:g=1'     # extra sbatch option on every run; repeat, replaces the list
+orx compute configure slurm --request-one-task false         # leave out #SBATCH --ntasks=1 for clusters that refuse it
+orx compute configure slurm --clear sbatch-arg --clear request-one-task
 orx compute connect slurm --host cluster
 orx compute configure k8s --context research --namespace experiments
 orx compute configure ray --address http://127.0.0.1:8265

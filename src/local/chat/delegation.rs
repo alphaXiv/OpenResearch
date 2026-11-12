@@ -193,6 +193,7 @@ pub fn delegate_session(
         project_id: parent.project_id.clone(),
         harness: route.harness.clone(),
         native_session_id: None,
+        native_fork_at: None,
         title_source: title.is_some().then(|| "user".to_string()),
         title,
         model: Some(route.model.clone()),
@@ -696,6 +697,7 @@ mod tests {
             project_id: "proj".into(),
             harness: harness.into(),
             native_session_id: None,
+            native_fork_at: None,
             title: None,
             title_source: None,
             model: None,
@@ -767,6 +769,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                result_native_message_id: None,
                 native_harness: None,
             })
             .unwrap();
@@ -932,6 +935,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                result_native_message_id: None,
                 native_harness: None,
             })
             .unwrap();

@@ -896,6 +896,7 @@ fn shared_session(
                     .map(|(_, id)| id.clone()),
                 base_native_session_id: None,
                 result_native_session_id: None,
+                result_native_message_id: None,
                 native_harness: None,
             })
         })
@@ -916,6 +917,7 @@ fn shared_session(
         project_id: project_id.to_string(),
         harness: harness.to_string(),
         native_session_id: None,
+        native_fork_at: None,
         title: shared.title.clone(),
         title_source: shared.title.as_ref().map(|_| "user".to_string()),
         model: shared.model.clone().filter(|_| same_harness),
@@ -1042,6 +1044,7 @@ mod tests {
             parent_id: parent.map(str::to_string),
             base_native_session_id: Some("native-before".into()),
             result_native_session_id: Some("native-after".into()),
+            result_native_message_id: None,
             native_harness: Some("claude-code".into()),
         }
     }
@@ -1052,6 +1055,7 @@ mod tests {
             project_id: project_id.into(),
             harness: "claude-code".into(),
             native_session_id: None,
+            native_fork_at: None,
             title: Some("Lower the learning rate".into()),
             title_source: Some("generated".into()),
             model: None,

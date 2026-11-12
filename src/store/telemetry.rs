@@ -720,6 +720,28 @@ impl Store {
         self.conn.execute("INSERT INTO chat_usage_samples (execution_id, sample_id, harness, model, provider, usage_json) SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE EXISTS (SELECT 1 FROM chat_usage_executions WHERE execution_id = ?1 AND outcome IS NULL) ON CONFLICT(execution_id, sample_id) DO UPDATE SET model = COALESCE(excluded.model, model), provider = COALESCE(excluded.provider, provider), usage_json = CASE WHEN ?7 THEN excluded.usage_json ELSE usage_json END", params![execution_id, sample_id, harness, model, provider, serde_json::to_string(usage)?, usage != &TokenUsage::default()])?;
         Ok(())
     }
+
+    /// The native model id behind the chat's latest reported call, sub-agents included; `None`
+    /// when that label names no model, such as Cursor's `Auto`. The chat's configured model is
+    /// no substitute: Claude Code's is an alias such as `opus`.
+    pub(crate) fn last_reported_chat_model(&self, session_id: &str) -> Result<Option<String>> {
+        let latest: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT s.harness, s.model FROM chat_usage_samples s
+                 JOIN chat_usage_executions u ON u.execution_id = s.execution_id
+                 JOIN chat_turns t ON t.id = u.turn_id
+                 WHERE t.session_id = ?1 AND s.model IS NOT NULL
+                 ORDER BY s.rowid DESC LIMIT 1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(latest.and_then(|(harness, model)| {
+            let (attribution, _) = chat_attribution(&harness, Some(&model), true, None);
+            (attribution == "exact").then_some(model)
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -1746,6 +1768,90 @@ mod tests {
             )
             .unwrap();
         assert!(complete);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn last_reported_chat_model_is_the_latest_call_in_that_chat() {
+        let dir = std::env::temp_dir().join(format!("orx-chat-model-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
+                                         prepared_input, settings_json, state, delivery_state, created_at, updated_at)
+                 VALUES ('t1', 'chat', 'a1', 'c1', 'h', '', '{}', 'completed', 'delivered', 1, 1),
+                        ('t2', 'chat', 'a2', 'c2', 'h', '', '{}', 'running', 'pending', 2, 2),
+                        ('other', 'other-chat', 'a3', 'c3', 'h', '', '{}', 'running', 'pending', 3, 3);",
+            )
+            .unwrap();
+        assert_eq!(store.last_reported_chat_model("chat").unwrap(), None);
+
+        store
+            .begin_usage_execution("e1", "t1", "claude-code")
+            .unwrap();
+        store
+            .record_usage_sample(
+                "e1",
+                "s1",
+                "claude-code",
+                Some("claude-haiku-4-5-20251001"),
+                None,
+                &TokenUsage::default(),
+            )
+            .unwrap();
+        store
+            .begin_usage_execution("e2", "t2", "claude-code")
+            .unwrap();
+        store
+            .record_usage_sample(
+                "e2",
+                "s2",
+                "claude-code",
+                Some("claude-opus-5-5"),
+                None,
+                &TokenUsage::default(),
+            )
+            .unwrap();
+        store
+            .record_usage_sample(
+                "e2",
+                "s3",
+                "claude-code",
+                None,
+                None,
+                &TokenUsage::default(),
+            )
+            .unwrap();
+        store.begin_usage_execution("e3", "other", "codex").unwrap();
+        store
+            .record_usage_sample(
+                "e3",
+                "s3",
+                "codex",
+                Some("gpt-6.1-sol"),
+                None,
+                &TokenUsage::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.last_reported_chat_model("chat").unwrap().as_deref(),
+            Some("claude-opus-5-5")
+        );
+
+        store
+            .record_usage_sample(
+                "e2",
+                "s4",
+                "claude-code",
+                Some("<synthetic>"),
+                None,
+                &TokenUsage::default(),
+            )
+            .unwrap();
+        assert_eq!(store.last_reported_chat_model("chat").unwrap(), None);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

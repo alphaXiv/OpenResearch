@@ -22,7 +22,8 @@ pub const LIBRARY_READ_TOOLS: &[&str] =
     &["list_library", "list_annotated_papers", "get_paper_notes"];
 pub const WRITE_TOOLS: &[&str] = &["save_papers_to_folder", "create_folder"];
 const SIGNED_OUT: &str = "alphaXiv is signed out on the computer running this chat, so library tools are unavailable. Research tools still work.";
-const INSTRUCTIONS: &str = "alphaXiv tools research papers and researchers. Library tools read the user's saved folders, notes and highlights and need alphaXiv sign-in on the computer running this chat. Save papers or create folders only when requested. Want to read, Reading and Completed are folders, not exclusive states. Link papers as https://www.alphaxiv.org/abs/<arXiv id>.";
+const FORWARDED_LAPSED: &str = "The alphaXiv sign-in the user's laptop shared with the computer running this chat has expired, so library tools are unavailable until the user reconnects to this computer from OpenResearch on their laptop. Research tools still work.";
+const INSTRUCTIONS: &str = "alphaXiv tools research papers and researchers. Library tools read the user's saved folders, notes and highlights and need alphaXiv sign-in on the computer running this chat, or on the laptop connected to it. Save papers or create folders only when requested. Want to read, Reading and Completed are folders, not exclusive states. Link papers as https://www.alphaxiv.org/abs/<arXiv id>.";
 
 /// Under the agents' 300 s tool-call timeouts, so this error reaches the agent first.
 const CALL_TIMEOUT: Duration = Duration::from_secs(240);
@@ -51,16 +52,17 @@ pub async fn run() -> Result<()> {
         let sender = sender.clone();
         tokio::spawn(async move {
             let reply = handle(message.clone()).await;
-            let list_failed = message["method"] == "tools/list" && reply.get("error").is_some();
+            let list_stale = message["method"] == "tools/list" && !listing_is_complete(&reply);
             let _ = sender.send(reply);
-            if !list_failed {
+            if !list_stale {
                 return;
             }
-            // Agents keep their first tool list; ask them to list again once alphaXiv answers.
+            // Agents keep their first tool list; ask them to list again once alphaXiv
+            // answers, or a lapsed sign-in is renewed.
             let sender = sender.downgrade();
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                if handle(message.clone()).await.get("error").is_none() {
+                if listing_is_complete(&handle(message.clone()).await) {
                     if let Some(sender) = sender.upgrade() {
                         let _ = sender.send(
                             json!({"jsonrpc":"2.0", "method":"notifications/tools/list_changed"}),
@@ -74,6 +76,18 @@ pub async fn run() -> Result<()> {
     drop(sender);
     writer.await??;
     Ok(())
+}
+
+/// A listing that matches this computer's sign-in: errors and the research-only
+/// fallback for a lapsed grant are not.
+fn listing_is_complete(reply: &Value) -> bool {
+    let Some(tools) = reply.pointer("/result/tools").and_then(Value::as_array) else {
+        return false;
+    };
+    !crate::alphaxiv::signed_in()
+        || tools
+            .iter()
+            .any(|tool| LIBRARY_READ_TOOLS.contains(&tool["name"].as_str().unwrap_or("")))
 }
 
 fn allowed(name: &str, signed_in: bool) -> bool {
@@ -133,10 +147,12 @@ async fn handle(message: Value) -> Value {
                     return reply;
                 }
                 Err(error) => {
-                    let error = if error.is::<crate::alphaxiv::NotConnected>() {
-                        SIGNED_OUT.to_owned()
-                    } else {
-                        format!("alphaXiv tools are unavailable: {error}")
+                    let error = match error.downcast_ref::<crate::alphaxiv::NotConnected>() {
+                        Some(crate::alphaxiv::NotConnected::SignedOut) => SIGNED_OUT.to_owned(),
+                        Some(crate::alphaxiv::NotConnected::ForwardedLapsed) => {
+                            FORWARDED_LAPSED.to_owned()
+                        }
+                        None => format!("alphaXiv tools are unavailable: {error}"),
                     };
                     eprintln!("{error}");
                     if listing {
@@ -268,7 +284,7 @@ mod tests {
         let config = crate::config::config_dir();
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("alphaxiv.json"), json!({"apiUrl":api,"accessToken":"test-access","refreshToken":"test-refresh","expiresAtMs":crate::store::now_ms()+3_600_000}).to_string()).unwrap();
-        let reply = handle(list).await;
+        let reply = handle(list.clone()).await;
         assert_eq!(reply["id"], "tools");
         assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 3);
         assert_eq!(
@@ -286,6 +302,31 @@ mod tests {
             "IP rate limit"
         );
         assert!(!crate::alphaxiv::signed_in());
+
+        // A lapsed token from the user's laptop says how to renew it, and research still works.
+        std::fs::write(
+            config.join("alphaxiv-forwarded.json"),
+            json!({"apiUrl":api,"accessToken":"forwarded","expiresAtMs":0}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            handle(call("list_library")).await["result"]["content"][0]["text"],
+            FORWARDED_LAPSED
+        );
+        assert_eq!(
+            handle(call("discover_papers")).await["result"]["content"][0]["text"],
+            "IP rate limit"
+        );
+
+        // Agents that listed during the lapse are told to list again once it is renewed.
+        assert!(!listing_is_complete(&handle(list.clone()).await));
+        std::fs::write(
+            config.join("alphaxiv-forwarded.json"),
+            json!({"apiUrl":api,"accessToken":"forwarded","expiresAtMs":crate::store::now_ms()+3_600_000}).to_string(),
+        )
+        .unwrap();
+        assert!(listing_is_complete(&handle(list).await));
+
         let calls = calls.lock().unwrap();
         assert_eq!(calls[4], ("/mcp/v1/anonymous".to_owned(), None));
         assert!(calls[..2]
