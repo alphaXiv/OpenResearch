@@ -88,10 +88,12 @@ jobs:
       matrix:
         include:
           - check: build
-          - check: test 1/2
-            shard: 1/2
-          - check: test 2/2
-            shard: 2/2
+          - check: test 1/3
+            shard: 1/3
+          - check: test 2/3
+            shard: 2/3
+          - check: test 3/3
+            shard: 3/3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -187,10 +189,14 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
   rust:
-    name: Rust
+    name: Rust (${{ matrix.name }})
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '[{"name":"test1","partition":"slice:1/2"},{"name":"test2","partition":"slice:2/2"}]' || '[{"name":"all","partition":""}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -210,6 +216,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: check
+          save-if: ${{ matrix.name != 'test2' }}
       - name: Cache incremental compilation
         if: github.ref == 'refs/heads/main'
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -231,8 +238,15 @@ jobs:
       - name: Test
         env:
           CARGO_INCREMENTAL: 1
-        run: cargo nextest run --locked --timings --profile ci
+          PARTITION: ${{ matrix.partition }}
+        run: |
+          args=()
+          if [ -n "$PARTITION" ]; then
+            args+=(--partition "$PARTITION")
+          fi
+          cargo nextest run --locked --timings --profile ci "${args[@]}"
       - name: Doc-tests
+        if: matrix.name != 'test2'
         env:
           CARGO_INCREMENTAL: 1
         run: cargo test --locked --doc
@@ -240,10 +254,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rust-timings
+          name: rust-${{ matrix.name }}-timings
           path: target/cargo-timings/
           retention-days: 1
       - name: Source builds disable production telemetry
+        if: matrix.name != 'test2'
         shell: bash
         run: test "$(target/debug/orx --no-telemetry version --build-channel)" = "development"
       - name: Remove checked-in UI
@@ -407,7 +422,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(!inputs.release && '["lint", "test1", "test2", "test3", "demo", "chat"]' || '["all"]') }}
+        mode: ${{ fromJSON(!inputs.release && '["lint", "test1", "test2", "test3", "test4", "demo", "chat"]' || '["all"]') }}
     runs-on: windows-latest
     env:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
@@ -494,9 +509,10 @@ jobs:
             chat = 'local::chat::'
           }
           $partitions = @{
-            test1 = 'slice:1/3'
-            test2 = 'slice:2/3'
-            test3 = 'slice:3/3'
+            test1 = 'slice:1/4'
+            test2 = 'slice:2/4'
+            test3 = 'slice:3/4'
+            test4 = 'slice:4/4'
           }
           $testArgs = @('--locked', '--timings')
           if ($filters.ContainsKey($env:TEST_MODE)) {
