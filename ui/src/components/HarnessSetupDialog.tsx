@@ -156,8 +156,8 @@ export function HarnessSetup({ harness, commands, action: forced, profile, onRea
           running={phase === "running"}
           signIn={action === "login" ? { agent: harness.name, page: pageSignIn, code: harness.id === "claude-code" } : undefined}
           status={action === "install" ? m.harness_setup_installing({ agent: harness.name }) : m.harness_setup_updating({ agent: harness.name })}
-          // OpenCode's own upgrade can ask before it installs, and a sign-in without a page happens in the terminal.
-          expanded={action === "upgrade" || (action === "login" && !pageSignIn)}
+          // A sign-in without a page happens in the terminal.
+          expanded={action === "login" && !pageSignIn}
           onComplete={() => void verify(false)}
           onError={fail}
         />
