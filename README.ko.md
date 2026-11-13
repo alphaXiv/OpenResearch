@@ -74,6 +74,7 @@ OpenResearch의 관리형 컴퓨팅을 사용할 수 있습니다.
 OpenCode에서 다음 도구를 통해 [로컬 모델을 사용할 수도 있습니다](https://openresearch.sh/docs/agents):
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
+<img src=".github/readme-assets/rapid-mlx.svg" alt="" width="18" height="18" align="texttop" /> Rapid-MLX,
 <img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama 또는 사용자 지정 엔드포인트.
 
 **최신 문헌을 근거로 연구 가설을 세우세요.** OpenResearch는 <img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv, <img src=".github/readme-assets/biorxiv.svg" alt="" width="18" height="18" align="absmiddle" /> bioRxiv, <img src=".github/readme-assets/pubmed.svg" alt="" width="18" height="18" align="absmiddle" /> PubMed와 연동되어 에이전트가 관련 논문을 찾고, 근거 있는 가설을 세우고, 실험을 기존 연구와 연결할 수 있습니다.

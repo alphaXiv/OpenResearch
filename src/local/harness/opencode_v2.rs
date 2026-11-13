@@ -238,6 +238,8 @@ async fn merge_projection(
     recorded: &mut HashSet<String>,
 ) -> Result<bool> {
     let mut answered = false;
+    let mut latest_usage = None;
+    let mut latest_retry = None;
     for message in messages.iter().filter(|m| {
         m["id"].as_str().is_some_and(|id| !previous.contains(id)) && m["type"] == "assistant"
     }) {
@@ -261,22 +263,12 @@ async fn merge_projection(
             .is_some_and(|v| !v.is_null());
         record_message_usage(ctx, message, recorded);
         if let Some(used) = opencode_used_tokens(message.get("tokens")) {
-            ctx.report_usage(ContextUsage {
+            latest_usage = Some(ContextUsage {
                 used_tokens: used,
                 context_window: None,
             });
         }
-        if let Some(retry) = message.get("retry").filter(|retry| !retry.is_null()) {
-            ctx.show_retry_status(
-                "native",
-                &error_text(&retry["error"]),
-                retry["attempt"].as_i64().unwrap_or(1),
-                None,
-                retry["at"].as_i64(),
-            );
-        } else {
-            ctx.clear_retry_status();
-        }
+        latest_retry = message.get("retry").filter(|retry| !retry.is_null());
         let mut parts = projected_parts(message);
         for (part, content) in &mut parts {
             if content["type"] != "tool" || content["name"] != "subagent" {
@@ -302,8 +294,22 @@ async fn merge_projection(
             part.children = child_messages.into_iter().flat_map(wire_parts).collect();
         }
         for (part, _) in parts {
-            ctx.upsert_part_preserving_children(part);
+            ctx.upsert_part_raw(part);
         }
+    }
+    if let Some(retry) = latest_retry {
+        ctx.show_retry_status(
+            "native",
+            &error_text(&retry["error"]),
+            retry["attempt"].as_i64().unwrap_or(1),
+            None,
+            retry["at"].as_i64(),
+        );
+    } else {
+        ctx.clear_retry_status();
+    }
+    if let Some(usage) = latest_usage {
+        ctx.report_usage(usage);
     }
     Ok(answered)
 }

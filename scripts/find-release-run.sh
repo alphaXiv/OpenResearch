@@ -12,11 +12,15 @@ while IFS= read -r run; do
   rm -f "$dir/release-source.json"
   gh run download "$run" --repo "$GITHUB_REPOSITORY" --name release-source --dir "$dir" 2>/dev/null || continue
   if jq -e --arg tag "$tag" --arg sha "$sha" '.tag == $tag and .sha == $sha' "$dir/release-source.json" >/dev/null &&
-    [ "$(gh run view "$run" --repo "$GITHUB_REPOSITORY" --json jobs --jq '[.jobs[] | select(.name == "host" and .conclusion == "success")] | length')" = 1 ]; then
+    gh run view "$run" --repo "$GITHUB_REPOSITORY" --json jobs | jq -e '
+      [.jobs[] | select(.conclusion == "success") | .name] as $passed |
+      ($passed | index("host")) != null or
+      (["plan", "build-ui", "build-host / build"] - $passed | length == 0)
+    ' >/dev/null; then
     echo "$run"
     exit 0
   fi
 done <<< "$runs"
 
-echo "::error::No publishing release run with retained source metadata found for $tag ($sha)." >&2
+echo "::error::No successful release artifact build with retained source metadata found for $tag ($sha)." >&2
 exit 1

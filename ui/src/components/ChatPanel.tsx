@@ -6224,7 +6224,7 @@ export function ChatPanel({
 
   useEffect(() => onChatEvent((event) => {
     if (event.type === "reconnected") void syncSessionList(true);
-    if (event.type === "runsChanged" || event.type === "reconnected") {
+    if (event.type === "runsChanged") {
       void queryClient.invalidateQueries({ queryKey: listChatActiveRunsQuery().queryKey });
     }
   }), [syncSessionList]);
@@ -6286,14 +6286,6 @@ export function ChatPanel({
     }
   }, [queued]);
   const historyLoading = !!activeId && historyQuery.isPending;
-  const waitingSessions = useMemo(() => {
-    const waiting = new Set<string>();
-    for (const [id, messages] of Object.entries(state.messagesBySession)) {
-      const busy = state.busySessions.has(id);
-      if (hasPendingInput(activePath(messages, state.activeLeafBySession[id]), busy)) waiting.add(id);
-    }
-    return waiting;
-  }, [state.busySessions, state.messagesBySession, state.activeLeafBySession]);
   // Async questions can await an answer while the agent continues working.
   const awaitingInput = busy && messages.some((message) => message.parts.some(
     (part) => part.type === "prompt" && part.prompt && !part.prompt.resolved && part.prompt.nativeId,
@@ -7255,8 +7247,8 @@ export function ChatPanel({
   useHotkey(appHotkeys["chat.find"], openFind, { enabled: mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right"), requireReset: true, ignoreInputs: false, capture: true, conflictBehavior: "allow" });
   useHotkey("Mod+Shift+Enter", newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
 
-  const sessionWaiting = (session: ChatSession) => state.messagesBySession[session.id]
-    ? waitingSessions.has(session.id) : session.awaitingInput === true;
+  const sessionWaiting = (session: ChatSession) => session.id === activeId && historyQuery.data
+    ? hasPendingInput(messages, busy) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
   const sidebarRows: SidebarRow[] = [];
   if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {

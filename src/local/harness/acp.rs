@@ -779,27 +779,35 @@ fn render_tool(ctx: &mut TurnCtx, id: &str, tool: &Value, terminals: &HashMap<St
         _ => "running",
     };
     let raw_input = tool.get("rawInput");
-    let (name, input) = match (tool["title"].as_str(), tool["name"].as_str()) {
-        (Some("subagent" | "task" | "Agent" | "Task"), _) => ("task", raw_input.cloned()),
-        (Some("SubagentHandback"), _) => ("SubagentHandback", raw_input.cloned()),
+    let antigravity = ctx.harness == "antigravity";
+    let native = tool["name"].as_str().filter(|_| antigravity);
+    let (name, input) = match (tool["title"].as_str(), native) {
+        (Some("subagent" | "task" | "Agent" | "Task"), _) => ("task".into(), raw_input.cloned()),
+        (Some("SubagentHandback"), _) => ("SubagentHandback".into(), raw_input.cloned()),
         // agy sends its own tool name and argument names, as in its transcripts.
-        (_, Some(native)) if ctx.harness == "antigravity" => {
-            super::antigravity::normalize_tool(native, raw_input)
-        }
+        (_, Some(native)) => super::antigravity::normalize_tool(native, raw_input),
         _ => (
             match tool["kind"].as_str() {
                 Some("execute") => "bash",
                 Some(kind) => kind,
                 None => "tool",
-            },
+            }
+            .into(),
             raw_input.cloned(),
         ),
     };
     let mut part = WirePart::tool(format!("acp-tool-{id}"), name, status, None);
     if let Some(state) = part.state.as_mut() {
-        state.title = tool["title"].as_str().map(str::to_owned);
+        // agy titles an MCP call with no more than its tool's name.
+        state.title = tool["title"]
+            .as_str()
+            .filter(|title| native.is_none_or(|native| !title.contains(native)))
+            .map(str::to_owned);
         state.input = input;
-        state.output = tool_output(tool, terminals);
+        state.output = match tool_output(tool, terminals) {
+            Some(output) if antigravity => Some(super::antigravity::without_hook_notice(&output)),
+            output => output,
+        };
     }
     ctx.upsert_part(part);
 }

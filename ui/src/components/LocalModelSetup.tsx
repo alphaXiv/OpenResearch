@@ -1,5 +1,5 @@
 import { useWorkspace } from "../workspace";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ExternalLink, Link2, RefreshCw } from "lucide-react";
 import { UnlistedError, type LocalModelConnection } from "../api";
@@ -10,17 +10,28 @@ import { OptionPicker } from "./ModelPicker";
 import lmStudioLogo from "../assets/lm-studio-logo.svg";
 import ollamaLogo from "../assets/ollama-logo.png";
 import omlxLogo from "../assets/omlx-logo.svg";
+import rapidMlxLogo from "../assets/rapid-mlx-logo.svg";
 import { Button, Input, Spinner } from "./ui";
 
-const LM_STUDIO = { id: "lmstudio", label: "LM Studio", icon: lmStudioLogo, url: "http://127.0.0.1:1234/v1" };
-const SERVERS = [
+type Server = {
+  id: string;
+  label: string;
+  icon: string | null;
+  url: string;
+  /** The `owned_by` its model list names, which tells it from another server at the same address. */
+  owner?: string;
+  /** A one-colour logo, drawn light in dark mode. */
+  invert?: boolean;
+};
+
+const LM_STUDIO: Server = { id: "lmstudio", label: "LM Studio", icon: lmStudioLogo, url: "http://127.0.0.1:1234/v1" };
+const SERVERS: Server[] = [
   LM_STUDIO,
-  { id: "omlx", label: "oMLX", icon: omlxLogo, url: "http://127.0.0.1:8000/v1" },
-  { id: "ollama", label: "Ollama", icon: ollamaLogo, url: "http://127.0.0.1:11434/v1" },
+  { id: "omlx", label: "oMLX", icon: omlxLogo, url: "http://127.0.0.1:8000/v1", owner: "omlx" },
+  { id: "rapid-mlx", label: "Rapid-MLX", icon: rapidMlxLogo, url: "http://127.0.0.1:8000/v1", owner: "rapid-mlx", invert: true },
+  { id: "ollama", label: "Ollama", icon: ollamaLogo, url: "http://127.0.0.1:11434/v1", invert: true },
   { id: "openai-compatible", label: "Custom Endpoint", icon: null, url: "http://127.0.0.1:8000/v1" },
 ];
-
-type Server = (typeof SERVERS)[number];
 
 /** The server a connection was made for: by the name it was given, else by its port. */
 export function endpointServer(connection: Pick<LocalModelConnection, "name" | "baseUrl">): Server | undefined {
@@ -31,13 +42,21 @@ export function endpointServer(connection: Pick<LocalModelConnection, "name" | "
 
 export function EndpointMark({ server, size }: { server: Server | undefined; size: number }) {
   if (!server?.icon) return <Link2 size={size} className="shrink-0" aria-hidden="true" />;
-  return <img src={server.icon} alt="" width={size} height={size} className={`shrink-0 object-contain${server.id === "ollama" ? " dark:invert" : ""}`} style={{ width: size, height: size }} />;
+  return <img src={server.icon} alt="" width={size} height={size} className={`shrink-0 object-contain${server.invert ? " dark:invert" : ""}`} style={{ width: size, height: size }} />;
 }
 
 const CUSTOM = SERVERS[SERVERS.length - 1];
 
-/** A model server found answering where orx runs: the models it lists, or that it wants a key first. */
-export type LocalServer = { server: Server; models: string[]; needsKey: boolean };
+const sameAddress = (a: string, b: string) => a.trim().replace(/\/+$/, "") === b.replace(/\/+$/, "");
+
+/** The known server at `url`; where several share the address, the one whose models `owner` names. */
+function serverAt(url: string, owner?: string | null) {
+  const here = SERVERS.filter((server) => server.icon && sameAddress(url, server.url));
+  if (!owner || here.every((server) => !server.owner)) return here[0];
+  return here.find((server) => server.owner === owner);
+}
+/** A model server found answering where orx runs: the models it lists and who it says owns them, or that it wants a key first. */
+export type LocalServer = { server: Server; models: string[]; ownedBy: string | null; needsKey: boolean };
 
 /** Why a server listed no models; an orx from before the codes says so only in these messages. */
 function unlisted(error: unknown) {
@@ -55,14 +74,17 @@ export function useLocalServers() {
   return useQuery({
     queryKey: workspaceKey("localServers"),
     queryFn: async () => {
-      const answers = await Promise.all(SERVERS.filter((server) => server.icon).map(async (server): Promise<LocalServer | null> => {
+      const addresses = [...new Set(SERVERS.filter((server) => server.icon).map((server) => server.url))];
+      const answers = await Promise.all(addresses.map(async (url): Promise<LocalServer | null> => {
         try {
-          return { server, models: (await api.discoverLocalModels({ baseUrl: server.url, apiKey: "" })).models, needsKey: false };
+          const { models, ownedBy } = await api.discoverLocalModels({ baseUrl: url, apiKey: "" });
+          // Another app at a shared address is still a server answering, just one without a name here.
+          return { server: serverAt(url, ownedBy) ?? { ...CUSTOM, url }, models, ownedBy: ownedBy ?? null, needsKey: false };
         } catch (error) {
           const code = unlisted(error);
           if (code === "unreachable") return null;
           if (!code) throw error;
-          return { server, models: [], needsKey: code === "needsKey" };
+          return { server: serverAt(url)!, models: [], ownedBy: null, needsKey: code === "needsKey" };
         }
       }));
       return answers.filter((answer) => answer !== null);
@@ -71,8 +93,6 @@ export function useLocalServers() {
     retry: false,
   });
 }
-
-const sameAddress = (a: string, b: string) => a.trim().replace(/\/+$/, "") === b.replace(/\/+$/, "");
 
 /** The custom endpoint form's state and fields: an address first, then its key if the server asks for one. */
 export function useLocalModelForm(disabled: boolean) {
@@ -96,11 +116,14 @@ export function useLocalModelForm(disabled: boolean) {
   const [model, setModel] = useState<string | null>(null);
   const [contextWindow, setContextWindow] = useState("32768");
   const [error, setError] = useState<string | null>(null);
-  const server = running.data?.find((found) => sameAddress(baseUrl, found.server.url))?.server ?? CUSTOM;
+  /** Who the listed models say owns them, which names a server sharing its address with another. */
+  const [owner, setOwner] = useState<string | null>(null);
+  const server = serverAt(baseUrl, owner) ?? CUSTOM;
 
-  const list = (found: string[]) => {
+  const list = (found: string[], ownedBy: string | null = null) => {
     setModels(found);
     setModel(found[0] ?? null);
+    setOwner(ownedBy);
   };
   /** A new address starts over: its models, its key and any error belonged to the last one. */
   const address = (value: string) => {
@@ -114,7 +137,7 @@ export function useLocalModelForm(disabled: boolean) {
   const adopt = (found: LocalServer) => {
     address(found.server.url);
     setAskKey(found.needsKey);
-    list(found.models);
+    list(found.models, found.ownedBy);
   };
 
   const probe = useMutation({ mutationFn: discoverLocalModels });
@@ -127,7 +150,7 @@ export function useLocalModelForm(disabled: boolean) {
     setError(null);
     try {
       const result = await probe.mutateAsync({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() });
-      if (!cancelled.current) list(result.models);
+      if (!cancelled.current) list(result.models, result.ownedBy ?? null);
     } catch (e) {
       if (cancelled.current) return;
       if (unlisted(e) === "needsKey" && !askKey) setAskKey(true);
@@ -169,7 +192,7 @@ export function useLocalModelForm(disabled: boolean) {
               <div className="flex flex-wrap gap-2">
                 {presets.map((answer) => (
                   <Button key={answer.server.id} size="small" disabled={busy} onClick={() => adopt(answer)}>
-                    <EndpointMark server={answer.server} size={14} />{answer.server.label}
+                    <EndpointMark server={answer.server} size={14} />{answer.server.icon ? answer.server.label : m.local_models_custom_endpoint()}
                   </Button>
                 ))}
               </div>
@@ -191,8 +214,9 @@ export function useLocalModelForm(disabled: boolean) {
   return { fields, server, installed, found, canSubmit, busy, check, back, adopt, request, error, setError };
 }
 
-/** The runtimes the guide walks through, each where it serves by default. */
+/** The runtimes the guide walks through; the MLX ones only where MLX runs, on Apple silicon. */
 const RUNTIMES = SERVERS.filter((server) => server.id === "lmstudio" || server.id === "ollama");
+const MLX_RUNTIMES = SERVERS.filter((server) => server.id === "omlx" || server.id === "rapid-mlx");
 
 /** The model size a machine's memory runs comfortably, quantized the way local runtimes ship models. */
 function modelSize(memBytes: number) {
@@ -219,35 +243,43 @@ export function LocalModelGuide({ disabled, onFound }: { disabled: boolean; onFo
   }
   const empty = detect.data?.[0];
   const recommended = machine.data?.os === "macos" ? "lmstudio" : "ollama";
-  const runtime = [picked, empty?.server.id, recommended].map((id) => RUNTIMES.find((server) => server.id === id)).find(Boolean) ?? LM_STUDIO;
-  const lmStudio = runtime.id === "lmstudio";
+  const runtimes = machine.data?.os === "macos" && machine.data.arch === "aarch64" ? [...RUNTIMES, ...MLX_RUNTIMES] : RUNTIMES;
+  const runtime = [picked, empty?.server.id, recommended].map((id) => runtimes.find((server) => server.id === id)).find(Boolean) ?? LM_STUDIO;
   const memory = machine.data?.memBytes;
-  const code = "self-start rounded-xs border border-border-variant bg-surface px-1 py-px font-mono text-xs";
-  const steps = [
-    {
-      text: lmStudio ? m.local_models_guide_install_lmstudio() : m.local_models_guide_install_ollama(),
-      extra: machine.data?.os === "linux" && !lmStudio ? <code className={code}>curl -fsSL https://ollama.com/install.sh | sh</code> : (
-        <a href={lmStudio ? "https://lmstudio.ai/download" : "https://ollama.com/download"} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent-blue-strong underline">
-          {m.local_models_guide_download({ name: runtime.label })}<ExternalLink size={12} aria-hidden="true" />
-        </a>
-      ),
-    },
-    {
-      text: lmStudio ? m.local_models_guide_model_lmstudio() : m.local_models_guide_model_ollama(),
-      extra: memory ? <span className="text-subtext">{m.local_models_guide_size({ memory: fmtMemory(memory), size: modelSize(memory) })}</span> : null,
-    },
-    {
-      text: lmStudio ? m.local_models_guide_serve_lmstudio() : m.local_models_guide_serve_ollama(),
-      extra: <code className={code}>{lmStudio ? "lms server start" : "ollama serve"}</code>,
-    },
-  ];
+  const size = memory ? <span className="text-subtext">{m.local_models_guide_size({ memory: fmtMemory(memory), size: modelSize(memory) })}</span> : null;
+  const code = (command: string) => <code className="self-start rounded-xs border border-border-variant bg-surface px-1 py-px font-mono text-xs">{command}</code>;
+  const download = (url: string) => (
+    <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent-blue-strong underline">
+      {m.local_models_guide_download({ name: runtime.label })}<ExternalLink size={12} aria-hidden="true" />
+    </a>
+  );
+  const steps: Record<string, { text: string; extra: ReactNode }[]> = {
+    lmstudio: [
+      { text: m.local_models_guide_install_lmstudio(), extra: download("https://lmstudio.ai/download") },
+      { text: m.local_models_guide_model_lmstudio(), extra: size },
+      { text: m.local_models_guide_serve_lmstudio(), extra: code("lms server start") },
+    ],
+    ollama: [
+      { text: m.local_models_guide_install_ollama(), extra: machine.data?.os === "linux" ? code("curl -fsSL https://ollama.com/install.sh | sh") : download("https://ollama.com/download") },
+      { text: m.local_models_guide_model_ollama(), extra: size },
+      { text: m.local_models_guide_serve_ollama(), extra: code("ollama serve") },
+    ],
+    omlx: [
+      { text: m.local_models_guide_install_omlx(), extra: download("https://github.com/jundot/omlx/releases") },
+      { text: m.local_models_guide_model_omlx(), extra: size },
+    ],
+    "rapid-mlx": [
+      { text: m.local_models_guide_install_rapid_mlx(), extra: code("brew install rapid-mlx") },
+      { text: m.local_models_guide_serve_rapid_mlx(), extra: <>{code("rapid-mlx serve qwen3.5-4b-4bit")}{size}</> },
+    ],
+  };
 
   return (
     <div className="grid gap-4">
       {detect.error ? <p role="alert" className="m-0 text-sm text-accent-red">{detect.error.message}</p>
         : <p className="m-0 text-sm">{empty ? m.local_models_guide_no_models({ name: empty.server.label }) : m.local_models_guide_none()}</p>}
       <OptionPicker
-        choices={RUNTIMES.map((server) => ({ id: server.id, label: server.label }))}
+        choices={runtimes.map((server) => ({ id: server.id, label: server.label }))}
         value={runtime.id}
         title={m.local_models_server()}
         header={m.local_models_server()}
@@ -260,7 +292,7 @@ export function LocalModelGuide({ disabled, onFound }: { disabled: boolean; onFo
         onSelect={setPicked}
       />
       <ol className="m-0 list-none space-y-3 p-0 text-sm">
-        {steps.map((step, index) => (
+        {steps[runtime.id].map((step, index) => (
           <li key={index} className="flex gap-3">
             <span className="grid size-5 shrink-0 place-items-center rounded-full border border-border text-xs text-subtext">{index + 1}</span>
             <span className="flex min-w-0 flex-col gap-1">{step.text}{step.extra}</span>
