@@ -102,6 +102,7 @@ struct Builtin {
     setup_url: &'static str,
 }
 
+/// Each entry needs its logo in `ACP_PRESET_LOGOS` in `ui/src/components/HarnessLogo.tsx`.
 const BUILTINS: &[Builtin] = &[
     Builtin {
         id: "acp:dee4a440-fd64-4217-a4a7-1d4c148c0dd1",
