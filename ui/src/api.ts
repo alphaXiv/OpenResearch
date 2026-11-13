@@ -125,6 +125,8 @@ export interface Run {
   cancelUnconfirmed?: number[] | null;
   /** The backend's own word on why a submitting or starting run hasn't started. */
   waitingReason?: string | null;
+  /** Why the stop of a cancelling run keeps failing to reach its backend, which retries it. */
+  cancelError?: string | null;
   lostReason: string | null;
   /** The SSH alias or Slurm login node the run's job lives on. */
   host: string | null;

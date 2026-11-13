@@ -134,10 +134,7 @@ impl Fixture {
                 }
             })
             .collect();
-        self.engine
-            .observe_runs(backend, &runs, budget)
-            .await
-            .unwrap();
+        self.engine.observe_runs(backend, &runs, budget).await;
     }
 
     async fn terminal(&self, backend: &dyn Backend, id: &str) -> StoredRun {
@@ -1620,7 +1617,7 @@ async fn a_source_swept_before_launch_is_restaged_and_runs() {
     let mut intent = f.intent("swept", "cat repo/train >> executions", "ssh_job");
     intent.run.backend_json = json!({"kind":"ssh_job", "sourceDigest":digest,"sourcePath":archive,"sourceSize":bytes.len()}).to_string();
     f.ssh
-        .stage_blob(&digest, &archive, bytes.len() as u64)
+        .stage_blob(&digest, &archive, bytes.len() as u64, &|| false)
         .await
         .unwrap();
     let blob = f.server.home().join("engine-root/sources").join(&digest);
@@ -2043,6 +2040,13 @@ async fn ssh_launch_auth_failure_before_send_keeps_a_retryable_submission() {
         .home()
         .join("never-launched/runs/blocked-auth")
         .exists());
+    // Recovery can't ask the host either; it waits for Connect without counting a failure.
+    assert!(matches!(
+        ssh.recover(&intent).await,
+        Recovery::Blocked {
+            contact: crate::store::Contact::NeedsAuth { .. }
+        }
+    ));
     fs::write(
         f.server.directory().join("authorized_keys"),
         fs::read(f.server.directory().join("client_key.pub")).unwrap(),
@@ -2107,7 +2111,7 @@ async fn ssh_launch_unreachable_before_send_keeps_a_retryable_submission() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ssh_launch_written_with_response_lost_stays_unreconciled() {
+async fn ssh_launch_written_with_response_lost_waits_for_the_host_then_recovers() {
     let f = Fixture::new().await;
     let command = f.server.directory().join("command");
     let original = fs::read_to_string(&command).unwrap();
@@ -2131,9 +2135,10 @@ async fn ssh_launch_written_with_response_lost_stays_unreconciled() {
     let intent = f.intent("lost-response", "echo launched", "ssh_job");
     f.submit(f.ssh.as_ref(), &intent).await;
     let state = f.store().engine_run_state(&intent.run.id).unwrap().unwrap();
+    // Recovery could not ask the host that went away with the reply.
     assert!(matches!(
         state.contact,
-        crate::store::Contact::Unreconciled { .. }
+        crate::store::Contact::Unreachable { .. }
     ));
     assert!(state.submission_fence.is_some());
     assert!(f.dir(&intent.run.id).join("launch.json").exists());
@@ -2172,6 +2177,7 @@ fn cancelled_receipts_use_the_latest_process_proof_and_describe_unchecked_proces
                     state: "S".into(),
                 }],
                 outcome: Outcome::Survivors,
+                detail: None,
             },
         },
         log_len: None,
@@ -2285,7 +2291,7 @@ async fn recovery_checks_accepted_cancel_before_and_during_resumed_staging() {
         };
         if during {
             f.ssh
-                .stage_blob(&sha, &archive, bytes.len() as u64)
+                .stage_blob(&sha, &archive, bytes.len() as u64, &|| false)
                 .await
                 .unwrap();
             let part = dir.join(format!("source.tar.{sha}.part"));
@@ -2480,6 +2486,7 @@ async fn slurm_receipt_survivors_do_not_offer_wrapper_cleanup_after_step_teardow
         }],
         outcome: orx_host_proto::CancelOutcome::Survivors,
         finished_at: None,
+        detail: None,
     };
     orx_host::publish(&f.dir(&intent.run.id).join("exit.json"), &receipt).unwrap();
     let observed = slurm
@@ -2738,6 +2745,136 @@ async fn local_recovery_never_starts_a_staged_payload_after_an_accepted_cancel()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_launch_without_bash_is_rejected_before_its_intent() {
+    let f = Fixture::new().await;
+    let root = f.server.directory().join("local-runs");
+    let local = Local::new(root.clone());
+    let mut intent = f.intent("no-bash", "touch should-not-run", "local_job");
+    intent.launch.options = json!({"env":{"PATH":"/nonexistent"}});
+    let store = std::sync::Mutex::new(f.store());
+    let fence = Fence {
+        store: &store,
+        run_id: &intent.run.id,
+        attempt: 1,
+        taken_at: 1,
+    };
+    let Err(LaunchError::Rejected { reason }) = local.launch(&intent, &fence).await else {
+        panic!("a launch without bash was not rejected")
+    };
+    assert!(reason.contains("bash"), "{reason}");
+    assert!(!root.join("no-bash/launch.json").exists());
+}
+
+fn local_intent_on_disk(dir: &Path, intent: &RunIntent, env: &[(&str, &str)]) {
+    fs::create_dir_all(dir).unwrap();
+    orx_host::publish(
+        &dir.join("launch.json"),
+        &orx_host_proto::LaunchIntent {
+            run: intent.run.id.clone(),
+            digest: intent.spec_digest.clone(),
+            run_sh: intent.run.command.clone(),
+            env: env
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            source: None,
+            cancel_sh: None,
+        },
+    )
+    .unwrap();
+    orx_host::publish_bytes(&dir.join("run.sh"), intent.run.command.as_bytes()).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_wrapper_that_cannot_start_the_payload_fails_the_run_with_its_cause() {
+    let f = Fixture::new().await;
+    let root = f.server.directory().join("local-runs");
+    let local = Local::new(root.clone());
+    let intent = f.intent("spawn-failed", "touch should-not-run", "local_job");
+    let dir = root.join(&intent.run.id);
+    local_intent_on_disk(&dir, &intent, &[("PATH", "/nonexistent")]);
+    let wrapped = crate::process::command(crate::engine::transport::local_binary(&root).unwrap())
+        .arg("wrap")
+        .arg(&dir)
+        .stderr(fs::File::create(dir.join("wrapper.log")).unwrap())
+        .status()
+        .unwrap();
+    assert!(!wrapped.success());
+    let run = WatchedRun {
+        id: intent.run.id.clone(),
+        handle: Handle::Local {
+            dir: dir.to_string_lossy().into_owned(),
+        },
+    };
+    let observed = local.observe(&[run], Duration::ZERO).await;
+    let reason = observed
+        .iter()
+        .find_map(|(_, observation)| match observation {
+            Observation::Failed { reason, .. } => Some(reason),
+            _ => None,
+        })
+        .expect("a run whose payload never started did not fail");
+    assert!(reason.contains("run.sh"), "{reason}");
+    assert!(!dir.join("should-not-run").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_cancel_ends_a_run_whose_wrapper_died_before_starting_it() {
+    let f = Fixture::new().await;
+    let root = f.server.directory().join("local-runs");
+    let local = Local::new(root.clone());
+    let intent = f.intent("died-before-start", "touch should-not-run", "local_job");
+    let dir = root.join(&intent.run.id);
+    local_intent_on_disk(&dir, &intent, &[]);
+    let mut identity = orx_host::platform::identity(std::process::id()).unwrap();
+    identity.starttime += 1;
+    orx_host::publish(&dir.join("wrapper.json"), &identity).unwrap();
+    fs::write(dir.join("cancel.req"), "").unwrap();
+    let run = WatchedRun {
+        id: intent.run.id.clone(),
+        handle: Handle::Local {
+            dir: dir.to_string_lossy().into_owned(),
+        },
+    };
+    let observed = local.observe(&[run], Duration::ZERO).await;
+    assert!(
+        observed
+            .iter()
+            .any(|(_, observation)| matches!(observation, Observation::CancelReceipt { .. })),
+        "{observed:?}"
+    );
+    assert!(!dir.join("started").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_after_a_legacy_local_run_finished_keeps_its_result() {
+    let f = Fixture::new().await;
+    let dir = f.server.directory().join("finished-legacy");
+    fs::create_dir_all(&dir).unwrap();
+    let mut finished = crate::process::command("true").spawn().unwrap();
+    finished.wait().unwrap();
+    fs::write(dir.join("pid"), finished.id().to_string()).unwrap();
+    fs::write(dir.join("exit_code"), "0\n").unwrap();
+    let descriptor =
+        crate::jobs::BackendDescriptor::parse(&json!({"kind":"local_job","jobId":dir}).to_string())
+            .unwrap();
+    let run = WatchedRun {
+        id: "finished-legacy".into(),
+        handle: Handle::Legacy {
+            descriptor: Box::new(descriptor),
+        },
+    };
+    let local = Local::new(f.dir("unused"));
+    assert!(matches!(local.cancel(&run).await, CancelOutcome::Pending));
+    assert!(local
+        .observe(&[run], Duration::ZERO)
+        .await
+        .iter()
+        .any(|(_, observation)| matches!(observation, Observation::Exited { code: Some(0), .. })));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_recovery_waits_for_the_wrapper_start_marker_before_returning_a_handle() {
     let f = Fixture::new().await;
     let root = f.server.directory().join("local-runs");
@@ -2890,6 +3027,7 @@ async fn a_verified_cancel_receipt_after_a_lost_reply_settles_the_recovered_tomb
             reason: ExitReason::Cancelled,
             processes: Vec::new(),
             outcome: orx_host_proto::CancelOutcome::Verified,
+            detail: None,
         },
     )
     .unwrap();
@@ -2995,6 +3133,7 @@ async fn slurm_cancel_survivors_settle_on_scheduler_teardown_without_a_new_recei
                 state: "D".into(),
             }],
             outcome: orx_host_proto::CancelOutcome::Survivors,
+            detail: None,
         },
     )
     .unwrap();
@@ -3160,7 +3299,15 @@ async fn dead_wrapper_survivors_settle_through_host_observation_after_engine_res
     assert_eq!(fs::read(dir.join("exit.json")).unwrap(), bytes);
     let proof = orx_host::wrapper::cleanup_result(&dir).unwrap().unwrap();
     assert!(proof.processes.is_empty());
-    assert_eq!(proof.outcome, orx_host_proto::CancelOutcome::Verified);
+    // macOS can hide processes from a tag scan, so there a dead wrapper's stop stays unconfirmed.
+    if cfg!(target_os = "macos") {
+        assert!(matches!(
+            proof.outcome,
+            orx_host_proto::CancelOutcome::Unverifiable { .. }
+        ));
+    } else {
+        assert_eq!(proof.outcome, orx_host_proto::CancelOutcome::Verified);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3222,5 +3369,344 @@ async fn legacy_survivors_settle_on_group_absence_without_reconnect() {
         );
         assert_eq!(f.store().get_run(id).unwrap().unwrap().status, "cancelled");
         assert!(!f.engine.memory().cancels_sent.contains(id));
+    }
+}
+
+/// A launch another orx-host still prepares holds launch.lock; recovery waits for it instead
+/// of reading the run as absent, which would end a cancelled run before its payload starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_never_reads_a_launch_in_preparation_as_absent() {
+    let f = Fixture::new().await;
+    let slurm = Slurm::new(f.ssh.clone(), f.clock.clone());
+    f.shim("squeue", "exit 0");
+    f.shim("sacct", "exit 0");
+    for (backend, id) in [
+        (f.ssh.as_ref() as &dyn Backend, "preparing-ssh"),
+        (&slurm, "preparing-slurm"),
+    ] {
+        let kind = if id == "preparing-ssh" {
+            "ssh_job"
+        } else {
+            "slurm_job"
+        };
+        let intent = f.intent(id, "touch ran", kind);
+        let dir = f.dir(id);
+        fs::create_dir_all(&dir).unwrap();
+        if kind == "slurm_job" {
+            fs::write(dir.join("job.sbatch"), "batch preparation in progress").unwrap();
+        }
+        let preparation = orx_host::lock(&dir.join("launch.lock")).unwrap().unwrap();
+        let recovery = backend.recover_with_cancel(&intent, &|| true).await;
+        assert!(
+            matches!(&recovery, Recovery::Unknown { detail } if detail.contains("still being prepared")),
+            "{id}: {recovery:?}"
+        );
+        drop(preparation);
+        assert!(
+            matches!(
+                backend.recover_with_cancel(&intent, &|| true).await,
+                Recovery::Absent
+            ),
+            "{id}"
+        );
+        assert!(!dir.join("ran").exists());
+    }
+}
+
+/// A cancel that reached no wrapper is honoured by the next feed instead of respawning one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dead_wrapper_with_a_pending_cancel_is_cancelled_not_respawned() {
+    let f = Fixture::new().await;
+    let intent = f.intent("cancel-pending", "touch ran", "ssh_job");
+    let dir = f.dir("cancel-pending");
+    fs::create_dir_all(&dir).unwrap();
+    orx_host::publish(
+        &dir.join("launch.json"),
+        &orx_host_proto::LaunchIntent {
+            run: intent.run.id.clone(),
+            digest: intent.spec_digest.clone(),
+            run_sh: intent.run.command.clone(),
+            env: Default::default(),
+            source: None,
+            cancel_sh: None,
+        },
+    )
+    .unwrap();
+    fs::write(dir.join("cancel.req"), "").unwrap();
+    let run = WatchedRun {
+        id: intent.run.id.clone(),
+        handle: f.ssh.handle(),
+    };
+    let observed = f.ssh.observe(&[run], Duration::ZERO).await;
+    assert!(
+        observed
+            .iter()
+            .any(|(_, observation)| matches!(observation, Observation::CancelReceipt { .. })),
+        "{observed:?}"
+    );
+    let receipt = orx_host::wrapper::receipt(&dir).unwrap().unwrap();
+    assert_eq!(receipt.reason, ExitReason::Cancelled);
+    for never in ["started", "wrapper.log", "ran"] {
+        assert!(!dir.join(never).exists(), "{never}");
+    }
+}
+
+/// A wrapper that keeps dying before it starts the payload, leaving nothing behind, is given
+/// up on with a spawn_failed receipt that ends the run, instead of respawning forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wrapper_dying_before_start_is_respawned_a_bounded_number_of_times() {
+    let f = Fixture::with_host_env("export ORX_TEST_CRASH_AT=wrapper_locked").await;
+    let intent = f.intent("never-starts", "touch ran", "ssh_job");
+    f.submit(f.ssh.as_ref(), &intent).await;
+    let run = f.terminal(f.ssh.as_ref(), "never-starts").await;
+    assert_eq!(run.status, "failed");
+    let dir = f.dir("never-starts");
+    let receipt = orx_host::wrapper::receipt(&dir).unwrap().unwrap();
+    assert_eq!(receipt.reason, ExitReason::SpawnFailed);
+    let reason = run.result_markdown.unwrap_or_default();
+    assert!(reason.contains("exited 5 times"), "{reason}");
+    assert!(!dir.join("started").exists());
+    assert!(!dir.join("ran").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrunnable_sbatch_fails_the_launch_with_what_to_fix() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new().await;
+    f.shim("sbatch", "exit 0");
+    let sbatch = f.server.directory().join("shims/sbatch");
+    fs::set_permissions(&sbatch, fs::Permissions::from_mode(0o600)).unwrap();
+    let slurm = Slurm::new(f.ssh.clone(), f.clock.clone());
+    let intent = f.intent("no-sbatch", "true", "slurm_job");
+    f.submit(&slurm, &intent).await;
+    let run = f.store().get_run("no-sbatch").unwrap().unwrap();
+    assert_eq!(run.status, "failed");
+    let reason = run.result_markdown.unwrap();
+    assert!(
+        reason.contains("sbatch can't run") && reason.contains("PATH"),
+        "{reason}"
+    );
+    for retracted in ["launch.json", "job.sbatch"] {
+        assert!(!f.dir("no-sbatch").join(retracted).exists(), "{retracted}");
+    }
+}
+
+/// A host orx-host can't run on fails a launch that was never sent, naming the host and why,
+/// rather than waiting on a connection that can never succeed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unsupported_host_rejects_the_launch_instead_of_waiting() {
+    let f = Fixture::new().await;
+    f.shim(
+        "uname",
+        "case \"$1\" in -s) echo FreeBSD ;; *) /usr/bin/uname \"$@\" ;; esac",
+    );
+    let mut cfg = config(f.server.directory(), f.server.alias());
+    cfg.ssh_config = Some(f.server.config_path());
+    cfg.root = "~/unsupported".into();
+    let conn = {
+        let store = f.store();
+        let auth = crate::engine::transport::Auth::new(&store, &cfg.alias).unwrap();
+        HostConn::start_shared(cfg, store, f.transport_clock.clone(), auth)
+    }
+    .unwrap();
+    let ssh = Ssh::new(f.server.alias().into(), "~/unsupported".into(), conn);
+    let intent = f.intent("unsupported", "true", "ssh_job");
+    f.submit(&ssh, &intent).await;
+    let run = f.store().get_run("unsupported").unwrap().unwrap();
+    assert_eq!(run.status, "failed");
+    let reason = run.result_markdown.unwrap();
+    assert!(
+        reason.contains(f.server.alias()) && reason.contains("FreeBSD"),
+        "{reason}"
+    );
+}
+
+/// Slurm lost the submission's outcome and shows no job: a cancel can't wait for the scheduler
+/// to answer, so recovery has the host scancel by name and publish the cancelled receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_ends_a_slurm_submission_the_scheduler_never_shows() {
+    let f = Fixture::new().await;
+    f.shim(
+        "sbatch",
+        "cat >/dev/null; echo 'Socket timed out' >&2; exit 1",
+    );
+    f.shim("squeue", "exit 0");
+    f.shim("sacct", "exit 0");
+    f.shim("scancel", "printf '%s' \"$*\" > \"$HOME/scancel\"");
+    let slurm = Slurm::new(f.ssh.clone(), f.clock.clone());
+    let intent = f.intent("unseen", "touch ran", "slurm_job");
+    f.submit(&slurm, &intent).await;
+    assert_eq!(
+        f.store().get_run("unseen").unwrap().unwrap().status,
+        "submitting"
+    );
+    assert!(f.engine.cancel(&slurm, "unseen", "user").await.unwrap());
+    f.engine.recover(&slurm, "unseen").await.unwrap();
+    assert_eq!(f.terminal(&slurm, "unseen").await.status, "cancelled");
+    assert_eq!(
+        fs::read_to_string(f.server.home().join("scancel")).unwrap(),
+        "--name=unseen"
+    );
+    assert!(!f.dir("unseen").join("started").exists());
+}
+
+/// Before the wrapper starts, the queued job is scancelled before any receipt claims the
+/// stop; a failed scancel leaves the cancel undelivered, to be sent again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_scancel_publishes_no_cancelled_receipt() {
+    let f = Fixture::new().await;
+    f.shim("sbatch", "cat >/dev/null; printf '456\\n'");
+    f.shim("squeue", "printf '456|queued|PENDING\\n'");
+    f.shim("sacct", "exit 1");
+    f.shim("scancel", "echo 'Socket timed out' >&2; exit 1");
+    let slurm = Slurm::new(f.ssh.clone(), f.clock.clone());
+    f.submit(&slurm, &f.intent("queued", "true", "slurm_job"))
+        .await;
+    let run = watched(&f, "queued");
+    assert!(matches!(
+        slurm.cancel(&run).await,
+        CancelOutcome::Undelivered { detail } if detail.contains("Socket timed out")
+    ));
+    assert!(!f.dir("queued").join("exit.json").exists());
+    f.shim("scancel", "exit 0");
+    assert!(matches!(slurm.cancel(&run).await, CancelOutcome::Pending));
+    let receipt = orx_host::wrapper::receipt(&f.dir("queued"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.reason, ExitReason::Cancelled);
+}
+
+/// A wrapper killed after it accepted a cancel, before its receipt, leaves the payload running:
+/// the next contact sends the stop again and the run ends cancelled once nothing is left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_outlives_a_wrapper_killed_before_its_receipt() {
+    cancel_after_the_wrapper_is_killed(Fixture::new().await, cfg!(target_os = "macos")).await;
+}
+
+/// As on a macOS host whose payload is one of Apple's binaries, which show other processes an
+/// empty environment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_never_claims_a_stop_a_host_cannot_see() {
+    cancel_after_the_wrapper_is_killed(
+        Fixture::with_host_env("export ORX_TEST_HIDDEN_TAG=1").await,
+        true,
+    )
+    .await;
+}
+
+/// Where the host can't see run tags, the run waits unreconciled instead of claiming a stop;
+/// elsewhere the cancel ends it and its payload.
+async fn cancel_after_the_wrapper_is_killed(f: Fixture, hidden: bool) {
+    let intent = f.intent(
+        "wrapper-killed",
+        "printf $$ > payload; exec sleep 600",
+        "ssh_job",
+    );
+    f.submit(f.ssh.as_ref(), &intent).await;
+    let dir = f.dir("wrapper-killed");
+    exists(&dir.join("payload")).await;
+    let identity: orx_host_proto::ProcessIdentity =
+        orx_host::read_json(&dir.join("wrapper.json")).unwrap();
+    let wrapper = orx_host::platform::process(identity.pid).unwrap();
+    orx_host::platform::signal(&wrapper, libc::SIGSTOP).unwrap();
+    assert!(f
+        .engine
+        .cancel(f.ssh.as_ref(), "wrapper-killed", "user")
+        .await
+        .unwrap());
+    assert!(dir.join("cancel.req").exists());
+    orx_host::platform::signal(&wrapper, libc::SIGKILL).unwrap();
+    let payload: u32 = fs::read_to_string(dir.join("payload"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    if hidden {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                f.poll(
+                    f.ssh.as_ref(),
+                    &["wrapper-killed"],
+                    Duration::from_millis(50),
+                )
+                .await;
+                let state = f
+                    .store()
+                    .engine_run_state("wrapper-killed")
+                    .unwrap()
+                    .unwrap();
+                if let crate::store::Contact::Unreconciled { detail, .. } = state.contact {
+                    assert!(detail.contains("can't see"), "{detail}");
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !Phase::parse(&f.store().get_run("wrapper-killed").unwrap().unwrap().status)
+                .unwrap()
+                .is_terminal()
+        );
+        unsafe { libc::kill(payload as i32, libc::SIGKILL) };
+    } else {
+        assert_eq!(
+            f.terminal(f.ssh.as_ref(), "wrapper-killed").await.status,
+            "cancelled"
+        );
+        // A bash whose environment the wrapper can read may still exec one of Apple's binaries.
+        #[cfg(target_os = "linux")]
+        assert!(
+            orx_host::platform::process(payload).map_or(true, |process| !process.live()),
+            "payload survived"
+        );
+        #[cfg(not(target_os = "linux"))]
+        unsafe {
+            libc::kill(payload as i32, libc::SIGKILL)
+        };
+    }
+    assert!(!dir.join("exit.json").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_source_the_host_cannot_unpack_fails_the_run_with_why() {
+    let f = Fixture::new().await;
+    f.shim(
+        "tar",
+        "echo 'tar: Cannot open: No space left on device' >&2; exit 2",
+    );
+    let archive = f.server.directory().join("source.tar");
+    fs::write(&archive, "archive").unwrap();
+    let digest = orx_host::sha(b"archive");
+    let mut intent = f.intent("unpack", "touch ran", "ssh_job");
+    intent.run.backend_json =
+        json!({"kind":"ssh_job", "sourceDigest":digest, "sourcePath":archive, "sourceSize":7})
+            .to_string();
+    let metadata = crate::jobs::BackendDescriptor::parse(&intent.run.backend_json).unwrap();
+    let mut row = submitting(&intent);
+    row.metadata = &metadata;
+    f.engine.submit(f.ssh.as_ref(), row).await.unwrap();
+    let run = f.terminal(f.ssh.as_ref(), "unpack").await;
+    assert_eq!(run.status, "failed");
+    let reason = run.result_markdown.unwrap_or_default();
+    assert!(
+        reason.contains("The run couldn't start") && reason.contains("No space left on device"),
+        "{reason}"
+    );
+    assert!(!f.dir("unpack").join("ran").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staging_stops_at_an_accepted_cancel() {
+    let f = Fixture::new().await;
+    let archive = f.server.directory().join("cancelled.tar");
+    fs::write(&archive, vec![b'x'; 1 << 20]).unwrap();
+    let digest = orx_host::sha(&fs::read(&archive).unwrap());
+    assert!(matches!(
+        f.ssh.stage_blob(&digest, &archive, 1 << 20, &|| true).await,
+        Err(LaunchError::Interrupted { detail }) if detail.contains("cancel")
+    ));
+    let sources = f.server.home().join("engine-root/sources");
+    for staged in [digest.clone(), format!("{digest}.part")] {
+        assert!(!sources.join(staged).exists());
     }
 }

@@ -76,7 +76,9 @@ A fence is written before the backend is called, and any launcher subprocess rec
 - handle → starting
 - rejected → failed
 - never sent → stay submitting, with that contact; relaunch next tick
-- reply lost → recover: found → starting; absent → relaunch once, then back off with the error shown; unknown → unreconciled, retried with backoff
+- reply lost → recover: found → starting; absent → relaunch once, then back off with the error shown; unknown → unreconciled, retried with backoff; the backend unreachable → stay submitting, with that contact
+
+An accepted cancel or Abandon cuts the backoff short: recovery decides at once, with the cancel in hand.
 
 **A launch is idempotent in the run ID.** On a host, the first launch intent is published exclusively; an identical retry adopts it, a different one conflicts, and the wrapper refuses a run that already started, so a payload never runs twice. API backends find a lost launch by the run ID where the provider allows it; elsewhere the run stays unreconciled until the user abandons it.
 
@@ -84,11 +86,12 @@ A fence is written before the backend is called, and any launcher subprocess rec
 
 Cancelling records the intent and reason on the run. Before the fence it is immediate; after it, the backend's stop proof decides the result, and a death seen while that verdict is pending does not end the run. After an accepted cancel, a job proven gone ends cancelled, and so does a nonzero exit or signal on a hosted service, keeping the reported exit code.
 
-The engine delivers the stop once per connection, whenever the machine is reachable; the run's wrapper performs it, so verification never races its own exit ([remote](remote.md)). A run completes when its direct child exits; processes left behind are listed, raise one notice and stop only on request.
+The engine delivers the stop once per connection, whenever the machine is reachable, and again whenever the run loses contact; the run's wrapper performs it, so verification never races its own exit ([remote](remote.md)). A run completes when its direct child exits; processes left behind are listed, raise one notice and stop only on request.
 
 | State | Meaning |
 | --- | --- |
 | cancelling, while submitting, unreachable or needs auth | The cancel has not reached the machine. |
+| cancelling, with a cancel error | The backend refuses the stop; it is retried every round and shown with its error. |
 | cancelling, otherwise | The stop is running. |
 | cancelled, live | The stop finished and a complete scan found nothing left. |
 | cancelled, stopping | Survivors outlived the stop; the wrapper keeps killing them. |
@@ -96,7 +99,7 @@ The engine delivers the stop once per connection, whenever the machine is reacha
 
 `ui/src/runDisplay.ts` builds the dashboard's labels from these fields.
 
-**Abandon** ends an unfinished run with no live contact as lost and sends the terminal notice. The kill stays pending: a terminal run without live contact is a **tombstone**, still watched, whose stop is delivered whenever the job or host returns, and which settles on the next proof that nothing is left.
+**Abandon** ends an unfinished run with no live contact, or whose stop its backend keeps refusing, as lost and sends the terminal notice. The kill stays pending: a terminal run without live contact is a **tombstone**, still watched, whose stop is delivered whenever the job or host returns, and which settles on the next proof that nothing is left.
 
 ### Logs
 

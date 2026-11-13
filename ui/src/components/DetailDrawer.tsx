@@ -14,12 +14,12 @@ import { ExperimentOverview } from "./ExperimentOverview";
 import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { RunContactNotice } from "./RunContactNotice";
-import { statusLabel, StatusBadge } from "./StatusBadge";
+import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { useResolvedTheme } from "../theme";
 import { Button, ButtonLink, MenuItem } from "./ui";
 import { buildHistoryNodes } from "./experimentLineageModel";
-import { runActive, runDisplay } from "../runDisplay";
+import { runActive, runDisplay, runStoppable } from "../runDisplay";
 
 export type ExperimentView = "overview" | "terminal" | "trackio";
 
@@ -124,7 +124,6 @@ function TerminalView({
     ? trackioRunUrl(trackio, selectedRun.id, { theme })
     : null;
   const display = selectedRun && runDisplay(selectedRun);
-  const cancelling = live && Boolean(selectedRun?.cancelling);
   const error = cancel.error === undefined ? null : cancel.error instanceof Error ? cancel.error.message : String(cancel.error);
   // expRuns is newest-first, so the oldest run is #1. Number a run by its
   // position from the end of the list.
@@ -194,10 +193,10 @@ function TerminalView({
             {m.experiment_overview_visualize()}
           </Button>
         )}
-        {live && display && (
-          <Button size="small" variant="ghost" disabled={cancelling} onClick={stop}>
+        {selectedRun && runStoppable(selectedRun) && (
+          <Button size="small" variant="ghost" onClick={stop}>
             <CircleStop size={14} />
-            {!cancelling ? m.common_stop() : statusLabel(display.status, display.stopping)}
+            {m.common_stop()}
           </Button>
         )}
         {expRuns.length > 0 && selectedRun && display && (

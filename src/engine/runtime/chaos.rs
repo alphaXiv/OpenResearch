@@ -1,7 +1,9 @@
 //! Seeded chaos over real SSH: the production `Runtime`, transport and `orx-host` run through
-//! network, sshd, engine-kill and clock faults while payloads crash, daemonize and flood logs.
-//! Every second asserts that phases only advance, a run starts once and sends one terminal
-//! notice, an auth failure brings no further login, and kept logs match the remote bytes.
+//! network, sshd, engine-kill and clock faults while payloads crash, daemonize and flood logs,
+//! and runs are cancelled or abandoned at random points. Every second asserts that phases only
+//! advance, a run starts once and sends one terminal notice, a cancelled run never starts its
+//! payload after its stop proof, an auth failure brings no further login, and kept logs match
+//! the remote bytes. At the end every run is terminal and no cancelled or abandoned payload runs.
 //!
 //! Opt-in; the ordinary suite compiles it and leaves it ignored:
 //!
@@ -97,7 +99,7 @@ async fn chaos_engine_worker() {
     let _ = fs::remove_file(&live);
     fs::write(directory.join("worker-ready"), b"ready").unwrap();
     if let Ok(point) = std::env::var("ORX_TEST_CRASH_AT") {
-        let runtime = runtime.clone();
+        let (runtime, engine) = (runtime.clone(), engine.clone());
         tokio::spawn(async move {
             let backend = runtime
                 .backend_for(&Key::Ssh {
@@ -140,6 +142,7 @@ async fn chaos_engine_worker() {
         runtime.clone().start();
     }
     while unsafe { libc::getppid() } == parent {
+        apply_requests(&directory, &runtime, &engine).await;
         let connected = lock(&runtime.conns).iter().any(|((alias, _), conn)| {
             alias == "orx-test"
                 && conn
@@ -155,6 +158,82 @@ async fn chaos_engine_worker() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Cancels and abandons runs the schedule asks for in `requests/` with `<run>.cancel` or
+/// `<run>.abandon`, as the dashboard would. A `.applied` marker is written before each takes
+/// effect, so the checks never see its result without it; Abandon waits, as the API makes it,
+/// until the run has no live contact.
+async fn apply_requests(directory: &Path, runtime: &Runtime, engine: &Engine) {
+    let requests = directory.join("requests");
+    let Ok(entries) = fs::read_dir(&requests) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some((id, action)) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.split_once('.'))
+            .map(|(id, action)| (id.to_owned(), action.to_owned()))
+        else {
+            continue;
+        };
+        if !matches!(action.as_str(), "cancel" | "abandon") {
+            continue;
+        }
+        let (run, state) = match engine.load(&id) {
+            Ok(loaded) => loaded,
+            Err(_) => continue,
+        };
+        if crate::local::is_terminal(&run.status) {
+            fs::remove_file(&path).unwrap();
+            continue;
+        }
+        if action == "abandon" && state.contact == crate::store::Contact::Live {
+            continue;
+        }
+        let marker = requests.join(format!("{id}.{action}.applied"));
+        fs::write(&marker, b"").unwrap();
+        let applied = if action == "cancel" {
+            runtime.cancel(&run, "chaos").await.is_ok()
+        } else {
+            engine.abandon(&id).unwrap_or(false)
+        };
+        if !applied {
+            fs::remove_file(&marker).unwrap();
+        }
+        fs::remove_file(&path).unwrap();
+    }
+}
+
+/// Runs the schedule cancelled or abandoned, as far as `action` took effect.
+fn applied(server: &Sshd, action: &str) -> std::collections::BTreeSet<String> {
+    let suffix = format!(".{action}.applied");
+    fs::read_dir(server.directory().join("requests"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()?
+                .strip_suffix(&suffix)
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// The processes still carrying run `id`'s tag on the host.
+fn tagged(server: &Sshd, id: &str) -> usize {
+    let remote = server.home().join("chaos-root/runs").join(id);
+    let Ok(tag) = fs::read_to_string(remote.join("started")) else {
+        return 0;
+    };
+    let identity =
+        orx_host::read_json::<orx_host_proto::ProcessIdentity>(&remote.join("wrapper.json")).ok();
+    orx_host::platform::scan(identity.as_ref(), tag.trim(), false)
+        .map_or(0, |scan| scan.processes.len())
 }
 
 fn worker(server: &Sshd, hook: Option<&str>) -> Process {
@@ -273,10 +352,13 @@ impl Drop for Payloads {
     }
 }
 
+/// `stopped` holds, per run first seen cancelled, whether it had started and how many payload
+/// starts it had then.
 fn assert_step(
     server: &Sshd,
     worker: &Process,
     starts: &mut BTreeMap<String, u64>,
+    stopped: &mut BTreeMap<String, (bool, usize)>,
     reachable_since: Option<Instant>,
 ) -> usize {
     use std::os::unix::fs::MetadataExt;
@@ -315,6 +397,8 @@ fn assert_step(
             }
         }
     }
+    let cancelled = applied(server, "cancel");
+    let abandoned = applied(server, "abandon");
     let mut terminal = 0;
     for (id, status, notices) in runs {
         let phase = Phase::parse(&status).unwrap();
@@ -346,19 +430,24 @@ fn assert_step(
                 "host returned but receipt stayed nonterminal: {id}"
             );
         }
-        if phase == Phase::Lost {
+        if phase == Phase::Lost && abandoned.contains(&id) {
+        } else if phase == Phase::Lost {
             assert_eq!(id, "boot-swap", "unexpected Lost run without receipt: {id}");
             assert!(
                 matches!(orx_host::wrapper::state(&remote).unwrap(), orx_host_proto::RunState::Lost {reason} if reason == "host rebooted")
             );
         } else if phase.is_terminal() {
             let receipt = orx_host::wrapper::receipt(&remote)
-                .unwrap_or_else(|error| panic!("receipt unreadable for {id} ({phase:?}): {error}"))
-                .unwrap_or_else(|| panic!("terminal {id} ({phase:?}) has no receipt"));
-            let expected = if receipt.code == Some(0) && receipt.signal.is_none() {
-                Phase::Done
-            } else {
-                Phase::Failed
+                .unwrap_or_else(|error| panic!("receipt unreadable for {id} ({phase:?}): {error}"));
+            let expected = match receipt {
+                Some(receipt) if receipt.reason == orx_host_proto::ExitReason::Cancelled => {
+                    Phase::Cancelled
+                }
+                Some(receipt) if receipt.code == Some(0) && receipt.signal.is_none() => Phase::Done,
+                Some(_) => Phase::Failed,
+                // Cancelled before the launch, or proven gone after an accepted cancel.
+                None if cancelled.contains(&id) => Phase::Cancelled,
+                None => panic!("terminal {id} ({phase:?}) has no receipt"),
             };
             assert_eq!(phase, expected, "receipt disagrees with phase: {id}");
         }
@@ -367,6 +456,15 @@ fn assert_step(
             .lines()
             .count();
         assert!(launch_count <= 1, "duplicate payload: {}", id);
+        if phase == Phase::Cancelled {
+            let started = remote.join("started").exists();
+            let (had_started, had_launched) =
+                *stopped.entry(id.clone()).or_insert((started, launch_count));
+            assert!(
+                (had_started || !started) && launch_count == had_launched,
+                "payload started after its cancel's stop proof: {id}"
+            );
+        }
         let manifest = server
             .directory()
             .join("store/run-logs")
@@ -386,8 +484,12 @@ fn assert_step(
                     id, range.offset
                 );
             }
-        } else if phase.is_terminal() && phase != Phase::Lost {
-            // A finished run may wait for its log, but then owes it.
+        } else if phase.is_terminal()
+            && phase != Phase::Lost
+            && (phase != Phase::Cancelled || remote.join("started").exists())
+        {
+            // A finished run may wait for its log, but then owes it; one cancelled before it
+            // started has none.
             let owed: bool = db
                 .query_row(
                     "SELECT done = 0 FROM log_collections WHERE run_id = ?1",
@@ -475,6 +577,7 @@ fn held_outage_does_not_make_an_old_live_marker_prove_receipt_reconciliation() {
         reason: orx_host_proto::ExitReason::Exited,
         processes: vec![],
         outcome: orx_host_proto::CancelOutcome::Verified,
+        detail: None,
     };
     orx_host::publish(&remote.join("exit.json"), &receipt).unwrap();
     let live = server.directory().join("host-live");
@@ -490,10 +593,19 @@ fn held_outage_does_not_make_an_old_live_marker_prove_receipt_reconciliation() {
             .unwrap();
     }
     let worker = Process::spawn(&mut crate::process::command("true")).unwrap();
-    let mut starts = BTreeMap::new();
-    assert_eq!(assert_step(&server, &worker, &mut starts, None), 0);
+    let (mut starts, mut stopped) = (BTreeMap::new(), BTreeMap::new());
+    assert_eq!(
+        assert_step(&server, &worker, &mut starts, &mut stopped, None),
+        0
+    );
     let healthy = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        assert_step(&server, &worker, &mut starts, Some(Instant::now() - age))
+        assert_step(
+            &server,
+            &worker,
+            &mut starts,
+            &mut stopped,
+            Some(Instant::now() - age),
+        )
     }));
     assert!(healthy.is_err());
 }
@@ -665,7 +777,9 @@ async fn schedule() {
     }
     identity.boot_id.push_str("-chaos-reboot");
     orx_host::publish(&boot.join("wrapper.json"), &identity).unwrap();
-    let mut starts = BTreeMap::new();
+    let (mut starts, mut stopped) = (BTreeMap::new(), BTreeMap::new());
+    let requests = server.directory().join("requests");
+    fs::create_dir_all(&requests).unwrap();
     let started = Instant::now();
     let mut reachable_since = Some(started);
     let mut faults: Vec<_> = (0..9).collect();
@@ -695,7 +809,20 @@ async fn schedule() {
         }
         let fault = faults[step % faults.len()];
         let hold = 1 + rng.next() % 60;
-        eprintln!("seed={seed} step={step} fault={fault} hold={hold}s runs={runs}");
+        let request = rng.next().is_multiple_of(2).then(|| {
+            let run = format!("chaos-{seed:016x}-{:04}", rng.next() as usize % runs);
+            let action = if rng.next().is_multiple_of(3) {
+                "abandon"
+            } else {
+                "cancel"
+            };
+            fs::write(requests.join(format!("{run}.{action}")), b"").unwrap();
+            format!(" {action}={run}")
+        });
+        eprintln!(
+            "seed={seed} step={step} fault={fault} hold={hold}s runs={runs}{}",
+            request.unwrap_or_default()
+        );
         match fault {
             0 => server
                 .proxy()
@@ -760,7 +887,13 @@ async fn schedule() {
         let hold_started = Instant::now();
         for second in 1..=hold {
             tokio::time::sleep_until((hold_started + Duration::from_secs(second)).into()).await;
-            assert_step(&server, &process, &mut starts, reachable_since);
+            assert_step(
+                &server,
+                &process,
+                &mut starts,
+                &mut stopped,
+                reachable_since,
+            );
             if matches!(fault, 0 | 1 | 5) && second >= 37 {
                 assert_ne!(
                     store
@@ -791,7 +924,13 @@ async fn schedule() {
             server.proxy().reset().unwrap();
         }
         reachable_since.get_or_insert_with(Instant::now);
-        assert_step(&server, &process, &mut starts, reachable_since);
+        assert_step(
+            &server,
+            &process,
+            &mut starts,
+            &mut stopped,
+            reachable_since,
+        );
         elapsed += hold;
         step += 1;
     }
@@ -801,7 +940,7 @@ async fn schedule() {
     let reconnected = Instant::now();
     // Payload delays reserve 20 seconds for setup and output.
     let deadline = reconnected + Duration::from_secs(seconds) + RECONCILE_BUDGET;
-    while assert_step(&server, &process, &mut starts, None) != runs + 5 {
+    while assert_step(&server, &process, &mut starts, &mut stopped, None) != runs + 5 {
         for run in store.list_runs_by_experiment("exp").unwrap() {
             if Phase::parse(&run.status).unwrap().is_terminal() {
                 continue;
@@ -848,19 +987,33 @@ async fn schedule() {
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    assert_step(&server, &process, &mut starts, None);
+    assert_step(&server, &process, &mut starts, &mut stopped, None);
+    let stopping: Vec<_> = applied(&server, "cancel")
+        .union(&applied(&server, "abandon"))
+        .cloned()
+        .collect();
     for run in store.list_runs_by_experiment("exp").unwrap() {
         let id = &run.id;
         let remote = server.home().join("chaos-root/runs").join(id);
+        let launches = fs::read_to_string(remote.join("payload-starts"))
+            .unwrap_or_default()
+            .lines()
+            .count();
+        if stopping.contains(id) {
+            assert!(launches <= 1, "{id}");
+            continue;
+        }
         assert!(remote.join("started").exists(), "never started: {id}");
-        assert_eq!(
-            fs::read_to_string(remote.join("payload-starts"))
-                .unwrap()
-                .lines()
-                .count(),
-            1,
-            "{id}"
+        assert_eq!(launches, 1, "{id}");
+    }
+    // A stop pending on a tombstone or a survivor is delivered once the host is back.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while let Some(id) = stopping.iter().find(|id| tagged(&server, id) > 0) {
+        assert!(
+            Instant::now() < deadline,
+            "a cancelled or abandoned payload still runs, seed={seed}: {id}"
         );
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     kill_worker(&mut process);
     eprintln!(

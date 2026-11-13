@@ -136,6 +136,7 @@ impl Api {
         }
         value["host"] = json!(super::run_host(&self.store(), run)?);
         value["cancelling"] = json!(cancelling);
+        value["cancelError"] = json!(self.engine.cancel_error(&run.id));
         value["durationSecs"] = json!(crate::local::run_duration_secs(run));
         value["updatedDisplay"] = json!(crate::local::fmt_ago(run.updated_at));
         Ok(value)
@@ -257,6 +258,11 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
         .route("/api/compute/hosts", get(hosts))
         .route("/api/compute/hosts/{alias}/retry", post(retry_host))
         .with_state(api)
+}
+
+/// See [`Engine::cancel_error`]; none when the engine isn't running in this process.
+pub(crate) fn cancel_error(run_id: &str) -> Option<String> {
+    installed().ok()?.engine.cancel_error(run_id)
 }
 
 fn installed() -> Result<&'static Arc<Api>> {
@@ -498,22 +504,50 @@ async fn abandon(State(api): State<Arc<Api>>, Path(id): Path<String>) -> ApiResu
     Ok(Json(api.view(&api.run(&id)?)?))
 }
 fn abandon_run(api: &Api, id: &str) -> ApiResult<()> {
+    let ended = |run: &StoredRun| {
+        Failure::Message(
+            StatusCode::CONFLICT,
+            format!(
+                "Run {id} already ended ({}), so there is nothing to abandon.",
+                run.status
+            ),
+        )
+    };
+    let elsewhere = || {
+        Failure::Message(
+            StatusCode::CONFLICT,
+            format!("Run {id} is supervised by another orx process, such as an orx 0.2 run, so it can't be abandoned. Cancel it instead: `orx exp cancel --run {id}`."),
+        )
+    };
+
     let run = api.run(id)?;
+    if Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
+        return Err(ended(&run));
+    }
+    if !crate::engine::is_engine_row(&run) && !api.engine.holds(id) {
+        return Err(elsewhere());
+    }
     let contact = api
         .store()
         .engine_run_state(id)?
         .map_or(Contact::Live, |state| state.contact);
-    if Phase::parse(&run.status).is_some_and(Phase::is_terminal) || contact == Contact::Live {
+    // A stop the backend keeps refusing is as stuck as one that cannot reach it.
+    if contact == Contact::Live && api.engine.cancel_error(id).is_none() {
         return Err(Failure::Message(
             StatusCode::CONFLICT,
-            "Abandon requires a non-terminal run without live contact".into(),
+            format!("OpenResearch can reach run {id} again. Cancel it instead: `orx exp cancel --run {id}`."),
         ));
     }
+
     if !api.engine.abandon(id)? {
-        return Err(Failure::Message(
-            StatusCode::CONFLICT,
-            "Run cannot be abandoned".into(),
-        ));
+        let run = api.run(id)?;
+        return Err(
+            if Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
+                ended(&run)
+            } else {
+                elsewhere()
+            },
+        );
     }
     Ok(())
 }

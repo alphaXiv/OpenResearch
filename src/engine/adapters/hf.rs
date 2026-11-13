@@ -1,6 +1,6 @@
 use super::api::{self, Api};
 use crate::engine::*;
-use crate::error::Result;
+use crate::error::{anyhow, Result};
 use crate::jobs::huggingface as hf;
 use crate::local::trackio;
 use async_trait::async_trait;
@@ -67,7 +67,14 @@ impl Api for HfAccount {
         }
     }
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation> {
-        let job = hf::inspect_job(&hf::resolve_token()?, &self.namespace, self.id(run)?).await?;
+        let token = hf::resolve_token()?;
+        let id = self.id(run)?;
+        let Some(job) = hf::inspect_job(&token, &self.namespace, id).await? else {
+            return Ok(match hf::unseen(&token, &self.namespace, id).await? {
+                Some(cause) => Observation::NeedsAuth { cause },
+                None => api::stage("DELETED", None, None, None, None),
+            });
+        };
         let exit_code = job.status.message.as_deref()
             .and_then(|message| message.strip_prefix("Job failed with exit code: "))
             .and_then(|message| message.split_once(". Reason:"))
@@ -75,7 +82,15 @@ impl Api for HfAccount {
         Ok(api::stage(&job.status.stage, job.status.message, exit_code, None, None))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
-        hf::cancel_job(&hf::resolve_token()?, &self.namespace, self.id(run)?).await
+        let token = hf::resolve_token()?;
+        let id = self.id(run)?;
+        if hf::cancel_job(&token, &self.namespace, id).await? {
+            return Ok(());
+        }
+        match hf::unseen(&token, &self.namespace, id).await? {
+            Some(cause) => Err(anyhow!(cause)),
+            None => Ok(()),
+        }
     }
     async fn logs(
         &self,

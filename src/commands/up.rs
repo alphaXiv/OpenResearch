@@ -1239,6 +1239,8 @@ struct ApiRun {
     exit_code: Option<i64>,
     contact: Option<crate::store::Contact>,
     cancelling: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cancel_error: Option<String>,
     cancel_unconfirmed: Option<Vec<u32>>,
     waiting_reason: Option<String>,
     lost_reason: Option<String>,
@@ -1300,6 +1302,7 @@ impl ApiRun {
                 .map(|state| state.contact)
                 .filter(|contact| *contact != crate::store::Contact::Live),
             cancelling: !is_terminal(&run.status) && (run.cancel_requested || accepted),
+            cancel_error: api_v2::cancel_error(&run.id),
             lost_reason: run
                 .result_markdown
                 .as_ref()
@@ -3308,9 +3311,7 @@ async fn cancel_run(
         Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
         None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
     };
-    api_v2::cancel_run(&run, &reason)
-        .await
-        .map_err(bad_request)?;
+    api_v2::cancel_run(&run, &reason).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

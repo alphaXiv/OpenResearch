@@ -84,12 +84,12 @@ function SentCard({ part, onOpenFile, onOpenRun }: Props) {
             onClick={() => links?.onOpenChat(from)}
           >
             {icon}
-            <span className="min-w-0 truncate">{sender}</span>
+            <span className="min-w-0 truncate">{m.agent_message_from({ sender })}</span>
           </button>
         ) : (
           <span className={senderClass}>
             {icon}
-            <span className="min-w-0 truncate">{sender}</span>
+            <span className="min-w-0 truncate">{m.agent_message_from({ sender })}</span>
           </span>
         )}
         <button

@@ -70,24 +70,24 @@ fn descriptor(handle: &Handle) -> Result<&BackendDescriptor> {
 
 /// The box as OpenResearch reports it; `None` once it is deleted.
 async fn lookup(descriptor: &BackendDescriptor) -> Result<Option<crate::client::Sandbox>> {
-    let id = descriptor.openresearch_ref()?.1;
+    let (org, id) = descriptor.openresearch_ref()?;
     let creds = crate::config::load_credentials()
         .await?
         .ok_or_else(|| anyhow!("Missing OpenResearch credentials"))?;
-    let lookup = tokio::time::timeout(
-        Duration::from_secs(15),
-        crate::client::get_sandbox(&creds, id),
-    );
-    match lookup.await {
-        Ok(Ok(envelope)) => Ok(Some(envelope.sandbox)),
-        Ok(Err(error)) if crate::jobs::openresearch::is_not_found_error(&error.to_string()) => {
-            Ok(None)
+    let lookup = async {
+        match crate::client::get_sandbox(&creds, id).await {
+            Ok(envelope) => Ok(Some(envelope.sandbox)),
+            Err(error) if crate::jobs::openresearch::is_not_found_error(&error.to_string()) => {
+                crate::jobs::openresearch::confirm_gone(&creds, org, id)
+                    .await
+                    .map(|()| None)
+            }
+            Err(error) => Err(error),
         }
-        Ok(Err(error)) => Err(error),
-        Err(_) => Err(anyhow!(
-            "OpenResearch did not answer about box {id} within 15 s"
-        )),
-    }
+    };
+    tokio::time::timeout(Duration::from_secs(15), lookup)
+        .await
+        .map_err(|_| anyhow!("OpenResearch did not answer about box {id} within 15 s"))?
 }
 
 async fn rental_deleted(descriptor: &BackendDescriptor) -> bool {
@@ -308,7 +308,8 @@ impl OpenResearch {
         let creds = crate::config::load_credentials()
             .await?
             .ok_or_else(|| anyhow!("Missing OpenResearch credentials"))?;
-        crate::jobs::openresearch::teardown(&creds, descriptor.openresearch_ref()?.1).await
+        let (org, id) = descriptor.openresearch_ref()?;
+        crate::jobs::openresearch::teardown(&creds, org, id).await
     }
 
     async fn inspect(
@@ -746,7 +747,13 @@ impl Backend for OpenResearch {
         descriptor.timeout_secs = Some(timeout);
         let lease = match created.rental_lease.filter(|lease| lease.version == 1) {
             Some(lease) => lease,
-            None => match crate::jobs::openresearch::teardown(&creds, &created.sandbox.id).await {
+            None => match crate::jobs::openresearch::teardown(
+                &creds,
+                &created.sandbox.organization_id,
+                &created.sandbox.id,
+            )
+            .await
+            {
                 Ok(()) => {
                     return Err(super::api::rejected(
                         "OpenResearch returned no supported rental lease; the box was deleted",
@@ -793,10 +800,23 @@ impl Backend for OpenResearch {
                             continue;
                         }
                         Ok(None) => {}
-                        Err(lookup) => eprintln!(
-                            "Run {}: could not check its box with OpenResearch: {lookup:#}",
-                            watched.id
-                        ),
+                        Err(lookup) => {
+                            if let Some(account) =
+                                lookup.downcast_ref::<crate::jobs::openresearch::OtherAccount>()
+                            {
+                                observations.push((
+                                    watched.id.clone(),
+                                    Observation::NeedsAuth {
+                                        cause: account.to_string(),
+                                    },
+                                ));
+                                continue;
+                            }
+                            eprintln!(
+                                "Run {}: could not check its box with OpenResearch: {lookup:#}",
+                                watched.id
+                            );
+                        }
                     }
                     let observation = descriptor(&watched.handle)
                         .ok()
