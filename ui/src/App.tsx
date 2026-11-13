@@ -927,7 +927,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     baselineRunsRef.current.clear();
     pendingFirstRunningRunsRef.current.clear();
     const runsVisit = ++runsVisitRef.current;
-    queryClient.fetchQuery(listRunsQuery(baselineProjectId))
+    queryClient.fetchQuery({ ...listRunsQuery(baselineProjectId), staleTime: 0 })
       .then((loadedRuns) => {
         if (
           projectIdRef.current !== baselineProjectId ||

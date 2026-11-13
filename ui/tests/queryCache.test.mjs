@@ -205,25 +205,42 @@ test("resync bursts share a refresh and repair a gap reported during it", async 
   off();
 });
 
-for (const cached of [false, true]) test(`resync replaces a pending ${cached ? "cached" : "cold"} read from before the event gap`, async () => {
+for (const cached of [false, true]) test(`resync repairs a pending ${cached ? "cached" : "cold"} read without rejecting its caller`, async () => {
   const requests = [];
   backend({ "/api/projects": (init) => { const request = deferred(); requests.push({ ...request, signal: init.signal }); return request.promise; } });
   const options = queries.listProjectsQuery();
   if (cached) client.setQueryData(options.queryKey, []);
   const observer = new QueryObserver(client, options);
   const off = observer.subscribe(() => {});
-  const stale = client.fetchQuery({ ...options, staleTime: 0 }).catch(() => undefined);
+  const read = client.fetchQuery({ ...options, staleTime: 0 });
   await settle();
   const repair = invalidation.repairLiveQueries();
   await settle();
+  assert.equal(requests[0].signal.aborted, cached);
+  if (!cached) {
+    assert.equal(requests.length, 1);
+    requests[0].resolve({ projects: [{ id: "before-gap" }] });
+    assert.equal((await read)[0].id, "before-gap");
+    await settle();
+  }
   assert.equal(requests.length, 2);
-  assert.equal(requests[0].signal.aborted, true);
   requests[1].resolve({ projects: [{ id: "repaired" }] });
   await repair;
   requests[0].resolve({ projects: [{ id: "stale" }] });
-  await stale;
+  if (cached) assert.equal((await read)[0].id, "repaired");
   assert.equal(client.getQueryData(options.queryKey)[0].id, "repaired");
   off();
+});
+
+test("reconnect preserves a side-chat send waiting on its cold history", async () => {
+  const history = deferred();
+  let sends = 0;
+  backend({ "/api/chat/sessions/side/messages": () => history.promise });
+  const send = client.fetchQuery(queries.getChatMessagesQuery("side")).then(() => { sends++; });
+  await invalidation.repairLiveQueries();
+  history.resolve({ messages: [], queued: [], activeLeafId: null });
+  await send;
+  assert.equal(sends, 1);
 });
 
 test("retiring a scope rejects a refresh even when it had cached data", async (t) => {
@@ -455,4 +472,22 @@ test("a background input summary survives live events during both list reads", a
   const rows = await read;
   assert.equal(rows[0].awaitingInput, true);
   assert.equal(rows[0].contextUsage.usedTokens, 42);
+});
+
+
+for (const event of ["open", "resync.required"]) test(`${event} repairs before listeners start fresh reads`, async () => {
+  backend({ "/api/projects": () => ({ projects: [{ id: "post-gap" }] }) });
+  const options = queries.listProjectsQuery();
+  client.setQueryData(options.queryKey, [{ id: "before-gap" }]);
+  await render(createElement(QueryEvents), workspace);
+  let listenerRead;
+  const off = workspace.events.onChatEvent((event) => {
+    if (event.type === "reconnected") listenerRead = client.fetchQuery({ ...options, staleTime: 0 });
+  });
+  await act(() => {
+    if (event === "open") { streams[0].onopen(); streams[0].onopen(); }
+    else streams[0].dispatchEvent(new MessageEvent(event, { data: "{}" }));
+  });
+  assert.equal((await listenerRead)[0].id, "post-gap");
+  off();
 });

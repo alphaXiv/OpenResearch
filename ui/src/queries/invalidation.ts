@@ -58,8 +58,10 @@ export function createInvalidation(client: WorkspaceClient) {
     repairing ??= (async () => {
       const scope = workspaceScope();
       while (repairAgain && isCurrentScope(scope)) {
-        repairAgain = false;
-        await invalidateFamilies(liveFamilies, scope, undefined, true);
+        // Keep cold-read callers alive, then repair their pre-gap snapshot once it lands.
+        repairAgain = queryClient.getQueryCache().findAll({ queryKey: scope, type: "active" }).some((query) =>
+          liveFamilies.includes(String(query.queryKey[2])) && !isImmutableQuery(query) && query.state.data === undefined && query.state.fetchStatus === "fetching");
+        await invalidateFamilies(liveFamilies, scope);
       }
     })().finally(() => { repairing = undefined; });
     return repairing;
@@ -72,8 +74,8 @@ export function createInvalidation(client: WorkspaceClient) {
       predicate: (query: Query) => families.includes(String(query.queryKey[2])) && !isImmutableQuery(query) && (!predicate || predicate(query)),
     };
     if (cancelReads) {
-      return queryClient.cancelQueries(filters).then(() => {
-        if (isCurrentScope(scope)) return queryClient.invalidateQueries(filters);
+      void queryClient.cancelQueries(filters).then(() => {
+        if (isCurrentScope(scope)) void queryClient.invalidateQueries(filters);
       });
     } else return queryClient.invalidateQueries(filters);
   }
