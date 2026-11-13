@@ -55,7 +55,9 @@ The visible workspace opens one event stream, `/api/events`, which is also the p
 
 **Only the diff sees other processes' writes**, so polling the store stays necessary. Events patch queries already loaded; the baseline comes from the queries themselves, and chat events are edge-only, with no replay on connect.
 
-**A gap is repaired by refetching.** Reopening a stream, after a drop or a hidden workspace, and `resync.required` both invalidate the live query families (`ui/src/queries/invalidation.ts`). A query that renders live data belongs in that list.
+**A gap is repaired by refetching.** Reopening a stream, after a drop or a hidden workspace, and `resync.required` refresh the live query families (`ui/src/queries/invalidation.ts`). Overlapping repairs share the current refresh and request one follow-up for gaps reported during it. A query that renders live data belongs in that list.
+
+Chat publishers send changed messages and the latest changed usage, not repeated polling snapshots. Background transcript events still patch their cached queries; the visible transcript subscribes only to its own history, while background attention indicators come from session summaries.
 
 ## Serving the app
 
