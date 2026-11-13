@@ -309,7 +309,9 @@ pub fn wrap(dir: &Path, keep_awake: bool) -> io::Result<()> {
 /// environment for Apple's own binaries, so without a live wrapper to walk its descendants an
 /// empty scan there proves nothing.
 fn tags_hidden() -> bool {
-    cfg!(target_os = "macos") || tag_hidden_by_test()
+    cfg!(target_os = "macos")
+        || cfg!(all(feature = "test-hooks", debug_assertions))
+            && std::env::var("ORX_TEST_HIDDEN_TAG").as_deref() == Ok("1")
 }
 
 /// Names the step in the receipt's detail and in wrapper.log.
@@ -350,14 +352,6 @@ fn unpack(dir: &Path) -> io::Result<()> {
     }
     fs::rename(part, dir.join("repo"))?;
     File::open(dir)?.sync_all()
-}
-
-fn tag_hidden_by_test() -> bool {
-    #[cfg(all(feature = "test-hooks", debug_assertions))]
-    if std::env::var("ORX_TEST_HIDDEN_TAG").as_deref() == Ok("1") {
-        return true;
-    }
-    false
 }
 
 fn missing_process(error: &io::Error) -> bool {
