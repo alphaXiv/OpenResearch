@@ -3673,35 +3673,24 @@ impl TurnGuard {
             return;
         }
         self.armed = false;
-        let (removed, drain_queued) = {
+        let claude = self.host.claude.live(&self.session_id).await;
+        let next = {
             let mut turns = self.host.turns.lock().await;
-            if matches!(
+            if !matches!(
                 turns.get(&self.session_id),
                 Some(TurnState::Reserved { .. } | TurnState::Switching)
             ) {
-                let drain_queued = self.host.drains_queue(&self.session_id);
-                if drain_queued {
-                    turns.insert(self.session_id.clone(), TurnState::Draining);
-                } else {
-                    self.host.release_durable_turn(&self.session_id);
-                    turns.remove(&self.session_id);
-                }
-                (true, drain_queued)
-            } else {
-                (false, false)
+                return;
             }
+            let drains = self.host.drains_queue(&self.session_id);
+            self.host
+                .pass_slot(&mut turns, &self.session_id, drains, claude.as_deref())
         };
-        if removed {
-            self.host.emit(
-                "chat.busy",
-                json!({ "sessionId": &self.session_id, "busy": drain_queued }),
-            );
-            if drain_queued {
-                self.host.drain_queue(&self.session_id).await;
-            } else {
-                self.host.record_held_continuation(&self.session_id);
-            }
-        }
+        self.host.emit(
+            "chat.busy",
+            json!({ "sessionId": &self.session_id, "busy": next != SlotHolder::None }),
+        );
+        self.host.start_slot_holder(&self.session_id, next).await;
     }
 }
 
@@ -3712,38 +3701,18 @@ impl Drop for TurnGuard {
         }
         let host = self.host.clone();
         let session_id = self.session_id.clone();
-        tokio::spawn(async move {
-            let (removed, drain_queued) = {
-                let mut turns = host.turns.lock().await;
-                if matches!(
-                    turns.get(&session_id),
-                    Some(TurnState::Reserved { .. } | TurnState::Switching)
-                ) {
-                    let drain_queued = host.drains_queue(&session_id);
-                    if drain_queued {
-                        turns.insert(session_id.clone(), TurnState::Draining);
-                    } else {
-                        host.release_durable_turn(&session_id);
-                        turns.remove(&session_id);
-                    }
-                    (true, drain_queued)
-                } else {
-                    (false, false)
-                }
-            };
-            if removed {
-                host.emit(
-                    "chat.busy",
-                    json!({ "sessionId": &session_id, "busy": drain_queued }),
-                );
-                if drain_queued {
-                    host.drain_queue(&session_id).await;
-                } else {
-                    host.record_held_continuation(&session_id);
-                }
-            }
-        });
+        tokio::spawn(async move { TurnGuard::adopt(&host, &session_id).release().await });
     }
+}
+
+/// Who takes a turn slot as its turn gives it up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SlotHolder {
+    /// The next queued user message.
+    Queue,
+    /// What the chat's Claude child began on its own while the slot was taken.
+    HeldReply,
+    None,
 }
 
 /// RAII registration of a turn's steering sink. An aborted turn's guard can
@@ -6751,7 +6720,8 @@ impl ChatHost {
         } else {
             None
         };
-        let reserved_queue = {
+        let claude = self.claude.live(session_id).await;
+        let next = {
             let refreshed = self.refresh_persisted_queue(session_id).is_ok();
             let mut turns = self.turns.lock().await;
             let matches = match (turns.get(session_id), message_id) {
@@ -6764,28 +6734,21 @@ impl ChatHost {
             if !matches {
                 return;
             }
-            let reserved_queue = message_id.is_some() && refreshed && self.drains_queue(session_id);
-            if reserved_queue {
-                turns.insert(session_id.to_string(), TurnState::Draining);
-            } else {
-                self.release_durable_turn(session_id);
-                turns.remove(session_id);
-            }
-            reserved_queue
+            let drains = message_id.is_some() && refreshed && self.drains_queue(session_id);
+            self.pass_slot(&mut turns, session_id, drains, claude.as_deref())
         };
+        let busy = next != SlotHolder::None;
         if let Some(session) = session {
             self.emit(
                 "chat.session",
-                json!({ "session": session_json(&session, reserved_queue) }),
+                json!({ "session": session_json(&session, busy) }),
             );
         }
         self.emit(
             "chat.busy",
-            json!({ "sessionId": session_id, "busy": reserved_queue }),
+            json!({ "sessionId": session_id, "busy": busy }),
         );
-        if !reserved_queue {
-            self.record_held_continuation(session_id);
-        }
+        self.start_slot_holder(session_id, next).await;
     }
 
     async fn finish_interruption(self: &Arc<Self>, session_id: &str) {
@@ -6795,7 +6758,7 @@ impl ChatHost {
     /// Records what a resident Claude child wrote on its own after its turn
     /// ended, such as its reply once a background task finished, as a turn with
     /// no user message. While the chat is busy the lines wait: its next Claude
-    /// turn folds them in, or the freed slot records them here.
+    /// turn folds them in, or the slot passes to them as its turn ends.
     pub(crate) async fn record_continuation(self: &Arc<Self>, session_id: &str) {
         let Some(mut guard) = TurnGuard::claim(self, session_id, None).await else {
             return;
@@ -6804,7 +6767,11 @@ impl ChatHost {
             guard.release().await;
             return;
         }
+        self.record_claimed_continuation(session_id, guard).await;
+    }
 
+    /// Records the segment `claim_continuation` marked, in the slot `guard` holds.
+    async fn record_claimed_continuation(self: &Arc<Self>, session_id: &str, guard: TurnGuard) {
         let request = SendTurnRequest {
             messages: Vec::new(),
             prepared_input: Some(String::new()),
@@ -6827,15 +6794,63 @@ impl ChatHost {
         }
     }
 
-    /// Starts recording a segment the chat's Claude child began while its slot
-    /// was taken; call once the slot is free.
+    /// Gives up a turn slot under the turn map's lock: to the next queued
+    /// message when `drains`, else to a segment the chat's `claude` child began
+    /// on its own meanwhile, claiming it, else frees it. Claiming before the slot
+    /// reads as free leaves no later check to take it from whoever claims next.
+    fn pass_slot(
+        &self,
+        turns: &mut HashMap<String, TurnState>,
+        session_id: &str,
+        drains: bool,
+        claude: Option<&crate::local::claude::ClaudeClient>,
+    ) -> SlotHolder {
+        let admitting = !self.exiting.load(std::sync::atomic::Ordering::SeqCst)
+            && !self.deleting_sessions.lock().unwrap().contains(session_id);
+        let next = if drains {
+            SlotHolder::Queue
+        } else if admitting
+            && claude.is_some_and(crate::local::claude::ClaudeClient::claim_continuation)
+        {
+            SlotHolder::HeldReply
+        } else {
+            SlotHolder::None
+        };
+        match next {
+            SlotHolder::Queue => {
+                turns.insert(session_id.to_string(), TurnState::Draining);
+            }
+            SlotHolder::HeldReply => {
+                turns.insert(
+                    session_id.to_string(),
+                    TurnState::Reserved { turn_id: None },
+                );
+            }
+            SlotHolder::None => {
+                self.release_durable_turn(session_id);
+                turns.remove(session_id);
+            }
+        }
+        next
+    }
+
+    async fn start_slot_holder(self: &Arc<Self>, session_id: &str, next: SlotHolder) {
+        match next {
+            SlotHolder::Queue => self.drain_queue(session_id).await,
+            SlotHolder::HeldReply => self.record_held_continuation(session_id),
+            SlotHolder::None => {}
+        }
+    }
+
+    /// Records the segment [`Self::pass_slot`] passed the slot to. Not
+    /// async: the recording turn's own release leads back here, and the
+    /// compiler cannot prove such a cycle of futures `Send`.
     fn record_held_continuation(self: &Arc<Self>, session_id: &str) {
         let chat = self.clone();
         let session_id = session_id.to_string();
         tokio::spawn(async move {
-            if chat.claude.has_continuation(&session_id).await {
-                chat.record_continuation(&session_id).await;
-            }
+            let guard = TurnGuard::adopt(&chat, &session_id);
+            chat.record_claimed_continuation(&session_id, guard).await;
         });
     }
 
@@ -13836,7 +13851,6 @@ for line in sys.stdin:
     /// fork waits until it owes no reply, then stops it for the next turn.
     #[cfg(unix)]
     #[test]
-    #[ignore = "races a dropped TurnGuard's held-continuation check; re-enable with its fix"]
     fn switching_forks_stops_an_idle_claude_child_and_waits_for_a_busy_one() {
         use crate::local::claude::tests::{chat_echo_worker, emit, ready_host, serve_turn};
 
