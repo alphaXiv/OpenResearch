@@ -100,6 +100,15 @@ impl Delegated {
         }
     }
 
+    /// Whether a command the agent runs in one of orx's terminals has not exited.
+    pub fn running_a_terminal(&self) -> bool {
+        self.terminals
+            .lock()
+            .unwrap()
+            .values()
+            .any(|terminal| terminal.exit.borrow().is_none())
+    }
+
     pub fn set_agent(&self, name: &str) {
         self.shell_commands
             .store(matches!(name, "affogato" | "grok"), Ordering::Relaxed);

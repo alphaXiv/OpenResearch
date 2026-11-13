@@ -67,6 +67,8 @@ pub struct Client {
     stop: Mutex<Option<oneshot::Sender<bool>>>,
     closed: tokio::sync::watch::Receiver<bool>,
     idle_since: Mutex<Option<Instant>>,
+    delegated: Arc<super::delegated::Delegated>,
+    pid: Option<u32>,
 }
 
 struct ConfigurationActivity<'a> {
@@ -293,6 +295,15 @@ impl Client {
 
     pub fn awaiting_permission(&self) -> bool {
         !self.io.permissions.lock().unwrap().is_empty()
+    }
+
+    /// A tool call the agent reports running proves nothing once its turn ends
+    /// (agy never closes an async one), so this asks the processes instead.
+    fn running_a_command(&self) -> bool {
+        self.delegated.running_a_terminal()
+            || self
+                .pid
+                .is_some_and(crate::local::chat::runs_a_detached_command)
     }
 
     pub fn native_id(&self) -> Option<String> {
@@ -560,40 +571,48 @@ impl Host {
                 let Some(host) = weak.upgrade() else {
                     break;
                 };
-                host.prune_slots();
-                let policy = crate::local::agent_lifecycle::IdlePolicy::current();
-                let slots: Vec<_> = host.clients.lock().unwrap().values().cloned().collect();
-                let mut idle = Vec::new();
-                for slot in slots {
-                    if let Ok(saved) = slot.try_lock() {
-                        if let Some(client) = saved.as_ref() {
-                            if let Some(since) = *client.idle_since.lock().unwrap() {
-                                idle.push((slot.clone(), since.elapsed()));
-                            }
-                        }
-                    }
-                }
-                let over_limit =
-                    policy.over_limit(&idle.iter().map(|(_, age)| *age).collect::<Vec<_>>());
-                for (index, (slot, age)) in idle.into_iter().enumerate() {
-                    if age < policy.idle_timeout && !over_limit.contains(&index) {
-                        continue;
-                    }
-                    if let Ok(mut saved) = slot.try_lock() {
-                        let idle = saved.as_ref().is_some_and(|client| {
-                            client.idle_since.lock().unwrap().is_some()
-                                && !client.awaiting_permission()
-                        });
-                        if idle {
-                            if let Some(client) = saved.take() {
-                                // A dev server the agent started stays the user's.
-                                client.end(true).await;
-                            }
-                        }
+                host.reap_idle_at(
+                    Instant::now(),
+                    crate::local::agent_lifecycle::IdlePolicy::current(),
+                )
+                .await;
+            }
+        });
+    }
+
+    async fn reap_idle_at(&self, now: Instant, policy: crate::local::agent_lifecycle::IdlePolicy) {
+        self.prune_slots();
+        let slots: Vec<_> = self.clients.lock().unwrap().values().cloned().collect();
+        let mut idle = Vec::new();
+        for slot in slots {
+            if let Ok(saved) = slot.try_lock() {
+                if let Some(client) = saved.as_ref() {
+                    let since = *client.idle_since.lock().unwrap();
+                    if let Some(since) = since.filter(|_| !client.running_a_command()) {
+                        idle.push((slot.clone(), now.saturating_duration_since(since)));
                     }
                 }
             }
-        });
+        }
+        let over_limit = policy.over_limit(&idle.iter().map(|(_, age)| *age).collect::<Vec<_>>());
+        for (index, (slot, age)) in idle.into_iter().enumerate() {
+            if age < policy.idle_timeout && !over_limit.contains(&index) {
+                continue;
+            }
+            if let Ok(mut saved) = slot.try_lock() {
+                let idle = saved.as_ref().is_some_and(|client| {
+                    client.idle_since.lock().unwrap().is_some()
+                        && !client.awaiting_permission()
+                        && !client.running_a_command()
+                });
+                if idle {
+                    if let Some(client) = saved.take() {
+                        // A dev server the agent started stays the user's.
+                        client.end(true).await;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -691,6 +710,8 @@ pub(super) async fn spawn(
     let (closed_sender, closed_receiver) = tokio::sync::watch::channel(false);
     let task_io = io.clone();
     let initialized_tools = delegated.clone();
+    let client_tools = delegated.clone();
+    let agent_pid = process.id;
     tokio::spawn(async move {
         let run = agent_client_protocol::Client
             .builder()
@@ -854,6 +875,8 @@ pub(super) async fn spawn(
                 stop: Mutex::new(Some(stop_sender)),
                 closed: closed_receiver,
                 idle_since: Mutex::new(Some(Instant::now())),
+                delegated: client_tools,
+                pid: agent_pid,
             }))
         }
         Ok(Ok(Err(message))) => format!("ACP initialization failed: {message}"),
@@ -905,6 +928,88 @@ mod tests {
             .unwrap();
         client.set_native_id(response["sessionId"].as_str().unwrap());
         client
+    }
+
+    async fn turn(client: &Client, text: &str) {
+        let session = client.native_id().unwrap();
+        let prompt = json!([{"type": "text", "text": format!("ACP_TEST:{text}")}]);
+        client
+            .request(
+                "session/prompt",
+                json!({"sessionId": session, "prompt": prompt}),
+            )
+            .await
+            .unwrap();
+        client.end_turn();
+    }
+
+    #[tokio::test]
+    async fn reaper_keeps_an_agent_only_while_its_terminal_runs() {
+        use crate::local::agent_lifecycle::IdlePolicy;
+        let host = Arc::new(Host::default());
+        let kept = |id: &str| {
+            host.clients
+                .lock()
+                .unwrap()
+                .get(id)
+                .is_some_and(|slot| slot.try_lock().is_ok_and(|saved| saved.is_some()))
+        };
+        let later = Instant::now() + std::time::Duration::from_secs(60 * 60);
+
+        let client = new_client(&host, "terminal").await;
+        turn(&client, "live-terminal").await;
+        for policy in [IdlePolicy::DEFAULT, IdlePolicy::LOW_MEMORY] {
+            host.reap_idle_at(later, policy).await;
+            assert!(kept("terminal"), "reaped while its terminal ran");
+        }
+        turn(&client, "kill-live-terminal").await;
+        host.reap_idle_at(later, IdlePolicy::DEFAULT).await;
+        assert!(!kept("terminal"), "kept after its terminal exited");
+        assert!(*client.closed.borrow());
+
+        let client = new_client(&host, "reported").await;
+        turn(&client, "background").await;
+        let cancel = async {
+            tokio::task::yield_now().await;
+            client.cancel();
+        };
+        tokio::join!(turn(&client, "hang"), cancel);
+        assert!(!*client.closed.borrow(), "the cancel ended the agent");
+        host.reap_idle_at(later, IdlePolicy::DEFAULT).await;
+        assert!(
+            !kept("reported"),
+            "a call left running after a cancel kept the agent"
+        );
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reaper_keeps_an_agent_while_a_command_it_detached_runs() {
+        use crate::local::agent_lifecycle::IdlePolicy;
+        let host = Arc::new(Host::default());
+        let kept = || {
+            host.clients
+                .lock()
+                .unwrap()
+                .get("detached")
+                .is_some_and(|slot| slot.try_lock().is_ok_and(|saved| saved.is_some()))
+        };
+        let later = Instant::now() + std::time::Duration::from_secs(60 * 60);
+        let client = new_client(&host, "detached").await;
+        // A helper in the agent's own session, like agy's MCP servers, keeps nothing.
+        turn(&client, "attached").await;
+        turn(&client, "detached").await;
+        for policy in [IdlePolicy::DEFAULT, IdlePolicy::LOW_MEMORY] {
+            host.reap_idle_at(later, policy).await;
+            assert!(kept(), "reaped while its detached command ran");
+        }
+
+        turn(&client, "end-detached").await;
+        host.reap_idle_at(later, IdlePolicy::DEFAULT).await;
+        assert!(!kept(), "kept after its detached command exited");
+        assert!(*client.closed.borrow());
+        host.shutdown().await;
     }
 
     #[tokio::test]
