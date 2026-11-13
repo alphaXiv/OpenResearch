@@ -244,10 +244,13 @@ impl Host {
                 let dir = run_dir(&self.root, &run)?;
                 // scancel would kill a started wrapper before its receipt; it reads cancel.req.
                 // Before it starts, the queued job goes first, so a cancelled receipt never
-                // stands for a job that still holds its place in the queue.
-                if dir.join("job.sbatch").try_exists()?
-                    && !dir.join("started").try_exists()?
-                    && wrapper::receipt(&dir)?.is_none()
+                // stands for a job that still holds its place in the queue. The marker goes
+                // first: published under start.lock, it keeps an unstarted wrapper from starting.
+                let slurm = dir.join("job.sbatch").try_exists()?;
+                if slurm {
+                    wrapper::request(&dir, "cancel.req")?;
+                }
+                if slurm && !dir.join("started").try_exists()? && wrapper::receipt(&dir)?.is_none()
                 {
                     let result = self.scheduler(
                         "scancel",
@@ -604,12 +607,13 @@ impl Host {
             File::open(&dir)?.sync_all()?;
             crash_point("launch_published");
         }
-        if dir.join("started").try_exists()? || dir.join("exit.json").try_exists()? {
-            return Ok(false);
-        }
         let Some(wrapper_lock) = lock(&dir.join("wrapper.lock"))? else {
             return Ok(false);
         };
+        // Under wrapper.lock, so a wrapper that just finished can't have its receipt replaced.
+        if dir.join("started").try_exists()? || dir.join("exit.json").try_exists()? {
+            return Ok(false);
+        }
 
         if directives.is_none() {
             let mut recovery = self

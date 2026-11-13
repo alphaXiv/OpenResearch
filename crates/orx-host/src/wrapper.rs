@@ -651,7 +651,7 @@ pub fn cleanup(dir: &Path) -> io::Result<CleanupAck> {
     Ok(CleanupAck::Accepted)
 }
 
-fn request(dir: &Path, name: &str) -> io::Result<bool> {
+pub(crate) fn request(dir: &Path, name: &str) -> io::Result<bool> {
     let _gate = start_gate(dir)?;
     let marker = OpenOptions::new()
         .write(true)

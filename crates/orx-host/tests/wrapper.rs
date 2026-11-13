@@ -1311,44 +1311,62 @@ fn a_dead_wrapper_kills_term_resistant_processes_after_the_cancel_grace() {
 
 #[test]
 fn an_unreachable_lease_api_is_retried_until_a_cancel_ends_the_run_unstarted() {
+    use std::io::{Read, Write};
     let unreachable = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap();
-    let run = Run::new("touch should-not-run\n");
-    let dir = &run.directory.0;
-    publish(
-        &dir.join("rental.json"),
-        &serde_json::json!({
-            "rental": {"apiUrl":format!("http://{unreachable}"), "sandboxId":"rental", "token":"capability"},
-            "directory":dir,
-        }),
-    )
-    .unwrap();
-    let log = fs::File::create(dir.join("wrapper.log")).unwrap();
-    let mut wrapper = Command::new(env!("CARGO_BIN_EXE_orx-host"))
-        .arg("wrap")
-        .arg(dir)
-        .env("ORX_TEST_FAST_STOPS", "1")
-        .stderr(log)
-        .spawn()
-        .unwrap();
-    until(Duration::from_secs(20), || {
-        assert!(wrapper.try_wait().unwrap().is_none());
-        fs::read_to_string(dir.join("wrapper.log"))
-            .unwrap()
-            .contains("retrying")
+    let limited = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let rate_limited = limited.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for mut stream in limited.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                request.push(byte[0]);
+            }
+            let _ = stream.read_exact(&mut [0; 2]);
+            let _ = stream.write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
     });
-    assert_eq!(
-        wrapper::state(dir).unwrap(),
-        RunState::Starting { reason: None }
-    );
-    wrapper::cancel(dir).unwrap();
-    assert!(wrapper.wait().unwrap().success());
-    let receipt = wrapper::receipt(dir).unwrap().unwrap();
-    assert_eq!(receipt.reason, ExitReason::Cancelled);
-    assert!(!dir.join("started").exists());
-    assert!(!dir.join("should-not-run").exists());
+    for lease_api in [unreachable, rate_limited] {
+        let run = Run::new("touch should-not-run\n");
+        let dir = &run.directory.0;
+        publish(
+            &dir.join("rental.json"),
+            &serde_json::json!({
+                "rental": {"apiUrl":format!("http://{lease_api}"), "sandboxId":"rental", "token":"capability"},
+                "directory":dir,
+            }),
+        )
+        .unwrap();
+        let log = fs::File::create(dir.join("wrapper.log")).unwrap();
+        let mut wrapper = Command::new(env!("CARGO_BIN_EXE_orx-host"))
+            .arg("wrap")
+            .arg(dir)
+            .env("ORX_TEST_FAST_STOPS", "1")
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        until(Duration::from_secs(20), || {
+            assert!(wrapper.try_wait().unwrap().is_none());
+            fs::read_to_string(dir.join("wrapper.log"))
+                .unwrap()
+                .contains("retrying")
+        });
+        assert_eq!(
+            wrapper::state(dir).unwrap(),
+            RunState::Starting { reason: None }
+        );
+        wrapper::cancel(dir).unwrap();
+        assert!(wrapper.wait().unwrap().success());
+        let receipt = wrapper::receipt(dir).unwrap().unwrap();
+        assert_eq!(receipt.reason, ExitReason::Cancelled);
+        assert!(!dir.join("started").exists());
+        assert!(!dir.join("should-not-run").exists());
+    }
 }
 
 fn with_source(run: &Run, files: &[(&str, &str)]) {

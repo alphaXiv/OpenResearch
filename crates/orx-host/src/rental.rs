@@ -32,10 +32,14 @@ impl Rental {
             .send("{}")
             .map(|_| ())
             .map_err(|error| match error {
-                ureq::Error::StatusCode(code) if (400..500).contains(&code) => io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("rental {operation} refused (HTTP {code})"),
-                ),
+                ureq::Error::StatusCode(code)
+                    if (400..500).contains(&code) && code != 408 && code != 429 =>
+                {
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("rental {operation} refused (HTTP {code})"),
+                    )
+                }
                 _ => io::Error::other(format!("rental {operation} unavailable")),
             })
     }
