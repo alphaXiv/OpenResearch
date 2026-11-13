@@ -25,7 +25,7 @@ OpenResearch turns the coding agents a researcher already has (Claude Code, Code
 
 ## Doing the task
 
-- **Do the whole task.** Finish what was asked on every surface it reaches: a new backend or agent gets the setup flow its siblings have, and a feature that works in one view works wherever that thing appears. An issue does not bound the scope, and each review finding is fixed or gets its own issue. If the work should split, propose the split and let the user choose.
+- **Do the whole task.** Finish what was asked on every surface it reaches: a new backend or agent gets the setup flow and the logo its siblings have, and a feature that works in one view works wherever that thing appears. An issue does not bound the scope, and each review finding is fixed or gets its own issue. If the work should split, propose the split and let the user choose.
 - **Fix the class, not the case.** When a bug is one instance of a pattern, fix it where every caller passes and check each site. A change that replaces a mechanism deletes the old one in the same change.
 - **Raise the expensive choice first.** Before building on a choice that is costly to undo (how two views share one piece of UI, the shape of a command agents call, a file format or a stored field), name it to the user and get a yes.
 - **Claim only what you saw.** Before saying something works, watch it work in the app or read it in the CI log, and say what you didn't check.
