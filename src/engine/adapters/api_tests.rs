@@ -2365,7 +2365,22 @@ async fn openresearch_launch_checks_the_key_is_usable_without_a_prompt() {
     crate::local::openresearch::launch_spec(&args)
         .await
         .unwrap();
+    std::fs::write(
+        &config,
+        "Match host 203.0.113.7\n  IdentityFile ~/keys/work\n",
+    )
+    .unwrap();
+    crate::local::openresearch::launch_spec(&args)
+        .await
+        .unwrap();
     std::fs::remove_file(&config).unwrap();
+
+    // An agent orx can't reach may hold the key.
+    std::env::set_var("SSH_AUTH_SOCK", root.join("no-agent.sock"));
+    crate::local::openresearch::launch_spec(&args)
+        .await
+        .unwrap();
+    std::env::remove_var("SSH_AUTH_SOCK");
     local_key(&root, "");
     crate::local::openresearch::launch_spec(&args)
         .await
