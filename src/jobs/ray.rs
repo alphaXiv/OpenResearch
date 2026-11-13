@@ -316,8 +316,24 @@ pub async fn run_job(address: &str, spec: &JobSubmission) -> Result<()> {
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach Ray Jobs at {address}: {e}"))?;
-    check(res, "job submit").await?;
-    Ok(())
+    let status = res.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = res.text().await.unwrap_or_default();
+    // Ray answers a reused submission ID with an error, though that job runs.
+    let known = inspect_job(address, &spec.submission_id).await?;
+    if known.stage != "GONE" {
+        return Ok(());
+    }
+    Err(super::Refused {
+        status: Some(status.as_u16()),
+        message: format!(
+            "Ray Jobs at {address} refused the job (HTTP {}): {body}",
+            status.as_u16()
+        ),
+    }
+    .into())
 }
 
 /// Upload a Ray `working_dir` package through the Jobs server. Ray's own SDK
@@ -398,7 +414,10 @@ pub async fn stop_job(address: &str, submission_id: &str) -> Result<()> {
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach Ray Jobs at {address}: {e}"))?;
-    check(res, "job stop").await?;
+    // A job Ray no longer has needs no stop; its next inspect proves it gone.
+    if res.status() != reqwest::StatusCode::NOT_FOUND {
+        check(res, "job stop").await?;
+    }
     Ok(())
 }
 

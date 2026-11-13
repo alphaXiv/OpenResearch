@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { noticeRun, runAbandonable, runActive, runDisplay, runNotice, runResult } from "../src/runDisplay.ts";
+import { noticeRun, runAbandonable, runActive, runDisplay, runNotice, runResult, runStoppable } from "../src/runDisplay.ts";
 
 const unreachable = { type: "unreachable", since: 100, cause: "Operation timed out" };
 const needsAuth = { type: "needs_auth", since: 200, cause: "Duo approval required" };
@@ -17,7 +17,7 @@ describe("runDisplay", () => {
     }
     assert.equal(runDisplay(run("running", { cancelling: true })).status, "cancelling");
     assert.equal(runDisplay(run("submitting", { cancelling: true })).status, "cancellation_pending");
-    assert.deepEqual(runNotice(run("submitting", { cancelling: true })), { kind: "cancel_pending_launch" });
+    assert.deepEqual(runNotice(run("submitting", { cancelling: true })), { kind: "cancel_pending_launch", detail: null });
   });
 
   test("lost contact replaces the phase with what the user must know", () => {
@@ -29,7 +29,7 @@ describe("runDisplay", () => {
       [run("running", { cancelling: true, contact: unreachable }), "cancellation_pending", 100],
       [run("running", { cancelling: true, contact: needsAuth }), "cancellation_pending", 200],
       [run("submitting", { cancelling: true, contact: unreconciled("No sandbox id") }), "cancellation_pending", 300],
-      [run("running", { cancelling: true, contact: unreconciled("Cancel not verified: 2 survivors") }), "cancelling", 300],
+      [run("running", { cancelling: true, contact: unreconciled("Cancel not verified: 2 survivors") }), "cancellation_pending", 300],
     ];
     for (const [input, status, since] of cases) {
       assert.deepEqual(runDisplay(input), { status, stale: true, since }, `${input.status} ${input.contact.type} cancelling=${input.cancelling}`);
@@ -67,7 +67,7 @@ describe("runNotice", () => {
   test("a pending cancel says why it is pending", () => {
     assert.deepEqual(runNotice(run("running", { cancelling: true, contact: unreachable })), { kind: "cancel_pending", host: "gpu-box", since: 100, contact: "unreachable" });
     assert.deepEqual(runNotice(run("running", { cancelling: true, contact: needsAuth })), { kind: "cancel_pending", host: "gpu-box", since: 200, contact: "needs_auth" });
-    assert.deepEqual(runNotice(run("submitting", { cancelling: true, contact: unreconciled("No sandbox id") })), { kind: "cancel_pending_launch" });
+    assert.deepEqual(runNotice(run("submitting", { cancelling: true, contact: unreconciled("No sandbox id") })), { kind: "cancel_pending_launch", detail: "No sandbox id" });
     assert.deepEqual(runNotice(run("running", { cancelling: true, contact: unreconciled("2 survivors") })), { kind: "cancel_unconfirmed", detail: "2 survivors" });
   });
 
@@ -101,7 +101,18 @@ test("abandon is offered only for active runs we can't observe", () => {
   assert.equal(runAbandonable(run("running", { contact: unreachable })), true);
   assert.equal(runAbandonable(run("submitting", { contact: unreconciled("x") })), true);
   assert.equal(runAbandonable(run("running")), false);
+  assert.equal(runAbandonable(run("running", { cancelling: true, cancelError: "HTTP 500" })), true, "a stop that keeps failing");
+  assert.equal(runDisplay(run("running", { cancelling: true, cancelError: "HTTP 500" })).status, "cancellation_pending");
   assert.equal(runAbandonable(run("lost", { contact: unreconciled("Abandoned") })), false);
+});
+
+test("stop is offered only while a cancel can still do something", () => {
+  assert.equal(runStoppable(run("running")), true);
+  assert.equal(runStoppable(run("running", { contact: unreachable })), true);
+  assert.equal(runStoppable(run("submitting")), true);
+  assert.equal(runStoppable(run("running", { cancelling: true })), false, "the badge carries a pending cancel");
+  assert.equal(runStoppable(run("submitting", { contact: unreconciled("No orx-host for darwin-aarch64") })), true, "the cancel is decided at once");
+  assert.equal(runStoppable(run("done")), false);
 });
 
 test("submitting counts as active", () => {

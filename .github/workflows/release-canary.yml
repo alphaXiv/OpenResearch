@@ -31,13 +31,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/canary-identity.sh
 
-  ci:
+  release-checks:
     needs: [identity, ui, build-host]
-    uses: ./.github/workflows/ci.yml
+    uses: ./.github/workflows/release-checks.yml
     with:
       plan: '{}'
       source-sha: ${{ github.sha }}
-      release: true
 
   build-host:
     needs: identity
@@ -85,7 +84,7 @@ jobs:
         with:
           name: release-ui
           path: ui/dist
-      - run: rustup target add ${{ matrix.target }}
+      - run: rustup toolchain install --no-self-update && rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: canary-macos
@@ -146,10 +145,111 @@ jobs:
           test "$(dist/OpenResearch.app/Contents/MacOS/OpenResearch --no-telemetry version --build-channel)" = production
           test "$(dist/OpenResearch.app/Contents/MacOS/OpenResearch --no-telemetry version --build-id)" = "$ORX_DESKTOP_CANARY_TAG"
           bash scripts/package-macos-app.sh
+      - name: Sign, notarize and package the CLIs
+        env:
+          ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          mkdir -p cli/notarize
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            mkdir -p "cli/$target"
+            cp "orx/canary-macos-orx-$target/orx" "cli/$target/orx"
+            chmod 755 "cli/$target/orx"
+            codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" "cli/$target/orx"
+            # Same requirement src/updates/macos_app.rs pins, so a wrong identity fails here.
+            codesign --verify --strict --verbose=2 \
+              -R='anchor apple generic and certificate leaf[subject.OU] = "9P69UXUJUK" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' \
+              "cli/$target/orx"
+            cp "cli/$target/orx" "cli/notarize/orx-$target"
+          done
+          test "$(cli/aarch64-apple-darwin/orx --no-telemetry version --build-channel)" = production
+          test "$(cli/aarch64-apple-darwin/orx --no-telemetry version --build-id)" = "$ORX_DESKTOP_CANARY_TAG"
+          # A bare binary can't carry a stapled ticket; Gatekeeper finds it online.
+          ditto -c -k cli/notarize "$RUNNER_TEMP/cli.zip"
+          result="$(xcrun notarytool submit "$RUNNER_TEMP/cli.zip" --keychain-profile orx-notary --wait --timeout 25m --output-format json)" || true
+          echo "$result"
+          if [ "$(jq -r .status <<< "$result")" != Accepted ]; then
+            xcrun notarytool log "$(jq -r .id <<< "$result")" --keychain-profile orx-notary || true
+            echo "::error::Notarization of the canary CLIs was not accepted"
+            exit 1
+          fi
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            archive="dist/OpenResearch-cli-$target.tar.gz"
+            COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -czf "$archive" -C "cli/$target" orx
+            shasum -a 256 "$archive" | cut -d' ' -f1 > "$archive.sha256"
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: canary-macos
-          path: dist/OpenResearch.dmg
+          path: |
+            dist/OpenResearch.dmg
+            dist/OpenResearch-cli-*
+          if-no-files-found: error
+
+  # Static like the stable CLI archives, so a remote machine needs no desktop libraries.
+  linux-cli:
+    needs: [identity, ui, build-host]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ui
+          path: ui/dist
+      - run: rustup toolchain install --no-self-update && rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: canary-linux-cli
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Install musl cross linker
+        run: cargo install cargo-zigbuild --locked --version 0.23.4
+      - name: Download release hosts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-host
+          path: target/host-binaries
+      - name: Build orx
+        env:
+          TARGET: ${{ matrix.target }}
+          ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
+          ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
+          ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
+          ORX_DESKTOP_CANARY_CHANGES: ${{ needs.identity.outputs.changes }}
+        run: |
+          cargo zigbuild --release --locked --bin orx --target "$TARGET"
+          orx="target/$TARGET/release/orx"
+          test "$("$orx" --no-telemetry version --build-channel)" = production
+          test "$("$orx" --no-telemetry version --build-id)" = "$ORX_DESKTOP_CANARY_TAG"
+          linked="$(ldd "$orx" 2>&1 || true)"
+          case "$linked" in
+            *"not a dynamic executable"* | *"statically linked"*) ;;
+            *) echo "::error::The headless orx links shared libraries: $linked"; exit 1 ;;
+          esac
+          mkdir -p cli-dist
+          archive="cli-dist/OpenResearch-cli-$TARGET.tar.gz"
+          tar -czf "$archive" -C "target/$TARGET/release" orx
+          sha256sum "$archive" | cut -d' ' -f1 > "$archive.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: canary-cli-${{ matrix.target }}
+          path: cli-dist/OpenResearch-cli-*
           if-no-files-found: error
 
   linux:
@@ -288,8 +388,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [identity, ci, ui, macos-build, macos, linux, windows]
-    if: '!cancelled() && needs.identity.result == ''success'' && needs.ci.result == ''success'' && needs.ui.result == ''success'' && (needs.macos-build.result == ''success'' || needs.macos-build.result == ''skipped'') && (needs.macos.result == ''success'' || needs.macos.result == ''skipped'') && (needs.linux.result == ''success'' || needs.linux.result == ''skipped'') && (needs.windows.result == ''success'' || needs.windows.result == ''skipped'') && (needs.macos.result == ''success'' || needs.linux.result == ''success'' || needs.windows.result == ''success'')'
+    needs: [identity, release-checks, ui, linux-cli, macos-build, macos, linux, windows]
+    if: '!cancelled() && needs.identity.result == ''success'' && needs.release-checks.result == ''success'' && needs.ui.result == ''success'' && needs.linux-cli.result == ''success'' && (needs.macos-build.result == ''success'' || needs.macos-build.result == ''skipped'') && (needs.macos.result == ''success'' || needs.macos.result == ''skipped'') && (needs.linux.result == ''success'' || needs.linux.result == ''skipped'') && (needs.windows.result == ''success'' || needs.windows.result == ''skipped'') && (needs.macos.result == ''success'' || needs.linux.result == ''success'' || needs.windows.result == ''success'')'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -305,6 +405,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: canary-cli-*
+          path: artifacts
+          merge-multiple: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: canary-macos

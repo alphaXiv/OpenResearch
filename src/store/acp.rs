@@ -120,7 +120,7 @@ impl Store {
         let launch = crate::local::acp::registered_definitions()
             .into_iter()
             .find(|definition| definition.id == session.harness)
-            .ok_or_else(|| anyhow!("ACP harness is no longer configured"))?;
+            .ok_or_else(|| anyhow!("This ACP agent is no longer configured"))?;
         launch.validate()?;
         Ok(Some(AcpSessionState {
             launch,

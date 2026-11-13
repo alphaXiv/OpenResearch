@@ -3,12 +3,37 @@ use crate::engine::*;
 use crate::error::{anyhow, Result};
 use crate::jobs::kubernetes as k8s;
 use async_trait::async_trait;
+use futures::future::{BoxFuture, FutureExt as _, Shared};
+use std::collections::HashMap;
+use std::time::Duration;
+
+/// How long one inspect waits for a source copy before reporting it still running.
+const COPY_WAIT: Duration = Duration::from_secs(5);
 
 pub struct K8sAccount {
-    pub context: Option<String>,
-    pub namespace: String,
+    context: Option<String>,
+    namespace: String,
+    /// By run. A copy outlives the inspect that started it, so an inspect timeout never starts a
+    /// second one; a finished copy stays, so a staged run is not copied again.
+    copies: std::sync::Mutex<HashMap<String, Shared<BoxFuture<'static, Copied>>>>,
 }
+
+#[derive(Clone)]
+enum Copied {
+    Staged,
+    Unstartable(String),
+    Failed(String),
+}
+
 impl K8sAccount {
+    pub fn new(context: Option<String>, namespace: String) -> Self {
+        Self {
+            context,
+            namespace,
+            copies: Default::default(),
+        }
+    }
+
     fn resources(&self, run: &WatchedRun) -> Result<Vec<String>> {
         let id = api::id(
             run,
@@ -62,7 +87,7 @@ impl Api for K8sAccount {
         let spec = self.spec(intent).map_err(api::rejected)?;
         let submitted = k8s::run_manifest(self.context.as_deref(), &self.namespace, &spec, Some(fence))
             .await
-            .map_err(api::interrupted)?;
+            .map_err(api::launch_error)?;
         Ok(Self::handle(
             intent,
             submitted.resources,
@@ -77,10 +102,10 @@ impl Api for K8sAccount {
         }
     }
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation> {
-        let state =
-            k8s::inspect_job(self.context.as_deref(), &self.namespace, &self.job(run)?).await?;
+        let job = self.job(run)?;
+        let state = k8s::inspect_job(self.context.as_deref(), &self.namespace, &job).await?;
         if state.stage == "DELETED" {
-            let selector = format!("job-name={}", self.job(run)?);
+            let selector = format!("job-name={job}");
             let body = k8s::kubectl(
                 self.context.as_deref(),
                 &[
@@ -109,6 +134,34 @@ impl Api for K8sAccount {
                 }
             });
         }
+        let mut unstartable = state.unstartable;
+        // Runs from 0.2 were staged before their handle was recorded.
+        if state.stage == "RUNNING" && matches!(run.handle, Handle::Api { .. }) {
+            let copy = self.copy(run, &job);
+            match tokio::time::timeout(crate::config::paced(COPY_WAIT), copy).await {
+                Err(_) => {
+                    return Ok(Observation::Queued {
+                        detail: Some("Copying the source".into()),
+                    })
+                }
+                Ok(Copied::Failed(error)) => return Err(anyhow!(error)),
+                Ok(Copied::Unstartable(reason)) => unstartable = Some(reason),
+                Ok(Copied::Staged) => {}
+            }
+        }
+        if let Some(reason) = unstartable {
+            // A waiting pod keeps its node's resources until the Job's deadline.
+            k8s::delete_resources(
+                self.context.as_deref(),
+                &self.namespace,
+                &self.resources(run)?,
+            )
+            .await?;
+            return Ok(Observation::Failed {
+                finished_at: None,
+                reason,
+            });
+        }
         Ok(api::stage(&state.stage, state.message, state.exit_code, None, None))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
@@ -119,12 +172,16 @@ impl Api for K8sAccount {
         )
         .await
     }
+    async fn finish(&self, run: &WatchedRun) -> Result<()> {
+        lock(&self.copies).remove(&run.id);
+        Ok(())
+    }
     async fn logs(
         &self,
         run: &WatchedRun,
         cursor: &mut k8s::LogResume,
         window: std::time::Duration,
-        sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+        sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c k8s::LogResume>) + Send),
     ) -> Result<bool> {
         let mut resume = cursor.clone();
         let job = self.job(run)?;
@@ -213,18 +270,92 @@ impl K8sAccount {
             }
             return Ok(None);
         }
-        let state = k8s::inspect_job(self.context.as_deref(), &self.namespace, &job).await?;
-        if !crate::jobs::is_terminal_stage(&state.stage) {
-            k8s::stage_source(
-                self.context.as_deref(),
-                &self.namespace,
-                &job,
-                &spec.source_archive,
-            )
-            .await?;
-        }
         Ok(Some(Self::handle(intent, expected, &job)))
     }
+
+    /// The run's copy in flight or done, or a new one when there is none or the last failed.
+    fn copy(&self, run: &WatchedRun, job: &str) -> Shared<BoxFuture<'static, Copied>> {
+        let mut copies = lock(&self.copies);
+        let current = copies
+            .get(&run.id)
+            .filter(|copy| !matches!(copy.peek(), Some(Copied::Failed(_))));
+        if let Some(copy) = current {
+            return copy.clone();
+        }
+        let (context, namespace) = (self.context.clone(), self.namespace.clone());
+        let (job, id) = (job.to_owned(), run.id.clone());
+        let task = tokio::spawn(async move {
+            stage(context.as_deref(), &namespace, &job, &id)
+                .await
+                .unwrap_or_else(|error| Copied::Failed(format!("{error:#}")))
+        });
+        let copy = async move {
+            task.await
+                .unwrap_or_else(|error| Copied::Failed(format!("The source copy stopped: {error}")))
+        }
+        .boxed()
+        .shared();
+        copies.insert(run.id.clone(), copy.clone());
+        copy
+    }
+}
+
+async fn stage(context: Option<&str>, namespace: &str, job: &str, run: &str) -> Result<Copied> {
+    let pod = k8s::leader_pod(context, namespace, job)
+        .await?
+        .ok_or_else(|| anyhow!("Job {namespace}/{job} has no pod to copy the source into"))?;
+    let spec = launch_spec(run)?;
+    // Before the copy, so the command never runs without its deadline.
+    if let Err(error) = k8s::start_deadline(context, namespace, job, &pod, spec.timeout_seconds).await
+    {
+        let forbidden = error
+            .downcast_ref::<crate::jobs::Refused>()
+            .is_some_and(|refused| refused.status == Some(403));
+        if forbidden {
+            return Ok(Copied::Unstartable(format!(
+                "{error:#}. Allow patching Jobs in namespace {namespace}, then run the experiment \
+                 again."
+            )));
+        }
+        return Err(error);
+    }
+    if k8s::source_staged(context, namespace, &pod).await {
+        return Ok(Copied::Staged);
+    }
+    let archive = spec.source_archive;
+    let missing = match tokio::fs::metadata(&archive).await {
+        Ok(metadata) => !metadata.is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            return Err(anyhow!(
+                "Could not read the source snapshot at {}: {error}",
+                archive.display()
+            ))
+        }
+    };
+    if missing {
+        return Ok(Copied::Unstartable(format!(
+            "The source snapshot for this run is missing at {}, so its pod can never start. Run \
+             the experiment again.",
+            archive.display()
+        )));
+    }
+    k8s::stage_source(context, namespace, &pod, &archive).await?;
+    Ok(Copied::Staged)
+}
+
+fn launch_spec(run: &str) -> Result<k8s::ManifestSpec> {
+    let launch = crate::store::Store::open()?
+        .engine_run_state(run)?
+        .and_then(|state| state.launch)
+        .ok_or_else(|| anyhow!("Run {run} has no launch spec to start it from"))?;
+    Ok(serde_json::from_value(launch.options)?)
+}
+
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -233,10 +364,7 @@ mod tests {
 
     #[test]
     fn adopted_runs_keep_the_recorded_primary_and_pre_resource_cancel_target() {
-        let account = K8sAccount {
-            context: None,
-            namespace: "default".into(),
-        };
+        let account = K8sAccount::new(None, "default".into());
         for resources in [
             serde_json::Value::Null,
             serde_json::json!(["job/worker", "job/primary"]),

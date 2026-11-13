@@ -8,6 +8,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
@@ -21,9 +22,12 @@ import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount"
 import { OpenResearchSshKey } from "./OpenResearchSshKey";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
-import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarnessDialog";
+import { AddAgentDialog, canConfigureHarness, ChoiceGrid, keyKind, OpenCodeSignInDialog, opencodeMajor, opencodeVersion, providerRank, providerTile, RECOMMENDED_TILES, sortHarnesses, TileMark, useDatacenterWarning, type AddedAgent } from "./AddAgentDialog";
+import { AgentIconButton, AgentIconTile, type Logo } from "./AgentIcon";
+import type { SetupAction } from "./harnessSetupState";
+import { OpenCodeKeyDialog } from "./OpenCodeKeyDialog";
 
-import { useQuery, useQueries } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
 import { useMutate } from "@clo/react-mutation";
 import {
   mutApplyUpdate,
@@ -33,7 +37,9 @@ import {
   mutInitializeProjectGit,
   mutInstallCli,
   mutRemoveAcpHarness,
+  mutRemoveLocalModel,
   mutRetryEngineHost,
+  mutSaveAcpHarness,
   mutSaveHfToken,
   mutSaveK8sSettings,
   mutSaveModalToken,
@@ -62,6 +68,7 @@ import {
   Cpu,
   ExternalLink,
   Info,
+  Link2,
   Monitor,
   Moon,
   Plus,
@@ -87,10 +94,14 @@ import {
   type ComputeTargetSummary,
   type EnvVar,
   type Project,
+  type AgentIcon,
+  tidyModelName,
   type Harness,
+  type HarnessModel,
   type HarnessSetupCommands,
-  type HarnessId,
   type HfSettings,
+  type LocalModelConnection,
+  type OpenCodeProvider,
   type K8sSettings,
   type LocalMachine,
   type VercelPlan,
@@ -123,8 +134,10 @@ import { OptionPicker } from "./ModelPicker";
 import { useDebouncedValue } from "./NewProjectForm";
 import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
-import { HarnessLogo } from "./HarnessLogo";
-import { LocalModelSetup } from "./LocalModelSetup";
+import { endpointMark, FREE_MODELS_MARK, harnessMark, pickerAgents, providerMark } from "./pickerAgents";
+import { BrandMark, ModelMark, modelLab } from "./HarnessLogo";
+import { agentModelLines, keptInstall } from "../modelSelection";
+import { ModelSettings } from "./ModelSettings";
 import { StatusBadge } from "./StatusBadge";
 import { SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
@@ -156,6 +169,10 @@ const SETTINGS_CARD_CLASS_NAME = [
   "[&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0",
 ].join(" ");
 
+/** An agent row, its icon as far from the side as from the top. */
+const AGENT_ROW_CLASS_NAME = "flex min-h-15.5 items-center gap-3 rounded-lg px-3.75 py-2";
+const AGENT_CARD_CLASS_NAME = cn(SETTINGS_CARD_CLASS_NAME, "mb-3 p-0");
+
 const KV_CLASS_NAME = [
   "kv grid grid-cols-[auto_1fr] items-baseline gap-y-1 gap-x-3.5 text-base",
   "[&_.k]:text-sm [&_.k]:text-subtext [&_.v]:text-base [&_.v]:text-text",
@@ -177,6 +194,8 @@ const SETTINGS_NOTE_CLASS_NAME = [
   "border border-accent-amber rounded-md bg-accent-amber-subtle",
   "text-accent-amber font-medium",
 ].join(" ");
+
+const SECTION_CLASS_NAME = "mt-5 mb-2 text-sm font-medium text-subtext";
 
 const FORM_CLASS_NAME = [
   "form font-sans text-sm text-text [&_.form-seg]:self-start [&_.form-seg]:mb-0.5",
@@ -338,7 +357,7 @@ function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label:
   if (h.catalogPending) return { cls: "warn", variant: "warning", label: m.onboarding_checking() };
   if (h.authCheckFailed) return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
   if (h.id.startsWith("acp:") && h.authState === "needsLogin") return { cls: "warn", variant: "warning", label: m.acp_auth_setup_needed() };
-  if (h.id.startsWith("acp:") && h.authState === "ready") return { cls: "ok", variant: "success", label: m.acp_credentials_configured() };
+  if (h.id.startsWith("acp:") && h.authState === "ready") return { cls: "ok", variant: "success", label: h.authEnvKey ? m.onboarding_api_key() : m.settings_page_ready_to_use() };
   if (h.agentReady && !h.authenticated && h.authMethod !== "local") return { cls: "warn", variant: "warning", label: m.onboarding_not_signed_in() };
   if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "thirdParty" || claudeProviderLabel(h) ? m.settings_page_ready_to_use() : h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
@@ -378,23 +397,56 @@ export function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undef
   return `/api/harnesses/setup?${new URLSearchParams({ harness: h.id, action, shell: "true" })}`;
 }
 
-function HarnessesTab({ remote }: { remote: boolean }) {
+function AgentsTab({ remote }: { remote: boolean }) {
+  return (
+    <>
+      <h2>{m.settings_page_harnesses()}</h2>
+      <AgentList remote={remote} />
+      <NestedDelegationRow />
+      <ModelSettings heading={<h3 className={cn(SECTION_CLASS_NAME, "mt-8")}>{m.settings_models()}</h3>} />
+    </>
+  );
+}
+
+/**
+ * Settings → Agents' rows: what OpenResearch keeps, then what it found working on this computer. The onboarding lists
+ * them as one, led by OpenCode's free models, and offers the recommended agents not set up yet.
+ */
+export function AgentList({ remote, onboarding }: {
+  remote: boolean;
+  onboarding?: {
+    /** The remote machine being set up, which warns before a Claude sign-in there. */
+    host?: string;
+    onAdded: (added: AddedAgent) => void;
+    /** OpenCode's own install, which the onboarding runs for the free models while OpenCode is missing. */
+    freeModels: FreeModelsInstall & { installing: boolean };
+  };
+}) {
   const { id: elementId } = useContext(WorkspaceDomContext);
 
   const workspace = useWorkspace();
-  const { showCustomDialog } = workspace.dialogs;
-  const { getHarnessesQuery, getHarnessSetupCommandsQuery, refreshHarnesses, listAcpHarnessesQuery } = workspace.queries;
-  const { workspaceKey, queryClient } = workspace;
-  const { listAcpPresets } = workspace.api;
+  const { showCustomDialog, showConfirmDialog } = workspace.dialogs;
+  const { getHarnessesQuery, getHarnessSetupCommandsQuery, getOpenCodeProvidersQuery, getLocalModelsQuery, getUiStateQuery, listAcpHarnessesQuery, refreshHarnesses, refreshHarness } = workspace.queries;
+  const { workspaceKey, queryClient, api } = workspace;
 
   const harnessesOptions = getHarnessesQuery();
-  const { data: harnesses = null, isError: harnessesError } = useQuery(harnessesOptions);
-  const [active, setActive] = useState<HarnessId | null>(null);
+  const { data: harnesses = null, isError: harnessesError, isFetching: harnessesFetching } = useQuery(harnessesOptions);
+  const providersOptions = getOpenCodeProvidersQuery();
+  const providers = useQuery(providersOptions);
+  const endpointsOptions = getLocalModelsQuery();
+  const endpoints = useQuery(endpointsOptions);
+  const [active, setActive] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const definitions = useQuery(listAcpHarnessesQuery());
-  const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets });
+  const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: api.listAcpPresets });
+  const { data: uiState } = useQuery(getUiStateQuery());
+  const warnFirst = useDatacenterWarning(onboarding?.host);
+  const withAlert = async (action: () => Promise<unknown>) => {
+    try { await action(); }
+    catch (error) { showAlert(error instanceof Error ? error.message : String(error), "error"); }
+  };
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
@@ -404,15 +456,39 @@ function HarnessesTab({ remote }: { remote: boolean }) {
   };
 
   const orderedHarnesses = sortHarnesses(harnesses ?? []);
-  const added = orderedHarnesses.filter((h) => h.installed || h.installBroken || definitions.data?.some((definition) => definition.id === h.id));
-  const ready = added.filter((h) => h.agentReady);
-  const suggestions = orderedHarnesses
-    .filter((h) => !h.agentReady && !h.catalogPending && (["claude-code", "codex", "opencode"].includes(h.id) || h.installed || (!h.setupUrl && definitions.data?.some((definition) => definition.id === h.id))))
-    .filter((h, index, all) => !h.setupUrl || all.findIndex((other) => other.setupUrl === h.setupUrl) === index);
+  const opencode = orderedHarnesses.find((h) => h.id === "opencode");
+  const records = [...(providers.data ?? [])].sort((a, b) => providerRank(a) - providerRank(b));
+  const opencode1 = opencodeMajor(opencode) === 1;
+  // Sign-ins made in OpenCode itself, by its accounts or the models it lists, which no record or endpoint of OpenResearch's stands for.
+  const recorded = (id: string) => id === "opencode"
+    || records.some((record) => record.id === id || record.canonical === id)
+    || Boolean(endpoints.data?.some((connection) => connection.id === id));
+  const opencodeSignIns = [...(opencode?.account?.split(", ") ?? []), ...(opencode?.models ?? []).map((model) => model.id.split("/")[0])];
+  const unrecorded = [...new Set(opencodeSignIns)].filter((id) => id && !recorded(id));
+  // What was added here shows with whatever is wrong with it; an agent merely found on this
+  // computer shows only while it works, and Add agent sets up the rest. OpenCode stands behind
+  // its providers: it shows for sign-ins no record stands for, or a fault those records hit.
+  const works = (h: Harness) => h.agentReady && !h.authCheckFailed;
+  // What OpenResearch keeps, apart from agents it found using their own settings on this computer.
+  const kept = (h: Harness) => Boolean(h.profile || keptInstall(h) || definitions.data?.some((definition) => definition.id === h.id));
+  const rows = orderedHarnesses
+    .filter((h) => kept(h)
+      || (h.id === "opencode" ? (unrecorded.length > 0 && works(h)) || (records.length > 0 && (h.installBroken || h.needsConfigRepair || opencode1)) : works(h)))
+    .filter((h, index, all) => h.profile || !h.setupUrl || all.findIndex((other) => other.setupUrl === h.setupUrl) === index);
+  const offersFreeModels = opencode?.installed && !opencode.installBroken;
+  const freeModels = opencode?.models.filter((model) => model.id.startsWith("opencode/")) ?? [];
+  const empty = rows.length === 0 && !records.length && !endpoints.data?.length && !offersFreeModels;
 
   const openAcp = (definition?: AcpDefinition) => showCustomDialog({
     component: AcpHarnessDialog,
-    props: { customOnly: !definition, definition, onSaved: () => load(true) },
+    props: {
+      customOnly: !definition,
+      definition,
+      onSaved: (id) => {
+        onboarding?.onAdded({ harness: id });
+        load(true, true);
+      },
+    },
     onConfirm: (save) => save(),
     onCancel: "close",
   });
@@ -422,180 +498,630 @@ function HarnessesTab({ remote }: { remote: boolean }) {
     onConfirm: () => {},
     onCancel: "close",
   });
-  const openSetup = (harness: Harness, commands = queryClient.getQueryData(getHarnessSetupCommandsQuery().queryKey)?.[harness.id]) => {
+  const openSetup = (harness: Harness, options: { action?: SetupAction; profile?: string } = {}) => {
+    const commands = queryClient.getQueryData(getHarnessSetupCommandsQuery().queryKey)?.[harness.id];
     if (remote || !commands) return;
-    showCustomDialog({
+    const open = () => showCustomDialog({
       component: HarnessSetupDialog,
-      props: { harness, commands, onAuth: openAuth, onBack: () => openAdd() },
+      props: { harness, commands, onAuth: openAuth, ...options },
       onConfirm: () => {},
       onCancel: "close",
     });
+    if (harness.id === "claude-code" && harness.authMethod !== "apiKey") void warnFirst(open, () => {});
+    else open();
   };
-  const openAdd = (initialCandidate?: HarnessId) => showCustomDialog({
-    component: AddHarnessDialog,
-    props: {
-      initialCandidate,
-      remote,
-      onCustom: () => openAcp(),
-      onEdit: openAcp,
-      onSetup: (harness, commands) => {
-        if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) openAuth(harness);
-        else openSetup(harness, commands);
-      },
-    },
-    onConfirm: () => {},
+  const openReplaceKey = (provider: OpenCodeProvider) => showCustomDialog({
+    component: OpenCodeKeyDialog,
+    props: { provider },
+    onConfirm: (save) => save(),
     onCancel: "close",
   });
-  const chooseHarness = (id: HarnessId) => {
-    const harness = orderedHarnesses.find((item) => item.id === id);
-    if (!harness) return;
-    if (canConfigureHarness(harness, remote, setupCommands.data?.[harness.id])) {
-      if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) openAuth(harness);
-      else openSetup(harness);
-    } else openAdd(id);
+  const signInAgain = async (provider: OpenCodeProvider) => {
+    const start = async () => {
+      const method = (await api.getOpenCodeIntegrations()).find((item) => item.id === provider.id)?.methods.find((item) => item.type === "oauth");
+      if (!method) throw new Error(m.add_agent_oauth_unavailable({ name: provider.name }));
+      return api.startOpenCodeSignIn({ integration: provider.id, method: method.id, name: provider.name, ...(provider.icon ? { icon: provider.icon } : {}) });
+    };
+    await withAlert(async () => {
+      const first = await start();
+      showCustomDialog({
+        component: OpenCodeSignInDialog,
+        props: { name: provider.name, first, start },
+        onConfirm: () => { void refreshHarness("opencode").catch(() => {}); },
+        onCancel: "disable",
+      });
+    });
   };
+  const confirmRemove = (name: string, action: () => Promise<unknown>) => showConfirmDialog({
+    title: m.settings_remove_agent_title({ name }),
+    description: m.settings_remove_agent_description(),
+    destructive: true,
+    confirmLabel: m.chat_panel_remove(),
+    onConfirm: async () => { await action(); },
+    onCancel: "close",
+  });
+  // Leaving goes only through its Cancel button, so a stray Escape or click loses no sign-in.
+  const openAdd = (tile?: string) => showCustomDialog({
+    component: AddAgentDialog,
+    props: { remote, host: onboarding?.host, tile, hideRecommended: Boolean(onboarding), onCustomAcp: () => openAcp(), onEditAcp: openAcp },
+    onConfirm: (added) => onboarding?.onAdded(added),
+    onCancel: "disable",
+  });
+  /** Saves, then waits for the list that shows it, so an edit never flickers back. */
+  const saver = (write: (changes: RecordChanges) => Promise<unknown>, queryKey: readonly unknown[]) => async (changes: RecordChanges) => {
+    await write(changes);
+    await queryClient.refetchQueries({ queryKey });
+  };
+
+  const turnedOff = new Set(uiState?.hiddenAgents);
+  /** Whether an agent besides the free models can start a chat, counting `turningOff` as off already. */
+  const othersOn = (turningOff?: string) => {
+    // By the switches as they stand, since an agent's own `off` trails a switch until the agents reload.
+    const agents = pickerAgents((harnesses ?? []).map((h) => ({ ...h, off: false })), records, endpoints.data ?? []);
+    return agents.some((agent) => {
+      if (agent.provider === "opencode") return false;
+      // Accounts, providers and endpoints OpenResearch keeps have no switch; OpenCode's covers the sign-ins made in it.
+      const switched = !agent.harness.profile && !(agent.provider && recorded(agent.provider));
+      return !(switched && (turnedOff.has(agent.harness.id) || agent.harness.id === turningOff));
+    });
+  };
+  const switchAgent = (key: string, on: boolean) => {
+    if (!uiState) return;
+    const hiddenAgents = on ? uiState.hiddenAgents.filter((id) => id !== key) : [...uiState.hiddenAgents, key];
+
+    // Something always runs a chat: turning off the last other agent turns the free models back on.
+    const freeModelsBack = !on && !othersOn(key) && !uiState.opencodeFreeModels;
+    // The agents say which are off, and the free models' list depends on their switch, so both reload.
+    const reload = freeModelsBack ? () => load(true) : () => void queryClient.invalidateQueries({ queryKey: getHarnessesQuery().queryKey });
+    mutUpdateUiState.runWithOptions(workspace, { hiddenAgents, ...(freeModelsBack ? { opencodeFreeModels: true } : {}) }, { onSuccessData: reload });
+  };
+  const freeModelsLocked = !othersOn();
+
+  const expandable = !onboarding;
+  const rowProps = (id: string) => ({
+    expandable,
+    expanded: active === id,
+    controls: elementId(`agent-details-${id}`),
+    onToggle: () => setActive((current) => current === id ? null : id),
+  });
+  /** A name the same as the agent's own is no name of the user's, so it clears. */
+  const saveLabel = (h: Harness, ownName: string, definition?: AcpDefinition) => saver(async ({ name, icon }) => {
+    if (definition && name !== undefined) {
+      const { id, ...fields } = definition;
+      await mutSaveAcpHarness.runAsHeadlessPromise(workspace, { ...fields, name }, id, {});
+    }
+    const label = { ...(name !== undefined && !definition ? { name: name === ownName ? null : name } : {}), ...(icon ? { icon } : {}) };
+    if (Object.keys(label).length) await api.updateAgent(h.id, label);
+  }, harnessesOptions.queryKey);
+
+  const harnessRow = (h: Harness) => {
+    const commands = setupCommands.data?.[h.id];
+    const status = harnessStatus(h);
+    const signedOut = !h.catalogPending && (!h.agentReady || Boolean(h.authCheckFailed));
+    if (h.profile) {
+      const profile = h.profile;
+      const signIn = () => openSetup(h, { action: "login", profile: profile.id });
+      const remove = () => confirmRemove(profile.name, () => api.removeAgentProfile(profile.id));
+      return (
+        <RecordRow
+          key={profile.id}
+          {...rowProps(profile.id)}
+          {...harnessMark(h)}
+          name={profile.name}
+          detail={signedOut ? status.label : [h.accountName ?? h.account, h.plan].filter(Boolean).join(" · ") || status.label}
+          warn={signedOut}
+          action={signedOut && !remote && commands
+            ? <Button size="small" onClick={signIn} aria-haspopup="dialog"><SquareTerminal size={14} />{m.harness_setup_login()}</Button>
+            : null}
+          onRemove={remove}
+          onSave={saver((changes) => api.updateAgent(profile.id, changes), harnessesOptions.queryKey)}
+        >
+          <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
+            {h.account && <><span className="k">{m.settings_page_account()}</span><span className="v">{h.account}</span></>}
+            {h.plan && <><span className="k">{m.settings_page_plan()}</span><span className="v">{h.plan}</span></>}
+            <span className="k">{m.settings_page_version()}</span>
+            <span className="v">{h.version ?? "—"}{h.managed && ` · ${m.settings_page_installed_by_openresearch()}`}</span>
+            <span className="k">{m.settings_page_agent_models()}</span>
+            <span className="v">{h.models.length > 0 ? <ModelCount harness={h.id} models={h.models} /> : h.agentReady ? m.settings_no_models() : m.settings_none()}</span>
+          </div>
+          <div className="mt-3 flex items-center gap-2">
+            <Button size="small" onClick={remove} aria-haspopup="dialog">{m.chat_panel_remove()}</Button>
+          </div>
+        </RecordRow>
+      );
+    }
+    const acp = definitions.data?.find((definition) => definition.id === h.id);
+    const update = h.id === "opencode" && opencode1 && !remote;
+    const action = update || (!h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands)));
+    const noModels = h.agentReady && !h.models.length;
+    const signIns = h.id === "opencode" ? unrecorded.map((id) => providerTile({ id, name: id }).tile.name).join(", ") : undefined;
+    const detail = h.id === "opencode" && opencode1 ? m.settings_opencode_update_needed()
+      : h.authCheckFailed || !h.agentReady
+        ? status.label
+        : noModels ? m.settings_no_models()
+        : [h.accountName, signIns, h.plan].filter(Boolean).join(" · ") ||
+          (h.accountLoading
+            ? m.onboarding_loading_account()
+            : claudeProviderLabel(h) ||
+              (h.authMethod === "apiKey" ? m.onboarding_api_key() : h.authMethod === "local" ? m.projects_local() : status.label));
+    const ownName = presets.data?.find((preset) => preset.setupUrl === h.setupUrl)?.name ?? h.name;
+    const name = h.label?.name ?? ownName;
+    const switchable = Boolean(uiState) && works(h) && !kept(h) && (h.id !== "opencode" || unrecorded.length > 0);
+    const on = !turnedOff.has(h.id);
+    const replaceKey = h.id.startsWith("acp:") && Boolean(h.authEnvKey) && h.agentReady && !h.catalogPending;
+    const remove = acp ? () => confirmRemove(name, () => mutRemoveAcpHarness.runAsHeadlessPromise(workspace, acp.id, {}))
+      : keptInstall(h) ? () => confirmRemove(name, async () => { await api.removeHarnessInstall(h.id); await refreshHarness(h.id).catch(() => {}); })
+      : undefined;
+    return (
+      <RecordRow
+        key={h.id}
+        {...rowProps(h.id)}
+        {...harnessMark(h)}
+        name={name}
+        detail={switchable && !on ? m.settings_agent_off() : detail}
+        warn={update || Boolean(h.authCheckFailed) || (!h.agentReady && !h.catalogPending) || noModels}
+        action={action || switchable ? (
+          <>
+            {action && (
+              <Button size="small" onClick={() => openSetup(h, update ? { action: "upgrade" } : {})} disabled={!commands} aria-haspopup="dialog">
+                <SquareTerminal size={14} />
+                {update || h.authState === "unsupported" ? m.harness_setup_update() : !h.installed || h.installBroken ? m.harness_setup_install() : m.harness_setup_login()}
+              </Button>
+            )}
+            {switchable && <Switch type="button" checked={on} aria-label={m.settings_agent_use({ name })} onClick={() => switchAgent(h.id, !on)} />}
+          </>
+        ) : null}
+        onRemove={remove}
+        onSave={saveLabel(h, ownName, acp)}
+      >
+        {((!remote && h.adapterMissing) || (h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending) || acp) && (
+          <div className="mb-3 flex items-center gap-2.5">
+            {!remote && h.adapterMissing && <Button size="small" onClick={() => openSetup(h)} disabled={!commands} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
+            {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => openAuth(h)} aria-haspopup="dialog">{status.label}</Button>}
+            {acp && <><Button size="small" onClick={() => openAcp(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={remove} aria-haspopup="dialog">{m.chat_panel_remove()}</Button></>}
+          </div>
+        )}
+        {update && (
+          <div className="mb-3">
+            <p className="mt-0 mb-2 text-sm text-subtext">{m.opencode_update_description({ version: opencodeVersion(h) ?? "1" })}</p>
+            <div className="flex flex-wrap gap-2">
+              <Button size="small" variant="primary" onClick={() => openSetup(h, { action: "upgrade" })} disabled={!commands} aria-haspopup="dialog">{m.opencode_update()}</Button>
+              <Button size="small" onClick={() => openSetup(h, { action: "install" })} disabled={!commands} aria-haspopup="dialog">{m.opencode_use_copy()}</Button>
+            </div>
+          </div>
+        )}
+        <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
+          {(acp || !h.managed) && (
+            <>
+              <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
+              <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
+            </>
+          )}
+          <span className="k">{m.settings_page_version()}</span>
+          <span className="v">{h.version ?? "—"}{h.managed && ` · ${m.settings_page_installed_by_openresearch()}`}</span>
+          {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
+            <>
+              <span className="k">{m.settings_page_auth()}</span>
+              <span className="v"><AuthLabel h={h} /></span>
+            </>
+          )}
+          {h.account && (
+            <>
+              <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
+              <span className="v">{h.account}</span>
+            </>
+          )}
+          {h.org && (
+            <>
+              <span className="k">{m.settings_page_org()}</span>
+              <span className="v">{h.org}</span>
+            </>
+          )}
+          <span className="k">{m.settings_page_agent_models()}</span>
+          <span className="v">
+            {h.catalogPending
+              ? m.onboarding_checking()
+              : h.models.length > 0
+              ? <ModelCount harness={h.id} models={h.models} />
+              : noModels ? m.settings_no_models() : m.settings_none()}
+          </span>
+        </div>
+        {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
+          note={h.agentNote}
+          className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
+          disabled={remote}
+          resolve={(command) => harnessSetupPath(h, commands, command) ?? settingsCommandPath(command)}
+          onRun={(command, path) => setupRun.start(command, path, h.id)}
+        />}
+        {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
+        {(replaceKey || (remove && !acp)) && (
+          <div className="mt-3 flex items-center gap-2">
+            {replaceKey && <Button size="small" onClick={() => openAuth(h)} aria-haspopup="dialog">{m.settings_replace_key()}</Button>}
+            {remove && !acp && <Button size="small" onClick={remove} aria-haspopup="dialog">{m.chat_panel_remove()}</Button>}
+          </div>
+        )}
+      </RecordRow>
+    );
+  };
+
+  const providerRow = (provider: OpenCodeProvider) => {
+    const { key } = providerTile(provider);
+    const kind = provider.kind === "oauth" ? m.add_agent_signed_in() : key ? keyKind(key) : m.add_agent_api_key();
+    const installs = !opencode?.installed && !remote && opencode && setupCommands.data?.opencode;
+    const models = opencode?.models.filter((model) => model.id.startsWith(`${provider.id}/`)) ?? [];
+    const missing = Boolean(opencode?.installed && !opencode.catalogPending && !harnessesFetching && models.length === 0);
+    const lineCount = agentModelLines("opencode", models).length;
+    const remove = () => confirmRemove(provider.name, () => api.removeOpenCodeProvider(provider.id));
+    const detail = !opencode?.installed ? m.settings_needs_opencode()
+      : opencode.catalogPending || harnessesFetching ? m.common_checking()
+        : lineCount > 0 ? m.settings_models_available({ count: fmtNumber(lineCount) })
+          : m.settings_no_models();
+    return (
+      <RecordRow
+        key={provider.id}
+        {...rowProps(`provider:${provider.id}`)}
+        {...providerMark(provider)}
+        name={provider.name}
+        detail={`${kind} · ${detail}`}
+        warn={missing}
+        action={installs ? <Button size="small" onClick={() => openSetup(opencode)} aria-haspopup="dialog"><SquareTerminal size={14} />{m.harness_setup_install()}</Button> : null}
+        onRemove={remove}
+        onSave={saver((changes) => api.updateAgent(`opencode:${provider.id}`, changes), providersOptions.queryKey)}
+      >
+        <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
+          {provider.keyEnding && <><span className="k">{m.onboarding_api_key()}</span><span className="v">{m.settings_key_ending({ ending: provider.keyEnding })}</span></>}
+          {opencode?.installed && (
+            <>
+              <span className="k">{m.settings_page_version()}</span>
+              <span className="v">{m.settings_runs_on_opencode({ version: opencodeVersion(opencode) ?? "—" })}{opencode.managed && ` · ${m.settings_page_installed_by_openresearch()}`}</span>
+            </>
+          )}
+          {models.length > 0 && <><span className="k">{m.settings_page_agent_models()}</span><span className="v"><ModelCount harness="opencode" models={models} /></span></>}
+        </div>
+        <div className="mt-3 flex items-center gap-2">
+          {!remote && provider.kind === "key" && <Button size="small" onClick={() => openReplaceKey(provider)} aria-haspopup="dialog">{m.settings_replace_key()}</Button>}
+          {!remote && provider.kind === "oauth" && missing && <Button size="small" onClick={() => void signInAgain(provider)} aria-haspopup="dialog">{m.harness_setup_login()}</Button>}
+          <Button size="small" onClick={remove} aria-haspopup="dialog">{m.chat_panel_remove()}</Button>
+        </div>
+      </RecordRow>
+    );
+  };
+
+  const endpointRow = (connection: LocalModelConnection) => (
+    <EndpointRow
+      key={connection.id}
+      {...rowProps(`endpoint:${connection.id}`)}
+      connection={connection}
+      harnessReady={opencode?.agentReady ?? false}
+      availableModels={opencode?.models.map((model) => model.id) ?? []}
+      checking={harnessesFetching || (opencode?.catalogPending ?? false)}
+      unknown={harnessesError}
+      disabled={remote}
+      onSave={saver((changes) => api.updateAgent(`opencode:${connection.id}`, changes), endpointsOptions.queryKey)}
+      onRemove={() => confirmRemove(connection.name, () => mutRemoveLocalModel.runAsHeadlessPromise(workspace, connection.id, {}))}
+    />
+  );
+
+  const addButton = <Button onClick={() => openAdd()} disabled={!harnesses} aria-haspopup="dialog"><Plus size={14} />{m.harness_add()}</Button>;
+  const anyAdded = rows.length > 0 || records.length > 0 || Boolean(endpoints.data?.length);
+  // A few of the providers Other providers offers, stacked like avatars.
+  const otherProviders = (
+    <span aria-hidden="true" className="flex shrink-0">
+      {(["deepseek", "kimi", "grok"] as const).map((brand) => (
+        <span key={brand} className="-ms-2 grid size-6 place-items-center rounded-full border border-border bg-background first:ms-0">
+          <BrandMark brand={brand} size={14} />
+        </span>
+      ))}
+    </span>
+  );
+  const list = onboarding ? (
+    <>
+      <h3 className={cn(SECTION_CLASS_NAME, "mt-0")}>{m.onboarding_installed()}</h3>
+      {/* Shown as on while OpenCode installs: onboarding waits for it before a first chat that needs it. */}
+      <FreeModelsRow expandable={false} models={freeModels} locked={freeModelsLocked} install={offersFreeModels || onboarding.freeModels.installing ? undefined : onboarding.freeModels} onChange={() => load(true)} />
+      {rows.map(harnessRow)}
+      {records.map(providerRow)}
+      {endpoints.data?.map(endpointRow)}
+      <h3 className={cn(SECTION_CLASS_NAME, "mt-8")}>{anyAdded ? m.onboarding_sign_in_more_accounts() : m.onboarding_sign_in_ai_provider()}</h3>
+      <ChoiceGrid featured columns={3} choices={RECOMMENDED_TILES.map((tile) => ({ key: tile.id, name: tile.name, blurb: tile.blurb?.(), mark: <TileMark tile={tile} size={24} />, select: () => openAdd(tile.id) }))} />
+      <div className="mt-2">
+        <ChoiceGrid columns={2} choices={[
+          { key: "endpoint", name: m.local_models_custom_endpoint(), blurb: m.add_agent_endpoint_blurb(), mark: <Link2 size={24} className="shrink-0" aria-hidden="true" />, select: () => openAdd("endpoint") },
+          { key: "other", name: m.add_agent_other_providers(), blurb: m.onboarding_other_providers_blurb(), mark: otherProviders, select: () => openAdd() },
+        ]} />
+      </div>
+    </>
+  ) : empty && definitions.data && !definitions.isError ? (
+    <p className="text-sm text-subtext">{m.harness_none_added()}</p>
+  ) : (
+    <>
+      {(offersFreeModels || rows.some(kept) || records.length > 0 || Boolean(endpoints.data?.length)) && <h3 className={SECTION_CLASS_NAME}>{m.settings_agents_managed()}</h3>}
+      {offersFreeModels && <FreeModelsRow models={freeModels} locked={freeModelsLocked} onChange={() => load(true)} />}
+      {rows.filter(kept).map(harnessRow)}
+      {records.map(providerRow)}
+      {endpoints.data?.map(endpointRow)}
+      {rows.some((h) => !kept(h)) && <h3 className={SECTION_CLASS_NAME}>{m.settings_agents_found()}</h3>}
+      {rows.filter((h) => !kept(h)).map(harnessRow)}
+    </>
+  );
 
   return (
     <>
-      <h2>{m.settings_page_harnesses()}</h2>
-      <div className="my-3 flex flex-wrap items-center gap-2">
-        <Button onClick={() => openAdd()} disabled={!harnesses} aria-haspopup="dialog"><Plus size={14} />{m.harness_add()}</Button>
-        <Button onClick={() => load(true, true)} disabled={refreshing}>
-          <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-        </Button>
-      </div>
+      {!onboarding && (
+        <div className="my-3 flex flex-wrap items-center gap-2">
+          {addButton}
+          <Button onClick={() => load(true, true)} disabled={refreshing}>
+            <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+          </Button>
+        </div>
+      )}
       {definitions.isError && <p role="alert" className="text-sm text-accent-red">{m.acp_definitions_load_failed()} <Button variant="ghost" onClick={() => void definitions.refetch()}>{m.app_retry()}</Button></p>}
       {!harnesses && harnessesError ? (
         <p role="alert" className="text-sm text-accent-red">{m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => load(true, true)}>{m.app_retry()}</Button></p>
       ) : !harnesses ? (
         <LoadingRow><Spinner /> {m.settings_page_detecting_harnesses()}</LoadingRow>
-      ) : ready.length === 0 && suggestions.length === 0 && definitions.data && !definitions.isError ? (
-        <p className="text-sm text-subtext">{m.harness_none_added()}</p>
-      ) : ready.map((h) => {
-        const acp = definitions.data?.find((definition) => definition.id === h.id);
-        const expanded = active === h.id;
-        const optionalLogin = h.id === "opencode" && !h.authenticated && !remote && !h.catalogPending && !h.needsConfigRepair;
-        const status = harnessStatus(h);
-        const detail = h.authCheckFailed
-          ? status.label
-          : [h.accountName, h.id === "opencode" ? h.account : undefined, h.plan].filter(Boolean).join(" · ") ||
-            (h.accountLoading
-              ? m.onboarding_loading_account()
-              : h.id === "opencode" && !h.authenticated && !h.authMethod
-                ? m.settings_free_models_no_sign_in()
-                : claudeProviderLabel(h) ||
-                  (h.authMethod === "apiKey" ? m.onboarding_api_key() : h.authMethod === "local" ? m.projects_local() : status.label));
-        return (
-          <div key={h.id} className={cn(SETTINGS_CARD_CLASS_NAME, "mb-3 p-0")}>
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setActive(expanded ? null : h.id)}
-                aria-expanded={expanded}
-                aria-controls={elementId(`harness-details-${h.id}`)}
-                className="flex min-h-14 w-full items-center gap-3 rounded-lg px-4.5 py-2 text-start text-text hover:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-[-2px]"
-              >
-                <HarnessLogo harness={h.id} logo={h.logo} size={22} />
-                <span className={cn("flex min-w-0 flex-1 flex-col", optionalLogin && "me-24")}>
-                  <span className="font-medium">{h.name}</span>
-                  <span dir="auto" className={cn("wrap-anywhere text-sm", h.authCheckFailed ? "text-accent-amber" : "text-subtext")}>{detail}</span>
-                </span>
-                <ChevronDown size={16} aria-hidden="true" className={cn("shrink-0 text-muted", expanded && "rotate-180")} />
-              </button>
-              {optionalLogin && (
-                <Button size="small" className="absolute end-9 top-1/2 -translate-y-1/2" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
-                  <SquareTerminal size={14} />
-                  {m.harness_setup_login()}
-                </Button>
-              )}
-            </div>
-            <div id={elementId(`harness-details-${h.id}`)} hidden={!expanded} className="px-4.5 pb-4 pt-2">
-              {expanded && (
-                <>
-                  <div className="settings-card-head flex items-center gap-2.5 mb-3">
-                    {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
-                    {!remote && h.adapterMissing && <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
-                    {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => openAuth(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
-                    {acp && <><Button size="small" onClick={() => openAcp(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => mutRemoveAcpHarness.run(workspace, acp.id)}>{m.chat_panel_remove()}</Button></>}
-                    {!h.id.startsWith("acp:") && !remote && !h.catalogPending && !h.needsConfigRepair && (h.installBroken || h.authState === "unsupported") && (
-                      <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
-                        <SquareTerminal size={14} />
-                        {h.installBroken ? m.harness_setup_install() : m.harness_setup_update()}
-                      </Button>
-                    )}
-                    {h.id !== "opencode" && !h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
-                      <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
-                        <SquareTerminal size={14} /> {m.harness_setup_login()}
-                      </Button>
-                    )}
-                  </div>
-                  <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
-                    <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
-                    <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
-                    <span className="k">{m.settings_page_version()}</span>
-                    <span className="v">{h.version ?? "—"}{h.managed && ` · ${m.settings_page_installed_by_openresearch()}`}</span>
-                    {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
-                      <>
-                        <span className="k">{m.settings_page_auth()}</span>
-                        <span className="v"><AuthLabel h={h} /></span>
-                      </>
-                    )}
-                    {h.account && (
-                      <>
-                        <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
-                        <span className="v">{h.account}</span>
-                      </>
-                    )}
-                    {h.org && (
-                      <>
-                        <span className="k">{m.settings_page_org()}</span>
-                        <span className="v">{h.org}</span>
-                      </>
-                    )}
-                    <span className="k">{m.settings_page_agent_models()}</span>
-                    <span className="v">
-                      {h.catalogPending
-                        ? m.onboarding_checking()
-                        : h.models.length > 0
-                        ? m.settings_models_available({ count: fmtNumber(h.models.length) })
-                        : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
-                    </span>
-                  </div>
-                  {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
-                    note={h.agentNote}
-                    className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
-                    disabled={remote}
-                    resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
-                    onRun={(command, path) => setupRun.start(command, path, h.id)}
-                  />}
-                  {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
-                  {h.id === "opencode" && <LocalModelSetup />}
-                </>
-              )}
-            </div>
-          </div>
-        );
-      })}
-      {suggestions.length > 0 && (
-        <div className="mt-4">
-          <h3 className="mb-2 text-sm font-medium text-subtext">{m.harness_suggested()}</h3>
-          <div className="flex flex-wrap gap-2">
-            {suggestions.map((h) => {
-              const name = presets.data?.find((preset) => preset.setupUrl === h.setupUrl)?.name ?? h.name;
-              return (
-                <Button key={h.id} onClick={() => chooseHarness(h.id)} aria-haspopup="dialog" aria-label={`${m.harness_add()}: ${name}`}>
-                  <HarnessLogo harness={h.id} logo={h.logo} size={16} />
-                  {name}
-                  <Plus size={14} aria-hidden="true" />
-                </Button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      ) : list}
       {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />}
-      <NestedDelegationRow />
     </>
+  );
+}
+
+function AgentRowButton({ expanded, controls, onToggle, mark, name, detail, warn, spaceForAction }: {
+  expanded: boolean;
+  controls: string;
+  onToggle: () => void;
+  mark: ReactNode;
+  name: string;
+  detail: ReactNode;
+  warn: boolean;
+  spaceForAction: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={expanded}
+      aria-controls={controls}
+      className={cn(AGENT_ROW_CLASS_NAME, "w-full text-start text-text hover:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-[-2px]")}
+    >
+      {mark}
+      <span className={cn("flex min-w-0 flex-1 flex-col gap-0.5", spaceForAction && "me-26")}>
+        <span className="font-medium">{name}</span>
+        <span dir="auto" className={cn("wrap-anywhere text-sm", warn ? "text-accent-amber" : "text-subtext")}>{detail}</span>
+      </span>
+      <ChevronDown size={16} aria-hidden="true" className={cn("shrink-0 text-muted", expanded && "rotate-180")} />
+    </button>
+  );
+}
+
+type RecordChanges = { name?: string; icon?: AgentIcon };
+
+/** How many models an agent offers, as the model picker counts them; hovering lists them. */
+function ModelCount({ harness, models }: { harness: string; models: HarnessModel[] }) {
+  const lines = agentModelLines(harness, models);
+  const shown = lines.slice(0, 15).map((line) => tidyModelName(line.label));
+  const more = lines.length - shown.length;
+  return (
+    <Tooltip content={[...shown, ...(more > 0 ? [m.add_agent_models_more({ count: fmtNumber(more) })] : [])].join("\n")} className="rounded-sm">
+      <span className="underline decoration-muted decoration-dotted underline-offset-4">{m.settings_models_available({ count: fmtNumber(lines.length) })}</span>
+    </Tooltip>
+  );
+}
+
+/** An agent OpenResearch keeps: its icon and name, which its details edit in place. */
+function RecordRow({ expandable, expanded, controls, onToggle, icon, brand, name, detail, warn, action, onRemove, onSave, children }: {
+  /** Whether the row opens its details, or shows only its name and action unless it needs attention. */
+  expandable: boolean;
+  expanded: boolean;
+  controls: string;
+  onToggle: () => void;
+  icon: AgentIcon;
+  brand: Logo;
+  name: string;
+  detail: ReactNode;
+  warn: boolean;
+  /** What the row needs first, beside its chevron. */
+  action: ReactNode;
+  /** Removes the agent after a confirm; a row that doesn't open its details offers it beside the action. */
+  onRemove?: () => void;
+  onSave: (changes: RecordChanges) => Promise<void>;
+  children: ReactNode;
+}) {
+  // Shown while a save is on its way, so a pick or a rename holds instead of flickering back.
+  const [picked, setPicked] = useState<AgentIcon | null>(null);
+  const [draft, setDraft] = useState<string | null>(null);
+  const latestIcon = useRef(0);
+  const save = (changes: RecordChanges) => onSave(changes).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
+  const rename = () => {
+    const next = draft?.trim();
+    if (!next || next === name) { setDraft(null); return; }
+    void save({ name: next }).finally(() => setDraft(null));
+  };
+
+  if (!expandable && !warn) {
+    return (
+      <div className={AGENT_CARD_CLASS_NAME}>
+        <div className={AGENT_ROW_CLASS_NAME}>
+          <AgentIconTile icon={icon} brand={brand} outline={false} />
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="font-medium">{name}</span>
+            <span dir="auto" className={cn("wrap-anywhere text-sm", warn ? "text-accent-amber" : "text-subtext")}>{detail}</span>
+          </span>
+          {(action || onRemove) && (
+            <div className="flex shrink-0 items-center gap-2">
+              {action}
+              {onRemove && (
+                <Tooltip interactive content={m.settings_remove_agent({ name: ltr(name) })}>
+                  <IconButton className="[&:hover:not(:disabled)]:text-accent-red" aria-label={m.settings_remove_agent({ name: ltr(name) })} aria-haspopup="dialog" onClick={onRemove}>
+                    <X size={16} />
+                  </IconButton>
+                </Tooltip>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className={AGENT_CARD_CLASS_NAME}>
+      <div className="relative">
+        <AgentRowButton expanded={expanded} controls={controls} onToggle={onToggle} mark={<AgentIconTile icon={picked ?? icon} brand={brand} />} name={draft?.trim() || name} detail={detail} warn={warn} spaceForAction={Boolean(action)} />
+        {action && <div className="absolute end-10.25 top-1/2 flex -translate-y-1/2 items-center gap-2">{action}</div>}
+      </div>
+      <div id={controls} hidden={!expanded} className="px-3.5 pb-4 pt-2">
+        {expanded && (
+          <>
+            <div className="mb-4 flex items-end gap-3">
+              <AgentIconButton
+                value={picked ?? icon}
+                brand={brand}
+                onChange={(next) => {
+                  const pick = ++latestIcon.current;
+                  setPicked(next);
+                  void save({ icon: next }).finally(() => { if (latestIcon.current === pick) setPicked(null); });
+                }}
+              />
+              <label className="grid min-w-0 flex-1 gap-1 text-sm text-subtext">
+                <span>{m.agent_name()}</span>
+                <Input
+                  value={draft ?? name}
+                  maxLength={80}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onBlur={rename}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                    else if (event.key === "Escape") setDraft(null);
+                  }}
+                />
+              </label>
+            </div>
+            {children}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EndpointRow({ connection, harnessReady, availableModels, checking, unknown, disabled, onSave, onRemove, ...row }: {
+  expandable: boolean;
+  expanded: boolean;
+  controls: string;
+  onToggle: () => void;
+  connection: LocalModelConnection;
+  harnessReady: boolean;
+  availableModels: string[];
+  checking: boolean;
+  unknown: boolean;
+  disabled: boolean;
+  onSave: (changes: RecordChanges) => Promise<void>;
+  onRemove: () => void;
+}) {
+  const { checkLocalModel } = useWorkspace().api;
+  const { refreshHarnesses } = useWorkspace().queries;
+
+  const probe = useMutation({ mutationFn: async () => {
+    try { await checkLocalModel(connection.id); }
+    finally { await refreshHarnesses(true); }
+  } });
+  const modelIds = Object.keys(connection.models);
+  const connected = modelIds.length > 0 && harnessReady && modelIds.every((id) => availableModels.includes(`${connection.id}/${id}`));
+  const pending = probe.isPending || checking;
+  const status = pending ? m.common_checking() : unknown ? m.settings_page_unknown() : connected ? m.local_models_connected() : m.model_picker_unavailable();
+  return (
+    <RecordRow
+      {...row}
+      {...endpointMark(connection)}
+      name={connection.name}
+      detail={[status, modelIds.join(", ")].filter(Boolean).join(" · ")}
+      warn={!pending && !unknown && !connected}
+      action={null}
+      onRemove={disabled ? undefined : onRemove}
+      onSave={onSave}
+    >
+      <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
+        <span className="k">{m.local_models_address()}</span>
+        <span className="v">{connection.baseUrl}</span>
+        <span className="k">{m.settings_page_agent_models()}</span>
+        <span className="v">{modelIds.join(", ") || m.settings_none()}</span>
+      </div>
+      {probe.error && !connected && <p className="mt-2 mb-0 text-sm text-accent-red" role="alert">{probe.error.message}</p>}
+      <div className="mt-3 flex items-center gap-2">
+        <Button size="small" disabled={disabled || probe.isPending} onClick={() => probe.mutate()}><RefreshCw size={14} />{m.onboarding_re_check()}</Button>
+        <Button size="small" disabled={disabled} onClick={onRemove} aria-haspopup="dialog">{m.chat_panel_remove()}</Button>
+      </div>
+    </RecordRow>
+  );
+}
+
+/** Labs whose free models the Free Models row names before others'. */
+const FEATURED_FREE_LABS: readonly string[] = ["deepseek", "thinkingmachines"];
+
+/** OpenCode's install for the free models while OpenCode is missing: what stopped it, and how to start it again. */
+type FreeModelsInstall = { error: string | null; onInstall: () => void };
+
+/** OpenCode's free models: on until switched off here, or as OpenCode Go is added. Until OpenCode is installed, `install` stands in for the switch. */
+function FreeModelsRow({ expandable = true, models, locked, install, onChange }: {
+  expandable?: boolean;
+  models: HarnessModel[];
+  /** Nothing else can start a chat, so the free models stay on. */
+  locked: boolean;
+  install?: FreeModelsInstall;
+  onChange: () => void;
+}) {
+  const workspace = useWorkspace();
+  const { data: uiState } = useQuery(workspace.queries.getUiStateQuery());
+  if (!uiState) return null;
+  // Lines up with the switches of rows that also have a chevron.
+  const end = expandable ? "me-6.5" : undefined;
+
+  // Two the user may know by their lab, featured labs first, named inline in the sentence the message words around them.
+  const labRank = (model: HarnessModel) => {
+    const rank = FEATURED_FREE_LABS.indexOf(modelLab(model, "opencode") ?? "");
+    return rank < 0 ? FEATURED_FREE_LABS.length : rank;
+  };
+  const named = agentModelLines("opencode", models)
+    .filter((line) => modelLab(line.offers[0].model, "opencode"))
+    .sort((a, b) => labRank(a.offers[0].model) - labRank(b.offers[0].model))
+    .slice(0, 2);
+  const slot = "\u0000";
+  const sentence = m.settings_free_models_list({ first: slot, second: slot }).split(slot);
+  const description = named.length === 2 ? sentence.flatMap((text, index) => {
+    const line = named[index];
+    const model = line && (
+      <span key={line.key} className="inline-flex items-center gap-1 align-bottom text-text">
+        <ModelMark model={line.offers[0].model} harness="opencode" size={12} />{tidyModelName(line.label)}
+      </span>
+    );
+    return model ? [text, model] : [text];
+  }) : m.settings_free_models_description();
+  return (
+    <div className={AGENT_CARD_CLASS_NAME}>
+      <div className={AGENT_ROW_CLASS_NAME}>
+        <AgentIconTile {...FREE_MODELS_MARK} outline={expandable} />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="font-medium">{m.settings_free_models()}</div>
+          <p className={cn("m-0 text-sm text-pretty", install?.error ? "text-accent-amber" : "text-subtext")}>{install?.error ?? description}</p>
+        </div>
+        {install ? (
+          <Button size="small" className={end} onClick={install.onInstall}>{install.error ? m.app_retry() : m.harness_setup_install()}</Button>
+        ) : locked && uiState.opencodeFreeModels ? (
+          // Focusable and hoverable while it can't change, so the reason reaches the user.
+          <Tooltip interactive content={m.settings_free_models_locked()} className={cn("rounded-full", end)}>
+            <Switch type="button" className="cursor-default opacity-45" checked aria-disabled aria-label={m.settings_free_models()} aria-description={m.settings_free_models_locked()} />
+          </Tooltip>
+        ) : (
+          <Switch
+            type="button"
+            className={end}
+            checked={uiState.opencodeFreeModels}
+            aria-label={m.settings_free_models()}
+            onClick={() => mutUpdateUiState.runWithOptions(workspace, { opencodeFreeModels: !uiState.opencodeFreeModels }, { onSuccessData: onChange })}
+          />
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -626,6 +1152,7 @@ function K8sHealthBadge({ s }: { s: K8sSettings }) {
   if (!p.kubectlFound) return <Badge variant="error">{m.settings_page_kubectl_not_found()}</Badge>;
   if (!p.reachable) return <Badge variant="error">{m.settings_page_cluster_unreachable()}</Badge>;
   if (!p.canCreateJobs) return <Badge variant="error">{m.settings_page_no_job_create_permission()}</Badge>;
+  if (!p.canPatchJobs) return <Badge variant="error">{m.settings_page_no_job_patch_permission()}</Badge>;
   return <Badge variant="success">{m.settings_page_connected()}</Badge>;
 }
 
@@ -2639,7 +3166,6 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
   if (settings.validationStatus === "missing") return <Badge variant="warning">{m.settings_page_not_configured()}</Badge>;
   if (settings.validationStatus === "invalid") return <Badge variant="error">{m.settings_page_invalid_token()}</Badge>;
   if (settings.validationStatus !== "valid") return null;
-  if (settings.jobsWrite === true) return <Badge variant="success">{m.settings_page_ready()}</Badge>;
   if (settings.jobsWrite === false)
     return (
       <span className="inline-flex items-center gap-2">
@@ -2649,6 +3175,17 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
         </Tooltip>
       </span>
     );
+  if (settings.sourceStaging === false)
+    return (
+      <span className="inline-flex items-center gap-2">
+        <Badge variant="warning">{m.settings_page_no_bucket_permission()}</Badge>
+        <Tooltip content={m.settings_hf_bucket_permission_help()} className="text-subtext">
+          <Info size={16} />
+        </Tooltip>
+      </span>
+    );
+  if (settings.jobsWrite === true && settings.sourceStaging === true)
+    return <Badge variant="success">{m.settings_page_ready()}</Badge>;
   return null;
 }
 
@@ -2712,7 +3249,7 @@ function HfSection({ remote }: { remote: boolean }) {
               </dd>
             </div>}
             {(settings.validationStatus === "missing" || settings.validationStatus === "invalid" ||
-              (settings.validationStatus === "valid" && settings.jobsWrite !== null)) && (
+              (settings.validationStatus === "valid" && (settings.jobsWrite !== null || settings.sourceStaging === false))) && (
                 <div className="flex items-center justify-between gap-4">
                   <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
                   <dd className="m-0 text-text"><HfStatusBadge settings={settings} /></dd>
@@ -2721,6 +3258,9 @@ function HfSection({ remote }: { remote: boolean }) {
           </dl>
           {settings.validationStatus === "unreachable" && settings.validationError && (
             <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.validationError}</p>
+          )}
+          {settings.sourceStaging === null && settings.sourceStagingError && (
+            <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.sourceStagingError}</p>
           )}
           {settings.source === "env" && (
             <p className={SETTINGS_NOTE_CLASS_NAME}>
@@ -4364,7 +4904,7 @@ export function SettingsView({
               <GithubSettings remote={remote} />
             </section>
             <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <HarnessesTab remote={remote} />
+              <AgentsTab remote={remote} />
             </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <OverleafCard />

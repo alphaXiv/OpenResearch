@@ -41,6 +41,8 @@ Credentials stack on top: `/api/internal/` needs a token issued to that agent ([
 
 Errors are JSON with a message the UI can show. The store is synchronous SQLite, so handlers move file walks, Git, archive building and other slow work onto blocking threads. Work a CLI command could race is coordinated through leases and claims in the store ([storage](storage.md)), because an in-memory lock stops at the process boundary.
 
+**No request waits on the network for long.** WebKit gives up on a response after a minute of silence, and a closed request must not cancel half-done work. Opening a shared project and publishing one run as operations: with `background=true` the request answers at once with an `operationId`, and the page polls `GET /api/operations/{id}` for the phase, bytes moved, and the result or error. A finished operation stays readable for a few minutes, so a lost poll can ask again, and the work itself gives up on a connection that stops moving. Operations live in memory, so after a restart the poll's 404 tells the user to try again. Without `background`, an older page still waits for the result.
+
 ## Live state
 
 The visible workspace opens one event stream, `/api/events`, which is also the page's only evidence that the server is up (`ui/src/events.ts`). Three sources feed it:
@@ -53,7 +55,9 @@ The visible workspace opens one event stream, `/api/events`, which is also the p
 
 **Only the diff sees other processes' writes**, so polling the store stays necessary. Events patch queries already loaded; the baseline comes from the queries themselves, and chat events are edge-only, with no replay on connect.
 
-**A gap is repaired by refetching.** Reopening a stream, after a drop or a hidden workspace, and `resync.required` both invalidate the live query families (`ui/src/queries/invalidation.ts`). A query that renders live data belongs in that list.
+**A gap is repaired by refetching.** Reopening a stream, after a drop or a hidden workspace, and `resync.required` refresh the live query families (`ui/src/queries/invalidation.ts`). Overlapping repairs share the current refresh and request one follow-up for gaps reported during it. A query that renders live data belongs in that list.
+
+Chat publishers send changed messages and the latest changed usage, not repeated polling snapshots. Background transcript events still patch their cached queries; the visible transcript subscribes only to its own history, while background attention indicators come from session summaries.
 
 ## Serving the app
 

@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -348,7 +348,7 @@ const CODEX_REASONING_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 /// part of the v2 surface), then one `model/list` request. Any failure returns
 /// `None`. Hidden catalog entries are skipped
 /// (the server already filters them by default; the guard is belt-and-braces).
-async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option<Vec<ModelInfo>> {
+async fn codex_model_list(bin: &Path, home: Option<&Path>) -> Option<Value> {
     // Acquire the spawn lane before the deadline — queue time must not spend
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
@@ -360,6 +360,9 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
             .stderr(Stdio::null())
             .kill_on_drop(true);
         prepare_env(&mut cmd);
+        if let Some(home) = home {
+            cmd.env("CODEX_HOME", home);
+        }
         let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
@@ -409,8 +412,8 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
         )
         .await?;
         let resp = recv(&mut lines, 2).await?;
-        let models = parse_model_list(resp.get("result")?, configured_effort);
-        (!models.is_empty()).then_some(models)
+        let result = resp.get("result")?.clone();
+        Some(result)
     };
     tokio::time::timeout(Duration::from_secs(15), fut)
         .await
@@ -491,6 +494,10 @@ pub struct Codex;
 /// Only the fields detection needs off `config.toml`; codex has many more.
 #[derive(Deserialize)]
 struct CodexConfig {
+    model: Option<String>,
+    profile: Option<String>,
+    #[serde(default)]
+    profiles: HashMap<String, CodexProfile>,
     model_provider: Option<String>,
     /// The user's configured effort override. Codex resolves it above the
     /// catalog's per-model `defaultReasoningEffort`, so the picker's
@@ -506,7 +513,52 @@ struct CodexConfig {
     model_providers: HashMap<String, CodexProvider>,
 }
 
-/// The `model_reasoning_effort` the user configured in `config.toml`, if any.
+#[derive(Deserialize)]
+struct CodexProfile {
+    model: Option<String>,
+}
+
+#[test]
+fn configured_model_precedes_catalog_recommendation() {
+    let catalog = serde_json::json!({"data":[{"model":"gpt-5.10-sol","isDefault":true}]});
+    assert_eq!(
+        codex_default_model(Some("model = 'custom'"), Some(&catalog)).as_deref(),
+        Some("custom")
+    );
+    assert_eq!(
+        codex_default_model(None, Some(&catalog)).as_deref(),
+        Some("gpt-5.10-sol")
+    );
+}
+
+#[test]
+fn configured_codex_profile_precedes_global_model_and_catalog() {
+    let raw = "model = 'global'\nprofile = 'lab'\n[profiles.lab]\nmodel = 'custom-provider-model'";
+    assert_eq!(
+        codex_default_model(Some(raw), None).as_deref(),
+        Some("custom-provider-model")
+    );
+}
+
+fn codex_default_model(raw: Option<&str>, catalog: Option<&Value>) -> Option<String> {
+    raw.and_then(|raw| toml::from_str::<CodexConfig>(raw).ok())
+        .and_then(|c| {
+            c.profile
+                .as_ref()
+                .and_then(|profile| c.profiles.get(profile))
+                .and_then(|profile| profile.model.clone())
+                .or(c.model)
+        })
+        .or_else(|| {
+            catalog?["data"]
+                .as_array()?
+                .iter()
+                .find(|m| m["isDefault"] == true)
+                .and_then(|m| m["model"].as_str().or_else(|| m["id"].as_str()))
+                .map(str::to_owned)
+        })
+}
+
 fn parse_configured_effort(raw: &str) -> Option<String> {
     toml::from_str::<CodexConfig>(raw)
         .ok()?
@@ -608,6 +660,65 @@ pub(crate) fn find_codex_required() -> Result<PathBuf> {
     })
 }
 
+fn read_auth(home: &Path, info: &mut HarnessInfo) {
+    if let Some(auth) = read_json(home.join("auth.json")) {
+        if nonempty_str(&auth, "OPENAI_API_KEY").is_some() {
+            info.authenticated = true;
+            info.auth_method = Some("apiKey");
+        }
+        if let Some(claims) = auth
+            .get("tokens")
+            .and_then(|t| t.get("id_token"))
+            .and_then(Value::as_str)
+            .and_then(jwt_payload)
+        {
+            info.authenticated = true;
+            info.auth_method = Some("oauth");
+            info.account = nonempty_str(&claims, "email");
+            info.account_name = nonempty_str(&claims, "name");
+            if let Some(oa) = claims.get("https://api.openai.com/auth") {
+                info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| codex_plan_label(&p));
+            }
+        }
+    }
+}
+
+/// A profile's sign-in, and with `models` its own catalog, for when the user's
+/// own Codex is signed out and has none to share.
+pub(crate) async fn profile_auth(bin: Option<&Path>, home: &Path, version: Option<&str>) -> Value {
+    let mut info = HarnessInfo::new("codex", "OpenAI Codex");
+    read_auth(home, &mut info);
+    let state = if info.authenticated {
+        super::HarnessAuthState::Ready
+    } else {
+        super::HarnessAuthState::NeedsLogin
+    };
+    let catalog = match bin {
+        Some(bin) if info.authenticated => codex_model_list(bin, Some(home)).await,
+        _ => None,
+    };
+    let mut entry = json!({
+        "authenticated": info.authenticated,
+        "supportsSteering": info.authenticated && !codex_exec_forced()
+            && version.and_then(parse_version).is_some_and(|version| version >= MIN_APP_SERVER_VERSION),
+        "authState": state,
+        "authMethod": info.auth_method,
+        "loginEligible": true,
+        "account": info.account,
+        "accountName": info.account_name,
+        "plan": info.plan,
+    });
+    let raw = std::fs::read_to_string(home.join("config.toml")).ok();
+    entry["defaultModel"] = json!(codex_default_model(raw.as_deref(), catalog.as_ref()));
+    if let Some(catalog) = catalog {
+        entry["models"] = json!(parse_model_list(
+            &catalog,
+            raw.as_deref().and_then(parse_configured_effort).as_deref()
+        ));
+    }
+    entry
+}
+
 /// One headless request on a throwaway `codex exec` thread. Deliberately
 /// *not* the session's own thread — a request there would pollute the real
 /// conversation history.
@@ -646,10 +757,16 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
             // server cwd's AGENTS.md into a request that carries its own context.
             .current_dir(std::env::temp_dir());
         prepare_env(&mut cmd);
-        cmd.env(
-            "CODEX_HOME",
-            native_store::prepare_codex(NativeStore::Isolated)?,
-        );
+        let home = match request.profile {
+            Some(id) => crate::local::agent_profiles::prepare(id, "codex")?,
+            None => native_store::prepare_codex(NativeStore::Isolated)?,
+        };
+        let sqlite = native_store::codex_home(NativeStore::Isolated);
+        cmd.env("CODEX_HOME", home);
+        cmd.args([
+            "-c",
+            &format!("sqlite_home={}", native_store::toml_string(&sqlite)),
+        ]);
         // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
         // would otherwise write escape codes straight into the reply.
         cmd.env("NO_COLOR", "1");
@@ -756,25 +873,8 @@ impl Codex {
                     "Set `{key}` for the configured Codex model provider."
                 ));
             }
-        } else if let Some(auth) = read_json(home.join("auth.json")) {
-            if nonempty_str(&auth, "OPENAI_API_KEY").is_some() {
-                info.authenticated = true;
-                info.auth_method = Some("apiKey");
-            }
-            if let Some(claims) = auth
-                .get("tokens")
-                .and_then(|t| t.get("id_token"))
-                .and_then(Value::as_str)
-                .and_then(jwt_payload)
-            {
-                info.authenticated = true;
-                info.auth_method = Some("oauth");
-                info.account = nonempty_str(&claims, "email");
-                info.account_name = nonempty_str(&claims, "name");
-                if let Some(oa) = claims.get("https://api.openai.com/auth") {
-                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| codex_plan_label(&p));
-                }
-            }
+        } else {
+            read_auth(&home, &mut info);
         }
 
         // The `model/list` handshake is only spawned where the auth evidence
@@ -798,19 +898,15 @@ impl Codex {
             )
             .await;
         } else {
-            let effort = configured_effort.clone();
             let (selected, probed) = super::detect::select_and_speculate(
                 "codex",
                 codex_candidates(),
                 None,
-                move |bin| {
-                    let effort = effort.clone();
-                    async move {
-                        if want_catalog {
-                            codex_model_list(&bin, effort.as_deref()).await
-                        } else {
-                            None
-                        }
+                move |bin| async move {
+                    if want_catalog {
+                        codex_model_list(&bin, None).await
+                    } else {
+                        None
                     }
                 },
             )
@@ -836,9 +932,17 @@ impl Codex {
         info.agent_ready = info.ready();
         if info.agent_ready {
             let catalog_answered = catalog.is_some();
-            info = info.with_models(catalog.unwrap_or_default());
+            info.configured_model = codex_default_model(config_raw.as_deref(), catalog.as_ref());
+            info = info.with_models(
+                catalog
+                    .as_ref()
+                    .map(|c| parse_model_list(c, configured_effort.as_deref()))
+                    .unwrap_or_default(),
+            );
             if want_catalog && !catalog_answered {
-                info.agent_note = Some("Could not load Codex models. Re-check this harness or update Codex; the CLI default model is still available.".to_string());
+                info.agent_note = Some(
+                    "Could not load Codex models. Re-check this agent or update Codex.".to_string(),
+                );
             }
             // Old CLIs still work via the legacy exec path, but miss the
             // app-server wins (permission prompts on sandbox escalations;
@@ -916,7 +1020,7 @@ impl Harness for Codex {
     }
 
     fn name(&self) -> &'static str {
-        "Codex"
+        "OpenAI Codex"
     }
 
     fn supports_chat(&self) -> bool {
@@ -937,18 +1041,32 @@ impl Harness for Codex {
         if !runs_app_server().await {
             return Ok(CompactOutcome::Fallback);
         }
+        if let Some(profile) = &ctx.profile {
+            crate::local::agent_profiles::prepare(profile, "codex")?;
+        }
         let live = ctx.host.codex.client_for(&ctx.session_id).await;
         let client = match live {
-            Some(client) if client.resumed_thread().as_deref() == Some(thread_id) => client,
+            Some(client)
+                if client.resumed_thread().as_deref() == Some(thread_id)
+                    && client.profile == ctx.profile =>
+            {
+                client
+            }
             _ => {
-                let session = codex_native_session(thread_id).await?.ok_or_else(|| {
-                    anyhow!("Codex's saved thread is missing — cannot compact this chat")
-                })?;
+                let Some(session) = codex_native_session(thread_id, ctx.profile.is_some()).await?
+                else {
+                    if ctx.profile.is_some() {
+                        return Ok(CompactOutcome::Fallback);
+                    }
+                    return Err(anyhow!(
+                        "Codex's saved thread is missing — cannot compact this chat"
+                    ));
+                };
                 let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
                 let client = ctx
                     .host
                     .codex
-                    .ensure(&ctx.session_id, session.store)
+                    .ensure(&ctx.session_id, session.store, ctx.profile.as_deref())
                     .await?;
                 let config = match codex_turn_config(&client, &repo).await {
                     Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
@@ -2757,7 +2875,10 @@ async fn ensure_codex_pre_accept(
     native_store: NativeStore,
 ) -> Result<Arc<CodexClient>> {
     loop {
-        let ensure = ctx.host.codex.ensure(&ctx.session_id, native_store);
+        let ensure = ctx
+            .host
+            .codex
+            .ensure(&ctx.session_id, native_store, ctx.profile.as_deref());
         let result = match ctx.orx_retry_remaining() {
             Some(remaining) => tokio::time::timeout(remaining, ensure)
                 .await
@@ -2875,7 +2996,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
 
     let native_session = match ctx.native_session_id.as_deref() {
-        Some(id) => codex_native_session(id).await?,
+        Some(id) => codex_native_session(id, ctx.profile.is_some()).await?,
         None => None,
     };
     let preferred_store = native_session
@@ -2944,7 +3065,10 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 Err(err) => {
                     // Transport failures never reach this arm. Recover only if
                     // the exact rollout disappeared after the initial lookup.
-                    if codex_native_session(&id).await?.is_some() {
+                    if codex_native_session(&id, ctx.profile.is_some())
+                        .await?
+                        .is_some()
+                    {
                         ctx.mark_terminal_failure("json_rpc", err.to_string());
                         return Err(anyhow!("codex thread/resume failed: {err}"));
                     }
@@ -4021,16 +4145,20 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
 
     let native_session = match ctx.native_session_id.as_deref() {
-        Some(id) => codex_native_session(id).await?,
+        Some(id) => codex_native_session(id, ctx.profile.is_some()).await?,
         None => None,
     };
     let native_store = native_session
         .as_ref()
         .map(|session| session.store)
         .unwrap_or(NativeStore::Isolated);
-    let codex_home = tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
-        .await
-        .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
+    let profile = ctx.profile.clone();
+    let codex_home = tokio::task::spawn_blocking(move || match profile {
+        Some(id) => crate::local::agent_profiles::prepare(&id, "codex"),
+        None => native_store::prepare_codex(native_store),
+    })
+    .await
+    .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
     let policy = if ctx.plan_mode {
         Some("read-only")
     } else {
@@ -4041,7 +4169,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         .flatten();
     let roots: Vec<PathBuf> = if policy == Some("workspace-write") {
         [
-            data_dir.clone(),
+            data_dir,
             Some(ensure_orx_lifecycle_lock_dir()?),
             shared_git_dir(&repo).await,
         ]
@@ -4070,10 +4198,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     // subcommand rejects `-s` ("unexpected argument"), but accepts `-c` on both
     // the fresh and resume paths (verified against codex-cli 0.143), so one form
     // works for the whole session lifecycle.
-    //
-    // Yields the data dir granted as a writable root (if any), so the child's
-    // store can be pinned to it below, after `prepare_env`.
-    let data_dir_pin = match policy {
+    match policy {
         Some(policy) => {
             cmd.args([
                 "-c",
@@ -4103,16 +4228,12 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             //     fail outright; grant the common dir (see `shared_git_dir`).
             if policy == "workspace-write" {
                 cmd.args(["-c", "sandbox_workspace_write.network_access=true"]);
-                data_dir
-            } else {
-                None
             }
         }
         None => {
             cmd.arg("--dangerously-bypass-approvals-and-sandbox");
-            None
         }
-    };
+    }
     // Reasoning level → Codex's own `model_reasoning_effort` config override.
     if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
@@ -4123,7 +4244,9 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(model) = &ctx.model {
         cmd.args(["-m", model]);
     }
-    if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
+    if let Some(override_arg) =
+        native_store::codex_sqlite_override(native_store, &codex_home, ctx.profile.is_some())
+    {
         cmd.args(["-c", &override_arg]);
     }
     // Only for the server-name collision check; an unreadable file keeps the default name.
@@ -4169,19 +4292,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     // Tag the run this sandboxed turn may launch (`orx exp run`) with the
     // session so it can be explicitly subscribed to. After prepare_env so it
     // isn't shadowed by a synced value.
-    set_chat_session_env(&mut cmd, &ctx.session_id, "codex", ctx.host.up_port());
-    // Pin the sandboxed turn's store to the exact path granted above. The
-    // grant was resolved from the host's env, but the child could resolve a
-    // different data dir — `prepare_env` injects dashboard-synced vars (a
-    // synced `ORX_DATA_DIR`/`XDG_DATA_HOME` absent from the host env), and a
-    // relative `ORX_DATA_DIR` resolves against the child's cwd, not ours.
-    // Must come after `prepare_env`: later `cmd.env` calls win, and the
-    // synced-env injection guards on the *process* env, not the cmd's map.
-    // (Unsandboxed Bypass has no grant to stay coherent with, so no pin — a
-    // synced `ORX_DATA_DIR` still wins there.)
-    if let Some(dir) = &data_dir_pin {
-        cmd.env("ORX_DATA_DIR", dir);
-    }
+    set_chat_session_env(&mut cmd, &ctx.session_id, "codex", ctx.host.up_port())?;
     ctx.persist_delivery(DeliveryState::Unknown)?;
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -4351,11 +4462,16 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
 
 async fn codex_native_session(
     native_id: &str,
+    profile: bool,
 ) -> Result<Option<native_store::NativeSessionLocation>> {
     let native_id = native_id.to_string();
-    tokio::task::spawn_blocking(move || native_store::codex_session(&native_id))
-        .await
-        .map_err(|error| anyhow!("codex rollout lookup failed: {error}"))?
+    tokio::task::spawn_blocking(move || {
+        native_store::codex_session(&native_id).map(|session| {
+            session.filter(|location| !profile || location.store == NativeStore::Isolated)
+        })
+    })
+    .await
+    .map_err(|error| anyhow!("codex rollout lookup failed: {error}"))?
 }
 
 fn legacy_exec_text(text: &str, plan_mode: bool) -> String {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
 import { ProgressBar } from "../src/components/ProgressBar.tsx";
+import { autoDir } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
 import { find, press, render, renderApp, serveApp, settle } from "./render.mjs";
 
@@ -29,11 +30,11 @@ const menuItem = (text) => find(`${visible} [role="menuitemradio"], ${visible} [
  * The app over a laptop that knows the remote machine `server`, whose own server answers through the laptop's
  * gateway as the same backend; `routes` answer first. Every request lands in the returned list.
  */
-async function laptop(path, routes = {}) {
+async function laptop(path, routes = {}, remote = () => server) {
   serveApp({
     "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project", updatedAt: 1 }] }),
     "GET /api/projects/activity": () => ({ activity: [] }),
-    "GET /api/remote/sessions": () => ({ sessions: [server] }),
+    "GET /api/remote/sessions": () => ({ sessions: [remote()] }),
     "GET /api/settings/ssh": () => ({ hosts: [{ host: "research" }], defaultHost: null }),
     "GET /api/settings/ssh/config": () => ({ path: "/tmp/config", content: "Host research" }),
     ...routes,
@@ -45,12 +46,61 @@ async function laptop(path, routes = {}) {
     const url = new URL(String(input), location.href);
     requests.push(`${init.method ?? "GET"} ${url.pathname}`);
     if (!url.pathname.startsWith(`${gateway}/`)) return backend(input, init);
-    if (url.pathname === `${gateway}/_orx/runtime`) return Response.json({ ...runtimes.ssh, session: server });
+    if (url.pathname === `${gateway}/_orx/runtime`) return Response.json({ ...runtimes.ssh, session: remote() });
     return backend(url.pathname.slice(gateway.length) + url.search, init);
   };
   await renderApp(path);
   return requests;
 }
+
+test("selecting a machine after Disconnect reconnects its existing SSH session", async () => {
+  let remote = server;
+  const requests = await laptop("/projects/p/tasks/new", {
+    "POST /_orx/disconnect": () => {
+      remote = { ...remote, status: "disconnected", canStartNewHost: false };
+      return remote;
+    },
+    "POST /api/remote/sessions/server/reconnect": () => {
+      remote = server;
+      return remote;
+    },
+  }, () => remote);
+  await click(switcher());
+  await click(menuItem("research"));
+  assert.equal(visibleMachine(), "server");
+  await click(switcher());
+  await click(menuItem(m.remote_disconnect()));
+  assert.equal(visibleMachine(), "local");
+  await click(switcher());
+  await click(menuItem("research"));
+  assert.equal(visibleMachine(), "server");
+  assert.equal(requests.filter((request) => request === "POST /api/remote/sessions/server/reconnect").length, 1);
+});
+
+test("a disconnected workspace without startup data offers Reconnect", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let remote = server;
+  let projectsAvailable = false;
+  serveApp({
+    "GET /_orx/runtime": () => ({ ...runtimes.ssh, session: remote }),
+    "GET /api/projects": () => projectsAvailable
+      ? { projects: [{ id: "p", name: "Project", updatedAt: 1 }] }
+      : Response.json({ error: "connection unavailable" }, { status: 503 }),
+    "POST /_orx/reconnect": () => {
+      remote = server;
+      projectsAvailable = true;
+      return remote;
+    },
+  });
+  await renderApp("/projects/p/tasks/new");
+  remote = { ...remote, status: "disconnected", canStartNewHost: false };
+  await act(async () => t.mock.timers.tick(2_000));
+  await settle();
+  await click(find("button", m.remote_reconnect()));
+  await act(async () => t.mock.timers.tick(2_000));
+  await settle();
+  assert.ok(find("button", "Project"));
+});
 
 for (const [place, path] of [["home", "/projects"], ["sidebar", "/projects/p/tasks/new"]]) {
   test(`the ${place} machine menu switches between retained machines and configures the laptop from either`, async () => {
@@ -79,9 +129,28 @@ for (const [place, path] of [["home", "/projects"], ["sidebar", "/projects/p/tas
   });
 }
 
+for (const [status, shown] of [["connected", null], ["reconnecting", m.remote_machine_connecting()], ["disconnected", m.remote_machine_disconnected()]]) {
+  test(`the sidebar names the machine it shows, ${status}`, async () => {
+    await laptop("/projects/p/tasks/new", { "GET /api/remote/sessions": () => ({ sessions: [{ ...server, status }] }) });
+    assert.match(switcher().textContent, new RegExp(m.projects_local()));
+    assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: m.projects_local() }));
+
+    await click(switcher());
+    await click(menuItem("research"));
+    assert.match(switcher().textContent, /research/);
+    if (shown) {
+      assert.match(switcher().textContent, new RegExp(shown));
+      assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher_status({ machine: autoDir("research"), status: shown }));
+    } else {
+      assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: autoDir("research") }));
+    }
+  });
+}
+
 for (const kind of ["local", "ssh"]) {
   for (const scenario of ["loading", "error", "onboarding", "no-projects", "projects"]) {
-    test(`${kind} project home always offers machine selection during ${scenario}`, async () => {
+    const offered = scenario === "error" || (kind === "ssh" && (scenario === "onboarding" || scenario === "no-projects"));
+    test(`${kind} project home ${offered ? "offers" : "leaves"} machine selection ${offered ? "during" : "to the sidebar during"} ${scenario}`, async () => {
       serveApp({
         "GET /_orx/runtime": () => runtimes[kind],
         "GET /api/projects": () => {
@@ -94,7 +163,11 @@ for (const kind of ["local", "ssh"]) {
         "GET /api/remote/sessions": () => ({ sessions: [session] }),
       });
       await renderApp("/projects");
-      assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: kind === "ssh" ? "research" : m.projects_local() }));
+      if (!offered) {
+        assert.equal(switcher(), undefined);
+        return;
+      }
+      assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: kind === "ssh" ? autoDir("research") : m.projects_local() }));
     });
   }
 }

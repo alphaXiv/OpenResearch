@@ -15,13 +15,9 @@ on:
         required: false
         type: string
         default: ''
-      release:
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ inputs.release && format('release-{0}', github.run_id) || (github.event_name == 'workflow_dispatch' && github.run_id || github.ref) }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -48,7 +44,23 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-          fetch-depth: 1
+          fetch-depth: 2
+      - name: Select checks for changed files
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ inputs.source-sha || github.sha }}
+          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' || inputs.plan != '' }}
+        run: node scripts/ci-changes.mjs
+
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -58,19 +70,21 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
           pipx run zizmor==1.31.1 --offline --format github .github
-      - name: Select checks for changed files
-        id: changes
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ inputs.source-sha || github.sha }}
-          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' || inputs.release || inputs.plan != '' }}
-        run: node scripts/ci-changes.mjs
 
   frontend:
-    name: Frontend
+    name: Frontend (${{ matrix.check }})
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: build
+          - check: test 1/2
+            shard: 1/2
+          - check: test 2/2
+            shard: 2/2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -91,19 +105,24 @@ jobs:
         working-directory: ui
         run: pnpm install --frozen-lockfile
       - name: Build UI
+        if: matrix.check == 'build'
         working-directory: ui
         run: pnpm exec vite build
       - name: UI typecheck
+        if: matrix.check == 'build'
         working-directory: ui
         run: pnpm typecheck
       - name: UI unit tests
+        if: matrix.shard != ''
         working-directory: ui
+        env:
+          NODE_OPTIONS: --test-shard=${{ matrix.shard }}
         run: pnpm test
 
   helpers:
     name: Helper tests
     needs: changes
-    if: needs.changes.outputs.dev == 'true' || needs.changes.outputs.chart == 'true' || needs.changes.outputs.release_notes == 'true'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.dev == 'true' || needs.changes.outputs.chart == 'true' || needs.changes.outputs.release_notes == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,32 +132,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Dev script tests
-        if: needs.changes.outputs.dev == 'true'
-        run: node --test --experimental-strip-types scripts/dev.test.ts
-      - name: Interactive chart authoring tests
-        if: needs.changes.outputs.chart == 'true'
-        run: python3 scripts/test_orx_chart.py
-      - name: Release notes composition
-        if: needs.changes.outputs.release_notes == 'true'
-        run: python3 scripts/test_release_notes.py
-
-  rust:
-    name: Rust
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ inputs.source-sha || github.sha }}
-      - name: Install OpenSSH server and zsh
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends openssh-server zsh
-          sudo mkdir -p /run/sshd
       - name: Shared SSH helper protocol tests
+        if: needs.changes.outputs.rust == 'true'
         run: |
           python3 scripts/test_ssh_helper.py
           for image in \
@@ -149,65 +144,118 @@ jobs:
               -v "$GITHUB_WORKSPACE:/work:ro" -w /work \
               "$image" python scripts/test_ssh_helper.py
           done
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
       - name: Embedded JavaScript tests
+        if: needs.changes.outputs.rust == 'true'
         run: node --test 'src/**/*.test.mjs'
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Dev script tests
+        if: needs.changes.outputs.dev == 'true'
+        run: node --test --experimental-strip-types scripts/dev.test.ts
+      - name: Interactive chart authoring tests
+        if: needs.changes.outputs.chart == 'true'
+        run: python3 scripts/test_orx_chart.py
+      - name: Release notes composition
+        if: needs.changes.outputs.release_notes == 'true'
+        run: python3 scripts/test_release_notes.py
+
+  rust-lint:
+    name: Rust lint
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: rustfmt, clippy
+          persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
+      - name: Install Rust toolchain
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: check # Preserve the former Rust job's cache namespace.
+          shared-key: rust-lint
       - name: Format
         run: |
           cargo fmt --all --check
           cargo fmt --manifest-path windows/launcher/Cargo.toml --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+
+  rust:
+    name: Rust (${{ matrix.name }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"name":"test1","partition":"slice:1/2"},{"name":"test2","partition":"slice:2/2"}]' || '[{"name":"all","partition":""}]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
+      # Installs alongside the toolchain and cache restores; the test step waits for it.
+      - name: Start installing OpenSSH server and zsh
+        run: |
+          {
+            sudo apt-get update &&
+              sudo apt-get install -y --no-install-recommends openssh-server zsh &&
+              sudo mkdir -p /run/sshd
+            echo $? > "$RUNNER_TEMP/apt.status"
+          } > "$RUNNER_TEMP/apt.log" 2>&1 &
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Install Rust toolchain
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: check
+          save-if: ${{ matrix.name != 'test2' }}
+      - name: Cache incremental compilation
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env: &linux-incremental-key
+          INCREMENTAL_KEY: incremental-linux-test-v1-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
+        with: &linux-incremental-cache
+          path: target/debug/incremental
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
+          restore-keys: ${{ env.INCREMENTAL_KEY }}-
+      - name: Restore incremental compilation
+        if: github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env: *linux-incremental-key
+        with: *linux-incremental-cache
+      - name: Install nextest
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-nextest@0.9.151
+      - name: Finish installing OpenSSH server and zsh
+        run: |
+          until [ -e "$RUNNER_TEMP/apt.status" ]; do sleep 1; done
+          cat "$RUNNER_TEMP/apt.log"
+          exit "$(cat "$RUNNER_TEMP/apt.status")"
+        timeout-minutes: 5
       - name: Test
-        run: cargo test --locked
+        env:
+          CARGO_INCREMENTAL: 1
+          PARTITION: ${{ matrix.partition }}
+        run: |
+          args=()
+          if [ -n "$PARTITION" ]; then
+            args+=(--partition "$PARTITION")
+          fi
+          cargo nextest run --locked --profile ci "${args[@]}"
+        timeout-minutes: 30
+      - name: Doc-tests
+        if: matrix.name != 'test2'
+        env:
+          CARGO_INCREMENTAL: 1
+        run: cargo test --locked --doc
+        timeout-minutes: 30
       - name: Source builds disable production telemetry
+        if: matrix.name != 'test2'
         shell: bash
         run: test "$(target/debug/orx --no-telemetry version --build-channel)" = "development"
-      - name: Remove checked-in UI
-        if: inputs.release && github.event_name != 'pull_request'
-        shell: bash
-        run: rm -rf ui/dist
-      - name: Download release UI
-        if: inputs.release && github.event_name != 'pull_request'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release-ui
-          path: ui/dist
-      - name: Download release hosts
-        if: inputs.release && github.event_name != 'pull_request'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release-host
-          path: target/host-binaries
-      - name: Verify embedded host lookup
-        if: inputs.release && github.event_name != 'pull_request'
-        env:
-          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
-        run: cargo test --locked embedded_hosts_keep_their_digest_and_allow_directory_overrides
-      - name: Optimized source builds disable production telemetry
-        if: inputs.release && github.event_name != 'pull_request'
-        env:
-          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --release --locked
-          test "$(target/release/orx --no-telemetry version --build-channel)" = "development"
-      - name: Packaged binary bootstraps SSH host without a binary directory
-        if: inputs.release && github.event_name != 'pull_request'
-        env:
-          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
-          ORX_PACKAGED_BINARY: ${{ github.workspace }}/target/release/orx
-        run: env -u ORX_HOST_BIN_DIR cargo test --locked --test packaged_host -- --ignored --nocapture
 
   e2e:
     name: End-to-end
@@ -228,10 +276,29 @@ jobs:
           package-json-file: e2e/package.json
           install: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: e2e
+      - name: Cache incremental compilation
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env: &e2e-incremental-key
+          INCREMENTAL_KEY: incremental-linux-e2e-v1-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
+        with: &e2e-incremental-cache
+          path: target/debug/incremental
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
+          restore-keys: ${{ env.INCREMENTAL_KEY }}-
+      - name: Restore incremental compilation
+        if: github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env: *e2e-incremental-key
+        with: *e2e-incremental-cache
+      # Compiles while dependencies install; the run's own build reports any error.
+      - name: Start building orx
+        env:
+          CARGO_INCREMENTAL: 1
+        run: cargo build --locked > "$RUNNER_TEMP/build.log" 2>&1 &
       - name: Install dependencies
         run: |
           pnpm --dir ui install --frozen-lockfile
@@ -242,6 +309,8 @@ jobs:
           pnpm --dir e2e typecheck
           node --test e2e/lint.test.ts
       - name: End-to-end tests
+        env:
+          CARGO_INCREMENTAL: 1
         run: node e2e/run.ts
       - name: Upload the report
         if: failure()
@@ -260,35 +329,62 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"lint"},{"arch":"aarch64","mode":"build"}]' || '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"all"}]') }}
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"arch":"x86_64","mode":"lint"},{"arch":"x86_64","mode":"test"},{"arch":"aarch64","mode":"lint"},{"arch":"aarch64","mode":"test"}]' || '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"all"}]') }}
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
     steps:
+      # Installs alongside the toolchain and cache restores; "Finish installing WebKitGTK" waits for it.
+      - name: Start installing WebKitGTK
+        run: |
+          {
+            sudo apt-get update &&
+              sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev openssh-server zsh &&
+              sudo mkdir -p /run/sshd
+            echo $? > "$RUNNER_TEMP/apt.status"
+          } > "$RUNNER_TEMP/apt.log" 2>&1 &
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-      - name: Install WebKitGTK
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev openssh-server zsh
-          sudo mkdir -p /run/sshd
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          components: clippy
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: linux-app
-          save-if: ${{ matrix.mode == 'all' }}
+          shared-key: linux-app-dev
+          save-if: ${{ matrix.mode != 'lint' }}
+      - name: Cache incremental compilation
+        if: matrix.mode != 'lint' && github.ref == 'refs/heads/main'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env: &desktop-incremental-key
+          INCREMENTAL_KEY: incremental-linux-desktop-dev-v1-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
+        with: &desktop-incremental-cache
+          path: target/debug/incremental
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
+          restore-keys: ${{ env.INCREMENTAL_KEY }}-
+      - name: Restore incremental compilation
+        if: matrix.mode != 'lint' && github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env: *desktop-incremental-key
+        with: *desktop-incremental-cache
+      - name: Install nextest
+        if: matrix.mode != 'lint'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-nextest@0.9.151
+      - name: Finish installing WebKitGTK
+        run: |
+          until [ -e "$RUNNER_TEMP/apt.status" ]; do sleep 1; done
+          cat "$RUNNER_TEMP/apt.log"
+          exit "$(cat "$RUNNER_TEMP/apt.status")"
+        timeout-minutes: 5
       - name: Clippy
-        if: matrix.mode != 'build'
+        if: matrix.mode != 'test'
         run: cargo clippy --all-targets --locked --features desktop -- -D warnings
-      - name: Build
-        if: github.event_name == 'pull_request' && !inputs.release && matrix.mode != 'lint'
-        run: cargo build --locked --features desktop
       - name: Test
-        if: github.event_name != 'pull_request' || inputs.release
-        run: cargo test --locked --features desktop
+        if: matrix.mode != 'lint'
+        env:
+          CARGO_INCREMENTAL: 1
+        run: cargo nextest run --locked --profile ci --features desktop
+        timeout-minutes: 30
 
   windows:
     name: windows (${{ matrix.mode }})
@@ -297,73 +393,177 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '["lint", "test"]' || '["all"]') }}
+        mode: [lint, test1, test2, test3, test4, test5, test6, integration, demo, onboarding, chat]
     runs-on: windows-latest
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
+      NEXTEST_TEST_THREADS: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          components: clippy, rustfmt
+      # Installs while the Dev Drive is set up; "Finish installing Rust" waits for it.
+      - name: Start installing Rust
+        env:
+          RUSTUP_PERMIT_COPY_RENAME: 1
+        run: |
+          $script = Join-Path $env:RUNNER_TEMP 'rustup.ps1'
+          Set-Content -LiteralPath $script -Value @'
+          $log = "$env:RUNNER_TEMP\rustup.log"
+          rustup toolchain install --no-self-update *>> $log
+          Set-Content -LiteralPath "$env:RUNNER_TEMP\rustup.status.tmp" -Value $LASTEXITCODE
+          Move-Item -LiteralPath "$env:RUNNER_TEMP\rustup.status.tmp" -Destination "$env:RUNNER_TEMP\rustup.status"
+          '@
+          Start-Process pwsh -WindowStyle Hidden -WorkingDirectory $env:GITHUB_WORKSPACE -ArgumentList '-NoProfile', '-File', $script
       # Tests create their git repositories under TEMP, so it moves to the Dev Drive too.
       - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
         with:
           drive-size: 20GB
           workspace-copy: true
-          trusted-dev-drive: true
           env-mapping: |
             CARGO_HOME,{{ DEV_DRIVE }}\.cargo
             TMP,{{ DEV_DRIVE }}\tmp
             TEMP,{{ DEV_DRIVE }}\tmp
       - run: New-Item -ItemType Directory -Force $env:TMP | Out-Null
+      - name: Finish installing Rust
+        run: |
+          $status = "$env:RUNNER_TEMP\rustup.status"
+          while (-not (Test-Path -LiteralPath $status)) { Start-Sleep -Milliseconds 250 }
+          Get-Content -LiteralPath "$env:RUNNER_TEMP\rustup.log"
+          exit ([int](Get-Content -LiteralPath $status))
+        timeout-minutes: 10
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: windows
-          save-if: ${{ matrix.mode == 'all' }}
+          shared-key: windows-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}${{ matrix.mode == 'lint' && '-lint' || '' }}
+          save-if: ${{ matrix.mode == 'lint' || matrix.mode == 'test1' }}
+          cache-on-failure: true
           workspaces: |
             ${{ env.DEV_DRIVE_WORKSPACE }} -> target
             ${{ env.DEV_DRIVE_WORKSPACE }}/windows/launcher -> target
+      # A warm registry skips revalidating the crate index before every build.
+      - name: Use the restored crate registry
+        run: |
+          cargo fetch --locked --offline --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -eq 0) { 'CARGO_NET_OFFLINE=true' >> $env:GITHUB_ENV }
+          $global:LASTEXITCODE = 0
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Restore incremental compilation
+        if: matrix.mode != 'lint'
+        id: incremental
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        env:
+          INCREMENTAL_KEY: incremental-windows-test-debug0-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}-v1-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
+        with:
+          path: &windows-incremental-path ${{ env.DEV_DRIVE_WORKSPACE }}/target/debug/incremental
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
+          restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Clippy
-        if: matrix.mode != 'test'
+        if: matrix.mode == 'lint'
         run: cargo clippy --all-targets --locked -- -D warnings
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Format app launcher
-        if: matrix.mode != 'test'
+        if: matrix.mode == 'lint'
         run: cargo fmt --manifest-path windows/launcher/Cargo.toml --check
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Clippy (app launcher)
-        if: matrix.mode != 'test'
+        if: matrix.mode == 'lint'
         run: cargo clippy --manifest-path windows/launcher/Cargo.toml --all-targets --locked -- -D warnings
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Build app launcher
-        if: matrix.mode != 'lint'
+        if: matrix.mode == 'lint'
         run: cargo build --manifest-path windows/launcher/Cargo.toml --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Test app launcher
-        if: matrix.mode != 'lint'
+        if: matrix.mode == 'lint'
         run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Build tests
+        if: matrix.mode == 'test1' && github.ref == 'refs/heads/main'
+        id: test-build
+        env: &windows-test-env
+          CARGO_INCREMENTAL: 1
+          CARGO_PROFILE_TEST_DEBUG: 0
+          RUST_TEST_THREADS: 16
+          TEST_MODE: ${{ matrix.mode }}
+        run: cargo test --locked --no-run
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+      - name: Install nextest
+        if: startsWith(matrix.mode, 'test') || matrix.mode == 'integration'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-nextest@0.9.151
       - name: Test
         if: matrix.mode != 'lint'
-        run: cargo test --locked
+        env: *windows-test-env
+        run: |
+          $binary = 'orx'
+          if ($env:TEST_MODE -eq 'integration') {
+            $metadataJson = cargo metadata --locked --no-deps --format-version 1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $metadata = $metadataJson | ConvertFrom-Json
+            $targetArgs = @('--lib', '--test', '*')
+            foreach ($package in $metadata.packages) {
+              if ($package.id -notin $metadata.workspace_default_members) { continue }
+              foreach ($target in $package.targets) {
+                if ($target.test -and 'bin' -in $target.kind -and $target.name -cne $binary) {
+                  $targetArgs += @('--bin', $target.name)
+                }
+              }
+            }
+            cargo nextest run --locked --profile ci @targetArgs
+            exit $LASTEXITCODE
+          }
+          $filters = @{
+            demo = 'local::demo::tests::'
+            onboarding = 'local::demo::tests::prewarmed_onboarding_seeds_full_demo'
+            chat = 'local::chat::'
+          }
+          $partitions = @{
+            test1 = 1
+            test2 = 2
+            test3 = 3
+            test4 = 4
+            test5 = 5
+            test6 = 6
+          }
+          $testArgs = @('--locked')
+          if ($filters.ContainsKey($env:TEST_MODE)) {
+            $filter = $filters[$env:TEST_MODE]
+            $testArgs += @('--bin', $binary, $filter, '--')
+            foreach ($nested in $filters.Values) {
+              if ($nested -ne $filter -and $nested.StartsWith($filter)) {
+                $testArgs += @('--skip', $nested)
+              }
+            }
+          } elseif ($partitions.ContainsKey($env:TEST_MODE)) {
+            $excluded = ($filters.Values | ForEach-Object { "test($_)" }) -join ' | '
+            $partition = "slice:$($partitions[$env:TEST_MODE])/$($partitions.Count)"
+            cargo nextest run --locked --profile ci --bin $binary --partition $partition -E "not (kind(bin) & binary(=$binary) & ($excluded))"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($env:TEST_MODE -ne 'test1') { exit 0 }
+            $testArgs += '--doc'
+          }
+          cargo test @testArgs
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        timeout-minutes: 30
+      - name: Save incremental compilation
+        if: always() && github.ref == 'refs/heads/main' && matrix.mode == 'test1' && steps.test-build.outcome == 'success' && steps.incremental.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: *windows-incremental-path
+          key: ${{ steps.incremental.outputs.cache-primary-key }}
 
   check:
     name: fmt, clippy, test
     if: always()
-    needs: [changes, frontend, helpers, rust, e2e, linux-app, windows]
+    needs: [changes, workflow-lint, frontend, helpers, rust-lint, rust, e2e, linux-app, windows]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
       - name: Verify all selected checks passed
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}

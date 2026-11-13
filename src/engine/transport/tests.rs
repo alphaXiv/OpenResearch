@@ -49,6 +49,13 @@ fn paced_child() -> bool {
 }
 
 fn config(server: &Sshd) -> Config {
+    let test = std::env::current_exe().unwrap();
+    // Cargo nests unit-test binaries at a varying depth below the profile directory holding `orx`.
+    let orx = test
+        .ancestors()
+        .map(|dir| dir.join("orx"))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no orx binary in any directory above {}", test.display()));
     Config {
         alias: server.alias().into(),
         root: "~/engine-root".into(),
@@ -57,13 +64,7 @@ fn config(server: &Sshd) -> Config {
         binary_dir: Some(binaries()),
         #[cfg(unix)]
         sharing_home: None,
-        askpass_executable: std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("orx"),
+        askpass_executable: orx,
     }
 }
 
@@ -731,6 +732,7 @@ fn jittered_cadence_is_persisted_and_capped_at_fifteen_minutes() {
         state,
         publish,
         incoming,
+        unsupported: None,
     };
     actor.classify(HostClass::Key);
     let mut since = None;
@@ -1140,6 +1142,54 @@ async fn key_retry_cannot_approve_a_changed_route() {
         Some("SSH route changed; press Connect to approve it")
     );
     assert_eq!(auth_attempts(&server), attempts);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_during_an_attempt_approves_a_route_changed_after_it_began() {
+    let server = Sshd::start().unwrap();
+    server
+        .proxy()
+        .set(Faults {
+            paused: true,
+            ..Faults::default()
+        })
+        .unwrap();
+    let conn = start(&server, TestClock::new());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while ssh_pids(&server).is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let old = fs::read_to_string(server.config_path()).unwrap();
+    fs::write(
+        server.config_path(),
+        old.replace("HostName 127.0.0.1", "HostName localhost"),
+    )
+    .unwrap();
+    let key = fs::read_to_string(server.directory().join("host_key.pub")).unwrap();
+    let mut known = fs::read_to_string(server.directory().join("known_hosts")).unwrap();
+    known.push_str(&format!("[localhost]:{} {key}", server.port()));
+    fs::write(server.directory().join("known_hosts"), known).unwrap();
+    let (reply, connected) = oneshot::channel();
+    conn.actions
+        .send(Action {
+            key_only: false,
+            keep_master: false,
+            prompt: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    server.proxy().clear().unwrap();
+    connected.await.unwrap().unwrap();
+    assert_eq!(conn.state().borrow().status, Status::Live);
+    assert!(alias_auth(&server)
+        .route
+        .unwrap()
+        .lines()
+        .any(|line| line == "hostname localhost"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1701,6 +1751,11 @@ async fn broken_config_during_connect_leaves_the_actor_alive() {
     let server = Sshd::start().unwrap();
     let conn = start(&server, TestClock::new());
     status(&conn, Status::Live).await;
+    conn.request(Request::Hello {
+        proto: orx_host_proto::PROTOCOL_VERSION,
+    })
+    .await
+    .unwrap();
     let original = fs::read_to_string(server.config_path()).unwrap();
     fs::write(server.config_path(), "InvalidOrxOption yes\n").unwrap();
     assert!(conn
@@ -2221,4 +2276,73 @@ fi
     let mut cfg = config(&server);
     cfg.sharing_home = Some(home);
     ssh::stop_master(&cfg, &pin).await.unwrap();
+}
+
+/// Pinning a source can take longer than a reply deadline: the pin and the launch are still
+/// answered, and the session every other run shares stays up meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_source_pin_is_answered_without_dropping_the_session() {
+    if !paced_child() {
+        return;
+    }
+    let server = Sshd::start().unwrap();
+    let command = server.directory().join("command");
+    let text = fs::read_to_string(&command).unwrap();
+    // Paced, the reply deadline is 3.5 s, and pinning takes 5 s.
+    fs::write(
+        &command,
+        text.replace("export HOME", "export HOME\nexport ORX_TEST_SLOW_RPC=5000"),
+    )
+    .unwrap();
+    let conn = start(&server, TestClock::new());
+    status(&conn, Status::Live).await;
+    let sessions = ssh_pids(&server);
+    let source = server.directory().join("slow-source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("train"), "x").unwrap();
+    let archive = server.directory().join("slow.tar");
+    assert!(crate::process::command("tar")
+        .arg("-cf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&source)
+        .arg(".")
+        .status()
+        .unwrap()
+        .success());
+    let bytes = fs::read(&archive).unwrap();
+    let sha = orx_host::sha(&bytes);
+    let len = bytes.len() as u64;
+    for request in [
+        Request::PutBlob {
+            sha: sha.clone(),
+            offset: 0,
+            bytes,
+        },
+        Request::HasBlob {
+            sha: sha.clone(),
+            len,
+        },
+        Request::PinSource {
+            run: "slow".into(),
+            sha: sha.clone(),
+        },
+    ] {
+        let response = conn.request(request).await.unwrap();
+        assert!(!matches!(response, Response::Error { .. }), "{response:?}");
+    }
+    let launched = conn
+        .request(Request::Launch(orx_host_proto::LaunchIntent {
+            run: "slow".into(),
+            digest: orx_host::sha(b"slow"),
+            run_sh: "cat repo/train > ran".into(),
+            env: Default::default(),
+            source: Some(sha),
+            cancel_sh: None,
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(launched, Response::Launch { .. }), "{launched:?}");
+    assert_eq!(conn.state.borrow().status, Status::Live);
+    assert_eq!(ssh_pids(&server), sessions);
 }

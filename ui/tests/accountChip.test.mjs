@@ -76,7 +76,7 @@ for (const linked of [true, false]) {
     assert.ok(!requests.includes("POST /api/settings/openresearch/logout"));
     await click(find('[role="dialog"] button', m.settings_openresearch_sign_out()));
     assert.ok(requests.includes("POST /api/settings/openresearch/logout"));
-    assert.equal(container.querySelector("button").textContent, m.account_sign_in_alphaxiv());
+    assert.equal(container.querySelector("button").textContent, m.settings_sign_in());
   });
 }
 
@@ -96,7 +96,7 @@ test("signed out opens the sign-in dialog; cancel rechecks the account", async (
 test("unavailable account retries instead of presenting signed out", async () => {
   let reads = 0;
   const { trigger } = await chip(() => { reads++; return outage; });
-  assert.notEqual(trigger().textContent, m.account_sign_in_alphaxiv());
+  assert.notEqual(trigger().textContent, m.settings_sign_in());
   await click(trigger());
   await click(find('[role="menuitem"]', m.settings_check_again()));
   assert.equal(reads, 2);

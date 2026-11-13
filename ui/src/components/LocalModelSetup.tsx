@@ -1,220 +1,307 @@
 import { useWorkspace } from "../workspace";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Link2, Plus, RefreshCw, Trash2, X } from "lucide-react";
-import { type LocalModelConnection } from "../api";
+import { ExternalLink, Link2, RefreshCw } from "lucide-react";
+import { UnlistedError, type LocalModelConnection } from "../api";
+import { fmtBytes, ltr } from "../i18n";
 
-import { type DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
-import { mutConnectLocalModel, mutRemoveLocalModel } from "../queries/settings";
 import { OptionPicker } from "./ModelPicker";
 import lmStudioLogo from "../assets/lm-studio-logo.svg";
 import ollamaLogo from "../assets/ollama-logo.png";
 import omlxLogo from "../assets/omlx-logo.svg";
-import { DialogContent, DialogTitle, Badge, Button, ButtonLink, IconButton, Input, Spinner } from "./ui";
+import rapidMlxLogo from "../assets/rapid-mlx-logo.svg";
+import { Button, Input, Spinner } from "./ui";
 
-const LM_STUDIO = { id: "lmstudio", label: "LM Studio", icon: lmStudioLogo, url: "http://127.0.0.1:1234/v1" };
-const SERVERS = [
+type Server = {
+  id: string;
+  label: string;
+  icon: string | null;
+  url: string;
+  /** The `owned_by` its model list names, which tells it from another server at the same address. */
+  owner?: string;
+  /** A one-colour logo, drawn light in dark mode. */
+  invert?: boolean;
+};
+
+const LM_STUDIO: Server = { id: "lmstudio", label: "LM Studio", icon: lmStudioLogo, url: "http://127.0.0.1:1234/v1" };
+const SERVERS: Server[] = [
   LM_STUDIO,
-  { id: "omlx", label: "oMLX", icon: omlxLogo, url: "http://127.0.0.1:8000/v1" },
-  { id: "ollama", label: "Ollama", icon: ollamaLogo, url: "http://127.0.0.1:11434/v1" },
+  { id: "omlx", label: "oMLX", icon: omlxLogo, url: "http://127.0.0.1:8000/v1", owner: "omlx" },
+  { id: "rapid-mlx", label: "Rapid-MLX", icon: rapidMlxLogo, url: "http://127.0.0.1:8000/v1", owner: "rapid-mlx", invert: true },
+  { id: "ollama", label: "Ollama", icon: ollamaLogo, url: "http://127.0.0.1:11434/v1", invert: true },
   { id: "openai-compatible", label: "Custom Endpoint", icon: null, url: "http://127.0.0.1:8000/v1" },
 ];
 
-type ProviderDraft = {
-  baseUrl: string;
-  apiKey: string;
-  models: string[];
-  model: string | null;
-  contextWindow: string;
-  error: string | null;
-};
-
-export function LocalModelSetup() {
-  const workspace = useWorkspace();
-  const { showCustomDialog } = workspace.dialogs;
-  const { getLocalModelsQuery, getHarnessesQuery } = workspace.queries;
-
-  const connections = useQuery(getLocalModelsQuery());
-  const harnesses = useQuery(getHarnessesQuery());
-  const opencode = harnesses.data?.find((harness) => harness.id === "opencode");
-
-  return (
-    <section className="mt-4 space-y-3 border-t border-border pt-4" aria-label={m.local_models_title()}>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="text-base font-medium">{m.local_models_title()}</h3>
-        <Button onClick={() => showCustomDialog({ component: LocalModelDialog, props: {}, onConfirm: (connect) => connect(), onCancel: "close" })} aria-haspopup="dialog">
-          <Plus size={14} />{m.local_models_add()}
-        </Button>
-      </div>
-      {connections.error && <p className="text-sm text-accent-red" role="alert">{connections.error.message}</p>}
-      <div className="space-y-3">
-        {connections.data?.map((connection) => (
-          <SavedLocalModel key={connection.id} connection={connection}
-            harnessReady={opencode?.agentReady ?? false}
-            availableModels={opencode?.models.map((model) => model.id) ?? []}
-            checking={harnesses.isFetching || (opencode?.catalogPending ?? false)}
-            unknown={harnesses.isError || !harnesses.data}
-            onRemove={() => mutRemoveLocalModel.run(workspace, connection.id)} />
-        ))}
-      </div>
-    </section>
-  );
+/** The server a connection was made for: by the name it was given, else by its port. */
+export function endpointServer(connection: Pick<LocalModelConnection, "name" | "baseUrl">): Server | undefined {
+  const port = (url: string) => { try { return new URL(url).port; } catch { return null; } };
+  return SERVERS.find((item) => item.label === connection.name || (item.id === "openai-compatible" && ["OpenAI-compatible server", "Custom endpoint"].includes(connection.name)))
+    ?? SERVERS.find((item) => item.icon && port(item.url) === port(connection.baseUrl));
 }
 
-export function LocalModelDialog({ confirm, cancel, isDisabled, errorMessage, onConnected }: DialogContentProps<() => Promise<void>> & {
-  onConnected?: (model: string) => void;
-}) {
-  const workspace = useWorkspace();
-  const { getHarnessesQuery } = workspace.queries;
-  const { discoverLocalModels } = workspace.api;
+export function EndpointMark({ server, size }: { server: Server | undefined; size: number }) {
+  if (!server?.icon) return <Link2 size={size} className="shrink-0" aria-hidden="true" />;
+  return <img src={server.icon} alt="" width={size} height={size} className={`shrink-0 object-contain${server.invert ? " dark:invert" : ""}`} style={{ width: size, height: size }} />;
+}
+
+const CUSTOM = SERVERS[SERVERS.length - 1];
+
+const sameAddress = (a: string, b: string) => a.trim().replace(/\/+$/, "") === b.replace(/\/+$/, "");
+
+/** The known server at `url`; where several share the address, the one whose models `owner` names. */
+function serverAt(url: string, owner?: string | null) {
+  const here = SERVERS.filter((server) => server.icon && sameAddress(url, server.url));
+  if (!owner || here.every((server) => !server.owner)) return here[0];
+  return here.find((server) => server.owner === owner);
+}
+/** A model server found answering where orx runs: the models it lists and who it says owns them, or that it wants a key first. */
+export type LocalServer = { server: Server; models: string[]; ownedBy: string | null; needsKey: boolean };
+
+/** Why a server listed no models; an orx from before the codes says so only in these messages. */
+function unlisted(error: unknown) {
+  if (error instanceof UnlistedError) return error.code;
+  const message = error instanceof Error ? error.message : "";
+  if (message.startsWith("The server requires an API key.")) return "needsKey";
+  if (message.startsWith("The server is running but has no models.")) return "noModels";
+  if (message.startsWith("Cannot reach the local server.")) return "unreachable";
+  return null;
+}
+
+/** Asks each model server's usual address where orx runs; a failure other than nothing answering fails the check. */
+export function useLocalServers() {
+  const { api, workspaceKey } = useWorkspace();
+  return useQuery({
+    queryKey: workspaceKey("localServers"),
+    queryFn: async () => {
+      const addresses = [...new Set(SERVERS.filter((server) => server.icon).map((server) => server.url))];
+      const answers = await Promise.all(addresses.map(async (url): Promise<LocalServer | null> => {
+        try {
+          const { models, ownedBy } = await api.discoverLocalModels({ baseUrl: url, apiKey: "" });
+          // Another app at a shared address is still a server answering, just one without a name here.
+          return { server: serverAt(url, ownedBy) ?? { ...CUSTOM, url }, models, ownedBy: ownedBy ?? null, needsKey: false };
+        } catch (error) {
+          const code = unlisted(error);
+          if (code === "unreachable") return null;
+          if (!code) throw error;
+          return { server: serverAt(url)!, models: [], ownedBy: null, needsKey: code === "needsKey" };
+        }
+      }));
+      return answers.filter((answer) => answer !== null);
+    },
+    staleTime: 0,
+    retry: false,
+  });
+}
+
+/** The custom endpoint form's state and fields: an address first, then its key if the server asks for one. */
+export function useLocalModelForm(disabled: boolean) {
+  const { getHarnessesQuery } = useWorkspace().queries;
+  const { discoverLocalModels } = useWorkspace().api;
 
   const harnesses = useQuery(getHarnessesQuery());
   const installed = harnesses.data?.find((harness) => harness.id === "opencode")?.installed ?? false;
-  const formRef = useRef<HTMLFormElement>(null);
+  const running = useLocalServers();
   const cancelled = useRef(false);
-  cancelled.current = isDisabled;
+  cancelled.current = disabled;
   useEffect(() => {
     cancelled.current = false;
     return () => { cancelled.current = true; };
   }, []);
-  const [serverId, setServerId] = useState("lmstudio");
-  const server = SERVERS.find((s) => s.id === serverId) ?? LM_STUDIO;
-  const [drafts, setDrafts] = useState<Record<string, ProviderDraft>>({});
-  const draft = drafts[server.id] ?? {
-    baseUrl: server.url, apiKey: "", models: [], model: null,
-    contextWindow: "32768", error: null,
+
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [askKey, setAskKey] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const [model, setModel] = useState<string | null>(null);
+  const [contextWindow, setContextWindow] = useState("32768");
+  const [error, setError] = useState<string | null>(null);
+  /** Who the listed models say owns them, which names a server sharing its address with another. */
+  const [owner, setOwner] = useState<string | null>(null);
+  const server = serverAt(baseUrl, owner) ?? CUSTOM;
+
+  const list = (found: string[], ownedBy: string | null = null) => {
+    setModels(found);
+    setModel(found[0] ?? null);
+    setOwner(ownedBy);
   };
-  const { baseUrl, models, model, contextWindow, error } = draft;
-  const apiKey = server.id === "ollama" ? "" : draft.apiKey;
-  const updateDraft = (changes: Partial<ProviderDraft>) => {
-    setDrafts((current) => ({ ...current, [server.id]: { ...(current[server.id] ?? draft), ...changes } }));
+  /** A new address starts over: its models, its key and any error belonged to the last one. */
+  const address = (value: string) => {
+    setBaseUrl(value);
+    setApiKey("");
+    setAskKey(false);
+    list([]);
+    setError(null);
   };
+  /** Takes up a server found running, with the models it listed or its ask for a key. */
+  const adopt = (found: LocalServer) => {
+    address(found.server.url);
+    setAskKey(found.needsKey);
+    list(found.models, found.ownedBy);
+  };
+
   const probe = useMutation({ mutationFn: discoverLocalModels });
   const context = Number(contextWindow);
-  const busy = probe.isPending || isDisabled;
-  const canSubmit = !busy && installed && (models.length === 0 || Boolean(model && Number.isSafeInteger(context) && context >= 4096));
-  const reset = (changes: Partial<ProviderDraft> = {}) => updateDraft({ models: [], model: null, error: null, ...changes });
+  const busy = probe.isPending || disabled;
+  const found = models.length > 0;
+  const canSubmit = !busy && (found ? Boolean(model && Number.isSafeInteger(context) && context >= 4096) : Boolean(baseUrl.trim()) && (!askKey || Boolean(apiKey.trim())));
   const check = async () => {
-    reset();
+    list([]);
+    setError(null);
     try {
-      const result = await probe.mutateAsync({ baseUrl: baseUrl.trim(), apiKey });
-      if (!cancelled.current) updateDraft({ models: result.models, model: result.models[0] ?? null });
-    } catch (e) { if (!cancelled.current) updateDraft({ error: e instanceof Error ? e.message : String(e) }); }
+      const result = await probe.mutateAsync({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() });
+      if (!cancelled.current) list(result.models, result.ownedBy ?? null);
+    } catch (e) {
+      if (cancelled.current) return;
+      if (unlisted(e) === "needsKey" && !askKey) setAskKey(true);
+      else setError(e instanceof Error ? e.message : String(e));
+    }
   };
-  const connect = () => {
-    if (!model) return;
-    updateDraft({ error: null });
-    confirm(async () => {
-      const result = await mutConnectLocalModel.runAsHeadlessPromise(workspace, { name: server.label, baseUrl: baseUrl.trim(), apiKey, model, contextWindow: context }, {});
-      onConnected?.(result.model);
-    });
+  /** Back from the key to the address; false when there's nowhere to go back to here. */
+  const back = () => {
+    if (!askKey) return false;
+    setAskKey(false);
+    setApiKey("");
+    list([]);
+    setError(null);
+    return true;
   };
-  const close = () => { if (!busy) cancel(); };
+  const request = model ? { name: server.label, baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), model, contextWindow: context } : null;
 
-  return <DialogContent
-      initialFocus={() => formRef.current?.querySelector("input") ?? null}
-      className="relative flex max-h-full w-140 flex-col p-0"
-      render={<form ref={formRef} onSubmit={(event) => {
-        event.preventDefault();
-        if (canSubmit) void (models.length > 0 ? connect() : check());
-      }} />}
-    >
-      <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
-        <DialogTitle>{m.local_models_add()}</DialogTitle>
-      </div>
-      <IconButton type="button" className="absolute end-3.5 top-3.5" aria-label={m.settings_page_cancel()} onClick={close} disabled={busy}><X size={16} /></IconButton>
-      <div className="min-h-0 overflow-y-auto px-6 pb-2">
-        <div className="space-y-4">
-          {!installed && <div className="text-sm text-text">
-            <p>{m.local_models_install_opencode()}</p>
-            <ButtonLink href="https://opencode.ai/docs/#install" target="_blank" rel="noreferrer">{m.local_models_get_opencode()}</ButtonLink>
-          </div>}
-          <OptionPicker choices={SERVERS} value={serverId} title={m.local_models_server()} header={m.local_models_server()} variant="field" floating dropDown disabled={busy}
-            renderLabel={(choice) => <>{choice.id === "openai-compatible" ? m.local_models_custom_endpoint() : choice.label}{choice.id === "openai-compatible" && <span className="ml-1 text-xs font-normal text-subtext">{m.local_models_compatible_api()}</span>}</>}
-            renderIcon={(choice) => {
-              const icon = SERVERS.find((server) => server.id === choice.id)?.icon;
-              return icon ? <img src={icon} alt="" width={14} height={14} className={`size-3.5 shrink-0 object-contain${choice.id === "ollama" ? " dark:invert" : ""}`} /> : <Link2 size={14} className="shrink-0" />;
-            }}
-            onSelect={setServerId} />
-          <label className="block space-y-1 text-sm text-subtext">
-            <span>{m.local_models_address()}</span>
-            <Input value={baseUrl} disabled={busy} onChange={(e) => { reset({ baseUrl: e.target.value }); }} />
+  const presets = running.data?.filter((answer) => !sameAddress(baseUrl, answer.server.url)) ?? [];
+  const fields = (
+    <div className="grid gap-4">
+      {!installed && <p className="m-0 text-sm text-subtext">{m.provider_key_installs_opencode()}</p>}
+      {askKey ? (
+        <>
+          <p className="m-0 text-sm">{m.local_models_needs_key({ address: ltr(baseUrl.trim()) })}</p>
+          <label className="grid gap-1 text-sm text-subtext">
+            <span>{m.add_agent_api_key()}</span>
+            <Input type="password" autoComplete="off" autoFocus value={apiKey} disabled={busy} onChange={(e) => { setApiKey(e.target.value); list([]); setError(null); }} />
           </label>
-          {server.id !== "ollama" && (
-            <details key={server.id} className="text-sm text-text">
-              <summary className="cursor-pointer">{m.settings_page_authentication()}</summary>
-              <label className="block space-y-1 mt-3 text-sm text-subtext">
-                <span>{server.id === "lmstudio" ? m.local_models_token() : m.local_models_key()}</span>
-                <Input type="password" autoComplete="off" value={apiKey} disabled={busy} onChange={(e) => reset({ apiKey: e.target.value })} />
-              </label>
-            </details>
+        </>
+      ) : (
+        <>
+          <label className="grid gap-1 text-sm text-subtext">
+            <span>{m.local_models_address()}</span>
+            <Input value={baseUrl} placeholder={CUSTOM.url} spellCheck={false} disabled={busy} onChange={(e) => address(e.target.value)} />
+          </label>
+          {presets.length > 0 && (
+            <div className="grid gap-2 text-sm text-subtext">
+              <span>{m.local_models_running()}</span>
+              <div className="flex flex-wrap gap-2">
+                {presets.map((answer) => (
+                  <Button key={answer.server.id} size="small" disabled={busy} onClick={() => adopt(answer)}>
+                    <EndpointMark server={answer.server} size={14} />{answer.server.icon ? answer.server.label : m.local_models_custom_endpoint()}
+                  </Button>
+                ))}
+              </div>
+            </div>
           )}
-          {models.length > 0 && <>
-            <OptionPicker choices={models.map((id) => ({ id, label: id }))} value={model} searchPlaceholder={m.model_picker_search_models()} title={m.model_picker_model()} header={m.model_picker_model()} variant="field" floating dropDown disabled={busy} onSelect={(id) => { updateDraft({ model: id }); }} />
-            <label className="block space-y-1 text-sm text-subtext">
-              <span>{m.local_models_context()}</span>
-              <Input type="number" min={4096} step={1024} value={contextWindow} disabled={busy} onChange={(e) => { updateDraft({ contextWindow: e.target.value }); }} />
-            </label>
-            <p className="text-sm text-subtext">{m.local_models_context_hint()}</p>
+        </>
+      )}
+      {found && <>
+        <OptionPicker choices={models.map((id) => ({ id, label: id }))} value={model} searchPlaceholder={m.model_picker_search_models()} title={m.model_picker_model()} header={m.model_picker_model()} variant="field" floating dropDown disabled={busy} onSelect={setModel} />
+        <label className="grid gap-1 text-sm text-subtext">
+          <span>{m.local_models_context()}</span>
+          <Input type="number" min={4096} step={1024} value={contextWindow} disabled={busy} onChange={(e) => setContextWindow(e.target.value)} />
+        </label>
+        {server !== CUSTOM && <p className="m-0 text-sm text-subtext">{m.local_models_context_hint()}</p>}
+      </>}
+    </div>
+  );
 
-          </>}
-          {(errorMessage ?? error) && <p className="text-sm text-accent-red" role="alert">{errorMessage ?? error}</p>}
-        </div>
-      </div>
-      <div className="flex shrink-0 justify-end gap-2 px-6 py-4">
-        <Button type="button" onClick={close} disabled={busy}>{m.settings_page_cancel()}</Button>
-        <Button type="submit" variant="primary" disabled={!canSubmit}>
-          {busy && <Spinner />}{models.length > 0 ? m.local_models_save() : m.local_models_check()}
-        </Button>
-      </div>
-    </DialogContent>;
+  return { fields, server, installed, found, canSubmit, busy, check, back, adopt, request, error, setError };
 }
 
-function SavedLocalModel({ connection, harnessReady, availableModels, checking, unknown, onRemove }: {
-  connection: LocalModelConnection;
-  harnessReady: boolean;
-  availableModels: string[];
-  checking: boolean;
-  unknown: boolean;
-  onRemove: () => void;
-}) {
-  const { checkLocalModel } = useWorkspace().api;
-  const { refreshHarnesses } = useWorkspace().queries;
+/** The runtimes the guide walks through; the MLX ones only where MLX runs, on Apple silicon. */
+const RUNTIMES = SERVERS.filter((server) => server.id === "lmstudio" || server.id === "ollama");
+const MLX_RUNTIMES = SERVERS.filter((server) => server.id === "omlx" || server.id === "rapid-mlx");
 
-  const probe = useMutation({ mutationFn: async () => {
-    try { await checkLocalModel(connection.id); }
-    finally { await refreshHarnesses(true); }
-  } });
-  const provider = SERVERS.find((item) => item.label === connection.name || (item.id === "openai-compatible" && ["OpenAI-compatible server", "Custom endpoint"].includes(connection.name)));
-  const modelIds = Object.keys(connection.models);
-  const ready = modelIds.length > 0 && harnessReady && modelIds.every((id) => availableModels.includes(`${connection.id}/${id}`));
-  const pending = probe.isPending || checking;
-  const statusUnknown = unknown;
-  const connected = ready;
+/** The model size a machine's memory runs comfortably, quantized the way local runtimes ship models. */
+function modelSize(memBytes: number) {
+  const gb = memBytes / 2 ** 30;
+  return gb < 12 ? "4B" : gb < 24 ? "8B" : gb < 48 ? "30B" : gb < 96 ? "70B" : "120B";
+}
+
+/**
+ * Finds a local model server running where orx runs and hands it to `onFound`; with none running, walks through
+ * installing one, picking the one already running without models, else LM Studio on macOS and Ollama elsewhere.
+ */
+export function LocalModelGuide({ disabled, onFound }: { disabled: boolean; onFound: (found: LocalServer) => void }) {
+  const { getLocalMachineQuery } = useWorkspace().queries;
+  const machine = useQuery(getLocalMachineQuery());
+  const [picked, setPicked] = useState<string | null>(null);
+  const detect = useLocalServers();
+  const ready = detect.data?.find((answer) => answer.models.length > 0 || answer.needsKey);
+  useEffect(() => {
+    if (ready) onFound(ready);
+  }, [ready]);
+
+  if (detect.isPending || ready) {
+    return <p role="status" className="m-0 flex items-center gap-2 text-sm text-subtext"><Spinner />{m.local_models_guide_looking()}</p>;
+  }
+  const empty = detect.data?.[0];
+  const recommended = machine.data?.os === "macos" ? "lmstudio" : "ollama";
+  const runtimes = machine.data?.os === "macos" && machine.data.arch === "aarch64" ? [...RUNTIMES, ...MLX_RUNTIMES] : RUNTIMES;
+  const runtime = [picked, empty?.server.id, recommended].map((id) => runtimes.find((server) => server.id === id)).find(Boolean) ?? LM_STUDIO;
+  const memory = machine.data?.memBytes;
+  const size = memory ? <span className="text-subtext">{m.local_models_guide_size({ memory: fmtBytes(memory), size: modelSize(memory) })}</span> : null;
+  const code = (command: string) => <code className="self-start rounded-xs border border-border-variant bg-surface px-1 py-px font-mono text-xs">{command}</code>;
+  const download = (url: string) => (
+    <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent-blue-strong underline">
+      {m.local_models_guide_download({ name: runtime.label })}<ExternalLink size={12} aria-hidden="true" />
+    </a>
+  );
+  const steps: Record<string, { text: string; extra: ReactNode }[]> = {
+    lmstudio: [
+      { text: m.local_models_guide_install_lmstudio(), extra: download("https://lmstudio.ai/download") },
+      { text: m.local_models_guide_model_lmstudio(), extra: size },
+      { text: m.local_models_guide_serve_lmstudio(), extra: code("lms server start") },
+    ],
+    ollama: [
+      { text: m.local_models_guide_install_ollama(), extra: machine.data?.os === "linux" ? code("curl -fsSL https://ollama.com/install.sh | sh") : download("https://ollama.com/download") },
+      { text: m.local_models_guide_model_ollama(), extra: size },
+      { text: m.local_models_guide_serve_ollama(), extra: code("ollama serve") },
+    ],
+    omlx: [
+      { text: m.local_models_guide_install_omlx(), extra: download("https://github.com/jundot/omlx/releases") },
+      { text: m.local_models_guide_model_omlx(), extra: size },
+    ],
+    "rapid-mlx": [
+      { text: m.local_models_guide_install_rapid_mlx(), extra: code("brew install rapid-mlx") },
+      { text: m.local_models_guide_serve_rapid_mlx(), extra: <>{code("rapid-mlx serve qwen3.5-4b-4bit")}{size}</> },
+    ],
+  };
+
   return (
-    <div className="@container min-w-0 px-4 py-4">
-      <div className="flex flex-col items-stretch gap-3 @sm:flex-row @sm:items-center @sm:justify-between">
-        <div className="flex min-w-0 flex-1 items-start gap-3">
-          {provider?.icon ? <img src={provider.icon} alt="" width={20} height={20} className={`mt-0.5 size-5 shrink-0 object-contain${provider.id === "ollama" ? " dark:invert" : ""}`} /> : <Link2 size={20} className="mt-0.5 shrink-0" />}
-          <div className="min-w-0 space-y-1">
-            <div className="text-base font-medium break-words">{modelIds.join(", ")}</div>
-            <div className="text-sm text-subtext break-all">{provider?.id === "openai-compatible" ? m.local_models_custom_endpoint() : provider?.label ?? connection.name}{provider?.id === "openai-compatible" && <span className="ml-1 text-xs font-normal text-subtext">{m.local_models_compatible_api()}</span>} · {connection.baseUrl}</div>
-          </div>
-        </div>
-        <div className="flex shrink-0 flex-col items-end gap-1 self-end @sm:self-auto @lg:flex-row @lg:items-center @lg:gap-2">
-          <span role="status"><Badge variant={pending || statusUnknown ? "default" : connected ? "success" : "warning"}>
-            {pending ? m.common_checking() : statusUnknown ? m.settings_page_unknown() : connected ? m.local_models_connected() : m.model_picker_unavailable()}
-          </Badge></span>
-          <div className="flex items-center gap-1">
-            <Button variant="ghost" disabled={probe.isPending} onClick={() => probe.mutate()}>
-              <RefreshCw size={14} />{m.onboarding_re_check()}
-            </Button>
-            <IconButton aria-label={m.local_models_disconnect({ name: connection.name })} disabled={probe.isPending} onClick={onRemove}><Trash2 size={14} /></IconButton>
-          </div>
-        </div>
-      </div>
-      {probe.error && !connected && <p className="mt-2 text-sm text-accent-red" role="alert">{probe.error.message}</p>}
+    <div className="grid gap-4">
+      {detect.error ? <p role="alert" className="m-0 text-sm text-accent-red">{detect.error.message}</p>
+        : <p className="m-0 text-sm">{empty ? m.local_models_guide_no_models({ name: empty.server.label }) : m.local_models_guide_none()}</p>}
+      <OptionPicker
+        choices={runtimes.map((server) => ({ id: server.id, label: server.label }))}
+        value={runtime.id}
+        title={m.local_models_server()}
+        header={m.local_models_server()}
+        variant="field"
+        floating
+        dropDown
+        disabled={disabled || detect.isFetching}
+        renderLabel={(choice) => <>{choice.label}{choice.id === recommended && <span className="ms-1 text-xs font-normal text-subtext">{m.add_agent_recommended()}</span>}</>}
+        renderIcon={(choice) => <EndpointMark server={SERVERS.find((server) => server.id === choice.id)} size={14} />}
+        onSelect={setPicked}
+      />
+      <ol className="m-0 list-none space-y-3 p-0 text-sm">
+        {steps[runtime.id].map((step, index) => (
+          <li key={index} className="flex gap-3">
+            <span className="grid size-5 shrink-0 place-items-center rounded-full border border-border text-xs text-subtext">{index + 1}</span>
+            <span className="flex min-w-0 flex-col gap-1">{step.text}{step.extra}</span>
+          </li>
+        ))}
+      </ol>
+      <Button className="justify-self-start" onClick={() => void detect.refetch()} disabled={disabled || detect.isFetching}>
+        {detect.isFetching ? <Spinner /> : <RefreshCw size={14} />}{m.onboarding_re_check()}
+      </Button>
     </div>
   );
 }

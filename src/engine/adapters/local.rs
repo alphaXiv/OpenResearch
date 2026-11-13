@@ -18,6 +18,45 @@ use crate::jobs::localbox;
 #[path = "../../../crates/orx-host/src/log.rs"]
 pub(super) mod log;
 
+/// Keeps this machine from idle sleep until dropped. Windows runs have no `orx-host wrap` to
+/// hold it, so the engine holds one while any local run is unfinished.
+#[cfg(windows)]
+pub(crate) fn keep_awake() -> std::io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Power::{
+        PowerCreateRequest, PowerRequestSystemRequired, PowerSetRequest,
+    };
+    use windows_sys::Win32::System::SystemServices::POWER_REQUEST_CONTEXT_VERSION;
+    use windows_sys::Win32::System::Threading::{
+        POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0,
+    };
+
+    let mut reason: Vec<u16> = "OpenResearch is running an experiment on this machine"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let context = REASON_CONTEXT {
+        Version: POWER_REQUEST_CONTEXT_VERSION,
+        Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+        Reason: REASON_CONTEXT_0 {
+            SimpleReasonString: reason.as_mut_ptr(),
+        },
+    };
+    // SAFETY: the context and its string outlive the call, which copies them.
+    let request = unsafe { PowerCreateRequest(&context) };
+    if request == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a fresh handle owned by nothing else; dropping it clears the request.
+    let request = unsafe { OwnedHandle::from_raw_handle(request) };
+    // SAFETY: `request` is a live power request handle.
+    if unsafe { PowerSetRequest(request.as_raw_handle(), PowerRequestSystemRequired) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(request)
+}
+
 pub struct Local {
     root: PathBuf,
 }
@@ -80,8 +119,6 @@ impl Local {
         intent: &RunIntent,
         cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Result<Handle> {
-        #[cfg(windows)]
-        let _ = cancelled;
         let dir = self.directory(intent)?;
         let options: LaunchOptions = serde_json::from_value(intent.launch.options.clone())?;
         fs::create_dir_all(&dir)?;
@@ -97,6 +134,7 @@ impl Local {
             .truncate(false)
             .open(dir.join("launch.lock"))?;
         ownership.lock()?;
+        let _ownership = crate::file_lock::FileLock::new(ownership);
         let launch = dir.join("launch.json");
         #[cfg(unix)]
         let existing = match orx_host::read_json::<orx_host_proto::LaunchIntent>(&launch) {
@@ -178,7 +216,29 @@ impl Local {
         let (payload, env) = prepare()?;
         #[cfg(unix)]
         {
+            // Before the intent, so a wrapper that cannot run fails the run rather than leaving
+            // an intent recovery cannot tell from a launch.
+            let binary = crate::engine::transport::local_binary(&self.root)?;
             if !launch.try_exists()? {
+                let sha = orx_host::sha(&fs::read(&binary)?);
+                let probe = crate::process::command(crate::local::bash::program())
+                    .args(["-c", "\"$@\"", "orx-local"])
+                    .arg(&binary)
+                    .args(["verify-self", &sha])
+                    .envs(&env)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .output()
+                    .map_err(|error| {
+                        anyhow!("Could not run bash to start the local run: {error}")
+                    })?;
+                if !probe.status.success() {
+                    bail!(
+                        "This machine can't run {}: {}",
+                        binary.display(),
+                        String::from_utf8_lossy(&probe.stderr).trim()
+                    );
+                }
                 orx_host::publish(
                     &launch,
                     &orx_host_proto::LaunchIntent {
@@ -194,7 +254,6 @@ impl Local {
             if !dir.join("run.sh").try_exists()? {
                 orx_host::publish_bytes(&dir.join("run.sh"), payload.as_bytes())?;
             }
-            let binary = crate::engine::transport::local_binary(&self.root)?;
             if cancelled() {
                 orx_host::wrapper::cancel(&dir)?;
                 return Ok(self.handle(intent, &dir));
@@ -206,7 +265,7 @@ impl Local {
             let status = crate::process::command(crate::local::bash::program())
                 .args(["-c", "\"$@\" &", "orx-local"])
                 .arg(binary)
-                .arg("wrap")
+                .args(["wrap", "--keep-awake"])
                 .arg(crate::paths::canonicalize(&dir)?)
                 .envs(&env)
                 .stdin(Stdio::null())
@@ -216,7 +275,7 @@ impl Local {
             if !status.success() {
                 bail!("Could not detach the local wrapper: {status}");
             }
-            drop(ownership);
+            drop(_ownership);
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             while !dir.join("started").try_exists()? && !dir.join("exit.json").try_exists()? {
                 if cancelled() {
@@ -255,6 +314,10 @@ impl Local {
             let mut child = localbox::windows::spawn(&mut command, &dir)?;
             let released = (|| -> Result<()> {
                 fs::write(dir.join("pid"), child.id().to_string())?;
+                // Without started, recovery reads Absent and the accepted cancel ends the run.
+                if cancelled() {
+                    bail!("The run was cancelled before it started");
+                }
                 let started = OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -287,9 +350,11 @@ impl Backend for Local {
             .map_err(|error| LaunchError::Rejected {
                 reason: error.to_string(),
             })?;
-        match self.start(intent, &|| fence.cancelled()).await {
+        let cancelled = || fence.cancelled();
+        match self.start(intent, &cancelled).await {
             Ok(handle) => Ok(handle),
-            Err(error) => match self.recover(intent).await {
+            Err(error) => match self.recover_with_cancel(intent, &cancelled).await {
+                Recovery::Found(handle) => Ok(handle),
                 Recovery::Absent => Err(LaunchError::Rejected {
                     reason: error.to_string(),
                 }),
@@ -344,10 +409,16 @@ impl Backend for Local {
             Ok(digest) if digest != intent.spec_digest => Recovery::Unknown {
                 detail: "Local launch intent differs".into(),
             },
-            Ok(_) if dir.join("started").exists() || dir.join("exit_code").exists() => {
-                Recovery::Found(self.handle(intent, &dir))
-            }
-            Ok(_) => Recovery::Absent,
+            Ok(_) => match (
+                dir.join("started").try_exists(),
+                dir.join("exit_code").try_exists(),
+            ) {
+                (Ok(true), _) | (_, Ok(true)) => Recovery::Found(self.handle(intent, &dir)),
+                (Ok(false), Ok(false)) => Recovery::Absent,
+                (Err(error), _) | (_, Err(error)) => Recovery::Unknown {
+                    detail: error.to_string(),
+                },
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Recovery::Absent,
             Err(error) => Recovery::Unknown {
                 detail: error.to_string(),
@@ -377,9 +448,18 @@ impl Backend for Local {
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
                         Err(error) => Err(error),
                     };
+                    let mut state = orx_host::wrapper::state(dir)?;
+                    // A wrapper that died before reading an accepted cancel leaves no receipt;
+                    // cancelling again publishes it now that the wrapper lock is free.
+                    if matches!(state, orx_host_proto::RunState::Starting { .. })
+                        && dir.join("cancel.req").try_exists()?
+                    {
+                        orx_host::wrapper::cancel(dir)?;
+                        state = orx_host::wrapper::state(dir)?;
+                    }
                     Ok(orx_host_proto::Summary {
                         started_at: orx_host::wrapper::started_at(dir),
-                        state: orx_host::wrapper::state(dir)?,
+                        state,
                         log_len: Some(len("log")?),
                         notify_len: len("notify")?,
                         cleanup: orx_host::wrapper::cleanup_result(dir)?,
@@ -418,11 +498,17 @@ impl Backend for Local {
                     signal: None,
                 }
             } else if job.stage == "ERROR" && !localbox::process_group_alive(dir) {
+                // The Windows run.sh creates log only after the launch gate releases it.
+                let never_started =
+                    cfg!(windows) && matches!(dir.join("log").try_exists(), Ok(false));
                 Observation::Failed {
                     finished_at: None,
-                    reason: job
-                        .message
-                        .unwrap_or_else(|| "Local process died without an exit code".into()),
+                    reason: if never_started {
+                        "The run never started: OpenResearch stopped while launching it.".into()
+                    } else {
+                        job.message
+                            .unwrap_or_else(|| "Local process died without an exit code".into())
+                    },
                 }
             } else {
                 // A killed launcher whose payload survives in its group is still running.
@@ -459,6 +545,8 @@ impl Backend for Local {
                 },
             };
         }
+        // A payload that finished before the cancel keeps its result; the observation records it.
+        let finished = localbox::exit_code_state(&dir).is_some();
         let result = tokio::task::spawn_blocking(move || -> Result<CancelOutcome> {
             localbox::cancel_job(&dir)?;
             #[cfg(unix)]
@@ -504,6 +592,7 @@ impl Backend for Local {
         })
         .await;
         match result {
+            Ok(Ok(_)) if finished => CancelOutcome::Pending,
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => CancelOutcome::Undelivered {
                 detail: format!("Local cancel: {error}"),

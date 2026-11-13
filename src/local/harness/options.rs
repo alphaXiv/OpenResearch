@@ -66,7 +66,7 @@ impl PermissionMode {
 /// because the reasoning axis is now *model*-derived: OpenCode's choices come
 /// from `opencode models --verbose` at detect time, so they can't be
 /// `&'static str`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OptionChoice {
     pub id: String,

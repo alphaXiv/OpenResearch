@@ -1,6 +1,6 @@
 use super::api::{self, Api};
 use crate::engine::*;
-use crate::error::Result;
+use crate::error::{anyhow, Result};
 use crate::jobs::huggingface as hf;
 use crate::local::trackio;
 use async_trait::async_trait;
@@ -16,7 +16,7 @@ impl HfAccount {
 
 #[async_trait]
 impl Api for HfAccount {
-    type Cursor = u64;
+    type Cursor = hf::LogResume;
 
     async fn launch(&self, intent: &RunIntent, fence: &Fence<'_>) -> Result<Handle, LaunchError> {
         let mut spec: hf::JobSubmission =
@@ -49,7 +49,7 @@ impl Api for HfAccount {
             Some(fence),
         )
         .await
-        .map_err(api::interrupted)?;
+        .map_err(api::launch_error)?;
         Ok(api::handle(intent, vec![job.id]))
     }
     async fn recover(&self, intent: &RunIntent) -> Recovery {
@@ -67,7 +67,14 @@ impl Api for HfAccount {
         }
     }
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation> {
-        let job = hf::inspect_job(&hf::resolve_token()?, &self.namespace, self.id(run)?).await?;
+        let token = hf::resolve_token()?;
+        let id = self.id(run)?;
+        let Some(job) = hf::inspect_job(&token, &self.namespace, id).await? else {
+            return Ok(match hf::unseen(&token, &self.namespace, id).await? {
+                Some(cause) => Observation::NeedsAuth { cause },
+                None => api::stage("DELETED", None, None, None, None),
+            });
+        };
         let exit_code = job.status.message.as_deref()
             .and_then(|message| message.strip_prefix("Job failed with exit code: "))
             .and_then(|message| message.split_once(". Reason:"))
@@ -75,31 +82,40 @@ impl Api for HfAccount {
         Ok(api::stage(&job.status.stage, job.status.message, exit_code, None, None))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
-        hf::cancel_job(&hf::resolve_token()?, &self.namespace, self.id(run)?).await
+        let token = hf::resolve_token()?;
+        let id = self.id(run)?;
+        if hf::cancel_job(&token, &self.namespace, id).await? {
+            return Ok(());
+        }
+        match hf::unseen(&token, &self.namespace, id).await? {
+            Some(cause) => Err(anyhow!(cause)),
+            None => Ok(()),
+        }
     }
     async fn logs(
         &self,
         run: &WatchedRun,
-        cursor: &mut u64,
+        cursor: &mut hf::LogResume,
         window: std::time::Duration,
-        sink: &mut (dyn for<'b> FnMut(&'b [u8]) + Send),
+        sink: &mut (dyn for<'b, 'c> FnMut(&'b [u8], Option<&'c hf::LogResume>) + Send),
     ) -> Result<bool> {
         let token = hf::resolve_token()?;
+        let id = self.id(run)?;
+        let idle = crate::config::paced(api::STREAM_IDLE);
         let mut received = 0;
         let outcome = {
-            let mut lines = api::lines(sink, &mut received);
-            let pass = hf::stream_logs(
-                &token,
-                &self.namespace,
-                self.id(run)?,
-                *cursor,
-                None,
-                &mut lines,
-            );
-            tokio::time::timeout(window, pass).await
+            let mut counted = |bytes: &[u8], resume: &hf::LogResume| {
+                received += bytes.len() as u64;
+                sink(bytes, Some(resume));
+            };
+            let follow = async {
+                while !hf::stream_logs(&token, &self.namespace, id, cursor, idle, &mut counted)
+                    .await?
+                {}
+                Ok(())
+            };
+            tokio::time::timeout(window, follow).await
         };
-        let closed = api::closed(outcome, received)?;
-        *cursor += received;
-        Ok(closed.is_some())
+        Ok(api::closed(outcome, received)?.is_some())
     }
 }

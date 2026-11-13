@@ -208,7 +208,7 @@ fn apply_antigravity_record(
                 name == "send_message" && parent.is_some() && args["Recipient"].as_str() == parent;
             let (tool, input) = if handback {
                 (
-                    "SubagentHandback",
+                    "SubagentHandback".into(),
                     Some(serde_json::json!({"message": args["Message"]})),
                 )
             } else {
@@ -235,7 +235,9 @@ fn apply_antigravity_record(
                 "running"
             }
             .into();
-            state.output = record["content"].as_str().map(str::to_owned);
+            state.output = record["content"]
+                .as_str()
+                .map(crate::local::harness::antigravity::without_hook_notice);
         }
     }
 }
@@ -290,6 +292,18 @@ mod tests {
         assert_eq!(
             children[0].state.as_ref().unwrap().input.as_ref().unwrap()["command"],
             "pwd"
+        );
+        // agy 1.5's result step for a command the invocation stamp rewrote.
+        apply_antigravity_record(
+            &spawn,
+            &serde_json::json!({"type":"GENERIC","status":"DONE","step_index":2,"content":"Created At: 2026-11-05T20:03:32-08:00\nCompleted At: 2026-11-05T20:03:33-08:00\nA pre-tool hook changed the arguments of this tool call before it ran. Changed: CommandLine.\n\nCommand exited with code 0.\n\nCommand output:\n/w\r\n"}),
+            Some("parent"),
+            &mut children,
+            &mut running,
+        );
+        assert_eq!(
+            children[0].state.as_ref().unwrap().output.as_deref(),
+            Some("Created At: 2026-11-05T20:03:32-08:00\nCompleted At: 2026-11-05T20:03:33-08:00\nCommand exited with code 0.\n\nCommand output:\n/w\r\n")
         );
         apply_antigravity_record(
             &spawn,

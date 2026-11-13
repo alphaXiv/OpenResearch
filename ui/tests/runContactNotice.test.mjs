@@ -74,13 +74,22 @@ test("pending and unverified cancels say why", async () => {
     `${plain(m.run_notice_cancel_pending({ host: "gpu-box", time: fmtClock(100) }))} ${m.run_notice_cancel_pending_later()}`,
   ]);
   assert.deepEqual((await notice({ cancelling: true, contact: needsAuth })).buttons, [m.settings_connect(), m.run_abandon()]);
-  assert.deepEqual((await notice({ status: "submitting", cancelling: true, contact: unreconciled("No sandbox id") })).lines, [m.status_cancellation_pending(), m.run_notice_cancel_pending_launch()]);
+  const unconfirmedLaunch = await notice({ status: "submitting", cancelling: true, contact: unreconciled("No orx-host for darwin-aarch64") });
+  assert.deepEqual(unconfirmedLaunch.lines, [m.status_cancellation_pending(), "No orx-host for darwin-aarch64", m.run_notice_cancel_pending_launch_unknown()]);
+  assert.deepEqual(unconfirmedLaunch.buttons, [m.run_abandon()]);
+  const launching = await notice({ status: "submitting", cancelling: true });
+  assert.deepEqual(launching.lines, [m.status_cancellation_pending(), m.run_notice_cancel_pending_launch()]);
+  assert.deepEqual(launching.buttons, []);
 
   const unverified = await notice({ cancelling: true, contact: unreconciled("2 processes still running") });
-  assert.deepEqual(unverified.lines, [m.status_cancelling(), "2 processes still running"]);
+  assert.deepEqual(unverified.lines, [m.status_cancellation_pending(), "2 processes still running"]);
   assert.deepEqual(unverified.buttons, [m.run_stop_again(), m.run_abandon()]);
   await unverified.click(m.run_stop_again());
   assert.ok(unverified.requests.includes("POST /api/runs/run/cancel"));
+
+  const refused = await notice({ cancelling: true, cancelError: "Ray stop_job: HTTP 500" });
+  assert.deepEqual(refused.lines, [m.status_cancellation_pending(), "Ray stop_job: HTTP 500", m.run_notice_cancel_refused()]);
+  assert.deepEqual(refused.buttons, [m.run_abandon()]);
 });
 
 test("an unconfirmed launch can only be abandoned", async () => {

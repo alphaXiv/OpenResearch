@@ -443,6 +443,8 @@ struct AgentChild {
     project_id: String,
     session_id: String,
     model: Option<String>,
+    /// The `OPENCODE_CONFIG_CONTENT` it started with, which carries provider keys and endpoints.
+    config: Option<std::ffi::OsString>,
     native_store: NativeStore,
     alphaxiv_signed_in: bool,
     binary: ResolvedBinary,
@@ -496,12 +498,13 @@ async fn spawn_agent(
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
     crate::local::local_models::prepare_generation_env(&mut cmd, model, binary.protocol)?;
+    let config = inline_config(&cmd);
     cmd.env("OPENCODE_DB", database.path())
         .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
     // Tag runs the agent launches (`orx exp run`) with this session so they can
     // be explicitly subscribed to. One serve child per session; set after the
     // synced-env loop so it isn't shadowed.
-    crate::local::chat::set_chat_session_env(&mut cmd, session_id, "opencode", up_port);
+    crate::local::chat::set_chat_session_env(&mut cmd, session_id, "opencode", up_port)?;
     if let Some(port) = up_port {
         for (name, value) in crate::local::chat::delegation::mcp_server(session_id, port)?.env {
             cmd.env(name, value);
@@ -529,12 +532,20 @@ async fn spawn_agent(
         project_id: project.id.clone(),
         session_id: session_id.to_string(),
         model: model.map(str::to_string),
+        config,
         native_store,
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         binary,
         endpoint,
         database,
     })
+}
+
+fn inline_config(cmd: &tokio::process::Command) -> Option<std::ffi::OsString> {
+    cmd.as_std()
+        .get_envs()
+        .find(|(name, _)| *name == "OPENCODE_CONFIG_CONTENT")
+        .and_then(|(_, value)| value.map(ToOwned::to_owned))
 }
 
 pub(crate) async fn verify_generation_models(endpoint: &AgentEndpoint, model: &str) -> Result<()> {
@@ -660,7 +671,7 @@ pub(crate) enum SummarizeOutcome {
 /// `Arc<AgentHost>` in axum state.
 pub struct AgentHost {
     /// Explicit `orx up --model` default when the session has no model.
-    model_override: Option<String>,
+    pub(crate) model_override: Option<String>,
     /// Serializes ensure() spawns (across all sessions — a spawn is seconds,
     /// and one at a time keeps clone/fetch traffic sane). Never taken by
     /// status()/endpoint_for(), and `inner` is never held across a spawn — a slow
@@ -921,6 +932,9 @@ impl AgentHost {
                 .await??,
             );
         }
+        let mut current = crate::process::tokio_command(&binary.path);
+        crate::local::local_models::prepare_generation_env(&mut current, model, binary.protocol)?;
+        let config = inline_config(&current);
         {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
@@ -930,6 +944,7 @@ impl AgentHost {
                     && agent.binary == binary
                     && agent.database.path() == database_path
                     && agent.model.as_deref() == model
+                    && agent.config == config
                     && matches!(agent.child.try_wait(), Ok(None))
                 {
                     let status = agent.status();
@@ -1083,15 +1098,13 @@ mod tests {
             routing::{get, post},
             Json, Router,
         };
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
         };
         let fixture = git::TemporaryDirectory::new("orx-resident-model").unwrap();
         let path = fixture.path().join("opencode");
-        std::fs::write(&path, "#!/bin/sh\necho 1.19.0\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        orx_test_support::write_executable(&path, "#!/bin/sh\necho 1.19.0\n", 0o700).unwrap();
         let binary = resolve_binary_at(path).await.unwrap();
         let database_path = fixture.path().join("opencode.db");
         let database =
@@ -1144,6 +1157,7 @@ mod tests {
                 project_id: project.id.clone(),
                 session_id: "chat".into(),
                 model: Some("cloud/selected".into()),
+                config: launch_config(&binary, "cloud/selected"),
                 native_store: NativeStore::Isolated,
                 alphaxiv_signed_in: false,
                 binary: binary.clone(),
@@ -1189,6 +1203,109 @@ mod tests {
         host.shutdown().await;
         assert!(host.resident_model("chat").await.is_none());
         server.abort();
+    }
+
+    fn launch_config(binary: &ResolvedBinary, model: &str) -> Option<std::ffi::OsString> {
+        let mut cmd = crate::process::tokio_command(&binary.path);
+        crate::local::local_models::prepare_generation_env(&mut cmd, Some(model), binary.protocol)
+            .unwrap();
+        inline_config(&cmd)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_provider_key_restarts_the_resident_child() {
+        if !crate::config::in_test_child(&["OPENCODE_CONFIG_CONTENT"]) {
+            return;
+        }
+        use axum::{routing::get, Json, Router};
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let fixture = git::TemporaryDirectory::new("orx-resident-config").unwrap();
+            let path = fixture.path().join("opencode");
+            orx_test_support::write_executable(&path, "#!/bin/sh\necho 1.19.0\n", 0o700).unwrap();
+            let binary = resolve_binary_at(path).await.unwrap();
+            let database_path = fixture.path().join("opencode.db");
+            let write_key = |key: &str| {
+                let path = crate::local::local_models::providers_path();
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let records = json!({"openai":{"kind":"key","key":key,"name":"Work"}});
+                std::fs::write(path, records.to_string()).unwrap();
+            };
+            write_key("sk-old");
+            let app = Router::new().route(
+                "/agent",
+                get(|| async {
+                    Json(json!([
+                        {"name":"title","model":{"providerID":"cloud","modelID":"selected"}},
+                        {"name":"compaction","model":{"providerID":"cloud","modelID":"selected"}}
+                    ]))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let child = crate::process::tokio_command("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let project = sample_project();
+            let host = AgentHost::new(None);
+            host.inner.lock().await.insert(
+                "chat".into(),
+                AgentChild {
+                    child,
+                    port,
+                    project_id: project.id.clone(),
+                    session_id: "chat".into(),
+                    model: Some("cloud/selected".into()),
+                    config: launch_config(&binary, "cloud/selected"),
+                    native_store: NativeStore::Isolated,
+                    alphaxiv_signed_in: false,
+                    binary: binary.clone(),
+                    endpoint: AgentEndpoint {
+                        base_url: format!("http://127.0.0.1:{port}"),
+                        client: crate::net::loopback_client().build().unwrap(),
+                        protocol: Protocol::V1,
+                        legacy_v2_api: false,
+                    },
+                    database: native_store::opencode_database::DatabaseLease::acquire(
+                        &database_path,
+                        1,
+                    )
+                    .unwrap(),
+                },
+            );
+            let ensure = || {
+                let (progress, _) = tokio::sync::watch::channel(String::new());
+                host.ensure(
+                    &project,
+                    "chat",
+                    Some("cloud/selected"),
+                    ResolvedRuntime {
+                        binary: binary.clone(),
+                        database: database_path.clone(),
+                        store: NativeStore::Isolated,
+                    },
+                    progress,
+                )
+            };
+            ensure().await.unwrap();
+            assert_eq!(host.inner.lock().await["chat"].child.id(), pid);
+
+            write_key("sk-new");
+            let _ = tokio::time::timeout(Duration::from_secs(30), ensure()).await;
+            let resident = host
+                .inner
+                .lock()
+                .await
+                .get("chat")
+                .map(|agent| agent.child.id());
+            assert_ne!(resident, Some(pid));
+            host.shutdown().await;
+            server.abort();
+        });
     }
 
     #[tokio::test]

@@ -20,6 +20,10 @@ pub struct Run {
     pub cancelling: bool,
     #[serde(default)]
     pub cancel_unconfirmed: Option<Vec<u32>>,
+    #[serde(default)]
+    pub waiting_reason: Option<String>,
+    #[serde(default)]
+    pub cancel_error: Option<String>,
     pub host: Option<String>,
     pub commit_sha: Option<String>,
     pub duration_secs: i64,
@@ -39,6 +43,8 @@ impl From<&StoredRun> for Run {
                 && !crate::engine::Phase::parse(&run.status)
                     .is_some_and(crate::engine::Phase::is_terminal),
             cancel_unconfirmed: None,
+            waiting_reason: None,
+            cancel_error: None,
             host: None,
             commit_sha: run.commit_sha.clone(),
             duration_secs: crate::local::run_duration_secs(run),
@@ -58,7 +64,9 @@ impl Run {
                     .is_some_and(crate::engine::Phase::is_terminal);
             run.contact = state.contact;
             run.cancel_unconfirmed = state.cancel_unconfirmed;
+            run.waiting_reason = state.waiting_reason;
         }
+        run.cancel_error = crate::commands::up::api_v2::cancel_error(&stored.id);
         run.host = crate::commands::up::run_host(store, stored)?;
         Ok(run)
     }
@@ -75,6 +83,11 @@ impl Run {
             "contact: {contact}, since {}: {cause}",
             crate::telemetry::iso8601_utc(*since)
         ))
+    }
+
+    pub fn waiting_detail(&self) -> Option<String> {
+        let reason = self.waiting_reason.as_deref()?;
+        Some(format!("waiting: {reason}"))
     }
 
     pub fn display_status(&self) -> std::borrow::Cow<'_, str> {
@@ -98,10 +111,12 @@ impl Run {
         }
         if self.cancelling {
             let pending = self.status == "submitting"
+                || self.cancel_error.is_some()
                 || matches!(
                     self.contact,
                     crate::store::Contact::Unreachable { .. }
                         | crate::store::Contact::NeedsAuth { .. }
+                        | crate::store::Contact::Unreconciled { .. }
                 );
             let key = if pending {
                 "status_cancellation_pending"
@@ -111,6 +126,36 @@ impl Run {
             return LABELS[key].as_str().into();
         }
         self.status.as_str().into()
+    }
+
+    /// The command that moves an unfinished run on when waiting alone won't.
+    pub fn next_step(&self) -> Option<String> {
+        use crate::store::Contact;
+        if crate::engine::Phase::parse(&self.status).is_some_and(crate::engine::Phase::is_terminal)
+        {
+            return None;
+        }
+        let abandon = format!("if the job is gone for good, `orx exp abandon {}`", self.id);
+        match (&self.contact, self.host.as_deref()) {
+            (Contact::NeedsAuth { .. }, Some(host)) => Some(format!(
+                "next: `orx compute connect ssh --host {host}` to sign in again; {abandon}."
+            )),
+            (
+                Contact::Unreachable { .. }
+                | Contact::NeedsAuth { .. }
+                | Contact::Unreconciled { .. },
+                _,
+            ) => Some(format!("next: {abandon}.")),
+            _ if self.cancel_error.is_some() => Some(format!(
+                "next: the cancel keeps failing ({}); {abandon}.",
+                self.cancel_error.as_deref().unwrap_or_default()
+            )),
+            _ if self.cancelling => Some(format!(
+                "next: `orx exp wait {}` returns when it ends.",
+                self.experiment_id
+            )),
+            _ => None,
+        }
     }
 
     pub fn failure_detail(&self) -> Option<String> {
@@ -366,6 +411,40 @@ mod cancel_tests {
     use super::*;
 
     #[test]
+    fn next_step_names_the_command_that_moves_a_run_on() {
+        let mut value = serde_json::json!({
+            "id": "run", "experimentId": "exp", "status": "running", "commitSha": null,
+            "durationSecs": 1, "updatedDisplay": "now", "resultMarkdown": null, "cancelReason": null,
+            "contact": {"type":"live"}, "cancelling": false, "host": "gpu-box",
+        });
+        let next = |value: &serde_json::Value| {
+            serde_json::from_value::<Run>(value.clone())
+                .unwrap()
+                .next_step()
+        };
+        assert_eq!(next(&value), None);
+        value["cancelling"] = true.into();
+        assert!(next(&value).unwrap().contains("`orx exp wait exp`"));
+        value["cancelError"] = "HTTP 500".into();
+        let refused = next(&value).unwrap();
+        assert!(refused.contains("HTTP 500") && refused.contains("`orx exp abandon run`"));
+        value["cancelError"] = serde_json::Value::Null;
+        for contact in [
+            serde_json::json!({"type":"unreachable", "since":1, "cause":"offline"}),
+            serde_json::json!({"type":"unreconciled", "since":1, "detail":"no orx-host"}),
+        ] {
+            value["contact"] = contact;
+            assert!(next(&value).unwrap().contains("`orx exp abandon run`"));
+        }
+        value["contact"] = serde_json::json!({"type":"needs_auth", "since":1, "cause":"Duo"});
+        assert!(next(&value)
+            .unwrap()
+            .contains("`orx compute connect ssh --host gpu-box`"));
+        value["status"] = "lost".into();
+        assert_eq!(next(&value), None);
+    }
+
+    #[test]
     fn cli_labels_decode_the_v2_cancel_fields_without_replacing_the_phase() {
         let mut value = serde_json::json!({
             "id": "run", "experimentId": "exp", "status": "running", "commitSha": null,
@@ -378,6 +457,7 @@ mod cancel_tests {
         for contact in [
             serde_json::json!({"type":"unreachable", "since":1, "cause":"offline"}),
             serde_json::json!({"type":"needs_auth", "since":1, "cause":"connect"}),
+            serde_json::json!({"type":"unreconciled", "since":1, "detail":"2 survivors"}),
         ] {
             value["contact"] = contact;
             let run: Run = serde_json::from_value(value.clone()).unwrap();

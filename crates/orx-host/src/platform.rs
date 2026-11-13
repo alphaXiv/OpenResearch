@@ -1,6 +1,10 @@
 use orx_host_proto::{CancelOutcome, ProcessIdentity, Survivor};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::time::{Duration, Instant};
+
+/// How long a process may stay unreadable while it forks, execs or exits on a busy machine.
+const UNREADABLE_SETTLE: Duration = Duration::from_millis(1000);
 
 #[derive(Debug, Clone)]
 pub struct Process {
@@ -129,54 +133,109 @@ pub(crate) struct ProcessTable {
 }
 
 impl ProcessTable {
-    pub(crate) fn read() -> io::Result<Self> {
-        Ok(Self::from_pids(pids()?, process, process_uid))
+    /// Unreadable processes started before `born_after` are left out: they cannot carry a tag
+    /// minted after them.
+    pub(crate) fn read(born_after: Option<u64>) -> io::Result<Self> {
+        Ok(Self::from_pids(
+            pids()?,
+            born_after,
+            UNREADABLE_SETTLE,
+            process,
+            process_uid,
+            environment,
+        ))
     }
 
     fn from_pids(
         pids: Vec<u32>,
+        born_after: Option<u64>,
+        settle: Duration,
         process: impl Fn(u32) -> io::Result<Process>,
         process_uid: impl Fn(u32) -> io::Result<u32>,
+        environment: impl Fn(u32) -> io::Result<Vec<u8>>,
     ) -> Self {
         let mut table = Self {
             processes: BTreeMap::new(),
             tags: BTreeMap::new(),
             unreadable: vec![],
         };
-        let uid = unsafe { libc::getuid() };
-        for pid in pids {
-            let process = match process(pid) {
-                Ok(process) => process,
-                Err(error) if vanished(&error) => continue,
-                Err(_) => {
-                    match process_uid(pid) {
-                        Ok(owner) if owner != uid => {}
-                        Err(error) if vanished(&error) => {}
-                        _ => table.unreadable.push(pid),
-                    }
-                    continue;
+        let mut unreadable: Vec<_> = pids
+            .into_iter()
+            .filter(|&pid| !table.inspect(pid, &process, &process_uid, &environment))
+            .collect();
+        let deadline = Instant::now() + settle;
+        let mut delay = Duration::from_millis(5);
+        loop {
+            unreadable.retain(|pid| {
+                born_after.is_none_or(|floor| {
+                    table
+                        .processes
+                        .get(pid)
+                        .is_none_or(|process| process.starttime >= floor)
+                })
+            });
+            if unreadable.is_empty() || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+            delay *= 2;
+            unreadable.retain(|&pid| {
+                let first = table.processes.remove(&pid);
+                if !table.inspect(pid, &process, &process_uid, &environment) {
+                    return true;
                 }
-            };
-            if process.uid == uid && process.live() {
-                match environment(pid) {
-                    Ok(env) => {
-                        for entry in env.split(|&byte| byte == 0) {
-                            if let Some(tag) = entry
-                                .strip_prefix(b"ORX_RUN_TAG=")
-                                .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                            {
-                                table.tags.entry(tag.to_owned()).or_default().insert(pid);
-                            }
+                if let Some(mut exited) = first.filter(|_| !table.processes.contains_key(&pid)) {
+                    exited.state = "X".into();
+                    table.processes.insert(pid, exited);
+                }
+                false
+            });
+        }
+        table.unreadable = unreadable;
+        table
+    }
+
+    /// Records `pid` unless it is gone; false when it could not be read.
+    fn inspect(
+        &mut self,
+        pid: u32,
+        process: &impl Fn(u32) -> io::Result<Process>,
+        process_uid: &impl Fn(u32) -> io::Result<u32>,
+        environment: &impl Fn(u32) -> io::Result<Vec<u8>>,
+    ) -> bool {
+        let uid = unsafe { libc::getuid() };
+        let mut process = match process(pid) {
+            Ok(process) => process,
+            Err(error) if vanished(&error) => return true,
+            Err(_) => {
+                return match process_uid(pid) {
+                    Ok(owner) if owner != uid => true,
+                    Err(error) if vanished(&error) => true,
+                    _ => false,
+                };
+            }
+        };
+        let mut readable = true;
+        if process.uid == uid && process.live() {
+            match environment(pid) {
+                Ok(env) => {
+                    for entry in env.split(|&byte| byte == 0) {
+                        if let Some(tag) = entry
+                            .strip_prefix(b"ORX_RUN_TAG=")
+                            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        {
+                            self.tags.entry(tag.to_owned()).or_default().insert(pid);
                         }
                     }
-                    Err(error) if vanished(&error) => continue,
-                    Err(_) if openssh_session(pid) => {}
-                    Err(_) => table.unreadable.push(pid),
                 }
+                // Kept as an ancestor, so a child it leaves behind stays a descendant.
+                Err(error) if vanished(&error) => process.state = "X".into(),
+                Err(_) if openssh_session(pid) => {}
+                Err(_) => readable = false,
             }
-            table.processes.insert(pid, process);
         }
-        table
+        self.processes.insert(pid, process);
+        readable
     }
 
     fn select(&self, wrapper: Option<&ProcessIdentity>, tag: &str, subreaper: bool) -> Scan {
@@ -206,26 +265,13 @@ impl ProcessTable {
             .filter(|process| process.live())
             .cloned()
             .collect();
-        // Processes older than the wrapper cannot inherit its newly minted tag.
-        let unreadable: Vec<_> = self
-            .unreadable
-            .iter()
-            .copied()
-            .filter(|pid| {
-                wrapper.is_none_or(|wrapper| {
-                    self.processes
-                        .get(pid)
-                        .is_none_or(|process| process.starttime >= wrapper.starttime)
-                })
-            })
-            .collect();
         Scan {
             processes,
             complete: (subreaper || cfg!(target_os = "macos"))
-                && unreadable.is_empty()
+                && self.unreadable.is_empty()
                 && live_wrapper.is_some()
                 && wrapper.is_some_and(|wrapper| alive(wrapper).unwrap_or(false)),
-            unreadable,
+            unreadable: self.unreadable.clone(),
         }
     }
 }
@@ -239,7 +285,8 @@ pub fn scan(wrapper: Option<&ProcessIdentity>, tag: &str, subreaper: bool) -> io
             ));
         }
     }
-    Ok(ProcessTable::read()?.select(wrapper, tag, subreaper))
+    let born_after = wrapper.map(|wrapper| wrapper.starttime);
+    Ok(ProcessTable::read(born_after)?.select(wrapper, tag, subreaper))
 }
 
 pub fn signal(process: &Process, signal: i32) -> io::Result<()> {
@@ -547,41 +594,50 @@ fn environment(pid: u32) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn denied<T>(_: u32) -> io::Result<T> {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    }
+
     #[test]
     fn only_unreadable_processes_proven_to_predate_the_wrapper_can_be_excluded() {
         let wrapper = identity(std::process::id()).unwrap();
-        let mut table = ProcessTable::default();
         let pid = u32::MAX;
-        table.processes.insert(
-            pid,
-            Process {
-                pid,
-                ppid: 1,
-                uid: unsafe { libc::getuid() },
-                starttime: wrapper.starttime - 1,
-                state: "S".into(),
-            },
-        );
-        table.unreadable.push(pid);
-        let scan = table.select(Some(&wrapper), "not-minted-yet", true);
-        assert_eq!(scan.outcome(true), CancelOutcome::Verified);
-        assert!(scan.unreadable.is_empty());
-        for starttime in [wrapper.starttime, wrapper.starttime + 1] {
-            table.processes.get_mut(&pid).unwrap().starttime = starttime;
+        let uid = unsafe { libc::getuid() };
+        let scan = |starttime: Option<u64>| {
+            ProcessTable::from_pids(
+                vec![pid],
+                Some(wrapper.starttime),
+                Duration::ZERO,
+                |pid| {
+                    starttime.map_or_else(
+                        || denied(pid),
+                        |starttime| {
+                            Ok(Process {
+                                pid,
+                                ppid: 1,
+                                uid,
+                                starttime,
+                                state: "S".into(),
+                            })
+                        },
+                    )
+                },
+                denied,
+                denied,
+            )
+            .select(Some(&wrapper), "tag", true)
+        };
+        let older = scan(Some(wrapper.starttime - 1));
+        assert_eq!(older.outcome(true), CancelOutcome::Verified);
+        assert!(older.unreadable.is_empty());
+        for starttime in [Some(wrapper.starttime), Some(wrapper.starttime + 1), None] {
             assert_eq!(
-                table.select(Some(&wrapper), "tag", true).outcome(true),
+                scan(starttime).outcome(true),
                 CancelOutcome::Unverifiable {
                     unreadable: vec![pid]
                 }
             );
         }
-        table.processes.clear();
-        assert_eq!(
-            table.select(Some(&wrapper), "tag", true).outcome(true),
-            CancelOutcome::Unverifiable {
-                unreadable: vec![pid]
-            }
-        );
     }
 
     #[test]
@@ -592,8 +648,11 @@ mod tests {
         for owner in [None, Some(uid), Some(uid + 1)] {
             let table = ProcessTable::from_pids(
                 vec![pid],
-                |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
-                |_| owner.ok_or_else(|| io::Error::from(io::ErrorKind::PermissionDenied)),
+                None,
+                Duration::ZERO,
+                denied,
+                |pid| owner.map_or_else(|| denied(pid), Ok),
+                denied,
             );
             let outcome = table.select(Some(&wrapper), "tag", true).outcome(true);
             if owner == Some(uid + 1) {
@@ -610,14 +669,83 @@ mod tests {
         for code in [libc::ENOENT, libc::ESRCH] {
             let table = ProcessTable::from_pids(
                 vec![pid],
-                |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+                None,
+                Duration::ZERO,
+                denied,
                 |_| Err(io::Error::from_raw_os_error(code)),
+                denied,
             );
             assert_eq!(
                 table.select(Some(&wrapper), "tag", true).outcome(true),
                 CancelOutcome::Verified
             );
         }
+    }
+
+    #[test]
+    fn a_process_unreadable_mid_spawn_is_read_once_it_settles() {
+        let wrapper = identity(std::process::id()).unwrap();
+        let uid = unsafe { libc::getuid() };
+        let pid = u32::MAX;
+        let reads = std::cell::Cell::new(0);
+        let table = ProcessTable::from_pids(
+            vec![pid],
+            Some(wrapper.starttime),
+            UNREADABLE_SETTLE,
+            |pid| {
+                Ok(Process {
+                    pid,
+                    ppid: 1,
+                    uid,
+                    starttime: wrapper.starttime,
+                    state: "R".into(),
+                })
+            },
+            denied,
+            |pid| {
+                reads.set(reads.get() + 1);
+                if reads.get() < 4 {
+                    return denied(pid);
+                }
+                Ok(b"ORX_RUN_TAG=tag\0".to_vec())
+            },
+        );
+        let scan = table.select(Some(&wrapper), "tag", true);
+        assert!(scan.unreadable.is_empty(), "{:?}", scan.unreadable);
+        let tagged: Vec<_> = scan.processes.iter().map(|process| process.pid).collect();
+        assert_eq!(tagged, [pid]);
+    }
+
+    #[test]
+    fn a_process_that_exits_mid_scan_is_gone_but_keeps_its_child() {
+        let wrapper = identity(std::process::id()).unwrap();
+        let uid = unsafe { libc::getuid() };
+        let (parent, child) = (u32::MAX - 1, u32::MAX);
+        let exited = std::cell::Cell::new(false);
+        let table = ProcessTable::from_pids(
+            vec![parent, child],
+            Some(wrapper.starttime),
+            UNREADABLE_SETTLE,
+            |pid| {
+                if pid == parent && exited.replace(true) {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(Process {
+                    pid,
+                    ppid: if pid == parent { wrapper.pid } else { parent },
+                    // Another owner, so no environment read stands in the way.
+                    uid: if pid == parent { uid } else { uid + 1 },
+                    starttime: wrapper.starttime,
+                    state: "R".into(),
+                })
+            },
+            |_| Err(io::Error::from_raw_os_error(libc::ESRCH)),
+            denied,
+        );
+        let scan = table.select(Some(&wrapper), "tag", true);
+        assert!(scan.unreadable.is_empty(), "{:?}", scan.unreadable);
+        let survivors: Vec<_> = scan.processes.iter().map(|process| process.pid).collect();
+        assert_eq!(survivors, [child]);
     }
 
     #[test]
@@ -650,7 +778,7 @@ mod tests {
         let child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!ProcessTable::read().unwrap().unreadable.contains(&pid));
+        assert!(!ProcessTable::read(None).unwrap().unreadable.contains(&pid));
         drop(child);
     }
 
@@ -672,7 +800,7 @@ mod tests {
             }
         }
         assert!(!other_uid.is_empty(), "test requires other-uid processes");
-        let table = ProcessTable::read().unwrap();
+        let table = ProcessTable::read(None).unwrap();
         assert!(other_uid.iter().all(|pid| !table.unreadable.contains(pid)));
         assert!(table.unreadable.is_empty(), "{:?}", table.unreadable);
     }

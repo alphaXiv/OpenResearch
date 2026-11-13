@@ -99,18 +99,31 @@ test("the contact notice follows the selected run", async () => {
   assert.equal(await notice("missing-run"), "");
 });
 
-test("stop distinguishes a pending cancel from a delivered one", async () => {
+test("stop is offered until a cancel is pending, and the badge carries the pending state", async () => {
   const live = { id: "run-live", experimentId: "experiment-a", createdAt: 4, status: "running", cancelling: false, contact: null, host: "gpu-box" };
-  const text = async (run) => (await show({ runs: [run] })).container.textContent;
-  assert.ok((await text(live)).includes(m.common_stop()));
+  const view = async (run) => {
+    const { container } = await show({ runs: [run] });
+    const header = container.querySelector(".term-bar");
+    return { text: header.textContent, buttons: [...header.querySelectorAll("button")].map((button) => button.textContent) };
+  };
+  assert.ok((await view(live)).buttons.includes(m.common_stop()));
   for (const [contact, label] of [
     [null, m.status_cancelling()],
     [{ type: "unreachable", since: 1, cause: "Offline" }, m.status_cancellation_pending()],
     [{ type: "needs_auth", since: 1, cause: "Connect" }, m.status_cancellation_pending()],
+    [{ type: "unreconciled", since: 1, detail: "2 survivors" }, m.status_cancellation_pending()],
   ]) {
-    const shown = await text({ ...live, cancelling: true, contact });
-    assert.ok(shown.includes(label), shown);
-    if (contact) assert.ok(!shown.includes(m.status_cancelling()), shown);
-    assert.ok((await text({ ...live, contact })).includes(m.common_stop()));
+    const cancelling = await view({ ...live, cancelling: true, contact });
+    assert.ok(cancelling.text.includes(label), cancelling.text);
+    if (contact) assert.ok(!cancelling.text.includes(m.status_cancelling()), cancelling.text);
+    assert.ok(!cancelling.buttons.includes(m.common_stop()), cancelling.buttons.join());
+    assert.ok((await view({ ...live, contact })).buttons.includes(m.common_stop()));
   }
+});
+
+test("an unconfirmed launch offers Stop and Abandon", async () => {
+  const launch = { id: "run-launch", experimentId: "experiment-a", createdAt: 4, status: "submitting", cancelling: false, host: "gpu-box", contact: { type: "unreconciled", since: 1, detail: "No orx-host for darwin-aarch64" } };
+  const buttons = [...(await show({ runs: [launch] })).container.querySelectorAll("button")].map((button) => button.textContent);
+  assert.ok(buttons.includes(m.common_stop()), buttons.join());
+  assert.ok(buttons.includes(m.run_abandon()), buttons.join());
 });

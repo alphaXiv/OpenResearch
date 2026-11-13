@@ -237,10 +237,11 @@ function RemoteSetup({
     retriedInteractiveError !== session.error &&
     !session.canStartNewHost;
   const showRepair = session.status === "disconnected" && session.repairCommand !== null;
+  const remoteNewer = session.dashboardProtocol !== null && session.dashboardProtocol > runtime.dashboardProtocol;
   const title = needsInstall
     ? m.remote_install_title()
     : needsUpdate
-      ? m.remote_update_title()
+      ? remoteNewer ? m.remote_update_local_title() : m.remote_update_title()
       : session.status === "applying"
         ? m.remote_applying_title({ host: ltr(session.host) })
         : session.status === "reconnecting"
@@ -526,8 +527,10 @@ export function RuntimeRoot() {
     );
   }
   if (runtime.kind === "local") return <RuntimeContext value={runtime}><QueryEvents /><Outlet /></RuntimeContext>;
-  const keepWorkspace = everConnected.current || runtime.session.status === "connected";
-  if (!keepWorkspace && runtime.session.status !== "connected") {
+  const keepWorkspace = everConnected.current &&
+    workspace.queryClient.getQueryData(workspace.queries.listProjectsQuery().queryKey) !== undefined &&
+    workspace.queryClient.getQueryData(workspace.queries.getUiStateQuery().queryKey) !== undefined;
+  if (!keepWorkspace && (runtime.session.status !== "connected" || error !== null)) {
     return error
       ? <><GatewayUnavailable host={runtime.session.host} /><WorkspaceConnection runtime={runtime} corner /></>
       : <><RemoteSetup

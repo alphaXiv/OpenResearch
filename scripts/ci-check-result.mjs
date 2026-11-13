@@ -8,12 +8,14 @@ export function checkResults(needs, flags) {
     return flags[name] === 'true'
   }
   const expected = {
+    'workflow-lint': true,
     frontend: selected('frontend'),
     rust: selected('rust'),
+    'rust-lint': selected('rust'),
     e2e: selected('rust') || selected('frontend'),
     windows: selected('windows'),
     'linux-app': selected('linux'),
-    helpers: ['dev', 'chart', 'release_notes'].map(selected).some(Boolean),
+    helpers: ['rust', 'dev', 'chart', 'release_notes'].map(selected).some(Boolean),
   }
   for (const [job, required] of Object.entries(expected)) {
     const result = needs[job]?.result

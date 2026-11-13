@@ -9,7 +9,6 @@ use orx_test_support::Sshd;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::BufReader;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -112,8 +111,7 @@ impl Remote {
     }
     fn shim(&self, name: &str, script: &str) {
         let path = self.server.home().join("bin").join(name);
-        fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        orx_test_support::write_executable(path, format!("#!/bin/sh\n{script}\n"), 0o700).unwrap();
     }
     fn launch(&mut self, run: &str, script: &str) -> Summary {
         let Response::Launch { summary } = self.request(Request::Launch(LaunchIntent {
@@ -455,6 +453,7 @@ fn fake_slurm_uses_receipts_and_keeps_unknown_jobs_unreconciled() {
         reason: ExitReason::Exited,
         processes: vec![],
         outcome: CancelOutcome::Verified,
+        detail: None,
     };
     orx_host::publish(&remote.root().join("runs/job/exit.json"), &receipt).unwrap();
     remote.shim("squeue", "echo 'controller down' >&2; exit 1");
@@ -885,6 +884,7 @@ fn cancelled_slurm_receipts_keep_querying_until_scheduler_proves_teardown() {
                 state: "D".into(),
             }],
             outcome: CancelOutcome::Survivors,
+            detail: None,
         },
     )
     .unwrap();

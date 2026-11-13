@@ -16,6 +16,7 @@ import { BackendLogo } from "./BackendLogos";
 import { HarnessLogo } from "./HarnessLogo";
 import { delegateStatusLabel } from "./DelegateCard";
 import { delegateLineage, delegateModelLabel, delegateStatus } from "../delegates";
+import { useModelName } from "./pickerAgents";
 import { IconButton, MenuItem, StatusIndicator, Spinner, Tooltip } from "./ui";
 import { usePopover } from "./ModelPicker";
 import { formatForDisplay } from "@tanstack/react-hotkeys";
@@ -305,6 +306,7 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
 /** The chats this one delegated to: running ones listed, finished ones folded behind a count. */
 function SubagentLineage({ sessions, sessionId, onOpen }: { sessions: ChatSession[]; sessionId: string; onOpen: (sessionId: string) => void }) {
   const [showFinished, setShowFinished] = useState(false);
+  const modelName = useModelName();
   const lineage = delegateLineage(sessions, sessionId);
   if (lineage.length === 0) return null;
   const ended = (session: ChatSession) => ["finished", "failed", "stopped"].includes(delegateStatus(session, sessions));
@@ -312,7 +314,7 @@ function SubagentLineage({ sessions, sessionId, onOpen }: { sessions: ChatSessio
   const finished = lineage.filter(({ session }) => ended(session));
   const failed = finished.filter(({ session }) => delegateStatus(session, sessions) === "failed").length;
   const row = ({ session, level }: { session: ChatSession; level: number }) => {
-    const title = session.title?.trim() || delegateModelLabel(session);
+    const title = session.title?.trim() || delegateModelLabel(session, modelName);
     const status = delegateStatus(session, sessions);
     return (
       <MenuItem key={session.id} data-keyboard-item className="min-h-7 py-1" onClick={() => onOpen(session.id)}>

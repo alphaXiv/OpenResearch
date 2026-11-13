@@ -97,9 +97,11 @@ function handle(message: Message) {
     case 'session/new': {
       const sessionId = `e2e-${crypto.randomUUID()}`
       if (!message.params?.mcpServers?.length) oneShots.add(sessionId)
-      return send({ id: message.id, result: { sessionId } })
+      const models = { currentModelId: 'e2e', availableModels: [{ modelId: 'e2e', name: 'E2E Model' }] }
+      return send({ id: message.id, result: { sessionId, models } })
     }
     case 'session/load':
+    case 'session/set_model':
       return send({ id: message.id, result: {} })
     case 'session/prompt':
       return void prompt(message)

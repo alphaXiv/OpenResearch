@@ -29,7 +29,9 @@ pub struct Host {
     /// Set when the client is gone, so long waits and commands end.
     stop: Arc<AtomicBool>,
     blobs: Mutex<()>,
-    recovery: Mutex<HashMap<RunId, (Instant, Duration)>>,
+    /// Per run: when the wrapper may be spawned again, the delay before that and how many
+    /// wrappers this host spawned for it.
+    recovery: Mutex<HashMap<RunId, (Instant, Duration, u32)>>,
 }
 
 impl Host {
@@ -50,10 +52,13 @@ impl Host {
     }
 
     pub fn handle(&self, request: Request) -> Response {
-        self.request(request)
-            .unwrap_or_else(|error| Response::Error {
+        self.request(request).unwrap_or_else(|error| {
+            Response::Error {
                 code: match error.kind() {
-                    io::ErrorKind::InvalidInput => ErrorCode::InvalidRequest,
+                    // A full disk refuses every retry until the user frees space.
+                    io::ErrorKind::InvalidInput
+                    | io::ErrorKind::StorageFull
+                    | io::ErrorKind::QuotaExceeded => ErrorCode::InvalidRequest,
                     io::ErrorKind::AlreadyExists => ErrorCode::Conflict,
                     io::ErrorKind::NotFound => ErrorCode::NotFound,
                     io::ErrorKind::Unsupported => ErrorCode::Unsupported,
@@ -61,7 +66,8 @@ impl Host {
                     _ => ErrorCode::Io,
                 },
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     fn exec(
@@ -70,7 +76,32 @@ impl Host {
         input: &[u8],
         timeout: Duration,
     ) -> io::Result<ExecResult> {
-        exec::run(command, input, timeout, Some(&self.stop))
+        exec::run(command, input, timeout, &|| {
+            self.stop.load(Ordering::Relaxed)
+        })
+    }
+
+    /// Runs a Slurm command; one the SSH session can't find or run is the host's setup to fix,
+    /// never an unknown outcome.
+    fn scheduler(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: Duration,
+    ) -> io::Result<ExecResult> {
+        self.exec(Command::new(program).args(args), input, timeout)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{program} can't run in the non-interactive SSH session orx uses on \
+                         this host ({error}). Add the directory holding the Slurm commands to \
+                         PATH in a file such sessions read, such as ~/.bashrc."
+                    ),
+                ),
+                _ => error,
+            })
     }
 
     fn request(&self, request: Request) -> io::Result<Response> {
@@ -86,7 +117,10 @@ impl Host {
                 if cfg!(target_os = "linux") && !platform::supported_kernel(&kernel) {
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
-                        "Linux kernel 3.2 or newer is required",
+                        format!(
+                            "orx-host needs Linux kernel 3.2 or newer, and this host runs \
+                             {kernel}. Choose another host."
+                        ),
                     ));
                 }
                 Ok(Response::Hello {
@@ -104,9 +138,33 @@ impl Host {
                     summary: self.summary(&intent.run, true, true)?,
                 })
             }
-            Request::Inspect { run } => Ok(Response::Inspect {
-                summary: self.summary(&run, false, false)?,
-            }),
+            Request::Inspect { run } => {
+                let summary = self.summary(&run, false, false)?;
+                if !matches!(summary.state, RunState::Missing | RunState::Staging) {
+                    return Ok(Response::Inspect { summary });
+                }
+                let dir = run_dir(&self.root, &run)?;
+                if !dir.try_exists()? {
+                    return Ok(Response::Inspect { summary });
+                }
+                let published = unless_preparing(&dir, || {
+                    Ok(dir.join("launch.json").try_exists()?
+                        || dir.join("job.sbatch").try_exists()?)
+                })?
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "A launch of this run is still being prepared on the host.",
+                    )
+                })?;
+                Ok(Response::Inspect {
+                    summary: if summary.state == RunState::Missing && published {
+                        self.summary(&run, false, false)?
+                    } else {
+                        summary
+                    },
+                })
+            }
             Request::Changes {
                 watch,
                 follow_logs,
@@ -184,19 +242,32 @@ impl Host {
             }
             Request::Cancel { run } => {
                 let dir = run_dir(&self.root, &run)?;
-                let outcome = wrapper::cancel(&dir)?;
                 // scancel would kill a started wrapper before its receipt; it reads cancel.req.
-                if dir.join("job.sbatch").try_exists()? && !dir.join("started").try_exists()? {
-                    let result = self.exec(
-                        Command::new("scancel").arg(format!("--name={run}")),
+                // Before it starts, the queued job goes first, so a cancelled receipt never
+                // stands for a job that still holds its place in the queue. The marker goes
+                // first: published under start.lock, it keeps an unstarted wrapper from starting.
+                let slurm = dir.join("job.sbatch").try_exists()?;
+                if slurm {
+                    wrapper::request(&dir, "cancel.req")?;
+                }
+                if slurm && !dir.join("started").try_exists()? && wrapper::receipt(&dir)?.is_none()
+                {
+                    let result = self.scheduler(
+                        "scancel",
+                        &[format!("--name={run}")],
                         &[],
                         Duration::from_secs(10),
                     )?;
                     if result.code != Some(0) || result.timed_out {
-                        return Err(io::Error::other("scancel did not acknowledge cancellation"));
+                        return Err(io::Error::other(format!(
+                            "scancel --name={run} did not acknowledge the cancel: {}",
+                            String::from_utf8_lossy(&result.stderr).trim()
+                        )));
                     }
                 }
-                Ok(Response::Cancel { outcome })
+                Ok(Response::Cancel {
+                    outcome: wrapper::cancel(&dir)?,
+                })
             }
             Request::Cleanup { run } => Ok(Response::Cleanup {
                 outcome: wrapper::cleanup(&run_dir(&self.root, &run)?)?,
@@ -227,44 +298,23 @@ impl Host {
                 })
             }
             Request::HasBlob { sha, len } => Ok(Response::HasBlob {
-                present: self.has_blob(&sha, len)?,
+                present: self.has_blob(&sha, len).map_err(|error| {
+                    staging(error, "checking the source in", &self.root.join("sources"))
+                })?,
             }),
             Request::PinSource { run, sha } => {
                 check_sha(&sha)?;
                 let dir = run_dir(&self.root, &run)?;
-                fs::create_dir_all(&dir)?;
-                let mutex = crate::run_mutex(&dir)?;
-                let _local = mutex
-                    .lock()
-                    .map_err(|_| io::Error::other("run lock poisoned"))?;
-                let Some(_ownership) = lock(&dir.join("launch.lock"))? else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "launch is being staged",
-                    ));
-                };
-                fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-                crate::slow_request();
-                let cross_device = crate::cross_device();
                 Ok(Response::PinSource {
-                    pinned: pin_source(
-                        &self.root.join("sources"),
-                        &sha,
-                        &dir,
-                        |blob, target| match cross_device {
-                            true => Err(io::Error::from_raw_os_error(libc::EXDEV)),
-                            false => fs::hard_link(blob, target),
-                        },
-                        if cross_device {
-                            Duration::ZERO
-                        } else {
-                            PIN_SLICE
-                        },
-                    )?,
+                    pinned: self
+                        .pin(&dir, &sha)
+                        .map_err(|error| staging(error, "copying the source into", &dir))?,
                 })
             }
             Request::PutBlob { sha, offset, bytes } => Ok(Response::PutBlob {
-                len: self.put_blob(&sha, offset, &bytes)?,
+                len: self.put_blob(&sha, offset, &bytes).map_err(|error| {
+                    staging(error, "writing the source to", &self.root.join("sources"))
+                })?,
             }),
             Request::SlurmSubmit { intent, directives } => {
                 let run = intent.run.clone();
@@ -282,16 +332,29 @@ impl Host {
                     ));
                 }
                 let sbatch = fs::read(dir.join("job.sbatch"))?;
-                let result = self.exec(
-                    Command::new("sbatch").args([
-                        "--parsable",
-                        "--no-requeue",
-                        &format!("--job-name={run}"),
-                        &format!("--output={}", dir.join("slurm.out").display()),
-                    ]),
+                // The launch was never started: retract it whole.
+                let retract = || -> io::Result<()> {
+                    fs::remove_file(dir.join("launch.json"))?;
+                    fs::remove_file(dir.join("job.sbatch"))?;
+                    File::open(&dir)?.sync_all()
+                };
+                let result = match self.scheduler(
+                    "sbatch",
+                    &[
+                        "--parsable".into(),
+                        "--no-requeue".into(),
+                        format!("--job-name={run}"),
+                        format!("--output={}", dir.join("slurm.out").display()),
+                    ],
                     &sbatch,
                     Duration::from_secs(30),
-                )?;
+                ) {
+                    Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                        retract()?;
+                        return Err(error);
+                    }
+                    result => result?,
+                };
                 let job = if result.code == Some(0) && !result.timed_out {
                     String::from_utf8_lossy(&result.stdout)
                         .trim()
@@ -300,12 +363,13 @@ impl Host {
                         .unwrap_or_default()
                         .to_owned()
                 } else {
-                    let queued = self.exec(
-                        Command::new("squeue").args([
-                            "--noheader",
-                            "--format=%i|%j|%T",
-                            &format!("--name={run}"),
-                        ]),
+                    let queued = self.scheduler(
+                        "squeue",
+                        &[
+                            "--noheader".into(),
+                            "--format=%i|%j|%T".into(),
+                            format!("--name={run}"),
+                        ],
                         &[],
                         Duration::from_secs(10),
                     )?;
@@ -343,10 +407,7 @@ impl Host {
                                 stderr.trim()
                             )));
                         }
-                        // The launch was never started: retract it whole.
-                        fs::remove_file(dir.join("launch.json"))?;
-                        fs::remove_file(dir.join("job.sbatch"))?;
-                        File::open(&dir)?.sync_all()?;
+                        retract()?;
                         return invalid(&format!("sbatch failed: {}", stderr.trim()));
                     }
                 };
@@ -361,8 +422,9 @@ impl Host {
                 if job.is_empty() || !job.bytes().all(|b| b.is_ascii_digit()) {
                     return invalid("invalid Slurm job id");
                 }
-                let result = self.exec(
-                    Command::new("scancel").arg(&job),
+                let result = self.scheduler(
+                    "scancel",
+                    std::slice::from_ref(&job),
                     &[],
                     Duration::from_secs(10),
                 )?;
@@ -385,7 +447,7 @@ impl Host {
             {
                 RunState::Staging
             } else {
-                RunState::Starting
+                RunState::Starting { reason: None }
             };
             let mut summary = slurm_summary(&dir, None, fallback);
             if follow {
@@ -394,7 +456,7 @@ impl Host {
             return Ok(summary);
         }
         let mut state = wrapper::state(&dir)?;
-        if matches!(state, RunState::Starting) {
+        if matches!(state, RunState::Starting { .. }) {
             let intent: LaunchIntent = read_json(&dir.join("launch.json"))?;
             if !repair || (intent.source.is_some() && !dir.join("source.tar").try_exists()?) {
                 return Ok(Summary {
@@ -409,15 +471,19 @@ impl Host {
                     cleanup: wrapper::cleanup_result(&dir)?,
                 });
             }
-            match self.launch(&intent, None) {
-                Ok(_) => {
-                    state = wrapper::state(&dir)?;
-                }
+            // A cancel that reached no wrapper is honoured here, never respawned past.
+            let launched = if dir.join("cancel.req").try_exists()? {
+                wrapper::cancel(&dir).map(drop)
+            } else {
+                self.launch(&intent, None).map(drop)
+            };
+            match launched {
+                Ok(()) => state = wrapper::state(&dir)?,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error),
             }
         }
-        if !matches!(state, RunState::Starting) {
+        if !matches!(state, RunState::Starting { .. }) {
             self.recovery
                 .lock()
                 .map_err(|_| io::Error::other("recovery lock poisoned"))?
@@ -541,13 +607,13 @@ impl Host {
             File::open(&dir)?.sync_all()?;
             crash_point("launch_published");
         }
-        if dir.join("started").try_exists()? || dir.join("exit.json").try_exists()? {
-            return Ok(false);
-        }
         let Some(wrapper_lock) = lock(&dir.join("wrapper.lock"))? else {
             return Ok(false);
         };
-        drop(wrapper_lock);
+        // Under wrapper.lock, so a wrapper that just finished can't have its receipt replaced.
+        if dir.join("started").try_exists()? || dir.join("exit.json").try_exists()? {
+            return Ok(false);
+        }
 
         if directives.is_none() {
             let mut recovery = self
@@ -555,42 +621,43 @@ impl Host {
                 .lock()
                 .map_err(|_| io::Error::other("recovery lock poisoned"))?;
             let now = Instant::now();
-            if recovery
-                .get(&intent.run)
-                .is_some_and(|(next, _)| *next > now)
-            {
+            let previous = recovery.get(&intent.run).copied();
+            if previous.is_some_and(|(next, _, _)| next > now) {
                 return Ok(false);
             }
-            let delay = recovery
-                .get(&intent.run)
-                .map_or(Duration::from_secs(1), |(_, delay)| {
-                    (*delay * 2).min(Duration::from_secs(30))
-                });
+            let spawns = previous.map_or(0, |(_, _, spawns)| spawns);
+            if spawns >= MAX_SPAWNS {
+                // Holding wrapper.lock, no wrapper can start while this receipt is published.
+                publish(
+                    &dir.join("exit.json"),
+                    &ExitReceipt {
+                        finished_at: SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|elapsed| elapsed.as_millis() as i64),
+                        code: None,
+                        signal: None,
+                        reason: ExitReason::SpawnFailed,
+                        processes: Vec::new(),
+                        outcome: CancelOutcome::Verified,
+                        detail: Some(format!(
+                            "its wrapper exited {spawns} times without starting it; \
+                             wrapper.log in {} may say why",
+                            dir.display()
+                        )),
+                    },
+                )?;
+                return Ok(false);
+            }
+            let delay = previous.map_or(Duration::from_secs(1), |(_, delay, _)| {
+                (delay * 2).min(Duration::from_secs(30))
+            });
             recovery.insert(
                 intent.run.clone(),
-                (now + crate::stop_duration(delay), delay),
+                (now + crate::stop_duration(delay), delay, spawns + 1),
             );
         }
-        if intent.source.is_some() && !dir.join("repo").try_exists()? {
-            let temporary = dir.join("repo.part");
-            if temporary.try_exists()? {
-                fs::remove_dir_all(&temporary)?;
-            }
-            fs::create_dir(&temporary)?;
-            let result = self.exec(
-                Command::new("tar")
-                    .arg("-xf")
-                    .arg(dir.join("source.tar"))
-                    .arg("-C")
-                    .arg(&temporary),
-                &[],
-                Duration::from_secs(300),
-            )?;
-            if result.code != Some(0) || result.timed_out {
-                return Err(io::Error::other("source extraction failed"));
-            }
-            fs::rename(temporary, dir.join("repo"))?;
-        }
+        drop(wrapper_lock);
         if !dir.join("run.sh").try_exists()? {
             publish_bytes(&dir.join("run.sh"), intent.run_sh.as_bytes())?;
         }
@@ -653,6 +720,37 @@ impl Host {
         )?
         .sync_all()?;
         Ok(true)
+    }
+
+    fn pin(&self, dir: &Path, sha: &str) -> io::Result<bool> {
+        fs::create_dir_all(dir)?;
+        let mutex = crate::run_mutex(dir)?;
+        let _local = mutex
+            .lock()
+            .map_err(|_| io::Error::other("run lock poisoned"))?;
+        let Some(_ownership) = lock(&dir.join("launch.lock"))? else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "launch is being staged",
+            ));
+        };
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        crate::slow_request();
+        let cross_device = crate::cross_device();
+        pin_source(
+            &self.root.join("sources"),
+            sha,
+            dir,
+            |blob, target| match cross_device {
+                true => Err(io::Error::from_raw_os_error(libc::EXDEV)),
+                false => fs::hard_link(blob, target),
+            },
+            if cross_device {
+                Duration::ZERO
+            } else {
+                PIN_SLICE
+            },
+        )
     }
 
     fn put_blob(&self, hash: &str, offset: u64, bytes: &[u8]) -> io::Result<u64> {
@@ -805,7 +903,7 @@ impl Host {
                 .unwrap_or_default()
                 .trim_end_matches('+');
             match scheduler_state(state, Duration::MAX) {
-                RunState::Starting | RunState::Running => {
+                RunState::Starting { .. } | RunState::Running => {
                     match fs::remove_file(&path) {
                         Ok(()) => File::open(&dir)?.sync_all()?,
                         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -819,8 +917,11 @@ impl Host {
                         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                         Err(error) => return Err(error),
                     };
-                    let fact = match previous {
-                        Some(fact) if fact.job == job && fact.state == state => fact,
+                    match previous {
+                        Some(fact) if fact.job == job && fact.state == state => {
+                            Ok(fact.since.elapsed().unwrap_or_default())
+                        }
+                        // A slow fsync must not count toward the grace of a state first seen now.
                         _ => {
                             let fact = SchedulerTerminal {
                                 job: job.into(),
@@ -828,10 +929,9 @@ impl Host {
                                 since: SystemTime::now(),
                             };
                             publish(&path, &fact)?;
-                            fact
+                            Ok(Duration::ZERO)
                         }
-                    };
-                    Ok(fact.since.elapsed().unwrap_or_default())
+                    }
                 }
                 _ => Ok(Duration::ZERO),
             }
@@ -849,7 +949,7 @@ impl Host {
                     Command::new("squeue").args([
                         "--noheader",
                         "--states=all",
-                        "--format=%i|%j|%T",
+                        "--format=%i|%j|%T|%r",
                         filter,
                     ]),
                     &[],
@@ -874,15 +974,24 @@ impl Host {
                 }
             };
             for line in String::from_utf8_lossy(&result.stdout).lines() {
-                let fields: Vec<_> = line.trim().split('|').collect();
-                if fields.len() != 3 {
+                let fields: Vec<_> = line.trim().splitn(4, '|').collect();
+                if fields.len() < 3 {
                     unanswered = Some(line.to_owned());
                     continue;
                 }
                 let Some(run) = find_run(fields[0], fields[1]) else {
                     continue;
                 };
-                let state = scheduler_state(fields[2], elapsed(&run, fields[0], fields[2])?);
+                let state = match scheduler_state(fields[2], elapsed(&run, fields[0], fields[2])?) {
+                    RunState::Starting { .. } => RunState::Starting {
+                        reason: fields
+                            .get(3)
+                            .map(|reason| reason.trim())
+                            .filter(|reason| !reason.is_empty() && *reason != "None")
+                            .map(str::to_owned),
+                    },
+                    state => state,
+                };
                 jobs.insert(
                     run.clone(),
                     SlurmJob {
@@ -1057,6 +1166,53 @@ impl Host {
     }
 }
 
+/// An OS error while staging a source, naming the step and directory, with the fix for a cause
+/// the user can clear.
+fn staging(error: io::Error, step: &str, dir: &Path) -> io::Error {
+    if error.raw_os_error().is_none() {
+        return error;
+    }
+    let fix = match error.kind() {
+        io::ErrorKind::QuotaExceeded => {
+            " Free space within your disk quota (`quota -s` shows it), then run the experiment again.".into()
+        }
+        io::ErrorKind::StorageFull => format!(
+            " Free space on its disk (`df -h {}`), then run the experiment again.",
+            quote(dir)
+        ),
+        io::ErrorKind::PermissionDenied => format!(
+            " Make it writable by you (`ls -ld {}`), then run the experiment again.",
+            quote(dir)
+        ),
+        _ => String::new(),
+    };
+    io::Error::new(
+        error.kind(),
+        format!("{error} {step} {}.{fix}", dir.display()),
+    )
+}
+
+/// Wrappers one host spawns for a run that keep dying before starting the payload, before it
+/// gives up with a spawn_failed receipt.
+const MAX_SPAWNS: u32 = 5;
+
+/// Runs `then` holding the run's launch ownership, or returns None while a launch of it is
+/// being prepared, here or by another orx-host.
+fn unless_preparing<T>(dir: &Path, then: impl FnOnce() -> io::Result<T>) -> io::Result<Option<T>> {
+    let mutex = crate::run_mutex(dir)?;
+    let _local = match mutex.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return Err(io::Error::other("run lock poisoned"))
+        }
+    };
+    let Some(_ownership) = lock(&dir.join("launch.lock"))? else {
+        return Ok(None);
+    };
+    then().map(Some)
+}
+
 fn invalid<T>(message: &str) -> io::Result<T> {
     Err(io::Error::new(io::ErrorKind::InvalidInput, message))
 }
@@ -1125,6 +1281,7 @@ fn slurm_summary(dir: &Path, old: Option<&SlurmLegacyRun>, fallback: RunState) -
                         reason: ExitReason::Exited,
                         processes: vec![],
                         outcome: CancelOutcome::Unverifiable { unreadable: vec![] },
+                        detail: None,
                     },
                 },
                 None if inspection.receipt_unreadable => RunState::Unreconciled {
@@ -1175,7 +1332,7 @@ fn scheduler_state(state: &str, elapsed: Duration) -> RunState {
         .unwrap_or_default()
         .trim_end_matches('+');
     if matches!(state, "PENDING" | "CONFIGURING") {
-        return RunState::Starting;
+        return RunState::Starting { reason: None };
     }
     if matches!(state, "RUNNING" | "COMPLETING" | "SUSPENDED") {
         return RunState::Running;
@@ -1561,7 +1718,7 @@ mod tests {
         );
         assert_eq!(
             scheduler_state("PENDING", Duration::from_secs(500)),
-            RunState::Starting
+            RunState::Starting { reason: None }
         );
     }
 }

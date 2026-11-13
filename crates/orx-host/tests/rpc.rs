@@ -169,11 +169,10 @@ fn change_feed_isolates_unreadable_intent() {
 
 #[test]
 fn starting_run_recovery_backs_off_and_preserves_the_staged_script() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = Directory::new();
     let binary = dir.0.join("fake-host");
-    fs::write(&binary, "#!/bin/sh\nprintf x >> \"$2/attempts\"\n").unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    orx_test_support::write_executable(&binary, "#!/bin/sh\nprintf x >> \"$2/attempts\"\n", 0o700)
+        .unwrap();
     let host = Host::new(dir.0.clone(), binary).unwrap();
     let intent = LaunchIntent {
         run: "retry".into(),
@@ -327,6 +326,32 @@ fn blob_retries_are_checked_and_only_verified_blobs_are_published() {
         Response::HasBlob { present: false }
     );
     assert!(!dir.0.join("sources").join(wrong_hash).exists());
+}
+
+#[test]
+fn a_staging_write_the_host_refuses_names_its_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Directory::new();
+    let host = host(&dir);
+    let sources = dir.0.join("sources");
+    fs::set_permissions(&sources, fs::Permissions::from_mode(0o500)).unwrap();
+    let response = host.handle(Request::PutBlob {
+        sha: sha(b"x"),
+        offset: 0,
+        bytes: b"x".to_vec(),
+    });
+    fs::set_permissions(&sources, fs::Permissions::from_mode(0o700)).unwrap();
+    let Response::Error {
+        code: ErrorCode::Io,
+        message,
+    } = response
+    else {
+        panic!("unexpected reply: {response:?}");
+    };
+    assert!(
+        message.contains(&sources.display().to_string()),
+        "{message}"
+    );
 }
 
 #[test]
@@ -638,6 +663,7 @@ fn receipt_read_errors_keep_their_type_and_recover() {
         reason: ExitReason::Exited,
         processes: vec![],
         outcome: CancelOutcome::Verified,
+        detail: None,
     };
     orx_host::publish(&path, &receipt).unwrap();
     assert_eq!(

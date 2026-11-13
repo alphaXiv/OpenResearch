@@ -25,8 +25,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 
 use super::detect::{
     bin_version, nonempty_str, parse_version, read_json, HarnessAuthState, HarnessInfo, ModelInfo,
@@ -136,7 +137,7 @@ pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence:
         .and_then(Value::as_str);
     let method = reported_method.and_then(|method| match method.to_ascii_lowercase().as_str() {
         "oauth" | "claude.ai" => Some("oauth"),
-        "api-key" | "api_key" | "apikey" => Some("apiKey"),
+        "api-key" | "api_key" | "apikey" | "api_key_helper" => Some("apiKey"),
         "third_party" | "third-party" => Some("thirdParty"),
         _ => None,
     });
@@ -171,18 +172,74 @@ pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence:
 }
 
 async fn probe_auth(bin: &Path, sequence: u64) -> AuthProbe {
+    probe_auth_at(bin, sequence, None).await
+}
+
+async fn probe_auth_at(bin: &Path, sequence: u64, home: Option<&Path>) -> AuthProbe {
     let mut cmd = crate::process::tokio_command(bin);
     cmd.args(["auth", "status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     prepare_env(&mut cmd);
+    profile_env(&mut cmd, home);
     match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
         Some(Ok(out)) => parse_auth_status(out.status.code(), &out.stdout, sequence),
         // A timeout or a spawn failure: no evidence of anything, least of all a
         // credential conflict.
         _ => AuthProbe::unknown(sequence),
     }
+}
+
+/// The profile's sign-in and model catalog.
+pub(crate) async fn profile_auth(bin: Option<&Path>, home: &Path, version: Option<&str>) -> Value {
+    let (probe, ultracode) = match bin {
+        Some(bin) => {
+            let (probe, ultracode) =
+                probe_auth_and_ultracode(bin, next_auth_sequence(), Some(home)).await;
+            (gate_oauth_version(probe, version), ultracode)
+        }
+        None => (AuthProbe::unknown(0), false),
+    };
+    let catalog = match bin {
+        Some(bin) if probe.state == HarnessAuthState::Ready => {
+            claude_models_response(bin.to_path_buf(), Some(home.to_path_buf())).await
+        }
+        _ => None,
+    };
+    let account = read_json(home.join(".claude.json")).and_then(|v| v.get("oauthAccount").cloned());
+    let credentials = read_json(home.join(".credentials.json"));
+    let tier = credentials
+        .as_ref()
+        .and_then(|v| v.get("claudeAiOauth"))
+        .and_then(|v| v.get("rateLimitTier"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            account
+                .as_ref()
+                .and_then(|v| v.get("organizationRateLimitTier"))
+                .and_then(Value::as_str)
+        });
+    let authenticated = probe.state == HarnessAuthState::Ready;
+    let mut entry = json!({
+        "authenticated": authenticated,
+        "supportsSteering": authenticated,
+        "authState": probe.state,
+        "authMethod": probe.method,
+        "authProvider": probe.provider,
+        "loginEligible": true,
+        "authCheckFailed": probe.failed_check,
+        "account": account.as_ref().filter(|_| authenticated).and_then(|v| nonempty_str(v, "emailAddress")),
+        "accountName": account.as_ref().filter(|_| authenticated).and_then(|v| nonempty_str(v, "displayName").or_else(|| nonempty_str(v, "fullName"))),
+        "plan": authenticated.then(|| billing_label(probe.subscription_type.as_deref(), tier,
+            account.as_ref().and_then(|v| v.get("billingType")).and_then(Value::as_str))).flatten(),
+    });
+    entry["defaultModel"] =
+        json!(configured_model(home).or_else(|| catalog.as_ref().and_then(claude_default_model)));
+    if let Some(catalog) = catalog {
+        entry["models"] = json!(parse_claude_model_list(&catalog, ultracode));
+    }
+    entry
 }
 
 /// The environment-credential overlay both auth paths share. Headless Claude
@@ -252,13 +309,13 @@ pub(crate) async fn current_auth_state() -> AuthProbe {
 
 pub(crate) fn auth_recovery_note(method: Option<&str>, provider: Option<&str>) -> &'static str {
     if external_provider(method, provider) {
-        "Check the configured Claude Code provider and run `claude auth status`, then re-check this harness."
+        "Check the configured Claude Code provider and run `claude auth status`, then re-check this agent."
     } else if has_api_credential() {
-        "Claude Code rejected the configured `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Replace or unset it, then re-check this harness."
+        "Claude Code rejected the configured `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Replace or unset it, then re-check this agent."
     } else if method == Some("oauth") || provider == Some("firstParty") {
-        "Sign in with `claude auth login`, then re-check this harness."
+        "Sign in with `claude auth login`, then re-check this agent."
     } else {
-        "Check Claude Code authentication with `claude auth status`, then re-check this harness."
+        "Check Claude Code authentication with `claude auth status`, then re-check this agent."
     }
 }
 
@@ -284,13 +341,18 @@ pub(crate) fn external_provider(method: Option<&str>, provider: Option<&str>) ->
 ///
 /// Any failure reports unsupported: a missing choice is a smaller harm than a
 /// choice that silently runs at the default effort.
-async fn probe_auth_and_ultracode(bin: &Path, sequence: u64) -> (AuthProbe, bool) {
+async fn probe_auth_and_ultracode(
+    bin: &Path,
+    sequence: u64,
+    home: Option<&Path>,
+) -> (AuthProbe, bool) {
     let mut cmd = crate::process::tokio_command(bin);
     cmd.args(["--effort", CLAUDE_ULTRACODE, "auth", "status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     prepare_env(&mut cmd);
+    profile_env(&mut cmd, home);
     let out = match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
         Some(Ok(out)) => out,
         _ => return (AuthProbe::unknown(sequence), false),
@@ -305,9 +367,17 @@ async fn probe_auth_and_ultracode(bin: &Path, sequence: u64) -> (AuthProbe, bool
     let mut probe = parse_auth_status(out.status.code(), &out.stdout, sequence);
     if warned && probe.state == HarnessAuthState::Unknown {
         // The parser rejected `--effort` and never reached `auth status`.
-        probe = probe_auth(bin, sequence).await;
+        probe = probe_auth_at(bin, sequence, home).await;
     }
     (apply_env_credential_override(probe), ultracode)
+}
+
+/// Points a probe at a profile's home and its own Keychain entry.
+fn profile_env(cmd: &mut Command, home: Option<&Path>) {
+    if let Some(home) = home {
+        cmd.env("CLAUDE_CONFIG_DIR", home)
+            .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home);
+    }
 }
 
 /// The `list_models` transport — a control request over `--print`
@@ -322,7 +392,7 @@ async fn probe_auth_and_ultracode(bin: &Path, sequence: u64) -> (AuthProbe, bool
 /// caller reports an unavailable catalog. The raw `response` payload comes
 /// back unparsed: the ultracode probe decides the parse, and detection runs
 /// both children concurrently.
-async fn claude_models_response(bin: PathBuf) -> Option<Value> {
+async fn claude_models_response(bin: PathBuf, home: Option<PathBuf>) -> Option<Value> {
     // Acquire the spawn lane before the deadline — queue time must not spend
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
@@ -337,6 +407,7 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
             "--verbose",
         ]);
         prepare_env(&mut cmd);
+        profile_env(&mut cmd, home.as_deref());
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -377,10 +448,21 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
         .flatten()
 }
 
-pub(crate) async fn external_model_catalog(bin: PathBuf, ultracode: bool) -> Vec<ModelInfo> {
-    super::detect::timed_probe("claude-code", "models", claude_models_response(bin))
+pub(crate) async fn external_model_catalog(
+    bin: PathBuf,
+    ultracode: bool,
+) -> (Vec<ModelInfo>, Option<String>) {
+    super::detect::timed_probe("claude-code", "models", claude_models_response(bin, None))
         .await
-        .map(|response| parse_claude_model_list(&response, ultracode))
+        .map(|response| {
+            (
+                parse_claude_model_list(&response, ultracode),
+                configured_model(&crate::local::native_store::claude_home(
+                    crate::local::native_store::NativeStore::Legacy,
+                ))
+                .or_else(|| claude_default_model(&response)),
+            )
+        })
         .unwrap_or_default()
 }
 
@@ -398,16 +480,16 @@ async fn claude_spec_probes(bin: PathBuf, sequence: u64) -> (AuthProbe, bool, Op
         super::detect::spawn_timed_probe(
             "claude-code",
             "models",
-            claude_models_response(bin.clone()),
+            claude_models_response(bin.clone(), None),
         )
     });
     let (auth, ultracode) = super::detect::timed_probe(
         "claude-code",
         "auth+ultracode",
-        probe_auth_and_ultracode(&bin, sequence),
+        probe_auth_and_ultracode(&bin, sequence, None),
     )
     .await;
-    // External provider model enumeration can stall; the CLI default remains usable.
+    // External provider enumeration is deferred so auth can settle first.
     let external = external_provider(auth.method, auth.provider.as_deref());
     let models = match models {
         Some(task) if auth.state == HarnessAuthState::Ready && !external => {
@@ -421,11 +503,79 @@ async fn claude_spec_probes(bin: PathBuf, sequence: u64) -> (AuthProbe, bool, Op
             None
         }
         None if auth.state == HarnessAuthState::Ready && !external => {
-            super::detect::timed_probe("claude-code", "models", claude_models_response(bin)).await
+            super::detect::timed_probe("claude-code", "models", claude_models_response(bin, None))
+                .await
         }
         None => None,
     };
     (auth, ultracode, models)
+}
+
+#[test]
+fn catalog_default_is_resolved_and_plan_alias_is_excluded() {
+    let catalog = json!({"models":[{"value":"default","resolvedModel":"claude-opus-5-5"},{"value":"opus","resolvedModel":"claude-opus-5-5"},{"value":"opusplan"},{"value":"custom"}]});
+    assert_eq!(
+        claude_default_model(&catalog).as_deref(),
+        Some("claude-opus-5-5")
+    );
+    assert_eq!(
+        parse_claude_model_list(&catalog, false)
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        ["opus", "custom"]
+    );
+}
+
+#[test]
+fn configured_plan_alias_resolves_like_a_missing_model() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let root = crate::local::git::TemporaryDirectory::new("orx-claude-model").unwrap();
+    for (setting, expected) in [
+        ("opusplan", "claude-opus-5-5"),
+        ("custom-opus", "custom-opus"),
+    ] {
+        std::fs::write(
+            root.path().join("settings.json"),
+            json!({"model":setting}).to_string(),
+        )
+        .unwrap();
+        let mut info = HarnessInfo::new("claude-code", "Claude Code");
+        info.agent_ready = true;
+        info.models = vec![
+            ModelInfo::new("opusplan"),
+            ModelInfo::new("claude-opus-5-5"),
+        ];
+        super::resolve_model(&mut info, configured_model(root.path()).as_deref());
+        assert_eq!(info.default_model.as_deref(), Some(expected));
+        assert!(!info.models.iter().any(|model| model.id == "opusplan"));
+        let routes = crate::local::model_routes::models(&json!({"harnesses":[info]}), &[]);
+        assert!(routes
+            .iter()
+            .flat_map(|model| &model.routes)
+            .all(|route| route.model != "opusplan"));
+    }
+}
+
+fn configured_model(home: &Path) -> Option<String> {
+    crate::local::shell_env::var("ANTHROPIC_MODEL")
+        .and_then(|model| model.into_string().ok())
+        .or_else(|| {
+            read_json(home.join("settings.json"))
+                .and_then(|settings| settings["model"].as_str().map(str::to_owned))
+        })
+        .filter(|model| super::concrete_model(model))
+}
+
+pub(crate) fn claude_default_model(result: &Value) -> Option<String> {
+    result["models"]
+        .as_array()?
+        .iter()
+        .find(|m| m["value"] == "default")?["resolvedModel"]
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// `list_models` response → per-model `ModelInfo`. Split from the transport
@@ -433,8 +583,7 @@ async fn claude_spec_probes(bin: PathBuf, sequence: u64) -> (AuthProbe, bool, Op
 ///
 /// * `value` is the id the CLI's own picker submits (aliases like `sonnet`,
 ///   `opus[1m]`), so it's what we store and pass back as `--model`.
-/// * The `default` entry is skipped — the composer's "Default model" row (a
-///   null model) already means "let the CLI pick".
+/// * Model-less and hybrid planning aliases are excluded.
 /// * A model without `supportedEffortLevels` (Haiku) gets an empty list, which
 ///   hides the reasoning picker — same absent-vs-empty contract as opencode.
 /// * `ultracode` is appended where the CLI accepts it (see
@@ -448,7 +597,7 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
         .iter()
         .filter_map(|m| {
             let value = m.get("value").and_then(Value::as_str)?;
-            if value == "default" {
+            if !crate::local::harness::concrete_model(value) {
                 return None;
             }
             let mut efforts: Vec<&str> = m
@@ -578,14 +727,19 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
-    cmd.env(
-        "CLAUDE_CONFIG_DIR",
-        native_store::prepare_claude(NativeStore::Isolated)?,
-    );
-    cmd.env(
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-        native_store::claude_secure_storage_config_dir(),
-    );
+    if let Some(profile) = request.profile {
+        crate::local::agent_profiles::home(profile, "claude-code")?;
+        cmd.envs(crate::local::agent_profiles::login_env(profile)?);
+    } else {
+        cmd.env(
+            "CLAUDE_CONFIG_DIR",
+            native_store::prepare_claude(NativeStore::Isolated)?,
+        );
+        cmd.env(
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            native_store::claude_secure_storage_config_dir(),
+        );
+    }
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
@@ -704,8 +858,7 @@ impl ClaudeCode {
                         credential_tier.as_deref(),
                         None,
                     );
-                    if let Some(acct) = crate::config::home_dir()
-                        .and_then(|h| read_json(h.join(".claude.json")))
+                    if let Some(acct) = read_json(native_store::claude_config_file())
                         .and_then(|cfg| cfg.get("oauthAccount").cloned())
                     {
                         info.account = nonempty_str(&acct, "emailAddress");
@@ -731,15 +884,19 @@ impl ClaudeCode {
             info.supports_steering = true;
             // The speculated `list_models` response is parsed here, where the
             // ultracode verdict has landed.
+            info.configured_model = configured_model(&crate::local::native_store::claude_home(
+                crate::local::native_store::NativeStore::Legacy,
+            ))
+            .or_else(|| spec_models.as_ref().and_then(claude_default_model));
             let models = spec_models.and_then(|resp| {
                 let parsed = parse_claude_model_list(&resp, ultracode);
                 (!parsed.is_empty()).then_some(parsed)
             });
             if models.is_none() && !snapshot {
                 info.agent_note = Some(if external_provider(info.auth_method, info.auth_provider.as_deref()) {
-                    "Loading Claude Code models; the CLI default model is available now."
+                    "Loading Claude Code models. Re-check this agent shortly."
                 } else {
-                    "Could not load Claude Code models. Re-check this harness or update Claude Code; the CLI default model is still available."
+                    "Could not load Claude Code models. Re-check this agent or update Claude Code."
                 }.to_string());
             }
             info = info.with_models(models.unwrap_or_default());
@@ -747,7 +904,7 @@ impl ClaudeCode {
             info.agent_note = Some(info.broken_note("Reinstall it"));
         } else if info.auth_state == HarnessAuthState::Unsupported {
             info.agent_note = Some(
-                "Update Claude Code to 2.1.211 or newer, then re-check this harness.".to_string(),
+                "Update Claude Code to 2.1.211 or newer, then re-check this agent.".to_string(),
             );
         } else if info.installed {
             // A saved OAuth login overridden by the environment credential is
@@ -756,9 +913,9 @@ impl ClaudeCode {
             // credential, not to sign in again.
             info.agent_note = Some(match info.auth_state {
                 HarnessAuthState::Unknown if info.needs_config_repair =>
-                    "Claude Code could not verify the effective `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Fix or unset it, then re-check this harness.".to_string(),
+                    "Claude Code could not verify the effective `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Fix or unset it, then re-check this agent.".to_string(),
                 HarnessAuthState::Unknown =>
-                    "Open a terminal and run `claude auth status`, then re-check this harness.".to_string(),
+                    "Open a terminal and run `claude auth status`, then re-check this agent.".to_string(),
                 _ => auth_recovery_note(info.auth_method, info.auth_provider.as_deref()).to_string(),
             });
         } else {
@@ -803,6 +960,9 @@ impl Harness for ClaudeCode {
                 .ok_or_else(|| {
                     anyhow!("Claude Code's saved conversation is unavailable for compaction")
                 })?;
+        if ctx.profile.is_some() && native_session.store == NativeStore::Legacy {
+            return Ok(CompactOutcome::Fallback);
+        }
         let project = ctx.project.clone();
         let session_id = ctx.session_id.clone();
         let skills_dir = self.session_skills_dir();
@@ -822,9 +982,11 @@ impl Harness for ClaudeCode {
                 effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
                 model: ctx.model.clone(),
                 native_store: native_session.store,
+                profile: ctx.profile.clone(),
                 alphaxiv_signed_in: crate::alphaxiv::signed_in(),
                 bridge_active: uses_permission_bridge(ctx.permission_mode)
                     && ctx.host.up_port().is_some(),
+                bin: find_claude(),
             },
         };
         ctx.host
@@ -2314,9 +2476,11 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
         native_store,
+        profile: ctx.profile.clone(),
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         // A failed bridge setup must respawn next turn rather than reuse a child without input.
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
+        bin: find_claude(),
     }
 }
 
@@ -2478,7 +2642,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 } else {
                     (
                         format!("produced no output for {}s", FIRST_EVENT_TIMEOUT.as_secs()),
-                        " (check Claude Code authentication in Harnesses)",
+                        " (check Claude Code in Agents settings)",
                     )
                 };
                 return Err(anyhow!(
@@ -2649,6 +2813,8 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             .map_err(|error| anyhow!("Claude session lookup failed: {error}"))??,
         None => None,
     };
+    let native_session = native_session
+        .filter(|session| ctx.profile.is_none() || session.store == NativeStore::Isolated);
     let native_store = native_session
         .as_ref()
         .map(|session| session.store)
@@ -2680,7 +2846,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         let mut spec = base_spec.clone();
         spec.resume = resume.clone();
         let (attempt, failed_generation) = run_attempt(ctx, spec).await?;
-        if !attempt.auth_failed {
+        if !attempt.auth_failed || ctx.profile.is_some() {
             state = attempt;
             break;
         }
@@ -2733,9 +2899,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 "Claude Code authentication needs attention. Check `claude auth status`, then retry this message."
             }
             HarnessAuthState::Unknown => {
-                "Claude Code authentication could not be verified. Run `claude auth status`, then re-check the harness."
+                "Claude Code authentication could not be verified. Run `claude auth status`, then re-check the agent."
             }
-            _ => "Claude Code authentication failed. Re-check the harness, then retry this message.",
+            _ => "Claude Code authentication failed. Re-check the agent, then retry this message.",
         };
         ctx.push_error(detail.to_string());
         state = attempt;
@@ -3150,7 +3316,7 @@ mod tests {
         assert_eq!(
             with.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             ["claude-fable-5[1m]", "haiku"],
-            "the `default` entry is the composer's null-model row, not a model"
+            "model-less entries are excluded"
         );
         // The versioned name is promoted out of the description's first `·`
         // segment (the alias ids and `displayName` are unversioned).
@@ -4234,6 +4400,16 @@ mod tests {
         );
         assert_eq!(key.method, Some("apiKey"));
         assert_eq!(key.provider.as_deref(), Some("bedrock"));
+        let helper = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"api_key_helper","apiProvider":"firstParty","apiKeySource":"ANTHROPIC_API_KEY"}"#,
+            2,
+        );
+        assert_eq!(helper.method, Some("apiKey"));
+        assert_eq!(
+            gate_oauth_version(helper, None).state,
+            HarnessAuthState::Ready
+        );
 
         let signed_out = parse_auth_status(
             Some(1),

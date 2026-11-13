@@ -11,7 +11,7 @@ use crate::ProjectCommand;
 pub async fn run(args: crate::ProjectArgs) -> Result<()> {
     match args.command {
         ProjectCommand::View { project_id, all } => {
-            let store = crate::store::Store::open()?;
+            let store = crate::store::Store::open_for_reading()?;
             resolve_project(store, &project_id)?.view_project(all).await
         }
         ProjectCommand::Edit {
@@ -51,7 +51,8 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
                 let scratch = crate::local::git::TemporaryDirectory::new("orx-publish")?;
                 let out = scratch.path().join("project.orx");
                 let manifest = share::export(&store, &project, &options, &out)?;
-                let link = client::publish_project(&creds, &project.id, &manifest, &out).await?;
+                let link = client::publish_project(&creds, &project.id, &manifest, &out, |_, _| {})
+                    .await?;
                 println!(
                     "Published {}: {} ({} experiments, {} runs, {} chats). Anyone with the link can open it.",
                     project.name,
@@ -104,7 +105,7 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
                     let public = client::get_public_project(&api, slug).await?;
                     let download = crate::local::git::TemporaryDirectory::new("orx-import")?;
                     let downloaded = download.path().join("download.orx");
-                    client::download_public_project(&api, slug, &downloaded).await?;
+                    client::download_public_project(&api, slug, &downloaded, |_, _| {}).await?;
                     // The publisher picks the name, so it must not steer the folder elsewhere.
                     let folder = public
                         .name
@@ -123,7 +124,7 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
             };
             let folder = path.unwrap_or(default_folder);
             let store = crate::store::Store::open()?;
-            let imported = share::import(&store, &file, &expand_path(&folder)?)?;
+            let imported = share::import(&store, &file, &expand_path(&folder)?, &mut |_| {})?;
             println!(
                 "Opened {} ({}) at {}: {} experiments, {} runs, {} chats.",
                 imported.project.name,

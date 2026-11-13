@@ -9,7 +9,7 @@ use crate::store::{LaunchSpec, Store, StoredRun};
 const PORT: u16 = 6006;
 
 pub async fn run(args: crate::TensorboardArgs) -> Result<()> {
-    let store = Store::open()?;
+    let store = Store::open_for_reading()?;
     let run = crate::local::resolve::resolve_run(&store, &args.run_id)?;
     let launch = store
         .engine_run_state(&run.id)?

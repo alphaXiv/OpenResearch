@@ -1,11 +1,11 @@
 import type { WorkspaceEvents } from "../workspace";
-import type { Api, Autonomy, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarChatPage, TurnOptions } from "../api";
+import type { Api, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarChatPage, TurnOptions } from "../api";
 import type { WorkspaceClient } from "./client";
 
 import { readLiveSnapshot, mergeLiveList, markLiveUpdate } from "./live";
 import { mutations } from "./mutations";
 import type { Workspace } from "../workspace";
-import { infiniteQueryOptions, queryOptions, type InfiniteData } from "@tanstack/react-query";
+import { CancelledError, infiniteQueryOptions, queryOptions, type InfiniteData } from "@tanstack/react-query";
 import type * as api from "../api";
 
 export function createChatQueries(
@@ -24,7 +24,10 @@ export function createChatQueries(
       return rows.filter((row) => !deletedSessionIds.has(row.id)).map((row) => ({
         ...row, contextUsage: row.contextUsage ?? previous?.find((old) => old.id === row.id)?.contextUsage,
       }));
-    }, mergeLiveList),
+    }, (incoming, current, changed) => {
+      const summaries = new Map(incoming.map((row) => [row.id, row.awaitingInput]));
+      return mergeLiveList(incoming, current, changed).map((row) => ({ ...row, awaitingInput: summaries.get(row.id) ?? row.awaitingInput }));
+    }),
     staleTime: 30_000,
   });
 
@@ -101,6 +104,18 @@ export function createChatQueries(
       refetchOnWindowFocus: "always",
     });
 
+  async function refreshChatMessages(sessionId: string) {
+    const options = { ...getChatMessagesQuery(sessionId), staleTime: 0 };
+    // A reconnect seed needs a new read without rejecting callers of a pre-gap cold read.
+    if (client.queryClient.isFetching({ queryKey: options.queryKey, exact: true })) {
+      await client.queryClient.fetchQuery(options).catch(() => {});
+    }
+    return client.queryClient.fetchQuery(options).catch((error: unknown) => {
+      if (error instanceof CancelledError && error.silent) return client.queryClient.fetchQuery(options);
+      throw error;
+    });
+  }
+
   async function readSidebarChatPage(filter: "active" | "archived" | "all", before: api.SidebarChatCursor | null, signal: AbortSignal) {
     const indicators = new Map<string, Partial<Pick<api.ChatSession, "busy" | "contextUsage">>>();
     const off = onChatEvent((event) => {
@@ -146,6 +161,7 @@ export function createChatQueries(
     listAllChatSessionsQuery,
     chatSearchQuery,
     getChatMessagesQuery,
+    refreshChatMessages,
     readSidebarChatPage,
     listSidebarChatSessionsQuery,
     listChatActiveRunsQuery,
@@ -228,7 +244,7 @@ export const mutDeleteChatSession = mutations.define({
 
 export const mutCreateChatSession = mutations.define({
   id: "chat/session/create",
-  mutate: (ws: Workspace, projectId: string, harness: HarnessId, options: TurnOptions & { autonomy?: Autonomy }) =>
+  mutate: (ws: Workspace, projectId: string, harness: HarnessId, options: NonNullable<Parameters<Api["createChatSession"]>[2]>) =>
     ws.api.createChatSession(projectId, harness, options),
   optimistic: () => {},
   key: ({ args: [ws, projectId] }) => [ws.identity, projectId],

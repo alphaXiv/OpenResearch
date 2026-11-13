@@ -14,13 +14,15 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 
 **The config directory never moves**, because the setting that points at the data directory lives there and a lock inside the data directory could not guard a move of it. `settings.json` has one writer, the locked read-modify-write in `src/telemetry.rs`, and every save keeps the fields a newer orx wrote; a second writer would clobber them.
 
+OpenCode provider records (`opencode-providers.json`, including API keys) stay in config. Custom endpoint records, names and icons live in the data directory's `local-models.json`; OpenCode OAuth credentials live in its isolated database.
+
 `~/.openresearch/env` sits outside all three. It holds the variables and compute credentials saved in compute settings and fans out to agents and launched runs (`src/config.rs`), so a secret that must stay on this machine, like Overleaf's, belongs in the config directory.
 
 ## The store
 
 A SQLite database in WAL mode (`src/store.rs`, `src/store/`) is orx's truth for everything that is not code or a file named below: projects, experiments, runs, chats and turns, notices, log-collection obligations, SSH host state, UI state. Many short-lived processes open it at once, each with a busy timeout, so write transactions stay short and hold no network I/O.
 
-**The schema only grows.** Every open applies the whole schema: tables are created if missing, and each added column is an `ALTER TABLE ADD COLUMN` whose failure on an existing column is ignored. Data fixes are idempotent and run every time. The rare backfill that is not idempotent runs once in a single transaction, gated on a fresh `user_version` value, so a half-applied one never records itself as done. Users run old and new binaries against the same file, a dashboard left open for days beside a freshly updated CLI, so:
+**The schema only grows.** Every open that may write applies the whole schema: tables are created if missing, and each added column is an `ALTER TABLE ADD COLUMN` whose failure on an existing column is ignored. Core tables, added columns and their deletion triggers commit together. Data fixes are idempotent and run every time. The rare backfill that is not idempotent runs once in a single transaction, gated on a fresh `user_version` value, so a half-applied one never records itself as done. A command that only reads, like `orx runs` or `orx logs`, applies it too unless the store cannot be written, as in a sandboxed agent; then it opens read-only and applies nothing. Users run old and new binaries against the same file, a dashboard left open for days beside a freshly updated CLI, so:
 
 - a new column needs a default an old binary can live with;
 - a column is never renamed, retyped or given a new meaning;
@@ -34,6 +36,18 @@ Retiring a table is the one removal: the open folds any rows still needed into t
 
 Chat search is a contentless full-text index in this same database, kept by triggers on the message table so writes from older binaries keep it current; every writer runs those triggers, so they must never fail on stored JSON. Text, tool inputs, tool errors, shell output the user ran and subagent reports are indexed. Other tool output and reasoning deliberately are not. Membership in a session, project or branch comes from source rows at query time. History is indexed in bounded background batches behind a committed cursor, and completion is recorded once (`src/store/search.sql`, `src/store/search.rs`).
 
+`chat_sessions.model` and `ui_state.preferred_model` remain nullable for shipped
+clients. New dashboard selections pin a concrete native model. API responses
+project legacy NULLs through the committed agent catalog without rewriting the
+row. Before a legacy chat's next turn, a known native or configured selection is
+persisted; unknown selections and explicit model-clear requests inherit native
+configuration. Store reads and writes preserve NULL.
+
+`ui_state.hidden_agents` stores the found agents turned off in Settings,
+separately from hidden models. Profiles keep their own routes; OpenCode's
+OpenResearch provider records, endpoints and free models remain available.
+Removable managed installs also ignore hidden-agent settings.
+
 ## Code lives in Git
 
 A project is a Git repository anywhere on disk, the user's own or one orx cloned into `repos/`; the store records only its path. orx shells out to `git` rather than embedding a Git library, so every repository stays readable with ordinary tools (`src/local/git.rs`). Each chat works in its own worktree under `worktrees/<project>/<session>`, so agents never edit the user's checkout. [Experiments](experiments.md) covers how branches relate.
@@ -44,6 +58,24 @@ Per-project artifacts are a plain folder, `files/<project slug>/` (`src/local/fi
 
 A run's output is an append-only file, never rows in the store, so reading it never contends for a database write lock and a chatty job cannot bloat the database or slow every other writer. It is written on the machine that ran the job and kept under `run-logs/` once collected ([experiments](experiments.md)).
 
+## Agent homes
+
+Claude Code, Codex and Cursor use isolated homes; OpenCode uses its own session database ([agents](agents.md#isolation)). The local account reuses the user's sign-in.
+Claude Code and Codex profiles keep private sign-ins under `agents/profiles`,
+with their names and icons in owner-only `agent-profiles.json`; their transcript
+directories link into the harness's shared orx home. Owner-only `agent-labels.json`
+stores names and icons the user gives agents found on this computer. Removing a profile leaves
+those transcripts intact. Chats created before isolation existed keep resolving
+to the user's own stores. Because these homes hold live SQLite files, a
+data-directory move first shuts down every idle agent process.
+[Agents](agents.md) explains why the homes exist.
+
+Managed agent releases live under the cache directory's `managed-agents`.
+Removing an agent deletes only its managed release directories and, for Pi's
+adapter, its managed Pi runtime. The shared Node.js runtime stays, as do agent
+homes, transcripts and user configuration. Shared env credentials also stay:
+they have no per-agent ownership record.
+
 ## Locks and leases
 
 | Lock file | Held by | Guards |
@@ -51,6 +83,7 @@ A run's output is an append-only file, never rows in the store, so reading it ne
 | config `locks/orx.lifecycle.lock` | shared: most `orx` commands (`command_uses_lifecycle_lock` in `src/main.rs`), `orx up`, the app, each 0.2.x supervisor; exclusive: `orx delete`, a storage migration | destroying or relocating shared state while anything runs |
 | `.orx-remote-<hash>.lock`, the engine lock, beside the data directory or inside it when the parent is not writable (`src/commands/remote_host.rs`) | exclusive: each `orx up` for its whole life | one server owns a data directory's runs |
 | `run-logs/<run>.supervisor.lock` and `.supervisor.shared-ssh.lock` (`src/engine/locks.rs`) | a 0.2.x supervisor, or the engine once it adopts the run | one owner per run |
+| config `managed-agents.lock` | exclusive: managed install, update and removal | shared runtime and release changes |
 | config `orx.data-dir-move.lock` | exclusive: a move; shared: file-deleting sweeps, the 0.2.x SSH service | a move starting under them |
 | data `run-artifacts.lock` | shared: submission; exclusive: deletion, orphan sweeps | a run's files while it is submitted |
 | data `submission-locks/<experiment>` | submission | one live run per experiment unless forced |
@@ -93,6 +126,19 @@ Detection repeats on every start, so an interrupted rename or reference repair r
 - **Sharing.** Nothing leaves on its own: sharing writes a `.orx` file the user sends themselves (`src/local/share.rs`), holding a Git bundle of the baseline and experiment branches, the experiment tree, finished runs without their descriptors, their logs, the artifacts and the chats the user left ticked. A chat, log or artifact that looks like a credential refuses the share; the code is not scanned, since it is what the user chose to send. An opened file becomes a new project with no remote, and its runs carry the backend kind `imported`, which nothing launches, watches or cleans up.
 - **Published projects.** Publishing, from the Share dialog or `orx project share --publish`, uploads exactly the file sharing would write, after the same scan, to openresearch.sh, which serves it to anyone with the link until the publisher deletes it. The upload names the local project ID, so publishing again replaces the file behind the same link.
 - **Updates.** Each surface checks GitHub releases on its own schedule ([desktop](desktop.md)).
-- **Agent releases.** Once a day `orx up` asks downloads.claude.ai, releases.openai.com and GitHub for the newest release of whichever of Claude Code, Codex and OpenCode is installed, and downloads one when it installs or updates a copy of its own ([agents](agents.md)). The requests carry no account or research data.
-- **Installers the user starts.** Agent installers come from each vendor's site (`src/commands/up/harness_setup.rs`), Git for Windows from GitHub (`src/local/portable_git.rs`).
-- **Integrations the user turns on.** Creating a project from a GitHub URL, which also asks GitHub's public API for its size; publishing to GitHub; syncing a paper with Overleaf, through its Git bridge or its live editor channel with the user's browser session cookie; Trackio metrics; and the agents' own model providers, which the agent talks to directly.
+- **Agent releases.** Once a day `orx up` asks downloads.claude.ai, releases.openai.com and GitHub for the newest release of whichever of Claude Code, Codex and OpenCode is installed (skipping one signed out on every account), and downloads one when it installs or updates a copy of its own ([agents](agents.md)); the onboarding installs OpenCode that way unasked while it is missing, for its free models. The requests carry no account or research data. Built-in agents additionally fetch Node.js releases
+  and SHA-256 lists from nodejs.org, package metadata and integrity-checked npm
+  packages from registry.npmjs.org (native package dependencies may fetch release
+  assets from github.com, api.github.com and release-assets.githubusercontent.com),
+  Kimi versions and binary manifests from code.kimi.com, Devin manifests and
+  bundles from static.devin.ai, oh-my-pi manifests and executables from
+  build.stencil.so and its payloads from
+  d4c085d38fe197a3f20bbeb20222b8b3.r2.cloudflarestorage.com,
+  Grok versions and binaries from storage.googleapis.com, fx versions and archives from releases.fx.sh, Cursor
+  release metadata from cursor.com and archives from downloads.cursor.com, and
+  Antigravity manifests from
+  antigravity-cli-auto-updater-974169037036.us-central1.run.app and payloads from
+  storage.googleapis.com. npm runs in an orx-owned prefix with isolated config
+  and cache; no user npm configuration or global prefix is used.
+- **Installers the user starts.** Git for Windows comes from GitHub (`src/local/portable_git.rs`).
+- **Integrations the user turns on.** Creating a project from a GitHub URL, which also asks GitHub's public API for its size; publishing to GitHub; syncing a paper with Overleaf, through its Git bridge or its live editor channel with the user's browser session cookie; Trackio metrics; and the agents' own model providers, which the agent talks to directly. Adding a custom endpoint also asks it, with its key, for its model list.

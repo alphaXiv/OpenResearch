@@ -100,6 +100,15 @@ impl Delegated {
         }
     }
 
+    /// Whether a command the agent runs in one of orx's terminals has not exited.
+    pub fn running_a_terminal(&self) -> bool {
+        self.terminals
+            .lock()
+            .unwrap()
+            .values()
+            .any(|terminal| terminal.exit.borrow().is_none())
+    }
+
     pub fn set_agent(&self, name: &str) {
         self.shell_commands
             .store(matches!(name, "affogato" | "grok"), Ordering::Relaxed);
@@ -231,7 +240,7 @@ impl Delegated {
                 session_id,
                 harness,
                 Some(*port),
-            );
+            )?;
         }
         #[cfg(unix)]
         command.process_group(0);
@@ -421,12 +430,10 @@ mod tests {
         let (command, file, body) = ("whoami", "whoami.cmd", "@echo AGENT_PATH_OK\r\n");
         let tool = dir.path().join("bin").join(file);
         std::fs::create_dir(dir.path().join("bin")).unwrap();
-        std::fs::write(&tool, body).unwrap();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        orx_test_support::write_executable(&tool, body, 0o755).unwrap();
+        #[cfg(windows)]
+        std::fs::write(&tool, body).unwrap();
 
         let delegated = Delegated::new(dir.path());
         let created = delegated

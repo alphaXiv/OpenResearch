@@ -35,6 +35,7 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("ORX_DATA_DIR", self.data())
             .env("ORX_NO_UPDATE_CHECK", "1")
+            .env("PATH", orx_test_support::agentless_path(&self.root))
             .env("ORX_SSH_CONFIG", self.server.config_path())
             .env("ORX_HOST_BIN_DIR", orx_test_support::host_binaries())
             .env("ORX_CHAT_SESSION_ID", "chat")
@@ -527,7 +528,7 @@ async fn cancellation_labels_agree_in_runs_status_and_wait() {
             true,
             false,
             None,
-            "Cancelling…",
+            "Cancellation pending",
         ),
         (
             "cancelled",
@@ -696,58 +697,53 @@ fn session_hover_runs_preserve_their_fields_and_expose_cancellation_proof() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn abandon_warns_that_actual_compute_must_be_shut_down() {
-    use axum::{routing::get, Json, Router};
+async fn abandon_says_the_cancel_stays_pending_only_once_the_server_accepts() {
+    use axum::{http::StatusCode, Json, Router};
     use serde_json::json;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        Arc,
     };
 
     let sandbox = Sandbox::new();
-    let contact = Arc::new(Mutex::new("unreachable"));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let (read_contact, abandoned) = (contact.clone(), calls.clone());
-    let app = Router::new()
-        .route(
-            "/api/v2/runs/run",
-            get(move || {
-                let contact = *read_contact.lock().unwrap();
-                async move { Json(json!({"id":"run", "contact":{"type":contact}})) }
-            }),
-        )
-        .route(
-            "/api/v2/runs/run/abandon",
-            axum::routing::post(move || {
-                abandoned.fetch_add(1, Ordering::SeqCst);
-                async { Json(json!({"ok":true})) }
-            }),
-        );
+    let refuse = Arc::new(AtomicBool::new(true));
+    let refusing = refuse.clone();
+    let app = Router::new().route(
+        "/api/v2/runs/run/abandon",
+        axum::routing::post(move || {
+            let refused = refusing.load(Ordering::SeqCst);
+            async move {
+                if refused {
+                    Err((
+                        StatusCode::CONFLICT,
+                        Json(json!({"error":"Run run already ended (done), so there is nothing to abandon."})),
+                    ))
+                } else {
+                    Ok(Json(json!({"ok":true})))
+                }
+            }
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    for (index, kind) in ["unreachable", "needs_auth", "unreconciled"]
-        .into_iter()
-        .enumerate()
-    {
-        *contact.lock().unwrap() = kind;
-        let output = sandbox
+    let abandon = || {
+        sandbox
             .command()
             .env("ORX_UP_PORT", port.to_string())
             .env("ORX_UP_AUTH_TOKEN", "test-only")
             .args(["exp", "abandon", "run"])
             .output()
-            .unwrap();
-        assert!(output.status.success(), "{}", diagnostics(&output));
-        let warning = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(
-            warning.contains("The machine is unreachable."),
-            kind == "unreachable"
-        );
-        assert!(warning.contains("OpenResearch will stop tracking this run. Double-check that the actual compute is shut down."), "{warning}");
-        assert!(stdout(&output).contains("cancel stays pending"));
-        assert_eq!(calls.load(Ordering::SeqCst), index + 1);
-    }
+            .unwrap()
+    };
+    let refused = abandon();
+    assert!(!refused.status.success());
+    assert!(diagnostics(&refused).contains("nothing to abandon"));
+    assert!(!stdout(&refused).contains("cancel stays pending"));
+    refuse.store(false, Ordering::SeqCst);
+    let accepted = abandon();
+    assert!(accepted.status.success(), "{}", diagnostics(&accepted));
+    assert!(stdout(&accepted).contains("cancel stays pending"));
     server.abort();
 }
 
@@ -801,4 +797,111 @@ fn an_engine_run_finishing_while_up_is_down_keeps_the_receipt_finish_time() {
         .unwrap();
     assert_eq!(ended_at, finished_at);
     assert!(started_at <= ended_at);
+}
+
+/// An agent whose config dir is not orx up's, as in a sandbox with its own home, launches
+/// unless that dir sets compute settings orx up would not use.
+#[test]
+fn a_caller_with_its_own_config_dir_launches_only_with_the_settings_orx_up_uses() {
+    let sandbox = Sandbox::new();
+    sandbox.project("echo done\n");
+    let started = sandbox.run(&["exp", "run", "exp", "--force", "--backend", "local"]);
+    assert!(started.status.success(), "{}", diagnostics(&started));
+    let agent_config = sandbox.root.join("agent-config");
+    let slurm = |partition: &str| format!(r#"{{"partition":"{partition}"}}"#);
+    let launch_with = |flags: &[&str]| {
+        let output = sandbox
+            .command()
+            .env("XDG_CONFIG_HOME", &agent_config)
+            .args(["exp", "run", "exp", "--force", "--backend", "slurm"])
+            .args(["--host", sandbox.server.alias()])
+            .args(flags)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let launch = || launch_with(&[]);
+    let refused = |stderr: &str| stderr.contains(agent_config.to_str().unwrap());
+
+    let empty = launch();
+    assert!(!refused(&empty), "{empty}");
+
+    std::fs::create_dir_all(agent_config.join("openresearch")).unwrap();
+    std::fs::write(agent_config.join("openresearch/slurm.json"), slurm("gpu")).unwrap();
+    let different = launch();
+    assert!(refused(&different), "{different}");
+    assert!(different.contains("partition"), "{different}");
+    assert!(
+        different.contains(sandbox.root.join("config").to_str().unwrap()),
+        "{different}"
+    );
+
+    std::fs::create_dir_all(sandbox.root.join("config/openresearch")).unwrap();
+    std::fs::write(
+        sandbox.root.join("config/openresearch/slurm.json"),
+        slurm("gpu"),
+    )
+    .unwrap();
+    let equal = launch();
+    assert!(!refused(&equal), "{equal}");
+
+    let limits = |mem: &str| format!(r#"{{"partition":"gpu","mem":"{mem}"}}"#);
+    std::fs::write(agent_config.join("openresearch/slurm.json"), limits("32G")).unwrap();
+    std::fs::write(
+        sandbox.root.join("config/openresearch/slurm.json"),
+        limits("64G"),
+    )
+    .unwrap();
+    let saved_limit = launch();
+    assert!(refused(&saved_limit), "{saved_limit}");
+    assert!(saved_limit.contains("mem"), "{saved_limit}");
+    let flagged = launch_with(&["--mem", "16G"]);
+    assert!(!refused(&flagged), "{flagged}");
+
+    let save = |caller: &str, own: &str| {
+        let saved = |field: &str| format!(r#"{{"partition":"gpu",{field}}}"#);
+        std::fs::write(agent_config.join("openresearch/slurm.json"), saved(caller)).unwrap();
+        std::fs::write(
+            sandbox.root.join("config/openresearch/slurm.json"),
+            saved(own),
+        )
+        .unwrap();
+    };
+    for (name, caller, own) in [
+        ("qos", r#""qos":"acc_debug""#, r#""qos":"acc_ehpc""#),
+        (
+            "sbatchArgs",
+            r#""sbatchArgs":["--rsc g=1"]"#,
+            r#""sbatchArgs":[]"#,
+        ),
+        (
+            "requestOneTask",
+            r#""requestOneTask":false"#,
+            r#""requestOneTask":true"#,
+        ),
+    ] {
+        save(caller, own);
+        let stderr = launch();
+        assert!(
+            refused(&stderr) && stderr.contains(name),
+            "{name}: {stderr}"
+        );
+    }
+    save(r#""qos":"acc_debug""#, r#""qos":"acc_ehpc""#);
+    let qos_flag = launch_with(&["--qos", "acc_debug"]);
+    assert!(!refused(&qos_flag), "{qos_flag}");
+
+    // Without the setting, orx writes --ntasks=1 just as `true` asks.
+    std::fs::write(
+        agent_config.join("openresearch/slurm.json"),
+        r#"{"partition":"gpu","requestOneTask":true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        sandbox.root.join("config/openresearch/slurm.json"),
+        r#"{"partition":"gpu"}"#,
+    )
+    .unwrap();
+    let one_task = launch();
+    assert!(!refused(&one_task), "{one_task}");
 }

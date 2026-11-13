@@ -403,7 +403,7 @@ pub(crate) fn forward_args(
 pub(crate) struct InteractiveConnection {
     pub args: Vec<String>,
     #[cfg(unix)]
-    _lock: std::fs::File,
+    _lock: crate::file_lock::FileLock,
 }
 
 /// Retires unusable Unix masters and holds their lock through the interactive login.
@@ -465,7 +465,7 @@ pub(crate) async fn prepare_interactive_connection(
 }
 
 #[cfg(unix)]
-async fn lock_master(path: &std::path::Path) -> Result<std::fs::File> {
+async fn lock_master(path: &std::path::Path) -> Result<crate::file_lock::FileLock> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -480,7 +480,7 @@ async fn lock_master(path: &std::path::Path) -> Result<std::fs::File> {
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
         }
     }
-    Ok(file)
+    Ok(crate::file_lock::FileLock::new(file))
 }
 
 #[cfg(unix)]

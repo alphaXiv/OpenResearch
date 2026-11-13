@@ -20,6 +20,7 @@ mod compute;
 mod config;
 mod engine;
 mod error;
+mod file_lock;
 mod folder_picker;
 mod invocation;
 mod jobs;
@@ -645,8 +646,8 @@ pub struct ExpRunArgs {
     /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes; Vercel
     /// defaults to 40m on Hobby so a 45-minute session still includes 5 minutes
     /// to read logs and the exit status, and caps a session at 24h otherwise). With
-    /// `--backend k8s` it becomes activeDeadlineSeconds unless the manifest
-    /// sets its own. With `--backend slurm` it becomes `#SBATCH --time=` and
+    /// `--backend k8s` it counts from the run's start, excluding the wait for a
+    /// node or image, unless the manifest sets activeDeadlineSeconds. With `--backend slurm` it becomes `#SBATCH --time=` and
     /// has no 4h default — unset falls back to the slurm settings, then the
     /// cluster's own limit. With `--backend openresearch` it bounds the run's
     /// wall clock on the box (the box itself is deleted when the run ends).
@@ -705,6 +706,15 @@ pub struct ExpRunArgs {
     #[arg(skip)]
     #[serde(default)]
     pub caller_config_dir: Option<std::path::PathBuf>,
+    /// The caller's interpreter overrides (`ORX_MODAL_PYTHON`, …), which must be the server's.
+    #[arg(skip)]
+    #[serde(default)]
+    pub caller_python_overrides: std::collections::BTreeMap<String, String>,
+    /// What the caller's config dir sets for this backend; absent from an orx that sends only
+    /// the dir.
+    #[arg(skip)]
+    #[serde(default)]
+    pub caller_compute_settings: Option<crate::commands::up::LaunchSettings>,
 }
 
 /// Markers the native agent CLIs export to their shells; nested agents are `unknown`.
@@ -1164,6 +1174,9 @@ async fn run_cli() {
         Cli::command().print_help().ok();
         return;
     };
+    if ends_with_its_stdout(&command) {
+        output::end_when_stdout_closes();
+    }
     // Outdated-version warning (skipped for the commands that manage updates
     // themselves). `start` prints the cached warning to stderr *now*,
     // before the command runs, so it shows even for commands that
@@ -1393,6 +1406,22 @@ fn install_panic_reporter() {
             show_error_dialog(&format!("{info}"));
         }
     }));
+}
+
+/// Servers, protocol children and per-call hooks outlive a closed stdout; every other
+/// command ends with it, as `orx runs | head` expects.
+fn ends_with_its_stdout(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Up(_)
+            | Command::Serve(_)
+            | Command::Mcp
+            | Command::AlphaxivMcp
+            | Command::AntigravityGate
+            | Command::RemoteHost(_)
+            | Command::PlanGate
+            | Command::InvocationGate
+    )
 }
 
 fn should_capture_command(command: &Command) -> bool {

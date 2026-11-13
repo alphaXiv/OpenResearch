@@ -13,6 +13,13 @@ use std::time::Duration;
 // An unreadable environment makes every concurrent same-UID scan incomplete.
 static CANCELLATIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// One failed cancellation test must not fail the rest on a poisoned lock.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    CANCELLATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[test]
 fn cancellation_before_started_never_spawns_the_payload() {
     let mut run = Run::new("touch should-not-run\n");
@@ -60,7 +67,7 @@ fn process_group_leader_can_be_a_wrapper() {
 
 #[test]
 fn term_is_delivered_once_and_checkpoint_completion_returns_before_the_grace_deadline() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new(
         r#"exec python3 - <<'PY'
 import signal, time
@@ -219,27 +226,27 @@ fn duplicate_wrapper_loser_writes_nothing() {
 
 #[test]
 fn crash_windows_never_reexecute_after_started() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("printf once >> count\n");
     assert_eq!(
         wrapper::state(&run.directory.0).unwrap(),
-        RunState::Starting
+        RunState::Starting { reason: None }
     );
     let mut forged = platform::identity(std::process::id()).unwrap();
     forged.starttime += 1;
     publish(&run.directory.0.join("wrapper.json"), &forged).unwrap();
     assert_eq!(
         wrapper::state(&run.directory.0).unwrap(),
-        RunState::Starting
+        RunState::Starting { reason: None }
     );
     run.spawn();
     run.wait();
     fs::remove_file(run.directory.0.join("exit.json")).unwrap();
+    // macOS can hide processes from a tag scan, so there the loss stays unconfirmed.
     until(Duration::from_secs(5), || {
-        matches!(
-            wrapper::state(&run.directory.0).unwrap(),
-            RunState::Lost { .. }
-        )
+        let state = wrapper::state(&run.directory.0).unwrap();
+        matches!(state, RunState::Lost { .. })
+            || cfg!(target_os = "macos") && matches!(state, RunState::Unreconciled { .. })
     });
     run.spawn();
     run.wait();
@@ -262,9 +269,10 @@ fn malformed_receipts_remain_unreconciled() {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn wrapper_gone_with_a_complete_empty_tag_scan_is_lost() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let dir = Directory::new();
     fs::write(dir.0.join("started"), "test:nonexistent").unwrap();
     let mut identity = platform::identity(std::process::id()).unwrap();
@@ -278,7 +286,7 @@ fn wrapper_gone_with_a_complete_empty_tag_scan_is_lost() {
 
 #[test]
 fn payload_exiting_during_cancel_publishes_one_receipt() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("touch ready\ntrap 'exit 0' TERM\nwhile :; do sleep 0.1; done\n");
     run.spawn();
     run.ready();
@@ -326,7 +334,7 @@ fn payload_exiting_during_cancel_publishes_one_receipt() {
 
 #[test]
 fn detached_double_fork_and_nohup_children_are_killed() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new(
         r#"python3 - <<'PY'
 import os, time
@@ -405,7 +413,7 @@ fn real_crashes_before_and_after_exactly_once_marker() {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_older_nondumpable_same_uid_process_does_not_block_verified_cancellation() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let dir = Directory::new();
     let old = common::Group(Command::new("python3")
         .arg("-c")
@@ -442,7 +450,7 @@ fn an_older_nondumpable_same_uid_process_does_not_block_verified_cancellation() 
 #[cfg(target_os = "linux")]
 #[test]
 fn unreadable_environment_requires_a_fresh_scan_after_proven_death() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("touch ready; exec sleep 60");
     run.spawn();
     run.ready();
@@ -502,7 +510,7 @@ fn reboot_only_loses_a_run_after_the_exactly_once_marker() {
     publish(&run.directory.0.join("wrapper.json"), &identity).unwrap();
     assert_eq!(
         wrapper::state(&run.directory.0).unwrap(),
-        RunState::Starting
+        RunState::Starting { reason: None }
     );
     fs::write(run.directory.0.join("started"), "test:old-tag").unwrap();
     assert_eq!(
@@ -515,7 +523,7 @@ fn reboot_only_loses_a_run_after_the_exactly_once_marker() {
 
 #[test]
 fn killed_wrapper_with_scrubbed_orphan_remains_unreconciled() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new(
         r#"python3 - <<'PY'
 import os, sys, time
@@ -564,7 +572,7 @@ PY
 
 #[test]
 fn direct_exit_is_published_before_lingering_daemon_cleanup() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new(
         r#"python3 - <<'PY'
 import os, sys, time
@@ -641,7 +649,7 @@ fn natural_daemon_exit_reaps_and_resolves_lingering_without_changing_the_result(
 
 #[test]
 fn a_timed_out_hook_retries_before_the_receipt_then_recovers() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("touch ready; sleep 60\n");
     fs::write(
         run.directory.0.join("cancel.sh"),
@@ -676,7 +684,7 @@ fn a_timed_out_hook_retries_before_the_receipt_then_recovers() {
 
 #[test]
 fn a_hook_prevents_lingering_from_upgrading_to_verified() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("bash -c 'touch ready; while [ ! -f release ]; do sleep .01; done' &\nwhile [ ! -f ready ]; do sleep .01; done\n");
     fs::write(run.directory.0.join("cancel.sh"), "true").unwrap();
     run.spawn();
@@ -718,6 +726,7 @@ fn an_empty_unverifiable_receipt_does_not_skip_cleanup() {
             reason: ExitReason::Exited,
             processes: vec![],
             outcome: CancelOutcome::Unverifiable { unreadable: vec![] },
+            detail: None,
         },
     )
     .unwrap();
@@ -830,7 +839,7 @@ fn wrapper_receipt_records_completion_time() {
 
 #[test]
 fn cancellation_waits_for_a_slow_survivor_inside_the_kill_window() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     let mut run = Run::new("touch ready; exec sleep 60");
     let hold = run.directory.0.join("hold");
     fs::write(&hold, "once").unwrap();
@@ -856,7 +865,7 @@ fn cancellation_waits_for_a_slow_survivor_inside_the_kill_window() {
 
 #[test]
 fn survivors_after_the_window_are_rekilled_and_the_proof_is_renewed() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     for slurm in [false, true] {
         let mut run = Run::new("touch ready; exec sleep 60");
         let hold = run.directory.0.join("hold");
@@ -931,6 +940,7 @@ fn a_dead_wrapper_reterms_receipted_survivors_even_after_their_tag_is_gone() {
             finished_at: None,
             processes: vec![survivor],
             outcome: CancelOutcome::Survivors,
+            detail: None,
         },
     )
     .unwrap();
@@ -959,6 +969,7 @@ fn cancellation_never_replaces_a_receipt_even_without_started() {
                 state: "D".into(),
             }],
             outcome: CancelOutcome::Survivors,
+            detail: None,
         },
     )
     .unwrap();
@@ -972,7 +983,7 @@ fn cancellation_never_replaces_a_receipt_even_without_started() {
 
 #[test]
 fn dead_wrapper_cleanup_renews_proof_without_changing_the_receipt() {
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     for reboot in [false, true] {
         let run = Run::new("true");
         let mut worker = common::Group(
@@ -999,6 +1010,7 @@ fn dead_wrapper_cleanup_renews_proof_without_changing_the_receipt() {
                 reason: ExitReason::Cancelled,
                 processes: vec![process.survivor()],
                 outcome: CancelOutcome::Survivors,
+                detail: None,
             },
         )
         .unwrap();
@@ -1017,17 +1029,22 @@ fn dead_wrapper_cleanup_renews_proof_without_changing_the_receipt() {
                 ));
                 wrapper::cleanup_result(&run.directory.0)
                     .unwrap()
-                    .is_some_and(|proof| proof.outcome == CancelOutcome::Verified)
+                    .is_some_and(|proof| proof.processes.is_empty())
             });
             assert!(worker.0.try_wait().unwrap().is_some());
         }
         let proof = wrapper::cleanup_result(&run.directory.0).unwrap().unwrap();
         assert!(proof.processes.is_empty());
-        assert_eq!(proof.outcome, CancelOutcome::Verified);
-        assert_eq!(
-            wrapper::cleanup(&run.directory.0).unwrap(),
-            CleanupAck::NothingLingering
-        );
+        // macOS can hide processes from a tag scan, so there only a new boot proves none left.
+        if cfg!(target_os = "macos") && !reboot {
+            assert!(matches!(proof.outcome, CancelOutcome::Unverifiable { .. }));
+        } else {
+            assert_eq!(proof.outcome, CancelOutcome::Verified);
+            assert_eq!(
+                wrapper::cleanup(&run.directory.0).unwrap(),
+                CleanupAck::NothingLingering
+            );
+        }
         assert_eq!(fs::read(run.directory.0.join("exit.json")).unwrap(), bytes);
     }
 }
@@ -1041,7 +1058,7 @@ fn rentals_release_after_receipts_with_or_without_a_collector_and_retry_release(
         Arc, Mutex,
     };
 
-    let _serial = CANCELLATIONS.lock().unwrap();
+    let _serial = serial();
     for (code, acknowledge, cancel) in [
         (0, true, false),
         (7, true, false),
@@ -1110,7 +1127,10 @@ fn rentals_release_after_receipts_with_or_without_a_collector_and_retry_release(
                     .to_owned();
                 if operation == "activate" {
                     assert!(!dir.join("started").exists());
-                    assert!(matches!(wrapper::state(&dir).unwrap(), RunState::Starting));
+                    assert!(matches!(
+                        wrapper::state(&dir).unwrap(),
+                        RunState::Starting { .. }
+                    ));
                 }
                 if operation == "release" {
                     assert!(dir.join("exit.json").exists());
@@ -1144,11 +1164,380 @@ fn rentals_release_after_receipts_with_or_without_a_collector_and_retry_release(
             }
         );
         let requests = requests.lock().unwrap();
+        if cancel {
+            assert!(
+                requests.is_empty(),
+                "a cancelled rental was billed: {requests:?}"
+            );
+            continue;
+        }
         assert_eq!(requests.first().unwrap(), "activate");
         assert_eq!(requests.last().unwrap(), "release");
         assert_eq!(requests.iter().filter(|op| *op == "release").count(), 2);
-        if !cancel {
-            assert!(requests.iter().any(|op| op == "heartbeat"));
+        assert!(requests.iter().any(|op| op == "heartbeat"));
+    }
+}
+
+#[test]
+fn a_failure_before_the_payload_starts_ends_the_run_once_with_its_cause() {
+    let _serial = serial();
+    use std::io::{Read, Write};
+    let refusing = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let lease_api = refusing.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for mut stream in refusing.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                request.push(byte[0]);
+            }
+            let _ = stream.read_exact(&mut [0; 2]);
+            let _ = stream.write_all(
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
         }
+    });
+    for cause in ["launch.json", "rental", "source", "run.sh"] {
+        let run = Run::new("touch should-not-run\n");
+        let dir = &run.directory.0;
+        match cause {
+            "launch.json" => fs::write(dir.join("launch.json"), "{").unwrap(),
+            "rental" => publish(
+                &dir.join("rental.json"),
+                &serde_json::json!({
+                    "rental": {"apiUrl":format!("http://{lease_api}"), "sandboxId":"rental", "token":"capability"},
+                    "directory":dir,
+                }),
+            )
+            .unwrap(),
+            "source" => {
+                fs::write(dir.join("source.tar"), "not a tar archive").unwrap();
+                let mut intent: LaunchIntent = read_json(&dir.join("launch.json")).unwrap();
+                intent.source = Some(orx_host::sha(b"not a tar archive"));
+                publish(&dir.join("launch.json"), &intent).unwrap();
+            }
+            _ => {
+                let mut intent: LaunchIntent = read_json(&dir.join("launch.json")).unwrap();
+                intent.env.insert("PATH".into(), "/nonexistent".into());
+                publish(&dir.join("launch.json"), &intent).unwrap();
+            }
+        }
+        let wrap = || {
+            Command::new(env!("CARGO_BIN_EXE_orx-host"))
+                .arg("wrap")
+                .arg(dir)
+                .stderr(fs::File::create(dir.join("wrapper.log")).unwrap())
+                .status()
+                .unwrap()
+        };
+        assert!(!wrap().success(), "{cause}");
+        let receipt = wrapper::receipt(dir).unwrap().unwrap();
+        assert_eq!(receipt.reason, ExitReason::SpawnFailed, "{cause}");
+        assert!(
+            receipt
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains(cause)),
+            "{cause}: {receipt:?}"
+        );
+        assert!(
+            fs::read_to_string(dir.join("wrapper.log"))
+                .unwrap()
+                .contains(cause),
+            "{cause}"
+        );
+        assert!(!dir.join("should-not-run").exists());
+        assert!(matches!(
+            wrapper::state(dir).unwrap(),
+            RunState::Exited { .. }
+        ));
+        let bytes = fs::read(dir.join("exit.json")).unwrap();
+        assert!(wrap().success(), "{cause}: a retry must not start the run");
+        assert_eq!(fs::read(dir.join("exit.json")).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn a_dead_wrapper_kills_term_resistant_processes_after_the_cancel_grace() {
+    let _serial = serial();
+    let mut run = Run::new("trap '' TERM\ntouch ready\nwhile :; do sleep 0.05; done\n");
+    run.spawn();
+    run.ready();
+    until(Duration::from_secs(3), || {
+        run.directory.0.join("ready").exists()
+    });
+    let identity: ProcessIdentity = read_json(&run.directory.0.join("wrapper.json")).unwrap();
+    let tag = fs::read_to_string(run.directory.0.join("started")).unwrap();
+    run.extra.extend(
+        platform::scan(Some(&identity), tag.trim(), false)
+            .unwrap()
+            .processes,
+    );
+    run.children[0].kill().unwrap();
+    run.children[0].wait().unwrap();
+    assert_eq!(
+        wrapper::cancel(&run.directory.0).unwrap(),
+        CancelAck::WrapperGone
+    );
+    assert!(matches!(
+        wrapper::state(&run.directory.0).unwrap(),
+        RunState::Unreconciled { .. }
+    ));
+    fs::File::options()
+        .write(true)
+        .open(run.directory.0.join("cancel.req"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
+        .unwrap();
+    let killed = |run: &Run| {
+        run.extra.iter().all(|seen| {
+            !platform::process(seen.pid)
+                .is_ok_and(|process| process.starttime == seen.starttime && process.live())
+        })
+    };
+    until(Duration::from_secs(5), || {
+        let state = wrapper::state(&run.directory.0).unwrap();
+        killed(&run) && matches!(state, RunState::Lost { .. } | RunState::Unreconciled { .. })
+    });
+    // macOS can hide processes from a tag scan, so there the stop stays unconfirmed.
+    let state = wrapper::state(&run.directory.0).unwrap();
+    if cfg!(target_os = "macos") {
+        assert!(matches!(state, RunState::Unreconciled { .. }), "{state:?}");
+    } else {
+        assert!(matches!(state, RunState::Lost { .. }), "{state:?}");
+    }
+    assert!(!run.directory.0.join("exit.json").exists());
+}
+
+#[test]
+fn an_unreachable_lease_api_is_retried_until_a_cancel_ends_the_run_unstarted() {
+    use std::io::{Read, Write};
+    let unreachable = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let limited = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let rate_limited = limited.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for mut stream in limited.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                request.push(byte[0]);
+            }
+            let _ = stream.read_exact(&mut [0; 2]);
+            let _ = stream.write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    for lease_api in [unreachable, rate_limited] {
+        let run = Run::new("touch should-not-run\n");
+        let dir = &run.directory.0;
+        publish(
+            &dir.join("rental.json"),
+            &serde_json::json!({
+                "rental": {"apiUrl":format!("http://{lease_api}"), "sandboxId":"rental", "token":"capability"},
+                "directory":dir,
+            }),
+        )
+        .unwrap();
+        let log = fs::File::create(dir.join("wrapper.log")).unwrap();
+        let mut wrapper = Command::new(env!("CARGO_BIN_EXE_orx-host"))
+            .arg("wrap")
+            .arg(dir)
+            .env("ORX_TEST_FAST_STOPS", "1")
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        until(Duration::from_secs(20), || {
+            assert!(wrapper.try_wait().unwrap().is_none());
+            fs::read_to_string(dir.join("wrapper.log"))
+                .unwrap()
+                .contains("retrying")
+        });
+        assert_eq!(
+            wrapper::state(dir).unwrap(),
+            RunState::Starting { reason: None }
+        );
+        wrapper::cancel(dir).unwrap();
+        assert!(wrapper.wait().unwrap().success());
+        let receipt = wrapper::receipt(dir).unwrap().unwrap();
+        assert_eq!(receipt.reason, ExitReason::Cancelled);
+        assert!(!dir.join("started").exists());
+        assert!(!dir.join("should-not-run").exists());
+    }
+}
+
+fn with_source(run: &Run, files: &[(&str, &str)]) {
+    let dir = &run.directory.0;
+    let tree = dir.join("tree");
+    fs::create_dir(&tree).unwrap();
+    for (name, contents) in files {
+        fs::write(tree.join(name), contents).unwrap();
+    }
+    assert!(Command::new("tar")
+        .arg("-cf")
+        .arg(dir.join("source.tar"))
+        .arg("-C")
+        .arg(&tree)
+        .arg(".")
+        .status()
+        .unwrap()
+        .success());
+    let mut intent: LaunchIntent = read_json(&dir.join("launch.json")).unwrap();
+    intent.source = Some(orx_host::sha(&fs::read(dir.join("source.tar")).unwrap()));
+    publish(&dir.join("launch.json"), &intent).unwrap();
+}
+
+#[test]
+fn the_wrapper_unpacks_the_source_and_a_cancel_stops_a_slow_unpack() {
+    let mut run = Run::new("cat repo/value > ran\n");
+    with_source(&run, &[("value", "unpacked")]);
+    run.spawn();
+    run.wait();
+    let dir = &run.directory.0;
+    assert_eq!(fs::read_to_string(dir.join("ran")).unwrap(), "unpacked");
+    let parts = |dir: &std::path::Path| {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("repo.part")
+            })
+            .count()
+    };
+    assert_eq!(parts(dir), 0);
+
+    // A tar orphaned by a wrapper killed mid-unpack never touches the next attempt's unpack.
+    let mut run = Run::new("cat repo/value > ran\n");
+    with_source(&run, &[("value", "second attempt")]);
+    let dir = run.directory.0.clone();
+    let shims = dir.join("shims");
+    fs::create_dir(&shims).unwrap();
+    fs::write(
+        shims.join("tar"),
+        // The orphan's directory can't be removed, as when its tar is still writing there.
+        "#!/bin/sh\nif [ ! -e orphan ]; then touch \"$4/partial\"; chmod 500 \"$4\"; echo \"$4\" > stuck; echo $$ > orphan; exec sleep 600; fi\nexec /usr/bin/tar \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        shims.join("tar"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let wrap = || {
+        Command::new(env!("CARGO_BIN_EXE_orx-host"))
+            .env("ORX_TEST_FAST_STOPS", "1")
+            .env(
+                "PATH",
+                format!("{}:{}", shims.display(), std::env::var("PATH").unwrap()),
+            )
+            .args(["wrap", dir.to_str().unwrap()])
+            .spawn()
+            .unwrap()
+    };
+    let mut first = wrap();
+    until(Duration::from_secs(5), || {
+        fs::read_to_string(dir.join("orphan")).is_ok_and(|pid| pid.trim().parse::<u32>().is_ok())
+    });
+    let orphan: u32 = fs::read_to_string(dir.join("orphan"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    first.kill().unwrap();
+    first.wait().unwrap();
+    run.children.push(wrap());
+    run.wait();
+    assert_eq!(
+        fs::read_to_string(dir.join("ran")).unwrap(),
+        "second attempt"
+    );
+    assert!(platform::process(orphan).is_ok_and(|process| process.live()));
+    unsafe { libc::kill(orphan as i32, libc::SIGKILL) };
+    let stuck = dir.join(fs::read_to_string(dir.join("stuck")).unwrap().trim());
+    fs::set_permissions(stuck, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+
+    let mut run = Run::new("touch should-not-run\n");
+    with_source(&run, &[("value", "never")]);
+    let dir = run.directory.0.clone();
+    let shims = dir.join("shims");
+    fs::create_dir(&shims).unwrap();
+    let tar = shims.join("tar");
+    fs::write(&tar, "#!/bin/sh\necho $$ > unpacking\nexec sleep 600\n").unwrap();
+    fs::set_permissions(&tar, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    run.children.push(
+        Command::new(env!("CARGO_BIN_EXE_orx-host"))
+            .env("ORX_TEST_FAST_STOPS", "1")
+            .env(
+                "PATH",
+                format!("{}:{}", shims.display(), std::env::var("PATH").unwrap()),
+            )
+            .args(["wrap", dir.to_str().unwrap()])
+            .spawn()
+            .unwrap(),
+    );
+    until(Duration::from_secs(5), || {
+        fs::read_to_string(dir.join("unpacking")).is_ok_and(|pid| pid.trim().parse::<u32>().is_ok())
+    });
+    let tar: u32 = fs::read_to_string(dir.join("unpacking"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let start = std::time::Instant::now();
+    assert_eq!(wrapper::cancel(&dir).unwrap(), CancelAck::Accepted);
+    run.wait();
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    let receipt = wrapper::receipt(&dir).unwrap().unwrap();
+    assert_eq!(receipt.reason, ExitReason::Cancelled);
+    assert_eq!(receipt.outcome, CancelOutcome::Verified);
+    assert!(!dir.join("started").exists());
+    assert!(!dir.join("repo").exists());
+    assert!(!platform::process(tar).is_ok_and(|process| process.live()));
+}
+
+/// macOS shows other processes an empty environment for Apple's binaries, so once the wrapper
+/// is gone its run tag can't prove the payload gone.
+#[cfg(target_os = "macos")]
+#[test]
+fn without_its_wrapper_a_macos_run_never_proves_its_processes_gone() {
+    let _serial = serial();
+    let mut run = Run::new("printf $$ > payload\ntouch ready\nexec sleep 600\n");
+    run.children.push(
+        Command::new(env!("CARGO_BIN_EXE_orx-host"))
+            .env("ORX_TEST_FAST_STOPS", "1")
+            .args(["wrap", run.directory.0.to_str().unwrap()])
+            .spawn()
+            .unwrap(),
+    );
+    run.ready();
+    let dir = run.directory.0.clone();
+    until(Duration::from_secs(5), || dir.join("ready").exists());
+    let identity: ProcessIdentity = read_json(&dir.join("wrapper.json")).unwrap();
+    platform::signal(&platform::process(identity.pid).unwrap(), libc::SIGKILL).unwrap();
+    run.children[0].wait().unwrap();
+    let payload: u32 = fs::read_to_string(dir.join("payload"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(wrapper::cancel(&dir).unwrap(), CancelAck::WrapperGone);
+    // Ends the payload whether or not this host's scan can find it.
+    unsafe { libc::kill(payload as i32, libc::SIGKILL) };
+    until(Duration::from_secs(5), || {
+        !platform::process(payload).is_ok_and(|process| process.live())
+    });
+    match wrapper::state(&dir).unwrap() {
+        RunState::Unreconciled { detail } => assert!(detail.contains("can't see"), "{detail}"),
+        state => panic!("a scan that can't see the run's processes proved {state:?}"),
     }
 }

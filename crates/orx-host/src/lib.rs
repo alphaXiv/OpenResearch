@@ -2,6 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
+mod awake;
 pub mod exec;
 pub mod legacy;
 pub mod log;
@@ -137,11 +138,8 @@ pub fn slow_request() {
 
 /// Whether to pin sources as if they were on another filesystem, one step per request.
 pub(crate) fn cross_device() -> bool {
-    #[cfg(all(feature = "test-hooks", debug_assertions))]
-    if std::env::var("ORX_TEST_CROSS_DEVICE").as_deref() == Ok("1") {
-        return true;
-    }
-    false
+    cfg!(all(feature = "test-hooks", debug_assertions))
+        && std::env::var("ORX_TEST_CROSS_DEVICE").as_deref() == Ok("1")
 }
 
 pub(crate) const TERM_GRACE: std::time::Duration = std::time::Duration::from_secs(10);

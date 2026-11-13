@@ -20,6 +20,7 @@
 //! Detection: `agy` on PATH or in `~/.local/bin`, `~/.gemini/bin`, or `~/.gemini/antigravity-cli/bin`;
 //! `agy models` for catalog and authentication verification.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -42,6 +43,10 @@ use crate::local::shell_env::installs;
 
 /// What agy prints as the answer when it gives up on a turn.
 const ERROR_MARKER: &str = "Agent execution terminated due to error.";
+/// What agy prints into the answer when it retries a model call.
+const RETRY_NOTICE: &str = "Model produced invalid output.";
+/// How agy's note on a call a `PreToolUse` hook rewrote begins.
+const HOOK_NOTICE: &str = "A pre-tool hook changed the arguments of this tool call before it ran.";
 /// The Stop hook's own bound; it returns well before this.
 const STOP_HOOK_TIMEOUT_SECS: u64 = 3600;
 
@@ -80,6 +85,13 @@ impl Antigravity {
                         info.authenticated = true;
                         info.auth_state = HarnessAuthState::Ready;
                         info.auth_method = Some("oauth");
+                        info.configured_model = crate::config::home_dir()
+                            .and_then(|home| {
+                                super::detect::read_json(
+                                    home.join(".gemini/antigravity-cli/settings.json"),
+                                )
+                            })
+                            .and_then(|settings| settings["model"].as_str().map(str::to_owned));
                         info = info.with_models(models);
                     }
                     Err(error) => {
@@ -101,8 +113,7 @@ impl Antigravity {
             info.agent_note = Some(info.broken_note(AGY_REINSTALL));
         } else if info.installed && info.agent_note.is_none() {
             info.agent_note = Some(
-                "Sign in by running `agy` in your terminal, then re-check this harness."
-                    .to_string(),
+                "Sign in by running `agy` in your terminal, then re-check this agent.".to_string(),
             );
         } else if !info.installed {
             info.agent_note = Some(
@@ -249,7 +260,7 @@ fn permission_choice(prompt: &WirePrompt, approve: bool) -> Option<String> {
 
 /// Every `agy` install, in preference order: Antigravity's own locations are
 /// `~/.gemini/bin`, `~/.gemini/antigravity-cli/bin` and the local data dir.
-fn agy_candidates() -> Vec<PathBuf> {
+pub(crate) fn agy_candidates() -> Vec<PathBuf> {
     let gemini = crate::config::home_dir().map(|home| home.join(".gemini"));
     let own = gemini
         .iter()
@@ -382,12 +393,20 @@ fn launch(bin: &Path, session_id: &str, skip_permissions: bool) -> Definition {
     }
 }
 
-/// The chat's worktree with the playbook, skills and agy's hooks in place.
-async fn prepare_worktree(
+/// The chat's resident agy launch and its worktree, with the playbook, skills and
+/// agy's hooks in place. Turns and compaction share it: a launch that differs
+/// restarts agy, and with it the work agy runs in the background.
+async fn prepare(
     project: &crate::local::model::LocalProject,
     session_id: &str,
-    skip_permissions: bool,
-) -> Result<PathBuf> {
+    permission_mode: Option<PermissionMode>,
+    plan_mode: bool,
+) -> Result<(Definition, PathBuf)> {
+    let bin = find_agy().ok_or_else(|| {
+        anyhow!("agy not found on PATH — install Antigravity CLI and sign in first")
+    })?;
+    let skip_permissions =
+        permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass && !plan_mode;
     // Side chats can share the worktree, so its hook file cannot hold a chat's mode.
     let approvals = approvals_path(session_id);
     let recorded = if skip_permissions {
@@ -404,6 +423,7 @@ async fn prepare_worktree(
             approvals.display()
         )
     })?;
+    let definition = launch(&bin, session_id, skip_permissions);
     let project = project.clone();
     let session_id = session_id.to_owned();
     let (repo, _playbook) = tokio::task::spawn_blocking(move || {
@@ -412,12 +432,7 @@ async fn prepare_worktree(
     .await
     .map_err(|e| anyhow!("playbook task failed: {e}"))??;
     write_hooks(&repo)?;
-    Ok(repo)
-}
-
-fn find_agy_or_error() -> Result<PathBuf> {
-    find_agy()
-        .ok_or_else(|| anyhow!("agy not found on PATH — install Antigravity CLI and sign in first"))
+    Ok((definition, repo))
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
@@ -437,11 +452,13 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 }
 
 async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
-    let bin = find_agy_or_error()?;
-    let bypass = ctx.permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass;
-    let skip_permissions = bypass && !ctx.plan_mode;
-    let repo = prepare_worktree(&ctx.project, &ctx.session_id, skip_permissions).await?;
-    let definition = launch(&bin, &ctx.session_id, skip_permissions);
+    let (definition, repo) = prepare(
+        &ctx.project,
+        &ctx.session_id,
+        ctx.permission_mode,
+        ctx.plan_mode,
+    )
+    .await?;
     let session = super::acp::open_session(ctx, &definition, &repo, false).await?;
     let native_id = session.native_id.clone();
     if let Some(model) = ctx
@@ -473,7 +490,7 @@ async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
         let sample = format!("antigravity-acp-{}", ctx.attempt_count_for_usage());
         ctx.record_native_usage(&sample, model.as_deref(), None, usage);
     }
-    if take_error_marker(ctx) {
+    if take_notices(ctx) {
         let cause = take_stop_error(&ctx.session_id, &native_id)
             .or_else(|| logged_network_failure(log, logged));
         let message = match cause {
@@ -493,35 +510,63 @@ async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
     Ok(())
 }
 
-/// Removes agy's give-up line from the answer; true when it ended the turn.
-fn take_error_marker(ctx: &mut TurnCtx) -> bool {
-    let Some(part) = ctx
+/// Removes the lines agy prints as notices from the answer; true when its give-up line ended the turn.
+fn take_notices(ctx: &mut TurnCtx) -> bool {
+    let last_text = ctx
         .assistant
         .parts
         .iter()
-        .rev()
-        .find(|part| part.kind == "text")
-        .filter(|part| {
-            part.text
-                .as_deref()
-                .is_some_and(|text| text.contains(ERROR_MARKER))
-        })
-        .cloned()
-    else {
-        return false;
+        .rposition(|part| part.kind == "text");
+    let is_notice = |line: &str, notice: &str| {
+        let line = line.trim();
+        line.strip_prefix('⚠').map_or(line, str::trim_start) == notice
     };
-    let text = part.text.as_deref().unwrap_or_default();
-    let kept = text
-        .replace(&format!("⚠ {ERROR_MARKER}"), "")
-        .replace(ERROR_MARKER, "");
-    if kept.trim().is_empty() {
-        ctx.assistant
-            .parts
-            .retain(|existing| existing.id != part.id);
-    } else {
-        ctx.upsert_part(WirePart::text(&part.id, kept.trim_end().to_string()));
+
+    let mut gave_up = false;
+    let mut edits = Vec::new();
+    for (index, part) in ctx.assistant.parts.iter().enumerate() {
+        let Some(text) = part.text.as_deref().filter(|_| part.kind == "text") else {
+            continue;
+        };
+        let kept = text
+            .lines()
+            .filter(|line| {
+                ![ERROR_MARKER, RETRY_NOTICE]
+                    .iter()
+                    .any(|notice| is_notice(line, notice))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if kept.trim() != text.trim() {
+            gave_up |=
+                Some(index) == last_text && text.lines().any(|line| is_notice(line, ERROR_MARKER));
+            edits.push((part.id.clone(), kept.trim().to_string()));
+        }
     }
-    true
+    for (id, kept) in edits {
+        if kept.is_empty() {
+            ctx.assistant.parts.retain(|part| part.id != id);
+        } else {
+            ctx.upsert_part(WirePart::text(&id, kept));
+        }
+    }
+    gave_up
+}
+
+/// A tool result without the note agy puts first once a `PreToolUse` hook rewrote the call's
+/// arguments, as the invocation stamp does to every command.
+pub(crate) fn without_hook_notice(output: &str) -> String {
+    let mut kept = String::with_capacity(output.len());
+    let mut after_notice = false;
+    for line in output.split_inclusive('\n') {
+        let notice = line.trim_start().starts_with(HOOK_NOTICE);
+        let dropped = notice || (after_notice && line.trim().is_empty());
+        if !dropped {
+            kept.push_str(line);
+        }
+        after_notice = notice;
+    }
+    kept
 }
 
 /// The first network failure agy logged after `offset`. agy fails before its
@@ -621,10 +666,13 @@ fn turn_usage(result: &Value) -> Option<crate::store::TokenUsage> {
 /// agy's `/compact`, sent to the chat's resident process, which holds the
 /// conversation.
 async fn compact(ctx: &CompactCtx, native_id: &str) -> Result<()> {
-    let bin = find_agy_or_error()?;
-    let bypass = ctx.permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass;
-    let repo = prepare_worktree(&ctx.project, &ctx.session_id, bypass).await?;
-    let definition = launch(&bin, &ctx.session_id, bypass);
+    let (definition, repo) = prepare(
+        &ctx.project,
+        &ctx.session_id,
+        ctx.permission_mode,
+        ctx.plan_mode,
+    )
+    .await?;
     let host = ctx.host.acp.clone();
     let mut client = host.get(&ctx.session_id, &definition, &repo).await?;
     if client.native_id().is_some_and(|id| id != native_id) {
@@ -771,10 +819,21 @@ fn write_hooks(repo: &Path) -> Result<()> {
     Ok(())
 }
 
+/// agy's tool call as the tool other agents name: its own tools as Claude Code's, and the tools of
+/// orx's MCP servers, which agy calls `mcp_<server>_<tool>`, in Claude Code's `mcp__<server>__<tool>`.
 pub(crate) fn normalize_tool<'a>(
     name: &'a str,
     params: Option<&Value>,
-) -> (&'a str, Option<Value>) {
+) -> (Cow<'a, str>, Option<Value>) {
+    for server in ["orx", "alphaxiv"] {
+        if let Some(tool) = name
+            .strip_prefix("mcp_")
+            .and_then(|name| name.strip_prefix(server))
+            .and_then(|name| name.strip_prefix('_'))
+        {
+            return (format!("mcp__{server}__{tool}").into(), params.cloned());
+        }
+    }
     let (tool, aliases): (&str, &[(&str, &str)]) = match name {
         "invoke_subagent" => ("task", &[("Role", "description")]),
         "run_command" => ("Bash", &[("CommandLine", "command"), ("Cwd", "cwd")]),
@@ -814,7 +873,7 @@ pub(crate) fn normalize_tool<'a>(
             }
         }
     }
-    (tool, input)
+    (tool.into(), input)
 }
 
 pub(crate) fn invocation_sample_id(conversation: &str, step: i64) -> String {
@@ -860,6 +919,241 @@ fn plan_card(parts: &[WirePart], assistant_id: &str) -> Option<WirePart> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a user sees of an agy turn, and that compacting its plan-mode chat keeps the agy that
+    /// ran it: a second launch would kill the work agy runs in the background. The fake `agy`
+    /// replays a turn in agy 1.5's ACP shapes to each prompt and records each launch.
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_mode_turn_reads_cleanly_and_compacting_it_keeps_its_agy() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        // Shapes captured from agy 1.5.6 over ACP; the retry notice is from agy 1.5.3's text stream.
+        let call = |update: &str,
+                    id: &str,
+                    name: &str,
+                    kind: &str,
+                    title: &str,
+                    status: &str,
+                    input: Value| {
+            json!({
+                "sessionUpdate": update, "toolCallId": id, "name": name, "args": input, "kind": kind,
+                "title": title, "status": status, "rawInput": input,
+            })
+        };
+        let text = |text: &str| json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}});
+        let ls = json!({"CommandLine": "ls runs", "WaitMsBeforeAsync": 5000, "toolSummary": "List runs"});
+        let read = json!({"githubUrl": "https://github.com/karpathy/nanochat", "path": "runs", "toolSummary": "Read runs directory"});
+        let wait = json!({"chatIds": ["chat_1"], "toolSummary": "Wait for child chat"});
+        let output = "A pre-tool hook changed the arguments of this tool call before it ran. Changed: CommandLine.\n\nCreated At: 2026-11-11T12:20:59-08:00\nCompleted At: 2026-11-11T12:20:59-08:00\nCommand exited with code 0.\n\nCommand output:\nminiseries.sh\truncpu.sh\r\n";
+        let mut ran = call(
+            "tool_call_update",
+            "c1",
+            "run_command",
+            "execute",
+            "ls runs",
+            "completed",
+            ls.clone(),
+        );
+        ran["rawOutput"] = json!({"output": output, "exit_code": 0});
+        ran["content"] = json!([{"type": "content", "content": {"type": "text", "text": output}}]);
+        let frames = [
+            text("Listing"),
+            text(" the runs."),
+            call(
+                "tool_call",
+                "c1",
+                "run_command",
+                "execute",
+                "ls runs",
+                "in_progress",
+                ls,
+            ),
+            ran,
+            call(
+                "tool_call",
+                "c2",
+                "mcp_alphaxiv_read_files_from_github_repository",
+                "other",
+                "Run mcp_alphaxiv_read_files_from_github_repository",
+                "in_progress",
+                read.clone(),
+            ),
+            call(
+                "tool_call_update",
+                "c2",
+                "mcp_alphaxiv_read_files_from_github_repository",
+                "other",
+                "Run mcp_alphaxiv_read_files_from_github_repository",
+                "completed",
+                read,
+            ),
+            call(
+                "tool_call",
+                "c3",
+                "mcp_orx_wait",
+                "other",
+                "Run mcp_orx_wait",
+                "in_progress",
+                wait.clone(),
+            ),
+            call(
+                "tool_call_update",
+                "c3",
+                "mcp_orx_wait",
+                "other",
+                "Run mcp_orx_wait",
+                "failed",
+                wait,
+            ),
+            text("\n⚠ Model produced invalid output.\n"),
+            text("Both scripts"),
+            text(" are there.\n\nThat means: \"Model produced invalid output.\""),
+        ];
+
+        let dir = std::env::temp_dir().join(format!("orx-agy-turn-{}", uuid::Uuid::new_v4()));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let replay = dir.join("frames.jsonl");
+        let lines: Vec<String> = frames.iter().map(Value::to_string).collect();
+        std::fs::write(&replay, lines.join("\n")).unwrap();
+        let record = dir.join("record.jsonl");
+        let peer = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/local/harness/fixtures/acp-peer.py"
+        );
+        let agy = bin.join("agy");
+        let script = format!(
+            "#!/bin/sh\nexec python3 '{peer}' 'replay:{}' '{}' \"$@\"\n",
+            replay.display(),
+            record.display()
+        );
+        std::fs::write(&agy, script).unwrap();
+        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::iter::once(bin).chain(std::env::split_paths(&path));
+        std::env::set_var("PATH", std::env::join_paths(path).unwrap());
+
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("README.md"), "agy\n").unwrap();
+        for args in [
+            &["init", "--quiet", "--initial-branch", "main"][..],
+            &["add", "README.md"],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        ] {
+            assert!(crate::local::git::git_command()
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        let mut ctx = TurnCtx::test_stub();
+        ctx.harness = "antigravity".into();
+        ctx.session_id = format!("chat-{}", uuid::Uuid::new_v4());
+        ctx.project.id = format!("agy-{}", uuid::Uuid::new_v4());
+        ctx.project.repo_path = repo.to_string_lossy().into_owned();
+        ctx.permission_mode = Some(PermissionMode::Bypass);
+        ctx.plan_mode = true;
+        ctx.text = "List the runs".into();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(Antigravity.run_turn(&mut ctx))
+            .map_err(|failure| failure.message)
+            .unwrap();
+
+        let texts: Vec<_> = ctx
+            .assistant
+            .parts
+            .iter()
+            .filter(|part| part.kind == "text")
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Listing the runs.",
+                "Both scripts are there.\n\nThat means: \"Model produced invalid output.\""
+            ]
+        );
+        let tool = |id: &str| {
+            ctx.assistant
+                .parts
+                .iter()
+                .find(|part| part.id == format!("acp-tool-{id}"))
+                .and_then(|part| Some((part.tool.clone()?, part.state.clone()?)))
+                .unwrap()
+        };
+        let (name, command) = tool("c1");
+        assert_eq!(name, "Bash");
+        assert_eq!(
+            command.output.as_deref(),
+            Some("Created At: 2026-11-11T12:20:59-08:00\nCompleted At: 2026-11-11T12:20:59-08:00\nCommand exited with code 0.\n\nCommand output:\nminiseries.sh\truncpu.sh\r\n")
+        );
+        let (name, read) = tool("c2");
+        assert_eq!(name, "mcp__alphaxiv__read_files_from_github_repository");
+        assert_eq!(read.input.unwrap()["path"], "runs");
+        assert_eq!(read.title, None);
+        let (name, wait) = tool("c3");
+        assert_eq!(
+            (name.as_str(), wait.status.as_str()),
+            ("mcp__orx__wait", "error")
+        );
+
+        let compact = CompactCtx {
+            profile: None,
+            host: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            native_session_id: ctx.native_session_id.clone(),
+            model: None,
+            project: ctx.project.clone(),
+            permission_mode: ctx.permission_mode,
+            plan_mode: ctx.plan_mode,
+            service_tier: None,
+            reasoning_level: None,
+        };
+        assert_eq!(
+            runtime.block_on(Antigravity.compact(&compact)).unwrap(),
+            CompactOutcome::Native
+        );
+        runtime.block_on(ctx.host.acp.stop(&ctx.session_id));
+
+        let received: Vec<Value> = std::fs::read_to_string(record)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let launches: Vec<_> = received
+            .iter()
+            .filter(|entry| entry["method"] == "launch")
+            .map(|entry| entry["params"]["arguments"].clone())
+            .collect();
+        assert_eq!(launches.len(), 1, "compaction restarted agy: {launches:?}");
+        assert!(!launches[0]
+            .as_array()
+            .unwrap()
+            .contains(&json!("--dangerously-skip-permissions")));
+        let prompts: Vec<_> = received
+            .iter()
+            .filter(|entry| entry["method"] == "session/prompt")
+            .map(|entry| entry["params"]["prompt"][0]["text"].clone())
+            .collect();
+        assert_eq!(prompts.last(), Some(&json!("/compact")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn hooks_leave_a_tracked_hook_file_untouched() {
@@ -944,7 +1238,7 @@ mod tests {
             "t",
             "\n⚠ Agent execution terminated due to error.\n",
         ));
-        assert!(take_error_marker(&mut ctx));
+        assert!(take_notices(&mut ctx));
         assert!(ctx.assistant.parts.is_empty());
 
         let mut ctx = TurnCtx::test_stub();
@@ -952,7 +1246,7 @@ mod tests {
             "t",
             "Partial answer.\n⚠ Agent execution terminated due to error.\n",
         ));
-        assert!(take_error_marker(&mut ctx));
+        assert!(take_notices(&mut ctx));
         assert_eq!(
             ctx.assistant.parts[0].text.as_deref(),
             Some("Partial answer.")
@@ -960,7 +1254,7 @@ mod tests {
 
         let mut ctx = TurnCtx::test_stub();
         ctx.upsert_part(WirePart::text("t", "PONG"));
-        assert!(!take_error_marker(&mut ctx));
+        assert!(!take_notices(&mut ctx));
 
         let log = std::env::temp_dir().join(format!("orx-agy-log-{}", uuid::Uuid::new_v4()));
         // An earlier turn's failure, and startup noise that is no cause.

@@ -54,7 +54,7 @@ const states = [
   [run({ status: "running", cancelling: true, contact: { type: "needs_auth", since: 1, cause: "Connect" } }), m.status_cancellation_pending(), true],
   [run({ status: "submitting", cancelling: true }), m.status_cancellation_pending(), true],
   [run({ status: "submitting", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "No handle" } }), m.status_cancellation_pending(), true],
-  [run({ status: "running", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "Stop pending" } }), m.status_cancelling(), true],
+  [run({ status: "running", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "Stop pending" } }), m.status_cancellation_pending(), true],
   [run(), m.status_cancelled(), false],
   [run({ contact: { type: "stopping", since: 1, count: 2 } }), survivors, true],
   [run({ cancelUnconfirmed: [], resultMarkdown: "Container processes couldn't be checked." }), m.status_cancelled_unconfirmed(), true],
@@ -91,6 +91,29 @@ test("chat run banners distinguish pending and delivered cancels", async () => {
   assert.ok((await banner(run({ status: "submitting", cancelling: true }))).includes(m.status_cancellation_pending()));
 });
 
+test("a chat run banner says why a run lost contact and offers the way forward", async () => {
+  const banner = async (value) => {
+    const { container } = await render(createElement(ExperimentRunBanner, { runs: [{ run: value, experimentName: "SSH sandwich" }] }));
+    await settle();
+    return { text: plain(container.textContent), buttons: [...container.querySelectorAll("button")].map((button) => button.textContent) };
+  };
+  const launch = await banner(run({ status: "submitting", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "No orx-host for darwin-aarch64" } }));
+  assert.ok(launch.text.includes("No orx-host for darwin-aarch64"), launch.text);
+  assert.ok(launch.buttons.includes(m.run_abandon()), launch.buttons.join());
+  assert.ok(!launch.buttons.some((label) => label.includes(m.common_stop())), launch.buttons.join());
+
+  const unverified = await banner(run({ status: "running", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "2 processes still running" } }));
+  assert.ok(unverified.buttons.includes(m.run_stop_again()), unverified.buttons.join());
+  assert.ok(!unverified.buttons.includes(m.common_stop()), unverified.buttons.join());
+
+  const offline = await banner(run({ status: "running", contact: { type: "unreachable", since: 1, cause: "Operation timed out" } }));
+  assert.ok(offline.text.includes("Operation timed out"), offline.text);
+  assert.ok(offline.buttons.includes(m.common_stop()) && offline.buttons.includes(m.run_abandon()), offline.buttons.join());
+
+  const healthy = await banner(run({ status: "running" }));
+  assert.deepEqual(healthy.buttons, [m.common_stop()]);
+});
+
 test("unchecked-process notes use the structured proof after the result text is edited", async () => {
   for (const [unreadable, expected] of [[[], m.run_notice_cancel_uncovered()], [[789, 790], plain(m.run_notice_cancel_unreadable({ pids: "789, 790" }))]]) {
     const { notice } = await surfaces(run({ cancelUnconfirmed: unreadable, resultMarkdown: "Edited result" }));
@@ -108,4 +131,19 @@ test("survivor counts take the locale's plural form, with the count and host", a
       assert.equal(statusLabel("not_fully_stopped", { count, host: "gpu-box" }), expected, `${locale} ${count}`);
     }
   }
+});
+
+test("a starting run shows the backend's waiting reason as plain text until contact is lost", async () => {
+  const reason = "0/4 nodes are available: <b>4 Insufficient nvidia.com/gpu</b>";
+  const waiting = run({ status: "starting", waitingReason: reason });
+  const { container } = await render(createElement(StatusBadge, runDisplay(waiting)));
+  assert.equal(plain(container.textContent), `${m.status_starting()} · ${reason}`);
+  assert.equal(container.querySelector("b"), null);
+  assert.ok(plain(container.querySelector("[title]").getAttribute("title")).endsWith(reason));
+
+  const banner = plain((await render(createElement(ExperimentRunBanner, { runs: [{ run: waiting, experimentName: "SSH sandwich" }] }))).container.textContent);
+  assert.ok(banner.includes(reason), banner);
+
+  const lost = await surfaces(run({ status: "starting", waitingReason: reason, contact: { type: "unreachable", since: 1, cause: "Offline" } }));
+  assert.ok(!lost.badge.includes(reason), lost.badge);
 });

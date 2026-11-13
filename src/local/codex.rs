@@ -14,7 +14,7 @@
 //! so `thread/resume {threadId}` survives an `orx up` restart.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::{anyhow, Result};
 use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
-use crate::local::harness::codex::{ensure_orx_data_dir, find_codex_required};
+use crate::local::harness::codex::{find_codex, find_codex_required};
 use crate::local::native_store::{self, NativeStore};
 
 /// Ceiling on a request's response wait — generous because `thread/start`
@@ -220,7 +220,10 @@ pub struct CodexClient {
     /// child (crash/restart replacement) — the DB signal covers that case.
     last_collab_mode: std::sync::Mutex<Option<&'static str>>,
     native_store: NativeStore,
+    pub(crate) profile: Option<String>,
     alphaxiv_signed_in: bool,
+    /// The executable this child runs; once detection picks another, the next turn respawns it.
+    bin: PathBuf,
     session_id: String,
     /// Each native (thread, turn)'s model, outliving any one orx turn: sub-agents do.
     turn_models: std::sync::Mutex<HashMap<(String, String), String>>,
@@ -720,12 +723,15 @@ fn spawn_client(
     session_id: &str,
     up_port: Option<u16>,
     native_store: NativeStore,
+    profile: Option<String>,
     bin: PathBuf,
     codex_home: PathBuf,
 ) -> Result<Arc<CodexClient>> {
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.arg("app-server");
-    if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
+    if let Some(override_arg) =
+        native_store::codex_sqlite_override(native_store, &codex_home, profile.is_some())
+    {
         cmd.args(["-c", &override_arg]);
     }
     cmd.stdin(Stdio::piped())
@@ -737,16 +743,7 @@ fn spawn_client(
     // Stamp the launching session (one app-server child per orx session) so a
     // run the agent starts via `orx exp run` is tagged with it and can be
     // explicitly subscribed to. After prepare_env so it isn't shadowed.
-    crate::local::chat::set_chat_session_env(&mut cmd, session_id, "codex", up_port);
-    // Pin the child's store to the same canonicalized dir the sandbox policy
-    // grants (see harness/codex.rs `ensure_orx_data_dir`) — after prepare_env
-    // so the pin beats a dashboard-synced ORX_DATA_DIR. Unconditional: the
-    // child is shared by every permission mode, so unlike the old per-turn
-    // exec pin this also applies under Bypass (more coherent — agent store ==
-    // served store in every mode).
-    if let Some(dir) = ensure_orx_data_dir() {
-        cmd.env("ORX_DATA_DIR", &dir);
-    }
+    crate::local::chat::set_chat_session_env(&mut cmd, session_id, "codex", up_port)?;
     // Own process group: a terminal SIGINT reaches orx up alone, which then
     // tears the child's group down deliberately (terminate()).
     #[cfg(unix)]
@@ -798,7 +795,9 @@ fn spawn_client(
         thread_model: std::sync::Mutex::new(None),
         last_collab_mode: std::sync::Mutex::new(None),
         native_store,
+        profile,
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+        bin,
         session_id: session_id.to_string(),
         turn_models: std::sync::Mutex::new(HashMap::new()),
         last_active: std::sync::Mutex::new(Instant::now()),
@@ -878,20 +877,28 @@ impl CodexHost {
         self: &Arc<Self>,
         session_id: &str,
         native_store: NativeStore,
+        profile: Option<&str>,
     ) -> Result<Arc<CodexClient>> {
-        let codex_home =
-            tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
-                .await
-                .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
+        let profile = profile.map(str::to_string);
+        let preparing_profile = profile.clone();
+        let codex_home = tokio::task::spawn_blocking(move || match preparing_profile {
+            Some(id) => crate::local::agent_profiles::prepare(&id, "codex"),
+            None => native_store::prepare_codex(native_store),
+        })
+        .await
+        .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
         let host = self.clone();
         let session = session_id.to_string();
-        self.ensure_with_spawn(session_id, native_store, async move {
+        let spawn_profile = profile.clone();
+        let selected = find_codex();
+        self.ensure_with_spawn(session_id, native_store, profile, selected, async move {
             let bin = find_codex_required()?;
             Ok(move || {
                 spawn_client(
                     &session,
                     host.up_port.get().copied(),
                     native_store,
+                    spawn_profile,
                     bin,
                     codex_home,
                 )
@@ -904,6 +911,8 @@ impl CodexHost {
         self: &Arc<Self>,
         session_id: &str,
         native_store: NativeStore,
+        profile: Option<String>,
+        bin: Option<PathBuf>,
         prepare: impl std::future::Future<Output = Result<F>>,
     ) -> Result<Arc<CodexClient>>
     where
@@ -911,7 +920,10 @@ impl CodexHost {
     {
         {
             let _spawning = self.spawn_lock.lock().await;
-            if let Some(existing) = self.reusable_client(session_id, native_store).await {
+            if let Some(existing) = self
+                .reusable_client(session_id, native_store, profile.as_deref(), bin.as_deref())
+                .await
+            {
                 return Ok(existing);
             }
         }
@@ -926,7 +938,10 @@ impl CodexHost {
                 return;
             }
             // Another caller may have completed startup during preparation.
-            if let Some(existing) = host.reusable_client(&session, native_store).await {
+            if let Some(existing) = host
+                .reusable_client(&session, native_store, profile.as_deref(), bin.as_deref())
+                .await
+            {
                 let _ = ready_tx.send(Ok(existing));
                 return;
             }
@@ -983,10 +998,14 @@ impl CodexHost {
         &self,
         session_id: &str,
         native_store: NativeStore,
+        profile: Option<&str>,
+        bin: Option<&Path>,
     ) -> Option<Arc<CodexClient>> {
         let guard = self.inner.lock().await;
         let client = guard.get(session_id)?;
         if client.native_store() == native_store
+            && client.profile.as_deref() == profile
+            && bin.is_none_or(|bin| bin == client.bin)
             && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
             && matches!(client.child.lock().await.try_wait(), Ok(None))
         {
@@ -1362,7 +1381,9 @@ pub(crate) mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            profile: None,
             alphaxiv_signed_in: false,
+            bin: PathBuf::new(),
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),
@@ -1415,7 +1436,9 @@ pub(crate) mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            profile: None,
             alphaxiv_signed_in: false,
+            bin: PathBuf::new(),
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(last_active),
@@ -1486,6 +1509,64 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn client_reuse_requires_the_same_profile() {
+        let host = Arc::new(CodexHost::new());
+        let mut client = idle_test_client(Instant::now());
+        Arc::get_mut(&mut client).unwrap().profile = Some("codex-012345abcd".into());
+        host.inner
+            .lock()
+            .await
+            .insert("chat".into(), client.clone());
+        assert!(host
+            .reusable_client(
+                "chat",
+                NativeStore::Isolated,
+                Some("codex-012345abcd"),
+                None
+            )
+            .await
+            .is_some());
+        assert!(host
+            .reusable_client(
+                "chat",
+                NativeStore::Isolated,
+                Some("codex-abcdefghij"),
+                None
+            )
+            .await
+            .is_none());
+        assert!(host
+            .reusable_client("chat", NativeStore::Isolated, None, None)
+            .await
+            .is_none());
+        host.kill_session("chat").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn client_reuse_requires_the_selected_binary() {
+        let host = Arc::new(CodexHost::new());
+        let mut client = idle_test_client(Instant::now());
+        Arc::get_mut(&mut client).unwrap().bin = PathBuf::from("/user/codex");
+        host.inner
+            .lock()
+            .await
+            .insert("chat".into(), client.clone());
+        let reusable = |bin: &'static str| {
+            let host = host.clone();
+            async move {
+                host.reusable_client("chat", NativeStore::Isolated, None, Some(Path::new(bin)))
+                    .await
+                    .is_some()
+            }
+        };
+        assert!(reusable("/user/codex").await);
+        assert!(!reusable("/managed/codex").await);
+        host.kill_session("chat").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn initialized_bring_up_hands_off_a_reusable_client() {
         let host = Arc::new(CodexHost::new());
         let client = rpc_test_client(
@@ -1494,14 +1575,14 @@ pub(crate) mod tests {
         let spawned = client.clone();
         let ensured = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("compact", NativeStore::Isolated, async {
+            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, async {
                 Ok(move || Ok(spawned))
             }),
         )
         .await;
         let reused = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("compact", NativeStore::Isolated, async {
+            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, async {
                 Ok(|| panic!("initialized client must be reused"))
             }),
         )
@@ -1524,7 +1605,7 @@ pub(crate) mod tests {
         let operation_host = host.clone();
         let operation = tokio::spawn(async move {
             operation_host
-                .ensure_with_spawn("compact", NativeStore::Isolated, async move {
+                .ensure_with_spawn("compact", NativeStore::Isolated, None, None, async move {
                     let _ = started_tx.send(());
                     let _ = release_rx.await;
                     Ok(move || {
@@ -1538,7 +1619,7 @@ pub(crate) mod tests {
         // A stalled preparation neither blocks reuse nor another cold startup.
         let reused = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("warm", NativeStore::Isolated, async {
+            host.ensure_with_spawn("warm", NativeStore::Isolated, None, None, async {
                 Ok(|| panic!("a warm client must not be spawned again"))
             }),
         )
@@ -1548,7 +1629,7 @@ pub(crate) mod tests {
         assert!(Arc::ptr_eq(&reused, &warm));
         let cold = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("other", NativeStore::Isolated, async {
+            host.ensure_with_spawn("other", NativeStore::Isolated, None, None, async {
                 Err::<fn() -> Result<Arc<CodexClient>>, _>(anyhow!("preparation reached"))
             }),
         )
@@ -1567,7 +1648,7 @@ pub(crate) mod tests {
         let operation_host = host.clone();
         let operation = tokio::spawn(async move {
             operation_host
-                .ensure_with_spawn("compact", NativeStore::Isolated, async {
+                .ensure_with_spawn("compact", NativeStore::Isolated, None, None, async {
                     Ok(move || Ok(spawned))
                 })
                 .await
@@ -1695,7 +1776,9 @@ pub(crate) mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            profile: None,
             alphaxiv_signed_in: false,
+            bin: PathBuf::new(),
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),

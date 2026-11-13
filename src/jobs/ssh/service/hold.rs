@@ -330,13 +330,14 @@ mod tests {
     /// Starts a login whose `ssh` is `script`, kept in the returned directory.
     #[cfg(unix)]
     async fn start_fake(registry: &Registry, script: &str) -> (Arc<Held>, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = std::env::temp_dir().join(format!("orx-hold-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let ssh = dir.join("ssh");
-        std::fs::write(&ssh, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        orx_test_support::write_executable(
+            dir.join("ssh"),
+            format!("#!/bin/sh\n{script}\n"),
+            0o755,
+        )
+        .unwrap();
         let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap());
         let operation = json!({
             "env": [["PATH", path]],

@@ -7,7 +7,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
-import type { Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import type { Agent } from './agent.ts'
 import type { Outside } from './outside.ts'
 
@@ -25,13 +25,13 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
   mkdirSync(path.join(home, 'projects'), { recursive: true })
   mkdirSync(path.join(root, 'tmp'))
   writeFileSync(path.join(home, '.gitconfig'), '[user]\n\tname = E2E Researcher\n\temail = e2e@example.com\n')
-  // Signed-out CLIs that shadow the host's, so every host looks the same. An agent must be installed:
-  // macOS finds ChatGPT.app's Codex outside PATH, and with none at all onboarding skips its agent
-  // step to install OpenCode. Linux runners ship a gh that would reach GitHub's API.
+  // Signed-out CLIs that shadow the host's, so every host looks the same: macOS finds ChatGPT.app's
+  // Codex outside PATH. Linux runners ship a gh that would reach GitHub's API.
   const bin = path.join(root, 'bin')
   mkdirSync(bin)
-  for (const [name, version] of [['claude', '2.1.0 (Claude Code)'], ['gh', 'gh version 2.80.0']]) {
-    writeFileSync(path.join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && echo "${version}" && exit 0\nexit 1\n`, { mode: 0o755 })
+  for (const [name, version, status] of [['claude', '2.1.0 (Claude Code)', '{"loggedIn":false}'], ['gh', 'gh version 2.80.0']]) {
+    const auth = status ? `[ "$1" = auth ] && echo '${status}'\n` : ''
+    writeFileSync(path.join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && echo "${version}" && exit 0\n${auth}exit 1\n`, { mode: 0o755 })
   }
   const log = path.join(root, 'orx.log')
   const env = {
@@ -107,7 +107,18 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     async onboard() {
       const agent = { name: 'E2E Agent', executable: process.execPath, arguments: [FAKE_AGENT] }
       const { id: harness } = await api<{ id: string }>('/api/harnesses/acp', agent)
-      await api('/api/onboarding/complete', { harness })
+      let model: string | undefined
+      await expect
+        .poll(
+          async () => {
+            const { harnesses } = await api<{ harnesses: { id: string; defaultModel?: string }[] }>('/api/harnesses')
+            model = harnesses.find((h) => h.id === harness)?.defaultModel
+            return model
+          },
+          { message: `${agent.name} reports its default model`, timeout: 30_000 },
+        )
+        .toBeTruthy()
+      await api('/api/onboarding/complete', { harness, model })
       await api('/api/settings/ui-state', { tourCompleted: true })
     },
     /** A blank project, as the New project dialog creates one. */

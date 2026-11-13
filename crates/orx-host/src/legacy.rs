@@ -176,7 +176,7 @@ fn cancel_container(container: &ContainerRun, stop: Option<&AtomicBool>) -> io::
         ]),
         &[],
         Duration::from_secs(5),
-        stop,
+        &|| stop.is_some_and(|stop| stop.load(Ordering::Relaxed)),
     )?;
     if result.timed_out || result.stdout_truncated {
         return Err(io::Error::other(
@@ -195,7 +195,7 @@ fn cancel_container(container: &ContainerRun, stop: Option<&AtomicBool>) -> io::
             ]),
             &[],
             Duration::from_secs(5),
-            stop,
+            &|| stop.is_some_and(|stop| stop.load(Ordering::Relaxed)),
         )?;
         if list.code != Some(0) || list.timed_out || list.stdout_truncated {
             return Err(io::Error::other("cannot inspect Docker daemon"));
@@ -252,7 +252,7 @@ exit 1
         Command::new("docker").args(["exec", "-i", &container.id, "bash", "-c", &script]),
         &[],
         Duration::from_secs(8),
-        stop,
+        &|| stop.is_some_and(|stop| stop.load(Ordering::Relaxed)),
     )?;
     if result.code == Some(0) && !result.timed_out {
         Ok(())

@@ -28,7 +28,7 @@ test('helper tests are independent and combine with other changes', () => {
 })
 test('docs skip builds, workflow changes and unknown files select all', () => {
   assert.deepEqual(enabled(['README.md', 'docs/linux.md', 'LICENSE', '.github/readme-assets/banner.png', 'macos/DISTRIBUTION.md', 'windows/README.md', 'ui/README.md']), [])
-  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'scripts/build-host.mjs', 'scripts/build-host.test.mjs', 'new-build-input']) assert.equal(enabled([path]).length, 8)
+  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'rust-toolchain.toml', 'scripts/build-host.mjs', 'scripts/build-host.test.mjs', 'new-build-input']) assert.equal(enabled([path]).length, 8)
 })
 test('embedded chart changes also run chart tests', () => {
   assert.equal(classifyChanges(['agent-skills/orx-figures/assets/orx_chart.py']).chart, true)
@@ -51,7 +51,7 @@ test('unavailable comparisons and forced runs select everything', () => {
   }
 })
 const flags = Object.fromEntries(Object.entries(classifyChanges(['ui/src/App.tsx'])).map(([key, value]) => [key, String(value)]))
-const needs = { changes: { result: 'success' }, frontend: { result: 'success' }, e2e: { result: 'success' }, rust: { result: 'skipped' }, windows: { result: 'skipped' }, 'linux-app': { result: 'skipped' }, helpers: { result: 'skipped' } }
+const needs = { changes: { result: 'success' }, 'workflow-lint': { result: 'success' }, frontend: { result: 'success' }, e2e: { result: 'success' }, rust: { result: 'skipped' }, 'rust-lint': { result: 'skipped' }, windows: { result: 'skipped' }, 'linux-app': { result: 'skipped' }, helpers: { result: 'skipped' } }
 test('aggregate accepts intentional skips and successful selected jobs', () => checkResults(needs, flags))
 test('aggregate rejects failures, cancellations, missing and unexpectedly skipped jobs', () => {
   for (const result of ['failure', 'cancelled', 'skipped', undefined]) assert.throws(() => checkResults({ ...needs, frontend: { result } }, flags))
@@ -61,7 +61,25 @@ test('aggregate rejects failures, cancellations, missing and unexpectedly skippe
   assert.throws(() => checkResults(needs, { ...flags, rust: undefined }))
 })
 
-test('embedded JavaScript selects the Rust job that runs its tests, without a frontend build', () => {
+test('workflow lint remains required when changes skip builds', () => {
+  const docsFlags = Object.fromEntries(Object.entries(classifyChanges(['README.md'])).map(([key, value]) => [key, String(value)]))
+  const docsNeeds = { ...needs, frontend: { result: 'skipped' }, e2e: { result: 'skipped' } }
+  checkResults(docsNeeds, docsFlags)
+  for (const result of ['failure', 'cancelled', 'skipped', undefined]) {
+    assert.throws(() => checkResults({ ...docsNeeds, 'workflow-lint': { result } }, docsFlags))
+  }
+})
+
+test('Rust changes require lint, tests and helper protocols', () => {
+  const rustFlags = Object.fromEntries(Object.entries(classifyChanges(['src/main.rs'])).map(([key, value]) => [key, String(value)]))
+  const passed = { ...needs, frontend: { result: 'skipped' }, rust: { result: 'success' }, 'rust-lint': { result: 'success' }, helpers: { result: 'success' }, windows: { result: 'success' }, 'linux-app': { result: 'success' } }
+  checkResults(passed, rustFlags)
+  for (const job of ['rust', 'rust-lint', 'helpers']) {
+    for (const result of ['failure', 'cancelled', 'skipped', undefined]) assert.throws(() => checkResults({ ...passed, [job]: { result } }, rustFlags))
+  }
+})
+
+test('embedded JavaScript selects Rust checks without a frontend build', () => {
   for (const path of ['src/commands/desktop_zoom.js', 'src/commands/macos_escape.js', 'src/local/acp/zcode-runtime.cjs']) {
     assert.deepEqual(enabled([path]), ['rust', 'windows', 'linux', 'macos'], path)
   }

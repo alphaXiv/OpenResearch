@@ -22,6 +22,44 @@ pub use askpass::Prompt;
 fn deadline() -> Duration {
     crate::config::paced(Duration::from_secs(35))
 }
+
+/// How long orx-host may work on one request before answering: sbatch then squeue take up to
+/// 40 s, and a request on a run may first wait for another doing that. Probes keep checking the
+/// session meanwhile, so a dead host is still noticed by `deadline`.
+const HOST_WORK: Duration = Duration::from_secs(80);
+
+/// Blob requests share one host lock, which checking another blob holds while it hashes: up to
+/// 5 GiB at `hash_time`'s rate.
+const BLOB_WORK: Duration = Duration::from_secs(320);
+
+/// Hashing a staged blob on a slow disk, at a pessimistic 16 MiB/s.
+fn hash_time(len: u64) -> Duration {
+    Duration::from_secs(len / (16 << 20))
+}
+
+fn reply_deadline(body: &Request) -> Duration {
+    deadline()
+        + match body {
+            Request::Exec { timeout_ms, .. } => Duration::from_millis(u64::from(*timeout_ms)),
+            Request::Changes { wait_ms, .. } => {
+                Duration::from_millis(u64::from(*wait_ms)) + HOST_WORK
+            }
+            Request::HasBlob { len, .. } => BLOB_WORK + hash_time(*len),
+            Request::PutBlob { .. } => BLOB_WORK,
+            Request::Launch(_)
+            | Request::SlurmSubmit { .. }
+            | Request::SlurmQueue { .. }
+            | Request::PinSource { .. }
+            | Request::Cancel { .. }
+            | Request::CancelLegacy { .. }
+            | Request::Cleanup { .. } => HOST_WORK,
+            Request::Hello { .. }
+            | Request::Inspect { .. }
+            | Request::ReadLog { .. }
+            | Request::SlurmCancelLegacy { .. }
+            | Request::InspectLegacy { .. } => Duration::ZERO,
+        }
+}
 const CHUNK: usize = 256 * 1024;
 
 /// sshd and the org key sync can lag a freshly online box, so its key refusals back off this
@@ -105,6 +143,18 @@ impl std::fmt::Display for Unavailable {
 }
 
 impl std::error::Error for Unavailable {}
+
+/// Context on an `Unavailable` whose last connection failed in a way no retry fixes: a platform
+/// orx-host doesn't support, or a bootstrap the host refuses. A launch that was never sent
+/// fails with it instead of waiting.
+#[derive(Debug)]
+pub struct Unsupported(pub String);
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -249,6 +299,7 @@ impl HostConn {
             state,
             publish,
             incoming,
+            unsupported: None,
         };
         tokio::spawn(actor.run(action_rx));
         Ok(Self {
@@ -329,6 +380,7 @@ struct Actor {
     state: HostState,
     publish: watch::Sender<HostState>,
     incoming: mpsc::Receiver<Call>,
+    unsupported: Option<String>,
 }
 
 fn lane(body: &Request) -> usize {
@@ -366,6 +418,17 @@ async fn publish_master(config: &Config, route: &str) {
 }
 
 impl Actor {
+    fn unavailable(&self, sent: bool) -> anyhow::Error {
+        let error = anyhow!(Unavailable {
+            state: self.state.clone(),
+            sent,
+        });
+        match &self.unsupported {
+            Some(cause) => error.context(Unsupported(cause.clone())),
+            None => error,
+        }
+    }
+
     fn save(&self) {
         if let Err(error) =
             self.store
@@ -446,6 +509,7 @@ impl Actor {
     ) -> Result<ssh::Session> {
         let auth = self.auth.clone();
         let _guard = auth.gate.lock().await;
+        self.unsupported = None;
         let blocked = auth.state.borrow().blocked.clone();
         if !approve_route {
             if let Some((_, cause)) = blocked {
@@ -652,7 +716,15 @@ impl Actor {
                 Ok(session)
             }
             Err(error) => {
+                #[cfg(windows)]
+                let resumed_older = resuming;
+                #[cfg(unix)]
+                let resumed_older = false;
+                let unsupported = error.downcast_ref::<Unsupported>().is_some() && !resumed_older;
                 let failure = session.failure(error, retry_closure).await;
+                if unsupported || failure.unsupported {
+                    self.unsupported = Some(failure.cause.clone());
+                }
                 if askpass
                     .as_ref()
                     .is_some_and(|bridge| bridge.auth_prompted())
@@ -727,7 +799,7 @@ impl Actor {
                 call = self.incoming.recv(), if queues.iter().map(VecDeque::len).sum::<usize>() < 256 => {
                     match call {
                         Some(call) if session.is_some() || matches!(self.state.status, Status::Idle | Status::Connecting) => queues[lane(&call.body)].push_back(call),
-                        Some(call) => { let _ = call.reply.send(Err(anyhow!(Unavailable { state: self.state.clone(), sent: false }))); }
+                        Some(call) => { let _ = call.reply.send(Err(self.unavailable(false))); }
                         None => break,
                     }
                 }
@@ -834,15 +906,7 @@ impl Actor {
                     if call.reply.is_closed() {
                         continue;
                     }
-                    let timeout = match &call.body {
-                        Request::Exec { timeout_ms, .. } => {
-                            Duration::from_millis(u64::from(*timeout_ms)) + deadline()
-                        }
-                        Request::Changes { wait_ms, .. } => {
-                            Duration::from_millis(u64::from(*wait_ms)) + deadline()
-                        }
-                        _ => deadline(),
-                    };
+                    let timeout = reply_deadline(&call.body);
                     let remaining = pending
                         .values()
                         .map(|call| call.deadline.saturating_sub(self.clock.monotonic()))
@@ -910,18 +974,12 @@ impl Actor {
                 }
                 for (_, call) in std::mem::take(&mut pending) {
                     if let Reply::Call(reply) = call.reply {
-                        let _ = reply.send(Err(anyhow!(Unavailable {
-                            state: self.state.clone(),
-                            sent: true
-                        })));
+                        let _ = reply.send(Err(self.unavailable(true)));
                     }
                 }
                 for queue in &mut queues {
                     for call in queue.drain(..) {
-                        let _ = call.reply.send(Err(anyhow!(Unavailable {
-                            state: self.state.clone(),
-                            sent: false
-                        })));
+                        let _ = call.reply.send(Err(self.unavailable(false)));
                     }
                 }
             }
@@ -978,8 +1036,17 @@ impl Actor {
                             let _ = action.reply.send(Err(anyhow!("Host requires Connect")));
                         }
                     }
+                    // A Connect pressed during an automatic attempt approves only the current route.
+                    let unapproved = !approve_route
+                        && result.is_ok()
+                        && queued_action
+                            .as_ref()
+                            .is_some_and(|action| !action.key_only)
+                        && ssh::route(&self.config).await.ok().as_ref()
+                            != self.auth.state.borrow().route.as_ref();
                     if queued_action.is_some()
                         && (result.is_err()
+                            || unapproved
                             || cfg!(unix)
                                 && !keep_master
                                 && queued_action
@@ -1022,10 +1089,7 @@ impl Actor {
                         }
                         for queue in &mut queues {
                             for call in queue.drain(..) {
-                                let _ = call.reply.send(Err(anyhow!(Unavailable {
-                                    state: self.state.clone(),
-                                    sent: false
-                                })));
+                                let _ = call.reply.send(Err(self.unavailable(false)));
                             }
                         }
                     }

@@ -238,6 +238,8 @@ async fn merge_projection(
     recorded: &mut HashSet<String>,
 ) -> Result<bool> {
     let mut answered = false;
+    let mut latest_usage = None;
+    let mut latest_retry = None;
     for message in messages.iter().filter(|m| {
         m["id"].as_str().is_some_and(|id| !previous.contains(id)) && m["type"] == "assistant"
     }) {
@@ -261,22 +263,12 @@ async fn merge_projection(
             .is_some_and(|v| !v.is_null());
         record_message_usage(ctx, message, recorded);
         if let Some(used) = opencode_used_tokens(message.get("tokens")) {
-            ctx.report_usage(ContextUsage {
+            latest_usage = Some(ContextUsage {
                 used_tokens: used,
                 context_window: None,
             });
         }
-        if let Some(retry) = message.get("retry").filter(|retry| !retry.is_null()) {
-            ctx.show_retry_status(
-                "native",
-                &error_text(&retry["error"]),
-                retry["attempt"].as_i64().unwrap_or(1),
-                None,
-                retry["at"].as_i64(),
-            );
-        } else {
-            ctx.clear_retry_status();
-        }
+        latest_retry = message.get("retry").filter(|retry| !retry.is_null());
         let mut parts = projected_parts(message);
         for (part, content) in &mut parts {
             if content["type"] != "tool" || content["name"] != "subagent" {
@@ -302,8 +294,22 @@ async fn merge_projection(
             part.children = child_messages.into_iter().flat_map(wire_parts).collect();
         }
         for (part, _) in parts {
-            ctx.upsert_part_preserving_children(part);
+            ctx.upsert_part_raw(part);
         }
+    }
+    if let Some(retry) = latest_retry {
+        ctx.show_retry_status(
+            "native",
+            &error_text(&retry["error"]),
+            retry["attempt"].as_i64().unwrap_or(1),
+            None,
+            retry["at"].as_i64(),
+        );
+    } else {
+        ctx.clear_retry_status();
+    }
+    if let Some(usage) = latest_usage {
+        ctx.report_usage(usage);
     }
     Ok(answered)
 }
@@ -769,9 +775,13 @@ fn selectable_model(model: &Value, connected: &HashSet<&str>) -> bool {
         return false;
     }
     // V2 scopes the catalog to available providers; anonymous Zen must also be explicitly free.
-    model["providerID"] != "opencode"
-        || connected.contains("opencode")
-        || model["cost"].as_array().is_some_and(|tiers| {
+    model["providerID"] != "opencode" || connected.contains("opencode") || free_model(model)
+}
+
+/// One of OpenCode's own models at no cost: what the free-models switch governs.
+fn free_model(model: &Value) -> bool {
+    model["providerID"] == "opencode"
+        && model["cost"].as_array().is_some_and(|tiers| {
             !tiers.is_empty()
                 && tiers.iter().all(|cost| {
                     cost["input"].as_f64() == Some(0.0) && cost["output"].as_f64() == Some(0.0)
@@ -789,11 +799,20 @@ pub(super) async fn detect(
     binary: crate::local::opencode::ResolvedBinary,
     mut info: HarnessInfo,
 ) -> HarnessInfo {
+    info.configured_model = super::snapshot_config().0["model"]
+        .as_str()
+        .map(str::to_owned);
+    let refreshed = crate::local::local_models::refresh_alias_models(&binary).await;
+    let records = crate::local::local_models::providers().unwrap_or_default();
     let catalog = tokio::spawn(async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let _lease = crate::local::opencode::prepare_database(&binary, &db).await?;
         let mut cmd = crate::process::tokio_command(&binary.path);
-        crate::local::local_models::prepare_env(&mut cmd, None)?;
+        crate::local::local_models::prepare_env(
+            &mut cmd,
+            None,
+            crate::local::opencode::Protocol::V2,
+        )?;
         cmd.env("OPENCODE_DB", _lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
             .current_dir(
@@ -819,11 +838,13 @@ pub(super) async fn detect(
                 })
                 .filter_map(|integration| integration["id"].as_str())
                 .collect();
+            let free = super::free_models_offered();
             info.models = models["data"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter(|model| selectable_model(model, &connected))
+                .filter(|model| free || !free_model(model))
                 .filter_map(|model| {
                     let provider = model["providerID"].as_str()?;
                     let id = model["id"].as_str()?;
@@ -833,15 +854,21 @@ pub(super) async fn detect(
                         .flatten()
                         .filter_map(|v| v["id"].as_str())
                         .collect();
+                    let label = crate::local::local_models::model_label(
+                        provider,
+                        model["name"].as_str().unwrap_or(id),
+                        &records,
+                    );
                     Some(
                         ModelInfo::new(format!("{provider}/{id}"))
-                            .with_label(model["name"].as_str(), None)
+                            .with_label(Some(&label), None)
                             .with_reasoning(&variants)
                             .with_image_input(image_input(model)),
                     )
                 })
                 .collect();
-            info.authenticated = !connected.is_empty();
+            info.authenticated =
+                !connected.is_empty() || crate::local::local_models::configures_remote();
             info.agent_ready = !info.models.is_empty();
             info.auth_state = if info.authenticated || info.agent_ready {
                 HarnessAuthState::Ready
@@ -861,6 +888,9 @@ pub(super) async fn detect(
         }
         Ok(Err(error)) => info.agent_note = Some(error.to_string()),
         Err(error) => info.agent_note = Some(format!("OpenCode discovery failed: {error}")),
+    }
+    if let Err(error) = refreshed {
+        info.agent_note = Some(format!("Could not refresh provider models: {error}"));
     }
     info
 }
@@ -1329,13 +1359,20 @@ mod tests {
             let polls = Arc::new(AtomicUsize::new(0));
             let count = polls.clone();
             let seen = polls.clone();
+            let reloaded = Arc::new(tokio::sync::Notify::new());
+            let observed = reloaded.clone();
             let app = Router::new()
                 .route(
                     "/api/model",
                     get(move || {
                         let count = count.clone();
+                        let observed = observed.clone();
                         async move {
-                            Json(if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                            let poll = count.fetch_add(1, Ordering::SeqCst);
+                            if poll == 2 {
+                                observed.notify_one();
+                            }
+                            Json(if poll == 0 {
                                 json!({"data":[]})
                             } else {
                                 json!({"data":[{"id":"fixture"}]})
@@ -1357,7 +1394,19 @@ mod tests {
                     }),
                 );
             let (endpoint, server) = catalog_server(app, false).await;
-            let result = discover_models_within(&endpoint, Duration::from_millis(100), RETRY).await;
+            let timeout = Duration::from_secs(30);
+            let discover = discover_models_within(&endpoint, timeout, RETRY);
+            tokio::pin!(discover);
+            if plugins_reload {
+                tokio::select! {
+                    _ = reloaded.notified() => {}
+                    result = &mut discover => panic!("discovery ended before its reload: {result:?}"),
+                }
+                tokio::time::pause();
+                tokio::time::advance(timeout).await;
+                tokio::time::resume();
+            }
+            let result = discover.await;
             server.abort();
             let (models, integrations) = result.unwrap();
             let expected = if plugins_reload {

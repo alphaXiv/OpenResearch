@@ -20,6 +20,8 @@ struct Fake {
     launch_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// A stop the backend never answers.
     cancel_hangs: AtomicBool,
+    /// A stop the backend refuses each time.
+    cancel_refused: AtomicBool,
     cancel_entered: tokio::sync::Notify,
     cancels: AtomicUsize,
     reads: AtomicUsize,
@@ -54,6 +56,11 @@ impl Backend for Fake {
         self.cancels.fetch_add(1, Ordering::SeqCst);
         if self.cancel_hangs.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
+        }
+        if self.cancel_refused.load(Ordering::SeqCst) {
+            return CancelOutcome::Undelivered {
+                detail: "refused by the provider".into(),
+            };
         }
         CancelOutcome::Pending
     }
@@ -1105,6 +1112,46 @@ async fn experiment_wait_excludes_older_completed_runs_after_subscribing() {
         )
         .unwrap();
     assert_eq!(completion(&mut events).await["id"], "run");
+}
+
+#[tokio::test]
+async fn experiment_wait_follows_new_launches_and_excludes_older_active_runs() {
+    let f = Fixture::new().await;
+    f.insert("old", "exp", "project", "running");
+    f.insert("run", "exp", "project", "running");
+    let connection = rusqlite::Connection::open(f.api.data_dir.join("orx.db")).unwrap();
+    connection
+        .execute("UPDATE runs SET created_at=2 WHERE id='run'", [])
+        .unwrap();
+    let mut events = f
+        .client
+        .events(&Filter {
+            experiment: Some("exp".into()),
+            wait: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for id in ["old", "run", "new"] {
+        if id == "new" {
+            f.insert("new", "exp", "project", "running");
+            connection
+                .execute("UPDATE runs SET created_at=3 WHERE id='new'", [])
+                .unwrap();
+        }
+        f.api
+            .engine
+            .observe(
+                id,
+                Observation::Exited {
+                    finished_at: None,
+                    code: Some(0),
+                    signal: None,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(completion(&mut events).await["id"], "new");
 }
 
 #[tokio::test]
@@ -2762,4 +2809,126 @@ async fn cancellation_proof_reaches_both_api_projections_without_contact_prose()
             json!(note)
         );
     }
+}
+
+#[tokio::test]
+async fn a_waiting_reason_reaches_both_views_and_the_event_stream() {
+    let f = Fixture::new().await;
+    f.insert("run", "exp", "project", "starting");
+    let mut events = f
+        .client
+        .events(&Filter {
+            run: Some("run".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    async fn next(events: &mut (impl Stream<Item = Result<Value>> + Unpin)) -> Value {
+        tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    }
+    assert!(next(&mut events).await["waitingReason"].is_null());
+
+    f.api
+        .engine
+        .observe(
+            "run",
+            Observation::Queued {
+                detail: Some("Provisioning box".into()),
+            },
+        )
+        .unwrap();
+    let event = next(&mut events).await;
+    assert_eq!(event["event"], "changed");
+    assert_eq!(event["waitingReason"], "Provisioning box");
+    let cli: crate::plane::Run = serde_json::from_value(event).unwrap();
+    assert_eq!(
+        cli.waiting_detail().as_deref(),
+        Some("waiting: Provisioning box")
+    );
+    let dashboard = {
+        let store = f.api.store();
+        let run = store.get_run("run").unwrap().unwrap();
+        serde_json::to_value(crate::commands::up::ApiRun::new(&store, &run).unwrap()).unwrap()
+    };
+    assert_eq!(dashboard["waitingReason"], "Provisioning box");
+
+    f.api
+        .engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
+    let event = next(&mut events).await;
+    assert_eq!(event["status"], "running");
+    assert!(event["waitingReason"].is_null());
+}
+
+#[tokio::test]
+async fn abandon_refusals_name_their_cause_and_the_way_forward() {
+    use tower::ServiceExt;
+    let f = Fixture::new().await;
+    let app = dashboard_routes(f.api.clone());
+    let refusal = |id: &'static str| {
+        let app = app.clone();
+        async move {
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("/api/runs/{id}/abandon"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            (status, String::from_utf8(bytes.to_vec()).unwrap())
+        }
+    };
+
+    f.insert("done", "exp", "project", "done");
+    let (status, message) = refusal("done").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(message.contains("already ended (done)"), "{message}");
+
+    f.insert("live", "exp", "project", "running");
+    let (status, message) = refusal("live").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(message.contains("`orx exp cancel --run live`"), "{message}");
+
+    f.insert("legacy", "exp", "project", "running");
+    let mut legacy = f.api.run("legacy").unwrap();
+    legacy.backend_json = r#"{"kind":"ssh_job","host":"gpu-box"}"#.into();
+    f.api.store().upsert_run(&legacy).unwrap();
+    f.api
+        .store()
+        .set_run_contact(
+            "legacy",
+            &Contact::Unreachable {
+                since: 1,
+                cause: "offline".into(),
+            },
+        )
+        .unwrap();
+    let (status, message) = refusal("legacy").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(message.contains("orx 0.2"), "{message}");
+    assert!(
+        message.contains("`orx exp cancel --run legacy`"),
+        "{message}"
+    );
+    assert_eq!(f.api.run("legacy").unwrap().status, "running");
+
+    // A stop its backend keeps refusing leaves a reachable run nothing but Abandon.
+    f.backend.cancel_refused.store(true, Ordering::SeqCst);
+    let cancel = f
+        .client
+        .json(reqwest::Method::POST, "runs/live/cancel", None)
+        .await
+        .unwrap();
+    assert_eq!(cancel["cancelError"], "refused by the provider");
+    let (status, message) = refusal("live").await;
+    assert_eq!(status, StatusCode::OK, "{message}");
+    assert_eq!(f.api.run("live").unwrap().status, "lost");
 }

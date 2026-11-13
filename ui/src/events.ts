@@ -300,10 +300,10 @@ export function createEvents(client: WorkspaceClient) {
           offlineTimer = undefined;
           setConnected(true);
           if (needsRepair || hasOpened.current) {
+            ref.current.onReconnect?.();
             emitChat({ type: "reconnected" });
             emitProjectActivityEvent();
             if (needsRepair) emitHarnessAuth({ harness: "*", authState: "unknown" });
-            ref.current.onReconnect?.();
           }
           hasOpened.current = true;
           // Every open after this one follows a drop by definition.
@@ -317,9 +317,9 @@ export function createEvents(client: WorkspaceClient) {
           }
         };
         es.addEventListener("resync.required", () => {
+          ref.current.onReconnect?.();
           emitChat({ type: "reconnected" });
           emitProjectActivityEvent();
-          ref.current.onReconnect?.();
         });
         es.addEventListener("run.updated", (e) => {
           const d = parse<{ run: Run }>(e as MessageEvent);

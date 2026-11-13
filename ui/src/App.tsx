@@ -133,6 +133,7 @@ import { Button, IconButton, MenuItem, SEGMENTED_CLASS_NAME, showAlert, Spinner,
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 import { WorkspaceConnection } from "./components/WorkspaceConnection";
 import { delegateModelLabel } from "./delegates";
+import { useModelName } from "./components/pickerAgents";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -271,6 +272,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     listRunsQuery,
     getArtifactsQuery,
     getChatMessagesQuery,
+    refreshChatMessages,
     readHarnesses,
   } = useWorkspace().queries;
   const {
@@ -926,7 +928,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     baselineRunsRef.current.clear();
     pendingFirstRunningRunsRef.current.clear();
     const runsVisit = ++runsVisitRef.current;
-    queryClient.fetchQuery(listRunsQuery(baselineProjectId))
+    queryClient.fetchQuery({ ...listRunsQuery(baselineProjectId), staleTime: 0 })
       .then((loadedRuns) => {
         if (
           projectIdRef.current !== baselineProjectId ||
@@ -1085,19 +1087,20 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [runExperimentNames]);
 
   // Rebuilt only when a title or harness changes, so transcripts do not re-render on every session update.
+  const modelName = useModelName();
   const chatSessionsRef = useRef(sessionsQuery.data);
   chatSessionsRef.current = sessionsQuery.data;
   const chatInfoKey = (sessionsQuery.data ?? [])
-    .map((session) => `${session.id}\u0000${session.title ?? ""}\u0000${session.model ?? ""}\u0000${session.harness}`)
+    .map((session) => `${session.id}\u0000${session.title ?? ""}\u0000${session.model ?? ""}\u0000${session.harness}\u0000${session.profile ?? ""}`)
     .join("\u0001");
   const chatInfo = useMemo(() => {
     void chatInfoKey;
     const chats = new Map((chatSessionsRef.current ?? []).map((session) => [
       session.id,
-      { title: session.title?.trim() || delegateModelLabel(session), harness: session.harness },
+      { title: session.title?.trim() || delegateModelLabel(session, modelName), harness: session.harness },
     ]));
     return (sessionId: string) => chats.get(sessionId);
-  }, [chatInfoKey]);
+  }, [chatInfoKey, modelName]);
 
   const experimentName = useCallback((experimentId: string) => {
     const exact = experimentNames.get(experimentId);
@@ -1532,10 +1535,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     // Generation token: a reconnect starts fresh seeds, and a stale in-flight
     // response from an earlier generation must not land after them.
     let seedGen = 0;
-    const seed = () => {
+    const seed = (afterGap = false) => {
       const gen = ++seedGen;
       for (const sid of new Set(subagentTabs.map((t) => t.sessionId))) {
-        queryClient.fetchQuery({ ...getChatMessagesQuery(sid), staleTime: 0 })
+        (afterGap ? refreshChatMessages(sid) : queryClient.fetchQuery({ ...getChatMessagesQuery(sid), staleTime: 0 }))
           .then(({ messages }) => {
             if (live && gen === seedGen)
               apply(messages, subagentTabs.filter((t) => t.sessionId === sid), true);
@@ -1549,7 +1552,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         // Frames lost during the outage may include the terminal update —
         // refetch, letting the fresh seed overwrite everything.
         liveUpdated.clear();
-        seed();
+        seed(true);
         return;
       }
       if (ev.type !== "message") return;
@@ -1822,11 +1825,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const sideParentSession = sessionsQuery.data?.find((session) => session.id === activeSessionId);
   const sideDraftAgent = useMemo(() => sideParentSession ? {
     harness: sideParentSession.harness,
+    profile: sideParentSession.profile ?? null,
     model: sideParentSession.model,
     serviceTier: sideParentSession.serviceTier,
     permissionMode: sideParentSession.permissionMode === "plan" ? null : sideParentSession.permissionMode,
     reasoningLevel: sideParentSession.reasoningLevel,
-  } : null, [sideParentSession?.harness, sideParentSession?.model,
+  } : null, [sideParentSession?.harness, sideParentSession?.profile, sideParentSession?.model,
     sideParentSession?.serviceTier, sideParentSession?.permissionMode,
     sideParentSession?.reasoningLevel]);
   const requestedCodeTab =
@@ -2013,7 +2017,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         <div className={EMPTY_STATE_CLASS_NAME}>
           <Spinner />
         </div>
-        <WorkspaceConnection runtime={runtime} corner />
       </div>
     );
   }

@@ -7,15 +7,19 @@ use crate::local::trackio::{self, MetricSummary, Point, RunMetrics};
 use crate::store::Store;
 
 pub async fn run(args: crate::MetricsArgs) -> Result<()> {
-    let store = Store::open()?;
+    let store = Store::open_for_reading()?;
     // Dropped at exit, which stops a local dashboard this command had to start.
     let local = std::sync::Arc::new(trackio::LocalServer::default());
     let mut reports = Vec::new();
     for id in &args.run_ids {
         let run = crate::local::resolve::resolve_run(&store, id)?;
-        let project = store
-            .get_local_project(&run.project_id)?
-            .ok_or_else(|| anyhow!("Run {}'s project is no longer in the local store.", run.id))?;
+        let project = store.get_local_project(&run.project_id)?.ok_or_else(|| {
+            anyhow!(
+                "Run {}'s project is no longer in the orx store at {}.",
+                run.id,
+                store.data_dir().display()
+            )
+        })?;
         let report = trackio::run_metrics(
             &local,
             trackio::project_for(&project.slug),

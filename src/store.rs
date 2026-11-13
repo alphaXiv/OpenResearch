@@ -19,7 +19,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::autonomy::Autonomy;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
@@ -92,13 +92,14 @@ pub(crate) fn open_lifecycle_lock_at(
     path: &std::path::Path,
 ) -> Result<fd_lock::RwLock<std::fs::File>> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::paths::create_dir_all(parent)?;
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(path)?;
+        .open(path)
+        .with_context(|| format!("Could not open {}", path.display()))?;
     Ok(fd_lock::RwLock::new(file))
 }
 
@@ -348,6 +349,8 @@ pub struct EngineRunState {
     pub started_at: Option<i64>,
     pub contact: Contact,
     pub cancel_unconfirmed: Option<Vec<u32>>,
+    /// What the backend last said the run is waiting for; only while submitting or starting.
+    pub waiting_reason: Option<String>,
     pub spec_digest: Option<String>,
     pub submission_attempt: u32,
     pub submission_fence: Option<SubmissionFence>,
@@ -779,10 +782,12 @@ const SHARED_SSH_LOCK: (&str, &str) = ("run-logs", ".supervisor.shared-ssh.lock"
 /// The kept end of an engine run's log too large to keep whole.
 const TAIL_LOG: (&str, &str) = ("run-logs", ".tail.log");
 /// Per-run files as (data-dir root, name suffix); the supervisor lock goes last so it excludes until the end.
-const RUN_ARTIFACTS: [(&str, &str); 18] = [
+const RUN_ARTIFACTS: [(&str, &str); 20] = [
     ("local-runs", ""),
     ("run-logs", ".log"),
     ("run-logs", ".spool.log"),
+    ("run-logs", ".spool.json"),
+    ("run-logs", ".spool.json.part"),
     ("run-logs", ".log.part"),
     ("run-logs", ".log.part.json"),
     TAIL_LOG,
@@ -898,6 +903,27 @@ const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
 /// Just past the source cache's idle window, so tars a pass had to skip are removable.
 const SOURCE_SWEEP_DELAY_MS: i64 = (crate::jobs::ssh::cleanup::SOURCE_IDLE_MINUTES + 1) * 60 * 1000;
 
+fn check_reader_floor(conn: &Connection) -> Result<()> {
+    let has_floor: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_floor {
+        let floor: Option<i64> = conn
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = 'min_reader_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(floor) = floor.filter(|floor| *floor > 1) {
+            return Err(anyhow!("This database requires a newer OpenResearch reader (min_reader_version {}). Update orx before opening it.", floor));
+        }
+    }
+    Ok(())
+}
+
 pub struct Store {
     conn: Connection,
     data_dir: PathBuf,
@@ -905,6 +931,10 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     pub(crate) fn relocate_project_paths(&self, paths: &[(String, String)]) -> Result<()> {
         let tx = self.begin()?;
         for (old, new) in paths {
@@ -923,12 +953,6 @@ impl Store {
         Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path(), BUSY_TIMEOUT)
     }
 
-    /// Open like `open`, but cap SQLite's lock wait — `orx exp wait` shrinks
-    /// this to its deadline so one blocked open can't overshoot it.
-    pub fn open_with_busy_timeout(busy_timeout: Duration) -> Result<Self> {
-        Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path(), busy_timeout)
-    }
-
     /// Open a store rooted at an explicit directory, bypassing `data_dir()`
     /// resolution.
     pub fn open_at(dir: PathBuf) -> Result<Self> {
@@ -936,41 +960,81 @@ impl Store {
         Self::open_at_with_move_lock(dir, move_lock_path, BUSY_TIMEOUT)
     }
 
+    /// Opens the store for a command that only reads it. Where the store cannot be
+    /// written, as in a sandboxed agent, it opens read-only and applies no schema;
+    /// elsewhere it opens as `open` does, so a newer reader still finds its columns.
+    pub fn open_for_reading() -> Result<Self> {
+        Self::open_for_reading_within(BUSY_TIMEOUT)
+    }
+
+    /// Open like `open_for_reading`, but cap SQLite's lock wait — `orx exp wait`
+    /// shrinks this to its deadline so one blocked open can't overshoot it.
+    pub fn open_for_reading_within(busy_timeout: Duration) -> Result<Self> {
+        let dir = data_dir();
+        let db = dir.join("orx.db");
+        let exists = db
+            .try_exists()
+            .with_context(|| format!("Could not read {}", db.display()))?;
+        let writable =
+            || Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path(), busy_timeout);
+        if !exists {
+            return writable();
+        }
+        // SQLite opens a file it may not write read-only.
+        let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .with_context(|| format!("Could not open {}", db.display()))?;
+        if !conn.is_readonly(rusqlite::DatabaseName::Main)? {
+            drop(conn);
+            return writable();
+        }
+        check_reader_floor(&conn)?;
+        conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
+        Ok(Self {
+            conn,
+            data_dir: dir,
+            data_dir_move_lock_path: data_dir_move_lock_path(),
+        })
+    }
+
     fn open_at_with_move_lock(
         dir: PathBuf,
         data_dir_move_lock_path: PathBuf,
         busy_timeout: Duration,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&dir)?;
+        crate::paths::create_dir_all(&dir)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             // SQLite and its sidecars contain scoped rental capabilities.
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         }
-        std::fs::create_dir_all(dir.join("run-logs"))
-            .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
+        crate::paths::create_dir_all(&dir.join("run-logs"))?;
         let conn = Connection::open(dir.join("orx.db"))?;
-        let has_floor: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata')",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_floor {
-            let floor: Option<i64> = conn
-                .query_row(
-                    "SELECT value FROM store_metadata WHERE key = 'min_reader_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(floor) = floor.filter(|floor| *floor > 1) {
-                return Err(anyhow!("This database requires a newer OpenResearch reader (min_reader_version {}). Update orx before opening it.", floor));
+        conn.busy_timeout(busy_timeout)?;
+        check_reader_floor(&conn)?;
+        // WAL conversion can return SQLITE_BUSY without invoking SQLite's busy handler.
+        let wal_start = std::time::Instant::now();
+        let mut delay = Duration::from_millis(1);
+        while let Err(error) = conn.pragma_update(None, "journal_mode", "WAL") {
+            let remaining = busy_timeout.saturating_sub(wal_start.elapsed());
+            if remaining.is_zero()
+                || error.sqlite_error_code() != Some(rusqlite::ErrorCode::DatabaseBusy)
+            {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Could not prepare the database at {}. Try again.",
+                        dir.join("orx.db").display()
+                    )
+                });
             }
+            std::thread::sleep(delay.min(remaining));
+            conn.busy_timeout(busy_timeout.saturating_sub(wal_start.elapsed()))?;
+            delay = (delay * 2).min(Duration::from_millis(50));
         }
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
-        conn.execute_batch(
+        conn.busy_timeout(busy_timeout)?;
+        let schema =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+        schema.execute_batch(
             "CREATE TABLE IF NOT EXISTS store_metadata (
                 key TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
@@ -1335,10 +1399,20 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN launch_spec TEXT",
             "ALTER TABLE runs ADD COLUMN notify_cursor TEXT",
             "ALTER TABLE runs ADD COLUMN started_at INTEGER",
+            "ALTER TABLE ui_state ADD COLUMN opencode_free_models INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE chat_sessions ADD COLUMN profile_id TEXT",
+            "ALTER TABLE ui_state ADD COLUMN preferred_profile TEXT",
+            "ALTER TABLE ui_state ADD COLUMN favorite_models TEXT",
+            "ALTER TABLE ui_state ADD COLUMN hidden_models TEXT",
+            "ALTER TABLE ui_state ADD COLUMN hidden_agents TEXT",
+            "ALTER TABLE ui_state ADD COLUMN model_section_order TEXT",
+            "ALTER TABLE ui_state ADD COLUMN collapsed_model_sections TEXT",
+            "ALTER TABLE ui_state ADD COLUMN model_sightings TEXT",
+            "ALTER TABLE runs ADD COLUMN waiting_reason TEXT",
         ] {
-            let _ = conn.execute(ddl, []);
+            let _ = schema.execute(ddl, []);
         }
-        conn.execute_batch(
+        schema.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS delete_run_outbox AFTER DELETE ON runs BEGIN
                  DELETE FROM run_notices WHERE run_id = OLD.id;
                  DELETE FROM run_subscriptions WHERE run_id = OLD.id;
@@ -1349,17 +1423,18 @@ impl Store {
              END;",
         )?;
         // Covers the periodic native-id scan so it never reads the large parts_json.
-        conn.execute_batch(
+        schema.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
              ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
         // A delegate that outlives its delegator, in a worktree of its own, stands as the user's.
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_delegates AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_delegates WHERE session_id = OLD.id OR parent_session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_delegates AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_delegates WHERE session_id = OLD.id OR parent_session_id = OLD.id; END;")?;
+        schema.commit()?;
         conn.execute(
             "DELETE FROM native_invocation_identities WHERE session_id IS NULL AND created_at < ?1",
             [now_ms() - 7 * 24 * 60 * 60 * 1000],
@@ -1591,20 +1666,30 @@ impl Store {
             "SELECT onboarding_completed, tour_completed, preferred_harness,
                     preferred_model, preferred_service_tier,
                     preferred_permission_mode, preferred_reasoning_level, workspace_state_json,
-                    preferred_autonomy, nested_delegation
+                    preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
+                    favorite_models, hidden_models, model_section_order,
+                    collapsed_model_sections, model_sightings, hidden_agents
              FROM ui_state WHERE id = 1",
             [],
             |row| {
+                let profile: Option<String> = row.get(11)?;
                 let harness = row.get::<_, Option<String>>(2)?;
                 let model = row.get::<_, Option<String>>(3)?;
                 let service_tier = row.get::<_, Option<String>>(4)?;
                 let permission_mode = row.get::<_, Option<String>>(5)?;
                 let reasoning_level = row.get::<_, Option<String>>(6)?;
                 let workspace_json = row.get::<_, Option<String>>(7)?;
+                let list = |index| -> rusqlite::Result<Vec<String>> {
+                    Ok(row
+                        .get::<_, Option<String>>(index)?
+                        .and_then(|json| serde_json::from_str(&json).ok())
+                        .unwrap_or_default())
+                };
                 Ok(StoredUiState {
                     onboarding_completed: row.get(0)?,
                     tour_completed: row.get(1)?,
                     preferred_agent: harness.map(|harness| StoredAgentSelection {
+                        profile,
                         harness,
                         model,
                         service_tier,
@@ -1619,6 +1704,15 @@ impl Store {
                         .as_deref()
                         .and_then(Autonomy::from_id),
                     nested_delegation: row.get(9)?,
+                    opencode_free_models: row.get(10)?,
+                    favorite_models: list(12)?,
+                    hidden_models: list(13)?,
+                    hidden_agents: list(17)?,
+                    model_section_order: list(14)?,
+                    collapsed_model_sections: list(15)?,
+                    model_sightings: row
+                        .get::<_, Option<String>>(16)?
+                        .and_then(|json| serde_json::from_str(&json).ok()),
                 })
             },
         )?)
@@ -1678,6 +1772,23 @@ impl Store {
         Ok(())
     }
 
+    /// Store one of the picker's JSON columns; `column` is always a literal.
+    pub fn set_ui_json(&self, column: &'static str, value: &impl Serialize) -> Result<()> {
+        self.conn.execute(
+            &format!("UPDATE ui_state SET {column} = ?1 WHERE id = 1"),
+            params![serde_json::to_string(value)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_opencode_free_models(&self, offered: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET opencode_free_models = ?1 WHERE id = 1",
+            params![offered],
+        )?;
+        Ok(())
+    }
+
     pub fn set_preferred_autonomy(&self, autonomy: Autonomy) -> Result<()> {
         self.conn.execute(
             "UPDATE ui_state SET preferred_autonomy = ?1 WHERE id = 1",
@@ -1691,7 +1802,7 @@ impl Store {
             "UPDATE ui_state
              SET preferred_harness = ?1, preferred_model = ?2,
                  preferred_service_tier = ?3,
-                 preferred_permission_mode = ?4, preferred_reasoning_level = ?5
+                 preferred_permission_mode = ?4, preferred_reasoning_level = ?5, preferred_profile = ?6
              WHERE id = 1",
             params![
                 selection.harness,
@@ -1699,6 +1810,7 @@ impl Store {
                 selection.service_tier,
                 selection.permission_mode,
                 selection.reasoning_level,
+                selection.profile,
             ],
         )?;
         Ok(())
@@ -2477,8 +2589,8 @@ impl Store {
                                             title_source, model, service_tier, permission_mode, plan_mode,
                                             plan_reset_pending, reasoning_level,
                                             archived, context_usage_json, bootstrap_context,
-                                            active_leaf_id, created_at, updated_at, side_parent_session_id, side_parent_leaf_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                                            active_leaf_id, created_at, updated_at, side_parent_session_id, side_parent_leaf_id, profile_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     session.id,
                     session.project_id,
@@ -2500,6 +2612,7 @@ impl Store {
                     session.updated_at,
                     session.side_parent_session_id,
                     session.side_parent_leaf_id,
+                    session.profile_id,
                 ],
             )?;
             if let Some(state) = self.acp_launch_for_session(session)? {
@@ -3448,8 +3561,8 @@ impl Store {
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         service_tier, permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
                                         active_leaf_id, created_at, updated_at, autonomy,
-                                        side_parent_session_id, side_parent_leaf_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                                        side_parent_session_id, side_parent_leaf_id, profile_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 s.id,
                 s.project_id,
@@ -3471,6 +3584,7 @@ impl Store {
                 s.autonomy,
                 s.side_parent_session_id,
                 s.side_parent_leaf_id,
+                s.profile_id,
             ],
         )?;
         if let Some(state) = acp_state {
@@ -3523,6 +3637,20 @@ impl Store {
              ORDER BY updated_at DESC"
         ))?;
         let rows = stmt.query_map(params![project_id], row_to_chat_session)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn chat_session_ids_for_agent(
+        &self,
+        harness: &str,
+        executable: &str,
+    ) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id FROM chat_sessions c LEFT JOIN acp_sessions a ON a.session_id = c.id
+             WHERE c.harness IN (?1, ?2)
+                OR (c.harness LIKE 'acp:%' AND json_extract(a.launch_json, '$.executable') = ?2)",
+        )?;
+        let rows = stmt.query_map(params![harness, executable], |row| row.get(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -3662,7 +3790,7 @@ impl Store {
     }
 
     /// Hold through ownership lookup, native purge and local row deletion, across dashboard processes.
-    pub fn lock_native_deletion(&self) -> Result<std::fs::File> {
+    pub fn lock_native_deletion(&self) -> Result<crate::file_lock::FileLock> {
         let path = self
             .conn
             .path()
@@ -3678,7 +3806,7 @@ impl Store {
                 "Could not lock native chat deletion; retry when other deletions finish: {error}"
             )
         })?;
-        Ok(lock)
+        Ok(crate::file_lock::FileLock::new(lock))
     }
 
     pub fn native_sessions_for_deletion(
@@ -3795,7 +3923,7 @@ impl Store {
     }
 
     /// Keeps any dashboard from starting a data-dir move until dropped; `None` while a move holds or claims it.
-    fn hold_off_data_dir_move(&self) -> Result<Option<std::fs::File>> {
+    fn hold_off_data_dir_move(&self) -> Result<Option<crate::file_lock::FileLock>> {
         if self.data_dir_move_claimed()? {
             return Ok(None);
         }
@@ -3806,6 +3934,7 @@ impl Store {
             Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
         }
+        let hold = crate::file_lock::FileLock::new(hold);
         Ok((!self.data_dir_move_lease_exists()?).then_some(hold))
     }
 
@@ -3942,7 +4071,7 @@ impl Store {
              context_usage_json = NULL, active_leaf_id = ?8,
              plan_mode = ?9,
              plan_reset_pending = (?2 = 'codex' AND ?7 IS NOT NULL AND NOT ?9),
-             updated_at = ?10, native_fork_at = ?11 WHERE id = ?1",
+             updated_at = ?10, native_fork_at = ?11, profile_id = ?12 WHERE id = ?1",
             params![
                 id,
                 agent.harness,
@@ -3954,7 +4083,8 @@ impl Store {
                 marker.id,
                 plan_mode,
                 now_ms(),
-                fork_at
+                fork_at,
+                agent.profile,
             ],
         )?;
         tx.commit()?;
@@ -5064,6 +5194,7 @@ pub struct SshHostTest {
 /// session/rollout id (set after the first turn for CLIs that mint it lazily).
 #[derive(Debug, Clone)]
 pub struct StoredChatSession {
+    pub profile_id: Option<String>,
     pub id: String,
     pub project_id: String,
     pub harness: String,
@@ -5119,6 +5250,7 @@ pub struct StoredChatSession {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredAgentSelection {
+    pub profile: Option<String>,
     pub harness: String,
     pub model: Option<String>,
     pub service_tier: Option<String>,
@@ -5137,6 +5269,18 @@ pub struct StoredUiState {
     /// Whether delegates may delegate in turn unless a `delegate` call says
     /// otherwise. Off: only chats the user started delegate.
     pub nested_delegation: bool,
+    /// Whether OpenCode's free models are offered beside the user's own.
+    pub opencode_free_models: bool,
+    /// The model families the picker lists first, by the key the picker gives each.
+    pub favorite_models: Vec<String>,
+    /// Models turned off in the picker and for delegates: a canonical id, plus `:free` for its free tier.
+    pub hidden_models: Vec<String>,
+    pub hidden_agents: Vec<String>,
+    /// The picker's section ids in the user's order.
+    pub model_section_order: Vec<String>,
+    pub collapsed_model_sections: Vec<String>,
+    /// The picker's own record of models it has seen, opaque to the server.
+    pub model_sightings: Option<serde_json::Value>,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -5277,7 +5421,7 @@ fn row_to_chat_turn(
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
      created_at, updated_at, title_source, bootstrap_context, active_leaf_id, \
-     goal, autonomy, side_parent_session_id, side_parent_leaf_id, native_fork_at";
+     goal, autonomy, side_parent_session_id, side_parent_leaf_id, native_fork_at, profile_id";
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -5306,6 +5450,7 @@ fn row_to_chat_session(
         side_parent_session_id: row.get(20)?,
         side_parent_leaf_id: row.get(21)?,
         native_fork_at: row.get(22)?,
+        profile_id: row.get(23)?,
     })
 }
 
@@ -5478,7 +5623,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT contact, spec_digest, submission_attempt, submission_fence,
-                        cancel_accepted_at, launch_spec, notify_cursor, cancel_unconfirmed, started_at
+                        cancel_accepted_at, launch_spec, notify_cursor, cancel_unconfirmed, started_at,
+                        CASE WHEN status IN ('submitting', 'starting') THEN waiting_reason END
                  FROM runs WHERE id = ?1",
                 [run_id],
                 |row| {
@@ -5492,6 +5638,7 @@ impl Store {
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<i64>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
                     ))
                 },
             )
@@ -5506,6 +5653,7 @@ impl Store {
             notify,
             cancel_unconfirmed,
             started_at,
+            waiting_reason,
         )) = row
         else {
             return Ok(None);
@@ -5514,6 +5662,7 @@ impl Store {
             started_at,
             contact: json(contact)?.unwrap_or(Contact::Live),
             cancel_unconfirmed: json(cancel_unconfirmed)?,
+            waiting_reason,
             spec_digest,
             submission_attempt,
             submission_fence: json(fence)?,
@@ -6232,6 +6381,130 @@ mod tests {
     use super::*;
 
     #[test]
+    fn open_busy_timeout_applies_before_schema_reads() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        drop(Store::open().unwrap());
+        let locked = Connection::open(data_dir().join("orx.db")).unwrap();
+        locked
+            .execute_batch(
+                "PRAGMA locking_mode = EXCLUSIVE;
+                 BEGIN EXCLUSIVE;
+                 UPDATE store_metadata SET value = value;",
+            )
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let error = Store::open_for_reading_within(Duration::ZERO)
+            .err()
+            .expect("the other connection holds the database exclusively");
+        let elapsed = start.elapsed();
+        assert_eq!(
+            error
+                .downcast_ref::<rusqlite::Error>()
+                .unwrap()
+                .sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    }
+
+    #[test]
+    fn wal_setup_honors_the_lock_timeout() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        std::fs::create_dir_all(data_dir()).unwrap();
+        let locked = Connection::open(data_dir().join("orx.db")).unwrap();
+        locked
+            .execute_batch(
+                "CREATE TABLE preserved (value TEXT);
+                 INSERT INTO preserved VALUES ('kept');
+                 BEGIN;
+                 SELECT * FROM preserved;",
+            )
+            .unwrap();
+
+        for timeout in [Duration::ZERO, Duration::from_millis(50)] {
+            let start = std::time::Instant::now();
+            let error = Store::open_for_reading_within(timeout)
+                .err()
+                .expect("the reader blocks the journal mode change");
+            let elapsed = start.elapsed();
+            assert_eq!(
+                error
+                    .downcast_ref::<rusqlite::Error>()
+                    .unwrap()
+                    .sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            assert!(elapsed >= timeout, "{elapsed:?}");
+            assert!(elapsed < timeout + Duration::from_secs(1), "{elapsed:?}");
+        }
+
+        locked.execute_batch("ROLLBACK").unwrap();
+        let store = Store::open().unwrap();
+        let mode: String = store
+            .conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+    }
+
+    #[test]
+    fn schema_setup_rolls_back_when_a_later_statement_fails() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-schema-rollback").unwrap();
+        let conn = Connection::open(dir.path().join("orx.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE preserved (value TEXT);
+             INSERT INTO preserved VALUES ('kept');
+             CREATE VIEW runs AS SELECT 'id' AS id;",
+        )
+        .unwrap();
+
+        assert!(Store::open_at(dir.path().to_path_buf()).is_err());
+        let schema_created: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'store_metadata')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!schema_created);
+
+        conn.execute_batch("DROP VIEW runs").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        let preserved: String = store
+            .conn
+            .query_row("SELECT value FROM preserved", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(preserved, "kept");
+    }
+
+    #[test]
+    fn concurrent_opens_apply_the_schema_without_partial_state() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-schema-concurrent").unwrap();
+        let ready = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        ready.wait();
+                        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+                        assert!(!store.ui_state().unwrap().onboarding_completed);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+    }
+
+    #[test]
     fn min_reader_version_refuses_before_migrations_on_every_open() {
         let dir = std::env::temp_dir().join(format!("orx-reader-floor-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -6786,6 +7059,7 @@ mod tests {
                     started_at: None,
                     contact: Contact::Live,
                     cancel_unconfirmed: None,
+                    waiting_reason: None,
                     spec_digest: None,
                     submission_attempt: 1,
                     submission_fence: None,
@@ -6992,6 +7266,41 @@ mod tests {
             .any(|(id, _)| id == &run.id));
         drop(shared_guard);
         drop(supervisor_guard);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A run 0.2.26 wrote has no waiting reason, and a reason 0.2.26 left behind on a run it
+    /// moved past starting never shows.
+    #[test]
+    fn runs_from_0_2_26_read_without_a_waiting_reason() {
+        let dir = std::env::temp_dir().join(format!("orx-store-0226-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = Connection::open(dir.join("orx.db")).unwrap();
+        old.execute_batch(include_str!("../tests/contracts/store-0.2.26-runs.sql"))
+            .unwrap();
+        drop(old);
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        let state = store.engine_run_state("starting").unwrap().unwrap();
+        assert_eq!(state.waiting_reason, None);
+        assert_eq!(state.contact, Contact::Live);
+        assert_eq!(state.launch.unwrap().kind, "k8s_job");
+        let run = store.get_run("starting").unwrap().unwrap();
+        let view = crate::plane::Run::from_store(&store, &run).unwrap();
+        assert_eq!(view.display_status(), "starting");
+        assert_eq!(view.waiting_detail(), None);
+
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET waiting_reason = 'Pulling image' WHERE id = 'running'",
+                [],
+            )
+            .unwrap();
+        let state = store.engine_run_state("running").unwrap().unwrap();
+        assert_eq!(state.waiting_reason, None);
+        assert_eq!(state.started_at, Some(250));
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -8727,7 +9036,8 @@ mod tests {
         assert!(run_dir.join("repo/output").is_file());
         survivor.kill().unwrap();
         survivor.wait().unwrap();
-        store.cleanup_orphaned_run_artifacts().unwrap();
+        let pass = store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(pass.kept.is_empty() && !pass.more, "{:?}", pass.kept);
         assert!(!run_dir.exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
@@ -9245,6 +9555,7 @@ mod tests {
         store.set_onboarding_completed(true).unwrap();
         store
             .set_preferred_agent(&StoredAgentSelection {
+                profile: None,
                 harness: "codex".into(),
                 model: None,
                 service_tier: None,
@@ -9290,10 +9601,18 @@ mod tests {
                 workspace: None,
                 preferred_autonomy: None,
                 nested_delegation: false,
+                opencode_free_models: true,
+                favorite_models: Vec::new(),
+                hidden_models: Vec::new(),
+                hidden_agents: Vec::new(),
+                model_section_order: Vec::new(),
+                collapsed_model_sections: Vec::new(),
+                model_sightings: None,
             }
         );
 
         let selection = StoredAgentSelection {
+            profile: None,
             harness: "codex".into(),
             model: Some("gpt-5.6".into()),
             service_tier: Some("priority".into()),
@@ -9304,6 +9623,26 @@ mod tests {
         store.set_tour_completed(true).unwrap();
         store.set_preferred_agent(&selection).unwrap();
         store.set_preferred_autonomy(Autonomy::Copilot).unwrap();
+        store
+            .set_ui_json("favorite_models", &["claude opus", "gpt sol"])
+            .unwrap();
+        store
+            .set_ui_json("hidden_models", &["gpt-6", "deepseek-r1:free"])
+            .unwrap();
+        store.set_ui_json("hidden_agents", &["codex"]).unwrap();
+        assert_eq!(
+            serde_json::to_value(store.ui_state().unwrap()).unwrap()["hiddenAgents"],
+            serde_json::json!(["codex"])
+        );
+        store
+            .set_ui_json("model_section_order", &["openai", "anthropic"])
+            .unwrap();
+        store
+            .set_ui_json("collapsed_model_sections", &["openai"])
+            .unwrap();
+        store
+            .set_ui_json("model_sightings", &serde_json::json!({"seen": ["gpt-6"]}))
+            .unwrap();
 
         assert_eq!(
             store.ui_state().unwrap(),
@@ -9314,6 +9653,13 @@ mod tests {
                 workspace: None,
                 preferred_autonomy: Some(Autonomy::Copilot),
                 nested_delegation: false,
+                opencode_free_models: true,
+                favorite_models: vec!["claude opus".into(), "gpt sol".into()],
+                hidden_models: vec!["gpt-6".into(), "deepseek-r1:free".into()],
+                hidden_agents: vec!["codex".into()],
+                model_section_order: vec!["openai".into(), "anthropic".into()],
+                collapsed_model_sections: vec!["openai".into()],
+                model_sightings: Some(serde_json::json!({"seen": ["gpt-6"]})),
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -9359,6 +9705,87 @@ mod tests {
         assert_eq!(preferred.harness, "claude-code");
         assert_eq!(preferred.permission_mode.as_deref(), Some("auto"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chat_profile_and_preferred_profile_roundtrip_and_switch() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-profiles-test").unwrap();
+        let store = Store::open_at(temp.path().to_path_buf()).unwrap();
+        let mut session = chat_session_fixture("profile-chat");
+        session.profile_id = Some("claude-012345abcd".into());
+        session.native_session_id = Some("native-context".into());
+        store.create_chat_session(&session).unwrap();
+        let saved = store.get_chat_session(&session.id).unwrap().unwrap();
+        assert_eq!(saved.profile_id, session.profile_id);
+        assert_eq!(
+            crate::local::chat::session_json_with(Some(&store), &saved, false)["profile"],
+            "claude-012345abcd"
+        );
+        let mut selection = StoredAgentSelection {
+            profile: Some("claude-abcdefghij".into()),
+            harness: "claude-code".into(),
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            reasoning_level: None,
+        };
+        store.set_preferred_agent(&selection).unwrap();
+        assert_eq!(
+            store.ui_state().unwrap().preferred_agent,
+            Some(selection.clone())
+        );
+        let mut marker = StoredChatMessage {
+            id: "profile-switch".into(),
+            session_id: session.id.clone(),
+            role: "assistant".into(),
+            parts_json: "[]".into(),
+            created_at: now_ms(),
+            completed_at: Some(now_ms()),
+            parent_id: None,
+            base_native_session_id: session.native_session_id.clone(),
+            result_native_session_id: None,
+            result_native_message_id: None,
+            native_harness: Some(session.harness.clone()),
+        };
+        marker.parent_id = session.active_leaf_id.clone();
+        store
+            .switch_chat_agent(
+                &session.id,
+                &selection,
+                session.native_session_id.as_deref(),
+                Some("native-point"),
+                &marker,
+                false,
+            )
+            .unwrap();
+        let switched = store.get_chat_session(&session.id).unwrap().unwrap();
+        assert_eq!(switched.profile_id, selection.profile);
+        assert_eq!(switched.native_session_id, session.native_session_id);
+        assert_eq!(switched.native_fork_at.as_deref(), Some("native-point"));
+        selection.harness = "codex".into();
+        selection.profile = Some("codex-012345abcd".into());
+        marker.id = "cross-agent-switch".into();
+        marker.parent_id = Some("profile-switch".into());
+        store
+            .switch_chat_agent(&session.id, &selection, None, None, &marker, false)
+            .unwrap();
+        let switched = store.get_chat_session(&session.id).unwrap().unwrap();
+        assert_eq!(switched.profile_id, selection.profile);
+        assert!(switched.native_session_id.is_none());
+        assert_eq!(
+            switched.active_leaf_id.as_deref(),
+            Some("cross-agent-switch")
+        );
+        drop(store);
+        assert_eq!(
+            Store::open_at(temp.path().to_path_buf())
+                .unwrap()
+                .get_chat_session(&session.id)
+                .unwrap()
+                .unwrap()
+                .profile_id,
+            selection.profile
+        );
     }
 
     #[test]
@@ -10272,16 +10699,7 @@ mod tests {
             if std::env::var(CHILD_PHASE).unwrap() == "blocked" {
                 assert!(store.lock_native_deletion().is_err());
             } else {
-                // A released lock lingers in children the parent's other tests forked, until
-                // they exec.
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                let _lock = loop {
-                    match store.lock_native_deletion() {
-                        Ok(lock) => break lock,
-                        Err(error) => assert!(std::time::Instant::now() < deadline, "{error}"),
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                };
+                let _lock = store.lock_native_deletion().unwrap();
                 let (deleting, retained) = store
                     .native_sessions_for_deletion(&["second".into()], &["opencode", "claude-code"])
                     .unwrap();
@@ -10328,6 +10746,7 @@ mod tests {
 
     fn chat_session_fixture(id: &str) -> StoredChatSession {
         StoredChatSession {
+            profile_id: None,
             id: id.into(),
             project_id: "proj_1".into(),
             harness: "claude-code".into(),

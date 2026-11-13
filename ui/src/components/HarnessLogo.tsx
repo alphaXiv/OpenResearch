@@ -1,31 +1,208 @@
 // Brand mark for a harness/provider, rendered inline because the UI is
 // rust-embedded and CSP-locked.
 
-import type { HarnessId } from "../api";
-import { Plug } from "lucide-react";
-import deepseek from "../assets/harnesses/deepseek.png";
-import kimi from "../assets/harnesses/kimi.svg";
-import minimax from "../assets/harnesses/minimax-code.svg";
-import zcode from "../assets/harnesses/zcode.png";
-import pi from "../assets/harnesses/pi-acp.svg";
+import type { HarnessId, HarnessModel } from "../api";
+import { Box, Plug } from "lucide-react";
+import ai2 from "../assets/harnesses/ai2.svg";
+import ai21 from "../assets/harnesses/ai21.svg";
+import aionlabs from "../assets/harnesses/aionlabs.svg";
+import alephalpha from "../assets/harnesses/alephalpha.svg";
+import amazon from "../assets/harnesses/amazon.png";
+import anthropic from "../assets/harnesses/anthropic.svg";
+import arcee from "../assets/harnesses/arcee.svg";
+import baichuan from "../assets/harnesses/baichuan.svg";
+import baidu from "../assets/harnesses/baidu.svg";
+import baseten from "../assets/harnesses/baseten.svg";
+import bedrock from "../assets/harnesses/bedrock.svg";
+import bytedance from "../assets/harnesses/bytedance.svg";
+import cerebras from "../assets/harnesses/cerebras.svg";
+import cohere from "../assets/harnesses/cohere.svg";
+import dbrx from "../assets/harnesses/dbrx.svg";
+import deepcogito from "../assets/harnesses/deepcogito.svg";
+import deepinfra from "../assets/harnesses/deepinfra.svg";
+import deepseek from "../assets/harnesses/deepseek.svg";
 import devin from "../assets/harnesses/devin.svg";
+import dotsstudio from "../assets/harnesses/dotsstudio.svg";
+import doubao from "../assets/harnesses/doubao.svg";
+import emojiBread from "../assets/harnesses/emoji-bread.svg";
+import emojiCat from "../assets/harnesses/emoji-cat.svg";
+import emojiChick from "../assets/harnesses/emoji-chick.svg";
+import emojiCucumber from "../assets/harnesses/emoji-cucumber.svg";
+import emojiHeart from "../assets/harnesses/emoji-heart.svg";
+import emojiIce from "../assets/harnesses/emoji-ice.svg";
+import emojiLaptop from "../assets/harnesses/emoji-laptop.svg";
+import emojiPlanet from "../assets/harnesses/emoji-planet.svg";
+import emojiRabbit from "../assets/harnesses/emoji-rabbit.svg";
+import essentialai from "../assets/harnesses/essentialai.svg";
+import fireworks from "../assets/harnesses/fireworks.svg";
+import gemini from "../assets/harnesses/gemini.svg";
+import githubCopilot from "../assets/harnesses/github-copilot.svg";
+import google from "../assets/harnesses/google.svg";
 import grok from "../assets/harnesses/grok-build.svg";
+import groq from "../assets/harnesses/groq.svg";
+import huggingface from "../assets/harnesses/huggingface.svg";
+import hunyuan from "../assets/harnesses/hunyuan.svg";
+import ibm from "../assets/harnesses/ibm.svg";
+import inception from "../assets/harnesses/inception.svg";
+import inclusionai from "../assets/harnesses/inclusionai.png";
+import inference from "../assets/harnesses/inference.svg";
+import inflection from "../assets/harnesses/inflection.svg";
+import internlm from "../assets/harnesses/internlm.svg";
+import kwaipilot from "../assets/harnesses/kwaipilot.svg";
+import ling from "../assets/harnesses/ling.svg";
+import liquid from "../assets/harnesses/liquid.svg";
+import longcat from "../assets/harnesses/longcat.svg";
+import meituan from "../assets/harnesses/meituan.png";
+import meta from "../assets/harnesses/meta.svg";
+import microsoft from "../assets/harnesses/microsoft.svg";
+import minimax from "../assets/harnesses/minimax.svg";
+import mistral from "../assets/harnesses/mistral.svg";
+import moondream from "../assets/harnesses/moondream.png";
+import moonshot from "../assets/harnesses/moonshot.svg";
+import morph from "../assets/harnesses/morph.svg";
+import nousresearch from "../assets/harnesses/nousresearch.svg";
+import nova from "../assets/harnesses/nova.svg";
+import nvidia from "../assets/harnesses/nvidia.svg";
+import ollama from "../assets/harnesses/ollama.svg";
+import openrouter from "../assets/harnesses/openrouter.svg";
+import oxalpha from "../assets/harnesses/oxalpha.svg";
+import perceptron from "../assets/harnesses/perceptron.svg";
+import perplexity from "../assets/harnesses/perplexity.svg";
+import pi from "../assets/harnesses/pi-acp.svg";
+import poolside from "../assets/harnesses/poolside.svg";
+import qwen from "../assets/harnesses/qwen.svg";
+import recursive from "../assets/harnesses/recursive.png";
+import reflection from "../assets/harnesses/reflection.svg";
+import reka from "../assets/harnesses/reka.svg";
+import relace from "../assets/harnesses/relace.svg";
+import sakana from "../assets/harnesses/sakana.svg";
+import sensenova from "../assets/harnesses/sensenova.svg";
+import sensetime from "../assets/harnesses/sensetime.png";
+import skywork from "../assets/harnesses/skywork.svg";
+import stepfun from "../assets/harnesses/stepfun.svg";
+import tencent from "../assets/harnesses/tencent.svg";
+import thinkingmachines from "../assets/harnesses/thinkingmachines.svg";
+import tii from "../assets/harnesses/tii.svg";
+import together from "../assets/harnesses/together.svg";
+import upstage from "../assets/harnesses/upstage.svg";
+import vercel from "../assets/harnesses/vercel.svg";
+import wenxin from "../assets/harnesses/wenxin.svg";
+import writer from "../assets/harnesses/writer.png";
+import xai from "../assets/harnesses/xai.svg";
+import xiaomi from "../assets/harnesses/xiaomi.svg";
+import yi from "../assets/harnesses/yi.svg";
+import zai from "../assets/harnesses/zai.svg";
+import zcode from "../assets/harnesses/zcode.png";
 
-const ACP_LOGOS: Record<string, string> = { dsh: deepseek, kimi, mcode: minimax, "zcode-acp-server": zcode, "pi-acp": pi, devin, grok };
-const ACP_PRESET_LOGOS: Record<string, string> = {
-  "acp:dee4a440-fd64-4217-a4a7-1d4c148c0dd1": deepseek,
-  "acp:a8b48911-e95c-42cb-bc35-bab3aa83e5e2": kimi,
-  "acp:1dba9897-707b-4cd8-b595-c8c26115f563": minimax,
-  "acp:2f1639e0-3f0f-4594-bb5b-a4078c36d5a4": zcode,
-  "acp:467b1900-c3c3-47c1-8b87-09389e1c44b5": pi,
-  "acp:565e351e-62c7-488f-a58a-914d30cc5776": devin,
-  "acp:ac7f713b-b520-40d2-9b56-75deca1574c7": grok,
+/** Vendor marks, and emoji standing in for models no lab owns; monochrome ones take the text colour, so they hold up in either theme. */
+const BRANDS = {
+  ai2: { image: ai2, colour: true },
+  ai21: { image: ai21, colour: false },
+  aionlabs: { image: aionlabs, colour: true },
+  alephalpha: { image: alephalpha, colour: false },
+  amazon: { image: amazon, colour: true },
+  anthropic: { image: anthropic, colour: false },
+  arcee: { image: arcee, colour: true },
+  baichuan: { image: baichuan, colour: true },
+  baidu: { image: baidu, colour: true },
+  baseten: { image: baseten, colour: false },
+  bedrock: { image: bedrock, colour: false },
+  bread: { image: emojiBread, colour: true },
+  bytedance: { image: bytedance, colour: true },
+  cat: { image: emojiCat, colour: true },
+  cerebras: { image: cerebras, colour: false },
+  chick: { image: emojiChick, colour: true },
+  cohere: { image: cohere, colour: true },
+  cucumber: { image: emojiCucumber, colour: true },
+  dbrx: { image: dbrx, colour: true },
+  deepcogito: { image: deepcogito, colour: true },
+  deepinfra: { image: deepinfra, colour: false },
+  deepseek: { image: deepseek, colour: true },
+  devin: { image: devin, colour: false },
+  dotsstudio: { image: dotsstudio, colour: false },
+  doubao: { image: doubao, colour: true },
+  essentialai: { image: essentialai, colour: false },
+  fireworks: { image: fireworks, colour: false },
+  gemini: { image: gemini, colour: true },
+  "github-copilot": { image: githubCopilot, colour: false },
+  google: { image: google, colour: true },
+  grok: { image: grok, colour: false },
+  groq: { image: groq, colour: false },
+  heart: { image: emojiHeart, colour: true },
+  huggingface: { image: huggingface, colour: true },
+  hunyuan: { image: hunyuan, colour: true },
+  ibm: { image: ibm, colour: false },
+  ice: { image: emojiIce, colour: true },
+  inception: { image: inception, colour: false },
+  inclusionai: { image: inclusionai, colour: true },
+  inference: { image: inference, colour: false },
+  inflection: { image: inflection, colour: false },
+  internlm: { image: internlm, colour: false },
+  kwaipilot: { image: kwaipilot, colour: false },
+  laptop: { image: emojiLaptop, colour: true },
+  ling: { image: ling, colour: true },
+  liquid: { image: liquid, colour: false },
+  longcat: { image: longcat, colour: true },
+  meituan: { image: meituan, colour: true },
+  meta: { image: meta, colour: true },
+  microsoft: { image: microsoft, colour: true },
+  minimax: { image: minimax, colour: true },
+  mistral: { image: mistral, colour: true },
+  moondream: { image: moondream, colour: true },
+  moonshot: { image: moonshot, colour: false },
+  morph: { image: morph, colour: true },
+  nousresearch: { image: nousresearch, colour: false },
+  nova: { image: nova, colour: true },
+  nvidia: { image: nvidia, colour: true },
+  ollama: { image: ollama, colour: false },
+  openrouter: { image: openrouter, colour: false },
+  oxalpha: { image: oxalpha, colour: false },
+  perceptron: { image: perceptron, colour: false },
+  perplexity: { image: perplexity, colour: true },
+  pi: { image: pi, colour: false },
+  planet: { image: emojiPlanet, colour: true },
+  poolside: { image: poolside, colour: true },
+  qwen: { image: qwen, colour: true },
+  rabbit: { image: emojiRabbit, colour: true },
+  recursive: { image: recursive, colour: false },
+  reflection: { image: reflection, colour: false },
+  reka: { image: reka, colour: false },
+  relace: { image: relace, colour: false },
+  sakana: { image: sakana, colour: true },
+  sensenova: { image: sensenova, colour: true },
+  sensetime: { image: sensetime, colour: true },
+  skywork: { image: skywork, colour: true },
+  stepfun: { image: stepfun, colour: true },
+  tencent: { image: tencent, colour: true },
+  thinkingmachines: { image: thinkingmachines, colour: false },
+  tii: { image: tii, colour: false },
+  together: { image: together, colour: true },
+  upstage: { image: upstage, colour: false },
+  vercel: { image: vercel, colour: false },
+  wenxin: { image: wenxin, colour: true },
+  writer: { image: writer, colour: false },
+  xai: { image: xai, colour: false },
+  xiaomi: { image: xiaomi, colour: true },
+  yi: { image: yi, colour: false },
+  zai: { image: zai, colour: false },
+  zcode: { image: zcode, colour: true },
+};
+export type Brand = keyof typeof BRANDS | "kimi";
+
+const ACP_LOGOS: Record<string, Brand> = { dsh: "deepseek", kimi: "kimi", mcode: "minimax", "zcode-acp-server": "zcode", "pi-acp": "pi", devin: "devin", grok: "grok" };
+const ACP_PRESET_LOGOS: Record<string, Brand> = {
+  "acp:dee4a440-fd64-4217-a4a7-1d4c148c0dd1": "deepseek",
+  "acp:a8b48911-e95c-42cb-bc35-bab3aa83e5e2": "kimi",
+  "acp:1dba9897-707b-4cd8-b595-c8c26115f563": "minimax",
+  "acp:2f1639e0-3f0f-4594-bb5b-a4078c36d5a4": "zcode",
+  "acp:467b1900-c3c3-47c1-8b87-09389e1c44b5": "pi",
+  "acp:565e351e-62c7-488f-a58a-914d30cc5776": "devin",
+  "acp:ac7f713b-b520-40d2-9b56-75deca1574c7": "grok",
 };
 
 export function HarnessLogo({ harness, logo, size = 16 }: { harness: HarnessId; logo?: string; size?: number }) {
-  const image = (logo && ACP_LOGOS[logo]) || ACP_PRESET_LOGOS[harness];
-  if (image === deepseek || image === zcode) return <img src={image} width={size} height={size} className="block shrink-0 object-contain" alt="" aria-hidden="true" />;
-  if (image) return <span className="block shrink-0 bg-current" style={{ width: size, height: size, maskImage: `url(${JSON.stringify(image)})`, maskSize: "contain", maskPosition: "center", maskRepeat: "no-repeat" }} aria-hidden="true" />;
+  const brand = (logo && ACP_LOGOS[logo]) || ACP_PRESET_LOGOS[harness];
+  if (brand) return <BrandMark brand={brand} size={size} />;
   if (harness.startsWith("acp:")) return <Plug size={size} className="block shrink-0" aria-hidden="true" />;
   const cls = "block shrink-0";
   if (harness === "claude-code") {
@@ -39,6 +216,7 @@ export function HarnessLogo({ harness, logo, size = 16 }: { harness: HarnessId; 
     return (
       <svg className={cls} width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
         <path d="M22 24H2V0h20zM17 4.8H7v14.4h10z" />
+        <path d="M17 9.6H7v9.6h10z" fillOpacity={0.3} />
       </svg>
     );
   }
@@ -83,4 +261,149 @@ export function HarnessLogo({ harness, logo, size = 16 }: { harness: HarnessId; 
       <path d="M249.176 323.434V298.276C249.176 296.158 249.971 294.569 251.825 293.509L302.406 264.381C309.29 260.409 317.5 258.555 325.973 258.555C357.75 258.555 377.877 283.185 377.877 309.399C377.877 311.253 377.877 313.371 377.611 315.49L325.178 284.771C322.001 282.919 318.822 282.919 315.645 284.771L249.176 323.434ZM367.283 421.415V361.301C367.283 357.592 365.694 354.945 362.516 353.092L296.048 314.43L317.763 301.982C319.617 300.925 321.206 300.925 323.058 301.982L373.639 331.112C388.205 339.586 398.003 357.592 398.003 375.069C398.003 395.195 386.087 413.733 367.283 421.412V421.415ZM233.553 368.452L211.838 355.742C209.986 354.684 209.19 353.095 209.19 350.975V292.718C209.19 264.383 230.905 242.932 260.301 242.932C271.423 242.932 281.748 246.641 290.49 253.26L238.321 283.449C235.146 285.303 233.555 287.951 233.555 291.659V368.455L233.553 368.452ZM280.292 395.462L249.176 377.985V340.913L280.292 323.436L311.407 340.913V377.985L280.292 395.462ZM300.286 475.968C289.163 475.968 278.837 472.259 270.097 465.64L322.264 435.449C325.441 433.597 327.03 430.949 327.03 427.239V350.445L349.011 363.155C350.865 364.213 351.66 365.802 351.66 367.922V426.179C351.66 454.514 329.679 475.965 300.286 475.965V475.968ZM237.525 416.915L186.944 387.785C172.378 379.31 162.582 361.305 162.582 343.827C162.582 323.436 174.763 305.164 193.563 297.485V357.861C193.563 361.571 195.154 364.217 198.33 366.071L264.535 404.467L242.82 416.915C240.967 417.972 239.377 417.972 237.525 416.915ZM234.614 460.343C204.689 460.343 182.71 437.833 182.71 410.028C182.71 407.91 182.976 405.792 183.238 403.672L235.405 433.863C238.582 435.715 241.763 435.715 244.938 433.863L311.407 395.466V420.622C311.407 422.742 310.612 424.331 308.758 425.389L258.179 454.519C251.293 458.491 243.083 460.343 234.611 460.343H234.614ZM300.286 491.854C332.329 491.854 359.073 469.082 365.167 438.892C394.825 431.211 413.892 403.406 413.892 375.073C413.892 356.535 405.948 338.529 391.648 325.552C392.972 319.991 393.766 314.43 393.766 308.87C393.766 271.003 363.048 242.666 327.562 242.666C320.413 242.666 313.528 243.723 306.644 246.109C294.725 234.457 278.307 227.042 260.301 227.042C228.258 227.042 201.513 249.815 195.42 280.004C165.761 287.685 146.694 315.49 146.694 343.824C146.694 362.362 154.638 380.368 168.938 393.344C167.613 398.906 166.819 404.467 166.819 410.027C166.819 447.894 197.538 476.231 233.024 476.231C240.172 476.231 247.058 475.173 253.943 472.788C265.859 484.441 282.278 491.854 300.286 491.854Z" />
     </svg>
   );
+}
+
+/**
+ * Model families by the lab that makes them, in the order the model picker lists labs, with the name the lab goes by
+ * for its section and its own logo where its models wear another mark. A model nothing here names lists under Other
+ * models.
+ */
+const MODEL_LABS: [pattern: RegExp, lab: Brand | "claude" | "openai" | "cursor", name: string, logo?: Brand][] = [
+  [/claude|opus|sonnet|haiku|mythos|fable/, "claude", "Anthropic", "anthropic"],
+  [/chatgpt|\bgpt|\bo\d\b|codex|dall-?e/, "openai", "OpenAI"],
+  [/gemini|gemma|imagen|\bveo\b|lyria|nano-?banana/, "gemini", "Google", "google"],
+  [/grok|\bxai\b/, "grok", "xAI", "xai"],
+  [/deepseek/, "deepseek", "DeepSeek"],
+  [/kimi|moonshot/, "kimi", "Moonshot AI", "moonshot"],
+  [/glm|zai|z-ai|zhipu/, "zai", "Z.ai"],
+  [/qwen|qwq/, "qwen", "Qwen"],
+  [/minimax/, "minimax", "MiniMax"],
+  [/mimo|xiaomi/, "xiaomi", "Xiaomi"],
+  [/composer/, "cursor", "Cursor"],
+  [/hunyuan|\bhy[\d-]/, "hunyuan", "Tencent", "tencent"],
+  [/longcat|meituan/, "longcat", "Meituan", "meituan"],
+  [/stepfun|\bstep[- ]\d/, "stepfun", "StepFun"],
+  [/nemotron|nvidia/, "nvidia", "NVIDIA"],
+  [/\bmuse\b|llama|\bmeta\b/, "meta", "Meta"],
+  [/mistral|mixtral|codestral|devstral|magistral|ministral|pixtral|voxtral|leanstral/, "mistral", "Mistral AI"],
+  [/cohere|\bcommand[- ]?[ar](\b|\d)|\baya\b|\bnorth\b/, "cohere", "Cohere"],
+  [/\bnova\b/, "nova", "Amazon", "amazon"],
+  [/doubao|bytedance|\bseed\b/, "bytedance", "ByteDance Seed"],
+  [/ernie|wenxin/, "wenxin", "Baidu", "baidu"],
+  [/inclusionai|\b(ling|ring)\b/, "ling", "inclusionAI", "inclusionai"],
+  [/\bphi\b|\bphi-?\d|\bmai\b|wizardlm/, "microsoft", "Microsoft"],
+  [/granite|\bibm\b/, "ibm", "IBM"],
+  [/jamba|ai21/, "ai21", "AI21 Labs"],
+  [/sonar|perplexity/, "perplexity", "Perplexity"],
+  [/\blfm|liquid/, "liquid", "Liquid AI"],
+  [/mercury|inception/, "inception", "Inception"],
+  [/\breka\b/, "reka", "Reka"],
+  [/reflection|\bbeam\b/, "reflection", "Reflection AI"],
+  [/poolside|laguna/, "poolside", "Poolside"],
+  [/arcee|\btrinity\b|\bafm\b/, "arcee", "Arcee AI"],
+  [/sakana|\bfugu\b|namazu/, "sakana", "Sakana AI"],
+  [/upstage|\bsolar\b/, "upstage", "Upstage"],
+  [/\baion/, "aionlabs", "Aion Labs"],
+  [/\bnous\b|nousresearch|hermes/, "nousresearch", "Nous Research"],
+  [/kwaipilot|\bkat-(coder|dev)/, "kwaipilot", "Kwaipilot"],
+  [/internlm|intern-?s1|internvl/, "internlm", "InternLM"],
+  [/olmo|\btulu|molmo|allenai|\bai2\b/, "ai2", "Ai2"],
+  [/cogito/, "deepcogito", "Deep Cogito"],
+  [/baichuan/, "baichuan", "Baichuan"],
+  [/falcon|\btii\b/, "tii", "TII"],
+  [/\byi[- ]|01-ai|01\.ai/, "yi", "01.AI"],
+  [/skywork/, "skywork", "Skywork"],
+  [/sensenova|sensechat/, "sensenova", "SenseTime", "sensetime"],
+  [/perceptron/, "perceptron", "Perceptron"],
+  [/essential|\brnj\b/, "essentialai", "Essential AI"],
+  [/\binflection\b/, "inflection", "Inflection AI"],
+  [/dbrx|databricks/, "dbrx", "Databricks"],
+  [/aleph|pharia|luminous/, "alephalpha", "Aleph Alpha"],
+  [/inkling|thinking-?machines/, "thinkingmachines", "Thinking Machines"],
+  [/writer|palmyra/, "writer", "Writer"],
+  [/moondream/, "moondream", "Moondream"],
+  [/\bdots[.-]|dots-studio/, "dotsstudio", "Dots Studio"],
+  [/schematron|inference-net/, "inference", "Inference.net"],
+  [/\bember-?\d/, "fireworks", "Fireworks AI"],
+  [/\bmorph\b/, "morph", "Morph"],
+  [/relace/, "relace", "Relace"],
+  [/recursive|\bflint\b/, "recursive", "Recursive"],
+  [/\bopenrouter\b/, "openrouter", "OpenRouter"],
+];
+
+export type Lab = (typeof MODEL_LABS)[number][1];
+
+export const LABS = MODEL_LABS.map(([, lab, name]) => ({ lab, name }));
+
+/**
+ * The lab behind a model; one its lab's own agent lists under a name no pattern knows is still that lab's. An id's
+ * first segment is OpenCode's provider, which hosts other labs' models, so only the rest decides.
+ */
+export function modelLab(model: Pick<HarnessModel, "id" | "displayName">, harness?: HarnessId): Lab | undefined {
+  const name = modelName(model);
+  return MODEL_LABS.find(([pattern]) => pattern.test(name))?.[1] ?? (harness ? agentLab(harness) : undefined);
+}
+
+function modelName(model: Pick<HarnessModel, "id" | "displayName">) {
+  return `${model.id.split("/").slice(1).join(" ") || model.id} ${model.displayName ?? ""}`.toLowerCase();
+}
+
+/** The lab an agent belongs to, when it is that lab's own: Claude Code is Anthropic's, DeepSeek Harness DeepSeek's. */
+export function agentLab(harness: HarnessId, logo?: string): Lab | undefined {
+  if (harness === "claude-code") return "claude";
+  if (harness === "codex") return "openai";
+  if (harness === "cursor") return "cursor";
+  if (harness === "antigravity") return "gemini";
+  const brand = (logo && ACP_LOGOS[logo]) || ACP_PRESET_LOGOS[harness];
+  return brand === "zcode" ? "zai" : MODEL_LABS.find(([, lab]) => lab === brand)?.[1];
+}
+
+/** Models whose mark isn't their lab's: Doubao's own, and emoji for stealth models, which no lab owns. */
+const MODEL_MARKS: [pattern: RegExp, brand: Brand][] = [
+  [/doubao/, "doubao"],
+  [/\box[- ]alpha/, "oxalpha"],
+  [/iceman/, "ice"],
+  [/cat[- ]jam/, "cat"],
+  [/space[- ]bunny/, "rabbit"],
+  [/big[- ]pickle/, "cucumber"],
+  [/crouton/, "bread"],
+  [/pulse[- ]alpha/, "heart"],
+  [/fledge/, "chick"],
+  [/\bexo\b/, "planet"],
+  [/\bll[- ]alpha/, "laptop"],
+];
+
+export function ModelMark({ model, harness, size }: { model: Pick<HarnessModel, "id" | "displayName">; harness?: HarnessId; size: number }) {
+  const own = MODEL_MARKS.find(([pattern]) => pattern.test(modelName(model)))?.[1];
+  return own ? <BrandMark brand={own} size={size} /> : <FamilyMark lab={modelLab(model, harness)} size={size} />;
+}
+
+/** The lab's own logo: Anthropic's, not Claude's. */
+export function LabMark({ lab, size }: { lab: Lab | undefined; size: number }) {
+  const logo = MODEL_LABS.find(([, entry]) => entry === lab)?.[3];
+  return logo ? <BrandMark brand={logo} size={size} /> : <FamilyMark lab={lab} size={size} />;
+}
+
+/** The mark a lab's models share, using Claude Code's, Codex's and Cursor's own for theirs; a neutral one for no lab. */
+function FamilyMark({ lab, size }: { lab: Lab | undefined; size: number }) {
+  if (lab === "claude") return <HarnessLogo harness="claude-code" size={size} />;
+  if (lab === "openai") return <HarnessLogo harness="codex" size={size} />;
+  if (lab === "cursor") return <HarnessLogo harness="cursor" size={size} />;
+  if (lab) return <BrandMark brand={lab} size={size} />;
+  return <Box size={size} className="block shrink-0 text-muted" aria-hidden="true" />;
+}
+
+export function BrandMark({ brand, size }: { brand: Brand; size: number }) {
+  if (brand === "kimi") {
+    // Kimi's K follows the text colour; its dot keeps the brand blue.
+    return (
+      <svg className="block shrink-0" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="#1783FF" d="M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z" />
+        <path fill="currentColor" d="M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.82c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.77c0 .128.083.23.186.23h2.69c.103 0 .186-.102.186-.23v-3.25c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.06c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z" />
+      </svg>
+    );
+  }
+  const { image, colour } = BRANDS[brand];
+  if (colour) return <img src={image} width={size} height={size} className="block shrink-0 object-contain" alt="" aria-hidden="true" />;
+  return <span className="block shrink-0 bg-current" style={{ width: size, height: size, maskImage: `url(${JSON.stringify(image)})`, maskSize: "contain", maskPosition: "center", maskRepeat: "no-repeat" }} aria-hidden="true" />;
 }

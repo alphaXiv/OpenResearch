@@ -29,7 +29,7 @@ async function openAbandon(contact = { type: "unreachable", since: 1, cause: "Of
 
 test("Abandon confirms first and warns about unreachable compute", async () => {
   const abandoned = await openAbandon();
-  for (const text of [m.run_abandon_title(), m.run_abandon_unreachable(), m.run_abandon_body()]) assert.ok(dialog().textContent.includes(text), text);
+  for (const text of [m.run_abandon_title(), m.run_abandon_unreachable(), m.run_abandon_effect()]) assert.ok(dialog().textContent.includes(text), text);
   assert.deepEqual(abandoned, []);
   await click(find("[role] button", m.run_abandon_confirm()));
   assert.deepEqual(abandoned, ["run"]);
@@ -53,5 +53,5 @@ test("failed abandonment keeps the dialog open with the error", async () => {
 test("Abandon on a host that needs sign-in does not claim the machine is unreachable", async () => {
   await openAbandon({ type: "needs_auth", since: 1, cause: "Connect" });
   assert.ok(!dialog().textContent.includes(m.run_abandon_unreachable()));
-  assert.ok(dialog().textContent.includes(m.run_abandon_body()));
+  assert.ok(dialog().textContent.includes(m.run_abandon_effect()));
 });

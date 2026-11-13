@@ -3,14 +3,14 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// A `timeout` too long for an `Instant`, such as `Duration::MAX`, never expires.
 pub fn run(
     command: &mut Command,
     input: &[u8],
     timeout: Duration,
-    stop: Option<&AtomicBool>,
+    stop: &dyn Fn() -> bool,
 ) -> io::Result<ExecResult> {
     unsafe {
         command.pre_exec(|| {
@@ -64,7 +64,7 @@ pub fn run(
         let mut sent = 0;
         let mut out_closed = false;
         let mut err_closed = false;
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now().checked_add(timeout);
         loop {
             if let Some(pipe) = &mut stdin {
                 if sent == input.len() {
@@ -111,7 +111,7 @@ pub fn run(
             if unsafe { info.si_pid() } != 0 && out_closed && err_closed {
                 break;
             }
-            if stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) || Instant::now() >= deadline {
+            if stop() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 result.timed_out = true;
                 break;
             }
@@ -137,10 +137,12 @@ pub fn run(
                     revents: 0,
                 });
             }
-            let wait_ms = deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis()
-                .min(100) as i32;
+            let wait_ms = deadline.map_or(100, |deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(100) as i32
+            });
             if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, wait_ms) } == -1 {
                 let error = io::Error::last_os_error();
                 if error.kind() != io::ErrorKind::Interrupted {
@@ -210,7 +212,7 @@ mod tests {
                 .arg("cat; head -c 400000 /dev/zero; head -c 40000 /dev/zero >&2"),
             b"hello\n",
             Duration::from_secs(5),
-            None,
+            &|| false,
         )
         .unwrap();
         assert_eq!(result.code, Some(0));
@@ -227,7 +229,7 @@ mod tests {
             Command::new("/bin/sh").arg("-c").arg("sleep 60 & wait"),
             &[],
             Duration::from_millis(50),
-            None,
+            &|| false,
         )
         .unwrap();
         assert!(result.timed_out);
@@ -246,7 +248,7 @@ mod tests {
                 .current_dir(&dir),
             &[],
             Duration::from_secs(2),
-            None,
+            &|| false,
         )
         .unwrap();
         assert_eq!(result.code, Some(0), "{result:?}");

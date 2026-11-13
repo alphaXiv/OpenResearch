@@ -37,7 +37,15 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
     {
         return wait(exp_id, project, timeout, interval).await;
     }
-    let mut store = Store::open()?;
+    let mut store = match &args.command {
+        ExpCommand::Status { .. }
+        | ExpCommand::Desc {
+            set: None,
+            stdin: false,
+            ..
+        } => Store::open_for_reading()?,
+        _ => Store::open()?,
+    };
     match args.command {
         ExpCommand::Archive {
             exp_id,
@@ -208,7 +216,7 @@ async fn wait(
         (Some(exp_id), None) => {
             let plane = crate::plane::local_plane::retry_on_db_lock(
                 || {
-                    let store = Store::open_with_busy_timeout(
+                    let store = Store::open_for_reading_within(
                         crate::plane::local_plane::busy_timeout_left(deadline),
                     )?;
                     resolve_experiment(store, &exp_id)
@@ -222,7 +230,7 @@ async fn wait(
         (None, Some(project_id)) => {
             let plane = crate::plane::local_plane::retry_on_db_lock(
                 || {
-                    let store = Store::open_with_busy_timeout(
+                    let store = Store::open_for_reading_within(
                         crate::plane::local_plane::busy_timeout_left(deadline),
                     )?;
                     resolve_project(store, &project_id)
@@ -277,9 +285,12 @@ fn request_legacy_run_cancel_at(
         .open(lock_path)?;
     let mut cancel_lock = fd_lock::RwLock::new(lock_file);
     let _cancel_guard = cancel_lock.write()?;
-    store
-        .get_run(run_id)?
-        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?;
+    store.get_run(run_id)?.ok_or_else(|| {
+        anyhow!(
+            "Run {run_id} was not found in the orx store at {}.",
+            store.data_dir().display()
+        )
+    })?;
     store.request_cancel(run_id, reason)?;
     Ok(())
 }
