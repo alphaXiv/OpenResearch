@@ -33,7 +33,7 @@ pub(crate) fn runtime(harness: &str) -> Option<&'static str> {
 
 const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
 const CODEX_CHANNEL: &str = "https://releases.openai.com/codex/channels/latest";
-const OPENCODE_RELEASES: &str = "https://api.github.com/repos/anomalyco/opencode/releases";
+const NPM_REGISTRY: &str = "https://registry.npmjs.org";
 
 /// Chats and compactions hold it shared; replacing OpenCode's binary takes it
 /// exclusively, so a new copy never retires a server that is mid-turn.
@@ -44,7 +44,7 @@ pub(crate) fn source(harness: &str) -> Option<&'static str> {
     match key(harness).as_str() {
         "claude-code" => Some("downloads.claude.ai"),
         "codex" => Some("releases.openai.com"),
-        "opencode" => Some("github.com"),
+        "opencode" => Some("registry.npmjs.org"),
         other => catalog::AGENTS
             .iter()
             .find(|(id, _, _)| *id == other)
@@ -235,52 +235,52 @@ pub(crate) async fn latest(harness: &str, major: Option<u64>) -> Result<Release>
                 .with_context(|| format!("Codex's latest release has an unexpected tag {tag:?}"))?;
             published_asset(&release, &asset, version, Format::TarGz)
         }
-        "opencode" => {
-            opencode_release(&client, OPENCODE_RELEASES, &asset, major.unwrap_or(2)).await
-        }
+        "opencode" => opencode_release(&client, NPM_REGISTRY, &asset, major.unwrap_or(2)).await,
         _ => bail!("orx does not install {harness}."),
     }
 }
 
+/// OpenCode's npm packages, where GitHub's API would refuse a shared network
+/// past 60 lookups an hour. OpenCode 2 renamed its packages.
 async fn opencode_release(
     client: &reqwest::Client,
-    url: &str,
-    asset: &str,
+    registry: &str,
+    platform: &str,
     major: u64,
 ) -> Result<Release> {
-    let mut page = 1;
-    loop {
-        let releases = get_json(client, &format!("{url}?per_page=40&page={page}")).await?;
-        let releases = releases
-            .as_array()
-            .ok_or_else(|| anyhow!("GitHub returned an invalid OpenCode release list."))?;
-        if let Some(release) = newest_opencode(releases, asset, major) {
-            return release;
-        }
-        if releases.len() < 40 {
-            bail!("GitHub lists no OpenCode {major}.x release.");
-        }
-        page += 1;
-    }
-}
-
-/// The newest stable `major` release on one page of OpenCode's releases.
-fn newest_opencode(releases: &[Value], asset: &str, major: u64) -> Option<Result<Release>> {
-    let (version, release) = releases
-        .iter()
-        .filter(|release| release["draft"] != true && release["prerelease"] != true)
-        .filter_map(|release| {
-            let tag = release["tag_name"].as_str()?.strip_prefix('v')?;
-            Some((semver::Version::parse(tag).ok()?, release))
-        })
-        .filter(|(version, _)| version.major == major && version.pre.is_empty())
-        .max_by(|a, b| a.0.cmp(&b.0))?;
-    let format = if asset.ends_with(".zip") {
-        Format::Zip
-    } else {
-        Format::TarGz
+    let package = match major {
+        1 => format!("opencode-{platform}"),
+        2 => format!("@opencode%2fcli-{platform}"),
+        _ => bail!("OpenResearch can't install OpenCode {major}."),
     };
-    Some(published_asset(release, asset, version, format))
+    let metadata = get_json(client, &format!("{registry}/{package}/latest")).await?;
+    let tag = metadata["version"].as_str().unwrap_or_default();
+    let version = semver::Version::parse(tag)
+        .with_context(|| format!("npm lists OpenCode as {tag:?}, which isn't a version"))?;
+    if version.major != major {
+        bail!("npm's newest OpenCode is {version}, not OpenCode {major}.");
+    }
+    let dist = &metadata["dist"];
+    let (Some(url), Some(integrity)) = (
+        dist["tarball"].as_str(),
+        dist["integrity"]
+            .as_str()
+            .and_then(|integrity| integrity.strip_prefix("sha512-")),
+    ) else {
+        bail!("npm lists no download or SHA-512 for OpenCode {version}.");
+    };
+    let sha512 = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, integrity)
+        .with_context(|| format!("npm lists a malformed SHA-512 for OpenCode {version}"))?;
+    let sha512 = sha512
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(Release {
+        version,
+        url: url.to_string(),
+        sha256: format!("sha512:{sha512}"),
+        format: Format::TarGz,
+    })
 }
 
 /// Claude Code's own updater follows `autoUpdatesChannel`, so the copy follows it too.
@@ -359,7 +359,7 @@ fn published_asset(
     })
 }
 
-/// The release asset for this computer: a Claude Code platform key, else a file name.
+/// The release for this computer: a Claude Code or OpenCode platform key, else a file name.
 fn asset(harness: &str) -> Option<String> {
     let os = std::env::consts::OS;
     let arch = match std::env::consts::ARCH {
@@ -413,8 +413,7 @@ fn asset(harness: &str) -> Option<String> {
                 ""
             };
             let libc = if os == "linux" && musl() { "-musl" } else { "" };
-            let extension = if os == "linux" { "tar.gz" } else { "zip" };
-            Some(format!("opencode-{os}-{arch}{baseline}{libc}.{extension}"))
+            Some(format!("{os}-{arch}{baseline}{libc}"))
         }
         _ => None,
     }
@@ -700,6 +699,11 @@ fn unpack(harness: &str, format: &Format, archive: &Path, into: &Path) -> Result
         if harness == "antigravity" && into.join("antigravity").is_file() {
             std::fs::rename(into.join("antigravity"), &bin)?;
         }
+        let packaged = into.join("bin").join(bin.file_name().unwrap());
+        if harness == "opencode" && packaged.is_file() {
+            std::fs::rename(packaged, &bin)?;
+            std::fs::remove_dir(into.join("bin"))?;
+        }
     }
     if !bin.is_file() {
         bail!("The download has no {}.", bin.display());
@@ -933,28 +937,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opencode_release_follows_pages_for_older_majors() {
-        use axum::{extract::Query, routing::get, Json, Router};
-        let app = Router::new().route("/releases", get(|Query(query): Query<std::collections::HashMap<String, String>>| async move {
-            let version = if query["page"] == "1" { "2.0.0" } else { "1.99.0" };
-            let release = serde_json::json!({
-                "tag_name": format!("v{version}"),
-                "assets": [{"name":"opencode.zip", "browser_download_url":"https://example.test/asset", "digest":"sha256:abc"}]
-            });
-            Json(if query["page"] == "1" { serde_json::json!(vec![release;40]) } else { serde_json::json!([release]) })
-        }));
+    async fn opencode_release_reads_each_majors_npm_package() {
+        use axum::{extract::Path, routing::get, Json, Router};
+        let app = Router::new().route(
+            "/{package}/latest",
+            get(|Path(package): Path<String>| async move {
+                let version = match package.as_str() {
+                    "opencode-darwin-arm64" => "1.19.5",
+                    "@opencode/cli-darwin-arm64" => "2.3.0",
+                    _ => "3.0.0",
+                };
+                Json(serde_json::json!({
+                    "version": version,
+                    "dist": {"tarball": format!("https://example.test/{version}.tgz"), "integrity": "sha512-3q2+7w=="},
+                }))
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/releases", listener.local_addr().unwrap());
+        let registry = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let release = opencode_release(&client().unwrap(), &url, "opencode.zip", 1)
+        let client = client().unwrap();
+
+        let v2 = opencode_release(&client, &registry, "darwin-arm64", 2)
             .await
             .unwrap();
-        assert_eq!(release.version, semver::Version::new(1, 99, 0));
-        assert!(
-            opencode_release(&client().unwrap(), &url, "opencode.zip", 3)
-                .await
-                .is_err()
-        );
+        assert_eq!(v2.version, semver::Version::new(2, 3, 0));
+        assert_eq!(v2.url, "https://example.test/2.3.0.tgz");
+        assert_eq!(v2.sha256, "sha512:deadbeef");
+        let v1 = opencode_release(&client, &registry, "darwin-arm64", 1)
+            .await
+            .unwrap();
+        assert_eq!(v1.version, semver::Version::new(1, 19, 5));
+        let renamed = opencode_release(&client, &registry, "linux-x64", 1).await;
+        assert!(renamed.is_err());
         server.abort();
     }
 
@@ -1127,33 +1142,9 @@ mod tests {
             "{codex}"
         );
         let opencode = asset("opencode").unwrap();
-        assert!(opencode.starts_with("opencode-"), "{opencode}");
-        assert_eq!(opencode.ends_with(".tar.gz"), cfg!(target_os = "linux"));
+        assert!(!opencode.contains('.'), "{opencode}");
         assert!(!asset("claude-code").unwrap().contains('.'));
         assert_eq!(asset("cursor"), None);
-    }
-
-    #[test]
-    fn opencode_defaults_to_newest_stable_v2_and_allows_explicit_v1() {
-        let releases = serde_json::json!(["1.19.5", "2.1.0", "2.2.5", "2.3.0-beta.1", "3.0.0"].map(|version| serde_json::json!({
-            "tag_name":format!("v{version}"),
-            "assets":[{"name":"opencode.zip","browser_download_url":"https://example.test/asset","digest":"sha256:abc"}]
-        })));
-        assert_eq!(
-            newest_opencode(releases.as_array().unwrap(), "opencode.zip", 2)
-                .unwrap()
-                .unwrap()
-                .version,
-            semver::Version::new(2, 2, 5)
-        );
-        assert_eq!(
-            newest_opencode(releases.as_array().unwrap(), "opencode.zip", 1)
-                .unwrap()
-                .unwrap()
-                .version,
-            semver::Version::new(1, 19, 5)
-        );
-        assert!(newest_opencode(releases.as_array().unwrap(), "opencode.zip", 4).is_none());
     }
 
     #[test]
@@ -1207,5 +1198,32 @@ mod tests {
         let tampered = dir.path().join("tampered");
         let wrong = Format::Zstd(format!("{:x}", Sha256::digest(b"other")));
         assert!(unpack("claude-code", &wrong, &archive, &tampered).is_err());
+    }
+
+    #[test]
+    fn opencode_unpacks_from_its_npm_package() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-managed-npm").unwrap();
+        let name = format!("opencode{}", std::env::consts::EXE_SUFFIX);
+        let bytes = b"opencode";
+        let mut package = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        for (path, content) in [
+            ("package/package.json".to_string(), &b"{}"[..]),
+            (format!("package/bin/{name}"), &bytes[..]),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            package.append_data(&mut header, path, content).unwrap();
+        }
+        let archive = dir.path().join("opencode.tgz");
+        std::fs::write(&archive, package.into_inner().unwrap().finish().unwrap()).unwrap();
+
+        let into = dir.path().join("release");
+        unpack("opencode", &Format::TarGz, &archive, &into).unwrap();
+        assert_eq!(std::fs::read(executable("opencode", &into)).unwrap(), bytes);
     }
 }

@@ -123,7 +123,7 @@ import { useColoredMarkdown, useThemePreference, type ThemePreference } from "..
 import { m } from "../paraglide/messages.js";
 import { fmtBytes, fmtClock, fmtMemory, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
-import { isLocale, type Locale } from "../paraglide/runtime.js";
+import { getLocale, isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
 import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
@@ -464,6 +464,7 @@ export function AgentList({ remote, onboarding }: {
     || Boolean(endpoints.data?.some((connection) => connection.id === id));
   const opencodeSignIns = [...(opencode?.account?.split(", ") ?? []), ...(opencode?.models ?? []).map((model) => model.id.split("/")[0])];
   const unrecorded = [...new Set(opencodeSignIns)].filter((id) => id && !recorded(id));
+  const providerNames = (ids: string[]) => new Intl.ListFormat(getLocale()).format(ids.map((id) => providerTile({ id, name: id }).tile.name));
   // What was added here shows with whatever is wrong with it; an agent merely found on this
   // computer shows only while it works, and Add agent sets up the rest. OpenCode stands behind
   // its providers: it shows for sign-ins no record stands for, or a fault those records hit.
@@ -633,7 +634,7 @@ export function AgentList({ remote, onboarding }: {
     const update = h.id === "opencode" && opencode1 && !remote;
     const action = update || (!h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands)));
     const noModels = h.agentReady && !h.models.length;
-    const signIns = h.id === "opencode" ? unrecorded.map((id) => providerTile({ id, name: id }).tile.name).join(", ") : undefined;
+    const signIns = h.id === "opencode" && unrecorded.length > 0 ? m.settings_opencode_signed_in({ providers: providerNames(unrecorded) }) : undefined;
     const detail = h.id === "opencode" && opencode1 ? m.settings_opencode_update_needed()
       : h.authCheckFailed || !h.agentReady
         ? status.label
@@ -680,15 +681,7 @@ export function AgentList({ remote, onboarding }: {
             {acp && <><Button size="small" onClick={() => openAcp(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={remove} aria-haspopup="dialog">{m.chat_panel_remove()}</Button></>}
           </div>
         )}
-        {update && (
-          <div className="mb-3">
-            <p className="mt-0 mb-2 text-sm text-subtext">{m.opencode_update_description({ version: opencodeVersion(h) ?? "1" })}</p>
-            <div className="flex flex-wrap gap-2">
-              <Button size="small" variant="primary" onClick={() => openSetup(h, { action: "upgrade" })} disabled={!commands} aria-haspopup="dialog">{m.opencode_update()}</Button>
-              <Button size="small" onClick={() => openSetup(h, { action: "install" })} disabled={!commands} aria-haspopup="dialog">{m.opencode_use_copy()}</Button>
-            </div>
-          </div>
-        )}
+        {update && <p className="mt-0 mb-3 text-sm text-subtext">{m.opencode_update_description({ version: opencodeVersion(h) ?? "1" })}</p>}
         <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
           {(acp || !h.managed) && (
             <>
@@ -707,7 +700,7 @@ export function AgentList({ remote, onboarding }: {
           {h.account && (
             <>
               <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
-              <span className="v">{h.account}</span>
+              <span className="v">{h.id === "opencode" ? providerNames(h.account.split(", ")) : h.account}</span>
             </>
           )}
           {h.org && (

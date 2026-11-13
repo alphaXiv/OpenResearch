@@ -67,7 +67,7 @@ pub(super) enum Action {
     Install,
     Login,
     Update,
-    /// OpenCode only: from 1.x to 2.x.
+    /// OpenCode only: from 1.x to 2.x, by the user's own updater or else orx's copy.
     Upgrade,
 }
 
@@ -547,9 +547,26 @@ async fn managed_setup(
             copy.as_ref().map(|(_, version)| version),
         ),
     });
+    // `opencode upgrade --major` arrived in 1.19; without it, or when it fails, the copy stands in.
     if let (Action::Upgrade, Some((bin, version))) = (request.action, &user) {
-        if version.major < 2 {
-            return upgrade_own_opencode(socket, attempt, size, follow_up, bin).await;
+        if version.major < 2 && *version >= semver::Version::new(1, 19, 0) {
+            let args = vec!["upgrade".to_string(), "--major".to_string()];
+            let (status, output) = run_in_terminal(
+                socket,
+                attempt,
+                size,
+                follow_up,
+                (bin.to_string_lossy().into_owned(), args),
+                Vec::new(),
+                &mut TerminalScreen::default(),
+            )
+            .await?;
+            let moved = managed::user_install(harness)
+                .await
+                .is_some_and(|(_, version)| version.major >= 2);
+            if moved {
+                return Ok(completed_or_failure(attempt, status, output));
+            }
         }
     }
     let release = managed::latest(harness, major).await;
@@ -620,43 +637,6 @@ fn following_major(user: Option<&semver::Version>, copy: Option<&semver::Version
         (Some(only), None) | (None, Some(only)) => only.major,
         (None, None) => 2,
     }
-}
-
-/// The user's own OpenCode 1 moves itself to OpenCode 2 with its own updater, which
-/// answers a method it can't handle (Homebrew, Scoop) with instructions and a clean exit.
-async fn upgrade_own_opencode(
-    socket: &mut WebSocket,
-    attempt: &SetupAttempt,
-    size: &mut PtySize,
-    follow_up: &mut FollowUp,
-    bin: &std::path::Path,
-) -> Result<Option<CommandFailure>, String> {
-    let args = vec!["upgrade".to_string(), "--major".to_string()];
-    let (status, output) = run_in_terminal(
-        socket,
-        attempt,
-        size,
-        follow_up,
-        (bin.to_string_lossy().into_owned(), args),
-        Vec::new(),
-        &mut TerminalScreen::default(),
-    )
-    .await?;
-    let moved = managed::user_install("opencode")
-        .await
-        .is_some_and(|(_, version)| version.major >= 2);
-    if moved {
-        return Ok(completed_or_failure(attempt, status, output));
-    }
-    Ok(Some(CommandFailure {
-        message: "OpenCode's own updater couldn't move it to OpenCode 2.".into(),
-        exit_code: if status.success() {
-            1
-        } else {
-            status.exit_code()
-        },
-        output,
-    }))
 }
 
 /// The terminal prints the attempt's error itself, once the attempt ends.

@@ -1127,22 +1127,19 @@ export function OpenCodeSignInDialog({ name, first, start, confirm, cancel, isDi
   </DialogContent>;
 }
 
-/** OpenCode 1 can't add providers: update the user's own, or use OpenResearch's copy. */
+/** OpenCode 1 can't add providers. */
 function OpenCodeUpdate({ opencode, commands, disabled, onReady }: {
   opencode: Harness;
   commands: HarnessSetupCommands;
   disabled: boolean;
   onReady: () => void;
 }) {
-  const [action, setAction] = useState<"upgrade" | "install" | null>(null);
-  if (action) return <HarnessSetup key={action} harness={opencode} commands={commands} action={action} disabled={disabled} onReady={onReady} />;
-  return <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); setAction("upgrade"); }}>
+  const [updating, setUpdating] = useState(false);
+  if (updating) return <HarnessSetup harness={opencode} commands={commands} action="upgrade" disabled={disabled} onReady={onReady} />;
+  return <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); setUpdating(true); }}>
     <p className="m-0 text-sm font-medium">{m.opencode_update_title()}</p>
     <p className="m-0 text-sm text-subtext">{m.opencode_update_description({ version: opencodeVersion(opencode) ?? "1" })}</p>
-    <div className="flex flex-wrap gap-2">
-      <Button type="submit" variant="primary" data-autofocus disabled={disabled}>{m.opencode_update()}</Button>
-      <Button type="button" disabled={disabled} onClick={() => setAction("install")}>{m.opencode_use_copy()}</Button>
-    </div>
+    <Button type="submit" variant="primary" data-autofocus disabled={disabled}>{m.opencode_update()}</Button>
   </form>;
 }
 
