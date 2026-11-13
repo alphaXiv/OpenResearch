@@ -5631,7 +5631,10 @@ fn spawn_agent_updates(state: AppState) {
         // Startup detection's probes go first.
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
-            update_agents(&state, harness_setup::keep_current).await;
+            update_agents(&state, |harness| {
+                harness_setup::keep_current(harness, &state.agent)
+            })
+            .await;
             tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
         }
     });

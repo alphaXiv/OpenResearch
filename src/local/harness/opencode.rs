@@ -380,6 +380,7 @@ impl Harness for OpenCode {
     }
 
     async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        let _in_use = super::managed::OPENCODE_IN_USE.read().await;
         selected_generation_model(request.model)?;
         opencode_one_shot(&crate::local::opencode::resolve_binary().await?, request).await
     }
@@ -1581,6 +1582,7 @@ async fn opencode_pre_accept_setup(
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+    let _in_use = super::managed::OPENCODE_IN_USE.read().await;
     // Native permission and question requests die with their turn. Clear any
     // crash/restart leftovers before a new live request can be surfaced.
     ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;

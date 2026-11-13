@@ -39,6 +39,8 @@ account is skipped until a sign-in shows it in use; one whose sign-in could
 not be checked is still kept current. New OpenCode installs
 use major 2; an existing major 1 still runs chats and offers an explicit upgrade
 or OpenResearch's own copy before provider changes.
+OpenResearch places a new OpenCode copy only while no chat or compaction is
+mid-turn, and stops the idle OpenCode servers first so none keeps the old binary.
 Agents orx starts run with Claude Code's updater off, so only this check
 changes an install. Cursor, Antigravity and ACP presets also use cached vendor
 releases; their updates replace orx's copy without invoking vendor installers.
