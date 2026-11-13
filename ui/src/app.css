@@ -412,11 +412,35 @@
     transform: scale(0.4);
   }
 }
-@keyframes title-char-in {
+/* The mask lives only in the keyframes, so with `backwards` fill it is gone
+   once the sweep ends and the title paints exactly like a static one. Block
+   sizing takes the parent's visible width, so the sweep and the inherited
+   ellipsis cover what is on screen rather than the full overflowing string. */
+.title-reveal {
+  display: block;
+  overflow: hidden;
+  text-overflow: inherit;
+  animation: title-reveal 700ms cubic-bezier(0.4, 0, 0.2, 1) backwards;
+}
+
+@keyframes title-reveal {
   from {
-    opacity: 0;
-    filter: blur(4px);
-    transform: translateY(0.15em);
+    mask-image: linear-gradient(to right, #000 33.3%, transparent 66.7%);
+    mask-size: 300% 100%;
+    mask-repeat: no-repeat;
+    mask-position: 100% 0;
+  }
+  to {
+    mask-image: linear-gradient(to right, #000 33.3%, transparent 66.7%);
+    mask-size: 300% 100%;
+    mask-repeat: no-repeat;
+    mask-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .title-reveal {
+    animation: none;
   }
 }
 
