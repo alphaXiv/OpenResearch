@@ -21,7 +21,7 @@ export function isImmutableQuery(query: Query) {
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
-export const liveFamilies = ["getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
+const liveFamilies = ["getSessionExperiments", "getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
 
 const settingsFamilies: Record<string, readonly string[]> = {
   hf: ["getHfSettings", "getComputeSettings", "getEnvVars", "getTrackioRuns"],
@@ -51,6 +51,20 @@ export function createInvalidation(client: WorkspaceClient) {
     url,
   } = client;
 
+  let repairing: Promise<void> | undefined;
+  let repairAgain = false;
+  function repairLiveQueries() {
+    repairAgain = true;
+    repairing ??= (async () => {
+      const scope = workspaceScope();
+      while (repairAgain && isCurrentScope(scope)) {
+        repairAgain = false;
+        await invalidateFamilies(liveFamilies, scope, undefined, true);
+      }
+    })().finally(() => { repairing = undefined; });
+    return repairing;
+  }
+
   function invalidateFamilies(families: readonly string[], scope = workspaceScope(), predicate?: QueryFilters["predicate"], cancelReads = false) {
     if (!isCurrentScope(scope)) return;
     const filters = {
@@ -58,10 +72,10 @@ export function createInvalidation(client: WorkspaceClient) {
       predicate: (query: Query) => families.includes(String(query.queryKey[2])) && !isImmutableQuery(query) && (!predicate || predicate(query)),
     };
     if (cancelReads) {
-      void queryClient.cancelQueries(filters).then(() => {
-        if (isCurrentScope(scope)) void queryClient.invalidateQueries(filters);
+      return queryClient.cancelQueries(filters).then(() => {
+        if (isCurrentScope(scope)) return queryClient.invalidateQueries(filters);
       });
-    } else void queryClient.invalidateQueries(filters);
+    } else return queryClient.invalidateQueries(filters);
   }
 
   function invalidateProjectFiles(
@@ -153,6 +167,7 @@ export function createInvalidation(client: WorkspaceClient) {
   }
 
   return {
+    repairLiveQueries,
     invalidateFamilies,
     invalidateProjectFiles,
     removeSession,

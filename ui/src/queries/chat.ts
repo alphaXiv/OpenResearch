@@ -24,7 +24,10 @@ export function createChatQueries(
       return rows.filter((row) => !deletedSessionIds.has(row.id)).map((row) => ({
         ...row, contextUsage: row.contextUsage ?? previous?.find((old) => old.id === row.id)?.contextUsage,
       }));
-    }, mergeLiveList),
+    }, (incoming, current, changed) => {
+      const summaries = new Map(incoming.map((row) => [row.id, row.awaitingInput]));
+      return mergeLiveList(incoming, current, changed).map((row) => ({ ...row, awaitingInput: summaries.get(row.id) ?? row.awaitingInput }));
+    }),
     staleTime: 30_000,
   });
 

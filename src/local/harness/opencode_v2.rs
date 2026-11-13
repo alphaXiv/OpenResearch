@@ -238,6 +238,8 @@ async fn merge_projection(
     recorded: &mut HashSet<String>,
 ) -> Result<bool> {
     let mut answered = false;
+    let mut latest_usage = None;
+    let mut latest_retry = None;
     for message in messages.iter().filter(|m| {
         m["id"].as_str().is_some_and(|id| !previous.contains(id)) && m["type"] == "assistant"
     }) {
@@ -261,22 +263,12 @@ async fn merge_projection(
             .is_some_and(|v| !v.is_null());
         record_message_usage(ctx, message, recorded);
         if let Some(used) = opencode_used_tokens(message.get("tokens")) {
-            ctx.report_usage(ContextUsage {
+            latest_usage = Some(ContextUsage {
                 used_tokens: used,
                 context_window: None,
             });
         }
-        if let Some(retry) = message.get("retry").filter(|retry| !retry.is_null()) {
-            ctx.show_retry_status(
-                "native",
-                &error_text(&retry["error"]),
-                retry["attempt"].as_i64().unwrap_or(1),
-                None,
-                retry["at"].as_i64(),
-            );
-        } else {
-            ctx.clear_retry_status();
-        }
+        latest_retry = message.get("retry").filter(|retry| !retry.is_null());
         let mut parts = projected_parts(message);
         for (part, content) in &mut parts {
             if content["type"] != "tool" || content["name"] != "subagent" {
@@ -302,8 +294,22 @@ async fn merge_projection(
             part.children = child_messages.into_iter().flat_map(wire_parts).collect();
         }
         for (part, _) in parts {
-            ctx.upsert_part_preserving_children(part);
+            ctx.upsert_part_raw(part);
         }
+    }
+    if let Some(retry) = latest_retry {
+        ctx.show_retry_status(
+            "native",
+            &error_text(&retry["error"]),
+            retry["attempt"].as_i64().unwrap_or(1),
+            None,
+            retry["at"].as_i64(),
+        );
+    } else {
+        ctx.clear_retry_status();
+    }
+    if let Some(usage) = latest_usage {
+        ctx.report_usage(usage);
     }
     Ok(answered)
 }
@@ -1046,6 +1052,108 @@ pub(super) async fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn repeated_projection_reports_only_the_latest_changed_usage() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut events = ctx.host.subscribe();
+        let endpoint = AgentEndpoint {
+            base_url: "http://127.0.0.1:1".into(),
+            client: crate::net::loopback_client().build().unwrap(),
+            protocol: crate::local::opencode::Protocol::V2,
+            legacy_v2_api: false,
+        };
+        let messages = vec![
+            json!({"id":"old", "type":"assistant", "tokens":{"input":10,"output":2}}),
+            json!({"id":"latest", "type":"assistant", "tokens":{"input":20,"output":3}}),
+        ];
+        let previous = HashSet::new();
+        let mut recorded = HashSet::new();
+        merge_projection(
+            &mut ctx,
+            &endpoint,
+            "session",
+            &messages,
+            &previous,
+            &mut recorded,
+        )
+        .await
+        .unwrap();
+        let (name, data) = events.try_recv().unwrap();
+        assert_eq!(name, "chat.usage");
+        assert_eq!(data["usage"]["usedTokens"], 23);
+        assert!(events.try_recv().is_err());
+        merge_projection(
+            &mut ctx,
+            &endpoint,
+            "session",
+            &messages,
+            &previous,
+            &mut recorded,
+        )
+        .await
+        .unwrap();
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn repeated_retry_projection_keeps_the_banner_without_republishing() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.session_id = uuid::Uuid::new_v4().to_string();
+        ctx.assistant.id = uuid::Uuid::new_v4().to_string();
+        let mut events = ctx.host.subscribe();
+        let endpoint = AgentEndpoint {
+            base_url: "http://127.0.0.1:1".into(),
+            client: crate::net::loopback_client().build().unwrap(),
+            protocol: crate::local::opencode::Protocol::V2,
+            legacy_v2_api: false,
+        };
+        let mut messages = vec![
+            json!({"id":"first", "type":"assistant", "content":[{"type":"text", "text":"working"}]}),
+            json!({"id":"second", "type":"assistant", "retry":{"error":"busy", "attempt":1, "at":123}, "content":[{"type":"text", "text":"next"}]}),
+        ];
+        let mut recorded = HashSet::new();
+        for index in 0..2 {
+            merge_projection(
+                &mut ctx,
+                &endpoint,
+                "session",
+                &messages,
+                &HashSet::new(),
+                &mut recorded,
+            )
+            .await
+            .unwrap();
+            ctx.flush().unwrap();
+            assert!(ctx
+                .assistant
+                .parts
+                .iter()
+                .any(|part| part.id == "turn-retry"));
+            if index == 0 {
+                assert_eq!(events.try_recv().unwrap().0, "chat.message");
+            }
+            assert!(events.try_recv().is_err());
+        }
+        messages[1]["retry"] = Value::Null;
+        merge_projection(
+            &mut ctx,
+            &endpoint,
+            "session",
+            &messages,
+            &HashSet::new(),
+            &mut recorded,
+        )
+        .await
+        .unwrap();
+        ctx.flush().unwrap();
+        assert!(!ctx
+            .assistant
+            .parts
+            .iter()
+            .any(|part| part.id == "turn-retry"));
+        assert_eq!(events.try_recv().unwrap().0, "chat.message");
+    }
 
     #[test]
     fn cancelled_question_step_is_not_a_provider_failure() {

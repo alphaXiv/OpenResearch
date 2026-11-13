@@ -8643,13 +8643,11 @@ impl TurnCtx {
         self.upsert_part_raw(part);
     }
 
-    fn upsert_part_raw(&mut self, part: WirePart) {
+    pub(crate) fn upsert_part_raw(&mut self, part: WirePart) {
         upsert_preserving_children(&mut self.assistant.parts, part);
     }
 
-    /// Bare in-memory ctx for harness unit tests: parts accumulate on
-    /// `assistant`, nothing is flushed or persisted (don't call `flush` /
-    /// `set_native_session_id` on it — those touch the store).
+    /// Harness test context; persistence methods use the test store.
     #[cfg(test)]
     pub fn test_stub() -> Self {
         Self {
@@ -8858,6 +8856,17 @@ impl TurnCtx {
             if usage.context_window.is_none() {
                 usage.context_window = prev.context_window;
             }
+            if prev == &usage {
+                return;
+            }
+        }
+        if self.durable {
+            let _ = Store::open().and_then(|store| {
+                store.set_chat_session_context_usage(
+                    &self.session_id,
+                    &serde_json::to_string(&usage)?,
+                )
+            });
         }
         self.context_usage = Some(usage.clone());
         self.host.emit(
@@ -9012,54 +9021,64 @@ impl TurnCtx {
         // (else that reconcile-then-clobber is a lost update). Only pay the lock
         // when this message actually carries a prompt part.
         let has_prompt = self.assistant.parts.iter().any(|p| p.prompt.is_some());
-        let wire_assistant = {
+        {
             // Clone the host handle so the guard borrows it, not `self` — the
             // reconcile below needs `&mut self`.
             let host = self.host.clone();
             let _guard = has_prompt.then(|| host.msg_write.lock().unwrap());
+            let stored = store.get_chat_message(&self.assistant.id)?;
             if has_prompt {
-                self.adopt_resolved_prompts(&store);
+                self.adopt_resolved_prompts(stored.as_ref());
             }
-            let mut wire_assistant = self.assistant.clone();
-            cap_tool_parts(&mut wire_assistant.parts);
-            // Stamp the branch position onto the SSE copy (see the interrupt
-            // marker above for what an unparented broadcast does to a client).
-            wire_assistant.parent_id = store.upsert_chat_message_on_branch(&StoredChatMessage {
-                id: wire_assistant.id.clone(),
-                session_id: self.session_id.clone(),
-                role: wire_assistant.role.clone(),
-                parts_json: serde_json::to_string(&wire_assistant.parts)?,
-                created_at: wire_assistant.created_at,
-                completed_at: wire_assistant.completed_at,
-                parent_id: None,
-                base_native_session_id: None,
-                result_native_session_id: self.native_session_id.clone(),
-                result_native_message_id: self.native_message_id.clone(),
-                native_harness: Some(self.harness.clone()),
-            })?;
-            wire_assistant
-        };
+            let parts_json = serde_json::to_string(&self.assistant.parts)?;
+            let unchanged = stored.as_ref().is_some_and(|stored| {
+                stored.parts_json == parts_json
+                    && stored.completed_at == self.assistant.completed_at
+                    && stored.result_native_session_id == self.native_session_id
+                    && stored.result_native_message_id == self.native_message_id
+                    && stored.native_harness.as_deref() == Some(self.harness.as_str())
+            });
+            if !unchanged {
+                let mut wire_assistant = self.assistant.clone();
+                // Stamp the branch position onto the SSE copy (see the interrupt
+                // marker above for what an unparented broadcast does to a client).
+                wire_assistant.parent_id =
+                    store.upsert_chat_message_on_branch(&StoredChatMessage {
+                        id: wire_assistant.id.clone(),
+                        session_id: self.session_id.clone(),
+                        role: wire_assistant.role.clone(),
+                        parts_json,
+                        created_at: wire_assistant.created_at,
+                        completed_at: wire_assistant.completed_at,
+                        parent_id: None,
+                        base_native_session_id: None,
+                        result_native_session_id: self.native_session_id.clone(),
+                        result_native_message_id: self.native_message_id.clone(),
+                        native_harness: Some(self.harness.clone()),
+                    })?;
+                self.host.emit(
+                    "chat.message",
+                    message_json(&wire_assistant, &self.session_id),
+                );
+            }
+        }
         // A delegate's card shows what it waits on, so a card appearing or
         // resolved mid-turn re-sends its session.
-        let asking = wire_assistant.parts.iter().find_map(|part| {
+        let asking = self.assistant.parts.iter().find_map(|part| {
             part.prompt
                 .as_ref()
                 .filter(|prompt| !prompt.resolved)
                 .map(|prompt| prompt.kind.clone())
         });
         if asking != self.asking {
-            self.asking = asking;
             if let Some(session) = store.get_chat_session(&self.session_id)? {
                 self.host.emit(
                     "chat.session",
                     json!({ "session": session_json(&session, true) }),
                 );
             }
+            self.asking = asking;
         }
-        self.host.emit(
-            "chat.message",
-            message_json(&wire_assistant, &self.session_id),
-        );
         self.last_flushed_tool_states = tool_state_signature(&self.assistant.parts);
         self.last_attempted_tool_states = self.last_flushed_tool_states.clone();
         Ok(())
@@ -9072,8 +9091,8 @@ impl TurnCtx {
     /// so it's safe regardless of ordering: the in-memory copy normally never
     /// carries an echo of its own, and dropping the stored one here would
     /// erase the stamped outcome on the next flush.
-    fn adopt_resolved_prompts(&mut self, store: &Store) {
-        let Ok(Some(stored)) = store.get_chat_message(&self.assistant.id) else {
+    fn adopt_resolved_prompts(&mut self, stored: Option<&StoredChatMessage>) {
+        let Some(stored) = stored else {
             return;
         };
         let persisted: Vec<WirePart> = serde_json::from_str(&stored.parts_json).unwrap_or_default();
@@ -11047,6 +11066,102 @@ mod cap_tests {
 mod bridge_tests {
     use super::*;
 
+    #[test]
+    fn usage_events_only_publish_changes_after_inheriting_the_window() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut events = ctx.host.subscribe();
+        ctx.report_usage(ContextUsage {
+            used_tokens: 42,
+            context_window: Some(100),
+        });
+        assert_eq!(events.try_recv().unwrap().0, "chat.usage");
+        ctx.report_usage(ContextUsage {
+            used_tokens: 42,
+            context_window: None,
+        });
+        assert!(events.try_recv().is_err());
+        ctx.report_usage(ContextUsage {
+            used_tokens: 43,
+            context_window: None,
+        });
+        assert_eq!(events.try_recv().unwrap().1["usage"]["contextWindow"], 100);
+        ctx.report_usage(ContextUsage {
+            used_tokens: 43,
+            context_window: Some(200),
+        });
+        assert_eq!(events.try_recv().unwrap().1["usage"]["contextWindow"], 200);
+    }
+
+    #[test]
+    fn unchanged_flushes_are_quiet_but_content_and_completion_are_published() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.session_id = uuid::Uuid::new_v4().to_string();
+        ctx.assistant.id = uuid::Uuid::new_v4().to_string();
+        ctx.assistant.parts = vec![WirePart::text("text", "hello")];
+        let mut events = ctx.host.subscribe();
+        ctx.flush().unwrap();
+        assert_eq!(events.try_recv().unwrap().0, "chat.message");
+        for _ in 0..10 {
+            ctx.flush().unwrap();
+        }
+        assert!(events.try_recv().is_err());
+        ctx.assistant.parts = vec![WirePart::text("text", "hello world")];
+        ctx.flush().unwrap();
+        assert_eq!(
+            events.try_recv().unwrap().1["message"]["parts"][0]["text"],
+            "hello world"
+        );
+        ctx.assistant.completed_at = Some(123);
+        ctx.flush().unwrap();
+        assert_eq!(events.try_recv().unwrap().1["message"]["completedAt"], 123);
+        ctx.native_session_id = Some("native".into());
+        ctx.flush().unwrap();
+        assert_eq!(
+            Store::open()
+                .unwrap()
+                .get_chat_message(&ctx.assistant.id)
+                .unwrap()
+                .unwrap()
+                .result_native_session_id
+                .as_deref(),
+            Some("native")
+        );
+        assert_eq!(events.try_recv().unwrap().0, "chat.message");
+    }
+
+    #[test]
+    fn quiet_flush_preserves_a_concurrently_answered_prompt() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.session_id = uuid::Uuid::new_v4().to_string();
+        ctx.assistant.id = uuid::Uuid::new_v4().to_string();
+        let mut part = WirePart::text("card", "");
+        part.kind = "prompt".into();
+        part.prompt = Some(WirePrompt {
+            kind: "question".into(),
+            ..Default::default()
+        });
+        ctx.assistant.parts = vec![part];
+        let mut events = ctx.host.subscribe();
+        ctx.flush().unwrap();
+        assert_eq!(events.try_recv().unwrap().0, "chat.message");
+        let mut answer = answer(&["A"], true, None);
+        answer.from = Some("chat_parent".into());
+        mark_prompt_resolved(&ctx.host.msg_write, &ctx.session_id, "card", Some(&answer)).unwrap();
+        ctx.flush().unwrap();
+        assert!(events.try_recv().is_err());
+        assert!(ctx.asking.is_none());
+        let stored = Store::open()
+            .unwrap()
+            .get_chat_message(&ctx.assistant.id)
+            .unwrap()
+            .unwrap();
+        let parts: Vec<WirePart> = serde_json::from_str(&stored.parts_json).unwrap();
+        let prompt = parts[0].prompt.as_ref().unwrap();
+        assert!(prompt.resolved);
+        assert_eq!(prompt.answers, ["A"]);
+        assert_eq!(prompt.answered_by.as_deref(), Some("chat_parent"));
+    }
+
     fn test_host() -> ChatHost {
         ChatHost::new(
             Arc::new(crate::local::opencode::AgentHost::new(None)),
@@ -11436,52 +11551,6 @@ mod bridge_tests {
         assert!(prompt.resolved);
         assert_eq!(prompt.approved, Some(false));
         assert_eq!(prompt.note, None);
-    }
-
-    #[test]
-    fn a_flush_keeps_the_answer_echo_another_path_stamped() {
-        let dir = std::env::temp_dir().join(format!("orx-adopt-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        let mut ctx = TurnCtx::test_stub();
-        let card = |prompt: WirePrompt| {
-            let mut part = WirePart::text("card", "");
-            part.kind = "prompt".into();
-            part.prompt = Some(prompt);
-            part
-        };
-        let mut stamped = WirePrompt {
-            kind: "question".into(),
-            ..Default::default()
-        };
-        let mut answer = answer(&["A"], true, None);
-        answer.from = Some("chat_parent".into());
-        stamp_resolved(&mut stamped, Some(&answer));
-        store
-            .upsert_chat_message(&StoredChatMessage {
-                id: ctx.assistant.id.clone(),
-                session_id: ctx.session_id.clone(),
-                role: "assistant".into(),
-                parts_json: serde_json::to_string(&[card(stamped)]).unwrap(),
-                created_at: 1,
-                completed_at: None,
-                parent_id: None,
-                base_native_session_id: None,
-                result_native_session_id: None,
-                result_native_message_id: None,
-                native_harness: None,
-            })
-            .unwrap();
-        ctx.assistant.parts = vec![card(WirePrompt {
-            kind: "question".into(),
-            ..Default::default()
-        })];
-
-        ctx.adopt_resolved_prompts(&store);
-        let adopted = ctx.assistant.parts[0].prompt.as_ref().unwrap();
-        assert!(adopted.resolved);
-        assert_eq!(adopted.answers, ["A"]);
-        assert_eq!(adopted.answered_by.as_deref(), Some("chat_parent"));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
