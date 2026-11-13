@@ -51,6 +51,7 @@ pub(crate) fn config_file(system: bool) -> Result<PathBuf> {
 }
 
 /// The variant without the system configuration, when `config` is the one with it.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn without_system(config: &Path) -> Option<Result<PathBuf>> {
     (config == directory().join("config")).then(|| config_file(false))
 }

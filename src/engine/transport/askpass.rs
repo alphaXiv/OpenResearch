@@ -156,6 +156,7 @@ impl Saved {
         self.state().loaded.get_or_insert(answers).clone()
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) async fn has_answers(&self) -> bool {
         !self.loaded().await.is_empty()
     }
