@@ -3,7 +3,7 @@ import type { DialogContentProps } from "../dialog";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import type { Harness, HarnessSetupCommands } from "../api";
-import { fmtNumber } from "../i18n";
+import { fmtBytes } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { selectionHarness } from "../modelSelection";
 import { isRecord } from "../workspaceState";
@@ -156,8 +156,8 @@ export function HarnessSetup({ harness, commands, action: forced, profile, onRea
           running={phase === "running"}
           signIn={action === "login" ? { agent: harness.name, page: pageSignIn, code: harness.id === "claude-code" } : undefined}
           status={action === "install" ? m.harness_setup_installing({ agent: harness.name }) : m.harness_setup_updating({ agent: harness.name })}
-          // OpenCode's own upgrade can ask before it installs, and a sign-in without a page happens in the terminal.
-          expanded={action === "upgrade" || (action === "login" && !pageSignIn)}
+          // A sign-in without a page happens in the terminal.
+          expanded={action === "login" && !pageSignIn}
           onComplete={() => void verify(false)}
           onError={fail}
         />
@@ -199,11 +199,10 @@ function progressFrame(value: unknown): Progress | null {
 }
 
 function DownloadBar({ progress }: { progress: Progress | null }) {
-  const megabytes = (bytes: number) => fmtNumber(Math.round(bytes / 1e6));
   const label = !progress ? undefined
-    : progress.total === null ? (progress.received < 5e5 ? undefined : m.harness_setup_downloaded({ received: megabytes(progress.received) }))
+    : progress.total === null ? (progress.received < 512 * 1024 ? undefined : fmtBytes(progress.received))
       : progress.received >= progress.total ? m.common_checking()
-        : m.harness_setup_download_size({ received: megabytes(progress.received), total: megabytes(progress.total) });
+        : m.operation_bytes({ done: fmtBytes(progress.received), total: fmtBytes(progress.total) });
   return <ProgressBar value={progress?.total ? Math.min(progress.received, progress.total) : undefined} max={progress?.total ?? undefined} label={label} />;
 }
 

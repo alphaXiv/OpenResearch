@@ -505,6 +505,20 @@ impl Actor {
         &mut self,
         prompt: Option<Prompt>,
         approve_route: bool,
+        keep_master: bool,
+    ) -> Result<ssh::Session> {
+        let saved = askpass::Saved::new(&self.config.alias);
+        let prompt = prompt.map(|user| saved.wrap(Some(user)));
+        let result = self.login(prompt, &saved, approve_route, keep_master).await;
+        saved.finish(result.is_ok()).await;
+        result
+    }
+
+    async fn login(
+        &mut self,
+        prompt: Option<Prompt>,
+        #[cfg_attr(windows, allow(unused_variables))] saved: &Arc<askpass::Saved>,
+        approve_route: bool,
         #[cfg_attr(windows, allow(unused_variables))] keep_master: bool,
     ) -> Result<ssh::Session> {
         let auth = self.auth.clone();
@@ -563,6 +577,20 @@ impl Actor {
         auth.update(&self.store, &self.config.alias, |state| {
             state.route = Some(route.clone())
         })?;
+        // A saved password brings an interactive host's ended master back once, unattended.
+        #[cfg(unix)]
+        let interactive = self.auth.state.borrow().class == Some(HostClass::Interactive);
+        #[cfg(unix)]
+        let prompt = match prompt {
+            None if interactive
+                && !ssh::master_alive(&self.config, &ssh::socket(&self.config, &route)?)
+                    .await?
+                && saved.has_answers().await =>
+            {
+                Some(saved.wrap(None))
+            }
+            prompt => prompt,
+        };
         #[cfg(unix)]
         let mut attach = false;
         #[cfg(windows)]

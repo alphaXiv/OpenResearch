@@ -19,13 +19,13 @@ ref (`msg_3fa9c1d2`) in the task instead of retyping it.
 
 - **Worktree.** By default a delegate works in this chat's worktree, so give
   parallel delegates separate files. `worktree: "own"` gives it a fresh
-  worktree from the project's baseline that appears in the sidebar: commit
-  first and name the commit in the task when it should start from your work.
-  Its changes never merge here automatically.
+  worktree from the project's baseline; it is still your delegate, so it stays
+  out of the sidebar. Commit first and name the commit in the task when it
+  should start from your work. Its changes never merge here automatically.
 - **Independent chats.** `notify: false` starts a chat that is not your
-  delegate: your side chat, or with `worktree: "own"` a chat of its own, for
-  work that should not report back. You do not hear from it unless you
-  `subscribe`, and you cannot `cancel` it. Do not open one as a substitute for
+  delegate: your side chat, or with `worktree: "own"` a top-level chat in the
+  user's sidebar. Start a top-level chat only when the user asks for one. You
+  do not hear from it unless you `subscribe`, and you cannot `cancel` it. Do not open one as a substitute for
   a follow-up message; `send` the chat you already have.
 - **Nesting.** A delegate may delegate only when you allow it with
   `canDelegate` or the user's setting does. Keep nesting shallow.

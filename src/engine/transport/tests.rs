@@ -414,6 +414,66 @@ async fn interactive_lifecycle(server: Sshd, factors: usize) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_saved_passphrase_logs_an_ended_master_back_in_once() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    std::env::set_var(crate::local::keychain::TEST_KEYCHAIN, "1");
+    let passphrase = "orx transport 'passphrase'";
+    let server = SshdBuilder {
+        extra_client_keys: vec![Some(passphrase.into()), None],
+        identity_files: vec!["client_key_1".into()],
+        ..SshdBuilder::default()
+    }
+    .start()
+    .unwrap();
+    let clock = TestClock::new();
+    let conn = start(&server, clock.clone());
+    status(&conn, Status::NeedsAuth).await;
+    let fixture = server.askpass(passphrase).unwrap();
+    let prompt: Prompt = Arc::new(move |question| {
+        let fixture = fixture.clone();
+        Box::pin(async move {
+            let answer = crate::process::tokio_command(fixture)
+                .arg(question)
+                .output()
+                .await?;
+            Ok(Some(String::from_utf8(answer.stdout)?.trim_end().into()))
+        })
+    });
+    conn.connect_interactive(prompt, false).await.unwrap();
+    status(&conn, Status::Live).await;
+    assert!(!crate::local::keychain::load(server.alias())
+        .unwrap()
+        .is_empty());
+
+    let exit_master = || {
+        let pin = alias_auth(&server).route.unwrap();
+        let path = ssh::socket(&config(&server), &pin).unwrap();
+        let output = server
+            .spawn(&["-S", path.to_str().unwrap(), "-O", "exit"], None)
+            .unwrap()
+            .wait(Duration::from_secs(5))
+            .unwrap();
+        assert!(output.status.success());
+    };
+    exit_master();
+    status(&conn, Status::Backoff).await;
+    let before = auth_attempts(&server);
+    clock.advance(6001);
+    status(&conn, Status::Live).await;
+    assert!(auth_attempts(&server).values().sum::<usize>() > before.values().sum::<usize>());
+
+    crate::local::keychain::save(server.alias(), &Default::default()).unwrap();
+    exit_master();
+    status(&conn, Status::Backoff).await;
+    let attempts = auth_attempts(&server);
+    clock.advance(6001);
+    status(&conn, Status::NeedsAuth).await;
+    assert_eq!(auth_attempts(&server), attempts);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_master_is_ignored_and_route_edits_require_explicit_approval() {
     let server = SshdBuilder {
         extra_client_keys: vec![None],
@@ -2171,7 +2231,7 @@ fi
         .filter(|line| !line.trim_start().starts_with("ControlPath "))
         .collect::<Vec<_>>()
         .join("\n")
-        + "\n";
+        + "\nHost *\nInclude openresearch_config\n";
     fs::write(home.join(".ssh/config"), &user_config).unwrap();
     let clock = TestClock::new();
     let store = Store::open_at(server.directory().join("store")).unwrap();
@@ -2189,10 +2249,7 @@ fi
     let registry = home.join(".ssh/openresearch_connections.json");
     assert!(fs::read_to_string(&registry).unwrap().contains("engine:"));
     let installed = fs::read_to_string(home.join(".ssh/config")).unwrap();
-    assert_eq!(
-        installed.matches("Include openresearch_config\n").count(),
-        1
-    );
+    assert_eq!(installed, user_config);
 
     let plain = |scoped: bool| {
         let mut command = crate::process::tokio_command("ssh");

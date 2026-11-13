@@ -4,10 +4,10 @@ import { useQuery } from "@tanstack/react-query";
 
 import { m } from "../paraglide/messages.js";
 import { mutDeleteLatexTemplate, mutDeleteUserSkill, mutUpdateUserSkill, mutUploadLatexTemplate, mutUploadUserSkill } from "../queries/settings";
-import { ltr } from "../i18n";
+import { fmtBytes, ltr } from "../i18n";
 import { Pencil, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { fmtBytes, fmtNumber, timeAgo, type LatexTemplate, type UserSkill, type SkillDiscovery } from "../api";
+import { fmtNumber, timeAgo, type LatexTemplate, type UserSkill, type SkillDiscovery } from "../api";
 import { Badge, Button, DialogContent, DialogTitle, IconButton, Spinner, Textarea, showAlert } from "./ui";
 import { copyToClipboard } from "../clipboard";
 
@@ -377,7 +377,7 @@ function SkillsCard() {
         return;
       }
       if (file.size > MAX_UPLOAD_BYTES) {
-        setError(m.skills_file_too_large());
+        setError(m.skills_file_too_large({ size: fmtBytes(MAX_UPLOAD_BYTES) }));
         return;
       }
       busyRef.current = true;
@@ -479,7 +479,7 @@ function LatexTemplatesCard() {
         return;
       }
       if (file.size > MAX_UPLOAD_BYTES) {
-        setError(m.skills_file_too_large());
+        setError(m.skills_file_too_large({ size: fmtBytes(MAX_UPLOAD_BYTES) }));
         return;
       }
       busyRef.current = true;

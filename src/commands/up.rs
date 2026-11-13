@@ -139,7 +139,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         engine.clone(),
         clock.clone(),
         crate::store::data_dir(),
-        crate::config::ssh_config(),
+        Some(crate::config::ssh_config()),
     );
     let instance = uuid::Uuid::new_v4().to_string();
     let project_lifecycle = Arc::new(ProjectLifecycle::default());
@@ -860,6 +860,16 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
+        .route("/api/settings/ssh/hosts", post(add_compute_host))
+        .route(
+            "/api/settings/ssh/hosts/{host}",
+            axum::routing::delete(remove_compute_host),
+        )
+        .route("/api/remote/hosts", get(remote_hosts).post(add_remote_host))
+        .route(
+            "/api/remote/hosts/{host}",
+            axum::routing::delete(remove_remote_host),
+        )
         .route(
             "/api/remote/sessions",
             get(remote_sessions).post(create_remote_session),
@@ -1739,11 +1749,12 @@ async fn list_project_activity(State(state): State<AppState>) -> ApiResult {
         let store = Store::open()?;
         let mut active_agents = HashMap::<String, usize>::new();
         for (session_id, project_id) in store.list_chat_session_project_ids()? {
-            // Side chats stay out of project agent counts.
+            // Side chats and delegates stay out of project agent counts.
             if busy.contains(&session_id)
                 && store
                     .get_chat_session(&session_id)?
                     .is_some_and(|session| session.side_parent_session_id.is_none())
+                && store.delegation(&session_id)?.parent.is_none()
             {
                 *active_agents.entry(project_id).or_default() += 1;
             }
@@ -3655,7 +3666,7 @@ async fn session_worktree(Path(id): Path<String>) -> ApiResult {
 }
 
 /// Cap on file bytes served to the viewer (mirrors openresearch.sh).
-const FILE_READ_LIMIT: u64 = 512_000;
+const FILE_READ_LIMIT: u64 = 512 * 1024;
 
 /// Resolve which on-disk checkout answers a file/code request for a project.
 ///
@@ -5632,7 +5643,10 @@ fn spawn_agent_updates(state: AppState) {
         // Startup detection's probes go first.
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
-            update_agents(&state, harness_setup::keep_current).await;
+            update_agents(&state, |harness| {
+                harness_setup::keep_current(harness, &state.agent)
+            })
+            .await;
             tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
         }
     });
@@ -8015,7 +8029,7 @@ async fn create_remote_session(
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host).await?;
+    require_saved_remote(&host).await?;
     let (created, session) = state
         .remote_sessions
         .create(host, req.ui_preferences, None)

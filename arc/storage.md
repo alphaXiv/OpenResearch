@@ -6,7 +6,7 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 
 | Directory | Location | Holds |
 | --- | --- | --- |
-| config | `$XDG_CONFIG_HOME/openresearch`, else `~/.config/openresearch` | `settings.json`, credentials for openresearch.sh, alphaXiv and Overleaf, the telemetry outbox, the locks that cover the data directory as a whole |
+| config | `$XDG_CONFIG_HOME/openresearch`, else `~/.config/openresearch` | `settings.json`, credentials for openresearch.sh, alphaXiv and Overleaf, the SSH hosts saved in orx (`ssh/`), the telemetry outbox, the locks that cover the data directory as a whole |
 | data | resolved below | `orx.db`, `repos/`, `worktrees/`, `agents/`, `run-logs/`, `files/`, `chat-attachments/`, per-run state |
 | cache | `ORX_CACHE_DIR`, the `cacheDir` setting, else `~/.cache/openresearch` | orx's managed agent copies and the legacy repository root, which [migrations](#migrations-follow-paths) empty |
 
@@ -15,6 +15,8 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 **The config directory never moves**, because the setting that points at the data directory lives there and a lock inside the data directory could not guard a move of it. `settings.json` has one writer, the locked read-modify-write in `src/telemetry.rs`, and every save keeps the fields a newer orx wrote; a second writer would clobber them.
 
 OpenCode provider records (`opencode-providers.json`, including API keys) stay in config. Custom endpoint records, names and icons live in the data directory's `local-models.json`; OpenCode OAuth credentials live in its isolated database.
+
+Saved SSH passwords and key passphrases sit in the system's credential store (Keychain, Credential Manager, the Secret Service), one item per host alias, never in a file ([remote](remote.md#saved-hosts)).
 
 `~/.openresearch/env` sits outside all three. It holds the variables and compute credentials saved in compute settings and fans out to agents and launched runs (`src/config.rs`), so a secret that must stay on this machine, like Overleaf's, belongs in the config directory.
 
@@ -126,7 +128,7 @@ Detection repeats on every start, so an interrupted rename or reference repair r
 - **Sharing.** Nothing leaves on its own: sharing writes a `.orx` file the user sends themselves (`src/local/share.rs`), holding a Git bundle of the baseline and experiment branches, the experiment tree, finished runs without their descriptors, their logs, the artifacts and the chats the user left ticked. A chat, log or artifact that looks like a credential refuses the share; the code is not scanned, since it is what the user chose to send. An opened file becomes a new project with no remote, and its runs carry the backend kind `imported`, which nothing launches, watches or cleans up.
 - **Published projects.** Publishing, from the Share dialog or `orx project share --publish`, uploads exactly the file sharing would write, after the same scan, to openresearch.sh, which serves it to anyone with the link until the publisher deletes it. The upload names the local project ID, so publishing again replaces the file behind the same link.
 - **Updates.** Each surface checks GitHub releases on its own schedule ([desktop](desktop.md)).
-- **Agent releases.** Once a day `orx up` asks downloads.claude.ai, releases.openai.com and GitHub for the newest release of whichever of Claude Code, Codex and OpenCode is installed (skipping one signed out on every account), and downloads one when it installs or updates a copy of its own ([agents](agents.md)); the onboarding installs OpenCode that way unasked while it is missing, for its free models. The requests carry no account or research data. Built-in agents additionally fetch Node.js releases
+- **Agent releases.** Once a day `orx up` asks downloads.claude.ai, releases.openai.com and registry.npmjs.org for the newest release of whichever of Claude Code, Codex and OpenCode is installed (skipping one signed out on every account), and downloads one when it installs or updates a copy of its own ([agents](agents.md)); the onboarding installs OpenCode that way unasked while it is missing, for its free models. The requests carry no account or research data. Built-in agents additionally fetch Node.js releases
   and SHA-256 lists from nodejs.org, package metadata and integrity-checked npm
   packages from registry.npmjs.org (native package dependencies may fetch release
   assets from github.com, api.github.com and release-assets.githubusercontent.com),

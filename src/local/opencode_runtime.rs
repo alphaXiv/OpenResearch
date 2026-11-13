@@ -82,10 +82,13 @@ impl ProbeEnvironment {
     }
 }
 
-/// The user's opencode, unless orx's own copy is newer.
+/// The user's opencode, unless orx's own copy is newer. A copy of a newer major
+/// is one the user chose over their own, so it stands in for it.
 pub(crate) async fn resolve_binary() -> Result<ResolvedBinary> {
     let user = user_binary().await;
-    let major = user.as_ref().ok().map(|binary| binary.protocol.major());
+    let own_major = user.as_ref().ok().map(|binary| binary.protocol.major());
+    let copy_major = crate::local::harness::managed::installed("opencode").map(|(_, v)| v.major);
+    let major = own_major.max(copy_major);
     let Some((path, version)) =
         crate::local::harness::managed::installed_for_major("opencode", major)
     else {
@@ -753,6 +756,28 @@ mod tests {
             .unwrap()
             .downcast_ref::<crate::local::native_store::opencode_database::DatabaseBusy>()
             .is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_newer_major_copy_stands_in_for_the_users_install() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let fake = |path: &Path, version: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("#!/bin/sh\necho {version}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let home = crate::config::home_dir().unwrap();
+        fake(&home.join(".opencode/bin/opencode"), "1.18.18");
+        assert_eq!(resolve_binary().await.unwrap().version, "1.18.18");
+
+        let copies = crate::local::git::cache_root().join("managed-agents/opencode");
+        fake(&copies.join("1.19.5/opencode"), "1.19.5");
+        fake(&copies.join("2.3.0/opencode"), "2.3.0");
+        assert_eq!(resolve_binary().await.unwrap().version, "2.3.0");
     }
 
     #[test]

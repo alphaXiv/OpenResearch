@@ -35,6 +35,7 @@ import emojiPlanet from "../assets/harnesses/emoji-planet.svg";
 import emojiRabbit from "../assets/harnesses/emoji-rabbit.svg";
 import essentialai from "../assets/harnesses/essentialai.svg";
 import fireworks from "../assets/harnesses/fireworks.svg";
+import fx from "../assets/harnesses/fx.svg";
 import gemini from "../assets/harnesses/gemini.svg";
 import githubCopilot from "../assets/harnesses/github-copilot.svg";
 import google from "../assets/harnesses/google.svg";
@@ -123,6 +124,7 @@ const BRANDS = {
   doubao: { image: doubao, colour: true },
   essentialai: { image: essentialai, colour: false },
   fireworks: { image: fireworks, colour: false },
+  fx: { image: fx, colour: false },
   gemini: { image: gemini, colour: true },
   "github-copilot": { image: githubCopilot, colour: false },
   google: { image: google, colour: true },
@@ -187,9 +189,9 @@ const BRANDS = {
   zai: { image: zai, colour: false },
   zcode: { image: zcode, colour: true },
 };
-export type Brand = keyof typeof BRANDS | "kimi";
+export type Brand = keyof typeof BRANDS | "kimi" | "oh-my-pi";
 
-const ACP_LOGOS: Record<string, Brand> = { dsh: "deepseek", kimi: "kimi", mcode: "minimax", "zcode-acp-server": "zcode", "pi-acp": "pi", devin: "devin", grok: "grok" };
+const ACP_LOGOS: Record<string, Brand> = { dsh: "deepseek", kimi: "kimi", mcode: "minimax", "zcode-acp-server": "zcode", "pi-acp": "pi", devin: "devin", grok: "grok", omp: "oh-my-pi", fx: "fx" };
 const ACP_PRESET_LOGOS: Record<string, Brand> = {
   "acp:dee4a440-fd64-4217-a4a7-1d4c148c0dd1": "deepseek",
   "acp:a8b48911-e95c-42cb-bc35-bab3aa83e5e2": "kimi",
@@ -198,6 +200,8 @@ const ACP_PRESET_LOGOS: Record<string, Brand> = {
   "acp:467b1900-c3c3-47c1-8b87-09389e1c44b5": "pi",
   "acp:565e351e-62c7-488f-a58a-914d30cc5776": "devin",
   "acp:ac7f713b-b520-40d2-9b56-75deca1574c7": "grok",
+  "acp:3d392186-692e-4b90-93b4-bb398f40007a": "oh-my-pi",
+  "acp:c33b22bc-6d2e-44c6-a5d6-117dd6722f7f": "fx",
 };
 
 export function HarnessLogo({ harness, logo, size = 16 }: { harness: HarnessId; logo?: string; size?: number }) {
@@ -400,6 +404,17 @@ export function BrandMark({ brand, size }: { brand: Brand; size: number }) {
       <svg className="block shrink-0" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
         <path fill="#1783FF" d="M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z" />
         <path fill="currentColor" d="M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.82c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.77c0 .128.083.23.186.23h2.69c.103 0 .186-.102.186-.23v-3.25c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.06c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z" />
+      </svg>
+    );
+  }
+  if (brand === "oh-my-pi") {
+    // The π follows the text colour; its plug keeps the brand orange.
+    return (
+      <svg className="block shrink-0" width={size} height={size} viewBox="8 -7 104 104" aria-hidden="true">
+        <path fill="currentColor" d="M12 8h96a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H87v35H75V20H37v60a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V20H12a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" />
+        <path fill="#f97316" fillRule="evenodd" d="M74 55h14a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H74a3 3 0 0 1-3-3V58a3 3 0 0 1 3-3Zm3 4a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-6a1 1 0 0 0-1-1Zm6 0a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-6a1 1 0 0 0-1-1Z" />
+        <circle cx="18" cy="14" r="2" fill="#f97316" opacity={0.8} />
+        <circle cx="102" cy="14" r="2" fill="#f97316" opacity={0.8} />
       </svg>
     );
   }

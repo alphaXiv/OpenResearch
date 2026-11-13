@@ -76,7 +76,7 @@ import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
-import { autoDir, ltr } from "../i18n";
+import { autoDir, fmtBytes, ltr } from "../i18n";
 import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
 import {
@@ -4359,8 +4359,11 @@ const Transcript = memo(function Transcript({
     rangeExtractor,
     scrollToFn: (offset, options, instance) => {
       // virtual-core passes size corrections with the last scroll event's offset; apply them to the live scrollTop so a scroll since isn't undone.
-      const target = options.adjustments === undefined ? offset : (instance.scrollElement?.scrollTop ?? offset) + options.adjustments;
-      programmaticScroll.current = target;
+      const element = instance.scrollElement;
+      const target = options.adjustments === undefined ? offset : (element?.scrollTop ?? offset) + options.adjustments;
+      // A write that leaves scrollTop in place fires no scroll event, and a stale record would claim the user's next one.
+      const landing = element ? Math.max(0, Math.min(target, element.scrollHeight - element.clientHeight)) : target;
+      programmaticScroll.current = element && Math.abs(landing - element.scrollTop) < 0.5 ? null : landing;
       elementScroll(target, { behavior: options.behavior }, instance);
     },
   });
@@ -4680,48 +4683,18 @@ function SessionFilterMenu({
   );
 }
 
-/** Per-character stagger, and the ceiling on the whole run — a long title
- * shouldn't take a second and a half to finish arriving. */
-const TITLE_CHAR_STAGGER_MS = 14;
-const TITLE_STAGGER_CAP_MS = 500;
-/** How long the reveal flag stays set: the capped stagger plus one character's
- * 240ms animation, plus slack. After this the title renders as plain text. */
-const TITLE_REVEAL_CLEAR_MS = 1200;
+/** How long the reveal flag stays set: the 700ms sweep plus slack. After this
+ * a remount (scrolling the rail, switching sessions) shows a static title. */
+const TITLE_REVEAL_CLEAR_MS = 1000;
 
-/** A session title that materializes character by character when a
+/** A session title that fades in behind a left-to-right mask when a
  * harness-generated one replaces the first-line placeholder. `animate` is false
  * everywhere else (initial load, renames, re-renders), and then this renders the
- * bare string — the animated form is deliberately the exception.
- *
- * The characters are `aria-hidden` and the whole title rides an `aria-label`:
- * a screen reader must hear one title, not forty single-letter spans. */
+ * bare string — the animated form is deliberately the exception. The text stays
+ * one run so kerning and antialiasing match the static title it settles into. */
 function TitleReveal({ title, animate }: { title: string; animate: boolean }) {
   if (!animate) return <>{title}</>;
-  return (
-    <span className="title-reveal" aria-label={title}>
-      {Array.from(title).map((ch, i) =>
-        // Spaces stay plain inline boxes: the animated characters must be
-        // inline-block (transform doesn't apply to inline boxes), but an
-        // inline-block space collapses to zero width and eats the word gap.
-        ch === " " ? (
-          <span key={i} aria-hidden>
-            {ch}
-          </span>
-        ) : (
-          <span
-            key={i}
-            aria-hidden
-            className="title-reveal-char inline-block animate-[title-char-in_240ms_ease-out_both] [@media((prefers-reduced-motion:_reduce))]:animate-none"
-            style={{
-              animationDelay: `${Math.min(i * TITLE_CHAR_STAGGER_MS, TITLE_STAGGER_CAP_MS)}ms`,
-            }}
-          >
-            {ch}
-          </span>
-        ),
-      )}
-    </span>
-  );
+  return <span className="title-reveal">{title}</span>;
 }
 
 /** One Recents row. Hover swaps the timestamp for a three-dot menu with
@@ -5464,6 +5437,7 @@ export function ChatPanel({
   const scrollToEndRef = useRef<(() => void) | null>(null);
   const stickToBottom = useRef(true);
   const programmaticScroll = useRef<number | null>(null);
+  const lastTranscriptTop = useRef(0);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<ComposerEditorHandle>(null);
   useEffect(() => {
@@ -5533,8 +5507,8 @@ export function ChatPanel({
     target?: { scope: typeof composerScopeRef.current; stashKey: string },
   ) {
     // Per-file and total caps keep the base64-inflated (~33%) request body
-    // under the backend's 64 MB limit — a single 30 MB file or a batch summing
-    // to 40 MB both stay clear once encoded.
+    // under the backend's 64 MiB limit — a single 30 MiB file or a batch summing
+    // to 40 MiB both stay clear once encoded.
     const MAX_BYTES = 30 * 1024 * 1024;
     const TOTAL_BYTES = 40 * 1024 * 1024;
     setAttachError(null);
@@ -5549,11 +5523,11 @@ export function ChatPanel({
         continue;
       }
       if (file.size > MAX_BYTES) {
-        setAttachError(m.chat_attachment_too_large({ name: ltr(file.name) }));
+        setAttachError(m.chat_attachment_too_large({ name: ltr(file.name), size: fmtBytes(MAX_BYTES) }));
         continue;
       }
       if (total + file.size > TOTAL_BYTES) {
-        setAttachError(m.chat_attachments_total_too_large());
+        setAttachError(m.chat_attachments_total_too_large({ size: fmtBytes(TOTAL_BYTES) }));
         continue;
       }
       total += file.size;
@@ -6202,8 +6176,7 @@ export function ChatPanel({
               next.set(ev.session.id, (cur.get(ev.session.id) ?? 0) + 1);
               return next;
             });
-            // Drop the flag once the run is over (longest stagger + one char
-            // duration, plus slack) so later re-renders show a static title.
+            // Drop the flag once the sweep is over so later remounts don't replay it.
             window.setTimeout(() => {
               setTitleReveals((cur) => {
                 if (!cur.has(ev.session.id)) return cur;
@@ -6487,11 +6460,15 @@ export function ChatPanel({
   const demoHintVisible =
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = distance < 60;
     // Wheels, keys, focus moves and screen readers scroll unannounced; only the virtualizer's own scrolls are recorded.
     const programmatic = programmaticScroll.current !== null && Math.abs(el.scrollTop - programmaticScroll.current) <= 1;
+    const movedUp = el.scrollTop < lastTranscriptTop.current;
     programmaticScroll.current = null;
-    if (!programmatic) stickToBottom.current = atBottom;
+    lastTranscriptTop.current = el.scrollTop;
+    // Trackpads scroll a pixel at a time, so any upward scroll lets go before the next resize re-pins it.
+    if (!programmatic) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
     setTranscriptAtBottom(atBottom);
   }, []);
   const pinTranscriptToBottom = useCallback(() => {
@@ -7255,7 +7232,7 @@ export function ChatPanel({
     const query = projectSessionsQueries[index];
     const projectSessions = project.id === projectId ? sessions : query.data ?? EMPTY_SESSIONS;
     const matching = projectSessions
-      .filter((session) => !session.sideParentSessionId && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
+      .filter((session) => !session.sideParentSessionId && !session.delegate && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const chatLimit = chatLimits[project.id] ?? 6;
     let visible = matching.slice(0, chatLimit);
@@ -7271,7 +7248,7 @@ export function ChatPanel({
   if (sidebarGrouping === "list") {
     const flat = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? [];
     const selected = sessions.find((session) => session.id === activeId);
-    if (selected && !flat.some((session) => session.id === selected.id)) flat.push(selected);
+    if (selected && !selected.delegate && !flat.some((session) => session.id === selected.id)) flat.push(selected);
     flat.filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).forEach((session) => {
       const project = sidebarProjects.find((project) => project.id === session.projectId);
       if (project) sidebarRows.push({ kind: "chat", project, session });

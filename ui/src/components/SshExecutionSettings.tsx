@@ -1,11 +1,60 @@
 import { useWorkspace } from "../workspace";
-import { useId } from "react";
+import { useId, useState } from "react";
 import { useMutate } from "@clo/react-mutation";
 import { type SshHost, type SshSettings } from "../api";
 import { m } from "../paraglide/messages.js";
-import { mutSaveSshDefault, mutSaveSshHost } from "../queries/settings";
+import { mutAddComputeHost, mutRemoveComputeHost, mutSaveSshDefault, mutSaveSshHost } from "../queries/settings";
 import { OptionPicker } from "./ModelPicker";
-import { Input } from "./ui";
+import { showRemoteHostDialog } from "./RemoteHostDialog";
+import { Button, Input, Spinner } from "./ui";
+
+/** Saves a compute host from a hostname or the ssh command the user already runs. */
+export function AddSshHost() {
+  const workspace = useWorkspace();
+  const add = useMutate(mutAddComputeHost);
+  const [command, setCommand] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const typed = command.trim();
+
+  return <div className="mb-4 grid gap-2">
+    <form
+      className="flex gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!typed || add.isPending) return;
+        setError(null);
+        add.runWithOptions(workspace, typed, {
+          onSuccessUi: () => setCommand(""),
+          onError: (failure) => setError(failure instanceof Error ? failure.message : String(failure)),
+        });
+      }}
+    >
+      <Input
+        value={command}
+        onChange={(event) => {
+          setCommand(event.target.value);
+          setError(null);
+        }}
+        placeholder={m.remote_add_placeholder()}
+        aria-label={m.ssh_add_host_label()}
+        autoComplete="off"
+        autoCapitalize="off"
+        spellCheck={false}
+      />
+      <Button type="submit" disabled={!typed || add.isPending}>
+        {add.isPending && <Spinner />}
+        {m.ssh_add_host()}
+      </Button>
+    </form>
+    {error && <p role="alert" className="m-0 text-sm text-accent-red">{error}</p>}
+    <p className="m-0 text-sm text-subtext">
+      {m.ssh_remote_note()}{" "}
+      <button type="button" className="cursor-pointer rounded-sm text-text underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-focus" onClick={() => showRemoteHostDialog(workspace.dialogs)}>
+        {m.ssh_open_remote()}
+      </button>
+    </p>
+  </div>;
+}
 
 export function SshDefaultHost({ settings }: { settings: SshSettings }) {
   const workspace = useWorkspace();
@@ -35,6 +84,7 @@ export function SshExecutionSettings({ host, connecting, reference, onChange }: 
 
   const id = useId();
   const save = useMutate(mutSaveSshHost);
+  const remove = useMutate(mutRemoveComputeHost);
   const failure = save.error;
   function change(value: string | null) {
     onChange(value);
@@ -58,6 +108,10 @@ export function SshExecutionSettings({ host, connecting, reference, onChange }: 
           onChange={(event) => change(event.target.value)} />
       </label>}
       {failure != null && <p className="m-0 text-sm text-accent-red" role="status">{failure instanceof Error ? failure.message : String(failure)}</p>}
+      {host.saved && <Button variant="danger" size="small" className="justify-self-start" disabled={connecting || remove.isPending}
+        onClick={() => remove.run(workspace, host.host)}>
+        {m.ssh_remove_host()}
+      </Button>}
     </div>
   </details>;
 }
