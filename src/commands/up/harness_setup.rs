@@ -535,7 +535,7 @@ async fn managed_setup(
     follow_up: &mut FollowUp,
     opencode_host: &crate::local::opencode::AgentHost,
 ) -> Result<Option<CommandFailure>, String> {
-    let _setup = managed::lock_installations().map_err(|error| error.to_string())?;
+    let _setup = wait_for_installations(socket).await?;
     let harness = request.harness.as_str();
     let user = managed::user_install(harness).await;
     let copy = managed::installed(harness);
@@ -701,6 +701,33 @@ async fn install_with_progress(
             message = socket.recv() => {
                 if matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) {
                     return None;
+                }
+            }
+        }
+    }
+}
+
+/// The installations lock, once another install, removal or background update lets go of it.
+async fn wait_for_installations(
+    socket: &mut WebSocket,
+) -> Result<crate::file_lock::FileLock, String> {
+    let error = |error: crate::error::Error| error.to_string();
+    if let Some(lock) = managed::try_lock_installations().map_err(error)? {
+        return Ok(lock);
+    }
+    write_terminal(socket, "Waiting for another agent install to finish…\r\n")
+        .await
+        .map_err(|error| error.to_string())?;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(crate::config::paced(std::time::Duration::from_millis(250))) => {
+                if let Some(lock) = managed::try_lock_installations().map_err(error)? {
+                    return Ok(lock);
+                }
+            }
+            message = socket.recv() => {
+                if matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) {
+                    return Err("The install was cancelled.".into());
                 }
             }
         }

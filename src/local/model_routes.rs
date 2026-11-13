@@ -104,13 +104,35 @@ const TIER_WORDS: &[&str] = &[
     "reasoner",
 ];
 
-/// What an offer adds to its model: Cursor's and Antigravity's effort, speed and thinking, Claude Code's long context.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+/// Speed tiers catalogs list as models of their own, slowest first.
+const SPEEDS: &[&str] = &["flex", "fast", "ultrafast"];
+
+/// What an offer adds to its model: Cursor's and Antigravity's effort, any catalog's speed and thinking tiers, Claude
+/// Code's long context.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Variant {
     pub effort: Option<String>,
-    pub fast: bool,
+    /// One of [`SPEEDS`]; none for the standard tier.
+    pub speed: Option<String>,
     pub thinking: bool,
     pub context: Option<String>,
+}
+
+impl Serialize for Variant {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut variant = serializer.serialize_struct("Variant", 5)?;
+        variant.serialize_field("effort", &self.effort)?;
+        variant.serialize_field("speed", &self.speed)?;
+        // What dashboards from before `speed` read.
+        variant.serialize_field("fast", &(self.speed.as_deref() == Some("fast")))?;
+        variant.serialize_field("thinking", &self.thinking)?;
+        variant.serialize_field("context", &self.context)?;
+        variant.end()
+    }
 }
 
 /// One catalog entry read as a model.
@@ -130,6 +152,9 @@ pub struct ModelName {
     pub variant: Variant,
     /// How far the catalog's name is from its model's plain variant; the lowest runs by default.
     pub variant_rank: usize,
+    /// A moving alias (`mistral-large-latest`) whose catalog also lists the versions it moves between, so pickers
+    /// leave it out.
+    pub superseded: bool,
 }
 
 /// Cursor and Antigravity list each effort, speed and thinking mode as a model of its own.
@@ -212,11 +237,16 @@ fn read(name: &str, spells: bool, variant: &mut Variant) -> Reading {
         let lower = word.to_lowercase();
         if spells
             && (EFFORTS.contains(&lower.as_str())
-                || matches!(lower.as_str(), "extra" | "fast" | "thinking" | "no")
+                || SPEEDS.contains(&lower.as_str())
+                || matches!(lower.as_str(), "extra" | "thinking" | "no")
                 || is_context(&lower))
         {
             if is_context(&lower) {
                 variant.context = Some(lower);
+            } else if SPEEDS.contains(&lower.as_str()) {
+                variant.speed.get_or_insert(lower);
+            } else if lower == "thinking" {
+                variant.thinking = true;
             }
             reading.variant_words += 1;
             continue;
@@ -263,7 +293,9 @@ fn id_variant(harness: &str, id: &str) -> Variant {
     let mut parts: Vec<&str> = lower.split('-').collect();
     while parts.len() > 1 {
         match *parts.last().unwrap() {
-            "fast" => variant.fast = true,
+            speed if SPEEDS.contains(&speed) && variant.speed.is_none() => {
+                variant.speed = Some(speed.to_string())
+            }
             "thinking" => variant.thinking = true,
             effort if EFFORTS.contains(&effort) && variant.effort.is_none() => {
                 let extra = effort == "high" && parts[parts.len() - 2] == "extra";
@@ -322,6 +354,32 @@ fn plain_name(name: &str, free: bool) -> String {
     name
 }
 
+/// `name` less the trailing speed and `thinking` words that make a tier of one model, each recorded on `variant`.
+/// Only words after a version count, so `Grok Code Fast 1` keeps its word.
+fn peel_switches(name: &str, variant: &mut Variant) -> String {
+    let mut name = name.trim_end();
+    // A hyphen separates words only in a slug, so `Flash 1017 Ultra-fast` stays one word.
+    let slug = !name.contains(' ');
+    let separator = |c: char| c == ' ' || slug && matches!(c, '-' | '_' | ':');
+    loop {
+        let start = name.rfind(separator).map_or(0, |index| index + 1);
+        let rest = name[..start].trim_end_matches(separator);
+        if !rest.contains(|c: char| c.is_ascii_digit()) {
+            break;
+        }
+        let word = name[start..].to_ascii_lowercase().replace('-', "");
+        if SPEEDS.contains(&word.as_str()) {
+            variant.speed = Some(word);
+        } else if word == "thinking" {
+            variant.thinking = true;
+        } else {
+            break;
+        }
+        name = rest;
+    }
+    name.to_string()
+}
+
 /// One catalog entry read as a model: its key across catalogs, its version, and its variant. An alias is keyed
 /// by `resolved`, the versioned model it runs.
 pub fn parse(
@@ -340,7 +398,12 @@ pub fn parse(
     let name = display_name
         .filter(|name| !name.is_empty())
         .map_or_else(|| tail(id), str::to_string);
-    let reading = read(&plain_name(&name, free), spells, &mut variant);
+    let mut name = plain_name(&name, free);
+    if !spells {
+        peel_switches(&plain_name(&tail(id), free), &mut variant);
+        name = peel_switches(&name, &mut variant);
+    }
+    let reading = read(&name, spells, &mut variant);
     let resolved_reading = resolved.map(|resolved| {
         read(
             &plain_name(&tail(resolved), false),
@@ -392,8 +455,18 @@ pub fn parse(
         }
         None => family.clone(),
     };
-    let variant_words =
-        reading.variant_words + usize::from(harness == "claude-code" && variant.context.is_some());
+    let variant_words = if spells {
+        reading.variant_words
+    } else {
+        [
+            variant.speed.is_some(),
+            variant.thinking,
+            variant.context.is_some(),
+        ]
+        .into_iter()
+        .filter(|&flag| flag)
+        .count()
+    };
     ModelName {
         key: if free {
             format!("{versioned_key}:free")
@@ -406,19 +479,58 @@ pub fn parse(
         label: reading.kept.join(" "),
         variant_rank: variant_words * 2 + usize::from(variant.effort.as_deref() != Some("medium")),
         variant,
+        superseded: false,
     }
 }
 
 /// Adds each wire model's [`ModelName`] as `parsed`, which the picker groups by and Settings hides by.
 pub fn name_models(harness: &str, models: &mut Value) {
-    for model in models.as_array_mut().into_iter().flatten() {
-        let parsed = parse(
-            harness,
-            model["id"].as_str().unwrap_or_default(),
-            model["displayName"].as_str(),
-            model["resolvedModel"].as_str(),
-        );
-        model["parsed"] = serde_json::json!(parsed);
+    let Some(models) = models.as_array_mut() else {
+        return;
+    };
+    let text = |model: &Value, field: &str| model[field].as_str().map(str::to_owned);
+    let entries: Vec<(String, Option<String>, ModelName)> = models
+        .iter()
+        .map(|model| {
+            let id = text(model, "id").unwrap_or_default();
+            let display = text(model, "displayName");
+            let parsed = parse(
+                harness,
+                &id,
+                display.as_deref(),
+                model["resolvedModel"].as_str(),
+            );
+            (id, display, parsed)
+        })
+        .collect();
+
+    // OpenCode's ids lead with their provider; each provider is a catalog of its own.
+    let catalog = |id: &str| {
+        id.split_once('/')
+            .map_or("", |(catalog, _)| catalog)
+            .to_owned()
+    };
+    let unaliased = |family: &str| {
+        let words: Vec<&str> = family.split(' ').filter(|word| *word != "latest").collect();
+        words.join(" ")
+    };
+    let versioned: std::collections::HashSet<(String, String)> = entries
+        .iter()
+        .filter(|(_, _, name)| name.version.is_some())
+        .map(|(id, _, name)| (catalog(id), unaliased(&name.family)))
+        .collect();
+    let says_latest = |text: &str| {
+        text.to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == "latest")
+    };
+
+    for (model, (id, display, mut name)) in models.iter_mut().zip(entries) {
+        let alias = name.version.is_none()
+            && (says_latest(id.rsplit('/').next().unwrap_or(&id))
+                || display.as_deref().is_some_and(says_latest));
+        name.superseded = alias && versioned.contains(&(catalog(&id), unaliased(&name.family)));
+        model["parsed"] = serde_json::json!(name);
     }
 }
 
@@ -877,6 +989,11 @@ mod tests {
                 ..Variant::default()
             }
         );
+        let named = parse("cursor", "opaque-id", Some("GPT 5 Flex Thinking"), None);
+        assert_eq!(
+            (named.variant.speed.as_deref(), named.variant.thinking),
+            (Some("flex"), true)
+        );
         let grok = parse(
             "cursor",
             "grok-4.7-low-fast",
@@ -887,9 +1004,9 @@ mod tests {
             (
                 grok.label.as_str(),
                 grok.variant.effort.as_deref(),
-                grok.variant.fast
+                grok.variant.speed.as_deref()
             ),
-            ("Grok 4.7", Some("low"), true)
+            ("Grok 4.7", Some("low"), Some("fast"))
         );
 
         let short = parse("claude-code", "claude-opus-5-5", Some("Opus 5.5"), None);
@@ -905,6 +1022,107 @@ mod tests {
         );
         assert_eq!(long.variant.context.as_deref(), Some("1m"));
         assert!(long.variant_rank > short.variant_rank);
+    }
+
+    #[test]
+    fn any_catalogs_speed_and_thinking_tiers_are_variants_of_one_model() {
+        let name = |id, display: Option<&str>| parse("opencode", id, display, None);
+        let plain = name("anthropic/claude-fable-5-2", Some("Claude Fable 5.2"));
+        let tiers = [
+            name(
+                "anthropic/claude-fable-5-2-fast",
+                Some("Claude Fable 5.2 Fast"),
+            ),
+            name(
+                "vercel/anthropic/claude-fable-5.2-fast",
+                Some("Claude Fable 5.2 (Fast)"),
+            ),
+        ];
+        for tier in &tiers {
+            assert_eq!(
+                (
+                    tier.key.as_str(),
+                    tier.label.as_str(),
+                    tier.variant.speed.as_deref()
+                ),
+                (plain.key.as_str(), "Claude Fable 5.2", Some("fast")),
+                "{tier:?}"
+            );
+            assert!(tier.variant_rank > plain.variant_rank);
+        }
+
+        let unnamed = name("anthropic/claude-fable-5-2-fast", None);
+        assert_eq!(
+            (unnamed.key.as_str(), unnamed.label.as_str()),
+            (plain.key.as_str(), "claude-fable-5-2")
+        );
+
+        let both = name(
+            "vercel/openai/gpt-5.1-thinking-fast",
+            Some("GPT 5.1 Thinking (Fast)"),
+        );
+        assert_eq!(
+            (
+                both.key.as_str(),
+                both.variant.speed.as_deref(),
+                both.variant.thinking
+            ),
+            (
+                name("vercel/openai/gpt-5.1", Some("GPT 5.1")).key.as_str(),
+                Some("fast"),
+                true
+            )
+        );
+
+        let ultra = name(
+            "fireworks-ai/routers/deepseek-v4p1-flash-1017-ultrafast",
+            Some("DeepSeek V4.1 Flash 1017 Ultra-fast"),
+        );
+        assert_eq!(
+            (ultra.variant.speed.as_deref(), ultra.label.as_str()),
+            (Some("ultrafast"), "DeepSeek V4.1 Flash")
+        );
+
+        let named = name("grok-code-fast-1", Some("Grok Code Fast 1"));
+        assert!(named.variant.speed.is_none() && named.label == "Grok Code Fast 1");
+    }
+
+    #[test]
+    fn every_speed_tier_is_a_variant_and_older_dashboards_still_read_fast() {
+        let speed = |id| parse("opencode", id, None, None).variant.speed;
+        assert_eq!(speed("openai/gpt-5-flex").as_deref(), Some("flex"));
+        assert_eq!(
+            speed("openai/gpt-6-astra-ultrafast").as_deref(),
+            Some("ultrafast")
+        );
+        assert_eq!(
+            parse("opencode", "openai/gpt-6-astra-ultrafast", None, None).key,
+            parse("opencode", "openai/gpt-6-astra", None, None).key
+        );
+
+        let wire = |id| serde_json::json!(parse("opencode", id, None, None).variant);
+        assert_eq!(wire("openai/gpt-5.5-fast")["fast"], true);
+        assert_eq!(wire("openai/gpt-5-flex")["fast"], false);
+    }
+
+    #[test]
+    fn a_latest_alias_steps_aside_for_the_versions_its_catalog_lists() {
+        let mut models = serde_json::json!([
+            {"id": "mistral/mistral-large-latest", "displayName": "Mistral Large (latest)"},
+            {"id": "mistral/mistral-large-2512", "displayName": "Mistral Large 3"},
+            {"id": "google/gemini-pro-latest", "displayName": "Gemini Pro Latest"},
+            {"id": "google/gemini-2.5-pro", "displayName": "Gemini 2.5 Pro"},
+            {"id": "openai/chat-latest", "displayName": "Chat Latest"},
+            {"id": "other/gemini-pro-latest", "displayName": "Gemini Pro Latest"},
+        ]);
+        name_models("opencode", &mut models);
+        let superseded: Vec<bool> = models
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["parsed"]["superseded"].as_bool().unwrap())
+            .collect();
+        assert_eq!(superseded, [true, false, true, false, false, false]);
     }
 
     #[test]

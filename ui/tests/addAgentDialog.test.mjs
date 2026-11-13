@@ -182,3 +182,27 @@ test("on Apple silicon the local model guide also walks through oMLX and Rapid-M
   await click(find("button", "Rapid-MLX"));
   assert.ok(find('[role="dialog"] code', "brew install rapid-mlx"));
 });
+
+test("a provider from OpenCode's list that takes a key links to where to get one", async () => {
+  serveApp({
+    "GET /api/harnesses": () => ({ harnesses: [opencode] }),
+    "GET /api/harnesses/acp": () => [],
+    "GET /api/harnesses/acp/presets": () => [],
+    "GET /api/harnesses/setup/commands": () => ({}),
+    "GET /api/opencode/providers": () => [],
+    "GET /api/local-models": () => [],
+    "GET /api/opencode/integrations": () => [{ id: "groq", name: "Groq", methods: [{ type: "key" }], connected: false }],
+  });
+  const { workspace } = await render(null);
+  await act(async () => workspace.dialogs.showCustomDialog({
+    component: AddAgentDialog,
+    props: { remote: false, onCustomAcp() {}, onEditAcp() {} },
+    onConfirm() {},
+    onCancel: "disable",
+  }));
+  await settle();
+  await click(find('[role="dialog"] button', m.add_agent_more()));
+  await click(find('[role="dialog"] button', "Groq"));
+  assert.ok(find('[role="dialog"] label', m.provider_key_label({ name: "Groq" })));
+  assert.equal(find('[role="dialog"] a', m.provider_key_get()).getAttribute("href"), "https://console.groq.com/keys");
+});

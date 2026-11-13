@@ -82,11 +82,12 @@ export function agentFor(agents: PickerAgent[], h: Harness, model: string | null
   return agents.find((agent) => agent.harness.id === "opencode" && agent.provider === provider);
 }
 
-/** An agent's models as offers; OpenCode's providers each offer their own. */
-export function agentOffers(agent: PickerAgent): ModelOffer<PickerAgent>[] {
+/** An agent's models as offers, less the moving aliases its versions stand for, unless `kept`. OpenCode's providers
+ * each offer their own. */
+export function agentOffers(agent: PickerAgent, kept?: string | null): ModelOffer<PickerAgent>[] {
   const h = agent.harness;
   const models = agent.provider ? h.models.filter((model) => model.id.startsWith(`${agent.provider}/`)) : h.models;
-  return models.map((model) => ({ tile: agent, model }));
+  return models.filter((model) => !model.parsed.superseded || model.id === kept).map((model) => ({ tile: agent, model }));
 }
 
 interface PickerCatalog {
@@ -109,10 +110,10 @@ export function pickerLines({ catalog, providers, endpoints, hiddenModels }: Pic
   const harnesses = sessionHarness ? [sessionHarness, ...offered.filter((h) => h.id !== sessionHarness.id)] : offered;
 
   const agents = pickerAgents(harnesses, providers, endpoints, value?.harness);
-  const offers = agents.flatMap(agentOffers);
   const selectedHarness = selectionHarness(harnesses, value);
   const selectedModel = value?.model ?? null;
   const selectedAgent = selectedHarness ? agentFor(agents, selectedHarness, selectedModel) : undefined;
+  const offers = agents.flatMap((agent) => agentOffers(agent, agent === selectedAgent ? selectedModel : null));
 
   const hidden = new Set(hiddenModels);
   const lines = groupModelLines(offers.filter((offer) => !hidden.has(offer.model.parsed.key) || (offer.tile === selectedAgent && offer.model.id === selectedModel)));

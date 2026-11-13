@@ -38,7 +38,7 @@ export function ModelSettings({ heading }: { heading: ReactNode }) {
   const listRef = useRef<HTMLDivElement>(null);
 
   const lines = useMemo(
-    () => groupModelLines(pickerAgents(catalog ?? [], providers ?? [], endpoints ?? []).flatMap(agentOffers)),
+    () => groupModelLines(pickerAgents(catalog ?? [], providers ?? [], endpoints ?? []).flatMap((agent) => agentOffers(agent))),
     [catalog, providers, endpoints],
   );
   if (!uiState || !lines.length) return null;
