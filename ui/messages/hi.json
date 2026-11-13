@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "{name} हटाएँ",
   "settings_remove_agent_description": "इसका इस्तेमाल करने वाली चैट को दूसरा एजेंट चाहिए होगा।",
   "settings_opencode_update_needed": "प्रोवाइडर जोड़ने के लिए अपडेट करें",
-  "settings_opencode_signed_in": "{providers} में साइन इन है",
+  "settings_opencode_models_from": "{providers} के मॉडल",
   "settings_free_models": "मुफ़्त मॉडल",
   "settings_free_models_locked": "मुफ़्त मॉडल बंद करने के लिए किसी दूसरे प्रोवाइडर से साइन इन करें",
   "settings_free_models_description": "OpenCode के दिए मॉडल, ताकि आप बिना भुगतान के शुरू कर सकें।",

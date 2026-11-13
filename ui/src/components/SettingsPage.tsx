@@ -634,7 +634,7 @@ export function AgentList({ remote, onboarding }: {
     const update = h.id === "opencode" && opencode1 && !remote;
     const action = update || (!h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands)));
     const noModels = h.agentReady && !h.models.length;
-    const signIns = h.id === "opencode" && unrecorded.length > 0 ? m.settings_opencode_signed_in({ providers: providerNames(unrecorded) }) : undefined;
+    const signIns = h.id === "opencode" && unrecorded.length > 0 ? m.settings_opencode_models_from({ providers: providerNames(unrecorded) }) : undefined;
     const detail = h.id === "opencode" && opencode1 ? m.settings_opencode_update_needed()
       : h.authCheckFailed || !h.agentReady
         ? status.label

@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "移除 {name}",
   "settings_remove_agent_description": "使用它的对话需要换用其他智能体。",
   "settings_opencode_update_needed": "更新后才能添加提供商",
-  "settings_opencode_signed_in": "已登录 {providers}",
+  "settings_opencode_models_from": "来自 {providers} 的模型",
   "settings_free_models": "免费模型",
   "settings_free_models_locked": "使用其他提供商登录后才能关闭免费模型",
   "settings_free_models_description": "OpenCode 提供的一组模型，无需付费即可上手。",

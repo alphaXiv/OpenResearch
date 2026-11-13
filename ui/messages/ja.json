@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "{name} を削除",
   "settings_remove_agent_description": "これを使うチャットには別のエージェントが必要になります。",
   "settings_opencode_update_needed": "プロバイダーを追加するには更新してください",
-  "settings_opencode_signed_in": "{providers} にサインイン済み",
+  "settings_opencode_models_from": "{providers} のモデル",
   "settings_free_models": "無料モデル",
   "settings_free_models_locked": "無料モデルをオフにするには、ほかのプロバイダーでサインインしてください",
   "settings_free_models_description": "OpenCode が提供する、支払いなしで始められるモデルです。",

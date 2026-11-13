@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "Usuń {name}",
   "settings_remove_agent_description": "Czaty, które go używają, będą potrzebować innego agenta.",
   "settings_opencode_update_needed": "Zaktualizuj, aby dodać dostawców",
-  "settings_opencode_signed_in": "Zalogowano do: {providers}",
+  "settings_opencode_models_from": "Modele od: {providers}",
   "settings_free_models": "Darmowe modele",
   "settings_free_models_locked": "Zaloguj się przez innego dostawcę, aby wyłączyć darmowe modele",
   "settings_free_models_description": "Zestaw modeli od OpenCode, by zacząć bez płacenia.",

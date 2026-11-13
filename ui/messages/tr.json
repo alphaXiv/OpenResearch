@@ -1665,7 +1665,7 @@
   "settings_remove_agent": "{name} öğesini kaldır",
   "settings_remove_agent_description": "Bunu kullanan sohbetlerin başka bir ajana ihtiyacı olacak.",
   "settings_opencode_update_needed": "Sağlayıcı eklemek için güncelleyin",
-  "settings_opencode_signed_in": "{providers} oturumu açık",
+  "settings_opencode_models_from": "{providers} modelleri",
   "settings_free_models": "Ücretsiz modeller",
   "settings_free_models_locked": "Ücretsiz modelleri kapatmak için başka bir sağlayıcıyla oturum açın",
   "settings_free_models_description": "Ödeme yapmadan başlamanız için OpenCode'un sunduğu modeller.",

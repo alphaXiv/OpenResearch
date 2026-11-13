@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "إزالة {name}",
   "settings_remove_agent_description": "ستحتاج المحادثات التي تستخدمه إلى وكيل آخر.",
   "settings_opencode_update_needed": "حدّث لإضافة مزوّدين",
-  "settings_opencode_signed_in": "تم تسجيل الدخول إلى {providers}",
+  "settings_opencode_models_from": "نماذج من {providers}",
   "settings_free_models": "نماذج مجانية",
   "settings_free_models_locked": "سجّل الدخول عبر مزوّد آخر لتعطيل النماذج المجانية",
   "settings_free_models_description": "مجموعة نماذج يوفّرها OpenCode لتبدأ دون أن تدفع.",

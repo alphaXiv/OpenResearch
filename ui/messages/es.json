@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "Quitar {name}",
   "settings_remove_agent_description": "Los chats que lo usan necesitarán otro agente.",
   "settings_opencode_update_needed": "Actualiza para añadir proveedores",
-  "settings_opencode_signed_in": "Sesión iniciada en {providers}",
+  "settings_opencode_models_from": "Modelos de {providers}",
   "settings_free_models": "Modelos gratuitos",
   "settings_free_models_locked": "Inicia sesión con otro proveedor para desactivar los modelos gratuitos",
   "settings_free_models_description": "Un conjunto de modelos que ofrece OpenCode para empezar sin pagar.",

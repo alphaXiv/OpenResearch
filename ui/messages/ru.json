@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "Удалить {name}",
   "settings_remove_agent_description": "Чатам, которые его используют, понадобится другой агент.",
   "settings_opencode_update_needed": "Обновите, чтобы добавлять провайдеров",
-  "settings_opencode_signed_in": "Вход выполнен: {providers}",
+  "settings_opencode_models_from": "Модели от {providers}",
   "settings_free_models": "Бесплатные модели",
   "settings_free_models_locked": "Войдите через другого провайдера, чтобы отключить бесплатные модели",
   "settings_free_models_description": "Модели от OpenCode, чтобы начать без оплаты.",

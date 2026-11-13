@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "حذف {name}",
   "settings_remove_agent_description": "گفت‌وگوهایی که از آن استفاده می‌کنند به عامل دیگری نیاز خواهند داشت.",
   "settings_opencode_update_needed": "برای افزودن ارائه‌دهنده به‌روزرسانی کنید",
-  "settings_opencode_signed_in": "وارد {providers} شده‌اید",
+  "settings_opencode_models_from": "مدل‌هایی از {providers}",
   "settings_free_models": "مدل‌های رایگان",
   "settings_free_models_locked": "برای غیرفعال کردن مدل‌های رایگان، با ارائه‌دهندهٔ دیگری وارد شوید",
   "settings_free_models_description": "مجموعه‌ای از مدل‌ها که OpenCode فراهم می‌کند تا بدون پرداخت شروع کنید.",

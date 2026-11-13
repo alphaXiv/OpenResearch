@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "Remove {name}",
   "settings_remove_agent_description": "Chats that use it will need another agent.",
   "settings_opencode_update_needed": "Update to add providers",
-  "settings_opencode_signed_in": "Signed in to {providers}",
+  "settings_opencode_models_from": "Models from {providers}",
   "settings_free_models": "Free Models",
   "settings_free_models_locked": "Sign in with another provider to disable the free models",
   "settings_free_models_description": "A set of models provided by OpenCode to get you started without paying.",

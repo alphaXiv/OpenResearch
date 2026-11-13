@@ -1634,7 +1634,7 @@
   "settings_remove_agent": "{name} 제거",
   "settings_remove_agent_description": "이 에이전트를 쓰는 채팅은 다른 에이전트가 필요합니다.",
   "settings_opencode_update_needed": "제공업체를 추가하려면 업데이트하세요",
-  "settings_opencode_signed_in": "{providers}에 로그인됨",
+  "settings_opencode_models_from": "{providers}의 모델",
   "settings_free_models": "무료 모델",
   "settings_free_models_locked": "무료 모델을 끄려면 다른 제공업체로 로그인하세요",
   "settings_free_models_description": "결제 없이 시작할 수 있도록 OpenCode가 제공하는 모델입니다.",
