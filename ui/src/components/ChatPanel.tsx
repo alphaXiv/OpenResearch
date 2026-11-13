@@ -7584,7 +7584,6 @@ export function ChatPanel({
     return (
       <>
         {displayedRail}
-        {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
         <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
           {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
@@ -7600,7 +7599,6 @@ export function ChatPanel({
   return (
     <>
       {displayedRail}
-      {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
       <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane relative flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}

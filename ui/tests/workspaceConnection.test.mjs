@@ -100,7 +100,8 @@ for (const [status, shown] of [["connected", null], ["reconnecting", m.remote_ma
 
 for (const kind of ["local", "ssh"]) {
   for (const scenario of ["loading", "error", "onboarding", "no-projects", "projects"]) {
-    test(`${kind} project home always offers machine selection during ${scenario}`, async () => {
+    const offered = scenario === "error" || (kind === "ssh" && (scenario === "onboarding" || scenario === "no-projects"));
+    test(`${kind} project home ${offered ? "offers" : "leaves"} machine selection ${offered ? "during" : "to the sidebar during"} ${scenario}`, async () => {
       serveApp({
         "GET /_orx/runtime": () => runtimes[kind],
         "GET /api/projects": () => {
@@ -113,6 +114,10 @@ for (const kind of ["local", "ssh"]) {
         "GET /api/remote/sessions": () => ({ sessions: [session] }),
       });
       await renderApp("/projects");
+      if (!offered) {
+        assert.equal(switcher(), undefined);
+        return;
+      }
       assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: kind === "ssh" ? autoDir("research") : m.projects_local() }));
     });
   }
