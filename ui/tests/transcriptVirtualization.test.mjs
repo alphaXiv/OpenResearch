@@ -221,6 +221,12 @@ test("the bottom pin follows every scroll except the virtualizer's own", async (
   grow();
   await resize(viewport);
   assert.equal(viewport.scrollTop, height - 800, "scrolling back to the end pins it again");
+
+  await scrolled();
+  await scrollTo(height - 802);
+  grow();
+  await resize(viewport.firstElementChild);
+  assert.equal(viewport.scrollTop, height - 4_802, "a trackpad's first pixels up let go of the end");
 });
 
 test("row estimates are computed once per response group", async () => {
