@@ -1355,13 +1355,20 @@ mod tests {
             let polls = Arc::new(AtomicUsize::new(0));
             let count = polls.clone();
             let seen = polls.clone();
+            let reloaded = Arc::new(tokio::sync::Notify::new());
+            let observed = reloaded.clone();
             let app = Router::new()
                 .route(
                     "/api/model",
                     get(move || {
                         let count = count.clone();
+                        let observed = observed.clone();
                         async move {
-                            Json(if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                            let poll = count.fetch_add(1, Ordering::SeqCst);
+                            if poll == 2 {
+                                observed.notify_one();
+                            }
+                            Json(if poll == 0 {
                                 json!({"data":[]})
                             } else {
                                 json!({"data":[{"id":"fixture"}]})
@@ -1383,7 +1390,19 @@ mod tests {
                     }),
                 );
             let (endpoint, server) = catalog_server(app, false).await;
-            let result = discover_models_within(&endpoint, Duration::from_millis(100), RETRY).await;
+            let timeout = Duration::from_secs(30);
+            let discover = discover_models_within(&endpoint, timeout, RETRY);
+            tokio::pin!(discover);
+            if plugins_reload {
+                tokio::select! {
+                    _ = reloaded.notified() => {}
+                    result = &mut discover => panic!("discovery ended before its reload: {result:?}"),
+                }
+                tokio::time::pause();
+                tokio::time::advance(timeout).await;
+                tokio::time::resume();
+            }
+            let result = discover.await;
             server.abort();
             let (models, integrations) = result.unwrap();
             let expected = if plugins_reload {

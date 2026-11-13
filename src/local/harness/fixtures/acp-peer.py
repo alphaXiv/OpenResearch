@@ -6,7 +6,7 @@ import sys
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
 
-# A mode may carry a port, such as "slow-delete:4000" for the test's connection that holds the delete.
+# A mode may carry the port that signals a stall or holds session/delete.
 mode, _, port = (sys.argv[1] if len(sys.argv) > 1 else "normal").partition(":")
 record = sys.argv[2] if len(sys.argv) > 2 else None
 session = "peer-session"
@@ -43,6 +43,12 @@ def note(method, params):
             file.write(json.dumps(dict(method=method, params=params, cwd=os.getcwd())) + "\n")
 
 
+def signal_stall():
+    if port:
+        with socket.create_connection(("127.0.0.1", int(port))):
+            pass
+
+
 def config(model="first"):
     return [dict(id="opaque-model", name="Model", category="model", type="select", currentValue=model,
                  options=[dict(value="first", name="First"), dict(value="second", name="Second"), dict(value="reject", name="Rejected model")]),
@@ -74,6 +80,7 @@ for line in sys.stdin:
         if mode == "crash-init":
             sys.exit(3)
         if mode == "stalled-init":
+            signal_stall()
             continue
         if mode == "auth-init":
             send(dict(id=request["id"], error=dict(code=-32000, message="Authentication required")))
@@ -84,6 +91,7 @@ for line in sys.stdin:
                                                        **({"sessionCapabilities": {"delete": {}}} if mode in ["delete", "slow-delete"] else {}))))
     elif method == "session/new":
         if mode == "stalled-setup":
+            signal_stall()
             continue
         if mode == "legacy-models":
             reply(request, dict(sessionId=session, models=dict(currentModelId="first", availableModels=[
@@ -159,6 +167,7 @@ for line in sys.stdin:
             response = reverse("fs/write_text_file", dict(path=text[13:], content="written"))
             update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=json.dumps(response.get("error")))))
         if text == "hang":
+            signal_stall()
             hanging = request
             continue
         if text.startswith("files:"):

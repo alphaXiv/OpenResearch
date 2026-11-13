@@ -1646,11 +1646,17 @@ pub(crate) fn kill_shell_group(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
-    let _ = crate::process::command("taskkill")
+    let result = crate::process::command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .spawn()
+        .and_then(|mut child| {
+            crate::process::wait_with_timeout(&mut child, Duration::from_secs(5))
+        });
+    if let Err(error) = result {
+        eprintln!("orx up: could not stop command group {pid}: {error}");
+    }
 }
 
 /// Kill an agent and every command it started. Agents such as `agy` start each
@@ -1735,7 +1741,7 @@ async fn stop_process_tree(pid: u32) {
     const BOUND: std::time::Duration = std::time::Duration::from_secs(15);
     let script = r#"
 $ErrorActionPreference = 'Stop'
-$processes = @(Get-CimInstance Win32_Process)
+$processes = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine)
 function Stop-TurnProcess([uint32] $processId) {
     $children = @($processes | Where-Object { $_.ParentProcessId -eq $processId })
     Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue

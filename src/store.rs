@@ -19,7 +19,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::autonomy::Autonomy;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
@@ -953,6 +953,7 @@ impl Store {
         std::fs::create_dir_all(dir.join("run-logs"))
             .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
         let conn = Connection::open(dir.join("orx.db"))?;
+        conn.busy_timeout(busy_timeout)?;
         let has_floor: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata')",
             [],
@@ -970,9 +971,29 @@ impl Store {
                 return Err(anyhow!("This database requires a newer OpenResearch reader (min_reader_version {}). Update orx before opening it.", floor));
             }
         }
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
-        conn.execute_batch(
+        // WAL conversion can return SQLITE_BUSY without invoking SQLite's busy handler.
+        let wal_start = std::time::Instant::now();
+        let mut delay = Duration::from_millis(1);
+        while let Err(error) = conn.pragma_update(None, "journal_mode", "WAL") {
+            let remaining = busy_timeout.saturating_sub(wal_start.elapsed());
+            if remaining.is_zero()
+                || error.sqlite_error_code() != Some(rusqlite::ErrorCode::DatabaseBusy)
+            {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Could not prepare the database at {}. Try again.",
+                        dir.join("orx.db").display()
+                    )
+                });
+            }
+            std::thread::sleep(delay.min(remaining));
+            conn.busy_timeout(busy_timeout.saturating_sub(wal_start.elapsed()))?;
+            delay = (delay * 2).min(Duration::from_millis(50));
+        }
+        conn.busy_timeout(busy_timeout)?;
+        let schema =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+        schema.execute_batch(
             "CREATE TABLE IF NOT EXISTS store_metadata (
                 key TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
@@ -1347,9 +1368,9 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN collapsed_model_sections TEXT",
             "ALTER TABLE ui_state ADD COLUMN model_sightings TEXT",
         ] {
-            let _ = conn.execute(ddl, []);
+            let _ = schema.execute(ddl, []);
         }
-        conn.execute_batch(
+        schema.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS delete_run_outbox AFTER DELETE ON runs BEGIN
                  DELETE FROM run_notices WHERE run_id = OLD.id;
                  DELETE FROM run_subscriptions WHERE run_id = OLD.id;
@@ -1360,17 +1381,18 @@ impl Store {
              END;",
         )?;
         // Covers the periodic native-id scan so it never reads the large parts_json.
-        conn.execute_batch(
+        schema.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
              ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
         // A delegate that outlives its delegator, in a worktree of its own, stands as the user's.
-        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_delegates AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_delegates WHERE session_id = OLD.id OR parent_session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_delegates AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_delegates WHERE session_id = OLD.id OR parent_session_id = OLD.id; END;")?;
+        schema.commit()?;
         conn.execute(
             "DELETE FROM native_invocation_identities WHERE session_id IS NULL AND created_at < ?1",
             [now_ms() - 7 * 24 * 60 * 60 * 1000],
@@ -6311,6 +6333,130 @@ fn real_path_under<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_busy_timeout_applies_before_schema_reads() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        drop(Store::open().unwrap());
+        let locked = Connection::open(data_dir().join("orx.db")).unwrap();
+        locked
+            .execute_batch(
+                "PRAGMA locking_mode = EXCLUSIVE;
+                 BEGIN EXCLUSIVE;
+                 UPDATE store_metadata SET value = value;",
+            )
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let error = Store::open_with_busy_timeout(Duration::ZERO)
+            .err()
+            .expect("the other connection holds the database exclusively");
+        let elapsed = start.elapsed();
+        assert_eq!(
+            error
+                .downcast_ref::<rusqlite::Error>()
+                .unwrap()
+                .sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    }
+
+    #[test]
+    fn wal_setup_honors_the_lock_timeout() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        std::fs::create_dir_all(data_dir()).unwrap();
+        let locked = Connection::open(data_dir().join("orx.db")).unwrap();
+        locked
+            .execute_batch(
+                "CREATE TABLE preserved (value TEXT);
+                 INSERT INTO preserved VALUES ('kept');
+                 BEGIN;
+                 SELECT * FROM preserved;",
+            )
+            .unwrap();
+
+        for timeout in [Duration::ZERO, Duration::from_millis(50)] {
+            let start = std::time::Instant::now();
+            let error = Store::open_with_busy_timeout(timeout)
+                .err()
+                .expect("the reader blocks the journal mode change");
+            let elapsed = start.elapsed();
+            assert_eq!(
+                error
+                    .downcast_ref::<rusqlite::Error>()
+                    .unwrap()
+                    .sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            assert!(elapsed >= timeout, "{elapsed:?}");
+            assert!(elapsed < timeout + Duration::from_secs(1), "{elapsed:?}");
+        }
+
+        locked.execute_batch("ROLLBACK").unwrap();
+        let store = Store::open().unwrap();
+        let mode: String = store
+            .conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+    }
+
+    #[test]
+    fn schema_setup_rolls_back_when_a_later_statement_fails() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-schema-rollback").unwrap();
+        let conn = Connection::open(dir.path().join("orx.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE preserved (value TEXT);
+             INSERT INTO preserved VALUES ('kept');
+             CREATE VIEW runs AS SELECT 'id' AS id;",
+        )
+        .unwrap();
+
+        assert!(Store::open_at(dir.path().to_path_buf()).is_err());
+        let schema_created: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'store_metadata')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!schema_created);
+
+        conn.execute_batch("DROP VIEW runs").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        let preserved: String = store
+            .conn
+            .query_row("SELECT value FROM preserved", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(preserved, "kept");
+    }
+
+    #[test]
+    fn concurrent_opens_apply_the_schema_without_partial_state() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-schema-concurrent").unwrap();
+        let ready = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        ready.wait();
+                        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+                        assert!(!store.ui_state().unwrap().onboarding_completed);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+    }
 
     #[test]
     fn min_reader_version_refuses_before_migrations_on_every_open() {

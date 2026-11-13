@@ -676,6 +676,7 @@ mod tests {
         code_requests: Vec<HashMap<String, String>>,
         answers: std::collections::VecDeque<&'static str>,
         polls: Vec<std::time::Instant>,
+        polled: Option<Arc<tokio::sync::Notify>>,
         issued: usize,
     }
 
@@ -716,6 +717,9 @@ mod tests {
         assert_eq!(form["client_id"], "openresearch-desktop");
         assert!(form["resource"].ends_with("/mcp/v1"));
         device.polls.push(std::time::Instant::now());
+        if let Some(polled) = device.polled.take() {
+            polled.notify_one();
+        }
         if let Some(error) = device.answers.pop_front() {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
         }
@@ -733,7 +737,7 @@ mod tests {
         .into_response()
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn a_code_approved_on_another_device_connects_alphaxiv() {
         if !crate::config::in_test_child(&[
             "ALPHAXIV_API_URL",
@@ -835,13 +839,25 @@ mod tests {
         assert!(expired.unwrap_err().to_string().contains("expired"));
         assert_eq!(device.lock().unwrap().polls.len(), 1);
 
-        // A code alphaXiv never settles ends when it expires.
-        device.lock().unwrap().expires_in = 2;
-        let (expired, _) = connect(&["authorization_pending"; 1000]).await;
+        // Expire an unanswered code after its first poll.
+        device.lock().unwrap().expires_in = 600;
+        let polled = Arc::new(tokio::sync::Notify::new());
+        device.lock().unwrap().polled = Some(polled.clone());
+        let (expired, _) = {
+            let pending = connect(&["authorization_pending"; 1000]);
+            tokio::pin!(pending);
+            tokio::select! {
+                _ = polled.notified() => {}
+                _ = &mut pending => panic!("device authorization ended before its first poll"),
+            }
+            tokio::time::pause();
+            tokio::time::advance(crate::config::paced(Duration::from_secs(600))).await;
+            tokio::time::resume();
+            pending.await
+        };
         assert!(expired.unwrap_err().to_string().contains("expired"));
         let polls = device.lock().unwrap().polls.len();
         assert!(polls > 0 && polls < 1000);
-        device.lock().unwrap().expires_in = 600;
 
         // A link off alphaXiv's site is never shown.
         device.lock().unwrap().link = Some("https://alphaxiv.example/device".into());

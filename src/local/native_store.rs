@@ -1869,6 +1869,9 @@ mod tests {
 
     #[test]
     fn opencode_sweep_purges_settled_unreferenced_roots_and_compacts() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
         let root =
             std::env::temp_dir().join(format!("orx-opencode-sweep-{}", uuid::Uuid::new_v4()));
         let agents = root.join("agents");

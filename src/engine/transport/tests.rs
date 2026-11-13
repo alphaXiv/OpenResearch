@@ -1750,6 +1750,11 @@ async fn broken_config_during_connect_leaves_the_actor_alive() {
     let server = Sshd::start().unwrap();
     let conn = start(&server, TestClock::new());
     status(&conn, Status::Live).await;
+    conn.request(Request::Hello {
+        proto: orx_host_proto::PROTOCOL_VERSION,
+    })
+    .await
+    .unwrap();
     let original = fs::read_to_string(server.config_path()).unwrap();
     fs::write(server.config_path(), "InvalidOrxOption yes\n").unwrap();
     assert!(conn
