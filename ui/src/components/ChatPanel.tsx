@@ -4359,8 +4359,11 @@ const Transcript = memo(function Transcript({
     rangeExtractor,
     scrollToFn: (offset, options, instance) => {
       // virtual-core passes size corrections with the last scroll event's offset; apply them to the live scrollTop so a scroll since isn't undone.
-      const target = options.adjustments === undefined ? offset : (instance.scrollElement?.scrollTop ?? offset) + options.adjustments;
-      programmaticScroll.current = target;
+      const element = instance.scrollElement;
+      const target = options.adjustments === undefined ? offset : (element?.scrollTop ?? offset) + options.adjustments;
+      // A write that leaves scrollTop in place fires no scroll event, and a stale record would claim the user's next one.
+      const landing = element ? Math.max(0, Math.min(target, element.scrollHeight - element.clientHeight)) : target;
+      programmaticScroll.current = element && Math.abs(landing - element.scrollTop) < 0.5 ? null : landing;
       elementScroll(target, { behavior: options.behavior }, instance);
     },
   });
@@ -5464,6 +5467,7 @@ export function ChatPanel({
   const scrollToEndRef = useRef<(() => void) | null>(null);
   const stickToBottom = useRef(true);
   const programmaticScroll = useRef<number | null>(null);
+  const lastTranscriptTop = useRef(0);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<ComposerEditorHandle>(null);
   useEffect(() => {
@@ -6487,11 +6491,15 @@ export function ChatPanel({
   const demoHintVisible =
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = distance < 60;
     // Wheels, keys, focus moves and screen readers scroll unannounced; only the virtualizer's own scrolls are recorded.
     const programmatic = programmaticScroll.current !== null && Math.abs(el.scrollTop - programmaticScroll.current) <= 1;
+    const movedUp = el.scrollTop < lastTranscriptTop.current;
     programmaticScroll.current = null;
-    if (!programmatic) stickToBottom.current = atBottom;
+    lastTranscriptTop.current = el.scrollTop;
+    // Trackpads scroll a pixel at a time, so any upward scroll lets go before the next resize re-pins it.
+    if (!programmatic) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
     setTranscriptAtBottom(atBottom);
   }, []);
   const pinTranscriptToBottom = useCallback(() => {
