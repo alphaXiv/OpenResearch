@@ -1149,10 +1149,14 @@ impl Commands for Runtime {
             // The engine may have adopted the host's last 0.2.x run while the user authenticated.
             #[cfg(windows)]
             let connected = if supervised()? {
-                connect_supervised(connected, prompt.as_ref(), |operation| {
+                let saved = super::transport::askpass::Saved::new(&host);
+                let prompt = prompt.clone().map(|user| saved.wrap(Some(user)));
+                let result = connect_supervised(connected, prompt.as_ref(), |operation| {
                     crate::jobs::ssh::service::request(&target, operation)
                 })
-                .await
+                .await;
+                saved.finish(result.is_ok()).await;
+                result
             } else {
                 connected
             };

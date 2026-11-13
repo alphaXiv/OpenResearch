@@ -116,6 +116,28 @@ export function createEvents(client: WorkspaceClient) {
     };
   }
 
+  // Pending until taken, since a hidden machine's app subscribes only once it is shown again.
+  let computeViewPending = false;
+  const computeViewListeners = new Set<() => void>();
+
+  function requestComputeView() {
+    computeViewPending = true;
+    computeViewListeners.forEach((fn) => fn());
+  }
+
+  function takeComputeView(): boolean {
+    const pending = computeViewPending;
+    computeViewPending = false;
+    return pending;
+  }
+
+  function onComputeViewRequest(fn: () => void): () => void {
+    computeViewListeners.add(fn);
+    return () => {
+      computeViewListeners.delete(fn);
+    };
+  }
+
   const hostListeners = new Set<HostListener>();
 
   function onEngineHost(fn: HostListener): () => void {
@@ -465,6 +487,9 @@ export function createEvents(client: WorkspaceClient) {
     pendingHostConnect,
     takeHostConnect,
     onHostConnectRequest,
+    requestComputeView,
+    takeComputeView,
+    onComputeViewRequest,
     onEngineHost,
     onRunLog,
     onChatEvent,

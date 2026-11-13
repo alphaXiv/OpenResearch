@@ -704,6 +704,8 @@ export interface DataDirValidation {
 export interface SshHost {
   container?: string | null;
   host: string;
+  /** Saved in OpenResearch rather than read from ~/.ssh/config. */
+  saved?: boolean;
   hostname?: string;
   user?: string;
   port?: string;
@@ -2430,6 +2432,26 @@ export function createApi(
   const saveSshConfig = (content: string, previousContent: string) =>
     put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
 
+  /** Saves a host from what the user typed: an alias, `user@host[:port]` or an `ssh …` command. */
+  const addComputeHost = (command: string) =>
+    post<{ host: string }>("/api/settings/ssh/hosts", { command }).then((r) => r.host);
+
+  const removeComputeHost = (host: string) =>
+    writeResponse(`/api/settings/ssh/hosts/${encodeURIComponent(host)}`, { method: "DELETE" }).then((r) =>
+      json<{ ok: boolean }>(r),
+    );
+
+  const listRemoteHosts = (signal?: AbortSignal) =>
+    get<{ hosts: SshHost[] }>("/api/remote/hosts", signal).then((r) => r.hosts);
+
+  const addRemoteHost = (command: string) =>
+    post<{ host: string }>("/api/remote/hosts", { command }).then((r) => r.host);
+
+  const removeRemoteHost = (host: string) =>
+    writeResponse(`/api/remote/hosts/${encodeURIComponent(host)}`, { method: "DELETE" }).then((r) =>
+      json<{ ok: boolean }>(r),
+    );
+
   const getSshMasterStatus = (host: string, signal?: AbortSignal) =>
     get<{ running: boolean | null }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
 
@@ -3097,6 +3119,11 @@ export function createApi(
     getSshConfig,
     saveSshConfig,
     getSshMasterStatus,
+    addComputeHost,
+    removeComputeHost,
+    listRemoteHosts,
+    addRemoteHost,
+    removeRemoteHost,
     getRuntime,
     listRemoteSessions,
     createRemoteSession,

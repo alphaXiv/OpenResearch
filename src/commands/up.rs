@@ -139,7 +139,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         engine.clone(),
         clock.clone(),
         crate::store::data_dir(),
-        crate::config::ssh_config(),
+        Some(crate::config::ssh_config()),
     );
     let instance = uuid::Uuid::new_v4().to_string();
     let project_lifecycle = Arc::new(ProjectLifecycle::default());
@@ -858,6 +858,16 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
+        .route("/api/settings/ssh/hosts", post(add_compute_host))
+        .route(
+            "/api/settings/ssh/hosts/{host}",
+            axum::routing::delete(remove_compute_host),
+        )
+        .route("/api/remote/hosts", get(remote_hosts).post(add_remote_host))
+        .route(
+            "/api/remote/hosts/{host}",
+            axum::routing::delete(remove_remote_host),
+        )
         .route(
             "/api/remote/sessions",
             get(remote_sessions).post(create_remote_session),
@@ -8017,7 +8027,7 @@ async fn create_remote_session(
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host).await?;
+    require_saved_remote(&host).await?;
     let (created, session) = state
         .remote_sessions
         .create(host, req.ui_preferences, None)

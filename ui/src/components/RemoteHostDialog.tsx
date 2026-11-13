@@ -1,47 +1,68 @@
-import { useContext, useRef, useState } from "react";
+import { useContext, useId, useRef, useState } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useMachines } from "../machineSelection";
 import { useQuery } from "@tanstack/react-query";
-import { SlidersHorizontal, X } from "lucide-react";
+import { useMutate } from "@clo/react-mutation";
+import { Server, Trash2, X } from "lucide-react";
 
-import type { DialogContentProps } from "../dialog";
-import { ltr } from "../i18n";
+import type { SshHost } from "../api";
+import type { createDialogs, DialogContentProps } from "../dialog";
+import { autoDir } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { mutCreateRemoteSession } from "../queries/settings";
+import { mutAddRemoteHost, mutCreateRemoteSession, mutRemoveRemoteHost } from "../queries/settings";
 
 import { getThemePreference } from "../theme";
 import { ProgressBar } from "./ProgressBar";
-import { Button, DialogContent, DialogDescription, DialogTitle, IconButton, Input, Spinner } from "./ui";
+import { Button, DialogContent, DialogDescription, DialogTitle, IconButton, Input, Spinner, Tooltip } from "./ui";
 
-export function RemoteHostDialog({
+export function showRemoteHostDialog(dialogs: ReturnType<typeof createDialogs>) {
+  dialogs.showCustomDialog({
+    component: RemoteHostDialog,
+    props: {},
+    onConfirm: (openRemote: () => Promise<void>) => openRemote(),
+    onCancel: "close",
+  });
+}
+
+/** `user@hostname:port` when it says more than the alias does. */
+export function sshAddress(host: SshHost): string | null {
+  const address = `${host.user ? `${host.user}@` : ""}${host.hostname ?? host.host}${host.port ? `:${host.port}` : ""}`;
+  return address === host.host ? null : address;
+}
+
+function RemoteHostDialog({
   confirm,
   cancel,
   isDisabled,
   errorMessage,
-  onConfigureSsh,
-}: DialogContentProps<() => Promise<void>> & {
-  onConfigureSsh: () => void;
-}) {
+}: DialogContentProps<() => Promise<void>>) {
   const { id: elementId } = useContext(WorkspaceDomContext);
+  const suggestionsId = useId();
 
   const machines = useMachines();
-  const { getSshSettingsQuery, listRemoteSessionsQuery } = machines.owner.queries;
+  const owner = machines.owner;
+  const { getSshSettingsQuery, listRemoteHostsQuery, listRemoteSessionsQuery } = owner.queries;
 
-  const hostsQuery = useQuery(getSshSettingsQuery(), machines.owner.queryClient);
-  const sessionsQuery = useQuery(listRemoteSessionsQuery(), machines.owner.queryClient);
-  const hosts = hostsQuery.data?.hosts ?? null;
+  const hostsQuery = useQuery(listRemoteHostsQuery(), owner.queryClient);
+  const sessionsQuery = useQuery(listRemoteSessionsQuery(), owner.queryClient);
+  const sshConfigQuery = useQuery(getSshSettingsQuery(), owner.queryClient);
+  const remove = useMutate(mutRemoveRemoteHost);
+  const hosts = hostsQuery.data ?? null;
   const sessions = sessionsQuery.data ?? [];
-  const [query, setQuery] = useState("");
-  const loadError = !hosts ? hostsQuery.error?.message ?? sessionsQuery.error?.message ?? null : null;
+  const sessionByHost = new Map(sessions.map((session) => [session.host, session]));
+  const suggestions = (sshConfigQuery.data?.hosts ?? [])
+    .filter((host) => !hosts?.some((saved) => saved.host === host.host));
+  const [command, setCommand] = useState("");
   const [openingHost, setOpeningHost] = useState<string | null>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  function openRemote(host: string) {
-    setOpeningHost(host);
+  function open(target: (() => Promise<string>) | string) {
     confirm(async () => {
       try {
-        const session = await mutCreateRemoteSession.runAsHeadlessPromise(machines.owner, host, {
+        const host = typeof target === "string" ? target : await target();
+        setOpeningHost(host);
+        const session = await mutCreateRemoteSession.runAsHeadlessPromise(owner, host, {
           theme: getThemePreference(),
           locale: getLocale(),
         }, {});
@@ -52,14 +73,15 @@ export function RemoteHostDialog({
     });
   }
 
-  const filteredHosts = hosts?.filter((host) =>
-    host.host.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
-  );
-  const sessionByHost = new Map(sessions.map((session) => [session.host, session]));
+  function openCompute() {
+    cancel();
+    machines.selectLocal();
+    owner.events.requestComputeView();
+  }
 
   return <DialogContent
-      initialFocus={searchRef}
-      className="relative flex h-[min(42rem,calc(100vh-2.5rem))] w-160 max-w-full flex-col overflow-hidden p-0"
+      initialFocus={inputRef}
+      className="relative flex max-h-[min(42rem,calc(100vh-2.5rem))] w-160 max-w-full flex-col overflow-hidden p-0"
       aria-labelledby={elementId("remote-host-dialog-title")}
     >
       <IconButton className="absolute end-3.5 top-3.5" aria-label={m.remote_dialog_close()} onClick={cancel} disabled={isDisabled}>
@@ -67,55 +89,94 @@ export function RemoteHostDialog({
       </IconButton>
       <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
         <DialogTitle id={elementId("remote-host-dialog-title")}>{m.remote_dialog_title()}</DialogTitle>
-        <DialogDescription className="mt-2 leading-normal">{m.remote_dialog_description()}</DialogDescription>
-        <Input
-          ref={searchRef}
-          className="mt-4"
-          value={query}
-          disabled={isDisabled}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder={m.remote_search_hosts()}
-          aria-label={m.remote_search_hosts()}
-        />
+        <DialogDescription className="mt-2 leading-normal">{m.remote_hosts_description()}</DialogDescription>
+        <form
+          className="mt-4 flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const typed = command.trim();
+            if (!typed) return;
+            open(async () => {
+              const host = await mutAddRemoteHost.runAsHeadlessPromise(owner, typed, {});
+              setCommand("");
+              return host;
+            });
+          }}
+        >
+          <Input
+            ref={inputRef}
+            value={command}
+            disabled={isDisabled}
+            onChange={(event) => setCommand(event.target.value)}
+            placeholder={m.remote_add_placeholder()}
+            aria-label={m.remote_add_label()}
+            list={suggestionsId}
+            autoComplete="off"
+            autoCapitalize="off"
+            spellCheck={false}
+          />
+          <datalist id={suggestionsId}>
+            {suggestions.map((host) => <option key={host.host} value={host.host} />)}
+          </datalist>
+          <Button type="submit" variant="primary" disabled={isDisabled || !command.trim()}>{m.settings_connect()}</Button>
+        </form>
         <div role="status">
-          {openingHost && <ProgressBar label={m.remote_connecting_title({ host: ltr(openingHost) })} />}
+          {openingHost && <ProgressBar label={m.remote_connecting_title({ host: autoDir(openingHost) })} />}
         </div>
+        {errorMessage && <p role="alert" className="mt-3 mb-0 text-sm text-accent-red">{errorMessage}</p>}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto border-t border-border-variant p-2">
-        {errorMessage && <p role="alert" className="m-3 text-sm text-accent-red">{errorMessage}</p>}
-        {loadError ? (
-          <p className="m-3 text-sm text-accent-red">{loadError}</p>
+        {hostsQuery.error ? (
+          <p role="alert" className="m-3 text-sm text-accent-red">{hostsQuery.error.message}</p>
         ) : hosts === null ? (
-          <div className="flex items-center gap-2 p-3 text-sm text-subtext"><Spinner /> {m.settings_page_reading_ssh_config()}</div>
-        ) : filteredHosts?.length === 0 ? (
-          <p className="m-3 text-sm text-subtext">{m.remote_no_matching_hosts()}</p>
+          <div className="flex items-center gap-2 p-3 text-sm text-subtext"><Spinner /> {m.remote_hosts_loading()}</div>
+        ) : hosts.length === 0 ? (
+          <p className="m-3 text-sm text-subtext">{m.remote_hosts_empty()}</p>
         ) : (
-          filteredHosts?.map((host) => {
-            const session = sessionByHost.get(host.host);
-            return (
-              <Button
-                key={host.host}
-                variant="ghost"
-                className="w-full justify-start text-base font-normal"
-                disabled={isDisabled}
-                onClick={() => openRemote(host.host)}
-              >
-                <span className="min-w-0 flex-1 truncate text-start">{host.host}</span>
-                {openingHost === host.host ? (
-                  <Spinner />
-                ) : session ? (
-                  <span className="text-sm text-subtext">{m.remote_open()}</span>
-                ) : null}
-              </Button>
-            );
-          })
+          <ul className="m-0 list-none p-0">
+            {hosts.map((host) => {
+              const session = sessionByHost.get(host.host);
+              const address = sshAddress(host);
+              return (
+                <li key={host.host} className="group flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    className="h-auto min-w-0 flex-1 justify-start py-2 text-base font-normal"
+                    disabled={isDisabled}
+                    onClick={() => open(host.host)}
+                  >
+                    <Server size={16} className="flex-none text-subtext" />
+                    <span className="min-w-0 flex-1 text-start">
+                      <span className="block truncate">{host.host}</span>
+                      {address && <span className="block truncate text-sm text-subtext" dir="ltr">{address}</span>}
+                    </span>
+                    {openingHost === host.host ? (
+                      <Spinner />
+                    ) : session ? (
+                      <span className="text-sm text-subtext">{m.remote_open()}</span>
+                    ) : null}
+                  </Button>
+                  {!session && (
+                    <Tooltip interactive content={m.remote_remove_host({ host: autoDir(host.host) })}>
+                      <IconButton
+                        className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                        aria-label={m.remote_remove_host({ host: autoDir(host.host) })}
+                        disabled={isDisabled}
+                        onClick={() => remove.run(owner, host.host)}
+                      >
+                        <Trash2 size={14} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         )}
       </div>
-      <div className="shrink-0 border-t border-border-variant p-2">
-        <Button variant="ghost" className="w-full justify-start text-base font-normal" onClick={() => { cancel(); onConfigureSsh(); }} disabled={isDisabled}>
-          <SlidersHorizontal size={16} />
-          {m.ssh_configure_hosts()}
-        </Button>
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border-variant px-6 py-3">
+        <p className="m-0 min-w-0 flex-1 text-sm text-subtext">{m.remote_compute_note()}</p>
+        <Button variant="ghost" size="small" onClick={openCompute} disabled={isDisabled}>{m.remote_open_compute()}</Button>
       </div>
     </DialogContent>;
 }
