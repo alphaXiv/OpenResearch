@@ -85,7 +85,7 @@ A build is **production** only when it is an official release or canary built in
 3. Once CI, `verify-build-channel.yml` and `telemetry-contract.yml` pass, it publishes the release, creating the tag.
 4. `release-macos-app.yml`, `release-windows-app.yml` and `release-linux-app.yml` follow, each gated on a repository variable, and attach the desktop packages.
 
-Every push to main also runs `release-canary.yml`: desktop builds beside CI on that commit, published once both pass, possibly skipping intermediate commits. No pull request job builds an AppImage or the Windows installer, so packaging first runs here.
+Every push to main also runs `release-canary.yml`: desktop builds beside CI on that commit, published once both pass, possibly skipping intermediate commits. No pull request job builds an AppImage or the Windows installer, so packaging first runs here. Each canary also publishes headless CLIs, static for Linux and signed for macOS, which a canary laptop installs on remote machines ([remote](remote.md#two-versions-at-once)); their names, `<tag>--OpenResearch-cli-<target>.tar.gz` and a `.sha256` beside each, are a contract with every canary in the wild, and the manifest names only the desktop packages.
 
 - **Nothing publishes untested code.** `dist-workspace.toml` keeps the checks among dist's global-artifacts jobs, so a regenerated `release.yml` still gates on them. `dist generate` otherwise skips that hand-edited file.
 - **Signing runs in the `release-signing` environment**, for canaries too. Windows signs the CLI archive before dist checksums it, so self-updates keep a signed `orx.exe`.

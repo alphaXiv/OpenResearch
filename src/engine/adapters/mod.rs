@@ -113,7 +113,7 @@ mod windows_tests {
         let subscription = ssh.follow_logs("run");
         assert!(ssh.summary("run").await.is_none());
         assert!(ssh
-            .stage_blob(&"0".repeat(64), &dir.join("absent"), 1)
+            .stage_blob(&"0".repeat(64), &dir.join("absent"), 1, &|| false)
             .await
             .is_err());
         assert!(ssh.cleanup(&watched).await.is_err());
@@ -124,7 +124,9 @@ mod windows_tests {
             ));
             assert!(matches!(
                 backend.recover(&intent).await,
-                Recovery::Unknown { .. }
+                Recovery::Blocked {
+                    contact: crate::store::Contact::NeedsAuth { .. }
+                }
             ));
             assert!(matches!(
                 backend

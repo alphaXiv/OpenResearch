@@ -1,12 +1,14 @@
 import { useMutate } from "@clo/react-mutation";
 import { useWorkspace } from "../workspace";
 import { mutCancelRun } from "../queries/projects";
-import { ChevronRight, CircleStop, FlaskConical, Plug, ScrollText } from "lucide-react";
+import { ChevronRight, CircleStop, FlaskConical, ScrollText } from "lucide-react";
 import { useEffect, useState } from "react";
 import { fmtDuration, type ChatActiveRun } from "../api";
+import { autoDir } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { runConnectHost, runDisplay } from "../runDisplay";
+import { runDisplay, runNotice, runStoppable } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+import { RunContactNotice } from "./RunContactNotice";
 import { statusLabel } from "./StatusBadge";
 import { Button } from "./ui";
 
@@ -15,18 +17,17 @@ const BANNER_CLASS = "mb-2.5 rounded-lg border border-border bg-accent-green-sub
 
 function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; onOpenRun?: OpenTarget; onOpenExperiment?: OpenTarget }) {
   const workspace = useWorkspace();
-  const { requestHostConnect } = workspace.events;
   const cancel = useMutate(mutCancelRun);
 
   const { run, experimentName } = item;
   const [now, setNow] = useState(Date.now);
   const display = runDisplay(run);
-  const cancelling = run.cancelling;
   const error = cancel.error === undefined ? null : cancel.error instanceof Error ? cancel.error.message : String(cancel.error);
-  const label = display.stale || cancelling
+  const label = display.stale || run.cancelling
     ? statusLabel(display.status, display.stopping)
     : run.status === "running" ? m.chat_experiment_running() : m.chat_experiment_starting();
-  const connectHost = runConnectHost(run);
+  const noticeKind = runNotice(run)?.kind;
+  const showNotice = noticeKind !== undefined && noticeKind !== "monitoring" && noticeKind !== "cancelling";
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -46,15 +47,15 @@ function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; on
       <div className="ms-auto flex shrink-0 items-center gap-1">
         <span className="me-2 tabular-nums text-subtext">{fmtDuration(now - run.createdAt)}</span>
         {onOpenRun && <Button size="small" variant="ghost" {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun(run.id, intent))}><ScrollText size={14} />{m.experiment_overview_logs()}</Button>}
-        {connectHost ? (
-          <Button size="small" variant="ghost" onClick={() => requestHostConnect(connectHost)}><Plug size={14} />{m.settings_connect()}</Button>
-        ) : (
-          <Button size="small" variant="ghost" disabled={cancelling} onClick={() => cancel.run(workspace, run)}>
-            <CircleStop size={14} />{!cancelling ? m.common_stop() : statusLabel(display.status, display.stopping)}
+        {runStoppable(run) && (
+          <Button size="small" variant="ghost" onClick={() => cancel.run(workspace, run)}>
+            <CircleStop size={14} />{m.common_stop()}
           </Button>
         )}
       </div>
+      {display.waiting && <span className="w-full min-w-0 truncate ps-6 text-subtext" title={display.waiting}>{autoDir(display.waiting)}</span>}
       {error && <span className="w-full text-accent-red" role="alert">{error}</span>}
+      {showNotice && <RunContactNotice run={run} className="w-full" />}
     </div>
   );
 }

@@ -26,10 +26,10 @@ use crate::error::{anyhow, Result};
 
 /// Bundled Python launcher. Subcommands (argv[1]):
 ///   submit          spec JSON on stdin -> prints {"sandboxId": "sb-..."}
-///   status <id>     -> prints {"stage": "...", "message": "..."?}
+///   status <id>     -> prints {"stage": "...", "message": "..."?}, or {"missing": true}
 ///   logs <id> <from>  streams the sandbox's merged stdout/stderr from a resume point, as
 ///                     frames: a JSON `[from, length]` line, then that many raw bytes
-///   cancel <id>     terminate the sandbox
+///   cancel <id>     terminate the sandbox -> prints {"missing": bool}
 ///   auth            one authenticated call that checks the configured token
 ///
 /// Exit 3 = the `modal` package isn't importable (surfaced as a friendly hint),
@@ -113,10 +113,19 @@ def submit():
             _refuse(message)
     print(json.dumps({"sandboxId": sb.object_id}))
 
+def _missing(error):
+    from modal.exception import NotFoundError
+    return isinstance(error, NotFoundError)
+
 def status(sid):
     modal = _modal()
-    sb = modal.Sandbox.from_id(sid)
-    code = sb.poll()  # None while running, exit code once finished
+    try:
+        code = modal.Sandbox.from_id(sid).poll()  # None while running, exit code once finished
+    except Exception as error:
+        if not _missing(error):
+            raise
+        print(json.dumps({"missing": True}))
+        return
     if code is None:
         out = {"stage": "RUNNING"}
     elif code == 0:
@@ -157,7 +166,14 @@ def logs(sid, start):
 
 def cancel(sid):
     modal = _modal()
-    modal.Sandbox.from_id(sid).terminate()
+    try:
+        modal.Sandbox.from_id(sid).terminate()
+    except Exception as error:
+        if not _missing(error):
+            raise
+        print(json.dumps({"missing": True}))
+        return
+    print(json.dumps({"missing": False}))
 
 def auth():
     modal = _modal()
@@ -298,6 +314,7 @@ async fn launcher_capture(
     args: &[&str],
     stdin: Option<&str>,
     limit: Option<Duration>,
+    fence: Option<&crate::engine::Fence<'_>>,
 ) -> Result<Vec<u8>> {
     let mut cmd = crate::process::tokio_command(MODAL_ENV.interpreter());
     cmd.arg("-c")
@@ -316,6 +333,9 @@ async fn launcher_capture(
         .stderr(Stdio::piped())
         .kill_on_drop(limit.is_some());
     let mut child = cmd.spawn().map_err(|e| missing_python_hint(&e))?;
+    if let Some(fence) = fence {
+        fence.record_child(&mut child).await?;
+    }
     if let Some(input) = stdin {
         use tokio::io::AsyncWriteExt as _;
         if let Some(mut pipe) = child.stdin.take() {
@@ -414,8 +434,12 @@ pub struct ModalJobSpec {
     pub source_archive: Option<PathBuf>,
 }
 
-/// Submit the sandbox; returns its object id (the reattach handle).
-pub async fn run_job(spec: &ModalJobSpec) -> Result<String> {
+/// Submit the sandbox; returns its object id (the reattach handle). The launcher waits for its
+/// spec on stdin, so it creates nothing before it is recorded on `fence`.
+pub async fn run_job(
+    spec: &ModalJobSpec,
+    fence: Option<&crate::engine::Fence<'_>>,
+) -> Result<String> {
     // Default the sandbox's Python to unbuffered so the job's own prints stream
     // live instead of block-buffering behind a pipe (see jobs::default_python_env).
     let env = super::default_python_env(&spec.env);
@@ -431,7 +455,7 @@ pub async fn run_job(spec: &ModalJobSpec) -> Result<String> {
         "tags": spec.tags,
         "sourceArchive": spec.source_archive,
     });
-    let out = launcher_capture(&["submit"], Some(&body.to_string()), None).await?;
+    let out = launcher_capture(&["submit"], Some(&body.to_string()), None, fence).await?;
     let v: Value = serde_json::from_slice(&out).map_err(|e| {
         anyhow!(
             "Unreadable modal submit output: {} ({:?})",
@@ -454,11 +478,16 @@ pub struct JobState {
     pub exit_code: Option<i32>,
 }
 
-pub async fn inspect_job(sandbox_id: &str) -> Result<JobState> {
-    let out = launcher_capture(&["status", sandbox_id], None, None).await?;
+/// `None` when Modal raises `NotFoundError`, which it does both for a deleted sandbox and for one
+/// launched under another workspace or environment.
+pub async fn inspect_job(sandbox_id: &str) -> Result<Option<JobState>> {
+    let out = launcher_capture(&["status", sandbox_id], None, None, None).await?;
     let v: Value = serde_json::from_slice(&out)
         .map_err(|e| anyhow!("Unreadable modal status output: {}", e))?;
-    Ok(JobState {
+    if v["missing"] == true {
+        return Ok(None);
+    }
+    Ok(Some(JobState {
         stage: v
             .get("stage")
             .and_then(Value::as_str)
@@ -469,12 +498,15 @@ pub async fn inspect_job(sandbox_id: &str) -> Result<JobState> {
             .get("exitCode")
             .and_then(Value::as_i64)
             .and_then(|code| code.try_into().ok()),
-    })
+    }))
 }
 
-pub async fn cancel_job(sandbox_id: &str) -> Result<()> {
-    launcher_capture(&["cancel", sandbox_id], None, None).await?;
-    Ok(())
+/// False when Modal raises `NotFoundError`, as for [`inspect_job`].
+pub async fn cancel_job(sandbox_id: &str) -> Result<bool> {
+    let out = launcher_capture(&["cancel", sandbox_id], None, None, None).await?;
+    let v: Value = serde_json::from_slice(&out)
+        .map_err(|e| anyhow!("Unreadable modal cancel output: {}", e))?;
+    Ok(v["missing"] != true)
 }
 
 /// Where the sandbox log left off: the provider position a reconnect replays from, and how
@@ -617,6 +649,7 @@ pub async fn preflight(
         &["auth"],
         None,
         Some(crate::config::paced(TOKEN_CHECK_LIMIT)),
+        None,
     )
     .await?;
     Ok(())
@@ -781,6 +814,51 @@ mod credential_tests {
             assert_eq!(state["exitCode"].as_i64(), code.parse::<i64>().ok());
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A sandbox Modal can't find is reported missing, which proves nothing about deletion;
+    /// any other failure stays one.
+    #[tokio::test]
+    async fn a_missing_sandbox_is_reported_missing() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            crate::config::skip_without_tool("Python 3.10+");
+            return;
+        };
+        for (error, missing) in [("NotFoundError", true), ("ConnectionError", false)] {
+            let dir = std::env::temp_dir().join(format!("orx-modal-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(dir.join("modal")).unwrap();
+            std::fs::write(
+                dir.join("modal").join("__init__.py"),
+                format!(
+                    "from .exception import NotFoundError\nclass Sandbox:\n    @staticmethod\n    def from_id(sid): raise {error}(sid)\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("modal").join("exception.py"),
+                "class NotFoundError(Exception): pass\n",
+            )
+            .unwrap();
+            let launch = |command: &str| {
+                crate::process::command(python)
+                    .args(["-B", "-c", LAUNCHER, command, "sandbox"])
+                    .env("PYTHONPATH", &dir)
+                    .output()
+                    .unwrap()
+            };
+            let (status, cancel) = (launch("status"), launch("cancel"));
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert_eq!(status.status.success(), missing, "{error}: {status:?}");
+            assert_eq!(cancel.status.success(), missing, "{error}: {cancel:?}");
+            if missing {
+                for output in [status, cancel] {
+                    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(reply["missing"], true, "{output:?}");
+                }
+            }
+        }
     }
 
     /// A fake of the SDK pieces the launcher reads positions from: entry-id batches on V1
@@ -1102,7 +1180,7 @@ class Sandbox:
             tags: HashMap::new(),
             source_archive: Some(dir.join("source.tar")),
         };
-        let error = run_job(&spec).await.unwrap_err();
+        let error = run_job(&spec, None).await.unwrap_err();
         std::fs::remove_dir_all(dir).unwrap();
         let refused = error
             .downcast_ref::<super::super::Refused>()
@@ -1160,7 +1238,7 @@ class Sandbox:
         };
         for (mode, cause) in [("gpu", "H1000"), ("auth", "Token invalid")] {
             std::env::set_var("ORX_TEST_MODAL", mode);
-            let error = run_job(&spec).await.unwrap_err();
+            let error = run_job(&spec, None).await.unwrap_err();
             let refused = error
                 .downcast_ref::<super::super::Refused>()
                 .unwrap_or_else(|| panic!("{mode} is not a definite failure: {error}"));

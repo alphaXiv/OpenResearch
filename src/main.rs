@@ -710,6 +710,11 @@ pub struct ExpRunArgs {
     #[arg(skip)]
     #[serde(default)]
     pub caller_python_overrides: std::collections::BTreeMap<String, String>,
+    /// What the caller's config dir sets for this backend; absent from an orx that sends only
+    /// the dir.
+    #[arg(skip)]
+    #[serde(default)]
+    pub caller_compute_settings: Option<crate::commands::up::LaunchSettings>,
 }
 
 /// Markers the native agent CLIs export to their shells; nested agents are `unknown`.
@@ -1169,6 +1174,9 @@ async fn run_cli() {
         Cli::command().print_help().ok();
         return;
     };
+    if ends_with_its_stdout(&command) {
+        output::end_when_stdout_closes();
+    }
     // Outdated-version warning (skipped for the commands that manage updates
     // themselves). `start` prints the cached warning to stderr *now*,
     // before the command runs, so it shows even for commands that
@@ -1398,6 +1406,22 @@ fn install_panic_reporter() {
             show_error_dialog(&format!("{info}"));
         }
     }));
+}
+
+/// Servers, protocol children and per-call hooks outlive a closed stdout; every other
+/// command ends with it, as `orx runs | head` expects.
+fn ends_with_its_stdout(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Up(_)
+            | Command::Serve(_)
+            | Command::Mcp
+            | Command::AlphaxivMcp
+            | Command::AntigravityGate
+            | Command::RemoteHost(_)
+            | Command::PlanGate
+            | Command::InvocationGate
+    )
 }
 
 fn should_capture_command(command: &Command) -> bool {

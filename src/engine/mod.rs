@@ -86,8 +86,9 @@ pub enum Observation {
     Gone {
         reason: String,
     },
+    /// Not running yet; `detail` is the backend's own word on why, if it gave one.
     Queued {
-        detail: String,
+        detail: Option<String>,
     },
     Running {
         started_at: Option<i64>,
@@ -158,6 +159,10 @@ pub enum Recovery {
     Absent,
     Unknown {
         detail: String,
+    },
+    /// Nothing could be asked; contact must recover before recovery retries.
+    Blocked {
+        contact: Contact,
     },
 }
 
@@ -269,6 +274,20 @@ impl Fence<'_> {
             ))
         }
     }
+
+    /// [`Self::record_submitter`] for a launcher held at its stdin, which is killed when it
+    /// can't be recorded.
+    pub async fn record_child(&self, child: &mut tokio::process::Child) -> Result<()> {
+        let recorded = match child.id() {
+            Some(pid) => self.record_submitter(pid),
+            None => Err(anyhow!("The launcher exited before it could be fenced")),
+        };
+        if recorded.is_err() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        recorded
+    }
 }
 
 #[async_trait]
@@ -326,6 +345,8 @@ struct Memory {
     /// Cancels awaiting the backend's verdict, alive while their delivery is; the verdict, not
     /// a death seen meanwhile, ends the run.
     verifying: HashMap<String, Weak<()>>,
+    /// Why the latest stop of an unfinished run could not be delivered; it is retried each round.
+    cancel_errors: HashMap<String, String>,
     #[cfg(test)]
     after_legacy_snapshot: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
@@ -393,37 +414,41 @@ impl Engine {
     }
 
     #[cfg(test)]
-    pub async fn observe_runs(
-        &self,
-        backend: &dyn Backend,
-        runs: &[WatchedRun],
-        budget: Duration,
-    ) -> Result<()> {
+    pub async fn observe_runs(&self, backend: &dyn Backend, runs: &[WatchedRun], budget: Duration) {
         let observations = backend.observe(runs, budget).await;
         self.apply_observations(backend, runs, observations).await
     }
 
-    /// Applies what `Backend::observe` reported and delivers pending cancels.
+    /// Applies what `Backend::observe` reported and delivers pending cancels. Errors are
+    /// logged per run, so one run's error never costs the others their observations or stops.
     pub async fn apply_observations(
         &self,
         backend: &dyn Backend,
         runs: &[WatchedRun],
         observations: Vec<(String, Observation)>,
-    ) -> Result<()> {
+    ) {
         for (id, observation) in observations {
-            self.observe(&id, observation)?;
-        }
-        for watched in runs {
-            let (run, state) = self.load(&watched.id)?;
-            let phase = phase_of(&run)?;
-            let tombstone = reconcile::is_tombstone(phase, &state.contact);
-            if phase.is_terminal() && !tombstone {
-                self.memory().logs.remove(&watched.id);
-            } else if run.cancel_requested || state.cancel_accepted_at.is_some() || tombstone {
-                self.deliver_cancel(backend, &watched.id).await?;
+            if let Err(error) = self.observe(&id, observation) {
+                eprintln!("orx up: run {id}: {error:#}");
             }
         }
-        Ok(())
+        for watched in runs {
+            let id = &watched.id;
+            let settled = async {
+                let (run, state) = self.load(id)?;
+                let phase = phase_of(&run)?;
+                let tombstone = reconcile::is_tombstone(phase, &state.contact);
+                if phase.is_terminal() && !tombstone {
+                    self.memory().logs.remove(id);
+                } else if run.cancel_requested || state.cancel_accepted_at.is_some() || tombstone {
+                    self.deliver_cancel(backend, id).await?;
+                }
+                Ok::<_, crate::error::Error>(())
+            };
+            if let Err(error) = settled.await {
+                eprintln!("orx up: run {id}: {error:#}");
+            }
+        }
     }
 
     /// Whether a stop is on its way to the run's backend.
@@ -453,32 +478,60 @@ impl Engine {
             Contact::Live | Contact::Unreconciled { .. } | Contact::Stopping { .. }
         ) || matches!(&handle, Handle::OpenResearch { .. })
             || matches!(&handle, Handle::Legacy { descriptor } if descriptor.kind == "openresearch_job");
-        if !wanted || !deliverable || self.memory().cancels_sent.contains(run_id) {
+        if !wanted || !deliverable {
             return Ok(());
         }
-        let watched = WatchedRun {
-            id: run.id.clone(),
-            handle,
-        };
         let verifying = Arc::new(());
         {
             // Serialized with terminal decisions, which commit under the store lock.
             let _decisions = self.store();
             let mut memory = self.memory();
-            memory.cancels_sent.insert(run_id.to_string());
+            if !memory.cancels_sent.insert(run_id.to_string()) {
+                return Ok(());
+            }
             memory
                 .verifying
                 .insert(run_id.to_string(), Arc::downgrade(&verifying));
         }
+        let watched = WatchedRun {
+            id: run.id.clone(),
+            handle,
+        };
         let outcome = if reconcile::is_tombstone(phase, &state.contact) {
             backend.cleanup(&watched).await
         } else {
             backend.cancel(&watched).await
         };
-        if matches!(outcome, CancelOutcome::Undelivered { .. }) {
-            self.memory().cancels_sent.remove(run_id);
+        let refused = match &outcome {
+            CancelOutcome::Undelivered { detail } if !phase.is_terminal() => Some(detail.clone()),
+            _ => None,
+        };
+        let changed = {
+            let mut memory = self.memory();
+            if matches!(outcome, CancelOutcome::Undelivered { .. }) {
+                memory.cancels_sent.remove(run_id);
+            }
+            match refused {
+                Some(detail) => {
+                    memory.cancel_errors.insert(run_id.into(), detail.clone()) != Some(detail)
+                }
+                None => memory.cancel_errors.remove(run_id).is_some(),
+            }
+        };
+        if changed {
+            self.bus.publish(bus::RunEvent::Changed {
+                run_id: run_id.into(),
+                phase,
+                contact: state.contact.clone(),
+                cancelling: true,
+            });
         }
         self.apply_cancel(&run, outcome)
+    }
+
+    /// Why the stop of an unfinished run keeps failing to reach its backend, if it does.
+    pub fn cancel_error(&self, run_id: &str) -> Option<String> {
+        self.memory().cancel_errors.get(run_id).cloned()
     }
 
     fn load(&self, run_id: &str) -> Result<(StoredRun, EngineRunState)> {

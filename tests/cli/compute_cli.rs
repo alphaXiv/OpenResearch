@@ -20,6 +20,8 @@ impl Sandbox {
             .env_remove("MODAL_TOKEN_ID")
             .env_remove("MODAL_TOKEN_SECRET")
             .arg("--no-telemetry");
+        #[cfg(unix)]
+        cmd.env("PATH", orx_test_support::agentless_path(&self.0));
         cmd
     }
     fn stop_service(&self, data: &std::path::Path) {
@@ -360,7 +362,14 @@ fn ssh_config_conflict_and_execution_target_checks() {
     orx_test_support::write_executable(&ssh, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/calls\"\nprintf 'Permission denied\\n' >&2\nexit 255\n", 0o755).unwrap();
     let result = sandbox
         .command()
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                orx_test_support::agentless_path(&sandbox.0)
+            ),
+        )
         .args(["compute", "test", "ssh", "--json"])
         .output()
         .unwrap();

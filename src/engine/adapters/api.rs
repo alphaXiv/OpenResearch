@@ -644,13 +644,12 @@ pub fn stage(
             code: exit_code,
             signal: None,
         },
-        "DELETED" | "GONE" => Observation::Unreconciled {
-            detail: "Provider no longer knows the job".into(),
+        "DELETED" | "GONE" => Observation::Gone {
+            reason: "Outcome unavailable: the job was deleted before orx recorded its outcome"
+                .into(),
         },
         "RUNNING" => Observation::Running { started_at },
-        _ => Observation::Queued {
-            detail: message.unwrap_or_else(|| stage.into()),
-        },
+        _ => Observation::Queued { detail: message },
     }
 }
 

@@ -141,7 +141,7 @@ impl Api for K8sAccount {
             match tokio::time::timeout(crate::config::paced(COPY_WAIT), copy).await {
                 Err(_) => {
                     return Ok(Observation::Queued {
-                        detail: "Copying the source".into(),
+                        detail: Some("Copying the source".into()),
                     })
                 }
                 Ok(Copied::Failed(error)) => return Err(anyhow!(error)),

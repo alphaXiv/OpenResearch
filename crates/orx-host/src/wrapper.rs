@@ -11,7 +11,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub fn wrap(dir: &Path) -> io::Result<()> {
+/// `keep_awake` holds a sleep prevention from before the payload starts until its receipt.
+pub fn wrap(dir: &Path, keep_awake: bool) -> io::Result<()> {
     let Some(_ownership) = lock(&dir.join("wrapper.lock"))? else {
         return Ok(());
     };
@@ -19,48 +20,122 @@ pub fn wrap(dir: &Path) -> io::Result<()> {
         return Ok(());
     }
     crash_point("wrapper_locked");
-    // A detached wrapper must survive ssh hangup; only its payload receives the run tag.
-    unsafe {
-        libc::signal(libc::SIGHUP, libc::SIG_IGN);
-        libc::signal(libc::SIGCHLD, wake as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGUSR1, wake as *const () as libc::sighandler_t);
-    }
-    if unsafe { libc::getsid(0) } != std::process::id() as i32 && unsafe { libc::setsid() } == -1 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EPERM) {
-            return Err(error);
+    // Holding wrapper.lock, no other writer can publish a receipt for an unstarted run, and
+    // without one a failure here would read as Starting and be retried forever.
+    let spawn_failed = |error: io::Error| -> io::Result<()> {
+        publish(
+            &dir.join("exit.json"),
+            &ExitReceipt {
+                detail: Some(error.to_string()),
+                ..exit_receipt(
+                    None,
+                    ExitReason::SpawnFailed,
+                    vec![],
+                    CancelOutcome::Verified,
+                )
+            },
+        )?;
+        Err(error)
+    };
+    let cancelled = || -> io::Result<bool> {
+        let requested = dir.join("cancel.req").try_exists()?;
+        if requested {
+            publish(&dir.join("exit.json"), &cancelled_before_start())?;
         }
+        Ok(requested)
+    };
+    let prepared = (|| -> io::Result<Option<_>> {
+        // A detached wrapper must survive ssh hangup; only its payload receives the run tag.
+        unsafe {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+            libc::signal(libc::SIGCHLD, wake as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGUSR1, wake as *const () as libc::sighandler_t);
+        }
+        if unsafe { libc::getsid(0) } != std::process::id() as i32
+            && unsafe { libc::setsid() } == -1
+        {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EPERM) {
+                return Err(step("setsid")(error));
+            }
+        }
+        let identity = platform::identity(std::process::id()).map_err(step("wrapper identity"))?;
+        publish(&dir.join("wrapper.json"), &identity).map_err(step("publish wrapper.json"))?;
+        crash_point("wrapper_identity");
+        let subreaper = platform::subreaper().map_err(step("subreaper"))?;
+        let intent: LaunchIntent =
+            read_json(&dir.join("launch.json")).map_err(step("read launch.json"))?;
+        // Before rental activation, so a cancelled rental never starts billing.
+        if cancelled()? {
+            return Ok(None);
+        }
+        if intent.source.is_some() && !dir.join("repo").try_exists()? {
+            let unpacked = unpack(dir);
+            if cancelled()? {
+                return Ok(None);
+            }
+            unpacked.map_err(step("unpack the run's source"))?;
+        }
+        let log = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(dir.join("log"))
+            .map_err(step("open log"))?;
+        let tag = format!("{}:{}", intent.run, nonce()?);
+        Ok(Some((identity, subreaper, intent, log, tag)))
+    })();
+    let (identity, subreaper, intent, log, tag) = match prepared {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => return Ok(()),
+        Err(error) => return spawn_failed(error),
+    };
+    let mut awake = keep_awake
+        .then(|| crate::awake::hold(&intent.run))
+        .flatten();
+    // An unreachable lease API may recover; a rental it never answers is released by the
+    // service, and activation is then refused.
+    let _rental = loop {
+        match crate::rental::Duty::start(dir) {
+            Ok(rental) => break rental,
+            Err(error) if error.kind() == io::ErrorKind::Other => {
+                eprintln!("orx-host: rental: {error}; retrying");
+                match cancelled() {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(error) => return spawn_failed(error),
+                }
+                std::thread::sleep(crate::stop_duration(Duration::from_secs(5)));
+            }
+            Err(error) => return spawn_failed(step("rental")(error)),
+        }
+    };
+    let gated = (|| -> io::Result<bool> {
+        let _gate = start_gate(dir)?;
+        if cancelled()? {
+            return Ok(false);
+        }
+        let mut started = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.join("started"))?;
+        writeln!(started, "{tag}")?;
+        started.sync_all()?;
+        File::open(dir)?.sync_all()?;
+        Ok(true)
+    })();
+    match gated {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(error) => return spawn_failed(step("publish started")(error)),
     }
-    let identity = platform::identity(std::process::id())?;
-    publish(&dir.join("wrapper.json"), &identity)?;
-    crash_point("wrapper_identity");
-    let subreaper = platform::subreaper()?;
-    let intent: LaunchIntent = read_json(&dir.join("launch.json"))?;
-    let _rental = crate::rental::Duty::start(dir)?;
-    let tag = format!("{}:{}", intent.run, nonce()?);
-    let gate = start_gate(dir)?;
-    if dir.join("cancel.req").try_exists()? {
-        publish(&dir.join("exit.json"), &cancelled_before_start())?;
-        return Ok(());
-    }
-    let log = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .open(dir.join("log"))?;
-    let error_log = log.try_clone()?;
-    let mut started = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(dir.join("started"))?;
-    writeln!(started, "{tag}")?;
-    started.sync_all()?;
-    File::open(dir)?.sync_all()?;
-    drop(started);
-    drop(gate);
 
     crash_point("wrapper_started");
+    let error_log = match log.try_clone() {
+        Ok(error_log) => error_log,
+        Err(error) => return spawn_failed(step("open log")(error)),
+    };
     let mut command = Command::new("bash");
     command
         .arg("run.sh")
@@ -73,25 +148,7 @@ pub fn wrap(dir: &Path) -> io::Result<()> {
         .stderr(error_log);
     let child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => {
-            publish(
-                &dir.join("exit.json"),
-                &ExitReceipt {
-                    finished_at: Some(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as i64,
-                    ),
-                    code: None,
-                    signal: None,
-                    reason: ExitReason::SpawnFailed,
-                    processes: vec![],
-                    outcome: CancelOutcome::Verified,
-                },
-            )?;
-            return Err(error);
-        }
+        Err(error) => return spawn_failed(step("start bash run.sh")(error)),
     };
     let child_pid = child.id();
     drop(command);
@@ -139,6 +196,7 @@ pub fn wrap(dir: &Path) -> io::Result<()> {
                         ),
                     )
                 })?;
+                drop(awake.take());
                 if std::env::var_os("SLURM_JOB_ID").is_some()
                     || (processes.is_empty() && no_children)
                 {
@@ -235,6 +293,7 @@ pub fn wrap(dir: &Path) -> io::Result<()> {
                 )
             })?;
             crash_point("wrapper_receipt");
+            drop(awake.take());
             if std::env::var_os("SLURM_JOB_ID").is_some() || (processes.is_empty() && no_children) {
                 return Ok(());
             }
@@ -244,6 +303,66 @@ pub fn wrap(dir: &Path) -> io::Result<()> {
             libc::poll(std::ptr::null_mut(), 0, 1000);
         }
     }
+}
+
+/// Whether a tag scan can miss a run's processes. macOS shows other processes an empty
+/// environment for Apple's own binaries, so without a live wrapper to walk its descendants an
+/// empty scan there proves nothing.
+fn tags_hidden() -> bool {
+    cfg!(target_os = "macos")
+        || cfg!(all(feature = "test-hooks", debug_assertions))
+            && std::env::var("ORX_TEST_HIDDEN_TAG").as_deref() == Ok("1")
+}
+
+/// Names the step in the receipt's detail and in wrapper.log.
+fn step(what: &'static str) -> impl Fn(io::Error) -> io::Error {
+    move |error| io::Error::new(error.kind(), format!("{what}: {error}"))
+}
+
+/// Extracts `source.tar` into `repo/`, stopping early at a cancel. Each attempt unpacks into
+/// its own `repo.part.*`, since a tar left running by a wrapper that died mid-unpack keeps
+/// writing into the one it was given.
+fn unpack(dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("repo.part"))
+        {
+            // Best effort: an earlier tar may still be writing there, and the run's directory
+            // goes with the run.
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+    let name = format!("repo.part.{}", crate::nonce()?);
+    let part = dir.join(&name);
+    fs::create_dir(&part)?;
+    let cancel = dir.join("cancel.req");
+    let result = crate::exec::run(
+        Command::new("tar")
+            .args(["-xf", "source.tar", "-C", &name])
+            .current_dir(dir),
+        &[],
+        Duration::MAX,
+        &|| cancel.exists(),
+    )?;
+    if result.timed_out {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "stopped by a cancel",
+        ));
+    }
+    if result.code != Some(0) {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(io::Error::other(
+            match stderr.lines().find(|line| !line.trim().is_empty()) {
+                Some(line) => line.trim().to_owned(),
+                None => format!("tar exited with {:?}", result.code.or(result.signal)),
+            },
+        ));
+    }
+    fs::rename(part, dir.join("repo"))?;
+    File::open(dir)?.sync_all()
 }
 
 fn missing_process(error: &io::Error) -> bool {
@@ -272,6 +391,7 @@ fn exit_receipt(
         reason,
         processes,
         outcome,
+        detail: None,
     }
 }
 
@@ -333,7 +453,7 @@ fn stop(
                 Command::new("bash").arg("cancel.sh").current_dir(dir),
                 &[],
                 crate::stop_duration(crate::HOOK_TIMEOUT),
-                None,
+                &|| false,
             )?;
             if result.code == Some(0) && !result.timed_out {
                 Ok(())
@@ -356,7 +476,6 @@ fn stop(
         kill_window
     };
     let mut killed_at = None;
-    let mut unreadable_since = None;
     let mut termed = std::collections::BTreeSet::new();
     let mut delay = crate::stop_duration(Duration::from_millis(250));
     loop {
@@ -372,14 +491,7 @@ fn stop(
             .map(platform::Process::survivor)
             .collect();
         if scan.processes.is_empty() && no_children {
-            // An unreadable process is usually mid-exec; give it a moment before the proof gives up.
-            let settled = scan.unreadable.is_empty()
-                || !initial
-                || unreadable_since.get_or_insert_with(Instant::now).elapsed()
-                    >= Duration::from_secs(2);
-            if settled {
-                return Ok((scan, no_children));
-            }
+            return Ok((scan, no_children));
         }
         let killing = Instant::now() >= kill_at;
         if killed_at.is_some_and(|since: Instant| since.elapsed() >= kill_window) {
@@ -503,8 +615,9 @@ pub fn cleanup(dir: &Path) -> io::Result<CleanupAck> {
                 let scan = |known: &[Survivor]| -> io::Result<platform::Scan> {
                     let mut scan = platform::scan(Some(&identity), tag.trim(), false)?;
                     scan.include(known)?;
-                    scan.complete =
-                        scan.unreadable.is_empty() && !dir.join("cancel.sh").try_exists()?;
+                    scan.complete = scan.unreadable.is_empty()
+                        && !dir.join("cancel.sh").try_exists()?
+                        && !tags_hidden();
                     Ok(scan)
                 };
                 let before = scan(&proof.processes)?;
@@ -538,7 +651,7 @@ pub fn cleanup(dir: &Path) -> io::Result<CleanupAck> {
     Ok(CleanupAck::Accepted)
 }
 
-fn request(dir: &Path, name: &str) -> io::Result<bool> {
+pub(crate) fn request(dir: &Path, name: &str) -> io::Result<bool> {
     let _gate = start_gate(dir)?;
     let marker = OpenOptions::new()
         .write(true)
@@ -631,10 +744,11 @@ pub fn state(dir: &Path) -> io::Result<RunState> {
         return Ok(if dir.join("started").try_exists()? {
             RunState::Running
         } else {
-            RunState::Starting
+            RunState::Starting { reason: None }
         });
     }
     if dir.join("started").try_exists()? {
+        let untagged = tags_hidden();
         if let Ok(identity) = identity {
             if identity.node == platform::node()? {
                 if identity.boot_id != platform::boot_id()? {
@@ -645,8 +759,27 @@ pub fn state(dir: &Path) -> io::Result<RunState> {
                 if !dir.join("cancel.sh").try_exists()? {
                     let tag = fs::read_to_string(dir.join("started"))?;
                     if !tag.trim().is_empty() {
-                        let scan = platform::scan(Some(&identity), tag.trim(), false)?;
-                        if scan.processes.is_empty() && scan.unreadable.is_empty() {
+                        let mut scan = platform::scan(Some(&identity), tag.trim(), false)?;
+                        // A dead wrapper cannot escalate; cancel() sent TERM, so after the
+                        // grace the kill falls to whoever observes the run.
+                        let grace_over = match fs::metadata(dir.join("cancel.req")) {
+                            Ok(request) => {
+                                request.modified()?.elapsed().unwrap_or_default()
+                                    >= crate::stop_duration(crate::TERM_GRACE)
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                            Err(error) => return Err(error),
+                        };
+                        if grace_over && !scan.processes.is_empty() {
+                            for process in &scan.processes {
+                                match platform::signal(process, libc::SIGKILL) {
+                                    Err(error) if !missing_process(&error) => return Err(error),
+                                    _ => {}
+                                }
+                            }
+                            scan = platform::scan(Some(&identity), tag.trim(), false)?;
+                        }
+                        if scan.processes.is_empty() && scan.unreadable.is_empty() && !untagged {
                             return Ok(RunState::Lost {
                                 reason:
                                     "its supervisor died; no run process remains that orx can see"
@@ -658,11 +791,17 @@ pub fn state(dir: &Path) -> io::Result<RunState> {
             }
         }
         return Ok(RunState::Unreconciled {
-            detail: "wrapper gone after started; containment unverifiable".into(),
+            detail: if untagged {
+                "The run's supervisor died, and orx-host can't see this run's processes on this \
+                 host, so it can't confirm they're gone."
+            } else {
+                "wrapper gone after started; containment unverifiable"
+            }
+            .into(),
         });
     }
     if dir.join("launch.json").try_exists()? {
-        return Ok(RunState::Starting);
+        return Ok(RunState::Starting { reason: None });
     }
     Ok(RunState::Missing)
 }

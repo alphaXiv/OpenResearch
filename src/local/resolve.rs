@@ -7,7 +7,8 @@ use crate::store::{Store, StoredRun};
 pub fn resolve_project(store: &Store, project_id: &str) -> Result<LocalProject> {
     store.get_local_project(project_id)?.ok_or_else(|| {
         anyhow!(
-            "Project {project_id} is not registered locally. Run `orx up` in its repository first."
+            "Project {project_id} is not registered in the orx store at {}. Run `orx up` in its repository first.",
+            store.data_dir().display()
         )
     })
 }
@@ -15,7 +16,8 @@ pub fn resolve_project(store: &Store, project_id: &str) -> Result<LocalProject> 
 pub fn resolve_experiment(store: &Store, exp_id: &str) -> Result<LocalExperiment> {
     store.get_local_experiment(exp_id)?.ok_or_else(|| {
         anyhow!(
-            "Experiment {exp_id} was not found in the local orx store. Find local experiment ids with `orx project view <projectId>`."
+            "Experiment {exp_id} was not found in the orx store at {}. Find local experiment ids with `orx project view <projectId>`.",
+            store.data_dir().display()
         )
     })
 }
@@ -23,7 +25,8 @@ pub fn resolve_experiment(store: &Store, exp_id: &str) -> Result<LocalExperiment
 pub fn resolve_run(store: &Store, run_id: &str) -> Result<StoredRun> {
     crate::local::local_run(store, run_id)?.ok_or_else(|| {
         anyhow!(
-            "Run {run_id} was not found in a local orx project. Find local run ids with `orx runs <projectId>`."
+            "Run {run_id} was not found in the orx store at {}. Find local run ids with `orx runs <projectId>`.",
+            store.data_dir().display()
         )
     })
 }
@@ -112,20 +115,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_ids_are_local_not_found_errors() {
+    fn unknown_ids_name_the_store_they_were_looked_up_in() {
         let store = temp_store();
-        assert!(resolve_project(&store, "nope")
-            .unwrap_err()
-            .to_string()
-            .contains("not registered locally"));
-        assert!(resolve_experiment(&store, "nope")
-            .unwrap_err()
-            .to_string()
-            .contains("local orx store"));
-        assert!(resolve_run(&store, "nope")
-            .unwrap_err()
-            .to_string()
-            .contains("local orx project"));
+        let dir = store.data_dir().display().to_string();
+        for error in [
+            resolve_project(&store, "nope").map(|_| ()),
+            resolve_experiment(&store, "nope").map(|_| ()),
+            resolve_run(&store, "nope").map(|_| ()),
+        ] {
+            let error = error.unwrap_err().to_string();
+            assert!(error.contains("nope") && error.contains(&dir), "{error}");
+        }
     }
 
     #[test]

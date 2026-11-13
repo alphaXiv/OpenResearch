@@ -164,6 +164,25 @@ pub fn write_executable(
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
+/// A PATH that keeps an `orx` under test off the user's own agent CLIs and their sign-ins: the
+/// system's tools, after a signed-out `codex` that answers detection's version probe so it never
+/// reaches the one ChatGPT.app bundles off PATH.
+pub fn agentless_path(root: &Path) -> String {
+    let bin = root.join("agent-stand-ins");
+    fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    // Written once: a server may be running it, and rewriting a running file fails on Linux.
+    if !codex.exists() {
+        write_executable(
+            codex,
+            "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli 0.200.0' && exit 0\nexit 1\n",
+            0o755,
+        )
+        .unwrap();
+    }
+    format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin.display())
+}
+
 pub fn host_binaries() -> PathBuf {
     use std::hash::{Hash, Hasher};
     static BINARIES: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();

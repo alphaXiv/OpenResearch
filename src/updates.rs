@@ -314,6 +314,41 @@ fn release_asset_url(tag: &str, asset: &str) -> String {
     format!("{REPO_URL}/releases/download/{release}/{asset}")
 }
 
+/// The headless `orx` archive canary `tag` publishes for a Rust target triple.
+pub(crate) fn canary_cli_url(tag: &str, target: &str) -> String {
+    release_asset_url(tag, &format!("{tag}--OpenResearch-cli-{target}.tar.gz"))
+}
+
+/// The SHA-256 published beside a release asset, or `None` when the release
+/// no longer has it.
+pub(crate) async fn published_sha256(url: &str) -> Result<Option<String>> {
+    let url = format!("{url}.sha256");
+    let unreachable = |error: reqwest::Error| {
+        anyhow!("Can't check {url} from this computer: {error}. Check this computer's internet connection, then try again.")
+    };
+    let response = http()
+        .get(&url)
+        .header("user-agent", UA)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(unreachable)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let body = response
+        .error_for_status()
+        .map_err(unreachable)?
+        .text()
+        .await
+        .map_err(unreachable)?;
+    let digest = body.split_whitespace().next().unwrap_or_default();
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!("{url} doesn't hold a SHA-256 digest."));
+    }
+    Ok(Some(digest.to_ascii_lowercase()))
+}
+
 // ---------------------------------------------------------------------------
 // Install receipt (written by the cargo-dist shell installer)
 // ---------------------------------------------------------------------------
@@ -2260,12 +2295,13 @@ impl UpdateWarning {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, current_version,
-        detect_channel, exe_matches_prefix, now_unix, package_manager_owns, parse_manifest,
-        portable_dir, portable_outside_prefix, precedence, relaunch_args, release_asset_url,
-        render, restart_target, retired_path, staged_release_in, target_lock_path, warning_for,
-        write_staged_release, BackendLock, Changes, CheckCache, DistManifest, InstallChannel,
-        ReleaseChannel, UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        app_bundle_root, attempt_backoff, attempt_due, bold, canary_cli_url, claim_install,
+        current_version, detect_channel, exe_matches_prefix, now_unix, package_manager_owns,
+        parse_manifest, portable_dir, portable_outside_prefix, precedence, relaunch_args,
+        release_asset_url, render, restart_target, retired_path, staged_release_in,
+        target_lock_path, warning_for, write_staged_release, BackendLock, Changes, CheckCache,
+        DistManifest, InstallChannel, ReleaseChannel, UpdateTarget, ATTEMPT_BACKOFF_MAX,
+        ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -2330,6 +2366,10 @@ mod tests {
         assert_eq!(
             release_asset_url("v0.2.22", "OpenResearch.dmg"),
             format!("{base}/v0.2.22/OpenResearch.dmg")
+        );
+        assert_eq!(
+            canary_cli_url("canary-20261027.3", "aarch64-unknown-linux-musl"),
+            format!("{base}/canary/canary-20261027.3--OpenResearch-cli-aarch64-unknown-linux-musl.tar.gz")
         );
     }
 

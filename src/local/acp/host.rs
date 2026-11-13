@@ -638,7 +638,12 @@ pub(super) async fn spawn(
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     if up_port.is_some() {
-        crate::local::chat::set_chat_session_env(&mut command, session_id, &definition.id, up_port);
+        crate::local::chat::set_chat_session_env(
+            &mut command,
+            session_id,
+            &definition.id,
+            up_port,
+        )?;
     }
     #[cfg(unix)]
     command.process_group(0);

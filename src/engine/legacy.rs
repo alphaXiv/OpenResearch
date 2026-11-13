@@ -54,10 +54,27 @@ pub(super) fn cancel_note(run: &StoredRun) -> Option<String> {
 
 impl Engine {
     pub fn scan_legacy(&self) -> Result<Vec<(String, Adoption)>> {
-        let (candidates, interrupted) = {
+        let (candidates, interrupted, tombstones) = {
             let store = self.store();
             let mut candidates = Vec::new();
             let mut interrupted = Vec::new();
+            // Only the engine writes contact, so a 0.2.x tombstone was already adopted once.
+            let mut tombstones = Vec::new();
+            for run in store.list_engine_runs()? {
+                let Ok(descriptor) = BackendDescriptor::parse(&run.backend_json) else {
+                    continue;
+                };
+                let tombstone = super::Phase::parse(&run.status)
+                    .is_some_and(super::Phase::is_terminal)
+                    && store
+                        .engine_run_state(&run.id)?
+                        .is_some_and(|state| state.contact != Contact::Live);
+                if descriptor.kind != "engine" && tombstone {
+                    if let Some(adoption) = adoption(descriptor) {
+                        tombstones.push((run.id, adoption));
+                    }
+                }
+            }
             for run in store.list_active_runs()? {
                 let Ok(descriptor) = BackendDescriptor::parse(&run.backend_json) else {
                     continue;
@@ -73,7 +90,7 @@ impl Engine {
                     candidates.push((run, adoption));
                 }
             }
-            (candidates, interrupted)
+            (candidates, interrupted, tombstones)
         };
 
         // Without a handle a 0.2.x CLI may still be submitting it, so wait out the same settle.
@@ -98,6 +115,11 @@ impl Engine {
         }
 
         let mut decisions = Vec::new();
+        for (id, adoption) in tombstones {
+            if !self.memory().locks.holds(&id) && self.own(&id)? {
+                decisions.push((id, adoption));
+            }
+        }
         for (run, adoption) in candidates {
             if self.memory().locks.holds(&run.id) {
                 continue;

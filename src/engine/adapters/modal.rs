@@ -1,22 +1,30 @@
 use super::api::{self, Api};
 use crate::engine::*;
-use crate::error::Result;
+use crate::error::{anyhow, Result};
 use crate::jobs::modal;
 use async_trait::async_trait;
 
 pub struct ModalAccount;
 
+fn unseen(sandbox: &str) -> String {
+    format!(
+        "Modal can't find sandbox {sandbox} with the token and environment orx uses now. orx \
+         doesn't record which workspace and environment launched it, so this doesn't prove the \
+         sandbox was deleted. Check it in the Modal dashboard."
+    )
+}
+
 #[async_trait]
 impl Api for ModalAccount {
     type Cursor = modal::LogResume;
 
-    async fn launch(&self, intent: &RunIntent, _fence: &Fence<'_>) -> Result<Handle, LaunchError> {
+    async fn launch(&self, intent: &RunIntent, fence: &Fence<'_>) -> Result<Handle, LaunchError> {
         let mut spec: modal::ModalJobSpec =
             serde_json::from_value(intent.launch.options.clone()).map_err(api::rejected)?;
         spec.tags.insert("or_run".into(), intent.run.id.clone());
         spec.env.extend(crate::config::launch_env(&intent.run.id));
         modal::ensure_env().await.map_err(api::rejected)?;
-        modal::run_job(&spec)
+        modal::run_job(&spec, Some(fence))
             .await
             .map(|sandbox| api::handle(intent, vec![sandbox]))
             .map_err(api::launch_error)
@@ -27,11 +35,19 @@ impl Api for ModalAccount {
         )
     }
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation> {
-        let state = modal::inspect_job(api::id(run, "modal_job", None, None)?).await?;
+        let id = api::id(run, "modal_job", None, None)?;
+        let Some(state) = modal::inspect_job(id).await? else {
+            return Ok(Observation::Unreconciled { detail: unseen(id) });
+        };
         Ok(api::stage(&state.stage, state.message, state.exit_code, None, None))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
-        modal::cancel_job(api::id(run, "modal_job", None, None)?).await
+        let id = api::id(run, "modal_job", None, None)?;
+        if modal::cancel_job(id).await? {
+            Ok(())
+        } else {
+            Err(anyhow!(unseen(id)))
+        }
     }
     async fn logs(
         &self,

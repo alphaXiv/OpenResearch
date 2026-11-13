@@ -153,24 +153,34 @@ impl Backend for Slurm {
     }
 
     async fn recover(&self, intent: &RunIntent) -> Recovery {
+        self.recover_with_cancel(intent, &|| intent.run.cancel_requested)
+            .await
+    }
+
+    async fn recover_with_cancel(
+        &self,
+        intent: &RunIntent,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Recovery {
         match self
             .ssh
-            .changes(std::slice::from_ref(&intent.run.id), Duration::ZERO)
+            .request(Request::Inspect {
+                run: intent.run.id.clone(),
+            })
             .await
         {
-            Ok(changed)
-                if changed.iter().any(|(_, summary)| {
-                    matches!(summary.state, RunState::Missing | RunState::Staging)
-                }) =>
+            Ok(Response::Inspect { summary })
+                if matches!(summary.state, RunState::Missing | RunState::Staging) =>
             {
                 return Recovery::Absent
             }
-            Ok(_) => {}
-            Err(error) => {
+            Ok(Response::Inspect { .. }) => {}
+            Ok(response) => {
                 return Recovery::Unknown {
-                    detail: error.to_string(),
+                    detail: format!("Unexpected inspection reply: {response:?}"),
                 }
             }
+            Err(error) => return self.ssh.unanswered(error),
         }
         match self.query(vec![intent.run.id.clone()], Vec::new()).await {
             Ok(jobs) => match jobs.into_iter().find(|job| {
@@ -180,14 +190,29 @@ impl Backend for Slurm {
                     let id = (!job.job.is_empty()).then_some(job.job);
                     Recovery::Found(self.handle(id))
                 }
+                // The host cancels whatever the submission left: scancel by the run's name, and
+                // a cancelled receipt once no wrapper holds the run, which then ends it.
+                None if cancelled() => match self
+                    .ssh
+                    .request(Request::Cancel {
+                        run: intent.run.id.clone(),
+                    })
+                    .await
+                {
+                    Ok(Response::Cancel { .. }) => Recovery::Found(self.handle(None)),
+                    Ok(response) => Recovery::Unknown {
+                        detail: format!("Unexpected cancel reply: {response:?}"),
+                    },
+                    Err(error) => self.ssh.unanswered(error),
+                },
                 None => Recovery::Unknown {
-                    detail: "Slurm submission marker exists without a scheduler record or receipt"
+                    detail: "Slurm has no record of this run's submission and no receipt; it \
+                             stays unconfirmed until the scheduler or a receipt answers. If the \
+                             job is gone for good, abandon the run."
                         .into(),
                 },
             },
-            Err(error) => Recovery::Unknown {
-                detail: error.to_string(),
-            },
+            Err(error) => self.ssh.unanswered(error),
         }
     }
 

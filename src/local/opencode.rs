@@ -505,7 +505,7 @@ async fn spawn_agent(
     // Tag runs the agent launches (`orx exp run`) with this session so they can
     // be explicitly subscribed to. One serve child per session; set after the
     // synced-env loop so it isn't shadowed.
-    crate::local::chat::set_chat_session_env(&mut cmd, session_id, "opencode", up_port);
+    crate::local::chat::set_chat_session_env(&mut cmd, session_id, "opencode", up_port)?;
     if let Some(port) = up_port {
         for (name, value) in crate::local::chat::delegation::mcp_server(session_id, port)?.env {
             cmd.env(name, value);

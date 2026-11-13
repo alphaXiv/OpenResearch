@@ -74,6 +74,7 @@ async fn openresearch_sign_in_from_another_machine_shows_a_code() {
         .env("XDG_DATA_HOME", root.join("share"))
         .env("ORX_DATA_DIR", root.join("data"))
         .env("ORX_NO_UPDATE_CHECK", "1")
+        .env("PATH", orx_test_support::agentless_path(&root))
         .env("ALPHAXIV_API_URL", &site)
         .env("ALPHAXIV_WEB_URL", &site)
         .env_remove("SSH_CONNECTION")

@@ -43,7 +43,7 @@ The laptop and the remote run whatever versions they were last updated to.
 - **Control protocol** (`src/commands/remote_host.rs`): the control channel's shape. A mismatch reports the host as incompatible.
 - **Host protocol** (`crates/orx-host-proto`): Hello requires the exact version and binary SHA. The engine uploads its own `orx-host`, so `serve` never skews; only wrappers and files outlive a version.
 
-Only production builds ([desktop](desktop.md)) install a released binary, the laptop's own version. A development build asks for a binary of the same branch, since no public release speaks its protocol.
+**Installing or updating a remote puts the laptop's own build there,** so the protocols match by construction. Only production builds ([desktop](desktop.md)) install: a stable laptop runs the release installer for its version, and a canary, which shares its version number with a stable release, downloads its own headless CLI from the canary release, checks it against the published SHA-256 and renames it over the binary path the stable installer would use. The probe also reads the remote's build ID (`orx version --build-id`, the version or canary tag), so a build already in place is not installed again and the dashboard can say which build a host runs. The canary release keeps only the latest seven builds, so a laptop whose build is gone asks the user to update it. A development build asks for a binary of the same branch, since no public release speaks its protocol.
 
 **Any change to the remote API or the control channel's shape is a protocol change: bump the number,** and keep the laptop able to tell the user what to do with a mismatched peer. It reads a peer's protocols from the host descriptor and `orx version --dashboard-protocol`. A route only the laptop itself calls and can do without, like alphaXiv forwarding, is additive instead: the laptop recognizes an older host's answer and tells the user to update it.
 
@@ -60,10 +60,11 @@ Two roles run from that binary:
 
 Their rules:
 
+- **A launch only publishes.** `serve` answers once `launch.json` and the pinned source are on disk; the wrapper unpacks the source into `repo/` before it starts the payload, under its lock and with no deadline, and a cancel stops the unpacking. A run that can't start ends with a receipt saying why. On Slurm the unpacking runs on the compute node, inside the allocation.
 - **At most one start.** The wrapper creates `started` exclusively and fsyncs it before spawning the payload. Its presence forbids another start, even if a crash prevented the spawn, and a dead wrapper never authorizes a rerun.
 - **Receipts are whole,** so an NFS reader sees all of one or none. Failing to read, parse or inspect is uncertainty, never absence or a verified stop.
 - **Identity bounds what a host can prove.** Process checks and signals run only on the recorded node and boot. A new boot on that node proves the old execution ended; another node proves nothing about local PIDs.
-- **The kill set** is the wrapper's descendants (it is their subreaper on Linux), every same-user process carrying the run's tag, and every process already seen. A scan is complete only while the wrapper lives and no candidate was unreadable.
+- **The kill set** is the wrapper's descendants (it is their subreaper on Linux), every same-user process carrying the run's tag, and every process already seen. A scan is complete only while the wrapper lives and no candidate was unreadable. On macOS some processes, Apple's own binaries among them, show others an empty environment, so once the wrapper is gone no tag scan there is complete and a dead wrapper leaves its run unreconciled.
 - **Updates never touch a running wrapper.** It keeps its code until it exits, and a newer `serve` reads its receipts unchanged.
 - **Host locks are `fcntl` locks** on run-directory files, so a shared filesystem must honor them across nodes.
 

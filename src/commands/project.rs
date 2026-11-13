@@ -11,7 +11,7 @@ use crate::ProjectCommand;
 pub async fn run(args: crate::ProjectArgs) -> Result<()> {
     match args.command {
         ProjectCommand::View { project_id, all } => {
-            let store = crate::store::Store::open()?;
+            let store = crate::store::Store::open_for_reading()?;
             resolve_project(store, &project_id)?.view_project(all).await
         }
         ProjectCommand::Edit {

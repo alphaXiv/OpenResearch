@@ -144,6 +144,32 @@ async fn isolated() -> Option<PathBuf> {
             )
                 .into_response();
         }
+        if method == axum::http::Method::GET && uri.path() == "/orgs" {
+            let orgs = std::fs::read(root.join("orgs.json")).unwrap_or_else(|_| {
+                br#"{"orgs":[{"id":"org","name":"Org","createdBy":"u"}]}"#.into()
+            });
+            return (
+                headers,
+                Json(serde_json::from_slice::<Value>(&orgs).unwrap()),
+            )
+                .into_response();
+        }
+        if method == axum::http::Method::GET && uri.path() == "/users/me" {
+            return (
+                headers,
+                Json(json!({"user": {"id": "u", "email": "other@example.com"}})),
+            )
+                .into_response();
+        }
+        if method == axum::http::Method::GET && uri.path() == "/api/whoami-v2" {
+            let whoami = std::fs::read(root.join("whoami.json"))
+                .unwrap_or_else(|_| br#"{"name":"me","orgs":[{"name":"org"}]}"#.into());
+            return (
+                headers,
+                Json(serde_json::from_slice::<Value>(&whoami).unwrap()),
+            )
+                .into_response();
+        }
         if method == axum::http::Method::GET && uri.path() == "/ssh-keys" {
             if let Ok(keys) = std::fs::read(root.join("ssh-keys.json")) {
                 return (
@@ -180,6 +206,17 @@ async fn isolated() -> Option<PathBuf> {
                     .into_response();
             }
             return (headers, Json(json!({}))).into_response();
+        }
+        if method == axum::http::Method::POST
+            && (uri.path().ends_with("/cancel") || uri.path().ends_with("/stop"))
+        {
+            let status = std::fs::read_to_string(root.join("cancel-status"))
+                .map_or(200, |status| status.parse().unwrap());
+            return (
+                axum::http::StatusCode::from_u16(status).unwrap(),
+                Json(json!({})),
+            )
+                .into_response();
         }
         assert_eq!(
             method,
@@ -569,13 +606,11 @@ else:
     let budget = Duration::from_secs(10);
     engine
         .observe_runs(&first, std::slice::from_ref(&run), budget)
-        .await
-        .unwrap();
+        .await;
     assert_eq!(std::fs::read(root.join("source.tar")).unwrap(), b"snapshot");
     engine
         .observe_runs(&adapter(&clock), std::slice::from_ref(&run), budget)
-        .await
-        .unwrap();
+        .await;
     assert_eq!(
         std::fs::read_to_string(root.join("copies")).unwrap(),
         "copy\n"
@@ -805,8 +840,7 @@ async fn k8s_waiting_pod_stays_queued_and_receives_the_source_once_it_runs() {
     let budget = Duration::from_secs(10);
     engine
         .observe_runs(&adapter, std::slice::from_ref(&run), budget)
-        .await
-        .unwrap();
+        .await;
     starting(&engine);
 
     waiting_pod(
@@ -817,8 +851,7 @@ async fn k8s_waiting_pod_stays_queued_and_receives_the_source_once_it_runs() {
     clock.advance(budget);
     engine
         .observe_runs(&adapter, std::slice::from_ref(&run), budget)
-        .await
-        .unwrap();
+        .await;
     starting(&engine);
     assert!(!root.join("source.tar").exists());
 
@@ -831,8 +864,7 @@ async fn k8s_waiting_pod_stays_queued_and_receives_the_source_once_it_runs() {
     waiting_pod(&root, Some("gpu-1"), script_running("2026-01-01T00:01:00Z"));
     engine
         .observe_runs(&adapter, std::slice::from_ref(&run), budget)
-        .await
-        .unwrap();
+        .await;
     assert_eq!(std::fs::read(root.join("source.tar")).unwrap(), b"snapshot");
     assert_eq!(engine.load("run").unwrap().0.status, "running");
     let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
@@ -869,8 +901,7 @@ async fn k8s_timeout_starts_when_the_script_container_does() {
         async {
             engine
                 .observe_runs(&adapter, std::slice::from_ref(&run), budget)
-                .await
-                .unwrap();
+                .await;
             engine.load("run").unwrap().0
         }
     };
@@ -928,8 +959,7 @@ async fn k8s_pull_errors_that_may_have_cleared_keep_the_run_queued() {
             std::slice::from_ref(&run),
             Duration::from_secs(10),
         )
-        .await
-        .unwrap();
+        .await;
     assert_eq!(engine.load("run").unwrap().0.status, "starting");
     assert!(!root.join("deleted").exists());
 }
@@ -948,8 +978,7 @@ async fn k8s_a_forbidden_deadline_patch_fails_the_run_and_frees_the_job() {
             std::slice::from_ref(&run),
             Duration::from_secs(10),
         )
-        .await
-        .unwrap();
+        .await;
     let row = engine.load("run").unwrap().0;
     assert_eq!(row.status, "failed");
     let reason = row.result_markdown.unwrap();
@@ -1003,8 +1032,7 @@ async fn k8s_unpullable_image_fails_with_the_pull_error_and_frees_the_job() {
     let budget = Duration::from_secs(10);
     engine
         .observe_runs(&adapter, std::slice::from_ref(&run), budget)
-        .await
-        .unwrap();
+        .await;
     assert_eq!(engine.load("run").unwrap().0.status, "starting");
     assert!(!root.join("deleted").exists());
 
@@ -1017,8 +1045,7 @@ async fn k8s_unpullable_image_fails_with_the_pull_error_and_frees_the_job() {
     clock.advance(budget);
     engine
         .observe_runs(&adapter, std::slice::from_ref(&run), budget)
-        .await
-        .unwrap();
+        .await;
     let row = engine.load("run").unwrap().0;
     assert_eq!(row.status, "failed");
     let reason = row.result_markdown.unwrap();
@@ -1126,8 +1153,7 @@ async fn openresearch_cancel_and_abandon_release_without_ssh_and_retry_api_failu
                     assert!(engine.abandon(&id).unwrap());
                     engine
                         .observe_runs(&adapter, &watched, Duration::ZERO)
-                        .await
-                        .unwrap();
+                        .await;
                 } else {
                     assert!(engine.cancel(&adapter, &id, "user").await.unwrap());
                 }
@@ -1138,8 +1164,7 @@ async fn openresearch_cancel_and_abandon_release_without_ssh_and_retry_api_failu
                 std::fs::remove_file(root.join("delete-fails")).unwrap();
                 engine
                     .observe_runs(&adapter, &watched, Duration::ZERO)
-                    .await
-                    .unwrap();
+                    .await;
                 let (run, state) = engine.load(&id).unwrap();
                 assert_eq!(run.status, if abandon { "lost" } else { "cancelled" });
                 assert_eq!(state.contact, Contact::Live);
@@ -1319,8 +1344,7 @@ async fn openresearch_rejected_key_auto_cancel_checks_rental_and_survives_restar
             std::fs::remove_file(root.join(flag)).unwrap();
             engine
                 .observe_runs(&adapter, &watched, Duration::ZERO)
-                .await
-                .unwrap();
+                .await;
         }
         let (run, state) = engine.load(case).unwrap();
         assert_eq!(
@@ -1352,8 +1376,7 @@ async fn openresearch_rejected_key_auto_cancel_checks_rental_and_survives_restar
         for _ in 0..2 {
             engine
                 .observe_runs(&adapter, &watched, Duration::ZERO)
-                .await
-                .unwrap();
+                .await;
         }
         assert_eq!(engine.load(case).unwrap().1.cancel_accepted_at, accepted);
         let requests = std::fs::read_to_string(root.join("http.log")).unwrap();
@@ -1512,8 +1535,7 @@ async fn round_one_bootstrap_heartbeat_precedes_wrapper_activation() {
         while !directory.join("started").exists() {
             engine
                 .observe_runs(&adapter, std::slice::from_ref(&watched), Duration::ZERO)
-                .await
-                .unwrap();
+                .await;
             clock.advance(Duration::from_secs(10));
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -1539,8 +1561,7 @@ async fn round_one_bootstrap_heartbeat_precedes_wrapper_activation() {
             clock.advance(Duration::from_secs(60));
             engine
                 .observe_runs(&adapter, std::slice::from_ref(&watched), Duration::ZERO)
-                .await
-                .unwrap();
+                .await;
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
@@ -1684,8 +1705,7 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
     }];
     engine
         .observe_runs(&adapter, &watched, Duration::from_secs(1))
-        .await
-        .unwrap();
+        .await;
     if !watching {
         assert!(matches!(
             engine.load(&id).unwrap().1.contact,
@@ -1787,8 +1807,7 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
         loop {
             engine
                 .observe_runs(&adapter, &watched, Duration::ZERO)
-                .await
-                .unwrap();
+                .await;
             if matches!(
                 engine.load(&id).unwrap().1.contact,
                 crate::store::Contact::NeedsAuth { .. }
@@ -1865,8 +1884,7 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
         assert!(engine.abandon(&id).unwrap());
         engine
             .observe_runs(&adapter, &watched, Duration::ZERO)
-            .await
-            .unwrap();
+            .await;
         assert_eq!(engine.load(&id).unwrap().0.status, "lost");
     }
     assert_eq!(
@@ -2037,8 +2055,7 @@ async fn openresearch_box_refusing_the_key_fails_the_run_with_the_cause() {
             loop {
                 engine
                     .observe_runs(&adapter, std::slice::from_ref(&watched), Duration::ZERO)
-                    .await
-                    .unwrap();
+                    .await;
                 let (run, state) = engine.load(&watched.id).unwrap();
                 if phase_of(&run).unwrap().is_terminal() {
                     break;
@@ -2143,8 +2160,7 @@ async fn openresearch_box_that_never_comes_online_fails_with_the_service_reason(
         let observe = || async {
             engine
                 .observe_runs(&adapter, &watched, Duration::ZERO)
-                .await
-                .unwrap();
+                .await;
             engine.load(&watched[0].id).unwrap().0
         };
         if case == "deadline" {
@@ -2283,8 +2299,7 @@ async fn openresearch_box_lost_after_contact_keeps_the_service_reason() {
         std::fs::write(root.join("http.log"), "").unwrap();
         engine
             .observe_runs(&adapter, &watched, Duration::ZERO)
-            .await
-            .unwrap();
+            .await;
         let (run, _) = engine.load(&watched[0].id).unwrap();
         assert_eq!(run.status, status, "{case}");
         let reason = run.result_markdown.unwrap();
@@ -2365,7 +2380,22 @@ async fn openresearch_launch_checks_the_key_is_usable_without_a_prompt() {
     crate::local::openresearch::launch_spec(&args)
         .await
         .unwrap();
+    std::fs::write(
+        &config,
+        "Match host 203.0.113.7\n  IdentityFile ~/keys/work\n",
+    )
+    .unwrap();
+    crate::local::openresearch::launch_spec(&args)
+        .await
+        .unwrap();
     std::fs::remove_file(&config).unwrap();
+
+    // An agent orx can't reach may hold the key.
+    std::env::set_var("SSH_AUTH_SOCK", root.join("no-agent.sock"));
+    crate::local::openresearch::launch_spec(&args)
+        .await
+        .unwrap();
+    std::env::remove_var("SSH_AUTH_SOCK");
     local_key(&root, "");
     crate::local::openresearch::launch_spec(&args)
         .await
@@ -2472,6 +2502,15 @@ touch '{}/leaked-k8s'
             root.display()
         ),
     );
+    for launcher in ["modal", "vercel"] {
+        script(
+            &root.join(format!("bin/{launcher}-python")),
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\nsleep 0.2\ntouch '{}/leaked-{launcher}'\n",
+                root.display()
+            ),
+        );
+    }
     let engine = engine(&root);
     let fence = Fence {
         store: &engine.store,
@@ -2500,9 +2539,21 @@ touch '{}/leaked-k8s'
         .err()
         .expect("unfenced creation succeeded");
     assert!(error.to_string().contains("no longer awaits"), "{error}");
+    let modal = serde_json::from_value(json!({"script":"true","image":"python","gpu":null,"cpu":null,"memory":null,"env":{},"timeout_seconds":60,"app":"openresearch","tags":{},"source_archive":null})).unwrap();
+    let error = crate::jobs::modal::run_job(&modal, Some(&fence))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no longer awaits"), "{error}");
+    let vercel = serde_json::from_value(json!({"name":"orx-run","script":"true","image":"python","vcpus":null,"env":{},"timeout_seconds":60,"session_cap":2700,"region":null,"tags":{},"source_archive":null})).unwrap();
+    let error = crate::jobs::vercel::run_job(&vercel, Some(&fence))
+        .await
+        .err()
+        .expect("unfenced creation succeeded");
+    assert!(error.to_string().contains("no longer awaits"), "{error}");
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(!root.join("leaked-hf").exists());
-    assert!(!root.join("leaked-k8s").exists());
+    for leak in ["leaked-hf", "leaked-k8s", "leaked-modal", "leaked-vercel"] {
+        assert!(!root.join(leak).exists(), "{leak}");
+    }
 }
 
 #[tokio::test]
@@ -2662,8 +2713,7 @@ esac
         .any(|(_, observation)| observation.ends_run()));
     engine
         .apply_observations(backend.as_ref(), &[run], observations)
-        .await
-        .unwrap();
+        .await;
     runtime.start();
     tokio::time::timeout(Duration::from_secs(30), async {
         while engine.store().log_collection_pending("run").unwrap() {
@@ -2901,8 +2951,7 @@ else:
             std::slice::from_ref(&run),
             Duration::from_secs(5),
         )
-        .await
-        .unwrap();
+        .await;
     assert_eq!(engine.load("run").unwrap().0.status, "running");
     assert!(engine.store().run_notice_batch("chat").unwrap().is_empty());
 
@@ -2911,8 +2960,7 @@ else:
     clock.advance(Duration::from_secs(10));
     engine
         .observe_runs(backend.as_ref(), &[run], Duration::from_secs(5))
-        .await
-        .unwrap();
+        .await;
     assert_eq!(engine.load("run").unwrap().0.status, "cancelled");
     let notices = engine.store().run_notice_batch("chat").unwrap();
     assert_eq!(notices.len(), 1);
@@ -3112,7 +3160,7 @@ case "$3" in
       printf '{{"stage":"RUNNING"}}'
     fi ;;
   logs) printf 'first\nlast\n' ;;
-  cancel) touch '{root}/cancelled' ;;
+  cancel) touch '{root}/cancelled'; printf '{{"missing":false}}' ;;
   finish) touch '{root}/destroyed' ;;
   *) exit 1 ;;
 esac
@@ -3183,8 +3231,7 @@ esac
             std::slice::from_ref(&watched),
             Duration::from_secs(1),
         )
-        .await
-        .unwrap();
+        .await;
     assert_eq!(engine.load("run").unwrap().0.status, "cancelled");
     adapter.finish(&watched).await.unwrap();
     assert!(root.join("destroyed").exists());
@@ -3391,6 +3438,132 @@ esac
         let row = engine.load(&cancel_id).unwrap().0;
         assert_eq!(row.status, "cancelled", "{kind}");
         assert_eq!(row.exit_code, Some(if kind == "k8s_job" { 7 } else { 137 }), "{kind}");
+    }
+}
+
+/// A provider's "no such job" ends the run only when it proves deletion: cancelled after an
+/// accepted cancel, lost otherwise, and a cancel it answers is delivered. Otherwise the run stays
+/// open and says why, and the cancel stays undelivered.
+#[tokio::test]
+async fn provider_404s_end_runs_only_when_they_prove_deletion() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    for launcher in ["modal-python", "vercel-python"] {
+        script(
+            &root.join("bin").join(launcher),
+            "#!/bin/sh\ncase \"$3\" in status|cancel) printf '{\"missing\":true}' ;; *) exit 1 ;; esac\n",
+        );
+    }
+    std::fs::write(root.join("inspect-response.json"), "{}").unwrap();
+    std::fs::write(root.join("inspect-status"), "404").unwrap();
+    std::fs::write(root.join("cancel-status"), "404").unwrap();
+    let engine = engine(&root);
+    let endpoint = std::env::var("HF_ENDPOINT").unwrap();
+    let member = r#"{"name":"ada-lovelace","orgs":[{"name":"org"}]}"#;
+    let outsider = r#"{"name":"ada-lovelace","orgs":[{"name":"elsewhere"}]}"#;
+    let explains = |kind: &str, why: &str| match kind {
+        "hf_job" => why.contains("ada-lovelace") && why.contains(" org "),
+        _ => why.contains("doesn't prove"),
+    };
+    for (case, kind, whoami, proven) in [
+        ("hf-member", "hf_job", member, true),
+        ("hf-outsider", "hf_job", outsider, false),
+        ("ray", "ray_job", member, true),
+        ("modal", "modal_job", member, false),
+        ("vercel", "vercel_job", member, false),
+    ] {
+        std::fs::write(root.join("whoami.json"), whoami).unwrap();
+        let target = match kind {
+            "ray_job" => Some(endpoint.as_str()),
+            "hf_job" => Some("org"),
+            _ => None,
+        };
+        let ids = match kind {
+            "vercel_job" => vec!["box".into(), "process".into()],
+            _ => vec!["job".into()],
+        };
+        let handle = super::api::test_handle(kind, target, None, ids);
+        let metadata = BackendDescriptor::parse(&json!({"kind":kind}).to_string()).unwrap();
+        let cancelled = format!("{case}-cancel");
+        let runs = [case.to_string(), cancelled.clone()].map(|id| WatchedRun {
+            id,
+            handle: handle.clone(),
+        });
+        for run in &runs {
+            engine
+                .store()
+                .upsert_run(&crate::store::StoredRun {
+                    id: run.id.clone(),
+                    experiment_id: "exp".into(),
+                    project_id: "proj".into(),
+                    status: "running".into(),
+                    backend_json: crate::engine::handle::backend_json(
+                        kind,
+                        Some(&handle),
+                        &metadata,
+                    )
+                    .unwrap(),
+                    command: "true".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                    ended_at: None,
+                    exit_code: None,
+                    commit_sha: None,
+                    result_markdown: None,
+                    cancel_requested: false,
+                    cancel_reason: None,
+                    chat_session_id: None,
+                })
+                .unwrap();
+        }
+        let adapter = (super::api::provider(kind).unwrap().build)(
+            &crate::engine::handle::ApiAccount {
+                target: target.map(str::to_owned),
+                context: None,
+            },
+            Arc::new(TestClock::new()),
+            root.join("spools"),
+        )
+        .unwrap();
+        let cancel = adapter.cancel(&runs[1]).await;
+        match &cancel {
+            CancelOutcome::Pending => assert!(proven, "{case}"),
+            CancelOutcome::Undelivered { detail } => {
+                assert!(!proven && explains(kind, detail), "{case}: {detail}");
+            }
+            other => panic!("{case}: {other:?}"),
+        }
+        assert!(engine
+            .store()
+            .accept_run_cancel(&cancelled, Some("Dashboard stop"))
+            .unwrap()
+            .is_some());
+        for (id, observation) in adapter.observe(&runs, Duration::from_secs(5)).await {
+            engine.observe(&id, observation).unwrap();
+        }
+        if proven {
+            assert_eq!(engine.load(case).unwrap().0.status, "lost", "{case}");
+            assert_eq!(
+                engine.load(&cancelled).unwrap().0.status,
+                "cancelled",
+                "{case}"
+            );
+            continue;
+        }
+        for id in [case, cancelled.as_str()] {
+            let (run, state) = engine.load(id).unwrap();
+            assert_eq!(run.status, "running", "{id}");
+            let why = match (kind, state.contact) {
+                ("hf_job", crate::store::Contact::NeedsAuth { cause, .. }) => cause,
+                (
+                    "modal_job" | "vercel_job",
+                    crate::store::Contact::Unreconciled { detail, .. },
+                ) => detail,
+                (_, contact) => panic!("{id}: {contact:?}"),
+            };
+            assert!(explains(kind, &why), "{id}: {why}");
+        }
     }
 }
 
@@ -3743,14 +3916,15 @@ if '--dry-run=client' in a:
 elif a[0] == 'apply':
     sys.stdin.read()
 elif a[0] == 'create':
-    if json.loads(sys.stdin.read())['kind'] == 'ConfigMap':
+    kind = json.loads(sys.stdin.read())['kind']
+    if kind == 'ConfigMap' or (mode == 'remnant' and kind == 'Job'):
         pass
     elif mode == 'limited':
         fail('Error from server (TooManyRequests): error when creating "STDIN": the server has received too many requests and has asked us to try again later')
     else:
         fail('Error from server (Forbidden): error when creating "STDIN": jobs.batch is forbidden: User "lab" cannot create resource "jobs" in API group "batch" in the namespace "default"')
 elif a[0] == 'delete':
-    if mode == 'stuck':
+    if mode == 'stuck' or (mode == 'remnant' and a[1].startswith('configmap/')):
         fail('Unable to connect to the server: dial tcp: i/o timeout')
 elif a[0] == 'get':
     print('{"items":[]}')
@@ -3798,6 +3972,32 @@ else:
         calls
             .lines()
             .any(|call| call.starts_with("forbidden delete configmap/run-config")),
+        "{calls}"
+    );
+
+    // A rollback that stops part way leaves the Job, which recovery finds by its label.
+    std::env::set_var("ORX_TEST_K8S", "remnant");
+    let service = json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"{{ORX_RUN}}-svc"}});
+    let mut launch = launch;
+    launch.options["manifest"] = json!(format!("{config}{job}{service}"));
+    engine
+        .submit(&adapter, pending("remnant", &metadata, &launch))
+        .await
+        .unwrap();
+    let (got, why) = launch_outcome(&engine, "remnant");
+    assert_eq!(got, "submitting", "{why}");
+    assert!(why.contains("rolling back"), "{why}");
+    let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
+    assert!(
+        calls
+            .lines()
+            .any(|call| call.starts_with("remnant delete configmap/")),
+        "{calls}"
+    );
+    assert!(
+        !calls
+            .lines()
+            .any(|call| call.starts_with("remnant delete job/")),
         "{calls}"
     );
 }
@@ -4166,4 +4366,86 @@ cat frames
         std::fs::read_to_string(root.join("from.log")).unwrap(),
         "\n"
     );
+}
+
+/// OpenResearch answers 404 for a box outside the signed-in account's organizations: no proof
+/// it was released, so a cancel stays undelivered and the run names the account to change.
+#[tokio::test]
+async fn openresearch_404_under_another_account_is_not_a_release() {
+    use super::openresearch::OpenResearch;
+    use crate::store::StoredRun;
+
+    let Some(root) = isolated().await else {
+        return;
+    };
+    crate::config::save_credentials(&crate::config::Credentials {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        token: "fake".into(),
+    })
+    .await
+    .unwrap();
+    let id = "hidden".to_string();
+    let mut descriptor = BackendDescriptor::parse(
+        &json!({"kind":"openresearch_job","namespace":"org","jobId":id}).to_string(),
+    )
+    .unwrap();
+    descriptor.rental_lease = Some(crate::jobs::rental::Rental {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        sandbox_id: id.clone(),
+        token: "fake".into(),
+        unknown: Default::default(),
+    });
+    let handle = Handle::Legacy {
+        descriptor: Box::new(descriptor.clone()),
+    };
+    let engine = Arc::new(engine(&root.join(&id)));
+    engine
+        .store()
+        .upsert_run(&StoredRun {
+            id: id.clone(),
+            experiment_id: "exp".into(),
+            project_id: "proj".into(),
+            status: "running".into(),
+            backend_json: handle::backend_json(&id, Some(&handle), &descriptor).unwrap(),
+            command: "true".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: Some("chat".into()),
+        })
+        .unwrap();
+    let adapter = OpenResearch::new(engine.clone(), Arc::new(|_| panic!("used SSH")));
+    let watched = WatchedRun { id, handle };
+    for flag in ["box-released", "delete-fails"] {
+        std::fs::write(root.join(flag), "").unwrap();
+    }
+    std::fs::write(root.join("orgs.json"), r#"{"orgs":[]}"#).unwrap();
+    assert!(matches!(
+        adapter.cancel(&watched).await,
+        CancelOutcome::Undelivered { .. }
+    ));
+    let observed = adapter
+        .observe(std::slice::from_ref(&watched), Duration::ZERO)
+        .await;
+    assert!(
+        observed.iter().any(|(_, observation)| matches!(
+            observation,
+            Observation::NeedsAuth { cause }
+                if cause.contains("other@example.com") && cause.contains("org")
+        )),
+        "{observed:?}"
+    );
+    std::fs::remove_file(root.join("orgs.json")).unwrap();
+    assert!(matches!(
+        adapter.cancel(&watched).await,
+        CancelOutcome::Verified
+    ));
+    for flag in ["box-released", "delete-fails"] {
+        std::fs::remove_file(root.join(flag)).unwrap();
+    }
 }

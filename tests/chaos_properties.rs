@@ -309,6 +309,7 @@ fn seeded_exit_and_wrapper_receipts_survive_roundtrips_and_reject_corruption() {
                     unreadable: vec![rng.next() as u32],
                 },
             },
+            detail: None,
         };
         std::fs::write(
             directory.join("wrapper.json"),

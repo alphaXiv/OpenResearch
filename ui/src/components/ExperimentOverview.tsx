@@ -18,6 +18,7 @@ import {
   type Project,
   type Run,
 } from "../api";
+import { autoDir } from "../i18n";
 import { noticeRun, runActive, runDisplay, runResult } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
@@ -81,6 +82,8 @@ export function ExperimentOverview({
   const { trackioRunUrl } = useWorkspace().api;
 
   const latestRun = runs[0] ?? null;
+  const latestDisplay = latestRun ? runDisplay(latestRun) : null;
+  const waiting = latestDisplay?.waiting;
   const attentionRun = noticeRun(runs);
   const result = latestRun ? runResult(latestRun) : null;
   const hasLiveRun = runs.some((run) => runActive(run.status));
@@ -102,8 +105,9 @@ export function ExperimentOverview({
           <div className="experiment-overview-heading min-w-0">
             <h1>{experiment.title || experiment.slug}</h1>
             <div className="experiment-overview-slug mt-1 text-muted text-sm">{experiment.slug}</div>
+            {waiting && <div className="mt-1 truncate text-subtext text-sm" title={waiting}>{autoDir(waiting)}</div>}
           </div>
-          {latestRun ? <StatusBadge {...runDisplay(latestRun)} /> : <StatusBadge status="idle" />}
+          {latestDisplay ? <StatusBadge {...latestDisplay} waiting={undefined} /> : <StatusBadge status="idle" />}
         </header>
 
         <div className="experiment-overview-actions flex gap-2 mt-4.5 [@media((max-width:_720px))]:flex-wrap">
@@ -159,7 +163,7 @@ export function ExperimentOverview({
           {latestRun && (
             <>
               <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-1 [&_code]:text-text [&_code]:text-xs">
-                <StatusBadge {...runDisplay(latestRun)} />
+                <StatusBadge {...runDisplay(latestRun)} className="max-w-full" />
                 <BackendBadge backend={latestRun.backend} />
                 <span title={m.experiment_overview_started()}>
                   <CalendarDays size={14} />
