@@ -341,6 +341,7 @@
   "subagent_status_stopped": "Detenido",
   "chat_notify_parent": "Avisar al agente principal al terminar",
   "agent_message_other_chat": "Otro chat",
+  "agent_message_from": "de {sender}:",
   "agent_message_openresearch": "OpenResearch",
   "agent_message_runs_unmonitored": "Se perdió el contacto con estas ejecuciones",
   "run_done_in": "Completado en {duration}",

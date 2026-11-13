@@ -341,6 +341,7 @@
   "subagent_status_stopped": "Stopped",
   "chat_notify_parent": "Notify the parent agent on completion",
   "agent_message_other_chat": "Another chat",
+  "agent_message_from": "from {sender}:",
   "agent_message_openresearch": "OpenResearch",
   "agent_message_runs_unmonitored": "Lost contact with these runs",
   "run_done_in": "Done in {duration}",
