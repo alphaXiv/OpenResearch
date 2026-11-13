@@ -341,6 +341,7 @@
   "subagent_status_stopped": "중지됨",
   "chat_notify_parent": "완료 시 상위 에이전트에 알림",
   "agent_message_other_chat": "다른 채팅",
+  "agent_message_from": "{sender}에서:",
   "agent_message_openresearch": "OpenResearch",
   "agent_message_runs_unmonitored": "이 실행과의 연결이 끊겼습니다",
   "run_done_in": "{duration} 만에 완료",

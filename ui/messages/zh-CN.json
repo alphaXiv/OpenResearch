@@ -341,6 +341,7 @@
   "subagent_status_stopped": "已停止",
   "chat_notify_parent": "完成后通知父代理",
   "agent_message_other_chat": "另一个对话",
+  "agent_message_from": "来自 {sender}：",
   "agent_message_openresearch": "OpenResearch",
   "agent_message_runs_unmonitored": "与这些运行失去联系",
   "run_done_in": "用时 {duration} 完成",

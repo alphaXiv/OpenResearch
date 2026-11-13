@@ -341,6 +341,7 @@
   "subagent_status_stopped": "रोका गया",
   "chat_notify_parent": "पूरा होने पर मूल एजेंट को सूचित करें",
   "agent_message_other_chat": "दूसरी चैट",
+  "agent_message_from": "{sender} से:",
   "agent_message_openresearch": "OpenResearch",
   "agent_message_runs_unmonitored": "इन रन से संपर्क टूट गया",
   "run_done_in": "{duration} में पूरा हुआ",
