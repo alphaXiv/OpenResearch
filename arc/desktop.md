@@ -81,13 +81,13 @@ A build is **production** only when it is an official release or canary built in
 **The release act is merging a reviewed pull request that bumps the version in `Cargo.toml`.** Nothing pushes tags. Workflows are in `.github/workflows/`; setup, recovery and the signing identity's contract with installed apps are in `macos/DISTRIBUTION.md`.
 
 1. A push to main that changes the version makes `release-on-bump.yml` dispatch `release.yml`.
-2. `release.yml` builds and signs every CLI target, with `ci.yml` beside the builds on the packaged commit.
-3. Once CI, `verify-build-channel.yml` and `telemetry-contract.yml` pass, it publishes the release, creating the tag.
+2. `release.yml` builds and signs every CLI target, with `ci.yml` and `release-checks.yml` beside the builds on the packaged commit.
+3. Once those, `verify-build-channel.yml` and `telemetry-contract.yml` pass, it publishes the release, creating the tag.
 4. `release-macos-app.yml`, `release-windows-app.yml` and `release-linux-app.yml` follow, each gated on a repository variable, and attach the desktop packages.
 
-Every push to main also runs `release-canary.yml`: desktop builds beside CI on that commit, published once both pass, possibly skipping intermediate commits. No pull request job builds an AppImage or the Windows installer, so packaging first runs here. Each canary also publishes headless CLIs, static for Linux and signed for macOS, which a canary laptop installs on remote machines ([remote](remote.md#two-versions-at-once)); their names, `<tag>--OpenResearch-cli-<target>.tar.gz` and a `.sha256` beside each, are a contract with every canary in the wild, and the manifest names only the desktop packages.
+Every push to main also runs `release-canary.yml`: desktop builds beside `release-checks.yml` on that commit, published once both pass, possibly skipping intermediate commits. No pull request job builds an AppImage or the Windows installer, so packaging first runs here. Each canary also publishes headless CLIs, static for Linux and signed for macOS, which a canary laptop installs on remote machines ([remote](remote.md#two-versions-at-once)); their names, `<tag>--OpenResearch-cli-<target>.tar.gz` and a `.sha256` beside each, are a contract with every canary in the wild, and the manifest names only the desktop packages.
 
-- **Nothing publishes untested code.** `dist-workspace.toml` keeps the checks among dist's global-artifacts jobs, so a regenerated `release.yml` still gates on them. `dist generate` otherwise skips that hand-edited file.
+- **Tests gate pull requests and releases, not canaries.** A pull request runs every test main runs, on the toolchain `rust-toolchain.toml` pins, so a flaky test holds back one pull request instead of every canary. A canary gates on `release-checks.yml`, which checks what only a release build embeds (the release UI and `orx-host`); a release also runs `ci.yml`. `dist-workspace.toml` keeps both among dist's global-artifacts jobs, so a regenerated `release.yml` still gates on them.
 - **Signing runs in the `release-signing` environment**, for canaries too. Windows signs the CLI archive before dist checksums it, so self-updates keep a signed `orx.exe`.
 
 ## The gate on main

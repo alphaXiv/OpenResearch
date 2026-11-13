@@ -184,6 +184,9 @@ impl LocalPlane {
                 {
                     println!("  {detail}");
                 }
+                if let Some(next) = run.next_step() {
+                    println!("  {next}");
+                }
                 let launch = state.and_then(|state| state.launch);
                 let backend = crate::store::public_backend(&r.backend_json, launch.as_ref())
                     .map(|backend| backend.to_string())
@@ -237,7 +240,7 @@ impl LocalPlane {
             {
                 println!("  run {}: {}", run.id, run.display_status());
             } else {
-                for detail in [run.waiting_detail(), run.contact_detail()]
+                for detail in [run.waiting_detail(), run.contact_detail(), run.next_step()]
                     .into_iter()
                     .flatten()
                 {
@@ -667,14 +670,8 @@ impl ApiClient {
     }
 
     pub async fn abandon(&self, run: &str) -> Result<()> {
-        let path = format!("runs/{}", urlencoding::encode(run));
-        let response = self.json(reqwest::Method::GET, &path, None).await?;
-        if response["contact"]["type"] == "unreachable" {
-            eprint!("{} ", super::LABELS["run_abandon_unreachable"]);
-        }
-        eprintln!("{}", super::LABELS["run_abandon_body"]);
-        self.json(reqwest::Method::POST, &format!("{path}/abandon"), None)
-            .await?;
+        let path = format!("runs/{}/abandon", urlencoding::encode(run));
+        self.json(reqwest::Method::POST, &path, None).await?;
         println!("Run {run} abandoned; its cancel stays pending until the job is confirmed gone.");
         Ok(())
     }
@@ -727,13 +724,24 @@ impl ApiClient {
             let request = serde_json::json!({
                 "chatSessionId": crate::local::chat::launching_chat_session(),
             });
-            self.json(
-                reqwest::Method::POST,
-                &format!("runs/{}/cancel", urlencoding::encode(id)),
-                Some(&request),
-            )
-            .await?;
-            println!("\u{2713} Cancel requested for run {id}.");
+            let run: Run = serde_json::from_value(
+                self.json(
+                    reqwest::Method::POST,
+                    &format!("runs/{}/cancel", urlencoding::encode(id)),
+                    Some(&request),
+                )
+                .await?,
+            )?;
+            println!(
+                "\u{2713} Cancel requested for run {id}: {}.",
+                run.display_status()
+            );
+            for line in [run.contact_detail(), run.failure_detail(), run.next_step()]
+                .into_iter()
+                .flatten()
+            {
+                println!("  {line}");
+            }
         }
         Ok(())
     }

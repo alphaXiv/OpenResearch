@@ -31,13 +31,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/canary-identity.sh
 
-  ci:
+  release-checks:
     needs: [identity, ui, build-host]
-    uses: ./.github/workflows/ci.yml
+    uses: ./.github/workflows/release-checks.yml
     with:
       plan: '{}'
       source-sha: ${{ github.sha }}
-      release: true
 
   build-host:
     needs: identity
@@ -85,7 +84,7 @@ jobs:
         with:
           name: release-ui
           path: ui/dist
-      - run: rustup target add ${{ matrix.target }}
+      - run: rustup toolchain install --no-self-update && rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: canary-macos
@@ -209,9 +208,7 @@ jobs:
         with:
           name: release-ui
           path: ui/dist
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          targets: ${{ matrix.target }}
+      - run: rustup toolchain install --no-self-update && rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: canary-linux-cli
@@ -391,8 +388,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [identity, ci, ui, linux-cli, macos-build, macos, linux, windows]
-    if: '!cancelled() && needs.identity.result == ''success'' && needs.ci.result == ''success'' && needs.ui.result == ''success'' && needs.linux-cli.result == ''success'' && (needs.macos-build.result == ''success'' || needs.macos-build.result == ''skipped'') && (needs.macos.result == ''success'' || needs.macos.result == ''skipped'') && (needs.linux.result == ''success'' || needs.linux.result == ''skipped'') && (needs.windows.result == ''success'' || needs.windows.result == ''skipped'') && (needs.macos.result == ''success'' || needs.linux.result == ''success'' || needs.windows.result == ''success'')'
+    needs: [identity, release-checks, ui, linux-cli, macos-build, macos, linux, windows]
+    if: '!cancelled() && needs.identity.result == ''success'' && needs.release-checks.result == ''success'' && needs.ui.result == ''success'' && needs.linux-cli.result == ''success'' && (needs.macos-build.result == ''success'' || needs.macos-build.result == ''skipped'') && (needs.macos.result == ''success'' || needs.macos.result == ''skipped'') && (needs.linux.result == ''success'' || needs.linux.result == ''skipped'') && (needs.windows.result == ''success'' || needs.windows.result == ''skipped'') && (needs.macos.result == ''success'' || needs.linux.result == ''success'' || needs.windows.result == ''success'')'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

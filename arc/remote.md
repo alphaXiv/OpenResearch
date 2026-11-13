@@ -60,10 +60,11 @@ Two roles run from that binary:
 
 Their rules:
 
+- **A launch only publishes.** `serve` answers once `launch.json` and the pinned source are on disk; the wrapper unpacks the source into `repo/` before it starts the payload, under its lock and with no deadline, and a cancel stops the unpacking. A run that can't start ends with a receipt saying why. On Slurm the unpacking runs on the compute node, inside the allocation.
 - **At most one start.** The wrapper creates `started` exclusively and fsyncs it before spawning the payload. Its presence forbids another start, even if a crash prevented the spawn, and a dead wrapper never authorizes a rerun.
 - **Receipts are whole,** so an NFS reader sees all of one or none. Failing to read, parse or inspect is uncertainty, never absence or a verified stop.
 - **Identity bounds what a host can prove.** Process checks and signals run only on the recorded node and boot. A new boot on that node proves the old execution ended; another node proves nothing about local PIDs.
-- **The kill set** is the wrapper's descendants (it is their subreaper on Linux), every same-user process carrying the run's tag, and every process already seen. A scan is complete only while the wrapper lives and no candidate was unreadable.
+- **The kill set** is the wrapper's descendants (it is their subreaper on Linux), every same-user process carrying the run's tag, and every process already seen. A scan is complete only while the wrapper lives and no candidate was unreadable. On macOS some processes, Apple's own binaries among them, show others an empty environment, so once the wrapper is gone no tag scan there is complete and a dead wrapper leaves its run unreconciled.
 - **Updates never touch a running wrapper.** It keeps its code until it exits, and a newer `serve` reads its receipts unchanged.
 - **Host locks are `fcntl` locks** on run-directory files, so a shared filesystem must honor them across nodes.
 

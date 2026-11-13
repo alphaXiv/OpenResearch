@@ -8,7 +8,7 @@ use orx_host_proto::{self as proto, *};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use super::super::transport::{HostConn, Status};
+use super::super::transport::{HostConn, Status, Unavailable, Unsupported};
 use super::super::{
     Backend, CancelOutcome, Fence, Handle, LaunchError, Observation, Recovery, RunIntent,
     WatchedRun,
@@ -17,6 +17,7 @@ use super::api::interrupted;
 use crate::error::{anyhow, bail, Result};
 use crate::jobs::ssh::sh_quote;
 use crate::jobs::BackendDescriptor;
+use crate::store::Contact;
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct LaunchOptions {
@@ -119,6 +120,34 @@ impl Ssh {
         }
     }
 
+    /// The contact a request the host never answered leaves a run with.
+    fn contact(&self, error: &crate::error::Error) -> Contact {
+        let state = error
+            .downcast_ref::<Unavailable>()
+            .map(|error| error.state.clone())
+            .unwrap_or_else(|| self.conn.state().borrow().clone());
+        let since = state.since_ms;
+        let cause = state.cause.unwrap_or_else(|| error.to_string());
+        if state.status == Status::NeedsAuth {
+            Contact::NeedsAuth { since, cause }
+        } else {
+            Contact::Unreachable { since, cause }
+        }
+    }
+
+    /// What recovery knows when its request went unanswered.
+    pub(super) fn unanswered(&self, error: crate::error::Error) -> Recovery {
+        if error.downcast_ref::<Unavailable>().is_some() {
+            Recovery::Blocked {
+                contact: self.contact(&error),
+            }
+        } else {
+            Recovery::Unknown {
+                detail: error.to_string(),
+            }
+        }
+    }
+
     pub(super) fn disconnected(&self, cause: String) -> Observation {
         let state = self.conn.state();
         let state = state.borrow();
@@ -170,21 +199,15 @@ impl Ssh {
             Err(error)
                 if !submitting
                     || error
-                        .downcast_ref::<super::super::transport::Unavailable>()
+                        .downcast_ref::<Unavailable>()
                         .is_some_and(|error| !error.sent) =>
             {
-                let state = error
-                    .downcast_ref::<super::super::transport::Unavailable>()
-                    .map(|error| error.state.clone())
-                    .unwrap_or_else(|| self.conn.state().borrow().clone());
-                let since = state.since_ms;
-                let cause = state.cause.unwrap_or_else(|| error.to_string());
-                let contact = if state.status == Status::NeedsAuth {
-                    crate::store::Contact::NeedsAuth { since, cause }
-                } else {
-                    crate::store::Contact::Unreachable { since, cause }
-                };
-                Err(LaunchError::Blocked { contact })
+                if let Some(Unsupported(cause)) = error.downcast_ref() {
+                    return Err(rejected(format!("Can't run on {}: {cause}", self.host)));
+                }
+                Err(LaunchError::Blocked {
+                    contact: self.contact(&error),
+                })
             }
             Ok(Response::Error { message, .. }) => Err(interrupted(message)),
             Err(error) => Err(interrupted(error)),
@@ -192,7 +215,13 @@ impl Ssh {
         }
     }
 
-    pub async fn stage_blob(&self, sha: &str, path: &Path, len: u64) -> Result<(), LaunchError> {
+    pub async fn stage_blob(
+        &self,
+        sha: &str,
+        path: &Path,
+        len: u64,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<(), LaunchError> {
         if let Response::HasBlob { present: true } = self
             .launch_request(Request::HasBlob {
                 sha: sha.into(),
@@ -215,6 +244,9 @@ impl Ssh {
         let mut offset = 0;
         let mut bytes = vec![0; 256 * 1024];
         loop {
+            if cancelled() {
+                return Err(interrupted(CANCELLED));
+            }
             let read = file.read(&mut bytes).await.map_err(unreadable)?;
             if read == 0 && len != 0 {
                 break;
@@ -305,7 +337,8 @@ impl Ssh {
             let len = metadata
                 .source_size
                 .ok_or_else(|| rejected("Source length missing"))?;
-            self.stage_blob(sha, Path::new(path), len).await?;
+            self.stage_blob(sha, Path::new(path), len, cancelled)
+                .await?;
             self.pin_source(&intent.run.id, sha, cancelled).await?;
         }
         let mut env = crate::config::launch_env(&intent.run.id);
@@ -463,6 +496,17 @@ pub(super) fn observations(run: String, summary: &Summary) -> Vec<(String, Obser
                 note,
             }
         }
+        RunState::Exited { receipt } if receipt.reason == ExitReason::SpawnFailed => {
+            Observation::Failed {
+                finished_at: receipt.finished_at,
+                reason: match &receipt.detail {
+                    Some(detail) => format!("The run couldn't start: {detail}"),
+                    None => {
+                        "The run couldn't start; wrapper.log in its run directory says why.".into()
+                    }
+                },
+            }
+        }
         RunState::Exited { receipt } => Observation::Exited {
             finished_at: receipt.finished_at,
             code: receipt.code,
@@ -579,26 +623,22 @@ impl Backend for Ssh {
             Ok(Response::Inspect { summary }) => match summary.state {
                 RunState::Missing => Recovery::Absent,
                 RunState::Staging if !cancelled() => {
-                    let payload = match self.payload(intent, cancelled).await {
-                        Ok(payload) => payload,
+                    let launched = match self.payload(intent, cancelled).await {
                         Err(_) if cancelled() => return Recovery::Found(self.handle()),
-                        Err(error) => {
-                            return Recovery::Unknown {
-                                detail: error.to_string(),
-                            }
-                        }
+                        Ok(_) if cancelled() => return Recovery::Found(self.handle()),
+                        Ok(payload) => self.launch_request(Request::Launch(payload)).await,
+                        Err(error) => Err(error),
                     };
-                    if cancelled() {
-                        return Recovery::Found(self.handle());
-                    }
-                    match self.request(Request::Launch(payload)).await {
+                    match launched {
                         Ok(Response::Launch { .. }) => Recovery::Found(self.handle()),
                         Ok(_) => Recovery::Unknown {
                             detail: UNEXPECTED.into(),
                         },
-                        Err(error) => Recovery::Unknown {
-                            detail: error.to_string(),
-                        },
+                        // Nothing started, and a relaunch is refused the same way, failing the run
+                        // with the reason.
+                        Err(LaunchError::Rejected { .. }) => Recovery::Absent,
+                        Err(LaunchError::Blocked { contact }) => Recovery::Blocked { contact },
+                        Err(LaunchError::Interrupted { detail }) => Recovery::Unknown { detail },
                     }
                 }
                 _ => Recovery::Found(self.handle()),
@@ -606,9 +646,7 @@ impl Backend for Ssh {
             Ok(response) => Recovery::Unknown {
                 detail: format!("Unexpected inspection reply: {response:?}"),
             },
-            Err(error) => Recovery::Unknown {
-                detail: error.to_string(),
-            },
+            Err(error) => self.unanswered(error),
         }
     }
 

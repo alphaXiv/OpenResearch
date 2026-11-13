@@ -1,7 +1,7 @@
-use super::{askpass::Askpass, deadline, Config};
+use super::{askpass::Askpass, deadline, Config, Unsupported};
 use crate::jobs::ssh::sh_quote;
 use anyhow::{anyhow, bail, Context, Result};
-use orx_host_proto::{Message, Request, Response, MAX_FRAME_LEN, PROTOCOL_VERSION};
+use orx_host_proto::{ErrorCode, Message, Request, Response, MAX_FRAME_LEN, PROTOCOL_VERSION};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -498,12 +498,20 @@ pub(super) fn binary(directory: Option<&Path>, os: &str, arch: &str) -> Result<B
     let os = match os {
         "Linux" => "linux",
         "Darwin" => "darwin",
-        _ => bail!("Unsupported SSH host OS: {os}"),
+        _ => {
+            return Err(anyhow!(Unsupported(format!(
+                "orx-host runs on Linux and macOS, and this host runs {os}. Choose another host."
+            ))))
+        }
     };
     let arch = match arch {
         "x86_64" | "amd64" => "x86_64",
         "aarch64" | "arm64" => "aarch64",
-        _ => bail!("Unsupported SSH host architecture: {arch}"),
+        _ => {
+            return Err(anyhow!(Unsupported(format!(
+                "orx-host runs on x86_64 and arm64, and this host is {arch}. Choose another host."
+            ))))
+        }
     };
     let Some(directory) = directory
         .map(Path::to_path_buf)
@@ -512,7 +520,7 @@ pub(super) fn binary(directory: Option<&Path>, os: &str, arch: &str) -> Result<B
         let (_, _, sha, bytes) = EMBEDDED_HOSTS
             .iter()
             .find(|(host_os, host_arch, _, _)| *host_os == os && *host_arch == arch)
-            .ok_or_else(|| anyhow!("No orx-host for {os}-{arch}. Release builds embed hosts; for development, run node scripts/build-host.mjs and set ORX_HOST_BIN_DIR to its output directory"))?;
+            .ok_or_else(|| anyhow!(Unsupported(format!("No orx-host for {os}-{arch}. Release builds embed hosts; for development, run node scripts/build-host.mjs and set ORX_HOST_BIN_DIR to its output directory"))))?;
         return Ok(Binary {
             sha: (*sha).into(),
             bytes: bytes.to_vec(),
@@ -667,6 +675,14 @@ impl Session {
                             ..
                         },
                 } => return Ok((os, arch, binary_sha)),
+                Message {
+                    id: 0,
+                    body:
+                        Response::Error {
+                            code: ErrorCode::Unsupported,
+                            message,
+                        },
+                } => return Err(anyhow!(Unsupported(message))),
                 Message { id: 0, body } => bail!("orx-host Hello mismatch: {body:?}"),
                 _ => {}
             }
@@ -704,11 +720,11 @@ impl Session {
         let stderr = String::from_utf8_lossy(&tail);
         let retry_closure = retry_closure || self.authenticated.load(Ordering::Relaxed);
         let mut failure = failure(&error.to_string(), &stderr, code, retry_closure);
-        if self.bootstrapped
-            || self.authenticated.load(Ordering::Relaxed) && matches!(code, Some(95..=98))
-        {
+        let refused = self.authenticated.load(Ordering::Relaxed) && matches!(code, Some(95..=98));
+        if self.bootstrapped || refused {
             failure.breaker = false;
         }
+        failure.unsupported = refused;
         failure
     }
 }
@@ -759,6 +775,8 @@ fn diagnostics(stderr: &str) -> impl Iterator<Item = &str> {
 pub(super) struct Failure {
     pub cause: String,
     pub breaker: bool,
+    /// The host refused the bootstrap itself, which no retry fixes.
+    pub unsupported: bool,
 }
 
 pub(super) fn failure(
@@ -827,6 +845,7 @@ pub(super) fn failure(
             return Failure {
                 cause: message.into(),
                 breaker: true,
+                unsupported: false,
             };
         }
     }
@@ -837,6 +856,7 @@ pub(super) fn failure(
         return Failure {
             cause,
             breaker: true,
+            unsupported: false,
         };
     }
     let first = lines.first().copied().unwrap_or(error);
@@ -861,6 +881,7 @@ pub(super) fn failure(
                     .map(str::to_owned)
                     .unwrap_or_else(|| first[start..].trim_end_matches('.').into()),
                 breaker: !retry_closure && needle.contains("connection closed"),
+                unsupported: false,
             };
         }
     }
@@ -868,6 +889,7 @@ pub(super) fn failure(
     Failure {
         cause: detail.map_or_else(|| primary.into(), |detail| format!("{primary}: {detail}")),
         breaker: true,
+        unsupported: false,
     }
 }
 

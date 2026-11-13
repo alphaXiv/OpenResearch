@@ -84,10 +84,24 @@ fn todays_disk_writer_matches_an_append_only_fixture() {
                 reason,
                 processes: vec![],
                 outcome: CancelOutcome::Verified,
+                detail: None,
             })
             .unwrap(),
         );
     }
+    check(
+        "exit",
+        serde_json::to_value(ExitReceipt {
+            finished_at: Some(1234567),
+            code: None,
+            signal: None,
+            reason: ExitReason::SpawnFailed,
+            processes: vec![],
+            outcome: CancelOutcome::Verified,
+            detail: Some("start bash run.sh: No such file or directory".into()),
+        })
+        .unwrap(),
+    );
     for (processes, outcome) in [
         (vec![], CancelOutcome::Verified),
         (
@@ -128,6 +142,7 @@ fn todays_disk_writer_matches_an_append_only_fixture() {
                     },
                     processes,
                     outcome,
+                    detail: None,
                 })
                 .unwrap(),
             );
@@ -159,4 +174,26 @@ fn required_proof_never_defaults_and_unknown_variants_are_rejected() {
     let mut value = fixture["exit"][0].clone();
     value["outcome"]["kind"] = "future".into();
     assert!(serde_json::from_value::<ExitReceipt>(value).is_err());
+}
+
+/// The receipt as orx 0.2.26 shipped it, which reads every later receipt.
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct ShippedExitReceipt {
+    #[serde(default)]
+    finished_at: Option<i64>,
+    code: Option<i32>,
+    signal: Option<i32>,
+    reason: ExitReason,
+    processes: Vec<Survivor>,
+    outcome: CancelOutcome,
+}
+
+#[test]
+fn a_shipped_reader_reads_every_receipt_written_since() {
+    for fixture in fixtures() {
+        for value in fixture["exit"].as_array().unwrap() {
+            serde_json::from_value::<ShippedExitReceipt>(value.clone()).unwrap();
+        }
+    }
 }

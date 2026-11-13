@@ -9042,7 +9042,8 @@ mod tests {
         assert!(run_dir.join("repo/output").is_file());
         survivor.kill().unwrap();
         survivor.wait().unwrap();
-        store.cleanup_orphaned_run_artifacts().unwrap();
+        let pass = store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(pass.kept.is_empty() && !pass.more, "{:?}", pass.kept);
         assert!(!run_dir.exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();

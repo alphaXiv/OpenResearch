@@ -414,7 +414,10 @@ pub async fn stop_job(address: &str, submission_id: &str) -> Result<()> {
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach Ray Jobs at {address}: {e}"))?;
-    check(res, "job stop").await?;
+    // A job Ray no longer has needs no stop; its next inspect proves it gone.
+    if res.status() != reqwest::StatusCode::NOT_FOUND {
+        check(res, "job stop").await?;
+    }
     Ok(())
 }
 

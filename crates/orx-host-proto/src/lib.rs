@@ -315,6 +315,9 @@ pub struct ExitReceipt {
     pub reason: ExitReason,
     pub processes: Vec<Survivor>,
     pub outcome: CancelOutcome,
+    /// Why a run that never started failed to, in words for the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

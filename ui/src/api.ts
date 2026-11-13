@@ -125,6 +125,8 @@ export interface Run {
   cancelUnconfirmed?: number[] | null;
   /** The backend's own word on why a submitting or starting run hasn't started. */
   waitingReason?: string | null;
+  /** Why the stop of a cancelling run keeps failing to reach its backend, which retries it. */
+  cancelError?: string | null;
   lostReason: string | null;
   /** The SSH alias or Slurm login node the run's job lives on. */
   host: string | null;
@@ -2976,7 +2978,8 @@ export function createApi(
   const respondChat = (sessionId: string, answer: PromptAnswer) =>
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/respond`, answer);
   const getLocalModels = (signal?: AbortSignal) => get<LocalModelConnection[]>("/api/local-models", signal);
-  const discoverLocalModels = (request: { baseUrl: string; apiKey: string }) => post<{ models: string[] }>("/api/local-models/discover", request);
+  /** `ownedBy` is the owner the server names for its models; an orx from before it sends none. */
+  const discoverLocalModels = (request: { baseUrl: string; apiKey: string }) => post<{ models: string[]; ownedBy?: string | null }>("/api/local-models/discover", request);
   const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string; created: boolean }>("/api/local-models", request);
   const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
   /** Removes one model, or with none named the whole connection. */

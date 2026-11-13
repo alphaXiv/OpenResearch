@@ -8,9 +8,9 @@ and command sessions. Detached `wrap RUN_DIR` processes outlive the connection.
 
 `PutBlob` resumes a `.part` file and checks overlapping retry bytes. `HasBlob`
 checks the supplied total length and SHA before publishing the final source.
-`Launch` records intent exclusively, stages a source into `repo/`, and starts a
-wrapper. A missing source yields `Staging`; a later feed or repeated launch
-resumes it. Equal run ids require equal intents. `SlurmSubmit` passes the supplied
+`Launch` records intent exclusively and starts a wrapper, which unpacks the
+pinned source into `repo/` before starting the payload. A missing source yields
+`Staging`; a later feed or repeated launch resumes it. Equal run ids require equal intents. `SlurmSubmit` passes the supplied
 batch script to `sbatch` and records `job.sbatch` to prevent login-node recovery
 from starting a compute-node wrapper. The script prepares the shared run directory and
 executes `wrap` on the compute node.
@@ -24,7 +24,9 @@ too. Cleanup preserves the original exit receipt.
 
 `RunState::Exited` carries the receipt, including cancellation proof. A cancelled
 receipt without `CancelOutcome::Verified` remains Cancelling + Unreconciled in the engine.
-Darwin has no subreaper and never verifies cancellation. Unreadable process data
+Darwin has no subreaper. Apple's own binaries show other processes an empty
+environment there, so once the wrapper is gone no tag scan of a run is complete.
+Unreadable process data
 observed during cancellation remains part of the final incomplete scan, except
 for processes proven to predate the wrapper and its tag. A
 container hook that fails or exceeds 30 seconds also prevents verification.
@@ -37,7 +39,8 @@ shared by threads. Source uploads have their own thread mutex.
 
 `test-hooks` in debug builds enables `ORX_TEST_CRASH_AT`: `before_launch`, `launch_published`,
 `wrapper_locked`, `wrapper_identity`, `wrapper_started`, `wrapper_spawned`,
-`wrapper_before_receipt`, `wrapper_receipt`. Normal test runs cover the crash
+`wrapper_before_receipt`, `wrapper_receipt`. `ORX_TEST_HIDDEN_TAG=1` makes tag
+scans count as blind, as on macOS. Normal test runs cover the crash
 states; feature-enabled tests also abort actual wrappers at every wrapper hook.
 
 Tests enable `test-hooks` through a dev dependency. `ORX_TEST_FAST_STOPS=1`

@@ -102,6 +102,15 @@ describe("buildHistoryNodes", () => {
     );
   });
 
+  test("draws a run that is last seen, or waiting on a cancel, as stale rather than running", () => {
+    const status = (extra) => buildHistoryNodes([experiment("e", 1)], [{ ...run("r", "e", 10, "aaa", "running"), ...extra }])[0].status;
+    assert.equal(status({}), "running");
+    assert.equal(status({ cancelling: true }), "running");
+    assert.equal(status({ contact: { type: "unreachable", since: 1, cause: "offline" } }), "stale");
+    assert.equal(status({ status: "submitting", cancelling: true }), "stale");
+    assert.equal(status({ status: "done" }), "done");
+  });
+
   test("lays out an experiment whose parent is not in the list as a root but keeps the missing id", () => {
     const [orphan] = buildHistoryNodes([experiment("orphan", 1, "gone")], []);
 

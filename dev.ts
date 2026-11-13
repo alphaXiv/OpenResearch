@@ -456,6 +456,12 @@ async function build() {
   rmSync(BINARY, { force: true })
   // A copy, so a rebuild of the worktree can't swap the binary that the running backend's hooks execute.
   copyFileSync(path.join(target, 'debug', `orx${EXE}`), BINARY, constants.COPYFILE_FICLONE)
+  // Debug builds embed no orx-host and look for one beside their executable to wrap local runs.
+  if (!WINDOWS) {
+    const host = path.join(path.dirname(BINARY), 'orx-host')
+    rmSync(host, { force: true })
+    copyFileSync(path.join(target, 'debug', 'orx-host'), host, constants.COPYFILE_FICLONE)
+  }
 }
 
 async function startBackend() {
@@ -507,6 +513,16 @@ async function finishOnboarding() {
       body: JSON.stringify(body),
     })
     if (!response.ok) throw new Error(`${route}: ${await response.text()}`)
+  }
+  // Onboarding picks the agent's default model, which waits for its model catalog.
+  const deadline = Date.now() + 60_000
+  while (true) {
+    const response = await fetch(`http://127.0.0.1:${ports.backend}/api/harnesses?harness=claude-code`)
+    if (!response.ok) throw new Error(`/api/harnesses: ${await response.text()}`)
+    const { harnesses } = await response.json() as { harnesses: { id: string; catalogPending?: boolean }[] }
+    if (!harnesses.find((harness) => harness.id === 'claude-code')?.catalogPending) break
+    if (Date.now() > deadline) throw new Error('Claude Code was still checking its models after a minute')
+    await delay(250)
   }
   await post('/api/onboarding/complete', { harness: 'claude-code', researchAreas: ['AI/ML'] })
   await post('/api/settings/ui-state', { tourCompleted: true })

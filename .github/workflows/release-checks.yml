@@ -1,0 +1,74 @@
+name: Release checks
+
+# Checks of what only a release build embeds. Canaries gate on these alone; releases also run ci.yml.
+on:
+  workflow_call:
+    inputs:
+      # Required by cargo-dist's custom job calling convention.
+      plan:
+        required: true
+        type: string
+      source-sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-build:
+    name: Release build
+    runs-on: ubuntu-24.04
+    env:
+      ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
+    steps:
+      # Installs alongside the toolchain and downloads; the packaged binary step waits for it.
+      - name: Start installing OpenSSH server and zsh
+        run: |
+          {
+            sudo apt-get update &&
+              sudo apt-get install -y --no-install-recommends openssh-server zsh &&
+              sudo mkdir -p /run/sshd
+            echo $? > "$RUNNER_TEMP/apt.status"
+          } > "$RUNNER_TEMP/apt.log" 2>&1 &
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source-sha }}
+      - name: Install Rust toolchain
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-checks
+      - name: Remove checked-in UI
+        run: rm -rf ui/dist
+      - name: Download release UI
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ui
+          path: ui/dist
+      - name: Download release hosts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-host
+          path: target/host-binaries
+      - name: Verify embedded host lookup
+        run: cargo test --locked embedded_hosts_keep_their_digest_and_allow_directory_overrides
+      - name: Optimized source builds disable production telemetry
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          test "$(target/release/orx --no-telemetry version --build-channel)" = "development"
+      - name: Finish installing OpenSSH server and zsh
+        run: |
+          until [ -e "$RUNNER_TEMP/apt.status" ]; do sleep 1; done
+          cat "$RUNNER_TEMP/apt.log"
+          exit "$(cat "$RUNNER_TEMP/apt.status")"
+        timeout-minutes: 5
+      - name: Packaged binary bootstraps SSH host without a binary directory
+        env:
+          ORX_PACKAGED_BINARY: ${{ github.workspace }}/target/release/orx
+        run: env -u ORX_HOST_BIN_DIR cargo test --locked --test packaged_host -- --ignored --nocapture
