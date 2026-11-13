@@ -178,6 +178,19 @@ export function WorkspaceConnection({
                           closeOnClick={false}
                           disabled={disconnect.isMutating}
                           onClick={() => disconnect.runWithOptions(workspace, {
+                            onSuccessData: (disconnected) => {
+                              const { owner } = machines;
+                              const runtimeKey = workspace.queries.getRuntimeQuery().queryKey;
+                              const sessionsKey = owner.queries.listRemoteSessionsQuery().queryKey;
+                              void workspace.queryClient.cancelQueries({ queryKey: runtimeKey });
+                              void owner.queryClient.cancelQueries({ queryKey: sessionsKey });
+                              workspace.setScopedQueryData(runtimeKey, (current) =>
+                                current?.kind === "ssh" ? { ...current, session: disconnected } : current,
+                              );
+                              owner.setScopedQueryData(sessionsKey, (sessions) =>
+                                sessions?.map((session) => session.id === disconnected.id ? disconnected : session),
+                              );
+                            },
                             onSuccessUi: () => {
                               setOpen(false);
                               if (machines.canSwitch) machines.selectLocal();
