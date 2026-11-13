@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use crate::client::{delete_sandbox, SandboxTarget};
+use crate::client::{current_user, delete_sandbox, list_orgs, SandboxTarget};
 use crate::config::Credentials;
 use crate::error::{anyhow, Result};
 
@@ -76,10 +76,44 @@ pub(crate) fn is_not_found_error(message: &str) -> bool {
     message.contains("(404 ")
 }
 
+/// OpenResearch hides a box from an account outside its organization, so a 404 for it says
+/// nothing about whether it still bills.
+#[derive(Debug)]
+pub struct OtherAccount(pub String);
+
+impl std::fmt::Display for OtherAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OtherAccount {}
+
+/// After a 404 for box `sandbox_id` of organization `org`: Ok when the signed-in account
+/// belongs to `org`, so the box is gone; `OtherAccount` when it doesn't.
+pub(crate) async fn confirm_gone(creds: &Credentials, org: &str, sandbox_id: &str) -> Result<()> {
+    if list_orgs(creds)
+        .await?
+        .orgs
+        .iter()
+        .any(|member| member.id == org)
+    {
+        return Ok(());
+    }
+    let account = current_user(creds)
+        .await
+        .map_or_else(|_| "signed in now".into(), |me| me.user.email);
+    Err(OtherAccount(format!(
+        "OpenResearch can't show box {sandbox_id} to the account {account}, which isn't in organization {org} that launched it, so orx can't tell whether it still runs. Sign in with an account in that organization (`orx login`)."
+    ))
+    .into())
+}
+
 /// Delete the box, retrying transient failures. A 404 is success — the box is
 /// already gone (dashboard delete, billing sweeper) — which makes teardown
-/// idempotent across supervisor restarts.
-pub async fn teardown(creds: &Credentials, sandbox_id: &str) -> Result<()> {
+/// idempotent across supervisor restarts, once the signed-in account can see
+/// `org`'s boxes.
+pub async fn teardown(creds: &Credentials, org: &str, sandbox_id: &str) -> Result<()> {
     let mut last = None;
     for backoff_secs in [0u64, 2, 5, 10] {
         if backoff_secs > 0 {
@@ -87,7 +121,9 @@ pub async fn teardown(creds: &Credentials, sandbox_id: &str) -> Result<()> {
         }
         match delete_sandbox(creds, sandbox_id).await {
             Ok(()) => return Ok(()),
-            Err(err) if err.to_string().contains("(404 ") => return Ok(()),
+            Err(err) if is_not_found_error(&err.to_string()) => {
+                return confirm_gone(creds, org, sandbox_id).await
+            }
             Err(err) => last = Some(err),
         }
     }

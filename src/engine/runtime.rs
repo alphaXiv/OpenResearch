@@ -624,13 +624,9 @@ impl Runtime {
                 // Other runs' phases wait on this; what is left resumes in `collect_pending`.
                 let _ = tokio::time::timeout(EARLY_COLLECTION_BUDGET, collecting).await;
             }
-            if let Err(error) = self
-                .engine
+            self.engine
                 .apply_observations(backend.as_ref(), &watched, observations)
-                .await
-            {
-                eprintln!("orx up: {key:?}: {error:#}");
-            }
+                .await;
             if finished {
                 self.changed.notify_one();
             }
@@ -1063,10 +1059,18 @@ impl Commands for Runtime {
                 reason,
             );
         }
-        let backend = self.backend_for(&self.key(run)?)?;
-        self.engine
-            .cancel(backend.as_ref(), &run.id, reason)
-            .await?;
+        match self.key(run).and_then(|key| self.backend_for(&key)) {
+            Ok(backend) => {
+                self.engine
+                    .cancel(backend.as_ref(), &run.id, reason)
+                    .await?;
+            }
+            // The tick shows the run unreconciled with this error; delivery waits for an adapter.
+            Err(_) => {
+                self.engine.accept_cancel(&run.id, reason)?;
+            }
+        }
+        self.changed.notify_one();
         Ok(())
     }
 
@@ -2405,6 +2409,10 @@ mod tests {
         let notices = store.run_notice_batch("chat").unwrap();
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].kind, crate::store::ATTENTION);
+        // Nothing launched, so the cancel needs no adapter.
+        let run = store.get_run("run").unwrap().unwrap();
+        runtime.cancel(&run, "user").await.unwrap();
+        assert_eq!(store.get_run("run").unwrap().unwrap().status, "cancelled");
         drop(runtime);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();

@@ -154,13 +154,9 @@ def status(name, pid):
     try:
         box = sandbox.get_sandbox(name=name)
     except types.SandboxApiError as error:
-        # Already destroyed. A terminal stage lets the engine finish the run;
-        # raising here would retry forever and leave it "running".
+        # Destroyed, or created under another team or project: orx can't tell which.
         if getattr(error, "status_code", None) == 404:
-            print(json.dumps({
-                "stage": "DELETED",
-                "message": "sandbox not found",
-            }))
+            print(json.dumps({"missing": True}))
             return
         raise
     tags = dict(box.tags or {})
@@ -245,13 +241,20 @@ def logs(name):
         sys.exit(1)
 
 def cancel(name):
-    sandbox, _ = _sdk()
-    box = sandbox.get_sandbox(name=name)
+    sandbox, types = _sdk()
+    try:
+        box = sandbox.get_sandbox(name=name)
+    except types.SandboxApiError as error:
+        if getattr(error, "status_code", None) == 404:
+            print(json.dumps({"missing": True}))
+            return
+        raise
     if _status(box) in ("pending", "running"):
         tags = dict(box.tags or {})
         tags["orx_cancelled"] = "1"
         box.update(tags=tags)
         box.stop()
+    print(json.dumps({"missing": False}))
 
 def finish(name):
     sandbox, types = _sdk()
@@ -875,7 +878,11 @@ fn plan_limit_hint(stderr: &str) -> Option<&'static str> {
     }
 }
 
-async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>> {
+async fn launcher_capture(
+    args: &[&str],
+    stdin: Option<&str>,
+    fence: Option<&crate::engine::Fence<'_>>,
+) -> Result<Vec<u8>> {
     let mut cmd = crate::process::tokio_command(VERCEL_ENV.interpreter());
     cmd.arg("-c")
         .arg(launcher())
@@ -890,6 +897,9 @@ async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>>
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| missing_python_hint(&e))?;
+    if let Some(fence) = fence {
+        fence.record_child(&mut child).await?;
+    }
     if let Some(input) = stdin {
         use tokio::io::AsyncWriteExt as _;
         if let Some(mut pipe) = child.stdin.take() {
@@ -976,8 +986,12 @@ pub struct Submitted {
     pub process_id: String,
 }
 
-/// Create the sandbox, upload the source, and start the job.
-pub async fn run_job(spec: &VercelJobSpec) -> Result<Submitted> {
+/// Create the sandbox, upload the source, and start the job. The launcher waits for its spec on
+/// stdin, so it creates nothing before it is recorded on `fence`.
+pub async fn run_job(
+    spec: &VercelJobSpec,
+    fence: Option<&crate::engine::Fence<'_>>,
+) -> Result<Submitted> {
     let env = super::default_python_env(&spec.env);
     let body = json!({
         "name": spec.name,
@@ -991,7 +1005,7 @@ pub async fn run_job(spec: &VercelJobSpec) -> Result<Submitted> {
         "tags": spec.tags,
         "sourceArchive": spec.source_archive,
     });
-    let out = launcher_capture(&["submit"], Some(&body.to_string())).await?;
+    let out = launcher_capture(&["submit"], Some(&body.to_string()), fence).await?;
     let v: Value = serde_json::from_slice(&out).map_err(|e| {
         anyhow!(
             "Unreadable vercel sandbox submit output: {} ({:?})",
@@ -1029,11 +1043,16 @@ pub struct JobState {
     pub exit_code: Option<i32>,
 }
 
-pub async fn inspect_job(sandbox_name: &str, process_id: &str) -> Result<JobState> {
-    let out = launcher_capture(&["status", sandbox_name, process_id], None).await?;
+/// `None` when Vercel answers 404, which it does both for a destroyed sandbox and for one
+/// created under another team or project.
+pub async fn inspect_job(sandbox_name: &str, process_id: &str) -> Result<Option<JobState>> {
+    let out = launcher_capture(&["status", sandbox_name, process_id], None, None).await?;
     let v: Value = serde_json::from_slice(&out)
         .map_err(|e| anyhow!("Unreadable vercel sandbox status output: {}", e))?;
-    Ok(JobState {
+    if v["missing"] == true {
+        return Ok(None);
+    }
+    Ok(Some(JobState {
         stage: v
             .get("stage")
             .and_then(Value::as_str)
@@ -1044,17 +1063,20 @@ pub async fn inspect_job(sandbox_name: &str, process_id: &str) -> Result<JobStat
             .get("exitCode")
             .and_then(Value::as_i64)
             .and_then(|code| code.try_into().ok()),
-    })
+    }))
 }
 
-pub async fn cancel_job(sandbox_name: &str) -> Result<()> {
-    launcher_capture(&["cancel", sandbox_name], None).await?;
-    Ok(())
+/// False when Vercel answers 404, as for [`inspect_job`].
+pub async fn cancel_job(sandbox_name: &str) -> Result<bool> {
+    let out = launcher_capture(&["cancel", sandbox_name], None, None).await?;
+    let v: Value = serde_json::from_slice(&out)
+        .map_err(|e| anyhow!("Unreadable vercel sandbox cancel output: {}", e))?;
+    Ok(v["missing"] != true)
 }
 
 /// Stop and destroy the sandbox; called once the run is terminal.
 pub async fn finish_job(sandbox_name: &str) -> Result<()> {
-    launcher_capture(&["finish", sandbox_name], None).await?;
+    launcher_capture(&["finish", sandbox_name], None, None).await?;
     Ok(())
 }
 
@@ -1692,17 +1714,17 @@ def get_sandbox(**kw): return Box()
         assert!(log.contains("syntax error"), "{log}");
     }
 
-    /// A missing sandbox is terminal. Raising would make the engine retry forever
-    /// and leave the run `running`.
+    /// Status and cancel report a sandbox Vercel answers 404 for as missing; any other
+    /// failure stays one.
     #[tokio::test]
-    async fn status_reports_deleted_when_the_sandbox_is_gone() {
+    async fn status_and_cancel_report_a_404_sandbox_missing() {
         let Ok(python) =
             crate::jobs::managed_env::base_python(VERCEL_ENV.min_python, VERCEL_ENV.label).await
         else {
             crate::config::skip_without_tool("no Python 3.10+ on PATH");
             return;
         };
-        for (status_code, deleted) in [(404, true), (500, false)] {
+        for (status_code, missing) in [(404, true), (500, false)] {
             let dir = std::env::temp_dir().join(format!("orx-vercel-{}", uuid::Uuid::new_v4()));
             let pkg = dir.join("vercel").join("sandbox");
             std::fs::create_dir_all(&pkg).unwrap();
@@ -1724,19 +1746,22 @@ def get_sandbox(**kw): return Box()
                 .env("PYTHONPATH", &dir)
                 .output()
                 .unwrap();
+            let cancel = crate::process::command(python)
+                .args(["-c", launcher(), "cancel", "orx-run-1"])
+                .env("PYTHONPATH", &dir)
+                .output()
+                .unwrap();
             let _ = std::fs::remove_dir_all(&dir);
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if deleted {
-                assert!(out.status.success(), "{status_code}: {stderr}");
+            for output in [out, cancel] {
                 assert_eq!(
-                    serde_json::from_slice::<Value>(stdout.as_bytes()).unwrap()["stage"],
-                    "DELETED",
-                    "{stdout}"
+                    output.status.success(),
+                    missing,
+                    "{status_code}: {output:?}"
                 );
-            } else {
-                assert!(!out.status.success(), "{status_code} should fail: {stdout}");
-                assert!(!stdout.contains("DELETED"), "{stdout}");
+                if missing {
+                    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(reply["missing"], true, "{output:?}");
+                }
             }
         }
     }

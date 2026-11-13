@@ -309,6 +309,14 @@ impl Engine {
             if verifying && observation.ends_run() {
                 return Change::default();
             }
+            // Proof the job is gone, which is what an accepted cancel waits for.
+            if let Observation::Lost { reason } = &observation {
+                if state.cancel_accepted_at.is_some()
+                    && matches!(phase, Phase::Starting | Phase::Running)
+                {
+                    return Change::terminal(Phase::Cancelled, Some(reason.clone()));
+                }
+            }
             let observation = match observation {
                 Observation::Exited {
                     finished_at,
@@ -398,11 +406,7 @@ impl Engine {
                 contact: Some(Contact::Stopping { since: now, count }),
                 ..Change::terminal(Phase::Cancelled, legacy_note)
             },
-            CancelOutcome::Undelivered { detail } => {
-                eprintln!("Cancel pending for {}: {detail}", run.id);
-                Change::default()
-            }
-            CancelOutcome::Pending => Change::default(),
+            CancelOutcome::Undelivered { .. } | CancelOutcome::Pending => Change::default(),
         })
     }
 
@@ -432,7 +436,7 @@ impl Engine {
         decide: impl FnOnce(Phase, &EngineRunState) -> Change,
     ) -> Result<()> {
         let now = self.clock.wall_ms();
-        let (phase, contact, cancelling, chats, changed) = {
+        let (phase, contact, cancelling, chats, changed, lost_contact) = {
             let store = self.store();
             let tx = store.begin_immediate()?;
             let (run, state) = load(&store, run_id)?;
@@ -522,6 +526,13 @@ impl Engine {
                 _ => state.contact.clone(),
             };
             let contact_changed = contact != state.contact;
+            let lost_contact = discriminant(&contact) != discriminant(&state.contact)
+                && matches!(
+                    contact,
+                    Contact::Unreachable { .. }
+                        | Contact::NeedsAuth { .. }
+                        | Contact::Unreconciled { .. }
+                );
             if contact_changed {
                 store.set_run_contact(run_id, &contact)?;
             }
@@ -533,6 +544,8 @@ impl Engine {
             let mut chats = Vec::new();
             for chat in store.run_subscribers(run_id)? {
                 let notice = if let Some(body) = &terminal_body {
+                    // The ending supersedes an outage notice the chat has not been sent yet.
+                    store.settle_outage_notice(run_id, &chat)?;
                     Some((TERMINAL, body.clone()))
                 } else if phase == Phase::Cancelled && contact_changed && contact == Contact::Live {
                     if store.queue_cancel_settled_notice(run_id, &chat, now)? {
@@ -585,6 +598,7 @@ impl Engine {
                 cancelling,
                 chats,
                 moved || contact_changed || recorded || waiting_changed,
+                lost_contact,
             )
         };
 
@@ -596,10 +610,8 @@ impl Engine {
             } else {
                 memory.outages.remove(run_id);
             }
-            if matches!(
-                contact,
-                Contact::Unreachable { .. } | Contact::NeedsAuth { .. }
-            ) {
+            // A stop delivered before contact was lost may not have landed; send it once more.
+            if lost_contact {
                 memory.cancels_sent.remove(run_id);
             }
             let tombstone = is_tombstone(phase, &contact);
@@ -608,6 +620,7 @@ impl Engine {
             }
             if phase.is_terminal() && !tombstone {
                 memory.cancels_sent.remove(run_id);
+                memory.cancel_errors.remove(run_id);
                 memory.verifying.remove(run_id);
                 memory.locks.release(run_id);
             }

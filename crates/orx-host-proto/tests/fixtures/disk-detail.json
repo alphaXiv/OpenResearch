@@ -1,0 +1,18 @@
+{
+  "launch": [],
+  "identity": [],
+  "exit": [
+    {
+      "code": null,
+      "signal": null,
+      "reason": "spawn_failed",
+      "processes": [],
+      "outcome": {
+        "kind": "verified"
+      },
+      "finished_at": 1234567,
+      "detail": "start bash run.sh: No such file or directory"
+    }
+  ],
+  "cleanup": []
+}

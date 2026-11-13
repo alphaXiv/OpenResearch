@@ -20,6 +20,8 @@ struct Fake {
     launch_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// A stop the backend never answers.
     cancel_hangs: AtomicBool,
+    /// A stop the backend refuses each time.
+    cancel_refused: AtomicBool,
     cancel_entered: tokio::sync::Notify,
     cancels: AtomicUsize,
     reads: AtomicUsize,
@@ -54,6 +56,11 @@ impl Backend for Fake {
         self.cancels.fetch_add(1, Ordering::SeqCst);
         if self.cancel_hangs.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
+        }
+        if self.cancel_refused.load(Ordering::SeqCst) {
+            return CancelOutcome::Undelivered {
+                detail: "refused by the provider".into(),
+            };
         }
         CancelOutcome::Pending
     }
@@ -2856,4 +2863,72 @@ async fn a_waiting_reason_reaches_both_views_and_the_event_stream() {
     let event = next(&mut events).await;
     assert_eq!(event["status"], "running");
     assert!(event["waitingReason"].is_null());
+}
+
+#[tokio::test]
+async fn abandon_refusals_name_their_cause_and_the_way_forward() {
+    use tower::ServiceExt;
+    let f = Fixture::new().await;
+    let app = dashboard_routes(f.api.clone());
+    let refusal = |id: &'static str| {
+        let app = app.clone();
+        async move {
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("/api/runs/{id}/abandon"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            (status, String::from_utf8(bytes.to_vec()).unwrap())
+        }
+    };
+
+    f.insert("done", "exp", "project", "done");
+    let (status, message) = refusal("done").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(message.contains("already ended (done)"), "{message}");
+
+    f.insert("live", "exp", "project", "running");
+    let (status, message) = refusal("live").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(message.contains("`orx exp cancel --run live`"), "{message}");
+
+    f.insert("legacy", "exp", "project", "running");
+    let mut legacy = f.api.run("legacy").unwrap();
+    legacy.backend_json = r#"{"kind":"ssh_job","host":"gpu-box"}"#.into();
+    f.api.store().upsert_run(&legacy).unwrap();
+    f.api
+        .store()
+        .set_run_contact(
+            "legacy",
+            &Contact::Unreachable {
+                since: 1,
+                cause: "offline".into(),
+            },
+        )
+        .unwrap();
+    let (status, message) = refusal("legacy").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(message.contains("orx 0.2"), "{message}");
+    assert!(
+        message.contains("`orx exp cancel --run legacy`"),
+        "{message}"
+    );
+    assert_eq!(f.api.run("legacy").unwrap().status, "running");
+
+    // A stop its backend keeps refusing leaves a reachable run nothing but Abandon.
+    f.backend.cancel_refused.store(true, Ordering::SeqCst);
+    let cancel = f
+        .client
+        .json(reqwest::Method::POST, "runs/live/cancel", None)
+        .await
+        .unwrap();
+    assert_eq!(cancel["cancelError"], "refused by the provider");
+    let (status, message) = refusal("live").await;
+    assert_eq!(status, StatusCode::OK, "{message}");
+    assert_eq!(f.api.run("live").unwrap().status, "lost");
 }

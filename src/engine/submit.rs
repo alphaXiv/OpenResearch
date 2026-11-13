@@ -9,15 +9,22 @@ use super::{
 use crate::error::{anyhow, Result};
 use crate::store::{Contact, EngineRunState, SubmissionFence, SubmittingRun};
 
-/// Ends `attempt` if it is still the current one: Cancelled when a cancel was accepted, else
-/// Failed with `rejected`. A superseded attempt's result changes nothing.
+/// For an attempt that provably launched nothing, if it is still the current one: Cancelled
+/// when a cancel was accepted, else Failed with `rejected`, and an abandoned run has nothing
+/// left to stop. A superseded attempt's result changes nothing.
 fn end_attempt(
     attempt: u32,
     phase: Phase,
     state: &EngineRunState,
     rejected: Option<String>,
 ) -> Change {
-    if phase != Phase::Submitting || state.submission_attempt != attempt {
+    if state.submission_attempt != attempt {
+        return Change::default();
+    }
+    if is_tombstone(phase, &state.contact) {
+        return Change::contact(Contact::Live);
+    }
+    if phase != Phase::Submitting {
         return Change::default();
     }
     match (state.cancel_accepted_at, rejected) {
@@ -70,8 +77,12 @@ impl Engine {
             submitter: None,
         };
         if !self.store().set_submission_fence(run_id, attempt, &fence)? {
-            // Refused before any side effect; an accepted cancel ends the attempt.
+            // An accepted cancel ends an attempt never fenced; a fence another task set means a
+            // launch may exist, which only recovery can rule out.
             self.commit(run_id, |phase, state| {
+                if state.submission_fence.is_some() {
+                    return Change::default();
+                }
                 end_attempt(attempt, phase, state, None)
             })?;
             return Ok(None);
@@ -98,18 +109,18 @@ impl Engine {
                 })?;
             }
             Err(LaunchError::Blocked { contact }) => {
-                if self.store().clear_submission_fence(run_id, attempt)? {
-                    self.commit(run_id, |phase, state| {
-                        if phase != Phase::Submitting || state.submission_attempt != attempt {
-                            return Change::default();
-                        }
-                        if state.cancel_accepted_at.is_some() {
-                            end_attempt(attempt, phase, state, None)
-                        } else {
-                            Change::contact(contact)
-                        }
-                    })?;
-                }
+                let cleared = self.store().clear_submission_fence(run_id, attempt)?;
+                self.commit(run_id, |phase, state| {
+                    if cleared
+                        && phase == Phase::Submitting
+                        && state.submission_attempt == attempt
+                        && state.cancel_accepted_at.is_none()
+                    {
+                        Change::contact(contact)
+                    } else {
+                        end_attempt(attempt, phase, state, None)
+                    }
+                })?;
             }
             Err(LaunchError::Interrupted { detail }) => return Ok(Some(detail)),
         }
@@ -215,10 +226,21 @@ impl Engine {
                         None => Ok(()),
                     };
                 }
+                Recovery::Blocked { contact } => {
+                    return self.commit(run_id, |phase, state| {
+                        if is_tombstone(phase, &state.contact) {
+                            Change::default()
+                        } else {
+                            Change::contact(contact)
+                        }
+                    })
+                }
                 Recovery::Unknown { detail } => {
                     let detail = match launch_error {
-                        Some(error) => format!("{detail}; the launch failed: {error}"),
-                        None => detail,
+                        Some(error) if error != detail => {
+                            format!("{detail}; the launch failed: {error}")
+                        }
+                        _ => detail,
                     };
                     return self.unknown(run_id, detail);
                 }
@@ -245,6 +267,16 @@ impl Engine {
 
     /// Before the fence cancel is immediate; after it, the backend's stop proof decides the result.
     pub async fn cancel(&self, backend: &dyn Backend, run_id: &str, reason: &str) -> Result<bool> {
+        if !self.accept_cancel(run_id, reason)? {
+            return Ok(false);
+        }
+        self.deliver_cancel(backend, run_id).await?;
+        Ok(true)
+    }
+
+    /// The half of [`Self::cancel`] that needs no backend: records the intent and ends a run
+    /// that never launched.
+    pub fn accept_cancel(&self, run_id: &str, reason: &str) -> Result<bool> {
         if !self.own(run_id)?
             || self
                 .store()
@@ -253,6 +285,9 @@ impl Engine {
         {
             return Ok(false);
         }
+        // Recovery decides a fenced launch with the cancel in hand, so it does not wait out a
+        // backoff earned before it.
+        self.memory().retries.remove(run_id);
         // A busy gate means a launch or recovery is running; it will see the accepted cancel.
         if let Some(_gate) = self.try_gate(run_id) {
             self.commit(run_id, |phase, state| {
@@ -273,7 +308,6 @@ impl Engine {
                 cancelling: true,
             });
         }
-        self.deliver_cancel(backend, run_id).await?;
         Ok(true)
     }
 
@@ -287,6 +321,7 @@ impl Engine {
         {
             return Ok(false);
         }
+        self.memory().retries.remove(run_id);
         let now = self.clock.wall_ms();
         self.commit(run_id, |_, _| Change {
             contact: Some(Contact::Unreconciled {
