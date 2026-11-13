@@ -25,9 +25,8 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
   mkdirSync(path.join(home, 'projects'), { recursive: true })
   mkdirSync(path.join(root, 'tmp'))
   writeFileSync(path.join(home, '.gitconfig'), '[user]\n\tname = E2E Researcher\n\temail = e2e@example.com\n')
-  // Signed-out CLIs that shadow the host's, so every host looks the same. An agent must be installed:
-  // macOS finds ChatGPT.app's Codex outside PATH, and with none at all onboarding skips its agent
-  // step to install OpenCode. Linux runners ship a gh that would reach GitHub's API.
+  // Signed-out CLIs that shadow the host's, so every host looks the same: macOS finds ChatGPT.app's
+  // Codex outside PATH. Linux runners ship a gh that would reach GitHub's API.
   const bin = path.join(root, 'bin')
   mkdirSync(bin)
   for (const [name, version, status] of [['claude', '2.1.0 (Claude Code)', '{"loggedIn":false}'], ['gh', 'gh version 2.80.0']]) {

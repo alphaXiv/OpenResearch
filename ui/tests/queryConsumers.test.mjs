@@ -95,6 +95,76 @@ test("agent settings list what works, OpenResearch's accounts and installs, and 
   assert.ok(!rows().includes("codex"));
 });
 
+/** Settings → Agents over `harnesses`, with the free models switched off; records each preference written. */
+async function agentSwitches(harnesses) {
+  let uiState = { onboardingCompleted: true, hiddenAgents: [], hiddenModels: [], modelSectionOrder: [], opencodeFreeModels: false };
+  const state = { writes: [], harnessReads: 0 };
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
+    "GET /api/settings/ui-state": () => uiState,
+    "POST /api/settings/ui-state": (init) => {
+      const { workspace, ...changes } = JSON.parse(init.body);
+      if (!workspace) state.writes.push(changes);
+      uiState = { ...uiState, ...changes };
+      return uiState;
+    },
+    "GET /api/harnesses": () => {
+      state.harnessReads++;
+      return { harnesses };
+    },
+    "GET /api/harnesses/acp": () => [],
+    "GET /api/harnesses/acp/presets": () => [],
+    "GET /api/harnesses/setup/commands": () => ({}),
+    "GET /api/opencode/providers": () => [],
+    "GET /api/local-models": () => [],
+  });
+  await renderApp("/projects/p/settings/harnesses");
+  return state;
+}
+const freeModels = () => document.querySelector(`button[aria-label="${m.settings_free_models()}"]`);
+const agentSwitch = (name) => document.querySelector(`button[aria-label="${m.settings_agent_use({ name })}"]`);
+const opencodeWith = (...ids) => ({ ...codex, id: "opencode", name: "OpenCode", models: ids.map((id) => model(id)), defaultModel: ids[0] });
+
+test("the free models come back on with the last other agent turned off, and stay on until another is", async () => {
+  const state = await agentSwitches([codex, opencodeWith("opencode/big-pickle")]);
+  assert.ok(freeModels().closest(".settings-card").textContent.includes(m.settings_free_models_description()), "with no model it can name, the row says what the free models are");
+  assert.equal(freeModels().getAttribute("aria-disabled"), null, "with Codex on, the free models can be switched off");
+
+  const reads = state.harnessReads;
+  await click(agentSwitch("Codex"));
+  assert.deepEqual(state.writes, [{ hiddenAgents: ["codex"], opencodeFreeModels: true }]);
+  assert.ok(state.harnessReads > reads, "the agents reload to list the free models");
+
+  assert.equal(freeModels().getAttribute("aria-disabled"), "true");
+  assert.equal(freeModels().getAttribute("aria-description"), m.settings_free_models_locked());
+  await click(freeModels());
+  assert.equal(state.writes.length, 1, "the free models stay on while nothing else runs a chat");
+
+  await click(agentSwitch("Codex"));
+  assert.deepEqual(state.writes.at(-1), { hiddenAgents: [] });
+  assert.equal(freeModels().getAttribute("aria-disabled"), null);
+});
+
+test("a provider signed in to in OpenCode itself is listed, and switching it off brings the free models back", async () => {
+  // Signed in through the environment, so OpenCode lists its models but names no account for it.
+  const state = await agentSwitches([opencodeWith("opencode/big-pickle", "deepseek/deepseek-v4")]);
+  assert.ok(agentSwitch("OpenCode"), "OpenCode's own sign-ins have a row");
+  await click(agentSwitch("OpenCode"));
+  assert.deepEqual(state.writes, [{ hiddenAgents: ["opencode"], opencodeFreeModels: true }]);
+});
+
+test("the free models name two models a user may know", async () => {
+  const named = [
+    model("opencode/big-pickle", "Big Pickle"), model("opencode/glm-5.3-flash-free", "GLM-5.3 Flash"),
+    model("opencode/inkling-2-small-free", "Inkling 2 Small"), model("opencode/deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash"),
+  ];
+  await agentSwitches([codex, { ...opencodeWith("opencode/big-pickle"), models: named }]);
+  const row = () => freeModels().closest(".settings-card").textContent;
+  for (const name of ["DeepSeek V4.1 Flash", "Inkling 2 Small"]) assert.ok(row().includes(name), name);
+  assert.ok(!row().includes("GLM-5.3 Flash"), "the featured labs' models come first");
+  assert.ok(!row().includes("Big Pickle"), "a model of no known lab isn't named");
+});
+
 test("queued chat writes stop when their captured workspace retires", async () => {
   const reply = deferred();
   const chat = await renderChat("/projects/p/tasks/s", { remote: true, routes: { "POST /api/chat/sessions/s/message": () => reply.promise } });

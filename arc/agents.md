@@ -151,6 +151,7 @@ another agent before the chat can continue.
 OpenCode runs local inference over connections to OpenAI-compatible servers (`src/local/local_models.rs`). They live in `local-models.json` in the data directory, owner-only, and reach OpenCode as inline configuration on every spawn, so the user's OpenCode files stay untouched.
 
 - **Loopback or HTTPS.** Loopback is relative to the machine running `orx up`; a remote endpoint requires HTTPS. Settings → Agents → Add agent → Custom endpoint configures the connection, its name and its icon.
+- **Found by asking.** Add agent asks each known local server's usual loopback address for its models, offering the ones that answer, and asks for a key only once a server says it wants one.
 - **No silent fallback to a cloud model.** A chat pins OpenCode's title and compaction models to its selected model, and the start fails if the effective configuration disagrees.
 - **Offered only when servable.** A loopback provider, orx's or the user's own, appears in the picker only while its server advertises the model, and OpenCode's provider allow and deny lists stay in force.
 

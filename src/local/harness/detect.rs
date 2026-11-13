@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     fn signed_in_with(probe: BinProbe) -> HarnessInfo {
-        let mut info = HarnessInfo::new("codex", "Codex");
+        let mut info = HarnessInfo::new("codex", "OpenAI Codex");
         info.record_bin(&PathBuf::from("/usr/local/bin/codex"), probe);
         info.authenticated = true;
         info
@@ -1256,7 +1256,7 @@ mod tests {
         assert!(!info.ready(), "a CLI that cannot run cannot run a turn");
         assert!(info
             .broken_note("Reinstall it")
-            .starts_with("Codex is installed but failed to run."));
+            .starts_with("OpenAI Codex is installed but failed to run."));
     }
 
     #[test]

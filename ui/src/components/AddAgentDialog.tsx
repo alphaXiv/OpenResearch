@@ -1,8 +1,8 @@
 import { useWorkspace } from "../workspace";
 import { mutUpdateUiState } from "../queries/settings";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronDown, CircleCheck, Copy, CreditCard, KeyRound, Link2, Plus, RefreshCw, Search } from "lucide-react";
+import { useQuery, type QueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Check, ChevronDown, CircleCheck, Copy, CreditCard, KeyRound, Laptop, Link2, Plus, RefreshCw, Search, TriangleAlert } from "lucide-react";
 import {
   OpenCode1Error,
   harnessModelLabel,
@@ -20,7 +20,7 @@ import {
 } from "../api";
 import type { DialogContentProps } from "../dialog";
 import { copyToClipboard } from "../clipboard";
-import { fmtNumber } from "../i18n";
+import { fmtNumber, ltr } from "../i18n";
 
 import { m } from "../paraglide/messages.js";
 import { agentModelLines } from "../modelSelection";
@@ -28,7 +28,7 @@ import { AcpAuth } from "./AcpAuthDialog";
 import { AgentIconButton, BRAND_ICON } from "./AgentIcon";
 import { BrandMark, HarnessLogo, ModelMark, type Brand } from "./HarnessLogo";
 import { HarnessSetup, SignInSteps } from "./HarnessSetupDialog";
-import { EndpointMark, useLocalModelForm } from "./LocalModelSetup";
+import { EndpointMark, LocalModelGuide, useLocalModelForm } from "./LocalModelSetup";
 import { renderNote } from "./agentNote";
 import { Button, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Input, Spinner, Switch } from "./ui";
 import { cn } from "./ui/cn";
@@ -71,18 +71,18 @@ type SignIn =
   | { kind: "profile"; harness: "claude-code" | "codex" }
   | { kind: "agent"; harness: HarnessId; plan?: string; via?: string }
   | { kind: "native"; logo: string; key?: true }
-  | { kind: "endpoint" };
+  | { kind: "endpoint"; guide?: true };
 
 type AgentTile = {
   id: string;
   name: string;
-  mark: { brand: Brand } | { harness: HarnessId; logo?: string } | { icon: "endpoint" | "custom" } | { letter: string };
+  mark: { brand: Brand } | { harness: HarnessId; logo?: string } | { icon: "endpoint" | "local" | "custom" } | { letter: string };
   blurb?: () => string;
   methods: SignIn[];
 };
 
 const CLAUDE: AgentTile = { id: "claude-code", name: "Claude Code", mark: { harness: "claude-code" }, blurb: m.add_agent_claude_blurb, methods: [{ kind: "profile", harness: "claude-code" }] };
-const CODEX: AgentTile = { id: "codex", name: "Codex", mark: { harness: "codex" }, blurb: m.add_agent_codex_blurb, methods: [{ kind: "profile", harness: "codex" }] };
+const CODEX: AgentTile = { id: "codex", name: "OpenAI Codex", mark: { harness: "codex" }, blurb: m.add_agent_codex_blurb, methods: [{ kind: "profile", harness: "codex" }] };
 const OPENCODE_GO: AgentTile = {
   id: "opencode-go", name: "OpenCode Go", mark: { harness: "opencode" }, blurb: m.add_agent_opencode_go_blurb,
   methods: [{ kind: "key", id: "opencode-go", platform: "OpenCode Go", keyUrl: "https://opencode.ai/console" }],
@@ -166,6 +166,8 @@ const MORE_PROVIDERS = [
   listedTile("baseten", "Baseten", { brand: "baseten" }),
 ];
 const PROVIDER_TILES = [OPENCODE_GO, ...LABS, OPENROUTER, ...MORE_PROVIDERS];
+/** What the wizard recommends first. */
+export const RECOMMENDED_TILES = [CLAUDE, CODEX, OPENCODE_GO];
 /** The labs' own ACP agents, offered on their lab's tile rather than in the shelf. */
 const NATIVE_LOGOS = new Set(LABS.flatMap((tile) => tile.methods.flatMap((method) => method.kind === "native" ? [method.logo] : [])));
 /** Marks for providers no tile offers, by id; each also covers that id's regional and plan variants, like `alibaba-cn`. */
@@ -241,6 +243,7 @@ export function TileMark({ tile, size }: { tile: AgentTile; size: number }) {
     return <span aria-hidden="true" className="grid shrink-0 place-items-center font-semibold leading-none" style={{ width: size, height: size, fontSize: size * 0.75 }}>{tile.mark.letter}</span>;
   }
   if (tile.mark.icon === "custom") return <Plus size={size} className="shrink-0" aria-hidden="true" />;
+  if (tile.mark.icon === "local") return <Laptop size={size} className="shrink-0" aria-hidden="true" />;
   return <Link2 size={size} className="shrink-0" aria-hidden="true" />;
 }
 
@@ -255,11 +258,17 @@ type Saved =
   | { kind: "provider"; id: string; name: string; replaced?: boolean }
   | { kind: "endpoint"; id: string; model: string; name: string; replaced: boolean };
 
-/** Which agent the wizard added; Claude Code and Codex name the account. */
-type AddedAgent = { harness: HarnessId; profile?: string };
+/** Which agent the wizard added; Claude Code and Codex name the account, OpenCode the provider of the models it added. */
+export type AddedAgent = { harness: HarnessId; profile?: string; provider?: string };
 
-export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAcp, onEditAcp }: DialogContentProps<AddedAgent> & {
+export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = false, confirm, cancel, isDisabled, onCustomAcp, onEditAcp }: DialogContentProps<AddedAgent> & {
   remote: boolean;
+  /** A recommended tile's id, or `endpoint`, whose sign-in the wizard opens on. */
+  tile?: string;
+  /** Leaves out the recommended agents, for a page that offers them already. */
+  hideRecommended?: boolean;
+  /** The remote machine being set up, where a Claude subscription signed in from a datacenter IP may be flagged. */
+  host?: string;
   onCustomAcp: () => void;
   onEditAcp: (definition: AcpDefinition) => void;
 }) {
@@ -296,6 +305,9 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState(false);
+  /** The local model guide found a server, so its form takes over. */
+  const [localFound, setLocalFound] = useState(false);
+  const warnFirst = useDatacenterWarning(host);
   const endpoint = useLocalModelForm(isDisabled);
   const bodyRef = useRef<HTMLDivElement>(null);
   const formId = useId();
@@ -339,6 +351,9 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
   const endpointTile: AgentTile = {
     id: "endpoint", name: m.local_models_custom_endpoint(), mark: { icon: "endpoint" }, blurb: m.add_agent_endpoint_blurb, methods: [{ kind: "endpoint" }],
   };
+  const localTile: AgentTile = {
+    id: "local", name: m.local_models_guide_name(), mark: { icon: "local" }, blurb: m.local_models_guide_blurb, methods: [{ kind: "endpoint", guide: true }],
+  };
   const customAcp: AgentTile = { id: "custom-acp", name: m.harness_custom_acp(), mark: { icon: "custom" }, methods: [] };
 
   const methodHarness = method ? harnessFor(method) : undefined;
@@ -380,7 +395,9 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
 
   /** Claude Code and Codex always sign in to an account of OpenResearch's own. */
   const createProfile = (signIn: Extract<SignIn, { kind: "profile" }>, from: AgentTile) => run(async () => {
-    const profileName = freeName(from.name, takenNames());
+    // Named as the agent is elsewhere, so a second Codex account reads "Codex 2" rather than its tile's "OpenAI Codex".
+    const agentName = harnesses.find((h) => h.id === signIn.harness && !h.profile)?.name ?? from.name;
+    const profileName = freeName(agentName, takenNames());
     const { id } = await api.createAgentProfile({ harness: signIn.harness, name: profileName });
     setSaved({ kind: "profile", id, name: profileName });
     setName(profileName);
@@ -403,11 +420,15 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
   });
   /** What a sign-in does first, once OpenCode can take it. */
   const begin = (signIn: SignIn | null, from: AgentTile, canSignIn = opencodeReady && !needsOpenCode2) => {
-    if (signIn?.kind === "profile" && !remote) void createProfile(signIn, from);
+    if (signIn?.kind === "profile" && !remote) {
+      const create = () => createProfile(signIn, from);
+      void (signIn.harness === "claude-code" ? warnFirst(create, () => leave("provider")) : create());
+    }
     if (signIn?.kind === "oauth" && canSignIn) void startOAuth(signIn, from);
   };
   const choose = (signIn: SignIn | null, from = tile) => {
     setMethod(signIn);
+    setLocalFound(false);
     setKey("");
     setSignedIn(false);
     setOauth(null);
@@ -421,6 +442,15 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
     choose(next.methods.length === 1 ? next.methods[0] : null, next);
     setStep("signin");
   };
+  // Once, though development renders mount twice: picking a tile may start a sign-in.
+  const opened = useRef(false);
+  useEffect(() => {
+    const start = opening && [...RECOMMENDED_TILES, endpointTile].find((candidate) => candidate.id === opening);
+    const shown = start && offered(start);
+    if (opened.current || !shown) return;
+    opened.current = true;
+    if (step === "provider") pick(shown);
+  }, [harnessQuery.data]);
   // A provider OpenCode signs in to only one way starts it as soon as OpenCode lists it.
   useLayoutEffect(() => {
     if (method?.kind === "opencode" && ways.length === 1) choose(ways[0]);
@@ -437,7 +467,8 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
   const go = async (target: Step | "choices" | "close") => {
     setError(null);
     if (discards(target)) await discard();
-    if (target === "close") { cancel(); return; }
+    // Opened on a tile, the wizard's provider step is the page that opened it.
+    if (target === "close" || (target === "provider" && opening)) { cancel(); return; }
     if (target === "choices") { choose(listing ?? null); return; }
     if (target === "provider") { setTile(null); choose(null); }
     setStep(target);
@@ -448,6 +479,7 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
     showCustomDialog({ component: DiscardDialog, props: { trigger: target === "close" ? "close" : "back" }, onConfirm: () => go(target), onCancel: "close" });
   };
   const back = () => {
+    if (step === "signin" && method?.kind === "endpoint" && endpoint.back()) return;
     if (step === "name") leave("signin");
     else if (method && method.kind !== "opencode" && (listing ? ways : tile?.methods ?? []).length > 1) leave("choices");
     else leave("provider");
@@ -493,13 +525,14 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
     if (tile?.id === "opencode-go" && uiState.data?.opencodeFreeModels && hideFreeModels)
       mutUpdateUiState.runWithOptions(workspace, { opencodeFreeModels: false }, { onSuccessData: () => void refreshHarness("opencode").catch(() => {}) });
     confirm(saved?.kind === "profile" && method?.kind === "profile" ? { harness: method.harness, profile: saved.id }
-      : { harness: backedByOpenCode ? "opencode" : methodHarness?.id ?? "opencode" });
+      : backedByOpenCode ? { harness: "opencode", ...(saved ? { provider: saved.id } : {}) }
+        : { harness: methodHarness?.id ?? "opencode" });
   });
 
   const search = query.trim().toLowerCase();
-  const recommended = [CLAUDE, CODEX, OPENCODE_GO].flatMap((candidate) => offered(candidate) ?? []);
+  const recommended = RECOMMENDED_TILES.flatMap((candidate) => offered(candidate) ?? []);
   const labs = LABS.flatMap((candidate) => offered(candidate) ?? []);
-  const routes = [OPENROUTER, endpointTile];
+  const routes = [OPENROUTER, localTile, endpointTile];
   // A tile also answers to the providers it signs in to, so "moonshot" finds Kimi.
   const matches = (candidate: AgentTile) => [
     candidate.id,
@@ -536,9 +569,10 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
   ];
   const title = step === "provider" || !tile ? m.harness_add()
     : step === "name" ? (recordless ? m.add_agent_models_title({ name: tile.name }) : m.add_agent_name_title())
+      : tile.id === "local" ? m.local_models_guide_title()
       : tile.id === "endpoint" ? m.local_models_add()
         : m.add_agent_sign_in_title({ name: tile.name });
-  const logo = (size: number) => tile?.id === "endpoint" ? <EndpointMark server={endpoint.server} size={size} /> : tile && <TileMark tile={tile} size={size} />;
+  const logo = (size: number) => tile?.id === "endpoint" || (tile?.id === "local" && localFound) ? <EndpointMark server={endpoint.server} size={size} /> : tile && <TileMark tile={tile} size={size} />;
 
   /** OpenCode 2 is there to sign in with, or what it takes to get it. */
   const opencodeGate = (): ReactNode => {
@@ -563,11 +597,13 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
           <Button variant="ghost" onClick={() => { void definitions.refetch(); void presets.refetch(); }}>{m.app_retry()}</Button>
         </p>
       )}
-      <h3 className="mt-0 mb-2 text-sm font-medium text-subtext">{m.add_agent_recommended()}</h3>
-      <ChoiceGrid choices={recommended.map((candidate) => choice(candidate, true))} columns={3} featured />
-      <h3 className="mt-5 mb-2 text-sm font-medium text-subtext">{m.add_agent_other_providers()}</h3>
+      {!hideRecommended && <>
+        <h3 className="mt-0 mb-2 text-sm font-medium text-subtext">{m.add_agent_recommended()}</h3>
+        <ChoiceGrid choices={recommended.map((candidate) => choice(candidate, true))} columns={3} featured />
+      </>}
+      <h3 className={cn("mb-2 text-sm font-medium text-subtext", hideRecommended ? "mt-0" : "mt-5")}>{m.add_agent_other_providers()}</h3>
       <ChoiceGrid choices={labs.map((candidate) => choice(candidate))} columns={4} />
-      <div className="mt-2"><ChoiceGrid choices={routes.map((candidate) => choice(candidate))} columns={2} /></div>
+      <div className="mt-2"><ChoiceGrid choices={routes.map((candidate) => choice(candidate))} columns={3} /></div>
       <h3 className="mt-5 mb-0">
         <button
           type="button"
@@ -674,6 +710,8 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
     ) : null;
     retry = oauth || signedIn ? null : () => void startOAuth(method, tile);
     primary = <Button variant="primary" disabled={!signedIn || disabled} onClick={() => setStep("name")}>{m.onboarding_continue()}</Button>;
+  } else if (step === "signin" && method?.kind === "endpoint" && method.guide && !localFound) {
+    body = <LocalModelGuide disabled={disabled} onFound={(found) => { endpoint.adopt(found); setLocalFound(true); }} />;
   } else if (step === "signin" && method?.kind === "endpoint") {
     body = <form id={formId} onSubmit={(event) => {
       event.preventDefault();
@@ -806,6 +844,42 @@ export function AddAgentDialog({ remote, confirm, cancel, isDisabled, onCustomAc
       </div>
     </DialogContent>
   );
+}
+
+/** The hosts each workspace has warned about, so the page and every wizard it opens warn once between them. */
+const warnedHosts = new WeakMap<QueryClient, Set<string>>();
+
+/** Runs a Claude Code sign-in on remote machine `host` only after warning, once, that a subscription signed in from a datacenter IP may be flagged. */
+export function useDatacenterWarning(host: string | undefined) {
+  const { queryClient, queries, dialogs } = useWorkspace();
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  return async (proceed: () => unknown, back: () => void) => {
+    const warned = warnedHosts.get(queryClient) ?? new Set<string>();
+    warnedHosts.set(queryClient, warned);
+    if (!host || warned.has(host)) return proceed();
+    const network = await queryClient.fetchQuery(queries.getPublicNetworkQuery()).catch(() => null);
+    if (!mounted.current) return;
+    warned.add(host);
+    if (!network?.isDatacenter) return proceed();
+    dialogs.showCustomDialog({ component: ClaudeDatacenterWarning, props: { host, ip: network.ip }, onConfirm: async () => { await proceed(); }, onCancel: back });
+  };
+}
+
+function ClaudeDatacenterWarning({ host, ip, confirm, cancel }: DialogContentProps<void> & { host: string; ip: string }) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  return <DialogContent role="alertdialog" initialFocus={cancelRef} className="w-140 max-w-full p-6">
+    <TriangleAlert size={36} className="mb-4 text-accent-amber" aria-hidden="true" />
+    <DialogTitle className="mb-3 text-2xl text-accent-amber">{m.remote_claude_datacenter_title()}</DialogTitle>
+    <p className="mb-5 text-base text-text">{m.remote_claude_datacenter_description({ host: ltr(host), ip: ltr(ip) })}</p>
+    <div className="flex justify-end gap-2">
+      <Button ref={cancelRef} variant="primary" onClick={cancel}>{m.common_cancel()}</Button>
+      <Button onClick={() => confirm()}>{m.remote_claude_datacenter_continue()}</Button>
+    </div>
+  </DialogContent>;
 }
 
 /** Earlier steps are links back; the current and later ones are not. */
@@ -1154,7 +1228,7 @@ type Choice = {
   select: () => void;
 };
 
-function ChoiceGrid({ choices, columns, featured = false }: { choices: Choice[]; columns: 2 | 3 | 4; featured?: boolean }) {
+export function ChoiceGrid({ choices, columns, featured = false }: { choices: Choice[]; columns: 2 | 3 | 4; featured?: boolean }) {
   return (
     <div className={cn("grid gap-2", columns === 4 ? "grid-cols-2 sm:grid-cols-4" : columns === 3 ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1 sm:grid-cols-2")}>
       {choices.map((choice) => (
@@ -1164,8 +1238,8 @@ function ChoiceGrid({ choices, columns, featured = false }: { choices: Choice[];
           aria-disabled={choice.unavailable || undefined}
           onClick={() => { if (!choice.unavailable) choice.select(); }}
           className={cn(
-            "flex w-full items-center gap-3 rounded-lg border border-border bg-background px-3 text-start text-sm outline-none hover:bg-surface focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-offset-2 aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
-            featured ? "min-h-16 py-3" : "min-h-12 py-2",
+            "flex w-full items-center gap-3 rounded-lg border border-border bg-background p-3 text-start text-sm outline-none hover:bg-surface focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-offset-2 aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
+            featured ? "min-h-16" : "min-h-12",
           )}
         >
           {choice.mark}
