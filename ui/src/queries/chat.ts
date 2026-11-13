@@ -5,7 +5,7 @@ import type { WorkspaceClient } from "./client";
 import { readLiveSnapshot, mergeLiveList, markLiveUpdate } from "./live";
 import { mutations } from "./mutations";
 import type { Workspace } from "../workspace";
-import { infiniteQueryOptions, queryOptions, type InfiniteData } from "@tanstack/react-query";
+import { CancelledError, infiniteQueryOptions, queryOptions, type InfiniteData } from "@tanstack/react-query";
 import type * as api from "../api";
 
 export function createChatQueries(
@@ -110,7 +110,10 @@ export function createChatQueries(
     if (client.queryClient.isFetching({ queryKey: options.queryKey, exact: true })) {
       await client.queryClient.fetchQuery(options).catch(() => {});
     }
-    return client.queryClient.fetchQuery(options);
+    return client.queryClient.fetchQuery(options).catch((error: unknown) => {
+      if (error instanceof CancelledError && error.silent) return client.queryClient.fetchQuery(options);
+      throw error;
+    });
   }
 
   async function readSidebarChatPage(filter: "active" | "archived" | "all", before: api.SidebarChatCursor | null, signal: AbortSignal) {

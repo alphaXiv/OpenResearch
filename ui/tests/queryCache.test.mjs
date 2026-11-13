@@ -508,3 +508,28 @@ test("a reconnect seed waits for a new transcript without cancelling a pending c
   requests[1].resolve(snapshot(2));
   assert.equal((await seed).messages[0].completedAt, 2);
 });
+
+
+test("the latest reconnect seed survives a second repair replacing its joined read", async () => {
+  const requests = [];
+  backend({ "/api/chat/sessions/parent/messages": () => { const request = deferred(); requests.push(request); return request.promise; } });
+  const snapshot = (completedAt) => ({ messages: [{ id: "agent", role: "assistant", parts: [], createdAt: 1, completedAt }], queued: [], activeLeafId: "agent" });
+  const options = queries.getChatMessagesQuery("parent");
+  client.setQueryData(options.queryKey, snapshot(null));
+  const observer = new QueryObserver(client, { ...options, refetchOnMount: false });
+  const off = observer.subscribe(() => {});
+  const repair = invalidation.repairLiveQueries();
+  const first = queries.refreshChatMessages("parent");
+  invalidation.repairLiveQueries();
+  const second = queries.refreshChatMessages("parent");
+  const result = Promise.allSettled([first, second]);
+  requests[0].resolve(snapshot(null));
+  await settle();
+  assert.equal(requests.length, 3);
+  requests[2].resolve(snapshot(2));
+  await repair;
+  const seeds = await result;
+  assert.equal(seeds[1].status, "fulfilled");
+  assert.equal(seeds[1].value.messages[0].completedAt, 2);
+  off();
+});
