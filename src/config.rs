@@ -175,20 +175,23 @@ pub(crate) fn env_path(var: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-/// The `ssh -F` file named by `$ORX_SSH_CONFIG`, else none: the user's own.
-/// ssh finds that through the account record, not `$HOME`, so under test the
-/// default is an empty file in [`test_home`].
-pub(crate) fn ssh_config() -> Option<PathBuf> {
-    let config = env_path("ORX_SSH_CONFIG");
-    #[cfg(test)]
-    let config = config.or_else(|| {
-        let ssh = test_home().join(".ssh");
-        std::fs::create_dir_all(&ssh).unwrap();
-        let empty = ssh.join("orx-test-config");
-        std::fs::write(&empty, "").unwrap();
-        Some(empty)
-    });
-    config
+/// The `ssh -F` file every orx ssh call reads: `$ORX_SSH_CONFIG`, else the
+/// generated one that puts saved hosts ahead of the user's own configuration.
+/// Under test it leaves out the system configuration.
+pub(crate) fn ssh_config() -> PathBuf {
+    if let Some(config) = env_path("ORX_SSH_CONFIG") {
+        return config;
+    }
+    static GENERATED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    GENERATED
+        .get_or_init(|| {
+            // ssh itself then names the file it cannot open.
+            crate::jobs::ssh::hosts::config_file(!cfg!(test)).unwrap_or_else(|error| {
+                eprintln!("orx: {error:#}");
+                config_dir().join("ssh").join("config")
+            })
+        })
+        .clone()
 }
 
 /// Whether `$var = value` leads to one of the developer's own homes. The main

@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import { ProgressBar } from "../src/components/ProgressBar.tsx";
 import { autoDir } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
-import { find, press, render, renderApp, serveApp, settle } from "./render.mjs";
+import { find, press, render, renderApp, serveApp, settle, type } from "./render.mjs";
 
 const session = {
   id: "s", host: "research", user: "me", status: "connected", version: "test", dashboardProtocol: 1,
@@ -35,8 +35,8 @@ async function laptop(path, routes = {}, remote = () => server) {
     "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project", updatedAt: 1 }] }),
     "GET /api/projects/activity": () => ({ activity: [] }),
     "GET /api/remote/sessions": () => ({ sessions: [remote()] }),
-    "GET /api/settings/ssh": () => ({ hosts: [{ host: "research" }], defaultHost: null }),
-    "GET /api/settings/ssh/config": () => ({ path: "/tmp/config", content: "Host research" }),
+    "GET /api/settings/ssh": () => ({ hosts: [{ host: "research" }, { host: "lab" }], defaultHost: null }),
+    "GET /api/remote/hosts": () => ({ hosts: [{ host: "research" }] }),
     ...routes,
   });
   const backend = globalThis.fetch;
@@ -103,7 +103,7 @@ test("a disconnected workspace without startup data offers Reconnect", async (t)
 });
 
 for (const [place, path] of [["home", "/projects"], ["sidebar", "/projects/p/tasks/new"]]) {
-  test(`the ${place} machine menu switches between retained machines and configures the laptop from either`, async () => {
+  test(`the ${place} machine menu switches between retained machines and lists the laptop's remotes from either`, async () => {
     const requests = await laptop(path);
     assert.equal(visibleMachine(), "local");
     await click(switcher());
@@ -113,12 +113,8 @@ for (const [place, path] of [["home", "/projects"], ["sidebar", "/projects/p/tas
     await click(switcher());
     await click(menuItem(m.remote_dialog_title()));
     assert.deepEqual(dialogTitles(), [m.remote_dialog_title()]);
-    await click(find(`${visible} [role="dialog"] button`, m.ssh_configure_hosts()));
-    assert.deepEqual(dialogTitles(), [m.ssh_config_title()]);
-    assert.ok(requests.includes("GET /api/settings/ssh/config"));
-    assert.ok(!requests.some((request) => request.endsWith("/workspaces/server/api/settings/ssh/config")));
-    await click(find(`${visible} [role="dialog"] button`, m.settings_page_cancel()));
-    assert.deepEqual(dialogTitles(), [m.remote_dialog_title()]);
+    assert.ok(requests.includes("GET /api/remote/hosts"));
+    assert.ok(!requests.some((request) => request.endsWith("/workspaces/server/api/remote/hosts")));
     await press("Escape");
     await settle();
     assert.deepEqual(dialogTitles(), []);
@@ -146,6 +142,77 @@ for (const [status, shown] of [["connected", null], ["reconnecting", m.remote_ma
     }
   });
 }
+
+test("a compute-only machine is one click from Compute, on the laptop", async () => {
+  await laptop("/projects/p/tasks/new");
+  await click(switcher());
+  await click(menuItem("research"));
+  assert.equal(visibleMachine(), "server");
+
+  await click(switcher());
+  await click(menuItem(m.remote_dialog_title()));
+  await click(find(`${visible} [role="dialog"] button`, m.remote_open_compute()));
+  assert.deepEqual(dialogTitles(), []);
+  assert.equal(visibleMachine(), "local");
+  assert.equal(document.querySelector(`${visible} .settings-view-scroll h1`)?.textContent, m.settings_page_compute());
+});
+
+test("a pasted ssh command is saved, then connected by the alias the server chose", async () => {
+  const added = [];
+  const connections = [];
+  await laptop("/projects", {
+    "GET /api/remote/sessions": () => ({ sessions: [] }),
+    "POST /api/remote/hosts": (init) => {
+      const { command } = JSON.parse(init.body);
+      added.push(command);
+      return command.includes("-Z")
+        ? Response.json({ error: "Unknown ssh option -Z." }, { status: 400 })
+        : { host: "gpu1.lab.edu" };
+    },
+    "POST /api/remote/sessions": (init) => {
+      connections.push(JSON.parse(init.body).host);
+      return server;
+    },
+  });
+  await click(switcher());
+  await click(menuItem(m.remote_dialog_title()));
+  const field = document.querySelector(`[role="dialog"] input[aria-label="${m.remote_add_label()}"]`);
+  assert.deepEqual([...document.querySelectorAll('[role="dialog"] datalist option')].map((option) => option.value), ["lab"]);
+
+  await type(field, "ssh -Z gpu1");
+  await click(find('[role="dialog"] button[type="submit"]', m.settings_connect()));
+  assert.equal(document.querySelector('[role="dialog"] [role="alert"]').textContent, "Unknown ssh option -Z.");
+  assert.deepEqual(connections, []);
+
+  await type(field, "  ssh -p 2222 clo@gpu1.lab.edu  ");
+  await click(find('[role="dialog"] button[type="submit"]', m.settings_connect()));
+  assert.deepEqual(added, ["ssh -Z gpu1", "ssh -p 2222 clo@gpu1.lab.edu"]);
+  assert.deepEqual(connections, ["gpu1.lab.edu"]);
+  assert.deepEqual(dialogTitles(), []);
+  assert.equal(visibleMachine(), "server");
+});
+
+test("a saved remote is removed unless a session is open on it", async () => {
+  const removed = [];
+  let hosts = [{ host: "research" }, { host: "lab", user: "me", hostname: "lab.example.edu", port: "2222" }];
+  await laptop("/projects", {
+    "GET /api/remote/sessions": () => ({ sessions: [server] }),
+    "GET /api/remote/hosts": () => ({ hosts }),
+    "DELETE /api/remote/hosts/lab": () => {
+      removed.push("lab");
+      hosts = hosts.filter((host) => host.host !== "lab");
+      return { ok: true };
+    },
+  });
+  await click(switcher());
+  await click(menuItem(m.remote_dialog_title()));
+  assert.ok(find('[role="dialog"] li', "me@lab.example.edu:2222"));
+  const removeButton = (host) => document.querySelector(`[role="dialog"] button[aria-label="${m.remote_remove_host({ host: autoDir(host) })}"]`);
+  assert.equal(removeButton("research"), null);
+  await click(removeButton("lab"));
+  assert.deepEqual(removed, ["lab"]);
+  assert.equal(find('[role="dialog"] li', "lab"), null);
+});
 
 for (const kind of ["local", "ssh"]) {
   for (const scenario of ["loading", "error", "onboarding", "no-projects", "projects"]) {

@@ -435,9 +435,9 @@ pub(super) async fn set_k8s_settings(Json(req): Json<SetK8sSettingsReq>) -> ApiR
     Ok(Json(k8s_settings_json().await))
 }
 
-/// Concrete Host entries from `~/.ssh/config` and the files it `Include`s
-/// (wildcard patterns skipped) — read-only groundwork for an SSH compute
-/// backend. No keys are read.
+/// Compute hosts: those saved in OpenResearch (`saved`), then concrete Host
+/// entries from `~/.ssh/config` and the files it `Include`s (wildcard patterns
+/// skipped). An alias in both is the saved one, as ssh reads it. No keys are read.
 pub(super) fn list_ssh_hosts() -> Vec<Value> {
     let Some(home) = crate::config::home_dir() else {
         return Vec::new();
@@ -445,16 +445,23 @@ pub(super) fn list_ssh_hosts() -> Vec<Value> {
     ssh_hosts_in(&home)
 }
 
+/// Hosts saved for Connect to remote.
+pub(super) fn list_remote_hosts() -> Vec<Value> {
+    let home = crate::config::home_dir().unwrap_or_default();
+    let mut reader = SshHostReader::new(&home);
+    reader.read_file(&crate::jobs::ssh::hosts::List::Remotes.path());
+    reader.hosts
+}
+
 /// OpenSSH's `READCONF_MAX_DEPTH`.
 const SSH_INCLUDE_MAX_DEPTH: usize = 16;
 
 fn ssh_hosts_in(home: &std::path::Path) -> Vec<Value> {
-    let mut reader = SshHostReader {
-        home,
-        hosts: Vec::new(),
-        current: Vec::new(),
-        stack: Vec::new(),
-    };
+    let mut reader = SshHostReader::new(home);
+    reader.read_file(&crate::jobs::ssh::hosts::List::Compute.path());
+    for host in &mut reader.hosts {
+        host["saved"] = json!(true);
+    }
     reader.read_file(&home.join(".ssh").join("config"));
     reader.hosts
 }
@@ -468,7 +475,16 @@ struct SshHostReader<'a> {
     stack: Vec<std::path::PathBuf>,
 }
 
-impl SshHostReader<'_> {
+impl<'a> SshHostReader<'a> {
+    fn new(home: &'a std::path::Path) -> Self {
+        Self {
+            home,
+            hosts: Vec::new(),
+            current: Vec::new(),
+            stack: Vec::new(),
+        }
+    }
+
     /// Unreadable or missing files are skipped, like ssh does for Include.
     fn read_file(&mut self, path: &std::path::Path) {
         let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -494,7 +510,7 @@ impl SshHostReader<'_> {
                 ),
                 None => continue,
             };
-            let args = ssh_config_args(value);
+            let args = crate::jobs::ssh::hosts::config_args(value);
             if args.is_empty() {
                 continue;
             }
@@ -554,49 +570,6 @@ impl SshHostReader<'_> {
         self.hosts.push(json!({ "host": name }));
         self.hosts.len() - 1
     }
-}
-
-/// OpenSSH's argument quoting, escapes and word-start comments.
-fn ssh_config_args(value: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut arg = String::new();
-    let mut quote = None;
-    let mut started = false;
-    let mut chars = value.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            ' ' | '\t' if quote.is_none() => {
-                if started {
-                    args.push(std::mem::take(&mut arg));
-                    started = false;
-                }
-            }
-            '#' if !started => break,
-            '\\' if chars.peek().is_some_and(|&next| {
-                matches!(next, '\\' | '\'' | '"') || (quote.is_none() && next == ' ')
-            }) =>
-            {
-                arg.push(chars.next().unwrap());
-                started = true;
-            }
-            '\'' | '"' if quote.is_none() => {
-                quote = Some(c);
-                started = true;
-            }
-            c if quote == Some(c) => quote = None,
-            c => {
-                arg.push(c);
-                started = true;
-            }
-        }
-    }
-    if quote.is_some() {
-        return Vec::new();
-    }
-    if started {
-        args.push(arg);
-    }
-    args
 }
 
 /// Relative Include paths are under `~/.ssh`, even in nested files.
@@ -940,7 +913,10 @@ pub(super) async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host).await?;
+    // A remote workspace's Connect ends with this check too.
+    if let Err(error) = require_configured_ssh_host(&host).await {
+        require_saved_remote(&host).await.map_err(|_| error)?;
+    }
     if let Some(reference) = &req.container {
         crate::jobs::ssh::validate_container_reference(reference).map_err(bad_request)?;
     }
@@ -962,6 +938,71 @@ pub(super) async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult
     Ok(Json(result))
 }
 
+#[derive(Deserialize)]
+pub(super) struct AddSshHostReq {
+    command: String,
+}
+
+fn add_saved_host(list: crate::jobs::ssh::hosts::List, command: &str) -> ApiResult {
+    let block = crate::jobs::ssh::hosts::parse(command).map_err(bad_request)?;
+    crate::jobs::ssh::hosts::add(list, &block)?
+        .map_err(|message| ApiError(StatusCode::CONFLICT, message))?;
+    Ok(Json(json!({ "host": block.host })))
+}
+
+/// Forgets the alias's saved password once nothing reaches it by that name.
+fn remove_saved_host(list: crate::jobs::ssh::hosts::List, host: &str) -> ApiResult {
+    if !crate::jobs::ssh::hosts::remove(list, host)? {
+        return Err(not_found(host));
+    }
+    let known = list_ssh_hosts()
+        .into_iter()
+        .chain(list_remote_hosts())
+        .any(|entry| entry.get("host").and_then(Value::as_str) == Some(host));
+    if !known {
+        if let Err(error) = crate::local::keychain::save(host, &Default::default()) {
+            eprintln!("orx up: {error:#}");
+        }
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub(super) async fn add_compute_host(Json(req): Json<AddSshHostReq>) -> ApiResult {
+    blocking_api(move || add_saved_host(crate::jobs::ssh::hosts::List::Compute, &req.command)).await
+}
+
+pub(super) async fn remove_compute_host(Path(host): Path<String>) -> ApiResult {
+    blocking_api(move || remove_saved_host(crate::jobs::ssh::hosts::List::Compute, &host)).await
+}
+
+pub(super) async fn remote_hosts() -> ApiResult {
+    blocking_api(|| Ok(Json(json!({ "hosts": list_remote_hosts() })))).await
+}
+
+pub(super) async fn add_remote_host(Json(req): Json<AddSshHostReq>) -> ApiResult {
+    blocking_api(move || add_saved_host(crate::jobs::ssh::hosts::List::Remotes, &req.command)).await
+}
+
+pub(super) async fn remove_remote_host(Path(host): Path<String>) -> ApiResult {
+    blocking_api(move || remove_saved_host(crate::jobs::ssh::hosts::List::Remotes, &host)).await
+}
+
+pub(super) async fn require_saved_remote(host: &str) -> Result<(), ApiError> {
+    let host = host.to_owned();
+    let saved = tokio::task::spawn_blocking(move || {
+        list_remote_hosts()
+            .iter()
+            .any(|candidate| candidate.get("host").and_then(Value::as_str) == Some(&host))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("ssh task failed: {e}")))?;
+    if saved {
+        Ok(())
+    } else {
+        Err(bad_request("Add this host in Connect to remote first."))
+    }
+}
+
 pub(super) async fn require_configured_ssh_host(host: &str) -> Result<(), ApiError> {
     let hosts = tokio::task::spawn_blocking(list_ssh_hosts)
         .await
@@ -972,7 +1013,9 @@ pub(super) async fn require_configured_ssh_host(host: &str) -> Result<(), ApiErr
     {
         Ok(())
     } else {
-        Err(bad_request("Choose a host from ~/.ssh/config."))
+        Err(bad_request(
+            "Add this host under Compute, or choose one from ~/.ssh/config.",
+        ))
     }
 }
 
@@ -2295,14 +2338,16 @@ Host b
     #[test]
     fn ssh_args_preserve_windows_separators_and_quoted_hashes() {
         assert_eq!(
-            ssh_config_args(r#"C:\Users\alice\lab.conf 'lab #1.conf' lab\ #2.conf "#),
+            crate::jobs::ssh::hosts::config_args(
+                r#"C:\Users\alice\lab.conf 'lab #1.conf' lab\ #2.conf "#
+            ),
             [r"C:\Users\alice\lab.conf", "lab #1.conf", "lab #2.conf"]
         );
         assert_eq!(
-            ssh_config_args(r#""lab\"quote" 'lab\'quote'"#),
+            crate::jobs::ssh::hosts::config_args(r#""lab\"quote" 'lab\'quote'"#),
             ["lab\"quote", "lab'quote"]
         );
-        assert!(ssh_config_args("'unclosed path").is_empty());
+        assert!(crate::jobs::ssh::hosts::config_args("'unclosed path").is_empty());
     }
 
     #[test]

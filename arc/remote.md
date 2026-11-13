@@ -6,7 +6,7 @@ Research runs where the GPUs are, on machines reached over SSH. orx brings the d
 
 ## A remote workspace
 
-The laptop's dashboard opens a remote machine as a workspace, from the user's own SSH configuration (`src/commands/up_remote.rs`): `/_orx/workspaces/<session>/…` on the laptop's origin → the session's gateway → SSH forward → remote `orx` on its loopback. `orx up --remote` serves the same routes on a loopback gateway port of its own.
+The laptop's dashboard opens a remote machine as a workspace, from a host saved in Connect to remote ([saved hosts](#saved-hosts), `src/commands/up_remote.rs`): `/_orx/workspaces/<session>/…` on the laptop's origin → the session's gateway → SSH forward → remote `orx` on its loopback. `orx up --remote` serves the same routes on a loopback gateway port of its own.
 
 - **The laptop serves the UI.** Only `/api` reaches the remote, so one version's UI drives another version's API.
 - **The session holds the credential.** The gateway adds the bearer token to API requests, events, file resources and websockets, and drops the browser's own credentials; the page never sees the token. The local API's guard protects these paths ([dashboard](dashboard.md)).
@@ -16,6 +16,15 @@ The laptop's dashboard opens a remote machine as a workspace, from the user's ow
 - **The host refuses what only makes sense locally:** those account routes, file pickers, self-update, data-directory moves, the general settings command runner. A route that acts on the machine in front of the user joins the forbidden list in `src/commands/up.rs`.
 
 **orx never runs a remote binary another user could have replaced.** It resolves `orx` once through the login environment and then runs that exact path, so a non-interactive `PATH` cannot pick another binary. A candidate must be owned by the user or root, with neither it nor its directory writable by anyone else. A rejected candidate is reported, not treated as missing, and a repairing `chmod` runs only when the user asks. Installing or updating `orx` is a step the user confirms, with its paths visible and changeable.
+
+## Saved hosts
+
+**orx reaches every host through its own `ssh -F` file and never edits the user's SSH configuration** (`src/jobs/ssh/hosts.rs`), which may be read-only, as a Nix-managed `~/.ssh/config` is. The generated file includes the hosts saved in orx, then `~/.ssh/config` and the system file, so plain `ssh` and orx resolve every other alias alike.
+
+- **A host is added the way the user already reaches it:** a hostname, an alias, `user@host:port`, or a pasted `ssh …` command, which becomes the `Host` block that makes `ssh <alias>` connect the same way. Options that shape one session (forwards, a remote command) are dropped; options orx can't keep are refused by name.
+- **The alias stays the key.** Engine state, the auth breaker, the route pin and compute settings all name a host by alias, so a saved host is indistinguishable from a configured one. An alias saved in orx means one thing in both lists, so a conflicting second definition is refused; a saved alias overrides the same alias in `~/.ssh/config`, for orx only.
+- **Two lists, one file each:** `remotes` for Connect to remote, `compute` for SSH and Slurm compute, which also lists `~/.ssh/config`. A machine for agents and one only for runs are set up in different places, each pointing at the other.
+- **Passwords are saved, one try at a time.** A password or key passphrase that let a login through is kept in the system credential store under the alias; one-time codes and host-key answers never are. Each attempt answers a saved password once and a passphrase twice (a ProxyJump hop decrypts the key again), and a failed login drops the saved answers it used, so the user is asked next time, and the [auth breaker](#transport-and-the-auth-breaker) still opens on failure. On Unix it also logs an interactive host's ended master back in once without a click; on Windows the SSH service holds the login instead. Removing a host forgets its password once no list still names it. Linux needs `secret-tool` and a keyring; without them orx asks every time.
 
 ## The persistent host
 
@@ -82,7 +91,7 @@ Jobs are submitted with `--no-requeue`, named by the run ID so a lost submission
 
 ## Transport and the auth breaker
 
-**The engine reaches each host root over one system `ssh` child, multiplexing every request on it** (`src/engine/transport/`), with the user's own config, agent and keys; orx never reads a key. Requests queue in lanes (control, feed, logs, upload), and cheaper lanes stop dispatching first, so bulk uploads and log pages can never take the slots a cancel needs.
+**The engine reaches each host root over one system `ssh` child, multiplexing every request on it** (`src/engine/transport/`), with orx's [SSH file](#saved-hosts) over the user's own config, agent and keys; orx never reads a key. Requests queue in lanes (control, feed, logs, upload), and cheaper lanes stop dispatching first, so bulk uploads and log pages can never take the slots a cancel needs.
 
 - Idle → Connecting → Live.
 - Connecting → Backoff on a network failure.
@@ -95,13 +104,13 @@ Jobs are submitted with `--no-requeue`, named by the run ID so a lost submission
 **After an authentication failure, no automatic login.** Repeated logins lock accounts and trip MFA, so the breaker is one per SSH alias, shared by its roots and kept in the store. Only the user's Connect closes it; a retry resets a key host's backoff and nothing more.
 
 - **First contact is one batch-mode attempt.** Success classifies the alias as a key host, which then connects with no click. A network failure before authentication backs off like any key host. Anything that could have reached authentication marks the host interactive with the breaker open, and a first attempt interrupted by a crash opens the breaker too.
-- **Interactive hosts keep an authenticated master on Unix.** Connect relays passphrase, password and host-key prompts to the dashboard or CLI and stores none of the answers. Key hosts keep a master only when the run engine is off or an active SSH or Slurm run uses the alias.
+- **Interactive hosts keep an authenticated master on Unix.** Connect relays passphrase, password and host-key prompts to the dashboard or CLI, answering a password from the credential store first ([saved hosts](#saved-hosts)). Key hosts keep a master only when the run engine is off or an active SSH or Slurm run uses the alias.
 - **The route is pinned.** A fingerprint of `ssh -G` covers destination, identity, proxy and host-key settings, and a change opens the breaker until Connect approves it.
 - **Background `ssh` never prompts.** It runs without a terminal and with askpass disabled, because a jump host ignores the outer batch mode and would otherwise prompt.
 
 Workspace tunnels and probes take a separate path (`src/jobs/ssh.rs`): batch mode over the ControlMaster shared with compute settings, ending at an authentication failure instead of retrying.
 
-**Plain ssh shares an authenticated master.** On OpenSSH 8.4 and later, a live master is published through a managed file the user's SSH config includes (`src/jobs/ssh/sharing.rs`). A `Match … exec` check selects the socket only while its pinned route matches and the socket exists; without a live master, `ssh` authenticates as usual and never starts an engine login.
+**Plain ssh can share an authenticated master.** On OpenSSH 8.4 and later, a live master is published through a managed file, `~/.ssh/openresearch_config`, which the user's SSH config may include; orx never adds that line (`src/jobs/ssh/sharing.rs`). A `Match … exec` check selects the socket only while its pinned route matches and the socket exists; without a live master, `ssh` authenticates as usual and never starts an engine login.
 
 **On Windows the SSH service holds the login,** because Win32-OpenSSH cannot multiplex. Connect starts each root's `ssh` inside the detached `orx ssh-service` (`src/jobs/ssh/service/hold.rs`), reached on loopback with the token in its owner-only directory, and `orx up` talks to orx-host through it. A restarted or updated server reattaches with no prompt while the control protocol matches; the older orx-host then serves, and wraps new runs, until the login ends. It ends when the user signs out of Windows, Connect replaces it, its route changes, or no server has attached for 24 hours. Plain `ssh` does not share it, and Connect still logs in the transports existing 0.2.x runs need, so a second MFA prompt may be required.
 

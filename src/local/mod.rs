@@ -28,6 +28,7 @@ pub mod github;
 pub mod harness;
 pub mod hf;
 pub mod k8s;
+pub(crate) mod keychain;
 pub mod latex;
 pub mod latex_templates;
 pub mod local_models;

@@ -3,11 +3,10 @@ import { useMutate } from "@clo/react-mutation";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 import { useMachines } from "../machineSelection";
-import { RemoteHostDialog } from "./RemoteHostDialog";
-import { showSshConfigDialog } from "./SshConfigDialog";
+import { showRemoteHostDialog } from "./RemoteHostDialog";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 
-import { Check, ChevronsUpDown, Info, Unplug } from "lucide-react";
+import { Check, ChevronsUpDown, Info, Laptop, Plus, Power, Server, Unplug } from "lucide-react";
 import { type RemoteSessionStatus, type RuntimeInfo } from "../api";
 import { autoDir, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
@@ -16,12 +15,40 @@ import { Menu } from "@base-ui/react/menu";
 import { RemoteIcon } from "./RemoteIcon";
 
 import { RemoteStopDialog } from "./RemoteStopDialog";
-import { MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { MenuItem, showAlert, Spinner, StatusIndicator, Tooltip } from "./ui";
+
+const ITEM = "justify-start data-highlighted:bg-surface";
+const ICON = "shrink-0 text-subtext";
 
 function connection(status: RemoteSessionStatus) {
   if (status === "connected") return { state: "connected", label: m.remote_machine_connected() } as const;
   if (status === "connecting" || status === "reconnecting" || status === "applying") return { state: "connecting", label: m.remote_machine_connecting() } as const;
   return { state: "disconnected", label: m.remote_machine_disconnected() } as const;
+}
+
+/** Holds the check's width on every row so statuses line up. */
+function Selected() {
+  return (
+    <span className="flex size-3.5 shrink-0">
+      <Menu.RadioItemIndicator>
+        <Check size={14} />
+      </Menu.RadioItemIndicator>
+    </span>
+  );
+}
+
+function SessionStatus({ status }: { status: RemoteSessionStatus }) {
+  const { state, label } = connection(status);
+  return (
+    <StatusIndicator
+      tone={state === "connected" ? "success" : state === "connecting" ? "info" : "neutral"}
+      live={state === "connecting"}
+      stale={state === "disconnected"}
+      className="text-xs font-normal text-subtext"
+    >
+      {label}
+    </StatusIndicator>
+  );
 }
 
 export function WorkspaceConnection({
@@ -36,16 +63,7 @@ export function WorkspaceConnection({
   const machines = useMachines();
   const workspace = useWorkspace();
   const { showCustomDialog } = workspace.dialogs;
-  const openHosts = () =>
-    showCustomDialog({
-      component: RemoteHostDialog,
-      props: {
-        onConfigureSsh: () =>
-          showSshConfigDialog(workspace.dialogs, openHosts, machines.owner),
-      },
-      onConfirm: (openRemote) => openRemote(),
-      onCancel: "close",
-    });
+  const openHosts = () => showRemoteHostDialog(workspace.dialogs);
   const label =
     runtime.kind === "local" ? m.projects_local() : runtime.session.host;
   const activeSession = machines.sessions.find((session) => session.id === machines.activeId);
@@ -112,19 +130,16 @@ export function WorkspaceConnection({
                           nativeButton
                           value="local"
                           closeOnClick
-                          render={
-                            <MenuItem className="data-highlighted:bg-surface" />
-                          }
+                          render={<MenuItem className={ITEM} />}
                           onClick={() => {
                             switching.current = machines.activeId !== "local";
                             setOpen(false);
                             machines.selectLocal();
                           }}
                         >
-                          <span>{m.projects_local()}</span>
-                          <Menu.RadioItemIndicator>
-                            <Check size={14} />
-                          </Menu.RadioItemIndicator>
+                          <Laptop size={14} className={ICON} aria-hidden="true" />
+                          <span className="min-w-0 flex-1 truncate">{m.projects_local()}</span>
+                          <Selected />
                         </Menu.RadioItem>
                         {machines.sessions.map((session) => (
                           <Menu.RadioItem
@@ -132,9 +147,7 @@ export function WorkspaceConnection({
                             key={session.id}
                             value={session.id}
                             closeOnClick
-                            render={
-                              <MenuItem className="data-highlighted:bg-surface" />
-                            }
+                            render={<MenuItem className={ITEM} />}
                             onClick={() => {
                               switching.current =
                                 machines.activeId !== session.id;
@@ -142,52 +155,47 @@ export function WorkspaceConnection({
                               machines.selectRemote(session);
                             }}
                           >
+                            <Server size={14} className={ICON} aria-hidden="true" />
                             <span className="min-w-0 flex-1 truncate">
                               {session.host}
                             </span>
-                            <span className="text-xs text-subtext">
-                              {connection(session.status).label}
-                            </span>
-                            <Menu.RadioItemIndicator>
-                              <Check size={14} />
-                            </Menu.RadioItemIndicator>
+                            <SessionStatus status={session.status} />
+                            <Selected />
                           </Menu.RadioItem>
                         ))}
                       </Menu.RadioGroup>
-                      <Menu.Separator className="my-1 border-t border-border-variant" />
                       <Menu.Item
                         nativeButton
-                        render={
-                          <MenuItem className="data-highlighted:bg-surface" />
-                        }
+                        render={<MenuItem className={ITEM} />}
                         onClick={openHosts}
                       >
-                        {m.remote_dialog_title()}
+                        <Plus size={14} className={ICON} aria-hidden="true" />
+                        <span className="min-w-0 flex-1 truncate">{m.remote_dialog_title()}</span>
                       </Menu.Item>
                     </>
                   )}
                   {runtime.kind === "ssh" && (
-                    <>
-                      <div className="border-b border-border-variant px-2 pt-1 pb-2">
-                        <div className="text-sm font-medium text-text">
-                          {current?.state === "connected"
-                            ? m.remote_connected_as({
-                              host: ltr(runtime.session.host),
-                              user: ltr(runtime.session.user ?? ""),
-                            })
-                            : ltr(runtime.session.host)}
-                        </div>
-                        <div className="mt-0.5 text-xs text-subtext">
+                    <Menu.Group>
+                      {machines.canSwitch && (
+                        <Menu.Separator className="my-1 border-t border-border-variant" />
+                      )}
+                      <Menu.GroupLabel className="px-2 pt-1.5 pb-1 text-xs text-muted">
+                        <span className="block truncate" dir="ltr">
+                          {runtime.session.user
+                            ? `${runtime.session.user}@${runtime.session.host}`
+                            : runtime.session.host}
+                        </span>
+                        <span className="block">
                           {current && current.state !== "connected" && <>{current.label} · </>}
                           OpenResearch{" "}
                           {ltr(runtime.session.buildId ?? runtime.session.version ?? runtime.version)}
-                        </div>
-                      </div>
+                        </span>
+                      </Menu.GroupLabel>
                       <div className="flex items-center rounded-sm hover:bg-surface">
                         <Menu.Item
                           nativeButton
                           render={
-                            <MenuItem className="hover:bg-transparent data-highlighted:bg-surface data-disabled:opacity-45 data-disabled:cursor-default" />
+                            <MenuItem className="justify-start hover:bg-transparent data-highlighted:bg-surface data-disabled:opacity-45 data-disabled:cursor-default" />
                           }
                           closeOnClick={false}
                           disabled={disconnect.isMutating}
@@ -211,6 +219,7 @@ export function WorkspaceConnection({
                             },
                           })}
                         >
+                          <Unplug size={14} className={ICON} aria-hidden="true" />
                           {disconnect.isMutating
                             ? m.remote_closing()
                             : m.remote_disconnect()}
@@ -219,7 +228,7 @@ export function WorkspaceConnection({
                           content={m.remote_persistence_explanation()}
                           className="me-2 shrink-0 text-subtext"
                         >
-                          <Info size={16} />
+                          <Info size={14} />
                         </Tooltip>
                       </div>
                       <Menu.Item
@@ -227,7 +236,7 @@ export function WorkspaceConnection({
                         render={
                           <MenuItem
                             danger
-                            className="data-highlighted:bg-surface data-disabled:opacity-45 data-disabled:cursor-default"
+                            className="justify-start data-highlighted:bg-surface data-disabled:opacity-45 data-disabled:cursor-default"
                           />
                         }
                         closeOnClick={false}
@@ -260,9 +269,10 @@ export function WorkspaceConnection({
                           }
                         }}
                       >
+                        <Power size={14} className="shrink-0" aria-hidden="true" />
                         {m.remote_stop_host()}
                       </Menu.Item>
-                    </>
+                    </Menu.Group>
                   )}
                 </Menu.Popup>
               </Menu.Positioner>

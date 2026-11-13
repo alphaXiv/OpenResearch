@@ -139,7 +139,7 @@ import { agentModelLines, keptInstall } from "../modelSelection";
 import { ModelSettings } from "./ModelSettings";
 import { StatusBadge } from "./StatusBadge";
 import { SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
-import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
+import { AddSshHost, SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
 import { showSshConfigDialog } from "./SshConfigDialog";
 import {
   Badge,
@@ -1726,12 +1726,13 @@ function SshSection() {
           <Settings size={14} /> {m.ssh_configure_hosts()}
         </Button>
       </div>
+      <AddSshHost />
       {hosts === null ? (
         <LoadingRow>
           <Spinner /> {m.settings_page_reading_ssh_config()}
         </LoadingRow>
       ) : hosts.length === 0 ? (
-        <p className="settings-empty mt-1 mx-0 mb-0 text-base text-subtext">{m.settings_page_no_hosts_found_in_ssh_config()}</p>
+        <p className="settings-empty mt-1 mx-0 mb-0 text-base text-subtext">{m.ssh_no_hosts()}</p>
       ) : (
         <div className="border-y border-border-variant divide-y divide-border-variant">
           {hosts.map((h) => {

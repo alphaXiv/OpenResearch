@@ -6,7 +6,7 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 
 | Directory | Location | Holds |
 | --- | --- | --- |
-| config | `$XDG_CONFIG_HOME/openresearch`, else `~/.config/openresearch` | `settings.json`, credentials for openresearch.sh, alphaXiv and Overleaf, the telemetry outbox, the locks that cover the data directory as a whole |
+| config | `$XDG_CONFIG_HOME/openresearch`, else `~/.config/openresearch` | `settings.json`, credentials for openresearch.sh, alphaXiv and Overleaf, the SSH hosts saved in orx (`ssh/`), the telemetry outbox, the locks that cover the data directory as a whole |
 | data | resolved below | `orx.db`, `repos/`, `worktrees/`, `agents/`, `run-logs/`, `files/`, `chat-attachments/`, per-run state |
 | cache | `ORX_CACHE_DIR`, the `cacheDir` setting, else `~/.cache/openresearch` | orx's managed agent copies and the legacy repository root, which [migrations](#migrations-follow-paths) empty |
 
@@ -15,6 +15,8 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 **The config directory never moves**, because the setting that points at the data directory lives there and a lock inside the data directory could not guard a move of it. `settings.json` has one writer, the locked read-modify-write in `src/telemetry.rs`, and every save keeps the fields a newer orx wrote; a second writer would clobber them.
 
 OpenCode provider records (`opencode-providers.json`, including API keys) stay in config. Custom endpoint records, names and icons live in the data directory's `local-models.json`; OpenCode OAuth credentials live in its isolated database.
+
+Saved SSH passwords and key passphrases sit in the system's credential store (Keychain, Credential Manager, the Secret Service), one item per host alias, never in a file ([remote](remote.md#saved-hosts)).
 
 `~/.openresearch/env` sits outside all three. It holds the variables and compute credentials saved in compute settings and fans out to agents and launched runs (`src/config.rs`), so a secret that must stay on this machine, like Overleaf's, belongs in the config directory.
 

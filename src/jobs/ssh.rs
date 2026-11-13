@@ -16,6 +16,7 @@
 
 pub(crate) mod cleanup;
 mod container;
+pub(crate) mod hosts;
 #[cfg(unix)]
 mod prepared;
 pub(crate) mod service;
@@ -342,9 +343,8 @@ fn ssh_options(
     ];
     opts.extend(multiplexing);
     opts.extend(target.extra_opts.iter().cloned());
-    if let Some(config) = config {
-        opts.extend(["-F".into(), config.to_string_lossy().into_owned()]);
-    }
+    let config = config.map_or_else(crate::config::ssh_config, std::path::Path::to_path_buf);
+    opts.extend(["-F".into(), config.to_string_lossy().into_owned()]);
     opts
 }
 
@@ -895,8 +895,8 @@ mod tests {
         let target = SshTarget::alias("mybox");
         assert_eq!(target.dest, "mybox");
         assert!(target.extra_opts.is_empty());
-        // No `-p`/`-o Strict…` beyond the shared multiplexing opts.
-        let shared = 10 + multiplexing_opts(&target).len();
+        // No `-p`/`-o Strict…` beyond the shared multiplexing opts and `-F`.
+        let shared = 12 + multiplexing_opts(&target).len();
         assert_eq!(ssh_opts(&target, true).len(), shared);
     }
 
