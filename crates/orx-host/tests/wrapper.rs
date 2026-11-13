@@ -1380,7 +1380,70 @@ fn the_wrapper_unpacks_the_source_and_a_cancel_stops_a_slow_unpack() {
     run.wait();
     let dir = &run.directory.0;
     assert_eq!(fs::read_to_string(dir.join("ran")).unwrap(), "unpacked");
-    assert!(!dir.join("repo.part").exists());
+    let parts = |dir: &std::path::Path| {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("repo.part")
+            })
+            .count()
+    };
+    assert_eq!(parts(dir), 0);
+
+    // A tar orphaned by a wrapper killed mid-unpack never touches the next attempt's unpack.
+    let mut run = Run::new("cat repo/value > ran\n");
+    with_source(&run, &[("value", "second attempt")]);
+    let dir = run.directory.0.clone();
+    let shims = dir.join("shims");
+    fs::create_dir(&shims).unwrap();
+    fs::write(
+        shims.join("tar"),
+        // The orphan's directory can't be removed, as when its tar is still writing there.
+        "#!/bin/sh\nif [ ! -e orphan ]; then touch \"$4/partial\"; chmod 500 \"$4\"; echo \"$4\" > stuck; echo $$ > orphan; exec sleep 600; fi\nexec /usr/bin/tar \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        shims.join("tar"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let wrap = || {
+        Command::new(env!("CARGO_BIN_EXE_orx-host"))
+            .env("ORX_TEST_FAST_STOPS", "1")
+            .env(
+                "PATH",
+                format!("{}:{}", shims.display(), std::env::var("PATH").unwrap()),
+            )
+            .args(["wrap", dir.to_str().unwrap()])
+            .spawn()
+            .unwrap()
+    };
+    let mut first = wrap();
+    until(Duration::from_secs(5), || {
+        fs::read_to_string(dir.join("orphan")).is_ok_and(|pid| pid.trim().parse::<u32>().is_ok())
+    });
+    let orphan: u32 = fs::read_to_string(dir.join("orphan"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    first.kill().unwrap();
+    first.wait().unwrap();
+    run.children.push(wrap());
+    run.wait();
+    assert_eq!(
+        fs::read_to_string(dir.join("ran")).unwrap(),
+        "second attempt"
+    );
+    assert!(platform::process(orphan).is_ok_and(|process| process.live()));
+    unsafe { libc::kill(orphan as i32, libc::SIGKILL) };
+    let stuck = dir.join(fs::read_to_string(dir.join("stuck")).unwrap().trim());
+    fs::set_permissions(stuck, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
 
     let mut run = Run::new("touch should-not-run\n");
     with_source(&run, &[("value", "never")]);

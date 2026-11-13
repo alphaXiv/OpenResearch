@@ -319,17 +319,28 @@ fn step(what: &'static str) -> impl Fn(io::Error) -> io::Error {
     move |error| io::Error::new(error.kind(), format!("{what}: {error}"))
 }
 
-/// Extracts `source.tar` into `repo/`, stopping early at a cancel.
+/// Extracts `source.tar` into `repo/`, stopping early at a cancel. Each attempt unpacks into
+/// its own `repo.part.*`, since a tar left running by a wrapper that died mid-unpack keeps
+/// writing into the one it was given.
 fn unpack(dir: &Path) -> io::Result<()> {
-    let part = dir.join("repo.part");
-    if part.try_exists()? {
-        fs::remove_dir_all(&part)?;
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("repo.part"))
+        {
+            // Best effort: an earlier tar may still be writing there, and the run's directory
+            // goes with the run.
+            let _ = fs::remove_dir_all(path);
+        }
     }
+    let name = format!("repo.part.{}", crate::nonce()?);
+    let part = dir.join(&name);
     fs::create_dir(&part)?;
     let cancel = dir.join("cancel.req");
     let result = crate::exec::run(
         Command::new("tar")
-            .args(["-xf", "source.tar", "-C", "repo.part"])
+            .args(["-xf", "source.tar", "-C", &name])
             .current_dir(dir),
         &[],
         Duration::MAX,
