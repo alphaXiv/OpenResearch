@@ -74,6 +74,7 @@ OpenResearch のマネージドコンピュートを利用できます。
 OpenCode では、次のツールを通じて[ローカルモデルを使う](https://openresearch.sh/docs/agents)こともできます：
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
+<img src=".github/readme-assets/rapid-mlx.svg" alt="" width="18" height="18" align="texttop" /> Rapid-MLX,
 <img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama、またはカスタムエンドポイント。
 
 **最新の文献に基づいて研究仮説を立てる。** OpenResearch は <img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv、<img src=".github/readme-assets/biorxiv.svg" alt="" width="18" height="18" align="absmiddle" /> bioRxiv、<img src=".github/readme-assets/pubmed.svg" alt="" width="18" height="18" align="absmiddle" /> PubMed と連携し、エージェントが関連論文を見つけ、根拠のある仮説を立て、実験を既存の研究と結び付けられるようにします。

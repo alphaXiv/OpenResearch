@@ -74,6 +74,7 @@ Settings → Updates → **Install the `orx` command** 中为终端安装 `orx`�
 你也可以通过以下工具在 OpenCode 中[使用本地模型](https://openresearch.sh/docs/agents)：
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
+<img src=".github/readme-assets/rapid-mlx.svg" alt="" width="18" height="18" align="texttop" /> Rapid-MLX,
 <img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama，或自定义端点。
 
 **以最新文献为依据提出研究假设。** OpenResearch 集成 <img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv、<img src=".github/readme-assets/biorxiv.svg" alt="" width="18" height="18" align="absmiddle" /> bioRxiv 和 <img src=".github/readme-assets/pubmed.svg" alt="" width="18" height="18" align="absmiddle" /> PubMed，让智能体能够查找相关论文、提出有依据的假设，并将实验与现有研究联系起来。

@@ -75,6 +75,7 @@ y utilizar los recursos de cómputo administrados de OpenResearch.
 También puedes [usar un modelo local](https://openresearch.sh/docs/agents) con OpenCode a través de
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
+<img src=".github/readme-assets/rapid-mlx.svg" alt="" width="18" height="18" align="texttop" /> Rapid-MLX,
 <img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama o un endpoint personalizado.
 
 **Fundamenta tus hipótesis en la bibliografía más reciente.** OpenResearch se integra con <img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv, <img src=".github/readme-assets/biorxiv.svg" alt="" width="18" height="18" align="absmiddle" /> bioRxiv y <img src=".github/readme-assets/pubmed.svg" alt="" width="18" height="18" align="absmiddle" /> PubMed para que los agentes encuentren artículos relevantes, formulen hipótesis informadas y conecten sus experimentos con investigaciones existentes.

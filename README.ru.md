@@ -76,6 +76,7 @@ orx up
 Можно также [использовать локальную модель](https://openresearch.sh/docs/agents) с OpenCode через
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
+<img src=".github/readme-assets/rapid-mlx.svg" alt="" width="18" height="18" align="texttop" /> Rapid-MLX,
 <img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama или собственный адрес сервера.
 
 **Опирайте гипотезы на свежую литературу.** OpenResearch интегрирован с <img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv, <img src=".github/readme-assets/biorxiv.svg" alt="" width="18" height="18" align="absmiddle" /> bioRxiv и <img src=".github/readme-assets/pubmed.svg" alt="" width="18" height="18" align="absmiddle" /> PubMed, поэтому агенты находят подходящие статьи, выдвигают обоснованные гипотезы и связывают свои эксперименты с существующими исследованиями.

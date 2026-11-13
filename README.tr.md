@@ -77,6 +77,7 @@ oluşturun.
 Ayrıca OpenCode ile
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
+<img src=".github/readme-assets/rapid-mlx.svg" alt="" width="18" height="18" align="texttop" /> Rapid-MLX,
 <img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama veya özel bir uç nokta aracılığıyla
 [yerel bir model kullanabilirsiniz](https://openresearch.sh/docs/agents).
 

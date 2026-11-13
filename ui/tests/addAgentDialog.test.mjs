@@ -60,9 +60,10 @@ const LM_STUDIO = "http://127.0.0.1:1234/v1";
 const unreachable = () => Response.json({ error: "Cannot reach the local server.", code: "unreachable" }, { status: 400 });
 
 /** Opens the wizard on `tile` over model servers `discover` answers for; returns what each probe asked. */
-async function customEndpoint({ discover, connected = { model: "orx-local-lm/qwen", created: true }, removed = [], tile = m.local_models_custom_endpoint() }) {
+async function customEndpoint({ discover, connected = { model: "orx-local-lm/qwen", created: true }, removed = [], saved = [], machine, tile = m.local_models_custom_endpoint() }) {
   const probes = [];
   serveApp({
+    ...(machine && { "GET /api/settings/local": () => machine }),
     "GET /api/harnesses": () => ({ harnesses: [opencode] }),
     "GET /api/harnesses/acp": () => [],
     "GET /api/harnesses/acp/presets": () => [],
@@ -74,7 +75,10 @@ async function customEndpoint({ discover, connected = { model: "orx-local-lm/qwe
       probes.push(probe);
       return discover(probe);
     },
-    "POST /api/local-models": () => connected,
+    "POST /api/local-models": (init) => {
+      saved.push(JSON.parse(init.body));
+      return connected;
+    },
     "DELETE /api/local-models/orx-local-lm": (_init, path) => { removed.push(path); return { ok: true }; },
   });
   const { workspace } = await render(null);
@@ -148,4 +152,33 @@ test("the local model guide says a server is running without models, and that it
   await customEndpoint({ tile: m.local_models_guide_name(), discover: () => Response.json({ error: "OpenResearch is restarting." }, { status: 503 }) });
   assert.ok(find('[role="dialog"] [role="alert"]', "OpenResearch is restarting."));
   assert.ok(!find('[role="dialog"]', m.local_models_guide_none()), "an unknown check doesn't say nothing runs");
+});
+
+for (const [ownedBy, name] of [["omlx", "oMLX"], ["rapid-mlx", "Rapid-MLX"]]) {
+  test(`a server at an address two apps share is named by who owns its models: ${name}`, async () => {
+    const saved = [];
+    await customEndpoint({ saved, discover: ({ baseUrl }) => baseUrl === "http://127.0.0.1:8000/v1" ? { models: ["qwen"], ownedBy } : unreachable() });
+    for (const other of ["oMLX", "Rapid-MLX"].filter((label) => label !== name)) assert.equal(find('[role="dialog"] button', other), null, `${other} isn't what's running`);
+    await click(find('[role="dialog"] button', name));
+    await click(find('[role="dialog"] button', m.onboarding_continue()));
+    assert.equal(saved[0].name, name);
+  });
+}
+
+test("a server at that address from another app is offered as a custom endpoint", async () => {
+  const saved = [];
+  await customEndpoint({ saved, discover: ({ baseUrl }) => baseUrl === "http://127.0.0.1:8000/v1" ? { models: ["qwen"], ownedBy: "vllm" } : unreachable() });
+  await click(find('[role="dialog"] button', m.local_models_custom_endpoint()));
+  await click(find('[role="dialog"] button', m.onboarding_continue()));
+  assert.equal(saved[0].baseUrl, "http://127.0.0.1:8000/v1");
+  assert.equal(saved[0].name, "Custom Endpoint");
+});
+
+test("on Apple silicon the local model guide also walks through oMLX and Rapid-MLX, without recommending them", async () => {
+  await customEndpoint({ tile: m.local_models_guide_name(), machine: { os: "macos", arch: "aarch64", memBytes: 32 * 2 ** 30, gpus: [] }, discover: unreachable });
+  const picker = find('[role="dialog"] button[aria-haspopup="menu"]', "LM Studio");
+  assert.ok(picker, "LM Studio is still the default");
+  await click(picker);
+  await click(find("button", "Rapid-MLX"));
+  assert.ok(find('[role="dialog"] code', "brew install rapid-mlx"));
 });

@@ -442,7 +442,18 @@ impl std::fmt::Display for Unlisted {
 
 impl std::error::Error for Unlisted {}
 
+/// What a model server lists: its models, and the owner it names for them, which tells apart servers that
+/// share a default address.
+pub struct Listing {
+    pub models: Vec<String>,
+    pub owned_by: Option<String>,
+}
+
 pub async fn discover(req: &Probe) -> Result<Vec<String>> {
+    Ok(listing(req).await?.models)
+}
+
+pub async fn listing(req: &Probe) -> Result<Listing> {
     let local = is_loopback_url(&req.base_url);
     if !local && !is_remote_url(&req.base_url) {
         return Err(anyhow!(
@@ -498,7 +509,14 @@ pub async fn discover(req: &Probe) -> Result<Vec<String>> {
     if ids.is_empty() {
         return Err(Unlisted::NoModels.into());
     }
-    Ok(ids)
+    let owned_by = models
+        .iter()
+        .find_map(|m| m.get("owned_by").and_then(Value::as_str))
+        .map(str::to_owned);
+    Ok(Listing {
+        models: ids,
+        owned_by,
+    })
 }
 
 /// Adds a model to the connection at its address, made under the request's name unless one is
@@ -831,6 +849,36 @@ mod tests {
         )
         .is_err());
         assert_eq!(config["agents"]["title"], "invalid");
+    }
+
+    #[tokio::test]
+    async fn a_listing_names_who_owns_its_models() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/v1/models",
+                    axum::routing::get(|| async {
+                        axum::Json(
+                            json!({"data":[{"id":"qwen3.5-4b-4bit","owned_by":"rapid-mlx"}]}),
+                        )
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let found = listing(&Probe {
+            base_url: base,
+            api_key: String::new(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(found.models, ["qwen3.5-4b-4bit"]);
+        assert_eq!(found.owned_by.as_deref(), Some("rapid-mlx"));
+        server.abort();
     }
 
     #[tokio::test]

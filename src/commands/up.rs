@@ -8121,8 +8121,8 @@ async fn list_local_models() -> OpenCodeResult {
 
 async fn discover_local_models(Json(req): Json<local::local_models::Probe>) -> OpenCodeResult {
     opencode_for_change().await?;
-    let models =
-        local::local_models::discover(&req)
+    let listing =
+        local::local_models::listing(&req)
             .await
             .map_err(
                 |e| match e.downcast_ref::<local::local_models::Unlisted>() {
@@ -8132,7 +8132,9 @@ async fn discover_local_models(Json(req): Json<local::local_models::Probe>) -> O
                     None => bad_request(e.to_string()).into(),
                 },
             )?;
-    Ok(Json(json!({"models":models})))
+    Ok(Json(
+        json!({"models":listing.models,"ownedBy":listing.owned_by}),
+    ))
 }
 
 async fn check_local_model(Path(id): Path<String>) -> OpenCodeResult {
