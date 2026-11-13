@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ExternalLink, Link2, RefreshCw } from "lucide-react";
 import { UnlistedError, type LocalModelConnection } from "../api";
-import { fmtBytes, ltr } from "../i18n";
+import { fmtMemory, ltr } from "../i18n";
 
 import { m } from "../paraglide/messages.js";
 import { OptionPicker } from "./ModelPicker";
@@ -246,7 +246,7 @@ export function LocalModelGuide({ disabled, onFound }: { disabled: boolean; onFo
   const runtimes = machine.data?.os === "macos" && machine.data.arch === "aarch64" ? [...RUNTIMES, ...MLX_RUNTIMES] : RUNTIMES;
   const runtime = [picked, empty?.server.id, recommended].map((id) => runtimes.find((server) => server.id === id)).find(Boolean) ?? LM_STUDIO;
   const memory = machine.data?.memBytes;
-  const size = memory ? <span className="text-subtext">{m.local_models_guide_size({ memory: fmtBytes(memory), size: modelSize(memory) })}</span> : null;
+  const size = memory ? <span className="text-subtext">{m.local_models_guide_size({ memory: fmtMemory(memory), size: modelSize(memory) })}</span> : null;
   const code = (command: string) => <code className="self-start rounded-xs border border-border-variant bg-surface px-1 py-px font-mono text-xs">{command}</code>;
   const download = (url: string) => (
     <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent-blue-strong underline">

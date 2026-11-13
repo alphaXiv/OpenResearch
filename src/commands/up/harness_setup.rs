@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use super::{bad_request, AppState};
 use crate::local::harness::managed;
+use crate::store::human_bytes;
 use crate::telemetry::harness::SetupAttempt;
 
 mod sign_in;
@@ -690,7 +691,6 @@ async fn install_with_progress(
     let install = managed::install(harness, release, &mut progress);
     tokio::pin!(install);
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
-    let megabytes = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1e6);
     loop {
         tokio::select! {
             result = &mut install => {
@@ -708,8 +708,8 @@ async fn install_with_progress(
                 let (done, total) = *received.borrow_and_update();
                 let line = match total {
                     Some(total) if done >= total => "Checking and unpacking…".to_string(),
-                    Some(total) => format!("{} of {}", megabytes(done), megabytes(total)),
-                    None => megabytes(done),
+                    Some(total) => format!("{} of {}", human_bytes(done), human_bytes(total)),
+                    None => human_bytes(done),
                 };
                 write_terminal(socket, &format!("\r\x1b[2K{line}")).await.ok()?;
                 write_progress(socket, done, total).await.ok()?;

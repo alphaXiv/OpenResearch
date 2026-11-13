@@ -1,5 +1,5 @@
 import { m } from "../paraglide/messages.js";
-import { ltr } from "../i18n";
+import { fmtBytes, ltr } from "../i18n";
 // Mirror of openresearch.sh's GitDiff: per-file collapsible cards over
 // react-diff-view's unified view, with refractor syntax highlighting.
 
@@ -17,7 +17,7 @@ import {
 } from "react-diff-view";
 import { refractor } from "refractor";
 import { detectSyntaxLanguageFromFilePath } from "../syntaxLanguage";
-import { fmtBytes, fmtNumber } from "../api";
+import { fmtNumber } from "../api";
 const DIFF_CLASS_NAME = [
   "openresearch-diff flex flex-col gap-4",
   "[&_.openresearch-diff-file]:[--diff-background-color:var(--base)]",

@@ -3654,7 +3654,7 @@ async fn session_worktree(Path(id): Path<String>) -> ApiResult {
 }
 
 /// Cap on file bytes served to the viewer (mirrors openresearch.sh).
-const FILE_READ_LIMIT: u64 = 512_000;
+const FILE_READ_LIMIT: u64 = 512 * 1024;
 
 /// Resolve which on-disk checkout answers a file/code request for a project.
 ///
