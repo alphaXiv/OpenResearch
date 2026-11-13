@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import { QueryObserver } from "@tanstack/react-query";
 import { act, createElement } from "react";
+import { QueryEvents } from "../src/queries/Events.tsx";
 import * as live from "../src/queries/live.ts";
 import { createWorkspace } from "../src/workspace.tsx";
-import { render, serve, streams } from "./render.mjs";
+import { render, serve, streams, settle as settleView } from "./render.mjs";
 
 let workspace, client, queries, invalidation, chatStore;
 beforeEach(() => {
@@ -146,26 +147,100 @@ test("live bounded previews refresh their existing source key without retaining 
   assert.equal(client.getQueryCache().getAll().length, 2);
 });
 
-test("chat projection renders a cold route without waiting for the session catalog", () => {
-  const snapshot = { messages: [{ id: "m" }], queued: [], activeLeafId: "m" };
-  client.setQueryData(queries.getChatMessagesQuery("s").queryKey, snapshot);
-  client.setQueryData(queries.getChatMessagesQuery("hidden").queryKey, snapshot);
-  const state = chatStore.readChatState("p", "s");
-  assert.deepEqual(Object.keys(state.messagesBySession), ["s"]);
-  assert.equal(state.messagesBySession.s, snapshot.messages);
+test("background transcripts retain updates without rerendering the visible chat", async () => {
+  const snapshot = { messages: [], queued: [], activeLeafId: null };
+  const rows = [{ id: "active", busy: false }, { id: "background", busy: true }];
+  client.setQueryData(queries.listChatSessionsQuery("p").queryKey, rows);
+  for (const id of ["active", "background"]) client.setQueryData(queries.getChatMessagesQuery(id).queryKey, snapshot);
+  backend({
+    "/api/chat/sessions?projectId=p": () => ({ sessions: rows }),
+    "/api/chat/sessions/active/messages": () => snapshot,
+    "/api/chat/sessions/background/messages": () => client.getQueryData(queries.getChatMessagesQuery("background").queryKey),
+  });
+  let renders = 0;
+  let visible;
+  function Chat({ id }) {
+    [visible] = chatStore.useChatState("p", id);
+    renders++;
+    return createElement("div", null, visible.messagesBySession[id]?.map((message) => message.id).join(","));
+  }
+  const view = await render(createElement(Chat, { id: "active" }), workspace);
+  await settleView();
+  const before = renders;
+  await act(() => {
+    for (let i = 0; i < 100; i++) chatStore.dispatchChat("p", { type: "upsertMessage", sessionId: "background", message: { id: "reply", role: "assistant", parts: [{ type: "text", text: String(i) }], createdAt: 1 } }, true);
+    chatStore.dispatchChat("p", { type: "setQueued", sessionId: "background", items: [{ id: "queued" }] }, true);
+  });
+  await settleView();
+  assert.equal(renders, before);
+  assert.deepEqual(Object.keys(visible.messagesBySession), ["active"]);
+  const stored = client.getQueryData(queries.getChatMessagesQuery("background").queryKey);
+  assert.equal(stored.messages[0].parts[0].text, "99");
+  assert.equal(stored.queued[0].id, "queued");
+  await view.rerender(createElement(Chat, { id: "background" }));
+  await settleView();
+  assert.equal(view.container.textContent, "reply");
+  assert.equal(visible.messagesBySession.background[0].parts[0].text, "99");
+  assert.equal(visible.queuedBySession.background[0].id, "queued");
 });
 
-test("chat subscriptions ignore observer option changes and pending reads", () => {
-  const options = queries.getChatMessagesQuery("s");
-  const store = chatStore;
-  let notifications = 0;
-  const off = store.subscribeChat(() => notifications++);
-  const observer = new QueryObserver(client, { ...options, enabled: false });
-  observer.setOptions({ ...options, enabled: false });
-  assert.equal(notifications, 0);
-  client.setQueryData(options.queryKey, { messages: [], queued: [], activeLeafId: null });
-  assert.equal(notifications, 1);
+test("resync bursts share a refresh and repair a gap reported during it", async () => {
+  const requests = [];
+  backend({ "/api/projects": () => { const request = deferred(); requests.push(request); return request.promise; } });
+  const options = queries.listProjectsQuery();
+  client.setQueryData(options.queryKey, []);
+  const observer = new QueryObserver(client, options);
+  const off = observer.subscribe(() => {});
+  const first = invalidation.repairLiveQueries();
+  await settle();
+  for (let i = 0; i < 20; i++) assert.equal(invalidation.repairLiveQueries(), first);
+  assert.equal(requests.length, 1);
+  requests[0].resolve({ projects: [{ id: "before-gap" }] });
+  await settle();
+  assert.equal(requests.length, 2);
+  requests[1].resolve({ projects: [{ id: "after-gap" }] });
+  await first;
+  assert.equal(requests.length, 2);
+  assert.equal(client.getQueryData(options.queryKey)[0].id, "after-gap");
   off();
+});
+
+for (const cached of [false, true]) test(`resync repairs a pending ${cached ? "cached" : "cold"} read without rejecting its caller`, async () => {
+  const requests = [];
+  backend({ "/api/projects": (init) => { const request = deferred(); requests.push({ ...request, signal: init.signal }); return request.promise; } });
+  const options = queries.listProjectsQuery();
+  if (cached) client.setQueryData(options.queryKey, []);
+  const observer = new QueryObserver(client, options);
+  const off = observer.subscribe(() => {});
+  const read = client.fetchQuery({ ...options, staleTime: 0 });
+  await settle();
+  const repair = invalidation.repairLiveQueries();
+  await settle();
+  assert.equal(requests[0].signal.aborted, cached);
+  if (!cached) {
+    assert.equal(requests.length, 1);
+    requests[0].resolve({ projects: [{ id: "before-gap" }] });
+    assert.equal((await read)[0].id, "before-gap");
+    await settle();
+  }
+  assert.equal(requests.length, 2);
+  requests[1].resolve({ projects: [{ id: "repaired" }] });
+  await repair;
+  requests[0].resolve({ projects: [{ id: "stale" }] });
+  if (cached) assert.equal((await read)[0].id, "repaired");
+  assert.equal(client.getQueryData(options.queryKey)[0].id, "repaired");
+  off();
+});
+
+test("reconnect preserves a side-chat send waiting on its cold history", async () => {
+  const history = deferred();
+  let sends = 0;
+  backend({ "/api/chat/sessions/side/messages": () => history.promise });
+  const send = client.fetchQuery(queries.getChatMessagesQuery("side")).then(() => { sends++; });
+  await invalidation.repairLiveQueries();
+  history.resolve({ messages: [], queued: [], activeLeafId: null });
+  await send;
+  assert.equal(sends, 1);
 });
 
 test("retiring a scope rejects a refresh even when it had cached data", async (t) => {
@@ -360,15 +435,6 @@ test("sidebar pages preserve indicators arriving during cold and subsequent page
   await assert.rejects(pending, /offline/);
 });
 
-test("cached idle chats keep pending questions available when another chat is selected", () => {
-  client.setQueryData(queries.listChatSessionsQuery("p").queryKey, [{ id: "pending", busy: false }, { id: "active", busy: false }]);
-  const snapshot = { messages: [{ id: "m", parts: [{ type: "prompt", prompt: { kind: "question", resolved: false } }] }], queued: [], activeLeafId: "m" };
-  client.setQueryData(queries.getChatMessagesQuery("pending").queryKey, snapshot);
-  const state = chatStore.readChatState("p", "active");
-  assert.equal(state.messagesBySession.pending, snapshot.messages);
-  assert.equal(state.busySessions.has("pending"), false);
-});
-
 test("account queries read the owning laptop's cache inside another machine's page", async () => {
   const remote = createWorkspace("remote");
   const key = workspace.workspaceKey("getOpenResearchAccount");
@@ -378,4 +444,92 @@ test("account queries read the owning laptop's cache inside another machine's pa
     return createElement("span", null, queries.useOpenResearchAccount().data?.user?.firstName);
   }), remote);
   assert.equal(container.textContent, "Laptop account");
+});
+
+
+test("session updates preserve a background chat's pending input summary", async () => {
+  const key = queries.listChatSessionsQuery("p").queryKey;
+  client.setQueryData(key, [{ id: "waiting", projectId: "p", updatedAt: 1, awaitingInput: true }]);
+  await render(createElement(QueryEvents), workspace);
+  await act(() => streams[0].dispatchEvent(new MessageEvent("chat.session", { data: JSON.stringify({ session: { id: "waiting", projectId: "p", title: "New title", updatedAt: 2 } }) })));
+  assert.equal(client.getQueryData(key)[0].awaitingInput, true);
+  assert.equal(client.getQueryData(key)[0].title, "New title");
+});
+
+
+test("a background input summary survives live events during both list reads", async () => {
+  const requests = [];
+  backend({ "/api/chat/sessions?projectId=p": () => { const request = deferred(); requests.push(request); return request.promise; } });
+  const options = queries.listChatSessionsQuery("p");
+  client.setQueryData(options.queryKey, [{ id: "s", projectId: "p", awaitingInput: false }]);
+  const read = client.fetchQuery({ ...options, staleTime: 0 });
+  live.markLiveUpdate(client, options.queryKey, "s");
+  requests[0].resolve({ sessions: [{ id: "s", projectId: "p", awaitingInput: false }] });
+  await settle();
+  live.markLiveUpdate(client, options.queryKey, "s");
+  client.setQueryData(options.queryKey, [{ id: "s", projectId: "p", awaitingInput: false, contextUsage: { usedTokens: 42 } }]);
+  requests[1].resolve({ sessions: [{ id: "s", projectId: "p", awaitingInput: true }] });
+  const rows = await read;
+  assert.equal(rows[0].awaitingInput, true);
+  assert.equal(rows[0].contextUsage.usedTokens, 42);
+});
+
+
+for (const event of ["open", "resync.required"]) test(`${event} listeners receive post-gap data`, async () => {
+  backend({ "/api/projects": () => ({ projects: [{ id: "post-gap" }] }) });
+  const options = queries.listProjectsQuery();
+  client.setQueryData(options.queryKey, [{ id: "before-gap" }]);
+  await render(createElement(QueryEvents), workspace);
+  let listenerRead;
+  const off = workspace.events.onChatEvent((event) => {
+    if (event.type === "reconnected") listenerRead = client.fetchQuery({ ...options, staleTime: 0 });
+  });
+  await act(() => {
+    if (event === "open") { streams[0].onopen(); streams[0].onopen(); }
+    else streams[0].dispatchEvent(new MessageEvent(event, { data: "{}" }));
+  });
+  assert.equal((await listenerRead)[0].id, "post-gap");
+  off();
+});
+
+
+test("a reconnect seed waits for a new transcript without cancelling a pending cold read", async () => {
+  const requests = [];
+  backend({ "/api/chat/sessions/parent/messages": () => { const request = deferred(); requests.push(request); return request.promise; } });
+  const snapshot = (completedAt) => ({ messages: [{ id: "agent", role: "assistant", parts: [], createdAt: 1, completedAt }], queued: [], activeLeafId: "agent" });
+  const pending = client.fetchQuery(queries.getChatMessagesQuery("parent"));
+  const seed = queries.refreshChatMessages("parent");
+  await settle();
+  assert.equal(requests.length, 1);
+  requests[0].resolve(snapshot(null));
+  assert.equal((await pending).messages[0].completedAt, null);
+  await settle();
+  assert.equal(requests.length, 2);
+  requests[1].resolve(snapshot(2));
+  assert.equal((await seed).messages[0].completedAt, 2);
+});
+
+
+test("the latest reconnect seed survives a second repair replacing its joined read", async () => {
+  const requests = [];
+  backend({ "/api/chat/sessions/parent/messages": () => { const request = deferred(); requests.push(request); return request.promise; } });
+  const snapshot = (completedAt) => ({ messages: [{ id: "agent", role: "assistant", parts: [], createdAt: 1, completedAt }], queued: [], activeLeafId: "agent" });
+  const options = queries.getChatMessagesQuery("parent");
+  client.setQueryData(options.queryKey, snapshot(null));
+  const observer = new QueryObserver(client, { ...options, refetchOnMount: false });
+  const off = observer.subscribe(() => {});
+  const repair = invalidation.repairLiveQueries();
+  const first = queries.refreshChatMessages("parent");
+  invalidation.repairLiveQueries();
+  const second = queries.refreshChatMessages("parent");
+  const result = Promise.allSettled([first, second]);
+  requests[0].resolve(snapshot(null));
+  await settle();
+  assert.equal(requests.length, 3);
+  requests[2].resolve(snapshot(2));
+  await repair;
+  const seeds = await result;
+  assert.equal(seeds[1].status, "fulfilled");
+  assert.equal(seeds[1].value.messages[0].completedAt, 2);
+  off();
 });

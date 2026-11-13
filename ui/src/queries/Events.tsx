@@ -6,7 +6,7 @@ import { markLiveUpdate } from "./live";
 import { inputSummaryChanged } from "./chatState";
 import { useEffect, useMemo } from "react";
 
-import { artifactFamilies, liveFamilies } from "./invalidation";
+import { artifactFamilies } from "./invalidation";
 
 function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefined, next: T) {
   if (!rows) return undefined;
@@ -17,7 +17,7 @@ function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefin
 
 export function QueryEvents() {
   const { workspaceScope, isCurrentScope, queryClient, deletedSessionIds } = useWorkspace();
-  const { invalidateFamilies, removeSession } = useWorkspace().invalidation;
+  const { invalidateFamilies, repairLiveQueries, removeSession } = useWorkspace().invalidation;
   const {
     useOrxEventStream,
     emitEntity,
@@ -88,8 +88,7 @@ export function QueryEvents() {
     },
     onReconnect() {
       if (!isCurrentScope(scope)) return;
-      invalidateFamilies(liveFamilies, scope);
-      invalidateFamilies(["getSessionExperiments"], scope);
+      void repairLiveQueries();
       emitEntity.onReconnect();
     },
   });
@@ -128,7 +127,7 @@ export function QueryEvents() {
           if (!rows) return undefined;
           const old = rows.find((row) => row.id === event.session.id);
           if (!old) return [event.session, ...rows];
-          return upsert(rows, { ...event.session, contextUsage: event.session.contextUsage ?? old.contextUsage });
+          return upsert(rows, { ...event.session, contextUsage: event.session.contextUsage ?? old.contextUsage, awaitingInput: event.session.awaitingInput ?? old.awaitingInput });
         });
       } else if (event.type === "sessionDeleted") {
         removeSession(event.sessionId);

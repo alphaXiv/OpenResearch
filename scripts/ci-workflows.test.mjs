@@ -132,3 +132,33 @@ test('release source guard accepts merged source and rejects wrong tag, branch, 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('desktop recovery uses matching successful artifact builds after publication fails', () => {
+  const root = mkdtempSync(join(tmpdir(), 'orx-release-run-'))
+  try {
+    writeFileSync(join(root, 'gh'), `#!/usr/bin/env node
+const fs = require('fs'), path = require('path'), a = process.argv.slice(2);
+if (a[1] === 'list') console.log('123');
+else if (a[1] === 'download') fs.writeFileSync(path.join(a[a.indexOf('--dir') + 1], 'release-source.json'), process.env.SOURCE);
+else if (a[1] === 'view') console.log(process.env.JOBS);
+else process.exit(2);
+`, { mode: 0o755 })
+    const source = { tag: 'v0.2.27', sha: 'a'.repeat(40) }
+    const jobs = ['plan', 'build-ui', 'build-host / build'].map(name => ({ name, conclusion: 'success' }))
+    jobs.push({ name: 'host', conclusion: 'failure' })
+    const run = (metadata = source, results = jobs) => execFileSync('bash', [script('find-release-run.sh'), source.tag, source.sha], {
+      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, GITHUB_REPOSITORY: 'test/repo', SOURCE: JSON.stringify(metadata), JOBS: JSON.stringify({ jobs: results }) },
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+    assert.equal(run(), '123')
+    assert.equal(run(source, [{ name: 'host', conclusion: 'success' }]), '123')
+    assert.throws(() => run({ ...source, sha: 'b'.repeat(40) }))
+    assert.throws(() => run({ ...source, tag: 'v0.2.26' }))
+    for (const name of ['plan', 'build-ui', 'build-host / build']) {
+      assert.throws(() => run(source, jobs.filter(job => job.name !== name)))
+      for (const conclusion of ['failure', 'skipped']) {
+        assert.throws(() => run(source, jobs.map(job => job.name === name ? { ...job, conclusion } : job)))
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
