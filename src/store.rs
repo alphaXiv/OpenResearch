@@ -779,10 +779,12 @@ const SHARED_SSH_LOCK: (&str, &str) = ("run-logs", ".supervisor.shared-ssh.lock"
 /// The kept end of an engine run's log too large to keep whole.
 const TAIL_LOG: (&str, &str) = ("run-logs", ".tail.log");
 /// Per-run files as (data-dir root, name suffix); the supervisor lock goes last so it excludes until the end.
-const RUN_ARTIFACTS: [(&str, &str); 18] = [
+const RUN_ARTIFACTS: [(&str, &str); 20] = [
     ("local-runs", ""),
     ("run-logs", ".log"),
     ("run-logs", ".spool.log"),
+    ("run-logs", ".spool.json"),
+    ("run-logs", ".spool.json.part"),
     ("run-logs", ".log.part"),
     ("run-logs", ".log.part.json"),
     TAIL_LOG,
@@ -3724,7 +3726,7 @@ impl Store {
     }
 
     /// Hold through ownership lookup, native purge and local row deletion, across dashboard processes.
-    pub fn lock_native_deletion(&self) -> Result<std::fs::File> {
+    pub fn lock_native_deletion(&self) -> Result<crate::file_lock::FileLock> {
         let path = self
             .conn
             .path()
@@ -3740,7 +3742,7 @@ impl Store {
                 "Could not lock native chat deletion; retry when other deletions finish: {error}"
             )
         })?;
-        Ok(lock)
+        Ok(crate::file_lock::FileLock::new(lock))
     }
 
     pub fn native_sessions_for_deletion(
@@ -3857,7 +3859,7 @@ impl Store {
     }
 
     /// Keeps any dashboard from starting a data-dir move until dropped; `None` while a move holds or claims it.
-    fn hold_off_data_dir_move(&self) -> Result<Option<std::fs::File>> {
+    fn hold_off_data_dir_move(&self) -> Result<Option<crate::file_lock::FileLock>> {
         if self.data_dir_move_claimed()? {
             return Ok(None);
         }
@@ -3868,6 +3870,7 @@ impl Store {
             Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
         }
+        let hold = crate::file_lock::FileLock::new(hold);
         Ok((!self.data_dir_move_lease_exists()?).then_some(hold))
     }
 
@@ -10467,16 +10470,7 @@ mod tests {
             if std::env::var(CHILD_PHASE).unwrap() == "blocked" {
                 assert!(store.lock_native_deletion().is_err());
             } else {
-                // A released lock lingers in children the parent's other tests forked, until
-                // they exec.
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                let _lock = loop {
-                    match store.lock_native_deletion() {
-                        Ok(lock) => break lock,
-                        Err(error) => assert!(std::time::Instant::now() < deadline, "{error}"),
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                };
+                let _lock = store.lock_native_deletion().unwrap();
                 let (deleting, retained) = store
                     .native_sessions_for_deletion(&["second".into()], &["opencode", "claude-code"])
                     .unwrap();

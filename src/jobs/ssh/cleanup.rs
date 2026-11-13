@@ -488,15 +488,12 @@ mod tests {
         let bin = home.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let squeue = bin.join("squeue");
-        std::fs::write(
+        orx_test_support::write_executable(
             &squeue,
             "#!/bin/sh\ncase \"$3\" in 41) echo RUNNING;; 42) echo 'slurm_load_jobs error: Invalid job id specified' >&2; exit 1;; *) echo 'Unable to contact slurm controller' >&2; exit 1;; esac\n",
+            0o755,
         )
         .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&squeue, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
         for (id, pid, node) in [
             ("busy", wrapper.id(), node.as_str()),
             ("done", 999_999, node.as_str()),
@@ -631,7 +628,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn container_runs_stay_queued_until_docker_reports_the_container_gone() {
-        use std::os::unix::fs::PermissionsExt as _;
         // (inspect exit, info exit, expected outcome): stopped, removed, daemon down.
         for (inspect, info, expected) in [
             (
@@ -650,15 +646,15 @@ mod tests {
             let bin = home.path().join("bin");
             std::fs::create_dir_all(&bin).unwrap();
             let docker = bin.join("docker");
-            std::fs::write(
+            orx_test_support::write_executable(
                 &docker,
                 format!(
                     "#!/bin/sh\ncase \"$1\" in container) exit {inspect};; info) exit {info};; esac\n\
                      echo 'container is not running' >&2\nexit 1\n"
                 ),
+                0o755,
             )
             .unwrap();
-            std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
             let mut container = run("c", None, false);
             container.container = Some(("abc".into(), "/root/.orx/runs/c".into()));
             let dir = home.path().join(".orx/runs/c");

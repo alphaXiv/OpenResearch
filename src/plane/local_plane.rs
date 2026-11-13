@@ -620,6 +620,7 @@ impl ApiClient {
         args.chat_session_id = args.launching_chat_session();
         args.agent_origin = crate::agent_origin();
         args.caller_config_dir = Some(crate::commands::up::absolute_config_dir());
+        args.caller_python_overrides = crate::jobs::caller_python_overrides();
         args.invocation_context = args
             .invocation_identity()?
             .map(|identity| serde_json::to_string(&identity))

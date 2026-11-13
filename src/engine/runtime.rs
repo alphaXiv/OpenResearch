@@ -1131,6 +1131,8 @@ impl Commands for Runtime {
             args["container"].as_str().map(str::to_owned),
             args["noContainer"] == true,
             args["address"].as_str().map(str::to_owned),
+            &serde_json::from_value::<Option<_>>(args["callerPythonOverrides"].clone())?
+                .unwrap_or_default(),
         )
         .await
     }

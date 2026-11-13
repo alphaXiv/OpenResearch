@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::num::NonZeroU64;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -557,8 +557,7 @@ fn fixture_cleanup_does_not_abort_during_unwind() {
     let fixture = empty_fixture();
     let bin = fixture.root.join("bin");
     fs::create_dir(&bin).unwrap();
-    fs::write(bin.join("pgrep"), "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(bin.join("pgrep"), fs::Permissions::from_mode(0o700)).unwrap();
+    orx_test_support::write_executable(bin.join("pgrep"), "#!/bin/sh\nexit 0\n", 0o700).unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",

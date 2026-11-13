@@ -829,6 +829,12 @@ mod tests {
         assert!(refused.unwrap_err().to_string().contains("invalid_client"));
         assert_eq!(stored_refresh_token(), "device-refresh-1");
 
+        // A wait that overruns the code's life still asks once before calling it expired.
+        device.lock().unwrap().expires_in = 0;
+        let (expired, _) = connect(&["authorization_pending"]).await;
+        assert!(expired.unwrap_err().to_string().contains("expired"));
+        assert_eq!(device.lock().unwrap().polls.len(), 1);
+
         // A code alphaXiv never settles ends when it expires.
         device.lock().unwrap().expires_in = 2;
         let (expired, _) = connect(&["authorization_pending"; 1000]).await;

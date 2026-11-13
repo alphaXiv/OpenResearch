@@ -1090,15 +1090,13 @@ mod tests {
             routing::{get, post},
             Json, Router,
         };
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
         };
         let fixture = git::TemporaryDirectory::new("orx-resident-model").unwrap();
         let path = fixture.path().join("opencode");
-        std::fs::write(&path, "#!/bin/sh\necho 1.19.0\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        orx_test_support::write_executable(&path, "#!/bin/sh\necho 1.19.0\n", 0o700).unwrap();
         let binary = resolve_binary_at(path).await.unwrap();
         let database_path = fixture.path().join("opencode.db");
         let database =
@@ -1211,12 +1209,10 @@ mod tests {
             return;
         }
         use axum::{routing::get, Json, Router};
-        use std::os::unix::fs::PermissionsExt;
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let fixture = git::TemporaryDirectory::new("orx-resident-config").unwrap();
             let path = fixture.path().join("opencode");
-            std::fs::write(&path, "#!/bin/sh\necho 1.19.0\n").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            orx_test_support::write_executable(&path, "#!/bin/sh\necho 1.19.0\n", 0o700).unwrap();
             let binary = resolve_binary_at(path).await.unwrap();
             let database_path = fixture.path().join("opencode.db");
             let write_key = |key: &str| {

@@ -1656,13 +1656,17 @@ pub(crate) fn kill_shell_group(pid: Option<u32>) {
 /// Kill an agent and every command it started. Agents such as `agy` start each
 /// command in its own session, out of reach of [`kill_shell_group`]; detached
 /// experiment supervisors (`orx supervise`) are spared so their runs continue.
-pub(crate) fn kill_agent_tree(pid: Option<u32>) {
+pub(crate) async fn kill_agent_tree(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
-    stop_process_tree(pid);
     #[cfg(unix)]
-    kill_shell_group(Some(pid));
+    {
+        stop_process_tree(pid);
+        kill_shell_group(Some(pid));
+    }
+    #[cfg(not(unix))]
+    stop_process_tree(pid).await;
 }
 
 #[cfg(unix)]
@@ -1726,7 +1730,9 @@ fn is_experiment_supervisor(command: &str, supervisor_exe: Option<&std::path::Pa
 }
 
 #[cfg(not(unix))]
-fn stop_process_tree(pid: u32) {
+async fn stop_process_tree(pid: u32) {
+    // PowerShell sometimes never exits; the caller still kills the agent itself.
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(15);
     let script = r#"
 $ErrorActionPreference = 'Stop'
 $processes = @(Get-CimInstance Win32_Process)
@@ -1740,13 +1746,20 @@ function Stop-TurnProcess([uint32] $processId) {
 }
 Stop-TurnProcess ([uint32] $env:ORX_STOP_PID)
 "#;
-    let result = crate::process::command("powershell.exe")
+    let status = crate::process::tokio_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("ORX_STOP_PID", pid.to_string())
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
+        .kill_on_drop(true)
         .status();
-    if !result.is_ok_and(|status| status.success()) {
-        eprintln!("orx up: could not inspect agent descendants of {pid} while stopping it");
+    match tokio::time::timeout(BOUND, status).await {
+        Ok(Ok(status)) if status.success() => {}
+        Ok(_) => eprintln!("orx up: could not inspect agent descendants of {pid} while stopping it"),
+        Err(_) => eprintln!(
+            "orx up: PowerShell did not list the agent descendants of {pid} within {}s; stopping only the agent",
+            BOUND.as_secs()
+        ),
     }
 }
 
@@ -1791,7 +1804,7 @@ mod agent_tree_tests {
             pid,
             "command must lead its group"
         );
-        super::kill_agent_tree(child.id());
+        super::kill_agent_tree(child.id()).await;
         child.wait().await.unwrap();
         for _ in 0..100 {
             if unsafe { libc::kill(pid, 0) } != 0 {
@@ -10079,11 +10092,13 @@ mod cap_tests {
 
     #[cfg(unix)]
     fn write_orx_stub(dir: &std::path::Path, marker: &str) {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir).unwrap();
-        let bin = dir.join("orx");
-        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s' {marker}\n")).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        orx_test_support::write_executable(
+            dir.join("orx"),
+            format!("#!/bin/sh\nprintf '%s' {marker}\n"),
+            0o755,
+        )
+        .unwrap();
     }
 
     /// A stale `orx` on a directory a user startup file prepends, ahead of the
@@ -13789,8 +13804,6 @@ for line in sys.stdin:
     #[cfg(unix)]
     #[test]
     fn claude_fork_switches_branch_the_native_session() {
-        use std::os::unix::fs::PermissionsExt;
-
         async fn finished(
             chat: &ChatHost,
             events: &mut broadcast::Receiver<(&'static str, Value)>,
@@ -13837,7 +13850,7 @@ for line in sys.stdin:
             let args = root.join("claude-args");
             let prompts = root.join("claude-prompts");
             std::fs::create_dir_all(&bin).unwrap();
-            std::fs::write(
+            orx_test_support::write_executable(
                 bin.join("claude"),
                 format!(
                     r#"#!/bin/sh
@@ -13872,10 +13885,9 @@ done
                     args = args.display(),
                     prompts = prompts.display()
                 ),
+                0o755,
             )
             .unwrap();
-            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
             let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
                 &std::env::var_os("PATH").unwrap_or_default(),
             )))

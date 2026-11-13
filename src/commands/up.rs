@@ -3089,6 +3089,7 @@ impl CreateRunReq {
             agent_origin: self.agent_origin,
             forwarded: true,
             caller_config_dir: None,
+            caller_python_overrides: Default::default(),
         }
     }
 }

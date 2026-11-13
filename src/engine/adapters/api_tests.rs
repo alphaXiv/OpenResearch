@@ -14,10 +14,8 @@ use crate::local::model::LocalExperiment;
 use crate::store::{LaunchSpec, Store, SubmittingRun};
 
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    orx_test_support::write_executable(path, body, 0o700).unwrap();
 }
 
 pub(super) fn engine(root: &Path) -> Engine {
@@ -61,6 +59,50 @@ fn pending<'a>(
     }
 }
 
+/// Serves the HF log stream for the next connection from `sse/<n>`, recording each query in
+/// `sse.log`; a missing script answers 503. Each script line is sent as is, except `!keepalive`,
+/// which sends keep-alive comments and no data from then on.
+fn sse(root: &Path, query: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use std::io::Write;
+    let log = root.join("sse.log");
+    let connection = std::fs::read_to_string(&log).map_or(0, |log| log.lines().count());
+    let mut requests = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    writeln!(requests, "{query}").unwrap();
+    let Ok(script) = std::fs::read_to_string(root.join("sse").join(connection.to_string())) else {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response();
+    };
+    let lines: std::collections::VecDeque<String> = script.lines().map(str::to_owned).collect();
+    let body = futures::stream::unfold(lines, |mut lines| async move {
+        let line = match lines.front()?.as_str() {
+            "!keepalive" => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                ": keep-alive\n".to_owned()
+            }
+            _ => format!("{}\n", lines.pop_front()?),
+        };
+        Some((Ok::<_, std::io::Error>(line), lines))
+    });
+    axum::body::Body::from_stream(body).into_response()
+}
+
+/// An SSE script of HF log events, each `(timestamp, data)`.
+fn hf_events(events: &[(&str, &str)]) -> String {
+    events
+        .iter()
+        .map(|(timestamp, data)| {
+            format!(
+                "data: {}\n\n",
+                json!({"data": data, "timestamp": timestamp})
+            )
+        })
+        .collect()
+}
+
 /// Runs the calling test alone in a child process, against a fake provider API
 /// and with fake provider CLIs first on `PATH`. `None` in the parent.
 async fn isolated() -> Option<PathBuf> {
@@ -86,6 +128,9 @@ async fn isolated() -> Option<PathBuf> {
             .unwrap();
         writeln!(requests, "{method} {}", uri.path()).unwrap();
         let headers = axum::http::HeaderMap::new();
+        if uri.path().ends_with("/logs") && root.join("sse").is_dir() {
+            return sse(&root, uri.query().unwrap_or_default());
+        }
         if uri.path().ends_with("/logs") && root.join("slow-logs").exists() {
             tokio::time::sleep(Duration::from_secs(5)).await;
             return (headers, Json(json!({}))).into_response();
@@ -358,12 +403,15 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
     }];
     assert_eq!(
         adapter.observe(&runs, Duration::from_secs(2)).await,
-        vec![(
-            "run".into(),
-            Observation::Running {
-                started_at: Some(1234)
-            }
-        )]
+        vec![
+            (
+                "run".into(),
+                Observation::Running {
+                    started_at: Some(1234)
+                }
+            ),
+            ("run".into(), Observation::Log { len: 0 })
+        ]
     );
     assert!(adapter
         .observe(&runs, Duration::from_secs(2))
@@ -372,7 +420,7 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
     clock.advance(Duration::from_secs(10));
     assert_eq!(
         adapter.observe(&runs, Duration::from_secs(2)).await.len(),
-        1
+        2
     );
     *response.lock().unwrap() = json!({"status":"SUCCEEDED", "start_time":1234, "end_time":4567});
     clock.advance(Duration::from_secs(10));
@@ -446,9 +494,11 @@ with (root/'kubectl.log').open('a') as f: f.write(' '.join(a)+'\n')
 if '--dry-run=client' in a:
     print(sys.stdin.read())
 elif a[0]=='get' and a[1]=='pods':
-    print('{"items":[]}' if a[-1]=='json' else 'pod-1',end='')
+    print(json.dumps({'items':[{'metadata':{'name':'pod-1','annotations':{'kubectl.kubernetes.io/default-container':'run'}},'status':{'phase':'Running','containerStatuses':[{'name':'run','state':{'running':{'startedAt':'2026-01-01T00:00:00Z'}}}]}}]}))
 elif a[0]=='get' and a[1]=='job' and a[2]!='-n' and (root/'finished').exists():
     print('{"status":{"succeeded":1}}')
+elif a[0]=='get' and a[1]=='job' and a[2]!='-n':
+    print('{"spec":{"activeDeadlineSeconds":3600}}')
 elif a[0]=='get':
     print((root/'resources.json').read_text())
 elif a[0]=='exec' and 'test' in a:
@@ -481,7 +531,7 @@ else:
     let metadata = BackendDescriptor::parse(r#"{"kind":"k8s_job"}"#).unwrap();
     let launch = LaunchSpec {
         kind: "k8s_job".into(),
-        target: None,
+        target: Some("default".into()),
         options: json!({
             "manifest":manifest.to_string(), "script":"true", "run_token":"run", "env":{}, "timeout_seconds":3600, "labels":{}, "pod_env":[], "source_archive":archive
         }),
@@ -501,27 +551,42 @@ else:
             },
         )
         .unwrap();
-    let adapter = super::api::Adapter::new(
-        K8sAccount {
-            context: None,
-            namespace: "default".into(),
-        },
-        Arc::new(TestClock::new()),
-        root.join("spools"),
-    );
-    engine.recover(&adapter, "run").await.unwrap();
+    let adapter = |clock: &Arc<TestClock>| {
+        super::api::Adapter::new(
+            K8sAccount::new(None, "default".into()),
+            clock.clone(),
+            root.join("spools"),
+        )
+    };
+    let clock = Arc::new(TestClock::new());
+    let first = adapter(&clock);
+    engine.recover(&first, "run").await.unwrap();
     assert_eq!(engine.load("run").unwrap().0.status, "starting");
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: handle_of(&engine.load("run").unwrap().0).unwrap(),
+    };
+    let budget = Duration::from_secs(10);
+    engine
+        .observe_runs(&first, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
     assert_eq!(std::fs::read(root.join("source.tar")).unwrap(), b"snapshot");
+    engine
+        .observe_runs(&adapter(&clock), std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("copies")).unwrap(),
+        "copy\n"
+    );
+    let adapter = first;
     let state = engine.load("run").unwrap().1;
     let mut intent = RunIntent::new(engine.load("run").unwrap().0, &state).unwrap();
     assert!(matches!(
         adapter.recover(&intent).await,
         Recovery::Found(Handle::Api { .. })
     ));
-    assert_eq!(
-        std::fs::read_to_string(root.join("copies")).unwrap(),
-        "copy\n"
-    );
     let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
     assert!(
         !calls
@@ -578,6 +643,390 @@ else:
     assert!(matches!(adapter.recover(&intent).await, Recovery::Absent));
     let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
     assert!(calls.contains("delete job/primary -n default --cascade=foreground --wait=false"));
+}
+
+/// A cluster whose one Job's pod is whatever `pod.json` says; `cp` fails as a real API server
+/// does until the pod is on a node. The Job started at 2026-01-01T00:00:00Z and fails once `now`
+/// (seconds since then) reaches its deadline.
+const WAITING_KUBECTL: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['ORX_API_ROOT'])
+a = sys.argv[1:]
+with (root/'kubectl.log').open('a') as f: f.write(' '.join(a)+'\n')
+pod = json.loads((root/'pod.json').read_text())
+pod['metadata'] = {'name': 'run-pod', 'annotations': {'kubectl.kubernetes.io/default-container': 'run'}}
+deleted = (root/'deleted').exists()
+job_path = root/'job.json'
+job = json.loads(job_path.read_text()) if job_path.exists() else {'spec': {}}
+if '--dry-run=client' in a:
+    print(sys.stdin.read())
+elif a[0] == 'apply':
+    sys.stdin.read()
+elif a[0] == 'create':
+    doc = json.loads(sys.stdin.read())
+    if doc['kind'] == 'Job':
+        job_path.write_text(json.dumps(doc))
+elif a[0] == 'patch':
+    if (root/'patch-forbidden').exists():
+        print('Error from server (Forbidden): jobs.batch "run" is forbidden: User "lab" cannot patch resource "jobs" in API group "batch" in the namespace "default"', file=sys.stderr)
+        sys.exit(1)
+    job['spec'].update(json.loads(a[a.index('-p') + 1])['spec'])
+    job_path.write_text(json.dumps(job))
+elif a[0] == 'delete':
+    (root/'deleted').touch()
+elif a[:2] == ['get', 'job']:
+    if deleted:
+        print('Error from server (NotFound): jobs.batch "run" not found', file=sys.stderr)
+        sys.exit(1)
+    now = int((root/'now').read_text()) if (root/'now').exists() else 0
+    deadline = job['spec'].get('activeDeadlineSeconds')
+    status = {'startTime': '2026-01-01T00:00:00Z'}
+    if deadline is not None and now >= deadline:
+        status['conditions'] = [{'type': 'Failed', 'status': 'True', 'reason': 'DeadlineExceeded',
+                                 'message': 'Job was active longer than specified deadline'}]
+    else:
+        status['active'] = 1
+    print(json.dumps({'spec': job['spec'], 'status': status}))
+elif a[:2] == ['get', 'pods'] and a[-1] == 'json':
+    print(json.dumps({'items': [] if deleted else [pod]}))
+elif a[:2] == ['get', 'pods']:
+    print('' if deleted else 'run-pod', end='')
+elif a[:2] == ['get', 'pod']:
+    print(json.dumps(pod))
+elif a[:2] == ['get', 'events']:
+    path = root/'events.json'
+    print(path.read_text() if path.exists() else '{"items":[]}')
+elif a[0] == 'exec' and 'test' in a:
+    sys.exit(0 if (root/'ready').exists() else 1)
+elif a[0] == 'cp':
+    if not pod['spec'].get('nodeName'):
+        print('Error from server (BadRequest): pod run-pod does not have a host assigned', file=sys.stderr)
+        sys.exit(1)
+    (root/'source.tar').write_bytes(Path(a[1]).read_bytes())
+elif a[0] == 'exec' and 'sh' in a:
+    (root/'ready').touch()
+else:
+    raise Exception(a)
+"#;
+
+fn waiting_pod(root: &Path, node: Option<&str>, status: Value) {
+    let pod = json!({"spec": {"nodeName": node}, "status": status});
+    std::fs::write(root.join("pod.json"), pod.to_string()).unwrap();
+}
+
+fn script_waiting(reason: &str, message: &str) -> Value {
+    json!({"phase": "Pending", "containerStatuses": [
+        {"name": "run", "image": "ghcr.io/lab/train:v1",
+         "state": {"waiting": {"reason": reason, "message": message}}}
+    ]})
+}
+
+/// `Failed` events kubelet recorded for the pod, as (container field path, time, message).
+fn pull_events(root: &Path, events: &[(&str, &str, &str)]) {
+    let items: Vec<Value> = events
+        .iter()
+        .map(|(field, at, message)| {
+            json!({"reason": "Failed", "lastTimestamp": at, "message": message,
+                "involvedObject": {"kind": "Pod", "name": "run-pod", "fieldPath": field}})
+        })
+        .collect();
+    std::fs::write(
+        root.join("events.json"),
+        json!({"items": items}).to_string(),
+    )
+    .unwrap();
+}
+
+fn script_running(started_at: &str) -> Value {
+    json!({"phase": "Running", "containerStatuses": [
+        {"name": "run", "state": {"running": {"startedAt": started_at}}}
+    ]})
+}
+
+/// Submits a k8s run against [`WAITING_KUBECTL`] and returns its engine, adapter and handle.
+async fn waiting_run(
+    root: &Path,
+) -> (
+    Engine,
+    super::api::Adapter<K8sAccount>,
+    Arc<TestClock>,
+    WatchedRun,
+) {
+    script(&root.join("bin/kubectl"), WAITING_KUBECTL);
+    let archive = root.join("archive.tar");
+    std::fs::write(&archive, "snapshot").unwrap();
+    let manifest = json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"run"},"spec":{"template":{"spec":{"restartPolicy":"Never","containers":[{"name":"run","image":"ghcr.io/lab/train:v1","command":["bash","-c","eval \"$ORX_SCRIPT\""]}]}}}});
+    let metadata = BackendDescriptor::parse(r#"{"kind":"k8s_job"}"#).unwrap();
+    let launch = LaunchSpec {
+        kind: "k8s_job".into(),
+        target: Some("default".into()),
+        options: json!({
+            "manifest":manifest.to_string(), "script":"true", "run_token":"run", "env":{}, "timeout_seconds":3600, "labels":{}, "pod_env":[], "source_archive":archive
+        }),
+    };
+    let engine = engine(root);
+    let clock = Arc::new(TestClock::new());
+    let adapter = super::api::Adapter::new(
+        K8sAccount::new(None, "default".into()),
+        clock.clone(),
+        root.join("spools"),
+    );
+    engine
+        .submit(&adapter, pending("run", &metadata, &launch))
+        .await
+        .unwrap();
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: handle_of(&engine.load("run").unwrap().0).expect("the launch recorded no handle"),
+    };
+    (engine, adapter, clock, run)
+}
+
+#[tokio::test]
+async fn k8s_waiting_pod_stays_queued_and_receives_the_source_once_it_runs() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    waiting_pod(
+        &root,
+        None,
+        json!({"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+            "reason": "Unschedulable", "message": "0/2 nodes are available: 2 Insufficient nvidia.com/gpu."}]}),
+    );
+    let (engine, adapter, clock, run) = waiting_run(&root).await;
+    let starting = |engine: &Engine| {
+        let (row, state) = engine.load("run").unwrap();
+        assert_eq!(row.status, "starting");
+        assert_eq!(state.contact, crate::store::Contact::Live);
+    };
+    starting(&engine);
+
+    let budget = Duration::from_secs(10);
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    starting(&engine);
+
+    waiting_pod(
+        &root,
+        Some("gpu-1"),
+        script_waiting("ContainerCreating", ""),
+    );
+    clock.advance(budget);
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    starting(&engine);
+    assert!(!root.join("source.tar").exists());
+
+    // orx up restarts before the pod runs.
+    let adapter = super::api::Adapter::new(
+        K8sAccount::new(None, "default".into()),
+        clock.clone(),
+        root.join("spools"),
+    );
+    waiting_pod(&root, Some("gpu-1"), script_running("2026-01-01T00:01:00Z"));
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(root.join("source.tar")).unwrap(), b"snapshot");
+    assert_eq!(engine.load("run").unwrap().0.status, "running");
+    let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
+    assert!(
+        !calls.lines().any(|call| call.starts_with("delete")),
+        "{calls}"
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| call.starts_with("create -f"))
+            .count(),
+        1,
+        "{calls}"
+    );
+}
+
+#[tokio::test]
+async fn k8s_timeout_starts_when_the_script_container_does() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    waiting_pod(
+        &root,
+        None,
+        json!({"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+            "reason": "Unschedulable", "message": "0/2 nodes are available: 2 Insufficient nvidia.com/gpu."}]}),
+    );
+    let (engine, adapter, clock, run) = waiting_run(&root).await;
+    let budget = Duration::from_secs(10);
+    let observe_at = |now: u64| {
+        std::fs::write(root.join("now"), now.to_string()).unwrap();
+        clock.advance(budget);
+        async {
+            engine
+                .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+                .await
+                .unwrap();
+            engine.load("run").unwrap().0
+        }
+    };
+
+    // Waits two hours for a GPU, twice its one-hour timeout.
+    assert_eq!(observe_at(7200).await.status, "starting");
+
+    waiting_pod(&root, Some("gpu-1"), script_running("2026-01-01T02:00:00Z"));
+    assert_eq!(observe_at(7200).await.status, "running");
+    assert_eq!(observe_at(7200 + 3599).await.status, "running");
+
+    let row = observe_at(7200 + 3600).await;
+    assert_eq!(row.status, "failed");
+    let reason = row.result_markdown.unwrap();
+    assert!(reason.contains("DeadlineExceeded"), "{reason}");
+}
+
+#[tokio::test]
+async fn k8s_pull_errors_that_may_have_cleared_keep_the_run_queued() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    waiting_pod(
+        &root,
+        Some("gpu-1"),
+        script_waiting(
+            "ImagePullBackOff",
+            "Back-off pulling image \"ghcr.io/lab/train:v1\"",
+        ),
+    );
+    pull_events(
+        &root,
+        &[
+            (
+                "spec.initContainers{setup}",
+                "2026-01-01T00:01:00Z",
+                "Failed to pull image \"ghcr.io/lab/setup:v1\": unauthorized: authentication required",
+            ),
+            (
+                "spec.containers{run}",
+                "2026-01-01T00:02:00Z",
+                "Failed to pull image \"ghcr.io/lab/train:v1\": unauthorized: authentication required",
+            ),
+            (
+                "spec.containers{run}",
+                "2026-01-01T00:03:00Z",
+                "Failed to pull image \"ghcr.io/lab/train:v1\": toomanyrequests: rate limit exceeded",
+            ),
+        ],
+    );
+    let (engine, adapter, _clock, run) = waiting_run(&root).await;
+    engine
+        .observe_runs(
+            &adapter,
+            std::slice::from_ref(&run),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.load("run").unwrap().0.status, "starting");
+    assert!(!root.join("deleted").exists());
+}
+
+#[tokio::test]
+async fn k8s_a_forbidden_deadline_patch_fails_the_run_and_frees_the_job() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    std::fs::write(root.join("patch-forbidden"), "").unwrap();
+    waiting_pod(&root, Some("gpu-1"), script_running("2026-01-01T00:01:00Z"));
+    let (engine, adapter, _clock, run) = waiting_run(&root).await;
+    engine
+        .observe_runs(
+            &adapter,
+            std::slice::from_ref(&run),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    let row = engine.load("run").unwrap().0;
+    assert_eq!(row.status, "failed");
+    let reason = row.result_markdown.unwrap();
+    assert!(reason.contains("cannot patch"), "{reason}");
+    assert!(root.join("deleted").exists());
+    assert!(!root.join("source.tar").exists());
+}
+
+#[tokio::test]
+async fn k8s_preflight_needs_permission_to_patch_jobs() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/kubectl"),
+        r#"#!/usr/bin/env python3
+import sys
+a = sys.argv[1:]
+if a[:2] == ['auth', 'can-i']:
+    print('yes' if a[2] == 'create' else 'no')
+    sys.exit(0 if a[2] == 'create' else 1)
+"#,
+    );
+    let backend = crate::compute::backend("k8s").unwrap();
+    let preflight = backend
+        .preflight(&crate::compute::tests::tinker_args())
+        .await
+        .unwrap();
+    assert!(!preflight.ready, "{:?}", preflight.detail);
+}
+
+#[tokio::test]
+async fn k8s_unpullable_image_fails_with_the_pull_error_and_frees_the_job() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let backoff = || {
+        script_waiting(
+            "ImagePullBackOff",
+            "Back-off pulling image \"ghcr.io/lab/train:v1\"",
+        )
+    };
+    waiting_pod(&root, Some("gpu-1"), backoff());
+    let rate_limited = (
+        "spec.containers{run}",
+        "2026-01-01T00:01:00Z",
+        "Failed to pull image \"ghcr.io/lab/train:v1\": toomanyrequests: rate limit exceeded",
+    );
+    pull_events(&root, &[rate_limited]);
+    let (engine, adapter, clock, run) = waiting_run(&root).await;
+    let budget = Duration::from_secs(10);
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    assert_eq!(engine.load("run").unwrap().0.status, "starting");
+    assert!(!root.join("deleted").exists());
+
+    let missing = (
+        "spec.containers{run}",
+        "2026-01-01T00:02:00Z",
+        "Failed to pull image \"ghcr.io/lab/train:v1\": rpc error: code = NotFound desc = failed to resolve reference \"ghcr.io/lab/train:v1\": not found",
+    );
+    pull_events(&root, &[rate_limited, missing]);
+    clock.advance(budget);
+    engine
+        .observe_runs(&adapter, std::slice::from_ref(&run), budget)
+        .await
+        .unwrap();
+    let row = engine.load("run").unwrap().0;
+    assert_eq!(row.status, "failed");
+    let reason = row.result_markdown.unwrap();
+    assert!(
+        reason.contains("ghcr.io/lab/train:v1") && reason.contains("not found"),
+        "{reason}"
+    );
+    assert!(root.join("deleted").exists());
 }
 
 #[tokio::test]
@@ -2067,7 +2516,7 @@ async fn chatty_modal_logs_publish_a_partial_page_and_reuse_it() {
         &format!(
             r#"#!/bin/sh
 printf 'download\n' >> '{}/downloads'
-while :; do printf 'line\n'; sleep 0.01; done
+while :; do printf '["", 5]\nline\n'; sleep 0.01; done
 "#,
             root.display()
         ),
@@ -2131,7 +2580,12 @@ status) cat state ;;
 logs)
   if ! mkdir active-stream; then touch overlapping-streams; exit 1; fi
   trap 'rmdir active-stream' EXIT
-  cat history
+  from=${{5:-0}}
+  cp history snapshot
+  size=$(wc -c < snapshot | tr -d ' ')
+  if [ "$size" -lt "$from" ]; then size=$from; fi
+  printf '["%s", %d]\n' "$from" $((size - from))
+  tail -c +$((from + 1)) snapshot
   ;;
 esac
 "#,
@@ -2233,7 +2687,7 @@ async fn finished_modal_logs_drain_through_pauses_before_they_are_kept() {
     };
     script(
         &root.join("bin/modal-python"),
-        "#!/bin/sh\nprintf 'first\\n'\nsleep 11\nprintf 'last\\n'\n",
+        "#!/bin/sh\nprintf '[\"\", 6]\\nfirst\\n'\nsleep 11\nprintf '[\"\", 5]\\nlast\\n'\n",
     );
     let backend = super::api::Adapter::new(
         ModalAccount,
@@ -2273,6 +2727,78 @@ async fn finished_modal_logs_drain_through_pauses_before_they_are_kept() {
     assert_eq!(bytes, b"first\nlast\n");
 }
 
+/// Modal launcher frames: each chunk with the point a reconnect replays it from.
+fn modal_frames(chunks: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut frames = Vec::new();
+    for (from, data) in chunks {
+        frames.extend_from_slice(json!([from, data.len()]).to_string().as_bytes());
+        frames.push(b'\n');
+        frames.extend_from_slice(data);
+    }
+    frames
+}
+
+#[tokio::test]
+async fn modal_logs_reopen_a_stalled_stream_mid_batch_without_losing_bytes() {
+    use super::api::Api;
+    let Some(root) = isolated().await else {
+        return;
+    };
+    std::env::set_var("ORX_TEST_SPEEDUP", "120");
+    script(
+        &root.join("bin/modal-python"),
+        &format!(
+            r#"#!/bin/sh
+cd '{}'
+n=$(cat from.log 2>/dev/null | wc -l | tr -d ' ')
+printf '%s\n' "$5" >> from.log
+cat "frames/$n"
+if [ -e "frames/$n.stall" ]; then exec sleep 600; fi
+"#,
+            root.display()
+        ),
+    );
+    let record = format!("{{\"summary\":\"{}\"}}\n", "x".repeat(59_000)).into_bytes();
+    std::fs::create_dir_all(root.join("frames")).unwrap();
+    std::fs::write(
+        root.join("frames/0"),
+        modal_frames(&[("", b"A\n"), ("1", &record[..16 * 1024])]),
+    )
+    .unwrap();
+    std::fs::write(root.join("frames/0.stall"), "").unwrap();
+    // The reconnect regroups the batch it resumes inside.
+    std::fs::write(
+        root.join("frames/1"),
+        modal_frames(&[
+            ("1", &record[..20_000]),
+            ("1", &record[20_000..]),
+            ("2", b"B"),
+        ]),
+    )
+    .unwrap();
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("modal_job", None, None, vec!["sandbox".into()]),
+    };
+    let mut cursor = crate::jobs::modal::LogResume::default();
+    let mut log = Vec::new();
+    let closed = ModalAccount
+        .logs(
+            &run,
+            &mut cursor,
+            Duration::from_secs(30),
+            &mut |bytes, _| log.extend_from_slice(bytes),
+        )
+        .await
+        .unwrap();
+    assert!(closed);
+    assert_eq!(log, [b"A\n".as_slice(), &record, b"B"].concat());
+    assert_eq!(
+        std::fs::read_to_string(root.join("from.log")).unwrap(),
+        "\n1\n"
+    );
+}
+
 #[tokio::test]
 async fn kubernetes_cancel_keeps_the_spool_without_an_attention_notice() {
     use super::api::Api;
@@ -2306,6 +2832,8 @@ elif a[:2] == ['get', 'pods']:
 elif a[0] == 'logs':
     assert not (root/'gone').exists()
     print('2026-11-05T01:42:00Z SMOKE_CANCEL_READY')
+elif a[:3] == ['exec', '-n', 'default']:
+    assert 'test' in a, 'the source was already staged'
 else:
     raise Exception(a)
 "#,
@@ -2348,10 +2876,7 @@ else:
         id: "run".into(),
         handle,
     };
-    let account = K8sAccount {
-        context: None,
-        namespace: "default".into(),
-    };
+    let account = K8sAccount::new(None, "default".into());
     for terminating in [false, true] {
         std::fs::write(root.join("unexpected-deletion"), "").unwrap();
         if terminating {
@@ -2440,13 +2965,10 @@ async fn kubernetes_missing_pods_close_logs_only_after_job_deletion() {
             &root.join("bin/kubectl"),
             &format!("#!/bin/sh\ncase \"$1\" in\nget) {get} ;;\nlogs) exit 0 ;;\nesac\n"),
         );
-        let account = K8sAccount {
-            context: None,
-            namespace: "default".into(),
-        };
+        let account = K8sAccount::new(None, "default".into());
         let mut cursor = crate::jobs::kubernetes::LogResume::default();
         let closed = account
-            .logs(&run, &mut cursor, Duration::from_secs(5), &mut |_| {})
+            .logs(&run, &mut cursor, Duration::from_secs(5), &mut |_, _| {})
             .await;
         assert_eq!(
             matches!(closed, Ok(true)),
@@ -2498,14 +3020,14 @@ esac
             vec!["job".into()],
         ),
     };
-    let mut hf_cursor = 0;
+    let mut hf_cursor = crate::jobs::huggingface::LogResume::default();
     assert!(hf
-        .logs(&hf_run, &mut hf_cursor, budget, &mut |_| {})
+        .logs(&hf_run, &mut hf_cursor, budget, &mut |_, _| {})
         .await
         .unwrap_err()
         .to_string()
         .contains("timed out"));
-    assert_eq!(hf_cursor, 0);
+    assert_eq!(hf_cursor, Default::default());
     let modal_run = WatchedRun {
         id: "modal".into(),
         handle: crate::engine::adapters::api::test_handle(
@@ -2515,18 +3037,15 @@ esac
             vec!["sandbox".into()],
         ),
     };
-    let mut modal_cursor = 0;
+    let mut modal_cursor = crate::jobs::modal::LogResume::default();
     assert!(ModalAccount
-        .logs(&modal_run, &mut modal_cursor, budget, &mut |_| {})
+        .logs(&modal_run, &mut modal_cursor, budget, &mut |_, _| {})
         .await
         .unwrap_err()
         .to_string()
         .contains("timed out"));
-    assert_eq!(modal_cursor, 0);
-    let k8s = K8sAccount {
-        context: None,
-        namespace: "default".into(),
-    };
+    assert_eq!(modal_cursor, Default::default());
+    let k8s = K8sAccount::new(None, "default".into());
     let k8s_run = WatchedRun {
         id: "k8s".into(),
         handle: crate::engine::adapters::api::test_handle(
@@ -2541,7 +3060,7 @@ esac
             &k8s_run,
             &mut crate::jobs::kubernetes::LogResume::default(),
             budget,
-            &mut |_| {}
+            &mut |_, _| {}
         )
         .await
         .unwrap_err()
@@ -2929,4 +3448,722 @@ async fn hf_exit_evidence_requires_the_provider_failure_format() {
             ),
         }
     }
+}
+
+#[tokio::test]
+async fn hf_refusals_fail_the_run_with_the_step_that_refused() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let Ok(real) = crate::jobs::managed_env::base_python((3, 10), "Hugging Face Jobs").await else {
+        crate::config::skip_without_tool("no Python 3.10+ on PATH");
+        return;
+    };
+    let library = root.join("hf-lib/huggingface_hub");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(
+        library.join("__init__.py"),
+        r#"import os
+class HTTPError(Exception):
+    def __init__(self, status, text):
+        super().__init__("%d %s" % (status, text))
+        self.response = type("Response", (), {"status_code": status})()
+def fail_at(step):
+    failing, status = os.environ["ORX_TEST_HF"].split(":")
+    with open(os.environ["ORX_API_ROOT"] + "/launches", "a") as log:
+        log.write(step + "\n")
+    if failing == step:
+        raise HTTPError(int(status), "Payment Required" if status == "402" else "refused")
+class HfApi:
+    def __init__(self, **kwargs): pass
+    def sync_job_volume(self, *args, **kwargs):
+        fail_at("staging")
+        return "volume"
+    def run_job(self, **kwargs):
+        fail_at("job")
+"#,
+    )
+    .unwrap();
+    script(
+        &crate::config::config_dir().join("envs/huggingface/bin/python"),
+        &format!(
+            "#!/bin/sh\nPYTHONPATH='{}' exec '{real}' \"$@\"\n",
+            library.parent().unwrap().display()
+        ),
+    );
+    let archive = root.join("source.tar");
+    std::fs::write(&archive, "snapshot").unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"snapshot"));
+    let metadata = BackendDescriptor::parse(
+        &json!({ "kind":"hf_job", "sourcePath":archive, "sourceDigest":digest, "sourceSize":8 })
+            .to_string(),
+    )
+    .unwrap();
+    let launch = LaunchSpec {
+        kind: "hf_job".into(),
+        target: Some("org".into()),
+        options: json!({
+            "command":["true"], "docker_image":"python", "flavor":"cpu", "environment":{}, "secrets":{}, "timeout_seconds":3600, "labels":{}
+        }),
+    };
+    let adapter = super::api::Adapter::new(
+        HfAccount {
+            namespace: "org".into(),
+        },
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    );
+    let engine = engine(&root);
+    for (run, failure, status, message) in [
+        ("billing", "job:402", "failed", "without billing"),
+        ("bucket", "staging:403", "failed", "org/jobs-artifacts"),
+        (
+            "outage",
+            "job:503",
+            "submitting",
+            "did not create the job in org",
+        ),
+    ] {
+        std::env::set_var("ORX_TEST_HF", failure);
+        engine
+            .submit(&adapter, pending(run, &metadata, &launch))
+            .await
+            .unwrap();
+        let (got, reason) = launch_outcome(&engine, run);
+        assert_eq!(got, status, "{failure}");
+        assert!(reason.contains(message), "{failure}: {reason}");
+        assert!(!reason.contains("staging failed"), "{failure}: {reason}");
+    }
+    let launches = std::fs::read_to_string(root.join("launches")).unwrap();
+    assert_eq!(
+        launches.lines().collect::<Vec<_>>(),
+        ["staging", "job", "staging", "staging", "job", "staging", "job"],
+        "a refusal is never retried; an outage is"
+    );
+}
+
+/// The run's reason: the failure, or what keeps it unreconciled.
+fn launch_outcome(engine: &Engine, run: &str) -> (String, String) {
+    let (row, state) = engine.load(run).unwrap();
+    let reason = match state.contact {
+        crate::store::Contact::Unreconciled { detail, .. } => detail,
+        _ => row.result_markdown.unwrap_or_default(),
+    };
+    (row.status, reason)
+}
+
+#[tokio::test]
+async fn vercel_refusals_fail_the_run_and_conflicts_stay_unknown() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let Ok(real) = crate::jobs::managed_env::base_python((3, 10), "Vercel Sandbox").await else {
+        crate::config::skip_without_tool("no Python 3.10+ on PATH");
+        return;
+    };
+    let package = root.join("vercel-lib/vercel/sandbox");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(root.join("vercel-lib/vercel/__init__.py"), "").unwrap();
+    std::fs::write(
+        package.join("__init__.py"),
+        r#"class SandboxResources:
+    def __init__(self, vcpus=None): self.vcpus = vcpus
+class SandboxApiError(Exception):
+    def __init__(self, status_code):
+        super().__init__("%d from Vercel" % status_code)
+        self.status_code = status_code
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("sync.py"),
+        r#"import os
+from vercel.sandbox import SandboxApiError
+class FS:
+    def write_text(self, *args, **kwargs): raise OSError("disk full")
+class Box:
+    name = "orx-run"
+    fs = FS()
+    def stop(self): pass
+    def destroy(self, **kwargs):
+        open(os.environ["ORX_API_ROOT"] + "/destroyed", "a").write("x")
+def create_sandbox(**kwargs):
+    mode = os.environ["ORX_TEST_VERCEL"]
+    if mode == "setup": return Box()
+    if mode == "created-then-403":
+        open(os.environ["ORX_API_ROOT"] + "/created", "w").close()
+        raise SandboxApiError(403)
+    raise SandboxApiError(int(mode))
+def get_sandbox(**kwargs):
+    if os.path.exists(os.environ["ORX_API_ROOT"] + "/created"): return Box()
+    raise SandboxApiError(404)
+"#,
+    )
+    .unwrap();
+    script(
+        &root.join("bin/vercel-python"),
+        &format!(
+            "#!/bin/sh\nPYTHONPATH='{}' exec '{real}' \"$@\"\n",
+            root.join("vercel-lib").display()
+        ),
+    );
+    let engine = engine(&root);
+    let metadata = BackendDescriptor::parse(r#"{"kind":"vercel_job"}"#).unwrap();
+    let launch = LaunchSpec {
+        kind: "vercel_job".into(),
+        target: None,
+        options: json!({
+            "name":"ignored", "script":"true", "image":"python", "vcpus":2, "env":{},
+            "timeout_seconds":60, "session_cap":2700, "region":null, "tags":{},
+            "source_archive":null
+        }),
+    };
+    let adapter = (super::api::provider("vercel_job").unwrap().build)(
+        &crate::engine::handle::ApiAccount {
+            target: None,
+            context: None,
+        },
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    )
+    .unwrap();
+    for (run, mode, status, reason) in [
+        ("quota", "402", "failed", "HTTP 402"),
+        ("setup", "setup", "failed", "orx deleted it"),
+        ("taken", "409", "submitting", "409 from Vercel"),
+        (
+            "polled",
+            "created-then-403",
+            "submitting",
+            "403 from Vercel",
+        ),
+    ] {
+        std::env::set_var("ORX_TEST_VERCEL", mode);
+        engine
+            .submit(adapter.as_ref(), pending(run, &metadata, &launch))
+            .await
+            .unwrap();
+        let (got, why) = launch_outcome(&engine, run);
+        assert_eq!(got, status, "{mode}: {why}");
+        assert!(why.contains(reason), "{mode}: {why}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("destroyed")).unwrap(),
+        "x"
+    );
+}
+
+#[tokio::test]
+async fn ray_refusals_fail_the_run_unless_the_job_exists() {
+    use std::sync::Mutex;
+    type Answers = Arc<Mutex<(u16, u16)>>;
+    async fn api(
+        State(answers): State<Answers>,
+        method: axum::http::Method,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let (status, inspected) = *answers.lock().unwrap();
+        if method == axum::http::Method::POST {
+            let status = axum::http::StatusCode::from_u16(status).unwrap();
+            return (status, "Job with submission_id already exists").into_response();
+        }
+        match inspected {
+            200 => Json(json!({"status":"RUNNING"})).into_response(),
+            other => axum::http::StatusCode::from_u16(other)
+                .unwrap()
+                .into_response(),
+        }
+    }
+    let answers: Answers = Arc::new(Mutex::new((400, 404)));
+    let app = Router::new().fallback(any(api)).with_state(answers.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let root = std::env::temp_dir().join(format!("orx-ray-refused-{}", uuid::Uuid::new_v4()));
+    let engine = engine(&root);
+    let metadata = BackendDescriptor::parse(r#"{"kind":"ray_job"}"#).unwrap();
+    let launch = LaunchSpec {
+        kind: "ray_job".into(),
+        target: Some(address.clone()),
+        options: json!({
+            "entrypoint":"true", "submission_id":"ignored", "resources":{"cpus":1.0,"gpus":0.0,"memory_bytes":null}, "env":{}, "metadata":{}, "working_dir":null
+        }),
+    };
+    let adapter = super::api::Adapter::new(
+        RayAccount { address },
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    );
+    for (run, status, inspected, expected, reason) in [
+        ("refused", 400, 404, "failed", "HTTP 400"),
+        ("duplicate", 400, 200, "starting", ""),
+        ("uninspectable", 400, 500, "submitting", "inspect"),
+        ("limited", 429, 404, "submitting", "HTTP 429"),
+    ] {
+        *answers.lock().unwrap() = (status, inspected);
+        engine
+            .submit(&adapter, pending(run, &metadata, &launch))
+            .await
+            .unwrap();
+        let (got, why) = launch_outcome(&engine, run);
+        assert_eq!(got, expected, "{run}: {why}");
+        assert!(why.contains(reason), "{run}: {why}");
+    }
+    server.abort();
+    drop(engine);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn k8s_refusals_fail_the_run_unless_something_may_remain() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/kubectl"),
+        r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+a = sys.argv[1:]
+mode = os.environ['ORX_TEST_K8S']
+with (Path(os.environ['ORX_API_ROOT'])/'kubectl.log').open('a') as f: f.write(mode+' '+' '.join(a)+'\n')
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+if '--dry-run=client' in a:
+    if mode == 'invalid':
+        fail('error: error validating "STDIN": error validating data: ValidationError(Job.spec): unknown field "templat" in io.k8s.api.batch.v1.JobSpec')
+    if mode == 'unparsable':
+        fail('error: error parsing STDIN: error converting YAML to JSON: yaml: line 3: mapping values are not allowed in this context')
+    if mode == 'unrecognized':
+        fail('error: Get "https://k8s:6443/api?timeout=32s": net/http: TLS handshake timeout')
+    if mode == 'offline':
+        fail('E1111 memcache.go:265] couldn\'t get current server API group list: Get "https://k8s:6443/api": dial tcp: i/o timeout\nUnable to connect to the server: dial tcp: i/o timeout')
+    print(sys.stdin.read())
+elif a[0] == 'apply':
+    sys.stdin.read()
+elif a[0] == 'create':
+    if json.loads(sys.stdin.read())['kind'] == 'ConfigMap':
+        pass
+    elif mode == 'limited':
+        fail('Error from server (TooManyRequests): error when creating "STDIN": the server has received too many requests and has asked us to try again later')
+    else:
+        fail('Error from server (Forbidden): error when creating "STDIN": jobs.batch is forbidden: User "lab" cannot create resource "jobs" in API group "batch" in the namespace "default"')
+elif a[0] == 'delete':
+    if mode == 'stuck':
+        fail('Unable to connect to the server: dial tcp: i/o timeout')
+elif a[0] == 'get':
+    print('{"items":[]}')
+else:
+    raise Exception(a)
+"#,
+    );
+    let config =
+        json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ORX_RUN}}-config"}});
+    let job = json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"{{ORX_RUN}}"},"spec":{"template":{"spec":{"restartPolicy":"Never","containers":[{"name":"run","image":"python","command":["bash","-c","eval \"$ORX_SCRIPT\""]}]}}}});
+    let metadata = BackendDescriptor::parse(r#"{"kind":"k8s_job"}"#).unwrap();
+    let launch = LaunchSpec {
+        kind: "k8s_job".into(),
+        target: Some("default".into()),
+        options: json!({
+            "manifest":format!("{config}{job}"), "script":"true", "run_token":"run", "env":{}, "timeout_seconds":3600, "labels":{}, "pod_env":[], "source_archive":root.join("archive.tar")
+        }),
+    };
+    let engine = engine(&root);
+    let adapter = super::api::Adapter::new(
+        K8sAccount::new(None, "default".into()),
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    );
+    for (run, status, reason) in [
+        ("forbidden", "failed", "jobs.batch is forbidden"),
+        ("invalid", "failed", "unknown field"),
+        ("unparsable", "failed", "error parsing STDIN"),
+        ("unrecognized", "submitting", "TLS handshake timeout"),
+        ("limited", "submitting", "TooManyRequests"),
+        ("stuck", "submitting", "rolling back"),
+        ("offline", "submitting", "Unable to connect"),
+    ] {
+        std::env::set_var("ORX_TEST_K8S", run);
+        engine
+            .submit(&adapter, pending(run, &metadata, &launch))
+            .await
+            .unwrap();
+        let (got, why) = launch_outcome(&engine, run);
+        assert_eq!(got, status, "{run}: {why}");
+        assert!(why.contains(reason), "{run}: {why}");
+    }
+    let calls = std::fs::read_to_string(root.join("kubectl.log")).unwrap();
+    assert!(
+        calls
+            .lines()
+            .any(|call| call.starts_with("forbidden delete configmap/run-config")),
+        "{calls}"
+    );
+}
+
+fn hf_backend(root: &Path, clock: Arc<TestClock>) -> super::api::Adapter<HfAccount> {
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(
+        root.join("inspect-response.json"),
+        json!({"id":"job", "status":{"stage":"RUNNING"}}).to_string(),
+    )
+    .unwrap();
+    super::api::Adapter::new(
+        HfAccount {
+            namespace: "org".into(),
+        },
+        clock,
+        root.join("spools"),
+    )
+}
+
+fn hf_run() -> WatchedRun {
+    WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("hf_job", Some("org"), None, vec!["job".into()]),
+    }
+}
+
+async fn spooled(backend: &dyn Backend, run: &WatchedRun) -> String {
+    let whole = ByteRange {
+        start: 0,
+        end: orx_host_proto::MAX_PAGE_LEN,
+    };
+    let LogPage::Data { bytes, .. } = backend
+        .read_log(run, LogFile::Log, whole, None)
+        .await
+        .unwrap()
+    else {
+        panic!("no log page")
+    };
+    String::from_utf8(bytes).unwrap()
+}
+
+fn sse_queries(root: &Path) -> Vec<String> {
+    std::fs::read_to_string(root.join("sse.log"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn hf_logs_keep_long_lines_whole_however_a_replay_splits_them() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let record = format!("{{\"metadata\":\"{}\"}}", "x".repeat(59_000));
+    let stamp = |ms: u32| format!("2026-11-10T12:00:00.{ms:03}Z");
+    let mut replay = vec![(stamp(100), "A".to_owned())];
+    for (i, piece) in record.as_bytes().chunks(16 * 1024).enumerate() {
+        replay.push((
+            stamp(200 + i as u32),
+            String::from_utf8(piece.to_vec()).unwrap(),
+        ));
+    }
+    replay.extend([(stamp(300), "B".to_owned()), (stamp(400), "C".to_owned())]);
+    let replay: Vec<_> = replay
+        .iter()
+        .map(|(t, d)| (t.as_str(), d.as_str()))
+        .collect();
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(
+        root.join("sse/0"),
+        hf_events(&[
+            (&stamp(0), "===== Job started at 2026-11-10 12:00:00 ====="),
+            (&stamp(100), "A"),
+            (&stamp(200), &record),
+            (&stamp(300), "B"),
+        ]),
+    )
+    .unwrap();
+    std::fs::write(root.join("sse/1"), hf_events(&replay)).unwrap();
+    std::fs::write(root.join("sse/2"), hf_events(&replay)).unwrap();
+    let expected = format!("A\n{record}\nB\nC\n");
+
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    let run = hf_run();
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, format!("A\n{record}\nB\n"));
+    backend
+        .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+        .await;
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, expected);
+
+    // A restarted engine continues from where the last one left off.
+    drop(backend);
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, expected);
+    assert_eq!(sse_queries(&root), ["", "tail=100", "tail=100"]);
+}
+
+#[tokio::test]
+async fn hf_logs_resume_past_a_capped_replay_and_a_tail_that_skips_output() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let lines = |range: std::ops::RangeInclusive<u32>| {
+        let events: Vec<_> = range
+            .map(|n| (format!("2026-11-10T12:00:{n:02}.000Z"), format!("line {n}")))
+            .collect();
+        let events: Vec<_> = events
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_str()))
+            .collect();
+        hf_events(&events)
+    };
+    let written = |range: std::ops::RangeInclusive<u32>| {
+        range.map(|n| format!("line {n}\n")).collect::<String>()
+    };
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(root.join("sse/0"), lines(1..=10)).unwrap();
+    // The provider keeps only the newest part of a long history.
+    std::fs::write(root.join("sse/1"), lines(6..=12)).unwrap();
+    std::fs::write(root.join("sse/2"), lines(14..=14)).unwrap();
+    std::fs::write(root.join("sse/3"), lines(5..=14)).unwrap();
+    let clock = Arc::new(TestClock::new());
+    let backend = hf_backend(&root, clock.clone());
+    let run = hf_run();
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, written(1..=10));
+    for expected in [written(1..=12), written(1..=14)] {
+        backend
+            .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+            .await;
+        clock.advance(Duration::from_secs(10));
+        backend.drain_log(&run).await.unwrap();
+        assert_eq!(spooled(&backend, &run).await, expected);
+    }
+    assert_eq!(sse_queries(&root), ["", "tail=100", "tail=100", ""]);
+}
+
+#[tokio::test]
+async fn hf_logs_reopen_a_stream_sending_only_keep_alives_and_survive_a_failed_reopen() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    std::env::set_var("ORX_TEST_SPEEDUP", "120");
+    let stamp = |s: u32| format!("2026-11-10T12:00:{s:02}.000Z");
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(
+        root.join("sse/0"),
+        hf_events(&[(&stamp(0), "zero"), (&stamp(1), "one")]) + "!keepalive\n",
+    )
+    .unwrap();
+    // sse/1 is missing, so the first reopen answers 503.
+    std::fs::write(
+        root.join("sse/2"),
+        hf_events(&[(&stamp(0), "zero"), (&stamp(1), "one"), (&stamp(2), "two")]),
+    )
+    .unwrap();
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    let run = hf_run();
+    assert!(backend.drain_log(&run).await.is_err());
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, "zero\none\ntwo\n");
+    assert_eq!(sse_queries(&root), ["", "tail=100", "tail=100"]);
+}
+
+#[tokio::test]
+async fn hf_logs_stream_while_running_unread_so_a_capped_final_replay_loses_nothing() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let lines = |range: std::ops::RangeInclusive<u32>| {
+        let events: Vec<_> = range
+            .map(|n| (format!("2026-11-10T12:00:{n:02}.000Z"), format!("line {n}")))
+            .collect();
+        let events: Vec<_> = events
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_str()))
+            .collect();
+        hf_events(&events)
+    };
+    let written = |range: std::ops::RangeInclusive<u32>| {
+        range.map(|n| format!("line {n}\n")).collect::<String>()
+    };
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(root.join("sse/0"), lines(1..=10)).unwrap();
+    let clock = Arc::new(TestClock::new());
+    let backend = hf_backend(&root, clock.clone());
+    let run = hf_run();
+    backend
+        .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+        .await;
+
+    let spool = super::api::spool_path(&root.join("spools"), &run.id).unwrap();
+    let mut kept = String::new();
+    for _ in 0..100 {
+        kept = std::fs::read_to_string(&spool).unwrap_or_default();
+        if kept == written(1..=10) {
+            break;
+        }
+        tokio::time::sleep(crate::config::paced(Duration::from_millis(50))).await;
+    }
+    assert_eq!(kept, written(1..=10), "nothing streamed the unread log");
+
+    // Once the job ends, the provider replays only the newest part of its history.
+    std::fs::write(
+        root.join("inspect-response.json"),
+        json!({"id":"job", "status":{"stage":"COMPLETED"}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(root.join("sse/1"), lines(6..=12)).unwrap();
+    clock.advance(Duration::from_secs(10));
+    backend
+        .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+        .await;
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, written(1..=12));
+}
+
+#[tokio::test]
+async fn hf_logs_continue_across_an_engine_restart_past_a_capped_replay() {
+    use std::io::Write;
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let lines = |range: std::ops::RangeInclusive<u32>| {
+        let events: Vec<_> = range
+            .map(|n| (format!("2026-11-10T12:00:{n:02}.000Z"), format!("line {n}")))
+            .collect();
+        let events: Vec<_> = events
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_str()))
+            .collect();
+        hf_events(&events)
+    };
+    let written = |range: std::ops::RangeInclusive<u32>| {
+        range.map(|n| format!("line {n}\n")).collect::<String>()
+    };
+    std::fs::create_dir_all(root.join("sse")).unwrap();
+    std::fs::write(root.join("sse/0"), lines(1..=10) + "!keepalive\n").unwrap();
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    let run = hf_run();
+    let mut kept = String::new();
+    for _ in 0..100 {
+        kept = spooled(&backend, &run).await;
+        if kept == written(1..=10) {
+            break;
+        }
+        tokio::time::sleep(crate::config::paced(Duration::from_millis(50))).await;
+    }
+    assert_eq!(kept, written(1..=10));
+
+    // orx up stops mid-run, cut off partway through an append, while the provider goes on to
+    // keep only the newest part of the history.
+    drop(backend);
+    let spool = super::api::spool_path(&root.join("spools"), &run.id).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&spool)
+        .unwrap()
+        .write_all(b"line 1")
+        .unwrap();
+    std::fs::write(root.join("sse/1"), lines(6..=12)).unwrap();
+    let backend = hf_backend(&root, Arc::new(TestClock::new()));
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, written(1..=12));
+    assert_eq!(sse_queries(&root), ["", "tail=100"]);
+}
+
+#[tokio::test]
+async fn modal_logs_continue_across_a_regrouped_reconnect_and_an_engine_restart() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/modal-python"),
+        &format!(
+            r#"#!/bin/sh
+cd '{}'
+if [ "$3" = status ]; then echo '{{"stage":"RUNNING"}}'; exit; fi
+n=$(cat from.log 2>/dev/null | wc -l | tr -d ' ')
+printf '%s\n' "$5" >> from.log
+cat "frames/$n"
+"#,
+            root.display()
+        ),
+    );
+    let replay: [(&str, &[u8]); 4] = [
+        ("0", b"first\n"),
+        ("6", b"second\n"),
+        ("13", b"last\n"),
+        ("18", b"end\n"),
+    ];
+    std::fs::create_dir_all(root.join("frames")).unwrap();
+    std::fs::write(
+        root.join("frames/0"),
+        modal_frames(&[("0", b"first\nsecond\n")]),
+    )
+    .unwrap();
+    // The reconnect sends the chunk it resumes after in smaller pieces.
+    std::fs::write(root.join("frames/1"), modal_frames(&replay[..3])).unwrap();
+    std::fs::write(root.join("frames/2"), modal_frames(&replay)).unwrap();
+    let clock = Arc::new(TestClock::new());
+    let backend = super::api::Adapter::new(ModalAccount, clock.clone(), root.join("spools"));
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("modal_job", None, None, vec!["sandbox".into()]),
+    };
+    backend.drain_log(&run).await.unwrap();
+    backend
+        .observe(std::slice::from_ref(&run), Duration::from_secs(5))
+        .await;
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, "first\nsecond\nlast\n");
+
+    drop(backend);
+    let backend = super::api::Adapter::new(ModalAccount, clock, root.join("spools"));
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, "first\nsecond\nlast\nend\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("from.log")).unwrap(),
+        "\n0\n\n"
+    );
+}
+
+#[tokio::test]
+async fn modal_logs_an_older_orx_spooled_in_lines_are_rebuilt_from_the_start() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/modal-python"),
+        &format!(
+            r#"#!/bin/sh
+cd '{}'
+if [ "$3" = status ]; then echo '{{"stage":"RUNNING"}}'; exit; fi
+printf '%s\n' "$5" >> from.log
+cat frames
+"#,
+            root.display()
+        ),
+    );
+    std::fs::write(
+        root.join("frames"),
+        modal_frames(&[("0", b"a\r\nb\r\nc"), ("8", b"d\n")]),
+    )
+    .unwrap();
+    // How an older orx spooled the first chunk: one line at a time, each ending in `\n`.
+    std::fs::create_dir_all(root.join("spools")).unwrap();
+    std::fs::write(root.join("spools/run.spool.log"), "a\nb\nc\n").unwrap();
+    let backend = super::api::Adapter::new(
+        ModalAccount,
+        Arc::new(TestClock::new()),
+        root.join("spools"),
+    );
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("modal_job", None, None, vec!["sandbox".into()]),
+    };
+    backend.drain_log(&run).await.unwrap();
+    assert_eq!(spooled(&backend, &run).await, "a\r\nb\r\ncd\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("from.log")).unwrap(),
+        "\n"
+    );
 }

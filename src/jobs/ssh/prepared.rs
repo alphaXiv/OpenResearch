@@ -480,12 +480,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn ssh_version_prefers_stderr_and_falls_back_to_stdout() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = crate::local::git::TemporaryDirectory::new("orx-ssh-version").unwrap();
         let stub = |name: &str, body: &str| {
             let path = temp.path().join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            orx_test_support::write_executable(&path, format!("#!/bin/sh\n{body}\n"), 0o755)
+                .unwrap();
             path.to_string_lossy().into_owned()
         };
         let both = stub("both", "echo usage; echo; echo 'OpenSSH_9.6p1' >&2");

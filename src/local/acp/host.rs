@@ -827,7 +827,7 @@ pub(super) async fn spawn(
         if spare_detached && cfg!(unix) {
             crate::local::chat::kill_shell_group(process.id.take());
         } else {
-            crate::local::chat::kill_agent_tree(process.id.take());
+            crate::local::chat::kill_agent_tree(process.id.take()).await;
         }
         let _ = process.child.kill().await;
         let _ = process.child.wait().await;

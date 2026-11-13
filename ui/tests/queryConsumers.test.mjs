@@ -22,7 +22,7 @@ const field = (label) => [...document.querySelectorAll("label")].find((element) 
 const targets = {
   k8s: {
     fields: { namespace: () => m.settings_page_namespace() },
-    reply: (value) => ({ configured: true, contexts: [], currentContext: null, context: null, namespace: value, preflight: { kubectlFound: true, reachable: true, canCreateJobs: true } }),
+    reply: (value) => ({ configured: true, contexts: [], currentContext: null, context: null, namespace: value, preflight: { kubectlFound: true, reachable: true, canCreateJobs: true, canPatchJobs: true } }),
   },
   slurm: {
     fields: { partition: () => m.settings_page_partition(), account: () => m.settings_page_account(), timeLimit: () => m.settings_page_time_limit() },

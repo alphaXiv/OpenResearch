@@ -1152,6 +1152,7 @@ function K8sHealthBadge({ s }: { s: K8sSettings }) {
   if (!p.kubectlFound) return <Badge variant="error">{m.settings_page_kubectl_not_found()}</Badge>;
   if (!p.reachable) return <Badge variant="error">{m.settings_page_cluster_unreachable()}</Badge>;
   if (!p.canCreateJobs) return <Badge variant="error">{m.settings_page_no_job_create_permission()}</Badge>;
+  if (!p.canPatchJobs) return <Badge variant="error">{m.settings_page_no_job_patch_permission()}</Badge>;
   return <Badge variant="success">{m.settings_page_connected()}</Badge>;
 }
 
@@ -3165,7 +3166,6 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
   if (settings.validationStatus === "missing") return <Badge variant="warning">{m.settings_page_not_configured()}</Badge>;
   if (settings.validationStatus === "invalid") return <Badge variant="error">{m.settings_page_invalid_token()}</Badge>;
   if (settings.validationStatus !== "valid") return null;
-  if (settings.jobsWrite === true) return <Badge variant="success">{m.settings_page_ready()}</Badge>;
   if (settings.jobsWrite === false)
     return (
       <span className="inline-flex items-center gap-2">
@@ -3175,6 +3175,17 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
         </Tooltip>
       </span>
     );
+  if (settings.sourceStaging === false)
+    return (
+      <span className="inline-flex items-center gap-2">
+        <Badge variant="warning">{m.settings_page_no_bucket_permission()}</Badge>
+        <Tooltip content={m.settings_hf_bucket_permission_help()} className="text-subtext">
+          <Info size={16} />
+        </Tooltip>
+      </span>
+    );
+  if (settings.jobsWrite === true && settings.sourceStaging === true)
+    return <Badge variant="success">{m.settings_page_ready()}</Badge>;
   return null;
 }
 
@@ -3238,7 +3249,7 @@ function HfSection({ remote }: { remote: boolean }) {
               </dd>
             </div>}
             {(settings.validationStatus === "missing" || settings.validationStatus === "invalid" ||
-              (settings.validationStatus === "valid" && settings.jobsWrite !== null)) && (
+              (settings.validationStatus === "valid" && (settings.jobsWrite !== null || settings.sourceStaging === false))) && (
                 <div className="flex items-center justify-between gap-4">
                   <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
                   <dd className="m-0 text-text"><HfStatusBadge settings={settings} /></dd>
@@ -3247,6 +3258,9 @@ function HfSection({ remote }: { remote: boolean }) {
           </dl>
           {settings.validationStatus === "unreachable" && settings.validationError && (
             <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.validationError}</p>
+          )}
+          {settings.sourceStaging === null && settings.sourceStagingError && (
+            <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.sourceStagingError}</p>
           )}
           {settings.source === "env" && (
             <p className={SETTINGS_NOTE_CLASS_NAME}>

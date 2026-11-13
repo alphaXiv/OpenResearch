@@ -961,12 +961,12 @@ mod tests {
         )
         .unwrap();
         let stub = data.join("fake-claude");
-        std::fs::write(
+        orx_test_support::write_executable(
             &stub,
             "#!/bin/sh\n[ \"$CLAUDE_CONFIG_DIR\" = \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" ] || exit 2\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"oauth\",\"subscriptionType\":\"max\"}'\n",
+            0o700,
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = vec![
             json!({"id":"claude-code","installed":true,"version":"2.1.211","binPath":stub,"models":[{"id":"sonnet"}],"options":{"test":true},"account":"local@example.test","label":{"name":"Mine"}}),
             json!({"id":"codex","installed":true,"models":[{"id":"gpt-6"}],"options":{}}),
