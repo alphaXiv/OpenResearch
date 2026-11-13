@@ -165,6 +165,15 @@ for (const [ownedBy, name] of [["omlx", "oMLX"], ["rapid-mlx", "Rapid-MLX"]]) {
   });
 }
 
+test("a server at that address from another app is offered as a custom endpoint", async () => {
+  const saved = [];
+  await customEndpoint({ saved, discover: ({ baseUrl }) => baseUrl === "http://127.0.0.1:8000/v1" ? { models: ["qwen"], ownedBy: "vllm" } : unreachable() });
+  await click(find('[role="dialog"] button', m.local_models_custom_endpoint()));
+  await click(find('[role="dialog"] button', m.onboarding_continue()));
+  assert.equal(saved[0].baseUrl, "http://127.0.0.1:8000/v1");
+  assert.equal(saved[0].name, "Custom Endpoint");
+});
+
 test("on Apple silicon the local model guide also walks through oMLX and Rapid-MLX, without recommending them", async () => {
   await customEndpoint({ tile: m.local_models_guide_name(), machine: { os: "macos", arch: "aarch64", memBytes: 32 * 2 ** 30, gpus: [] }, discover: unreachable });
   const picker = find('[role="dialog"] button[aria-haspopup="menu"]', "LM Studio");

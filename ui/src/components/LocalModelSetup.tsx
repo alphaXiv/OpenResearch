@@ -55,8 +55,8 @@ function serverAt(url: string, owner?: string | null) {
   if (!owner || here.every((server) => !server.owner)) return here[0];
   return here.find((server) => server.owner === owner);
 }
-/** A model server found answering where orx runs: the models it lists, or that it wants a key first. */
-export type LocalServer = { server: Server; models: string[]; needsKey: boolean };
+/** A model server found answering where orx runs: the models it lists and who it says owns them, or that it wants a key first. */
+export type LocalServer = { server: Server; models: string[]; ownedBy: string | null; needsKey: boolean };
 
 /** Why a server listed no models; an orx from before the codes says so only in these messages. */
 function unlisted(error: unknown) {
@@ -78,13 +78,13 @@ export function useLocalServers() {
       const answers = await Promise.all(addresses.map(async (url): Promise<LocalServer | null> => {
         try {
           const { models, ownedBy } = await api.discoverLocalModels({ baseUrl: url, apiKey: "" });
-          const server = serverAt(url, ownedBy);
-          return server ? { server, models, needsKey: false } : null;
+          // Another app at a shared address is still a server answering, just one without a name here.
+          return { server: serverAt(url, ownedBy) ?? { ...CUSTOM, url }, models, ownedBy: ownedBy ?? null, needsKey: false };
         } catch (error) {
           const code = unlisted(error);
           if (code === "unreachable") return null;
           if (!code) throw error;
-          return { server: serverAt(url)!, models: [], needsKey: code === "needsKey" };
+          return { server: serverAt(url)!, models: [], ownedBy: null, needsKey: code === "needsKey" };
         }
       }));
       return answers.filter((answer) => answer !== null);
@@ -137,7 +137,7 @@ export function useLocalModelForm(disabled: boolean) {
   const adopt = (found: LocalServer) => {
     address(found.server.url);
     setAskKey(found.needsKey);
-    list(found.models, found.server.owner ?? null);
+    list(found.models, found.ownedBy);
   };
 
   const probe = useMutation({ mutationFn: discoverLocalModels });
@@ -192,7 +192,7 @@ export function useLocalModelForm(disabled: boolean) {
               <div className="flex flex-wrap gap-2">
                 {presets.map((answer) => (
                   <Button key={answer.server.id} size="small" disabled={busy} onClick={() => adopt(answer)}>
-                    <EndpointMark server={answer.server} size={14} />{answer.server.label}
+                    <EndpointMark server={answer.server} size={14} />{answer.server.icon ? answer.server.label : m.local_models_custom_endpoint()}
                   </Button>
                 ))}
               </div>
