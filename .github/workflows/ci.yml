@@ -436,15 +436,26 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
       NEXTEST_TEST_THREADS: 8
     steps:
+      # Installs while the checkout and Dev Drive are set up; "Finish installing Rust" waits for it.
+      - name: Start installing Rust
+        env:
+          COMPONENTS: ${{ (matrix.mode == 'lint' || matrix.mode == 'all') && 'clippy,rustfmt' || '' }}
+          RUSTUP_PERMIT_COPY_RENAME: 1
+        run: |
+          $script = Join-Path $env:RUNNER_TEMP 'rustup.ps1'
+          Set-Content -LiteralPath $script -Value @'
+          $flags = if ($env:COMPONENTS) { @('--component', $env:COMPONENTS) } else { @() }
+          $log = "$env:RUNNER_TEMP\rustup.log"
+          rustup toolchain install stable --profile minimal --no-self-update @flags *>> $log
+          if ($LASTEXITCODE -eq 0) { rustup default stable *>> $log }
+          Set-Content -LiteralPath "$env:RUNNER_TEMP\rustup.status.tmp" -Value $LASTEXITCODE
+          Move-Item -LiteralPath "$env:RUNNER_TEMP\rustup.status.tmp" -Destination "$env:RUNNER_TEMP\rustup.status"
+          '@
+          Start-Process pwsh -WindowStyle Hidden -ArgumentList '-NoProfile', '-File', $script
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-      - name: Install Rust toolchain
-        id: rust
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          components: ${{ (matrix.mode == 'lint' || matrix.mode == 'all') && 'clippy, rustfmt' || '' }}
       # Tests create their git repositories under TEMP, so it moves to the Dev Drive too.
       - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
         with:
@@ -455,6 +466,22 @@ jobs:
             TMP,{{ DEV_DRIVE }}\tmp
             TEMP,{{ DEV_DRIVE }}\tmp
       - run: New-Item -ItemType Directory -Force $env:TMP | Out-Null
+      - name: Finish installing Rust
+        id: rust
+        run: |
+          $status = "$env:RUNNER_TEMP\rustup.status"
+          while (-not (Test-Path -LiteralPath $status)) { Start-Sleep -Milliseconds 250 }
+          Get-Content -LiteralPath "$env:RUNNER_TEMP\rustup.log"
+          $code = [int](Get-Content -LiteralPath $status)
+          if ($code -ne 0) { exit $code }
+          # The cache key dtolnay/rust-toolchain derives: commit date, then the commit hash, 12 characters.
+          $version = rustc --version --verbose
+          $date = ($version | Select-String '^commit-date: (\d+)-(\d+)-(\d+)$').Matches[0].Groups[1..3].Value -join ''
+          $hash = ($version | Select-String '^commit-hash: (\S+)$').Matches[0].Groups[1].Value
+          "cachekey=$("$date$hash".Substring(0, 12))" >> $env:GITHUB_OUTPUT
+          'CARGO_INCREMENTAL=0' >> $env:GITHUB_ENV
+          'CARGO_TERM_COLOR=always' >> $env:GITHUB_ENV
+        timeout-minutes: 10
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}${{ matrix.mode == 'lint' && '-lint' || '' }}
