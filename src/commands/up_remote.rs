@@ -2539,9 +2539,9 @@ fn canary_cli_installer(url: &str, sha256: &str, binary: &str) -> Result<String>
          [ \"${{sum%% *}}\" = {sha256} ] || report checksum \"${{sum%% *}}\"; \
          tar -xzf \"$tmp/orx.tar.gz\" -C \"$tmp\" orx 2>\"$tmp/err\" \
          || report unpack \"$(tail -n 1 \"$tmp/err\")\"; \
-         staged={staged}.$$; \
-         {{ mkdir -p {dir} && cp \"$tmp/orx\" \"$staged\" && chmod 755 \"$staged\" && mv -f \"$staged\" {binary}; }} 2>\"$tmp/err\" \
-         || {{ rm -f \"$staged\"; report write \"$(tail -n 1 \"$tmp/err\")\"; }}; \
+         staged=; \
+         {{ mkdir -p {dir} && staged=$(mktemp {staged}.XXXXXX) && cat \"$tmp/orx\" > \"$staged\" && chmod 755 \"$staged\" && mv -f \"$staged\" {binary}; }} 2>\"$tmp/err\" \
+         || {{ [ -z \"$staged\" ] || rm -f \"$staged\"; report write \"$(tail -n 1 \"$tmp/err\")\"; }}; \
          report ok"
     ))
 }
