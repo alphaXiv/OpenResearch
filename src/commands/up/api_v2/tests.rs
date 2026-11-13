@@ -1108,6 +1108,46 @@ async fn experiment_wait_excludes_older_completed_runs_after_subscribing() {
 }
 
 #[tokio::test]
+async fn experiment_wait_follows_new_launches_and_excludes_older_active_runs() {
+    let f = Fixture::new().await;
+    f.insert("old", "exp", "project", "running");
+    f.insert("run", "exp", "project", "running");
+    let connection = rusqlite::Connection::open(f.api.data_dir.join("orx.db")).unwrap();
+    connection
+        .execute("UPDATE runs SET created_at=2 WHERE id='run'", [])
+        .unwrap();
+    let mut events = f
+        .client
+        .events(&Filter {
+            experiment: Some("exp".into()),
+            wait: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for id in ["old", "run", "new"] {
+        if id == "new" {
+            f.insert("new", "exp", "project", "running");
+            connection
+                .execute("UPDATE runs SET created_at=3 WHERE id='new'", [])
+                .unwrap();
+        }
+        f.api
+            .engine
+            .observe(
+                id,
+                Observation::Exited {
+                    finished_at: None,
+                    code: Some(0),
+                    signal: None,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(completion(&mut events).await["id"], "new");
+}
+
+#[tokio::test]
 async fn log_replacement_is_marked_and_identity_reaches_the_backend() {
     let f = Fixture::new().await;
     f.insert("run", "exp", "project", "running");

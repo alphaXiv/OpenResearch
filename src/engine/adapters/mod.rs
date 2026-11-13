@@ -21,9 +21,9 @@ macro_rules! providers {
 providers! {
     hf => ("hf_job", |account| hf::HfAccount { namespace: account.target()?.into() }),
     modal => ("modal_job", |_account| modal::ModalAccount),
-    k8s => ("k8s_job", |account| k8s::K8sAccount {
-        context: account.context.clone(), namespace: account.target()?.into()
-    }),
+    k8s => ("k8s_job", |account| k8s::K8sAccount::new(
+        account.context.clone(), account.target()?.into()
+    )),
     ray => ("ray_job", |account| ray::RayAccount { address: account.target()?.into() }),
     vercel => ("vercel_job", |_account| vercel::VercelAccount),
 }
@@ -170,10 +170,7 @@ mod windows_tests {
                 dir.join("spools"),
             )),
             Box::new(super::api::Adapter::new(
-                super::k8s::K8sAccount {
-                    context: None,
-                    namespace: "default".into(),
-                },
+                super::k8s::K8sAccount::new(None, "default".into()),
                 clock.clone(),
                 dir.join("spools"),
             )),

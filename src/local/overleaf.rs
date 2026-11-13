@@ -1631,20 +1631,11 @@ mod tests {
         fake.edit_on_overleaf("paper.tex", b"co-author's paragraph");
         std::fs::write(fake.paper.join("figs/loss.png"), b"regenerated").unwrap();
         // A remote that refuses the push, reached after the pull was planned.
-        std::fs::write(
-            fake.root.join("origin.git/hooks/pre-receive"),
-            "#!/bin/sh\nexit 1\n",
-        )
-        .unwrap();
+        let hook = fake.root.join("origin.git/hooks/pre-receive");
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                fake.root.join("origin.git/hooks/pre-receive"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
-        }
+        orx_test_support::write_executable(hook, "#!/bin/sh\nexit 1\n", 0o755).unwrap();
+        #[cfg(windows)]
+        std::fs::write(hook, "#!/bin/sh\nexit 1\n").unwrap();
 
         let payload = collect(&fake.paper.join("paper.tex")).unwrap();
         let failed = sync_with(

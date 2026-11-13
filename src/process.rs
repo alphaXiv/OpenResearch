@@ -49,6 +49,39 @@ pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
     command(program).into()
 }
 
+/// Waits for a child, killing and reaping it when the deadline expires.
+#[cfg(any(not(unix), test))]
+pub(crate) fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let started = std::time::Instant::now();
+    let error = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Err(error) => break error,
+            Ok(None) => {}
+        }
+
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("Process {} did not exit within {timeout:?}", child.id()),
+            );
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+    };
+
+    if let Err(kill_error) = child.kill() {
+        if child.try_wait()?.is_none() {
+            return Err(kill_error);
+        }
+    }
+    child.wait()?;
+    Err(error)
+}
+
 /// A bare name found on the search PATH stays bare on Unix, so a caller that
 /// gives the child its own PATH still decides what runs. Windows spawning
 /// tries only `.exe`, so there every hit is spelled out to reach `.cmd` shims.
@@ -68,6 +101,48 @@ fn resolve(program: &OsStr) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_wait_keeps_exit_codes_and_reaps_a_stalled_child() {
+        use std::io::{BufRead, Write};
+        use std::process::Stdio;
+        use std::time::Duration;
+
+        for exit_code in [Some(7), None] {
+            let python = crate::local::acp::fake_agent_interpreter("python3");
+            let mut child = command(python)
+                .args([
+                    "-u",
+                    "-c",
+                    "import sys; print('ready'); raise SystemExit(int(sys.stdin.readline()))",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = child.stdin.take().unwrap();
+            let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+            let mut ready = String::new();
+            output.read_line(&mut ready).unwrap();
+            assert_eq!(ready.trim(), "ready");
+
+            if let Some(code) = exit_code {
+                writeln!(input, "{code}").unwrap();
+            }
+            let timeout = if exit_code.is_some() {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(50)
+            };
+            let result = wait_with_timeout(&mut child, timeout);
+            match exit_code {
+                Some(code) => assert_eq!(result.unwrap().code(), Some(code)),
+                None => assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut),
+            }
+            assert!(child.try_wait().unwrap().is_some());
+            drop(input);
+        }
+    }
 
     #[test]
     fn a_child_gets_the_search_path_and_keeps_explicit_programs() {

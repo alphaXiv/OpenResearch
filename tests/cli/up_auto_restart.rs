@@ -1,6 +1,5 @@
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -66,15 +65,15 @@ fn idle_orx_up_relaunches_into_an_installed_update() {
     // What the installer does: rename a newer orx over the running one, then record it.
     let marker = root.join("relaunched");
     let next = bin.join("orx.next");
-    std::fs::write(
+    orx_test_support::write_executable(
         &next,
         format!(
             "#!/bin/sh\n[ \"$1\" = --version ] && echo 'orx 99.0.0' && exit 0\necho \"$@\" > '{}'\n",
             marker.display()
         ),
+        0o755,
     )
     .unwrap();
-    std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::rename(&next, &orx).unwrap();
     let config = root.join("config/openresearch");
     std::fs::create_dir_all(&config).unwrap();

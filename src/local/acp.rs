@@ -417,12 +417,17 @@ impl Directory {
     }
 
     /// Removes the directory once its child has exited. Windows can hold the
-    /// child's working directory for a moment after the exit, so this retries once.
+    /// child's working directory for a moment after the exit, so this retries for
+    /// about three seconds.
     async fn remove(self) {
-        if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
-            return;
+        let mut delay = std::time::Duration::from_millis(100);
+        for _ in 0..5 {
+            if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+                return;
+            }
+            tokio::time::sleep(delay).await;
+            delay *= 2;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         if let Err(error) = std::fs::remove_dir_all(&self.0) {
             if self.0.exists() {
                 eprintln!(
@@ -843,9 +848,44 @@ mod tests {
         mode: &str,
         request: OneShot<'_>,
     ) -> (Result<String>, Vec<(String, serde_json::Value)>) {
+        let stalled =
+            matches!(mode, "stalled-init" | "stalled-setup") || request.prompt == "ACP_TEST:hang";
+        let listener = if stalled {
+            Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap())
+        } else {
+            None
+        };
+        let signaled_mode = listener
+            .as_ref()
+            .map(|listener| format!("{mode}:{}", listener.local_addr().unwrap().port()));
+        // Only to just past the stall's deadline: cleanup bounds its own waits with Tokio timers.
+        let stall = if mode == "stalled-init" {
+            super::host::INITIALIZATION_BOUND
+        } else {
+            request.timeout
+        };
+        let advance = stall + std::time::Duration::from_secs(1);
         let record =
             std::env::temp_dir().join(format!("acp-oneshot-record-{}", uuid::Uuid::new_v4()));
-        let (answer, cleanup) = spawn_one_shot(&peer(mode, &record), request);
+        let (mut answer, cleanup) = spawn_one_shot(
+            &peer(signaled_mode.as_deref().unwrap_or(mode), &record),
+            request,
+        );
+
+        if let Some(listener) = listener {
+            let reached_stall =
+                tokio::time::timeout(std::time::Duration::from_secs(30), listener.accept());
+            tokio::select! {
+                result = &mut answer => panic!("the peer never stalled: {result:?}"),
+                connected = reached_stall => {
+                    connected.expect("the peer never reached its stall").unwrap();
+                }
+            }
+            tokio::time::pause();
+            tokio::time::advance(advance).await;
+            tokio::time::resume();
+        }
+
         let answer = answer.await.unwrap();
         finish(cleanup).await;
         (answer, received(record))
@@ -1257,7 +1297,11 @@ for line in sys.stdin:
             saved.executable = path.to_string_lossy().into_owned();
         }
 
-        let registered = register_definitions(vec![saved.clone()]);
+        let mut second = saved.clone();
+        second.id = format!("acp:{}", uuid::Uuid::new_v4());
+        second.name = "Another DeepSeek".into();
+        let registered = register_definitions(vec![saved.clone(), second.clone()]);
+        assert_eq!(&registered[..2], &[saved.clone(), second]);
         let matched = registered
             .iter()
             .find(|item| same_launch(item, &preset))
@@ -1284,6 +1328,45 @@ for line in sys.stdin:
                 .id,
             preset.id
         );
+    }
+
+    #[test]
+    fn preset_registration_refreshes_executable_paths() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        let root = crate::local::git::TemporaryDirectory::new("orx-preset-path").unwrap();
+        let preset = presets().remove(0).launch;
+        let binary = root
+            .path()
+            .join(if cfg!(windows) { "dsh.cmd" } else { "dsh" });
+        let mut saved = preset.clone();
+        saved.id = format!("acp:{}", uuid::Uuid::new_v4());
+        saved.executable = binary.to_string_lossy().into_owned();
+        std::env::set_var("PATH", root.path());
+
+        assert!(register_definitions(vec![saved.clone()])
+            .iter()
+            .any(|definition| definition.id == preset.id));
+
+        std::fs::write(&binary, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let registered = register_definitions(vec![saved.clone()]);
+        assert_eq!(registered.first(), Some(&saved));
+        assert!(!registered
+            .iter()
+            .any(|definition| definition.id == preset.id));
+
+        std::fs::remove_file(binary).unwrap();
+        assert!(register_definitions(vec![saved])
+            .iter()
+            .any(|definition| definition.id == preset.id));
     }
 
     #[tokio::test]

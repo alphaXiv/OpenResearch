@@ -421,12 +421,10 @@ mod tests {
         let (command, file, body) = ("whoami", "whoami.cmd", "@echo AGENT_PATH_OK\r\n");
         let tool = dir.path().join("bin").join(file);
         std::fs::create_dir(dir.path().join("bin")).unwrap();
-        std::fs::write(&tool, body).unwrap();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        orx_test_support::write_executable(&tool, body, 0o755).unwrap();
+        #[cfg(windows)]
+        std::fs::write(&tool, body).unwrap();
 
         let delegated = Delegated::new(dir.path());
         let created = delegated

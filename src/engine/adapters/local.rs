@@ -97,6 +97,7 @@ impl Local {
             .truncate(false)
             .open(dir.join("launch.lock"))?;
         ownership.lock()?;
+        let _ownership = crate::file_lock::FileLock::new(ownership);
         let launch = dir.join("launch.json");
         #[cfg(unix)]
         let existing = match orx_host::read_json::<orx_host_proto::LaunchIntent>(&launch) {
@@ -216,7 +217,7 @@ impl Local {
             if !status.success() {
                 bail!("Could not detach the local wrapper: {status}");
             }
-            drop(ownership);
+            drop(_ownership);
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             while !dir.join("started").try_exists()? && !dir.join("exit.json").try_exists()? {
                 if cancelled() {

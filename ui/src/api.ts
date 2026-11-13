@@ -138,6 +138,13 @@ export class RejectedResponseError extends Error {}
 /** OpenCode 1 can't do this; updating it or using OpenResearch's copy can. */
 export class OpenCode1Error extends RejectedResponseError {}
 
+/** Why a model server listed no models: nothing answered, it wants an API key, or it has no models. */
+export class UnlistedError extends RejectedResponseError {
+  constructor(message: string, readonly code: "unreachable" | "needsKey" | "noModels") {
+    super(message);
+  }
+}
+
 /** A rejected save whose messages each belong to one form field, keyed as in the request body. */
 export class FieldErrors extends RejectedResponseError {
   constructor(message: string, readonly fields: Record<string, string[]>) {
@@ -504,6 +511,8 @@ export interface HfSettings {
   validationError: string | null;
   username: string | null;
   jobsWrite: boolean | null;
+  sourceStaging: boolean | null;
+  sourceStagingError: string | null;
 }
 
 export interface TinkerSettings {
@@ -613,6 +622,7 @@ export interface K8sPreflight {
   kubectlFound: boolean;
   reachable: boolean;
   canCreateJobs: boolean;
+  canPatchJobs: boolean;
   error?: string;
 }
 
@@ -1889,11 +1899,13 @@ export function createApi(
             throw new FileChangedError(message, currentVersion, parsed.exists);
           }
           if (res.status === 409 && "code" in parsed && parsed.code === "opencode1") throw new OpenCode1Error(message);
+          if (res.status === 400 && "code" in parsed && (parsed.code === "unreachable" || parsed.code === "needsKey" || parsed.code === "noModels"))
+            throw new UnlistedError(message, parsed.code);
           if (res.status === 400 && "fields" in parsed && typeof parsed.fields === "object" && parsed.fields !== null)
             throw new FieldErrors(message, parsed.fields as Record<string, string[]>);
         }
       } catch (error) {
-        if (error instanceof FileChangedError || error instanceof OpenCode1Error || error instanceof FieldErrors) throw error;
+        if (error instanceof FileChangedError || error instanceof RejectedResponseError) throw error;
         // non-JSON body — show it raw
       }
       const ErrorType = res.status >= 400 && res.status < 500 ? RejectedResponseError : Error;

@@ -74,11 +74,19 @@ function IconMark({ icon, brand, size }: { icon: AgentIcon; brand: Logo; size: n
 }
 
 /** An agent's mark in its tile: on its colour, or in a plain outline. */
-export function AgentIconTile({ icon, brand, size = "md" }: { icon: AgentIcon; brand: Logo; size?: keyof typeof TILE_SIZES }) {
+export function AgentIconTile({ icon, brand, size = "md", outline = true }: {
+  icon: AgentIcon;
+  brand: Logo;
+  size?: keyof typeof TILE_SIZES;
+  /** Whether an uncoloured icon draws its tile's border; without it, its mark grows into the space the border framed. */
+  outline?: boolean;
+}) {
   const color = icon.color && COLORS[icon.color];
+  const bare = !color && !outline;
+  const plain = bare ? cn(PLAIN.tile, "border-transparent") : PLAIN.tile;
   return (
-    <span aria-hidden="true" className={cn("grid shrink-0 place-items-center overflow-hidden border", TILE_SIZES[size].box, !color ? PLAIN.tile : "image" in icon ? cn("border-transparent", color.solid) : color.tile)}>
-      <IconMark icon={icon} brand={brand} size={TILE_SIZES[size].mark} />
+    <span aria-hidden="true" className={cn("grid shrink-0 place-items-center overflow-hidden border", TILE_SIZES[size].box, !color ? plain : "image" in icon ? cn("border-transparent", color.solid) : color.tile)}>
+      <IconMark icon={icon} brand={brand} size={TILE_SIZES[size].mark + (bare ? 4 : 0)} />
     </span>
   );
 }

@@ -274,7 +274,7 @@ fn removed(harness: &str) -> crate::error::Error {
     let name = if harness == "claude-code" {
         "Claude Code"
     } else {
-        "Codex"
+        "OpenAI Codex"
     };
     anyhow!("This chat's {name} account was removed. Choose another agent.")
 }
@@ -839,7 +839,7 @@ mod tests {
         let root = home(&id, "claude-code").unwrap();
         assert_eq!(
             home(&id, "codex").unwrap_err().to_string(),
-            "This chat's Codex account was removed. Choose another agent."
+            "This chat's OpenAI Codex account was removed. Choose another agent."
         );
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(home(&id, "claude-code").unwrap_err().to_string(), gone);
@@ -961,12 +961,12 @@ mod tests {
         )
         .unwrap();
         let stub = data.join("fake-claude");
-        std::fs::write(
+        orx_test_support::write_executable(
             &stub,
             "#!/bin/sh\n[ \"$CLAUDE_CONFIG_DIR\" = \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" ] || exit 2\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"oauth\",\"subscriptionType\":\"max\"}'\n",
+            0o700,
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = vec![
             json!({"id":"claude-code","installed":true,"version":"2.1.211","binPath":stub,"models":[{"id":"sonnet"}],"options":{"test":true},"account":"local@example.test","label":{"name":"Mine"}}),
             json!({"id":"codex","installed":true,"models":[{"id":"gpt-6"}],"options":{}}),

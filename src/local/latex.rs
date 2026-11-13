@@ -967,13 +967,7 @@ mod tests {
         // remaining pass; a document that merely errored must still finish.
         let scratch = ScratchDir::new("timeout").expect("scratch");
         let script = scratch.0.join("hang.sh");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").expect("write");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
-        }
+        orx_test_support::write_executable(&script, "#!/bin/sh\nsleep 30\n", 0o755).expect("write");
         let mut command = crate::process::command(&script);
         command.current_dir(&scratch.0);
         // Borrow the real runner but with a deadline we can wait out.

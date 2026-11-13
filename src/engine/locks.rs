@@ -3,12 +3,13 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::path::PathBuf;
 
 use crate::error::Result;
+use crate::file_lock::FileLock;
 
 /// The per-run `.supervisor.lock` + `.supervisor.shared-ssh.lock` pairs the engine owns.
 /// Holding both is what makes 0.2.x startup, `orx supervise` and `ssh-service` leave a run alone;
 /// dropping the files releases them.
 #[derive(Default)]
-pub struct RunLocks(HashMap<String, [File; 2]>);
+pub struct RunLocks(HashMap<String, [FileLock; 2]>);
 
 impl RunLocks {
     pub fn holds(&self, run_id: &str) -> bool {
@@ -30,16 +31,20 @@ impl RunLocks {
                 .write(true)
                 .open(path)?)
         });
-        // Supervisor first, as `orx supervise` takes them: whoever holds it owns the run.
         let supervisor = supervisor?;
         let shared = shared?;
-        for file in [&supervisor, &shared] {
-            match file.try_lock() {
-                Ok(()) => {}
-                Err(TryLockError::WouldBlock) => return Ok(false),
-                Err(TryLockError::Error(error)) => return Err(error.into()),
-            }
-        }
+        let lock = |file: File| match file.try_lock() {
+            Ok(()) => Ok(Some(FileLock::new(file))),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(error)) => Err(error),
+        };
+        // Supervisor first, as `orx supervise` takes them: whoever holds it owns the run.
+        let Some(supervisor) = lock(supervisor)? else {
+            return Ok(false);
+        };
+        let Some(shared) = lock(shared)? else {
+            return Ok(false);
+        };
         self.0.insert(run_id.to_string(), [supervisor, shared]);
         Ok(true)
     }

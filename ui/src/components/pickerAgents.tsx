@@ -76,7 +76,7 @@ export function pickerAgents(harnesses: Harness[], providers: OpenCodeProvider[]
 }
 
 /** Which of `agents` runs `model` on harness entry `h`. */
-function agentFor(agents: PickerAgent[], h: Harness, model: string | null): PickerAgent | undefined {
+export function agentFor(agents: PickerAgent[], h: Harness, model: string | null): PickerAgent | undefined {
   if (h.id !== "opencode") return agents.find((agent) => agent.key === harnessKey(h));
   const provider = model?.split("/")[0];
   return agents.find((agent) => agent.harness.id === "opencode" && agent.provider === provider);

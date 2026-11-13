@@ -233,10 +233,11 @@ async fn run(
         )
         .await;
         let Some(install) = automatic_install_needed(&payload) else {
-            // Nothing was attempted and nothing is wrong: another agent is
-            // already installed, so the automatic flow stands down.
             attempt.record("interrupted", "detect", Some("not_eligible"), None, None);
-            return Err("Another coding agent is installed. Re-check your coding agents.".into());
+            return Err(
+                "Couldn't check which coding agents are installed. Re-check your coding agents."
+                    .into(),
+            );
         };
         run_command = install;
     }
@@ -891,27 +892,14 @@ fn spawn_failure_cause(error: &str) -> String {
         .to_string()
 }
 
+/// Whether the onboarding's unattended setup installs OpenCode, for its free models: while OpenCode is missing or
+/// broken, whatever else is installed. A healthy install is only re-checked; `None` when the agents can't be read.
 fn automatic_install_needed(payload: &Value) -> Option<bool> {
-    let entries = payload["harnesses"].as_array()?;
-    let opencode = entries.iter().find(|h| h["id"] == "opencode")?;
-    if opencode["installed"] == true && opencode["installBroken"] == false {
-        return Some(false);
-    }
-    if entries.iter().any(|h| {
-        h["id"].as_str().is_some_and(|id| id.starts_with("acp:")) && h["installed"] == true
-    }) {
-        return None;
-    }
-    crate::telemetry::harness::IDS
+    let opencode = payload["harnesses"]
+        .as_array()?
         .iter()
-        .all(|id| {
-            entries.iter().any(|h| {
-                h["id"] == *id
-                    && ((h["installed"] == false && h["installBroken"] == false)
-                        || (*id == "opencode" && h["installBroken"] == true))
-            })
-        })
-        .then_some(true)
+        .find(|h| h["id"] == "opencode")?;
+    Some(opencode["installed"] != true || opencode["installBroken"] == true)
 }
 
 fn setup_verified(
@@ -992,30 +980,26 @@ mod tests {
     }
 
     #[test]
-    fn automatic_setup_reinstalls_broken_opencode_and_rechecks_healthy_installs() {
+    fn automatic_setup_installs_missing_or_broken_opencode_and_rechecks_healthy_installs() {
         let mut payload = json!({"harnesses": crate::telemetry::harness::IDS.map(|id| json!({"id": id, "installed": false, "installBroken": false}))});
         assert_eq!(automatic_install_needed(&payload), Some(true));
         payload["harnesses"][2]["installed"] = json!(true);
         assert_eq!(automatic_install_needed(&payload), Some(false));
         payload["harnesses"][2]["installBroken"] = json!(true);
         assert_eq!(automatic_install_needed(&payload), Some(true));
-        payload["harnesses"][0]["installed"] = json!(true);
-        assert_eq!(automatic_install_needed(&payload), None);
         assert_eq!(automatic_install_needed(&json!({})), None);
-        let payload = json!({"harnesses": crate::telemetry::harness::IDS.map(|id| json!({"id": id, "installed": id == "antigravity", "installBroken": false}))});
-        assert_eq!(automatic_install_needed(&payload), None);
     }
 
     #[test]
-    fn automatic_setup_does_not_replace_an_installed_acp_agent() {
+    fn automatic_setup_installs_opencode_beside_other_agents() {
         let mut entries: Vec<_> = crate::telemetry::harness::IDS
             .iter()
-            .map(|id| json!({"id": id, "installed": false, "installBroken": false}))
+            .map(|id| json!({"id": id, "installed": *id != "opencode", "installBroken": false}))
             .collect();
         entries.push(json!({"id": "acp:565e351e-62c7-488f-a58a-914d30cc5776", "installed": true}));
         assert_eq!(
             automatic_install_needed(&json!({"harnesses": entries})),
-            None
+            Some(true)
         );
     }
 

@@ -1053,14 +1053,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn probe_bin_reports_broken_only_on_conclusive_evidence() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = std::env::temp_dir().join(format!("orx-probe-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = |name: &str, body: &str| {
             let path = dir.join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            orx_test_support::write_executable(&path, body, 0o755).unwrap();
             path
         };
 
@@ -1099,7 +1096,7 @@ mod tests {
     }
 
     fn signed_in_with(probe: BinProbe) -> HarnessInfo {
-        let mut info = HarnessInfo::new("codex", "Codex");
+        let mut info = HarnessInfo::new("codex", "OpenAI Codex");
         info.record_bin(&PathBuf::from("/usr/local/bin/codex"), probe);
         info.authenticated = true;
         info
@@ -1108,14 +1105,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn select_working_takes_the_first_healthy_candidate_in_path_order() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = std::env::temp_dir().join(format!("orx-select-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = |name: &str, body: &str| {
             let path = dir.join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            orx_test_support::write_executable(&path, body, 0o755).unwrap();
             path
         };
 
@@ -1262,7 +1256,7 @@ mod tests {
         assert!(!info.ready(), "a CLI that cannot run cannot run a turn");
         assert!(info
             .broken_note("Reinstall it")
-            .starts_with("Codex is installed but failed to run."));
+            .starts_with("OpenAI Codex is installed but failed to run."));
     }
 
     #[test]

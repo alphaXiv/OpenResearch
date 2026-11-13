@@ -13,7 +13,6 @@ fn references_are_names_not_shell_or_docker_options() {
 #[cfg(unix)]
 #[test]
 fn engine_run_sh_runs_the_payload_inside_the_container_with_its_source() {
-    use std::os::unix::fs::PermissionsExt;
     let temp = crate::local::git::TemporaryDirectory::new("orx-engine-container").unwrap();
     let host = temp.path().join("host-run");
     let staged = temp.path().join("staged");
@@ -32,7 +31,7 @@ fn engine_run_sh_runs_the_payload_inside_the_container_with_its_source() {
         .unwrap()
         .success());
     // `docker exec` runs its command here; the container is this machine.
-    std::fs::write(
+    orx_test_support::write_executable(
         bin.join("docker"),
         r#"#!/bin/bash
 echo "$*" >> "$CALLS"
@@ -46,9 +45,9 @@ case "$1" in
     exec "$@";;
 esac
 "#,
+        0o755,
     )
     .unwrap();
-    std::fs::set_permissions(bin.join("docker"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let container = ContainerRun {
         reference: "research".into(),
         id: "cid".into(),

@@ -597,6 +597,9 @@ impl Host {
     }
 }
 
+/// How long [`spawn`] waits for an agent to answer `initialize`.
+pub(super) const INITIALIZATION_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub(super) async fn spawn(
     definition: &Definition,
     cwd: &Path,
@@ -827,14 +830,13 @@ pub(super) async fn spawn(
         if spare_detached && cfg!(unix) {
             crate::local::chat::kill_shell_group(process.id.take());
         } else {
-            crate::local::chat::kill_agent_tree(process.id.take());
+            crate::local::chat::kill_agent_tree(process.id.take()).await;
         }
         let _ = process.child.kill().await;
         let _ = process.child.wait().await;
         let _ = closed_sender.send(true);
     });
-    let initialized =
-        tokio::time::timeout(std::time::Duration::from_secs(15), ready_receiver).await;
+    let initialized = tokio::time::timeout(INITIALIZATION_BOUND, ready_receiver).await;
     let message = match initialized {
         Ok(Ok(Ok((connection, initialized)))) => {
             return Ok(Arc::new(Client {

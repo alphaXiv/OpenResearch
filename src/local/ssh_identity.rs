@@ -744,12 +744,7 @@ mod tests {
         .await
         .expect("ssh-agent listens");
         let askpass = home.join("askpass");
-        std::fs::write(&askpass, "#!/bin/sh\necho secret\n").unwrap();
-        std::fs::set_permissions(
-            &askpass,
-            std::os::unix::fs::PermissionsExt::from_mode(0o700),
-        )
-        .unwrap();
+        orx_test_support::write_executable(&askpass, "#!/bin/sh\necho secret\n", 0o700).unwrap();
         std::env::set_var("SSH_AUTH_SOCK", &socket);
         assert!(crate::process::command("ssh-add")
             .arg(ssh.join("id_ed25519"))

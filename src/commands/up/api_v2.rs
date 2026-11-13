@@ -431,7 +431,11 @@ impl Filter {
         let rows = if let Some(id) = &self.run {
             store.get_run(id)?.into_iter().collect()
         } else if let Some(id) = &self.experiment {
-            store.list_runs_by_experiment(id)?
+            if self.wait {
+                store.latest_run_for_experiment(id)?.into_iter().collect()
+            } else {
+                store.list_runs_by_experiment(id)?
+            }
         } else if let Some(id) = &self.project {
             store.list_runs_by_project(id)?
         } else {
@@ -1004,6 +1008,12 @@ async fn events(
                         api.run(run_id).and_then(|run| {
                             if !filter.matches(&run) || filter.wait && completed.contains(run_id) {
                                 return Ok(None);
+                            }
+                            if filter.wait && filter.experiment.is_some() {
+                                let rows = filter.rows(api)?;
+                                if rows.first().is_none_or(|latest| latest.id != run.id) {
+                                    return Ok(None);
+                                }
                             }
                             let mut value = api.view(&run)?;
                             match &event {
