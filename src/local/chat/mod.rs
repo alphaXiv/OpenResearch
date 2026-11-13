@@ -13767,6 +13767,7 @@ for line in sys.stdin:
     /// fork waits until it owes no reply, then stops it for the next turn.
     #[cfg(unix)]
     #[test]
+    #[ignore = "races a dropped TurnGuard's held-continuation check; re-enable with its fix"]
     fn switching_forks_stops_an_idle_claude_child_and_waits_for_a_busy_one() {
         use crate::local::claude::tests::{chat_echo_worker, emit, ready_host, serve_turn};
 

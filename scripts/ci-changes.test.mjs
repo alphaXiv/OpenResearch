@@ -28,7 +28,7 @@ test('helper tests are independent and combine with other changes', () => {
 })
 test('docs skip builds, workflow changes and unknown files select all', () => {
   assert.deepEqual(enabled(['README.md', 'docs/linux.md', 'LICENSE', '.github/readme-assets/banner.png', 'macos/DISTRIBUTION.md', 'windows/README.md', 'ui/README.md']), [])
-  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'scripts/build-host.mjs', 'scripts/build-host.test.mjs', 'new-build-input']) assert.equal(enabled([path]).length, 8)
+  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'rust-toolchain.toml', 'scripts/build-host.mjs', 'scripts/build-host.test.mjs', 'new-build-input']) assert.equal(enabled([path]).length, 8)
 })
 test('embedded chart changes also run chart tests', () => {
   assert.equal(classifyChanges(['agent-skills/orx-figures/assets/orx_chart.py']).chart, true)
