@@ -942,7 +942,9 @@ impl AgentHost {
                 }
             }
             if let Some(mut old) = guard.remove(session_id) {
-                let _ = old.child.kill().await; // kill() also reaps
+                if let Err(error) = old.child.kill().await {
+                    eprintln!("orx up: failed to stop stale OpenCode for {session_id}: {error}");
+                }
             }
         }
         // A binary replacement invalidates every owned child using this database.
@@ -980,7 +982,9 @@ impl AgentHost {
         .await?;
         let mut inner = self.inner.lock().await;
         if *cancelled.borrow() || self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
-            let _ = agent.child.kill().await;
+            if let Err(error) = agent.child.kill().await {
+                eprintln!("orx up: failed to stop cancelled OpenCode for {session_id}: {error}");
+            }
             return Err(anyhow!("OpenCode startup was cancelled"));
         }
         let status = agent.status();
@@ -997,7 +1001,9 @@ impl AgentHost {
             }
         }
         if let Some(mut agent) = self.inner.lock().await.remove(session_id) {
-            let _ = agent.child.kill().await;
+            if let Err(error) = agent.child.kill().await {
+                eprintln!("orx up: failed to stop OpenCode for {session_id}: {error}");
+            }
         }
     }
 
@@ -1010,8 +1016,10 @@ impl AgentHost {
                 let _ = cancel.send(true);
             }
         }
-        for (_, mut agent) in self.inner.lock().await.drain() {
-            let _ = agent.child.kill().await;
+        for (session_id, mut agent) in self.inner.lock().await.drain() {
+            if let Err(error) = agent.child.kill().await {
+                eprintln!("orx up: failed to stop OpenCode for {session_id}: {error}");
+            }
         }
     }
 }
@@ -1422,9 +1430,14 @@ mod tests {
     async fn shutdown_and_drop_kill_descendants_in_the_server_process_group() {
         use tokio::io::AsyncBufReadExt as _;
 
-        for via_shutdown in [true, false] {
+        for mode in ["kill", "drop", "reaped_then_drop"] {
+            let script = if mode == "reaped_then_drop" {
+                "sleep 60 & echo $!"
+            } else {
+                "sleep 60 & echo $!; wait"
+            };
             let mut cmd = crate::process::tokio_command("sh");
-            cmd.args(["-c", "sleep 60 & echo $!; wait"])
+            cmd.args(["-c", script])
                 .stdout(std::process::Stdio::piped())
                 .kill_on_drop(true)
                 .process_group(0);
@@ -1435,10 +1448,23 @@ mod tests {
             assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, 0);
 
             let mut child = ServerChild::new(spawned);
-            if via_shutdown {
-                child.kill().await.unwrap();
-            } else {
-                drop(child);
+            match mode {
+                "kill" => child.kill().await.unwrap(),
+                "drop" => drop(child),
+                "reaped_then_drop" => {
+                    let mut reaped = false;
+                    for _ in 0..100 {
+                        if child.try_wait().unwrap().is_some() {
+                            reaped = true;
+                            break;
+                        }
+                        tokio::time::sleep(crate::config::paced(Duration::from_millis(10))).await;
+                    }
+                    assert!(reaped, "leader did not exit before drop");
+                    assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+                    drop(child);
+                }
+                _ => unreachable!(),
             }
 
             let mut exited = false;
@@ -1447,11 +1473,11 @@ mod tests {
                     exited = true;
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(crate::config::paced(Duration::from_millis(10))).await;
             }
             assert!(
                 exited,
-                "descendant {descendant_pid} survived server cleanup (via_shutdown={via_shutdown})"
+                "descendant {descendant_pid} survived server cleanup (mode={mode})"
             );
         }
     }

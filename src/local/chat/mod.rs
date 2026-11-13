@@ -4082,7 +4082,9 @@ impl ChatHost {
     /// so lease reconciliation on the next startup still offers Continue/Retry.
     pub async fn stop_for_shutdown(self: &Arc<Self>) {
         for session_id in self.busy_sessions().await {
-            let _ = self.stop_turn(&session_id, false).await;
+            if let Err(error) = self.stop_turn(&session_id, false).await {
+                eprintln!("orx up: failed to stop turn {session_id} for shutdown: {error}");
+            }
         }
     }
 
