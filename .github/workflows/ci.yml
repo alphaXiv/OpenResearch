@@ -365,6 +365,11 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         env: *desktop-incremental-key
         with: *desktop-incremental-cache
+      - name: Install nextest
+        if: matrix.mode != 'lint'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-nextest@0.9.151
       - name: Finish installing WebKitGTK
         run: |
           until [ -e "$RUNNER_TEMP/apt.status" ]; do sleep 1; done
@@ -378,8 +383,7 @@ jobs:
         if: matrix.mode != 'lint'
         env:
           CARGO_INCREMENTAL: 1
-          RUST_TEST_THREADS: 16
-        run: cargo test --locked --features desktop
+        run: cargo nextest run --locked --profile ci --features desktop
         timeout-minutes: 30
 
   windows:
