@@ -5,6 +5,7 @@ import { useRef, useState, type RefObject } from "react";
 
 import type { OperationProgress, Project, ShareChoice } from "../api";
 import type { DialogContentProps } from "../dialog";
+import { fmtBytes } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { useWorkspace } from "../workspace";
 import { mutPublishProject } from "../queries/projects";
@@ -12,9 +13,13 @@ import { useSignIn } from "./AccountChip";
 import { OperationProgressBar } from "./OperationProgressBar";
 import { Button, ButtonLink, DialogContent, DialogTitle, IconButton, Input, Spinner, showAlert } from "./ui";
 
+/** `share::MAX_FILE_BYTES` in the backend. */
+const SHARE_FILE_LIMIT_BYTES = 50 * 1024 * 1024;
+
 export function showShareExclusions(count: number) {
   if (count === 0) return;
-  showAlert(count === 1 ? m.share_skipped_one() : m.share_skipped({ count }), "warning");
+  const size = fmtBytes(SHARE_FILE_LIMIT_BYTES);
+  showAlert(count === 1 ? m.share_skipped_one({ size }) : m.share_skipped({ count, size }), "warning");
 }
 
 export function ShareProjectDialog({ project, remote, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage }: DialogContentProps<ShareChoice> & {

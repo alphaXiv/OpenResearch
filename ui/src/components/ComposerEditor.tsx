@@ -33,7 +33,8 @@ import {
 import { createPortal } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import { fmtBytes, type CitedMessage, type HarnessId, type SkillInfo } from "../api";
+import { type CitedMessage, type HarnessId, type SkillInfo } from "../api";
+import { fmtBytes } from "../i18n";
 import { CITED_ID, refLabel } from "../agentMessages";
 import { commandDisplayName } from "../composerCommands";
 import type { ComposerAttachment } from "../composerStash";

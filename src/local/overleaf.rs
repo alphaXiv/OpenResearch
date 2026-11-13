@@ -1173,8 +1173,8 @@ fn main_document_note(remote_files: &BTreeSet<String>, main: &str) -> Option<Str
 pub fn upload_form_html(payload: &Payload) -> Result<String> {
     if payload.total_bytes() > MAX_UPLOAD_BYTES {
         return Err(anyhow!(
-            "This paper and its figures are larger than {} MB, which is more than an Overleaf upload can carry. Link an Overleaf project and push over Git instead.",
-            MAX_UPLOAD_BYTES / (1024 * 1024)
+            "This paper and its figures are larger than {}, which is more than an Overleaf upload can carry. Link an Overleaf project and push over Git instead.",
+            crate::store::human_bytes(MAX_UPLOAD_BYTES)
         ));
     }
     let engine = payload

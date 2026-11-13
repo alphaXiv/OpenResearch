@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ExternalLink, Link2, RefreshCw } from "lucide-react";
 import { UnlistedError, type LocalModelConnection } from "../api";
-import { fmtBytes, ltr } from "../i18n";
+import { fmtMemory, ltr } from "../i18n";
 
 import { m } from "../paraglide/messages.js";
 import { OptionPicker } from "./ModelPicker";
@@ -234,7 +234,7 @@ export function LocalModelGuide({ disabled, onFound }: { disabled: boolean; onFo
     },
     {
       text: lmStudio ? m.local_models_guide_model_lmstudio() : m.local_models_guide_model_ollama(),
-      extra: memory ? <span className="text-subtext">{m.local_models_guide_size({ memory: fmtBytes(memory), size: modelSize(memory) })}</span> : null,
+      extra: memory ? <span className="text-subtext">{m.local_models_guide_size({ memory: fmtMemory(memory), size: modelSize(memory) })}</span> : null,
     },
     {
       text: lmStudio ? m.local_models_guide_serve_lmstudio() : m.local_models_guide_serve_ollama(),

@@ -6,7 +6,7 @@ import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { useQuery } from "@tanstack/react-query";
 
 import { m } from "../paraglide/messages.js";
-import { ltr } from "../i18n";
+import { fmtBytes, ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
 import {
   ChevronRight,
@@ -21,7 +21,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { FILE_PREVIEW_BYTES, fmtBytes, type ArtifactEntry, type FileAction, type Project, type ProjectArtifacts } from "../api";
+import { FILE_PREVIEW_BYTES, type ArtifactEntry, type FileAction, type Project, type ProjectArtifacts } from "../api";
 import { mutDeleteArtifact, mutManageArtifactFile } from "../queries/files";
 import { CodeView } from "./CodeView";
 import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
@@ -326,7 +326,7 @@ function PreviewPane({
         {body}
         {truncated && (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
-            {m.artifacts_tab_file_truncated_showing_the_first_512_kb()}
+            {m.artifacts_tab_file_truncated({ size: fmtBytes(FILE_PREVIEW_BYTES) })}
           </div>
         )}
       </div>

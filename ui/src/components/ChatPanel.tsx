@@ -76,7 +76,7 @@ import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
-import { autoDir, ltr } from "../i18n";
+import { autoDir, fmtBytes, ltr } from "../i18n";
 import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
 import {
@@ -5533,8 +5533,8 @@ export function ChatPanel({
     target?: { scope: typeof composerScopeRef.current; stashKey: string },
   ) {
     // Per-file and total caps keep the base64-inflated (~33%) request body
-    // under the backend's 64 MB limit — a single 30 MB file or a batch summing
-    // to 40 MB both stay clear once encoded.
+    // under the backend's 64 MiB limit — a single 30 MiB file or a batch summing
+    // to 40 MiB both stay clear once encoded.
     const MAX_BYTES = 30 * 1024 * 1024;
     const TOTAL_BYTES = 40 * 1024 * 1024;
     setAttachError(null);
@@ -5549,11 +5549,11 @@ export function ChatPanel({
         continue;
       }
       if (file.size > MAX_BYTES) {
-        setAttachError(m.chat_attachment_too_large({ name: ltr(file.name) }));
+        setAttachError(m.chat_attachment_too_large({ name: ltr(file.name), size: fmtBytes(MAX_BYTES) }));
         continue;
       }
       if (total + file.size > TOTAL_BYTES) {
-        setAttachError(m.chat_attachments_total_too_large());
+        setAttachError(m.chat_attachments_total_too_large({ size: fmtBytes(TOTAL_BYTES) }));
         continue;
       }
       total += file.size;

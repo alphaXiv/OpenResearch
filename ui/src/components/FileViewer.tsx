@@ -5,7 +5,7 @@ import { useFileManagerLabel } from "./useFileManagerLabel";
 import { mutSaveProjectFile, type LoadedFile } from "../queries/files";
 
 import { m } from "../paraglide/messages.js";
-import { ltr } from "../i18n";
+import { fmtBytes, ltr } from "../i18n";
 // Mirror of openresearch.sh's AgentFileView: one file from the project —
 // a branch's committed copy when the tab carries a ref, else the chat
 // session's worktree, else the hub clone, else the project's artifacts, with
@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { formatForDisplay, useHotkey } from "@tanstack/react-hotkeys";
-import { FileChangedError, type ArtifactEntry } from "../api";
+import { FILE_PREVIEW_BYTES, FileChangedError, type ArtifactEntry } from "../api";
 import { useFileVersion } from "../useFileVersion";
 import {
   conflictAfterRefresh,
@@ -964,7 +964,7 @@ export function FileViewer({
               />
             </div>
             {data.truncated && (
-              <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_file_truncated_showing_the_first_512_kb()}</div>
+              <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_file_truncated({ size: fmtBytes(FILE_PREVIEW_BYTES) })}</div>
             )}
           </>
         )}

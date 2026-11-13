@@ -82,7 +82,6 @@ import {
 
 import {
   type AcpDefinition,
-  fmtBytes,
   fmtDuration,
   fmtNumber,
   type DataDirSettings,
@@ -122,7 +121,7 @@ import {
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
-import { fmtClock, ltr } from "../i18n";
+import { fmtBytes, fmtClock, fmtMemory, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
@@ -2380,7 +2379,7 @@ function PreflightBadge({ test }: { test: "testing" | { reachable: boolean } | n
 
 function localMachineSummary(hw: LocalMachine) {
   const processor = hw.chip ?? `${hw.os}/${hw.arch}`;
-  const memory = hw.memBytes === null ? null : fmtBytes(hw.memBytes);
+  const memory = hw.memBytes === null ? null : fmtMemory(hw.memBytes);
   const gpu = hw.gpus.length === 0 ? null : m.settings_gpu_count({ count: hw.gpus.length });
   return [processor, hw.cpuCount > 0 ? m.settings_cpu_cores({ count: hw.cpuCount }) : null, memory, gpu]
     .filter(Boolean)

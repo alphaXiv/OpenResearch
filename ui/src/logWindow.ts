@@ -24,7 +24,7 @@ export function isKept(kept: readonly (readonly [number, number])[], span: Span)
 
 const UNITS: Record<string, number> = { b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
 
-/** A typed position: "63%", "2.5 GB", "512m", or a byte offset. */
+/** A typed position: "63%", "2.5 GiB", "512m", or a byte offset. */
 export function parsePosition(text: string, len: number): number | null {
   const match = /^\s*(\d+(?:[.,]\d+)?)\s*(%|[bkmgt]i?b?)?\s*$/i.exec(text);
   if (!match) return null;

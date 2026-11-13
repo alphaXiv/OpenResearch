@@ -225,20 +225,32 @@ pub fn data_dir_source() -> DataDirSource {
     DataDirSource::Default
 }
 
-/// Compact human-readable byte size (e.g. `1.2 KB`, `3.4 MB`). Shared by the
-/// artifacts listing and the data-dir move so the two don't drift.
+/// Binary size in IEC units, to three significant figures: `512 B`, `3.97 GiB`,
+/// `64 MiB`. The dashboard's `fmtBytes` prints the same.
 pub fn human_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    if n < 1024 {
-        return format!("{n} B");
-    }
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut size = n as f64;
     let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
+    // 1023.5 rather than 1024, so a size that rounds up reads `1 MiB`, not `1024 KiB`.
+    while size >= 1023.5 && unit < UNITS.len() - 1 {
         size /= 1024.0;
         unit += 1;
     }
-    format!("{:.1} {}", size, UNITS[unit])
+
+    let digits = if unit == 0 || size >= 100.0 {
+        0
+    } else if size >= 10.0 {
+        1
+    } else {
+        2
+    };
+    let number = format!("{size:.digits$}");
+    let number = if digits > 0 {
+        number.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        &number
+    };
+    format!("{number} {}", UNITS[unit])
 }
 
 pub fn log_path(data_dir: &Path, run_id: &str) -> PathBuf {
@@ -9440,9 +9452,16 @@ mod tests {
 
     #[test]
     fn human_bytes_scales() {
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(2048), "2.0 KB");
-        assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MB");
+        const KIB: u64 = 1024;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1536), "1.5 KiB");
+        assert_eq!(human_bytes(50 * 1024 * KIB), "50 MiB");
+        assert_eq!(human_bytes(GIB), "1 GiB");
+        assert_eq!(human_bytes(GIB * 397 / 100), "3.97 GiB");
+        assert_eq!(human_bytes(GIB * 39 / 10), "3.9 GiB");
+        assert_eq!(human_bytes(1023 * KIB + 1000), "1 MiB");
     }
 
     #[test]

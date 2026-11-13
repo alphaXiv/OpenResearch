@@ -1,3 +1,4 @@
+import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 
 // LRI/FSI through PDI keep interpolated text from reordering its surrounding sentence.
@@ -15,16 +16,25 @@ export function fmtClock(ms: number): string {
   return new Intl.DateTimeFormat(getLocale(), options).format(ms);
 }
 
-const BYTE_UNITS = [["gigabyte", 1024 ** 3], ["megabyte", 1024 ** 2], ["kilobyte", 1024]] as const;
+const BYTE_UNITS = [m.byte_size_b, m.byte_size_kib, m.byte_size_mib, m.byte_size_gib, m.byte_size_tib];
 
-/** Binary sizes with the familiar unit names: "3.97 GB", "64 MB". */
+/** Binary sizes in IEC units, to three significant figures: "512 B", "3.97 GiB", "64 MiB". */
 export function fmtBytes(bytes: number): string {
-  const [unit, size] = BYTE_UNITS.find(([, size]) => bytes >= size) ?? ["byte", 1];
-  const value = bytes / size;
-  return new Intl.NumberFormat(getLocale(), {
-    style: "unit",
-    unit,
-    unitDisplay: size > 1 ? "short" : "long",
-    maximumFractionDigits: value < 10 && size > 1 ? 2 : 0,
-  }).format(value);
+  let value = bytes;
+  let exponent = 0;
+  // 1023.5 rather than 1024, so a value that rounds up reads "1 MiB" instead of "1,024 KiB".
+  while (value >= 1023.5 && exponent < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    exponent += 1;
+  }
+
+  const digits = exponent === 0 || value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  const number = new Intl.NumberFormat(getLocale(), { maximumFractionDigits: digits }).format(value);
+  return BYTE_UNITS[exponent]({ value: number });
+}
+
+/** Installed memory the way spec sheets and About This Mac print it: whole binary gigabytes labelled GB, "48 GB". */
+export function fmtMemory(bytes: number): string {
+  const gigabytes = Math.round(bytes / 1024 ** 3);
+  return m.memory_size_gb({ value: new Intl.NumberFormat(getLocale()).format(gigabytes) });
 }
