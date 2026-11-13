@@ -59,7 +59,7 @@ function Resume({ projectId }: { projectId?: string }) {
       });
     return () => { current = false; };
   }, [projectId, attempt, navigate, workspace]);
-  return <>{error ? <RouteFailure error={error} reset={() => setAttempt((value) => value + 1)} /> : <RoutePending />}<WorkspaceConnection runtime={runtime} corner /></>;
+  return <>{error ? <RouteFailure error={error} reset={() => setAttempt((value) => value + 1)} /> : <RoutePending />}{error && <WorkspaceConnection runtime={runtime} corner />}</>;
 }
 
 export function ResumeGlobal() { return <Resume />; }
@@ -123,7 +123,7 @@ export function ProjectsPage() {
           ) : (
             <ResumeGlobal />
           )}
-      <WorkspaceConnection runtime={runtime} corner />
+      {(agentSetup || (error && (!projects || !state))) && <WorkspaceConnection runtime={runtime} corner />}
     </div>
   );
 }

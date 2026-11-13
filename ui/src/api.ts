@@ -739,6 +739,8 @@ export interface RemoteSessionInfo {
   user: string | null;
   status: RemoteSessionStatus;
   version: string | null;
+  /** The remote's version, or its canary tag; null when unknown. */
+  buildId: string | null;
   dashboardProtocol: number | null;
   gatewayUrl: string;
   error: string | null;

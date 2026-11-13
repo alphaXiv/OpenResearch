@@ -2016,7 +2016,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         <div className={EMPTY_STATE_CLASS_NAME}>
           <Spinner />
         </div>
-        <WorkspaceConnection runtime={runtime} corner />
       </div>
     );
   }

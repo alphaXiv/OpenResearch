@@ -88,6 +88,8 @@ pub(crate) struct RemoteSessionInfo {
     pub user: Option<String>,
     pub status: RemoteSessionStatus,
     pub version: Option<String>,
+    /// The remote's `orx version --build-id`: its version, or its canary tag.
+    pub build_id: Option<String>,
     pub dashboard_protocol: Option<u32>,
     pub gateway_url: String,
     pub error: Option<String>,
@@ -248,6 +250,7 @@ impl RemoteSessionManager {
             user: None,
             status: RemoteSessionStatus::Connecting,
             version: None,
+            build_id: None,
             dashboard_protocol: None,
             gateway_url: format!("http://127.0.0.1:{port}"),
             error: None,
@@ -418,6 +421,12 @@ async fn prepare_remote_session(session: Arc<RemoteSession>, generation: u64) {
     }
 }
 
+fn remote_newer_message(host: &str) -> String {
+    format!(
+        "'{host}' runs a newer OpenResearch than this computer. Update OpenResearch on this computer, then reconnect."
+    )
+}
+
 async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u64) {
     let _operation = session.operation.lock().await;
     if session.generation.load(Ordering::SeqCst) != generation {
@@ -539,7 +548,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
             update_paths.binary = remote_orx.path.clone();
             let message = protocol
                 .filter(|protocol| *protocol > DASHBOARD_PROTOCOL)
-                .map(|_| "This remote OpenResearch is newer than the local app. Update OpenResearch locally, then reconnect.".to_string())
+                .map(|_| remote_newer_message(&host))
                 .or_else(|| (crate::telemetry::build_channel() != "production").then(|| {
                     "This development build cannot install an unreleased public version. Build this branch for the remote machine and replace the binary at the path shown below."
                         .to_string()
@@ -548,6 +557,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
                 info.status = RemoteSessionStatus::NeedsUpdate;
                 info.error = message;
                 info.version = Some(remote_orx.version.clone());
+                info.build_id = remote_orx.build_id.clone();
                 info.dashboard_protocol = protocol;
                 info.install_paths = Some((&update_paths).into());
             })
@@ -589,6 +599,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
     let protocol = Some(descriptor.dashboard_protocol);
     if !update_session_if_current(&session, generation, |info| {
         info.version = Some(descriptor.version.clone());
+        info.build_id = descriptor.build_id.clone();
         info.dashboard_protocol = protocol;
     })
     .await
@@ -598,8 +609,8 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
     if protocol != Some(DASHBOARD_PROTOCOL) {
         let message = protocol
             .filter(|protocol| *protocol > DASHBOARD_PROTOCOL)
-            .map(|_| "This remote OpenResearch is newer than the local app. Update OpenResearch locally, then reconnect.".to_string())
-            .or_else(|| Some("The running OpenResearch host uses an older dashboard protocol. Stop it before updating the remote binary.".to_string()));
+            .map(|_| remote_newer_message(&host))
+            .or_else(|| Some(format!("OpenResearch on '{host}' is still running an older version. Stop it there, then update it to match this computer.")));
         update_session_if_current(&session, generation, |info| {
             info.status = RemoteSessionStatus::NeedsUpdate;
             info.error = message;
@@ -649,9 +660,8 @@ async fn install_and_connect(
         return Ok(session.info.read().await.clone());
     }
     if remote_protocol.is_some_and(|protocol| protocol > DASHBOARD_PROTOCOL) {
-        return Err(anyhow!(
-            "This remote OpenResearch is newer than the local app. Update OpenResearch locally, then reconnect."
-        ));
+        let host = session.info.read().await.host.clone();
+        return Err(anyhow!(remote_newer_message(&host)));
     }
     let update_binary = if previous == RemoteSessionStatus::NeedsUpdate {
         Some(update_binary.ok_or_else(|| {
@@ -715,6 +725,7 @@ async fn install_and_connect(
             return Ok(info.clone());
         }
         info.version = Some(remote_orx.version.clone());
+        info.build_id = remote_orx.build_id.clone();
         info.dashboard_protocol = protocol;
         info.install_paths = None;
     }
@@ -1896,10 +1907,15 @@ pub async fn run(host: &str, args: UpArgs) -> Result<()> {
 pub(crate) struct RemoteOrx {
     pub path: String,
     pub version: String,
+    /// `None` for a binary too old to report one.
+    pub build_id: Option<String>,
 }
 
 const REMOTE_PATH_MARKER: &str = "ORX_REMOTE_PATH=";
 const REMOTE_VERSION_MARKER: &str = "ORX_REMOTE_VERSION=";
+const REMOTE_BUILD_MARKER: &str = "ORX_REMOTE_BUILD=";
+const REMOTE_UNAME_MARKER: &str = "ORX_REMOTE_UNAME=";
+const CANARY_INSTALL_MARKER: &str = "ORX_CANARY_INSTALL=";
 const REMOTE_REJECTED_MARKER: &str = "ORX_REMOTE_REJECTED=";
 const REMOTE_REJECTED_OWNER_MARKER: &str = "ORX_REMOTE_REJECTED_OWNER=";
 const REMOTE_REJECTED_WRITABLE_MARKER: &str = "ORX_REMOTE_REJECTED_WRITABLE=";
@@ -1957,7 +1973,12 @@ fn parse_remote_orx(output: &str) -> Option<RemoteOrx> {
         .lines()
         .find_map(|line| line.strip_prefix(REMOTE_VERSION_MARKER))?;
     let version = version.strip_prefix("orx ").unwrap_or(version).to_string();
-    (!version.is_empty()).then_some(RemoteOrx { path, version })
+    let build_id = marker_text(output, REMOTE_BUILD_MARKER);
+    (!version.is_empty()).then_some(RemoteOrx {
+        path,
+        version,
+        build_id,
+    })
 }
 
 /// What the remote trust probe found at one candidate path.
@@ -2338,8 +2359,10 @@ fn remote_orx_probe(resolve_candidate: &str) -> String {
          fi; \
          if [ -n \"$owner\" ] && [ -z \"$unsafe\" ]; then \
          v=$(\"$p\" --version 2>/dev/null || true); \
+         b=$(\"$p\" --no-telemetry version --build-id 2>/dev/null || true); \
          printf '%s\\n' \"$p\" | orx_probe_emit '{}'; \
          printf '%s\\n' \"$v\" | orx_probe_emit '{}'; \
+         printf '%s\\n' \"$b\" | orx_probe_emit '{}'; \
          else \
          printf '%s\\n' \"$p\" | orx_probe_emit '{}'; \
          if [ -z \"$owner\" ]; then printf '%s\\n' \"$p\" | orx_probe_emit '{}'; fi; \
@@ -2348,6 +2371,7 @@ fn remote_orx_probe(resolve_candidate: &str) -> String {
          fi; fi; fi",
         REMOTE_PATH_MARKER,
         REMOTE_VERSION_MARKER,
+        REMOTE_BUILD_MARKER,
         REMOTE_REJECTED_MARKER,
         REMOTE_REJECTED_OWNER_MARKER,
         REMOTE_REJECTED_WRITABLE_MARKER,
@@ -2389,13 +2413,19 @@ pub(crate) async fn install_remote_orx(
     paths: &RemoteInstallPaths,
 ) -> Result<RemoteOrx> {
     let (cargo, _, _) = validated_roots(paths)?;
-    let cargo = crate::jobs::ssh::sh_quote(&cargo);
-    let version = env!("CARGO_PKG_VERSION");
-    let installer = remote_installer(version);
-    let command = remote_login_orx_cmd(&format!("export CARGO_HOME={cargo}; {installer}"));
-    crate::jobs::ssh::direct_run(target, &command, None)
-        .await
-        .map_err(|error| anyhow!("Could not install OpenResearch on '{host}': {error}"))?;
+    // A canary keeps the stable version number but may speak a newer protocol,
+    // so it installs its own build rather than the release with that number.
+    if let Some(tag) = option_env!("ORX_DESKTOP_CANARY_TAG") {
+        install_canary_orx(target, host, &paths.binary, tag).await?;
+    } else {
+        let cargo = crate::jobs::ssh::sh_quote(&cargo);
+        let version = env!("CARGO_PKG_VERSION");
+        let installer = remote_installer(version);
+        let command = remote_login_orx_cmd(&format!("export CARGO_HOME={cargo}; {installer}"));
+        crate::jobs::ssh::direct_run(target, &command, None)
+            .await
+            .map_err(|error| anyhow!("Could not install OpenResearch on '{host}': {error}"))?;
+    }
     match probe_remote_orx_path(target, host, &paths.binary).await? {
         RemoteOrxProbe::Trusted(orx) => Ok(orx),
         RemoteOrxProbe::Rejected(rejection) => Err(remote_orx_rejection_error(host, &rejection)),
@@ -2410,6 +2440,150 @@ pub(crate) fn remote_installer(version: &str) -> String {
         "curl --proto '=https' --tlsv1.2 -LsSf {}/releases/download/v{version}/openresearch-cli-installer.sh | sh",
         crate::updates::REPO_URL
     )
+}
+
+/// The canary CLI target every canary publishes, so its absence means the
+/// whole build is gone.
+const CANARY_REFERENCE_TARGET: &str = "x86_64-unknown-linux-musl";
+
+/// The canary CLI archive for a remote's `uname -sm`.
+fn canary_cli_target(uname: &str) -> Option<&'static str> {
+    match uname.split_whitespace().collect::<Vec<_>>()[..] {
+        ["Linux", "x86_64"] => Some("x86_64-unknown-linux-musl"),
+        ["Linux", "aarch64" | "arm64"] => Some("aarch64-unknown-linux-musl"),
+        ["Darwin", "x86_64"] => Some("x86_64-apple-darwin"),
+        ["Darwin", "arm64"] => Some("aarch64-apple-darwin"),
+        _ => None,
+    }
+}
+
+/// Install canary `tag`'s own headless `orx` at `binary`, unless it is already there.
+async fn install_canary_orx(target: &SshTarget, host: &str, binary: &str, tag: &str) -> Result<()> {
+    if let RemoteOrxProbe::Trusted(orx) = probe_remote_orx_path(target, host, binary).await? {
+        if orx.build_id.as_deref() == Some(tag) {
+            return Ok(());
+        }
+    }
+
+    let command = remote_orx_cmd(&format!(
+        "printf '{REMOTE_UNAME_MARKER}%s\\n' \"$(uname -sm)\""
+    ));
+    let output = crate::jobs::ssh::direct_run(target, &command, None)
+        .await
+        .map_err(|error| anyhow!("Can't check the platform of '{host}': {error}"))?;
+    let uname = marker_text(&output, REMOTE_UNAME_MARKER).ok_or_else(|| {
+        anyhow!("Can't check the platform of '{host}': `uname -sm` printed nothing.")
+    })?;
+    let triple = canary_cli_target(&uname).ok_or_else(|| {
+        anyhow!(
+            "OpenResearch has no build for '{host}', which runs {uname}. It runs on 64-bit Linux and macOS, on x86_64 or ARM."
+        )
+    })?;
+
+    let url = crate::updates::canary_cli_url(tag, triple);
+    let sha256 = match crate::updates::published_sha256(&url).await? {
+        Some(sha256) => sha256,
+        None => {
+            let reference = crate::updates::canary_cli_url(tag, CANARY_REFERENCE_TARGET);
+            let published = reference != url
+                && crate::updates::published_sha256(&reference)
+                    .await?
+                    .is_some();
+            return Err(canary_cli_missing(host, tag, triple, published));
+        }
+    };
+
+    let command = remote_login_orx_cmd(&canary_cli_installer(&url, &sha256, binary)?);
+    let output = crate::jobs::ssh::direct_run(target, &command, None)
+        .await
+        .map_err(|error| anyhow!("Could not install OpenResearch on '{host}': {error}"))?;
+    canary_install_result(host, &url, &sha256, binary, &output)
+}
+
+fn canary_cli_missing(
+    host: &str,
+    tag: &str,
+    triple: &str,
+    build_published: bool,
+) -> crate::error::Error {
+    if build_published {
+        anyhow!(
+            "This computer runs OpenResearch {tag}, which has no {triple} build for '{host}'. Switch OpenResearch on this computer to stable releases, then reconnect."
+        )
+    } else {
+        anyhow!(
+            "This computer runs OpenResearch {tag}, which is no longer available to install on '{host}'. Update OpenResearch on this computer, then reconnect."
+        )
+    }
+}
+
+/// A POSIX script that downloads `url`, checks it against `sha256` and renames
+/// its `orx` over `binary`. It always exits 0 and reports one
+/// [`CANARY_INSTALL_MARKER`] line, since a failing SSH command keeps only stderr.
+fn canary_cli_installer(url: &str, sha256: &str, binary: &str) -> Result<String> {
+    let dir = posix_path_parent(binary)
+        .ok_or_else(|| anyhow!("OpenResearch binary has no install directory"))?;
+    let url = crate::jobs::ssh::sh_quote(url);
+    let sha256 = crate::jobs::ssh::sh_quote(sha256);
+    let binary = crate::jobs::ssh::sh_quote(binary);
+    let staged = crate::jobs::ssh::sh_quote(&posix_join(&dir, ".orx-install"));
+    let dir = crate::jobs::ssh::sh_quote(&dir);
+    Ok(format!(
+        "report() {{ printf '{CANARY_INSTALL_MARKER}%s\\n' \"$*\"; exit 0; }}; \
+         tmp=$(mktemp -d 2>/dev/null) || report tmp; \
+         trap 'rm -rf \"$tmp\"' EXIT; \
+         curl --proto '=https' --tlsv1.2 -fLsS -o \"$tmp/orx.tar.gz\" {url} 2>\"$tmp/err\" \
+         || report download \"$(tail -n 1 \"$tmp/err\")\"; \
+         sum=$(sha256sum \"$tmp/orx.tar.gz\" 2>/dev/null || shasum -a 256 \"$tmp/orx.tar.gz\" 2>/dev/null) \
+         || report no-sha256; \
+         [ \"${{sum%% *}}\" = {sha256} ] || report checksum \"${{sum%% *}}\"; \
+         tar -xzf \"$tmp/orx.tar.gz\" -C \"$tmp\" orx 2>\"$tmp/err\" \
+         || report unpack \"$(tail -n 1 \"$tmp/err\")\"; \
+         staged=; \
+         {{ mkdir -p {dir} && staged=$(mktemp {staged}.XXXXXX) && cat \"$tmp/orx\" > \"$staged\" && chmod 755 \"$staged\" && mv -f \"$staged\" {binary}; }} 2>\"$tmp/err\" \
+         || {{ [ -z \"$staged\" ] || rm -f \"$staged\"; report write \"$(tail -n 1 \"$tmp/err\")\"; }}; \
+         report ok"
+    ))
+}
+
+fn canary_install_result(
+    host: &str,
+    url: &str,
+    sha256: &str,
+    binary: &str,
+    output: &str,
+) -> Result<()> {
+    let report = output
+        .lines()
+        .find_map(|line| line.strip_prefix(CANARY_INSTALL_MARKER))
+        .ok_or_else(|| {
+            anyhow!("The install on '{host}' stopped without reporting a result. Try again.")
+        })?;
+    let (outcome, detail) = report.split_once(' ').unwrap_or((report, ""));
+    match outcome {
+        "ok" => Ok(()),
+        "tmp" => Err(anyhow!(
+            "Couldn't create a temporary directory on '{host}' to download OpenResearch. Check that its temporary directory is writable and has free space, then try again."
+        )),
+        "download" => Err(anyhow!(
+            "'{host}' couldn't download {url}: {detail}. Check that '{host}' can reach github.com, then try again."
+        )),
+        "no-sha256" => Err(anyhow!(
+            "'{host}' has neither `sha256sum` nor `shasum`, so OpenResearch can't verify the download. Install coreutils on '{host}', then try again."
+        )),
+        "checksum" => Err(anyhow!(
+            "The download of {url} on '{host}' doesn't match its published checksum (expected {sha256}, got {detail}). Try again."
+        )),
+        "unpack" => Err(anyhow!(
+            "Couldn't unpack {url} on '{host}': {detail}. Try again."
+        )),
+        "write" => Err(anyhow!(
+            "Couldn't install `orx` at {binary} on '{host}': {detail}. Choose a binary path you can write to, then try again."
+        )),
+        _ => Err(anyhow!(
+            "The install on '{host}' reported an unknown result: {report}. Try again."
+        )),
+    }
 }
 
 /// Turn the `--remote` value into an [`SshTarget`], supporting a trailing
@@ -2702,6 +2876,7 @@ mod tests {
                 user: None,
                 status: RemoteSessionStatus::Connecting,
                 version: None,
+                build_id: None,
                 dashboard_protocol: None,
                 gateway_url: "http://127.0.0.1:1".into(),
                 error: None,
@@ -3168,6 +3343,163 @@ mod tests {
         .unwrap();
         assert_eq!(found.path, "/srv/users/me/bin/orx");
         assert_eq!(found.version, "1.2.3");
+        assert_eq!(found.build_id, None, "a binary too old to report its build");
+    }
+
+    #[test]
+    fn canary_cli_targets_follow_uname() {
+        for (uname, target) in [
+            ("Linux x86_64", Some("x86_64-unknown-linux-musl")),
+            ("Linux aarch64\n", Some("aarch64-unknown-linux-musl")),
+            ("Darwin arm64", Some("aarch64-apple-darwin")),
+            ("Darwin x86_64", Some("x86_64-apple-darwin")),
+            ("Linux armv7l", None),
+            ("Linux i686", None),
+            ("FreeBSD amd64", None),
+            ("Linux", None),
+        ] {
+            assert_eq!(canary_cli_target(uname), target, "{uname}");
+        }
+    }
+
+    #[test]
+    fn a_missing_canary_cli_says_whether_the_build_or_the_platform_is_gone() {
+        let expired = canary_cli_missing("gpu", "canary-20261101.2", "aarch64-apple-darwin", false)
+            .to_string();
+        assert!(expired.contains("no longer available"), "{expired}");
+        assert!(
+            expired.contains("Update OpenResearch on this computer"),
+            "{expired}"
+        );
+
+        let platform = canary_cli_missing("gpu", "canary-20261101.2", "aarch64-apple-darwin", true)
+            .to_string();
+        assert!(platform.contains("aarch64-apple-darwin"), "{platform}");
+        assert!(platform.contains("stable releases"), "{platform}");
+    }
+
+    #[test]
+    fn a_canary_install_without_a_report_is_not_success() {
+        let error = canary_install_result("gpu", "https://x", "a", "/b/bin/orx", "welcome\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("without reporting a result"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canary_installer_installs_only_the_verified_archive() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("orx-canary-install-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let source = base.join("source");
+        let fakes = base.join("fakes");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&fakes).unwrap();
+        std::fs::write(source.join("orx"), "#!/bin/sh\necho canary\n").unwrap();
+        std::fs::set_permissions(source.join("orx"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let archive = base.join("archive.tar.gz");
+        let packed = crate::process::command("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&source)
+            .arg("orx")
+            .status()
+            .unwrap();
+        assert!(packed.success());
+        let sha256 = format!("{:x}", Sha256::digest(std::fs::read(&archive).unwrap()));
+
+        let curl = fakes.join("curl");
+        std::fs::write(
+            &curl,
+            "#!/bin/sh\n\
+             while [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n\
+             if [ -n \"$ORX_TEST_CURL_FAILS\" ]; then echo 'curl: (22) The requested URL returned error: 404' >&2; exit 22; fi\n\
+             cp \"$ORX_TEST_ARCHIVE\" \"$out\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let url = "https://example.test/canary-20261112.3--OpenResearch-cli-x.tar.gz";
+        let install = |sha256: &str, binary: &std::path::Path, curl_fails: bool| {
+            let binary = binary.to_str().unwrap();
+            let script = canary_cli_installer(url, sha256, binary).unwrap();
+            let path = format!("{}:{}", fakes.display(), std::env::var("PATH").unwrap());
+            let mut command = crate::process::command("sh");
+            command
+                .arg("-c")
+                .arg(&script)
+                .env("PATH", path)
+                .env("ORX_TEST_ARCHIVE", &archive);
+            if curl_fails {
+                command.env("ORX_TEST_CURL_FAILS", "1");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            canary_install_result(
+                "gpu",
+                url,
+                sha256,
+                binary,
+                &String::from_utf8(output.stdout).unwrap(),
+            )
+        };
+
+        let binary = base.join("home/.cargo/bin/orx");
+        install(&sha256, &binary, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&binary).unwrap(),
+            "#!/bin/sh\necho canary\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(binary.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, ["orx"]);
+
+        std::fs::write(&binary, "previous").unwrap();
+        let tampered = install(&"0".repeat(64), &binary, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            tampered.contains("doesn't match its published checksum"),
+            "{tampered}"
+        );
+        assert!(tampered.contains(&sha256), "{tampered}");
+        assert_eq!(std::fs::read_to_string(&binary).unwrap(), "previous");
+
+        let unreachable = install(&sha256, &binary, true).unwrap_err().to_string();
+        assert!(
+            unreachable.contains("'gpu' couldn't download"),
+            "{unreachable}"
+        );
+        assert!(
+            unreachable.contains(url) && unreachable.contains("404"),
+            "{unreachable}"
+        );
+        assert_eq!(std::fs::read_to_string(&binary).unwrap(), "previous");
+
+        std::fs::write(base.join("not-a-directory"), "").unwrap();
+        let blocked = base.join("not-a-directory/bin/orx");
+        let unwritable = install(&sha256, &blocked, false).unwrap_err().to_string();
+        assert!(
+            unwritable.contains("Couldn't install `orx` at"),
+            "{unwritable}"
+        );
+        assert!(
+            unwritable.contains(blocked.to_str().unwrap()),
+            "{unwritable}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -3263,7 +3595,7 @@ mod tests {
             orx_test_support::write_executable(
                 &binary,
                 format!(
-                    "#!/bin/sh\ntouch {}\necho 'orx 9.9.9'\n",
+                    "#!/bin/sh\ntouch {}\ncase \"$*\" in *--build-id*) echo canary-20261112.3 ;; *) echo 'orx 9.9.9' ;; esac\n",
                     crate::jobs::ssh::sh_quote(flag.to_str().unwrap())
                 ),
                 0o755,
@@ -3286,8 +3618,11 @@ mod tests {
         };
 
         let trusted = run_probe(&trusted_dir.join("orx"));
-        assert!(trusted.contains("ORX_REMOTE_PATH="), "{trusted}");
-        assert!(trusted.contains("ORX_REMOTE_VERSION="), "{trusted}");
+        let RemoteOrxProbe::Trusted(found) = classify_probe_output(&trusted) else {
+            panic!("trusted candidate was not reported: {trusted}");
+        };
+        assert_eq!(found.version, "9.9.9");
+        assert_eq!(found.build_id.as_deref(), Some("canary-20261112.3"));
         assert!(flag.exists(), "trusted candidate should have run");
         std::fs::remove_file(&flag).unwrap();
 
