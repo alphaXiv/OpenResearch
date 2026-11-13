@@ -194,15 +194,19 @@ impl Saved {
         })
     }
 
-    /// After the attempt: a login keeps what the user typed, and a rejected
-    /// saved answer is dropped either way.
+    /// After the attempt: a login keeps what the user typed. A failed one drops
+    /// the saved answers it used, since ssh may give up without asking again.
     pub(crate) async fn finish(&self, authenticated: bool) {
         let (rejected, typed) = {
             let state = self.state();
-            if state.rejected.is_empty() && (state.typed.is_empty() || !authenticated) {
+            let mut rejected = state.rejected.clone();
+            if !authenticated {
+                rejected.extend(state.used.keys().cloned());
+            }
+            if rejected.is_empty() && (state.typed.is_empty() || !authenticated) {
                 return;
             }
-            (state.rejected.clone(), state.typed.clone())
+            (rejected, state.typed.clone())
         };
         let alias = self.alias.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -228,7 +232,11 @@ impl Saved {
 fn secret_key(question: &str) -> Option<String> {
     let question = question.trim();
     let lower = question.to_ascii_lowercase();
+    // ssh prefixes a server's own questions with `(user@host)`; only ssh itself asks for a key's passphrase.
     if let Some(at) = lower.find("passphrase") {
+        if question.starts_with('(') {
+            return None;
+        }
         let after = question[at..].split_once(" for ")?.1;
         let path = after
             .trim()
@@ -272,6 +280,10 @@ mod tests {
             (
                 "Enter passphrase for key '/home/me/.ssh/id_ed25519': ",
                 Some("passphrase /home/me/.ssh/id_ed25519"),
+            ),
+            (
+                "(clo@gpu1) Enter passphrase for key '/home/me/.ssh/id_ed25519': ",
+                None,
             ),
             (
                 "Bad passphrase, try again for /home/me/.ssh/id_ed25519: ",
@@ -355,6 +367,25 @@ mod tests {
         );
         assert_eq!(prompt(password.clone()).await.unwrap(), None);
         assert_eq!(prompt("Verification code:".into()).await.unwrap(), None);
+        saved.finish(false).await;
+        assert!(crate::local::keychain::load(host).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_saved_password_ssh_gave_up_on_is_forgotten() {
+        if !with_keychain() {
+            return;
+        }
+        let host = "keychain-changed";
+        crate::local::keychain::save(host, &[("Password:".to_owned(), "old".to_owned())].into())
+            .unwrap();
+        let saved = Saved::new(host);
+        let (prompt, _) = user(&[]);
+        let prompt = saved.wrap(Some(prompt));
+        assert_eq!(
+            prompt("Password:".into()).await.unwrap().as_deref(),
+            Some("old")
+        );
         saved.finish(false).await;
         assert!(crate::local::keychain::load(host).unwrap().is_empty());
     }

@@ -913,7 +913,10 @@ pub(super) async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host).await?;
+    // A remote workspace's Connect ends with this check too.
+    if let Err(error) = require_configured_ssh_host(&host).await {
+        require_saved_remote(&host).await.map_err(|_| error)?;
+    }
     if let Some(reference) = &req.container {
         crate::jobs::ssh::validate_container_reference(reference).map_err(bad_request)?;
     }

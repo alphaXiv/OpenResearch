@@ -287,12 +287,6 @@ pub(crate) fn parse(input: &str) -> Result<Block> {
             ));
         }
     }
-    // The first value wins in ssh, so later repeats would never apply.
-    let mut seen = std::collections::HashSet::new();
-    options.retain(|(key, _)| {
-        let key = key.to_ascii_lowercase();
-        key == "identityfile" || seen.insert(key)
-    });
     Ok(Block { host, options })
 }
 
@@ -521,6 +515,26 @@ pub(crate) fn add(list: List, block: &Block) -> Result<std::result::Result<(), S
             )));
         }
     }
+    // Every orx ssh call reads these files, so one bad keyword would break them all.
+    let check = directory().join(".check");
+    write(&check, &block.render())?;
+    let output = crate::process::command("ssh")
+        .arg("-F")
+        .arg(&check)
+        .arg("-G")
+        .arg(&block.host)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| anyhow!("Could not run ssh to check {}: {error}", block.host));
+    let _ = std::fs::remove_file(&check);
+    let output = output?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr.lines().next().unwrap_or_default();
+        let reason = reason.split_once(": ").map_or(reason, |(_, reason)| reason);
+        return Ok(Err(format!("ssh can't use this: {}", reason.trim())));
+    }
+
     let path = list.path();
     let mut text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -634,8 +648,14 @@ mod tests {
                 ("SendEnv", "LANG LC_*"),
             ])
         );
-        assert_eq!(options("ssh clo@gpu1 -l bob"), pairs(&[("User", "clo")]));
-        assert_eq!(options("ssh -l bob clo@gpu1"), pairs(&[("User", "bob")]));
+        assert_eq!(
+            options("ssh clo@gpu1 -l bob"),
+            pairs(&[("User", "clo"), ("User", "bob")])
+        );
+        assert_eq!(
+            options("ssh -l bob clo@gpu1"),
+            pairs(&[("User", "bob"), ("User", "clo")])
+        );
     }
 
     #[test]
@@ -647,6 +667,7 @@ mod tests {
                 ("Port", "2222"),
                 ("User", "alice"),
                 ("ServerAliveInterval", "30"),
+                ("User", "bob"),
             ])
         );
     }
@@ -753,6 +774,12 @@ mod tests {
             );
             add(List::Remotes, "gpu1").unwrap();
             add(List::Remotes, "ssh -p 2200 gpu1").unwrap_err();
+            let error = add(List::Remotes, "ssh -o ServerAliveInterva=30 typo").unwrap_err();
+            assert!(error.contains("serveraliveinterva"), "{error}");
+            assert!(read(List::Remotes)
+                .unwrap()
+                .iter()
+                .all(|block| block.host != "typo"));
 
             assert!(remove(List::Remotes, "gpu1").unwrap());
             assert_eq!(
