@@ -1737,11 +1737,12 @@ async fn list_project_activity(State(state): State<AppState>) -> ApiResult {
         let store = Store::open()?;
         let mut active_agents = HashMap::<String, usize>::new();
         for (session_id, project_id) in store.list_chat_session_project_ids()? {
-            // Side chats stay out of project agent counts.
+            // Side chats and delegates stay out of project agent counts.
             if busy.contains(&session_id)
                 && store
                     .get_chat_session(&session_id)?
                     .is_some_and(|session| session.side_parent_session_id.is_none())
+                && store.delegation(&session_id)?.parent.is_none()
             {
                 *active_agents.entry(project_id).or_default() += 1;
             }

@@ -35,7 +35,7 @@ export async function projectResumeLocation(projectId: string, workspace: Worksp
   const location = safeLocation(state?.lastLocation);
   if (location && parseDestination(location.split("?")[0])?.projectId === projectId
     && validSessionLocation(location, sessions)) return location;
-  const newest = sessions.find((session) => !session.archived && !session.sideParentSessionId);
+  const newest = sessions.find((session) => !session.archived && !session.sideParentSessionId && !session.delegate);
   const defaults = isDemoProjectId(projectId) ? defaultTaskWorkspace(newest?.id, !(await client.fetchQuery(getUiStateQuery())).tourCompleted) : undefined;
   const task = getTaskWorkspace(state, newest?.id ?? "new");
   const rememberedPane = task ? task.active : defaults?.active;

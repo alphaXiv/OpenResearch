@@ -3658,7 +3658,7 @@ impl Store {
     /// long-lived install cannot turn one dialog open into a multi-megabyte read.
     pub fn list_all_chat_sessions(&self) -> Result<Vec<StoredChatSession>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE side_parent_session_id IS NULL
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE {TOP_LEVEL_CHATS}
              ORDER BY updated_at DESC LIMIT 500"
         ))?;
         let rows = stmt.query_map([], row_to_chat_session)?;
@@ -3672,7 +3672,7 @@ impl Store {
     ) -> Result<Vec<StoredChatSession>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CHAT_SESSION_COLS} FROM chat_sessions
-             WHERE side_parent_session_id IS NULL AND (?1 IS NULL OR archived = ?1)
+             WHERE {TOP_LEVEL_CHATS} AND (?1 IS NULL OR archived = ?1)
                AND (?2 IS NULL OR updated_at < ?2 OR (updated_at = ?2 AND id < ?3))
              ORDER BY updated_at DESC, id DESC LIMIT 51"
         ))?;
@@ -3724,10 +3724,11 @@ impl Store {
     /// every agent that has worked on the project, not only the visible rail.
     pub fn list_project_activity_summaries(&self) -> Result<Vec<ProjectActivitySummary>> {
         let mut stmt = self.conn.prepare(
-            "WITH agent_counts AS (
+            &format!(
+                "WITH agent_counts AS (
                  SELECT project_id, COUNT(*) AS total_agents
                  FROM chat_sessions
-                 WHERE side_parent_session_id IS NULL
+                 WHERE {TOP_LEVEL_CHATS}
                  GROUP BY project_id
              ),
              experiment_counts AS (
@@ -3774,7 +3775,8 @@ impl Store {
              LEFT JOIN running_experiment_counts
                ON running_experiment_counts.project_id = local_projects.id
              LEFT JOIN latest_messages ON latest_messages.project_id = local_projects.id
-             JOIN latest_activity ON latest_activity.project_id = local_projects.id",
+             JOIN latest_activity ON latest_activity.project_id = local_projects.id"
+            ),
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(ProjectActivitySummary {
@@ -5417,6 +5419,10 @@ fn row_to_chat_turn(
         updated_at: row.get(17)?,
     })
 }
+
+/// The chats the user started or kept: neither a side chat nor a delegate.
+const TOP_LEVEL_CHATS: &str = "side_parent_session_id IS NULL
+     AND id NOT IN (SELECT session_id FROM chat_delegates)";
 
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
@@ -10999,6 +11005,43 @@ mod tests {
             set(&Store::open_at(dir.clone()).unwrap());
             assert!(check(&read()), "case {i}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_delegate_stays_out_of_the_sidebar_until_kept_or_orphaned() {
+        let dir = std::env::temp_dir().join(format!("orx-store-delegate-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["chat_parent", "chat_kept", "chat_orphan"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+        }
+        store
+            .record_chat_delegate("chat_kept", "chat_parent", false)
+            .unwrap();
+        store
+            .record_chat_delegate("chat_orphan", "chat_parent", false)
+            .unwrap();
+        let sidebar = |store: &Store| -> Vec<String> {
+            let mut ids: Vec<_> = store
+                .list_sidebar_chat_sessions(None, None)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        assert_eq!(sidebar(&store), ["chat_parent"]);
+        assert_eq!(store.list_all_chat_sessions().unwrap().len(), 1);
+
+        store.remove_chat_delegate("chat_kept").unwrap();
+        assert_eq!(sidebar(&store), ["chat_kept", "chat_parent"]);
+
+        store.delete_chat_session("chat_parent").unwrap();
+        assert_eq!(sidebar(&store), ["chat_kept", "chat_orphan"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

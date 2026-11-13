@@ -155,8 +155,6 @@ pub fn delegate_permission(parent: &StoredChatSession, harness_id: &str) -> Resu
         })
 }
 
-/// A delegate's chat: a side chat of its delegator, unless it gets a
-/// worktree of its own and stands as a chat in the sidebar.
 /// The id of a chat an agent starts. Given the agent's `clientRequestId` it
 /// is fixed, so a retry finds the chat the first attempt started.
 pub fn started_chat_id(parent: &StoredChatSession, request: Option<&str>) -> String {
@@ -178,6 +176,8 @@ pub fn request_key(caller: &str, request: &str) -> uuid::Uuid {
     )
 }
 
+/// A delegate's chat: a side chat of its delegator, unless it gets a worktree
+/// of its own. Either way it stays out of the sidebar while it is a delegate.
 pub fn delegate_session(
     id: String,
     parent: &StoredChatSession,
@@ -619,8 +619,8 @@ pub fn session_links(store: &Store, session: &StoredChatSession) -> Result<Value
 }
 
 /// The user keeps a delegate for themselves: it stops telling the chat that
-/// started it, and stands as that chat's side chat, or on its own when it has
-/// its own worktree. The delegator's agent can still read it.
+/// started it, and stands as that chat's side chat, or as a chat in the sidebar
+/// when it has its own worktree. The delegator's agent can still read it.
 pub fn release_delegate(store: &Store, id: &str) -> Result<Option<StoredChatSession>> {
     let Some(session) = store.get_chat_session(id)? else {
         return Ok(None);
