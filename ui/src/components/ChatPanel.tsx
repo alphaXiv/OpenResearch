@@ -7263,7 +7263,7 @@ export function ChatPanel({
     const query = projectSessionsQueries[index];
     const projectSessions = project.id === projectId ? sessions : query.data ?? EMPTY_SESSIONS;
     const matching = projectSessions
-      .filter((session) => !session.sideParentSessionId && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
+      .filter((session) => !session.sideParentSessionId && !session.delegate && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const chatLimit = chatLimits[project.id] ?? 6;
     let visible = matching.slice(0, chatLimit);
@@ -7279,7 +7279,7 @@ export function ChatPanel({
   if (sidebarGrouping === "list") {
     const flat = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? [];
     const selected = sessions.find((session) => session.id === activeId);
-    if (selected && !flat.some((session) => session.id === selected.id)) flat.push(selected);
+    if (selected && !selected.delegate && !flat.some((session) => session.id === selected.id)) flat.push(selected);
     flat.filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).forEach((session) => {
       const project = sidebarProjects.find((project) => project.id === session.projectId);
       if (project) sidebarRows.push({ kind: "chat", project, session });
