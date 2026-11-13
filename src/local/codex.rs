@@ -1043,6 +1043,21 @@ impl CodexHost {
         None
     }
 
+    /// A running child signed in to `profile`'s account, None for the user's
+    /// own, which every native store shares. Reading through it doesn't count
+    /// as the chat's activity.
+    pub async fn live_client(&self, profile: Option<&str>) -> Option<Arc<CodexClient>> {
+        let clients: Vec<_> = self.inner.lock().await.values().cloned().collect();
+        for client in clients {
+            if client.profile.as_deref() == profile
+                && matches!(client.child.lock().await.try_wait(), Ok(None))
+            {
+                return Some(client);
+            }
+        }
+        None
+    }
+
     /// Interrupt and harvest the in-flight turn while its child is reachable,
     /// then retire the child so a successor cannot race native cancellation.
     pub async fn interrupt_session(&self, session_id: &str) -> Option<Vec<Value>> {
@@ -1562,6 +1577,31 @@ pub(crate) mod tests {
         };
         assert!(reusable("/user/codex").await);
         assert!(!reusable("/managed/codex").await);
+        host.kill_session("chat").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plan_limits_are_read_through_a_chats_live_app_server() {
+        use crate::local::usage::Read;
+
+        let host = CodexHost::new();
+        let result = r#"{"rateLimits":{"limitId":"codex","primary":{"usedPercent":2,"windowDurationMins":10080,"resetsAt":1795202690},"planType":"pro"}}"#;
+        let client = rpc_test_client(&format!(
+            r#"IFS= read -r request; case "$request" in *account/rateLimits/read*) printf '%s\n' '{{"id":1,"result":{result}}}' ;; esac; sleep 600"#
+        ));
+        host.inner.lock().await.insert("chat".into(), client);
+        // No binary to spawn: an answer can only come from the live child.
+        let missing = Path::new("/nonexistent/codex");
+        let read = crate::local::harness::codex::read_plan(&host, None, missing, None).await;
+        assert!(matches!(read, Read::Plan(_)), "{read:?}");
+        let other =
+            crate::local::harness::codex::read_plan(&host, Some("codex-other"), missing, None)
+                .await;
+        assert!(
+            matches!(&other, Read::Failed(message) if message.contains("/nonexistent/codex")),
+            "another account's child is never asked: {other:?}"
+        );
         host.kill_session("chat").await;
     }
 

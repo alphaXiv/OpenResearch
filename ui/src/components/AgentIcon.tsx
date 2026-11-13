@@ -57,6 +57,7 @@ const GLYPHS: [id: string, label: () => string, Icon: LucideIcon][] = [
 
 const TILE_SIZES = {
   xs: { box: "size-5 rounded-md text-xs", mark: 13 },
+  ring: { box: "size-[15px] rounded-full border-0 text-2xs", mark: 10 },
   md: { box: "size-8 rounded-lg text-lg", mark: 18 },
   lg: { box: "size-11 rounded-xl text-2xl", mark: 24 },
 } as const;

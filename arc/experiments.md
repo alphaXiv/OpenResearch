@@ -35,6 +35,10 @@ Launching returns a **handle**, stored on the run with everything a later proces
 
 A default flavor applies only to its own backend and never leaks onto an explicitly chosen one.
 
+### The price of a run
+
+**A run is priced once, when its job exists.** The engine asks the backend what it charges per minute or hour (`Backend::quote`) and stores the answer on the run; a later price change never rewrites it. An OpenResearch box keeps the price openresearch.sh gave when creating it. A read that fails is retried a few times, then leaves the run unpriced; it never holds up the launch. Spend is the quote times the run's running time, so a running run's grows and is an estimate. Hugging Face Jobs, Modal and OpenResearch boxes are priced, and a run of theirs without a price shows that its cost is unavailable. Vercel and Tinker have no per-run price orx can read, and the user's own machines and clusters cost nothing orx can see; their runs show no cost.
+
 ## The engine
 
 **One engine per data directory, inside `orx up`.** The engine lock keeps it single ([storage](storage.md)). The dashboard, the desktop window, the CLI and agents are clients; none of them writes run state.

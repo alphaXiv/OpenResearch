@@ -190,6 +190,8 @@ pub struct Runtime {
     backends: Mutex<HashMap<Key, Arc<dyn Backend>>>,
     boxes: Mutex<HashMap<String, Arc<LegacyTransport>>>,
     watched: Mutex<HashMap<Key, watch::Sender<Vec<WatchedRun>>>>,
+    /// Runs whose price this process has started reading.
+    quoting: Mutex<std::collections::HashSet<String>>,
     changed: Notify,
     collect_now: Notify,
     /// Held while a local run is unfinished; a failure is kept so it is logged once.
@@ -217,6 +219,7 @@ impl Runtime {
             backends: Mutex::default(),
             boxes: Mutex::default(),
             watched: Mutex::default(),
+            quoting: Mutex::default(),
             changed: Notify::new(),
             collect_now: Notify::new(),
             #[cfg(windows)]
@@ -227,6 +230,8 @@ impl Runtime {
     pub fn start(self: &Arc<Self>) {
         tokio::spawn(self.clone().supervise());
         tokio::spawn(self.clone().collect_pending());
+        #[cfg(not(test))]
+        tokio::spawn(crate::local::prices::keep_fresh());
     }
 
     fn store(&self) -> Result<MutexGuard<'_, Store>> {
@@ -436,6 +441,8 @@ impl Runtime {
         }
         let runs = store.list_engine_runs()?;
         drop(store);
+        // A run no longer watched has ended; its price read, if any, goes on without it.
+        lock(&self.quoting).retain(|id| runs.iter().any(|run| run.id == *id));
         let mut watch: HashMap<Key, Vec<WatchedRun>> = HashMap::new();
         #[cfg(windows)]
         let mut local_unfinished = false;
@@ -606,6 +613,7 @@ impl Runtime {
                     continue;
                 }
             };
+            self.quote(&backend, &watched);
             let started = tokio::time::Instant::now();
             let observations = tokio::select! {
                 observations = backend.observe(&watched, key.budget()) => observations,
@@ -632,6 +640,65 @@ impl Runtime {
             }
             // Adapters that are not yet due answer at once; never spin on them.
             tokio::time::sleep_until(started + Duration::from_secs(1)).await;
+        }
+    }
+
+    /// Reads the price of each run that has none, once per run while it is watched, with a few
+    /// retries. A run whose price can't be read stays unpriced; its launch never waits on it.
+    fn quote(&self, backend: &Arc<dyn Backend>, watched: &[WatchedRun]) {
+        for run in watched {
+            if !lock(&self.quoting).insert(run.id.clone()) {
+                continue;
+            }
+            let launch = match self
+                .store()
+                .and_then(|store| store.unpriced_launch(&run.id))
+            {
+                Ok(Some(launch)) => launch,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "orx up: run {}: could not read its launch: {error:#}",
+                        run.id
+                    );
+                    lock(&self.quoting).remove(&run.id);
+                    continue;
+                }
+            };
+            let (backend, run, me) = (backend.clone(), run.clone(), self.me.clone());
+            tokio::spawn(async move {
+                let mut wait = Duration::from_secs(30);
+                for attempt in 1..=3 {
+                    let read = tokio::time::timeout(
+                        Duration::from_secs(120),
+                        backend.quote(&run, &launch),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow!("no answer within 2 minutes")));
+                    let error = match read {
+                        Ok(None) => return,
+                        Ok(Some(quote)) => match me.upgrade() {
+                            Some(me) => match me
+                                .store()
+                                .and_then(|store| store.record_run_price(&run.id, &quote))
+                            {
+                                Ok(_) => return,
+                                Err(error) => error,
+                            },
+                            None => return,
+                        },
+                        Err(error) => error,
+                    };
+                    eprintln!(
+                        "orx up: run {}: could not read its price (attempt {attempt} of 3): {error:#}",
+                        run.id
+                    );
+                    if attempt < 3 {
+                        tokio::time::sleep(crate::config::paced(wait)).await;
+                        wait *= 4;
+                    }
+                }
+            });
         }
     }
 
@@ -1454,6 +1521,161 @@ mod tests {
             }
             Ok(page)
         }
+    }
+
+    /// Fails its first `failures` price reads.
+    struct Priced {
+        reads: std::sync::atomic::AtomicU32,
+        failures: u32,
+    }
+
+    #[async_trait]
+    impl Backend for Priced {
+        async fn launch(
+            &self,
+            _: &super::super::RunIntent,
+            _: &super::super::Fence<'_>,
+        ) -> std::result::Result<Handle, super::super::LaunchError> {
+            unreachable!()
+        }
+        async fn recover(&self, _: &super::super::RunIntent) -> super::super::Recovery {
+            unreachable!()
+        }
+        async fn observe(&self, _: &[WatchedRun], _: Duration) -> Vec<(String, Observation)> {
+            unreachable!()
+        }
+        async fn cancel(&self, _: &WatchedRun) -> super::super::CancelOutcome {
+            unreachable!()
+        }
+        async fn quote(
+            &self,
+            _: &WatchedRun,
+            launch: &LaunchSpec,
+        ) -> Result<Option<crate::store::Quote>> {
+            assert_eq!(launch.kind, "hf_job");
+            let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if read <= self.failures {
+                bail!("price list unreachable");
+            }
+            Ok(Some(crate::store::Quote {
+                amount_micros: 167,
+                per: crate::store::Per::Minute,
+                currency: "USD".into(),
+                source: "test".into(),
+                quoted_at: 1,
+            }))
+        }
+        async fn read_log(
+            &self,
+            _: &WatchedRun,
+            _: LogFile,
+            _: ByteRange,
+            _: Option<&FileIdent>,
+        ) -> Result<LogPage> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_runs_price_is_read_once_with_bounded_retries() {
+        let dir = std::env::temp_dir().join(format!("orx-quote-{}", uuid::Uuid::new_v4()));
+        let runtime = collector(&dir);
+        for id in ["flaky", "broken"] {
+            insert_hf_run(&runtime, id);
+        }
+        let watched = |id: &str| WatchedRun {
+            id: id.into(),
+            handle: Handle::Local { dir: id.into() },
+        };
+        let flaky = Arc::new(Priced {
+            reads: Default::default(),
+            failures: 2,
+        });
+        let broken = Arc::new(Priced {
+            reads: Default::default(),
+            failures: u32::MAX,
+        });
+        let (flaky_backend, broken_backend): (Arc<dyn Backend>, Arc<dyn Backend>) =
+            (flaky.clone(), broken.clone());
+        // Each observation round asks again; only the first starts a read.
+        for _ in 0..2 {
+            runtime.quote(&flaky_backend, &[watched("flaky")]);
+            runtime.quote(&broken_backend, &[watched("broken")]);
+        }
+        tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+
+        use std::sync::atomic::Ordering;
+        assert_eq!(flaky.reads.load(Ordering::SeqCst), 3);
+        assert_eq!(broken.reads.load(Ordering::SeqCst), 3);
+        let store = runtime.store().unwrap();
+        assert!(store.unpriced_launch("flaky").unwrap().is_none());
+        assert!(store.unpriced_launch("broken").unwrap().is_some());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn insert_hf_run(runtime: &Runtime, id: &str) {
+        runtime
+            .store()
+            .unwrap()
+            .insert_submitting_run(SubmittingRun {
+                id,
+                experiment_id: "e",
+                project_id: "p",
+                metadata: &crate::jobs::BackendDescriptor::parse(r#"{"kind":"engine"}"#).unwrap(),
+                command: "true",
+                created_at: 1,
+                commit_sha: None,
+                chat_session_id: None,
+                spec_digest: "digest",
+                launch: &LaunchSpec {
+                    kind: "hf_job".into(),
+                    target: Some("lab".into()),
+                    options: json!({"flavor": "cpu-basic"}),
+                },
+            })
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_whose_launch_was_unreadable_is_priced_on_a_later_round() {
+        let dir = std::env::temp_dir().join(format!("orx-quote-launch-{}", uuid::Uuid::new_v4()));
+        let runtime = collector(&dir);
+        insert_hf_run(&runtime, "run");
+        let conn = rusqlite::Connection::open(dir.join("orx.db")).unwrap();
+        let launch: String = conn
+            .query_row("SELECT launch_spec FROM runs WHERE id = 'run'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        conn.execute("UPDATE runs SET launch_spec = '{' WHERE id = 'run'", [])
+            .unwrap();
+        let priced = Arc::new(Priced {
+            reads: Default::default(),
+            failures: 0,
+        });
+        let backend: Arc<dyn Backend> = priced.clone();
+        let watched = [WatchedRun {
+            id: "run".into(),
+            handle: Handle::Local { dir: "run".into() },
+        }];
+
+        runtime.quote(&backend, &watched);
+        conn.execute(
+            "UPDATE runs SET launch_spec = ?1 WHERE id = 'run'",
+            [launch],
+        )
+        .unwrap();
+        runtime.quote(&backend, &watched);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(priced.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(runtime
+            .store()
+            .unwrap()
+            .unpriced_launch("run")
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn collector(dir: &Path) -> Arc<Runtime> {

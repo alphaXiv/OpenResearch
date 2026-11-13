@@ -1,4 +1,4 @@
-import { useContext, useRef, useState } from "react";
+import { useContext, useRef, useState, useSyncExternalStore } from "react";
 import { useMutate } from "@clo/react-mutation";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
@@ -6,7 +6,7 @@ import { useMachines } from "../machineSelection";
 import { showRemoteHostDialog } from "./RemoteHostDialog";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 
-import { Check, ChevronsUpDown, Info, Laptop, Plus, Power, Server, Unplug } from "lucide-react";
+import { Check, ChevronsUpDown, CloudOff, Info, Laptop, Plus, Power, Server, Unplug } from "lucide-react";
 import { type RemoteSessionStatus, type RuntimeInfo } from "../api";
 import { autoDir, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
@@ -51,11 +51,22 @@ function SessionStatus({ status }: { status: RemoteSessionStatus }) {
   );
 }
 
+/** The workspace's machine as the status strip shows it: `current` is null for this computer, `live` whether its event stream is up. */
+export function useMachineState(runtime: RuntimeInfo) {
+  const machines = useMachines();
+  const { onConnectionChange, isConnected } = useWorkspace().events;
+  const live = useSyncExternalStore(onConnectionChange, isConnected, isConnected);
+  const activeSession = machines.sessions.find((session) => session.id === machines.activeId);
+  const current = runtime.kind === "ssh" ? connection(activeSession?.status ?? runtime.session.status) : null;
+  return { current, live };
+}
+
 export function WorkspaceConnection({
   runtime,
   corner = false,
 }: {
   runtime: RuntimeInfo;
+  /** On error screens, fixed in the window's corner; otherwise the status strip's segment, which grows into its free space. */
   corner?: boolean;
 }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
@@ -64,19 +75,24 @@ export function WorkspaceConnection({
   const workspace = useWorkspace();
   const { showCustomDialog } = workspace.dialogs;
   const openHosts = () => showRemoteHostDialog(workspace.dialogs);
-  const label =
-    runtime.kind === "local" ? m.projects_local() : runtime.session.host;
-  const activeSession = machines.sessions.find((session) => session.id === machines.activeId);
-  const current = runtime.kind === "ssh" ? connection(activeSession?.status ?? runtime.session.status) : null;
+  const label = runtime.kind === "local" ? m.projects_local() : runtime.session.host;
+  const { current, live } = useMachineState(runtime);
   const machine = runtime.kind === "ssh" ? autoDir(label) : label;
-  const caption = current?.state === "connected" ? null : current?.label;
-  const triggerName = caption
-    ? m.remote_machine_switcher_status({ machine, status: caption })
+  // In the strip, a machine that can't be reached is the offline notice: the cloud and its name in amber.
+  const offline = !corner && (current?.state === "disconnected" || !live);
+  const status = offline ? m.remote_machine_disconnected() : current?.state === "connected" ? null : current?.label;
+  const caption = offline ? null : status;
+  const triggerName = status
+    ? m.remote_machine_switcher_status({ machine, status })
     : m.remote_machine_switcher({ machine });
-  const triggerShape = corner ? "rounded-none px-2.5 py-1.5" : "min-h-9 rounded-md px-2 py-1";
-  const triggerTone = current
-    ? "border-accent-blue-border bg-accent-blue-subtle text-accent-blue-strong hover:border-accent-blue"
-    : "border-border bg-background text-text hover:bg-surface";
+  const triggerShape = corner ? "rounded-none px-2.5 py-1.5" : "h-7 flex-1 rounded-md px-2";
+  const triggerTone = corner
+    ? current
+      ? "border-accent-blue-border bg-accent-blue-subtle text-accent-blue-strong hover:border-accent-blue"
+      : "border-border bg-background text-text hover:bg-surface"
+    : offline ? "border-transparent text-accent-amber hover:bg-surface data-popup-open:bg-surface"
+      : current ? "border-transparent bg-accent-blue-subtle text-accent-blue-strong"
+        : "border-transparent text-text hover:bg-surface data-popup-open:bg-surface";
 
   const { getRemoteStopPreview } = workspace.api;
 
@@ -107,7 +123,7 @@ export function WorkspaceConnection({
             className={
               corner
                 ? "workspace-connection-corner fixed bottom-0 start-0 z-30"
-                : "relative flex min-w-0 max-w-full"
+                : "relative flex min-w-0 flex-1"
             }
           >
             <Menu.Portal container={portalContainer}>
@@ -277,20 +293,26 @@ export function WorkspaceConnection({
                 </Menu.Popup>
               </Menu.Positioner>
             </Menu.Portal>
-            <Tooltip interactive content={triggerName} className={corner ? "max-w-56" : "min-w-0 max-w-full"}>
+            <Tooltip interactive content={triggerName} className={corner ? "max-w-56" : "min-w-0 flex-1"}>
               <Menu.Trigger
                 data-machine-switcher
                 aria-label={triggerName}
                 className={`flex min-w-0 items-center gap-1.5 border text-start transition-[background,border-color] duration-120 ease-standard focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2 ${triggerShape} ${triggerTone}`}
               >
-                {current?.state === "connecting" ? <Spinner className="size-3.5 border-accent-blue-border border-t-accent-blue-strong" />
+                {offline ? <CloudOff size={14} className="shrink-0" aria-hidden="true" />
+                  : current?.state === "connecting" ? <Spinner className="size-3.5 border-accent-blue-border border-t-accent-blue-strong" />
                   : current?.state === "disconnected" ? <Unplug size={14} className="shrink-0" aria-hidden="true" />
                     : <RemoteIcon size={14} className={`shrink-0 ${current ? "" : "text-subtext"}`} />}
-                <span className="flex min-w-0 flex-col">
+                {corner ? <span className="flex min-w-0 flex-col">
                   <span dir="auto" className="truncate text-sm leading-tight">{label}</span>
                   {caption && <span className="truncate text-xs leading-tight">{caption}</span>}
-                </span>
-                {!corner && <ChevronsUpDown size={14} className="ms-auto shrink-0 opacity-70" aria-hidden="true" />}
+                </span> : <>
+                  <span data-machine-name className="flex min-w-0 flex-1 items-baseline gap-1">
+                    <span dir="auto" className="min-w-0 truncate text-sm">{label}</span>
+                    {caption && <span className="min-w-0 shrink-[100] truncate text-xs opacity-80 @max-[280px]:hidden">{caption}</span>}
+                  </span>
+                  <ChevronsUpDown size={12} className="shrink-0 opacity-60 @max-[250px]:hidden" aria-hidden="true" />
+                </>}
               </Menu.Trigger>
             </Tooltip>
           </div>

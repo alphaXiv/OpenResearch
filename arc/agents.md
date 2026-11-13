@@ -27,6 +27,23 @@ through its CLI; profiles check theirs in parallel in the second pass. Adding,
 renaming or removing an account, provider or endpoint re-checks only the agent
 it changes.
 
+**Plan limits come from the agents themselves.** For each Claude Code and Codex
+sign-in that may be on a subscription, the user's own and each profile's, one
+request answers: Claude's `get_usage` control request on a throwaway child in
+that account's home, Codex's `account/rateLimits/read` on a chat's running
+app-server for that account, else a throwaway one, since two processes
+refreshing one ChatGPT token can sign the user out (`src/local/usage.rs`).
+`orx up` keeps one snapshot per account in memory. `/api/usage` serves them at
+once, re-reads in the background any older than a minute, one read per account
+at a time, and announces the result with `usage.changed`; `POST
+/api/usage/refresh` re-reads them all. An account now signed in as someone else
+drops its snapshot. A running chat whose
+agent says its limits moved re-reads its account. A failed read keeps the last
+values beside the reason; an API key or a sign-out has no plan. A Codex reset is spent
+the same way, through `account/rateLimitResetCredit/consume` with the
+dashboard's key for that click, so a retry never spends two, and then
+re-reads that account.
+
 **orx keeps the built-in agents current.** Installing one from the
 dashboard downloads the vendor's release into orx's cache, checked against the
 checksum the vendor publishes, when available, and leaves the user's `PATH`

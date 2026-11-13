@@ -535,6 +535,13 @@ pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> 
                         eprintln!("orx up: could not persist ACP token usage: {error}");
                     }
                 }
+                if let (Some(execution), Some(cost)) = (ctx.usage_execution_id(), &tools.session_cost) {
+                    if let Err(error) = Store::open().and_then(|store| {
+                        store.record_acp_cost(execution, &ctx.harness, &session.native_id, cost, session.restored)
+                    }) {
+                        eprintln!("orx up: could not persist ACP cost: {error}");
+                    }
+                }
                 if result["stopReason"] == "cancelled" { return Err(anyhow!("Agent turn was cancelled")); }
                 break result;
             }
@@ -629,6 +636,8 @@ struct ToolUpdates {
     terminals: HashMap<String, String>,
     /// Tool activity since the last text, which the next text follows as a new part.
     text_break: bool,
+    /// The session's running cost from the agent's latest `usage_update`.
+    session_cost: Option<crate::store::Cost>,
 }
 
 impl ToolUpdates {
@@ -746,10 +755,14 @@ fn apply_event(ctx: &mut TurnCtx, event: Event, tools: &mut ToolUpdates) -> Resu
                 }
             }
             Some("usage_update") => {
+                if let Some(cost) = usage_cost(&update["cost"]) {
+                    tools.session_cost = Some(cost);
+                }
                 if let Some(used_tokens) = update["used"].as_u64() {
                     ctx.report_usage(crate::local::chat::ContextUsage {
                         used_tokens,
                         context_window: update["size"].as_u64(),
+                        ..Default::default()
                     });
                 }
             }
@@ -758,6 +771,11 @@ fn apply_event(ctx: &mut TurnCtx, event: Event, tools: &mut ToolUpdates) -> Resu
     }
     ctx.maybe_flush();
     Ok(())
+}
+
+/// ACP's `{amount, currency}`, the session's cumulative cost.
+fn usage_cost(cost: &Value) -> Option<crate::store::Cost> {
+    crate::store::Cost::of(cost["amount"].as_f64()?, cost["currency"].as_str()?)
 }
 
 fn permission_input(tool: &Value) -> Option<Value> {
@@ -950,6 +968,33 @@ mod tests {
             &json!({"configOptions":[], "models":{"availableModels":[{"modelId":"legacy"}]}})
         )
         .is_empty());
+    }
+
+    #[test]
+    fn usage_updates_keep_the_sessions_latest_cost() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut tools = ToolUpdates::default();
+        for update in [
+            json!({"sessionUpdate": "usage_update", "used": 900, "size": 200000,
+                   "cost": {"amount": 0.42, "currency": "usd"}}),
+            json!({"sessionUpdate": "usage_update", "used": 1200, "size": 200000}),
+            json!({"sessionUpdate": "usage_update", "used": 1300,
+                   "cost": {"amount": "lots", "currency": "USD"}}),
+        ] {
+            apply_event(&mut ctx, Event::Update(update), &mut tools).unwrap();
+        }
+        let cost = tools.session_cost.unwrap();
+        assert_eq!((cost.micros, cost.currency.as_str()), (420_000, "USD"));
+        assert_eq!(ctx.context_usage.unwrap().used_tokens, 1300);
+        assert!(usage_cost(&json!({"amount": 1, "currency": ""})).is_none());
+        assert!(usage_cost(&json!({"amount": -1, "currency": "EUR"})).is_none());
+        assert_eq!(
+            usage_cost(&json!({"amount": 2.5, "currency": "EUR"})).unwrap(),
+            crate::store::Cost {
+                micros: 2_500_000,
+                currency: "EUR".into()
+            }
+        );
     }
 
     #[test]

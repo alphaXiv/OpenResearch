@@ -266,6 +266,7 @@ async fn merge_projection(
             latest_usage = Some(ContextUsage {
                 used_tokens: used,
                 context_window: None,
+                ..Default::default()
             });
         }
         latest_retry = message.get("retry").filter(|retry| !retry.is_null());
@@ -342,6 +343,7 @@ fn record_message_usage(ctx: &TurnCtx, message: &Value, recorded: &mut HashSet<S
             .filter(|_| completed)
             .map(opencode_native_usage)
             .unwrap_or_default(),
+        opencode_cost(message).filter(|_| completed),
     );
 }
 

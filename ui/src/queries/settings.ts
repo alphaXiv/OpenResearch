@@ -202,6 +202,13 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 30_000,
   });
 
+  /** Plans, spend and, with `chat`, that chat's compute; null from an `orx up` without the route. */
+  const getUsageQuery = (chat: string | null = null) => queryOptions({
+    queryKey: workspaceKey("getUsage", chat),
+    queryFn: ({ signal }) => api.getUsage(chat, signal),
+    staleTime: 60_000,
+  });
+
   const getPendingWorkQuery = () => queryOptions({
     queryKey: workspaceKey("getPendingWork"),
     queryFn: ({ signal }) => api.getPendingWork(signal),
@@ -357,6 +364,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     listRemoteHostsQuery,
     listRemoteSessionsQuery,
     getUpdateStatusQuery,
+    getUsageQuery,
     getPendingWorkQuery,
     getBuildNotesQuery,
     getLitSourcesQuery,
@@ -500,6 +508,16 @@ export const mutSetComputeDefault = mutations.define({
   },
   key: ({ args: [ws, { projectId }] }) => [ws.identity, "compute-default", projectId ?? ""],
   describe: "change where new runs go",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+/** The re-read's result arrives as `usage.changed`, which refetches every usage query. */
+export const mutRefreshUsage = mutations.define({
+  id: "usage/refresh",
+  mutate: (ws: Workspace) => ws.api.refreshUsage(),
+  optimistic: () => {},
+  describe: "refresh usage",
   describeResult: null,
   refetchOnSuccess: false,
 });

@@ -511,6 +511,7 @@ pub(crate) fn record_post_invocation(
             Some(model),
             None,
             &Default::default(),
+            crate::store::SampleCost::Unreported { one_request: false },
         )?;
     }
     Ok(())

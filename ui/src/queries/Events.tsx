@@ -86,6 +86,9 @@ export function QueryEvents() {
       invalidateFamilies(artifactFamilies, scope, (query) => query.queryKey[3] === projectId);
       invalidateFamilies(["resolvedFile"], scope, (query) => query.queryKey[3] === projectId && query.queryKey[5] === "artifacts");
     },
+    onUsageChanged() {
+      invalidateFamilies(["getUsage"], scope);
+    },
     onReconnect() {
       if (!isCurrentScope(scope)) return;
       void repairLiveQueries();

@@ -130,6 +130,58 @@ fn http() -> &'static Client {
     })
 }
 
+/// `flavor`'s price on Hugging Face Jobs, from the public hardware list.
+pub async fn hardware_price(endpoint: &str, flavor: &str) -> Result<crate::store::Quote> {
+    hardware_price_with(http(), endpoint, flavor).await
+}
+
+async fn hardware_price_with(
+    http: &Client,
+    endpoint: &str,
+    flavor: &str,
+) -> Result<crate::store::Quote> {
+    use crate::store::Per;
+
+    let url = format!("{}/api/jobs/hardware", endpoint.trim_end_matches('/'));
+    let response = http.get(&url).send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!("{url} answered {status}"));
+    }
+    let hardware: Vec<serde_json::Value> = response
+        .json()
+        .await
+        .map_err(|error| anyhow!("{url} sent an unreadable hardware list: {error}"))?;
+    let entry = hardware
+        .iter()
+        .find(|entry| entry["name"] == flavor)
+        .ok_or_else(|| anyhow!("{url} lists no price for flavor {flavor}"))?;
+    let amount = entry["unitCostMicroUSD"]
+        .as_f64()
+        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+        .ok_or_else(|| anyhow!("{url} gives flavor {flavor} no unitCostMicroUSD"))?;
+    let per = match entry["unitLabel"].as_str() {
+        Some("minute") => Per::Minute,
+        Some("hour") => Per::Hour,
+        label => {
+            return Err(anyhow!(
+                "{url} prices flavor {flavor} per {}, which orx can't read",
+                label.unwrap_or("unknown unit")
+            ))
+        }
+    };
+    Ok(crate::store::Quote {
+        amount_micros: amount.round() as u64,
+        per,
+        currency: "USD".into(),
+        source: reqwest::Url::parse(endpoint)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .unwrap_or_else(|| endpoint.to_string()),
+        quoted_at: crate::store::now_ms(),
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStatus {
@@ -819,5 +871,43 @@ class HfApi:
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["id"], "job-123");
         assert!(String::from_utf8_lossy(&output.stderr).contains("Sync plan"));
+    }
+
+    #[tokio::test]
+    async fn quotes_the_flavor_from_the_hardware_list() {
+        const HARDWARE: &str = r#"[
+            {"name": "cpu-basic", "unitCostMicroUSD": 167, "unitLabel": "minute"},
+            {"name": "h200", "unitCostMicroUSD": 5000000, "unitLabel": "hour"},
+            {"name": "odd", "unitCostMicroUSD": 1, "unitLabel": "fortnight"}
+        ]"#;
+        let app = axum::Router::new().route(
+            "/api/jobs/hardware",
+            axum::routing::get(|| async { HARDWARE }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = crate::net::loopback_client().build().unwrap();
+
+        let quote = hardware_price_with(&http, &endpoint, "cpu-basic")
+            .await
+            .unwrap();
+        assert_eq!(quote.amount_micros, 167);
+        assert_eq!(quote.per, crate::store::Per::Minute);
+        assert_eq!(quote.currency, "USD");
+        assert_eq!(quote.source, "127.0.0.1");
+        let quote = hardware_price_with(&http, &endpoint, "h200").await.unwrap();
+        assert_eq!(
+            (quote.amount_micros, quote.per),
+            (5_000_000, crate::store::Per::Hour)
+        );
+        let missing = hardware_price_with(&http, &endpoint, "a100-large")
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("a100-large"), "{missing}");
+        let unit = hardware_price_with(&http, &endpoint, "odd")
+            .await
+            .unwrap_err();
+        assert!(unit.to_string().contains("fortnight"), "{unit}");
     }
 }

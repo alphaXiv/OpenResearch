@@ -10,9 +10,9 @@ export type Request = { service: 'openresearch' | 'refused'; method: string; tar
 
 export type Outside = Awaited<ReturnType<typeof startOutside>>
 
-/** Traffic arc/storage.md's "What leaves the machine" lists for what the specs do: the release check and the onboarding's OpenCode install. */
+/** Traffic arc/storage.md's "What leaves the machine" lists for what the specs do: the release check, the onboarding's OpenCode install and the daily price list. */
 export function listedEgress({ method, target }: Request) {
-  return method === 'CONNECT' && ['github.com:443', 'registry.npmjs.org:443'].includes(target)
+  return method === 'CONNECT' && ['github.com:443', 'registry.npmjs.org:443', 'models.dev:443'].includes(target)
 }
 
 export async function startOutside() {

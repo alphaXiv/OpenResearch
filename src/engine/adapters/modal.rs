@@ -29,6 +29,11 @@ impl Api for ModalAccount {
             .map(|sandbox| api::handle(intent, vec![sandbox]))
             .map_err(api::launch_error)
     }
+    async fn quote(&self, _run: &WatchedRun, launch: &LaunchSpec) -> Result<Option<Quote>> {
+        let spec: modal::ModalJobSpec = serde_json::from_value(launch.options.clone())?;
+        modal::ensure_env().await?;
+        modal::hourly_price(&spec).await.map(Some)
+    }
     async fn recover(&self, _intent: &RunIntent) -> Recovery {
         api::unknown(
             "Modal has no lookup by run label; abandon the run after inspecting the provider",

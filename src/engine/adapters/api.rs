@@ -94,6 +94,9 @@ pub trait Api: Send + Sync {
     async fn finish(&self, _run: &WatchedRun) -> Result<()> {
         Ok(())
     }
+    async fn quote(&self, _run: &WatchedRun, _launch: &LaunchSpec) -> Result<Option<Quote>> {
+        Ok(None)
+    }
     /// Hands `sink` the bytes past `cursor` as they arrive, and says whether the stream closed
     /// before `window` ran out. An error means nothing reached `sink`. A cursor given with the
     /// bytes is where a later engine continues after them, saved beside the spool.
@@ -339,6 +342,10 @@ impl<A: Api + 'static> Backend for Adapter<A> {
 
     async fn recover(&self, intent: &RunIntent) -> Recovery {
         self.account.recover(intent).await
+    }
+
+    async fn quote(&self, run: &WatchedRun, launch: &LaunchSpec) -> Result<Option<Quote>> {
+        self.account.quote(run, launch).await
     }
 
     async fn observe(&self, runs: &[WatchedRun], budget: Duration) -> Vec<(String, Observation)> {
