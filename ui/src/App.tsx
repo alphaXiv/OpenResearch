@@ -272,6 +272,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     listRunsQuery,
     getArtifactsQuery,
     getChatMessagesQuery,
+    refreshChatMessages,
     readHarnesses,
   } = useWorkspace().queries;
   const {
@@ -1534,10 +1535,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     // Generation token: a reconnect starts fresh seeds, and a stale in-flight
     // response from an earlier generation must not land after them.
     let seedGen = 0;
-    const seed = () => {
+    const seed = (afterGap = false) => {
       const gen = ++seedGen;
       for (const sid of new Set(subagentTabs.map((t) => t.sessionId))) {
-        queryClient.fetchQuery({ ...getChatMessagesQuery(sid), staleTime: 0 })
+        (afterGap ? refreshChatMessages(sid) : queryClient.fetchQuery({ ...getChatMessagesQuery(sid), staleTime: 0 }))
           .then(({ messages }) => {
             if (live && gen === seedGen)
               apply(messages, subagentTabs.filter((t) => t.sessionId === sid), true);
@@ -1551,7 +1552,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         // Frames lost during the outage may include the terminal update —
         // refetch, letting the fresh seed overwrite everything.
         liveUpdated.clear();
-        seed();
+        seed(true);
         return;
       }
       if (ev.type !== "message") return;

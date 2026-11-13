@@ -104,6 +104,15 @@ export function createChatQueries(
       refetchOnWindowFocus: "always",
     });
 
+  async function refreshChatMessages(sessionId: string) {
+    const options = { ...getChatMessagesQuery(sessionId), staleTime: 0 };
+    // A reconnect seed needs a new read without rejecting callers of a pre-gap cold read.
+    if (client.queryClient.isFetching({ queryKey: options.queryKey, exact: true })) {
+      await client.queryClient.fetchQuery(options).catch(() => {});
+    }
+    return client.queryClient.fetchQuery(options);
+  }
+
   async function readSidebarChatPage(filter: "active" | "archived" | "all", before: api.SidebarChatCursor | null, signal: AbortSignal) {
     const indicators = new Map<string, Partial<Pick<api.ChatSession, "busy" | "contextUsage">>>();
     const off = onChatEvent((event) => {
@@ -149,6 +158,7 @@ export function createChatQueries(
     listAllChatSessionsQuery,
     chatSearchQuery,
     getChatMessagesQuery,
+    refreshChatMessages,
     readSidebarChatPage,
     listSidebarChatSessionsQuery,
     listChatActiveRunsQuery,

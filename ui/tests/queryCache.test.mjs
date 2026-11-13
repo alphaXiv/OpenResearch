@@ -475,7 +475,7 @@ test("a background input summary survives live events during both list reads", a
 });
 
 
-for (const event of ["open", "resync.required"]) test(`${event} repairs before listeners start fresh reads`, async () => {
+for (const event of ["open", "resync.required"]) test(`${event} listeners receive post-gap data`, async () => {
   backend({ "/api/projects": () => ({ projects: [{ id: "post-gap" }] }) });
   const options = queries.listProjectsQuery();
   client.setQueryData(options.queryKey, [{ id: "before-gap" }]);
@@ -490,4 +490,21 @@ for (const event of ["open", "resync.required"]) test(`${event} repairs before l
   });
   assert.equal((await listenerRead)[0].id, "post-gap");
   off();
+});
+
+
+test("a reconnect seed waits for a new transcript without cancelling a pending cold read", async () => {
+  const requests = [];
+  backend({ "/api/chat/sessions/parent/messages": () => { const request = deferred(); requests.push(request); return request.promise; } });
+  const snapshot = (completedAt) => ({ messages: [{ id: "agent", role: "assistant", parts: [], createdAt: 1, completedAt }], queued: [], activeLeafId: "agent" });
+  const pending = client.fetchQuery(queries.getChatMessagesQuery("parent"));
+  const seed = queries.refreshChatMessages("parent");
+  await settle();
+  assert.equal(requests.length, 1);
+  requests[0].resolve(snapshot(null));
+  assert.equal((await pending).messages[0].completedAt, null);
+  await settle();
+  assert.equal(requests.length, 2);
+  requests[1].resolve(snapshot(2));
+  assert.equal((await seed).messages[0].completedAt, 2);
 });
