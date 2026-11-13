@@ -376,15 +376,19 @@ jobs:
         include: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '[{"arch":"x86_64","mode":"lint"},{"arch":"x86_64","mode":"build"},{"arch":"aarch64","mode":"lint"},{"arch":"aarch64","mode":"build"}]' || '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"all"}]') }}
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
     steps:
+      # Installs alongside the toolchain and cache restores; "Finish installing WebKitGTK" waits for it.
+      - name: Start installing WebKitGTK
+        run: |
+          {
+            sudo apt-get update &&
+              sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev openssh-server zsh &&
+              sudo mkdir -p /run/sshd
+            echo $? > "$RUNNER_TEMP/apt.status"
+          } > "$RUNNER_TEMP/apt.log" 2>&1 &
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.source-sha || github.sha }}
-      - name: Install WebKitGTK
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev openssh-server zsh
-          sudo mkdir -p /run/sshd
       - name: Install Rust toolchain
         id: rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -408,6 +412,12 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         env: *desktop-incremental-key
         with: *desktop-incremental-cache
+      - name: Finish installing WebKitGTK
+        run: |
+          until [ -e "$RUNNER_TEMP/apt.status" ]; do sleep 1; done
+          cat "$RUNNER_TEMP/apt.log"
+          exit "$(cat "$RUNNER_TEMP/apt.status")"
+        timeout-minutes: 5
       - name: Clippy
         if: matrix.mode != 'build'
         run: cargo clippy --all-targets --locked --features desktop -- -D warnings
