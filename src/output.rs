@@ -1,4 +1,42 @@
-//! Display helpers for tabular output.
+//! Display helpers for tabular output, and what a command does when its stdout reader goes.
+
+/// Ends the process once stdout's reader has gone: a short command dies as Unix's default
+/// SIGPIPE would kill it, and exits cleanly on Windows, which has no such signal.
+pub fn stdout_closed() -> ! {
+    #[cfg(unix)]
+    // SAFETY: restores one signal's default action, then raises it on this thread.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        libc::raise(libc::SIGPIPE);
+    }
+    std::process::exit(0)
+}
+
+/// Routes `println!`'s panic on a closed stdout to [`stdout_closed`]. SIGPIPE stays
+/// ignored, so a write to a child's closed stdin still fails with an error its caller reports.
+pub fn end_when_stdout_closes() {
+    let inner = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let closed = info
+            .payload_as_str()
+            .and_then(|message| message.strip_prefix("failed printing to stdout: "))
+            .is_some_and(is_broken_pipe);
+        if closed {
+            stdout_closed();
+        }
+        inner(info);
+    }));
+}
+
+/// Whether an `io::Error`'s display, `… (os error N)`, names a broken pipe.
+fn is_broken_pipe(error: &str) -> bool {
+    error
+        .rsplit_once("(os error ")
+        .and_then(|(_, code)| code.strip_suffix(')')?.parse().ok())
+        .is_some_and(|code| {
+            std::io::Error::from_raw_os_error(code).kind() == std::io::ErrorKind::BrokenPipe
+        })
+}
 
 /// Formats a duration in seconds as a compact human string: `1h42m`, `3m12s`,
 /// `45s`. Negative inputs render as an em dash.

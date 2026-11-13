@@ -11,6 +11,18 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path).map(plain)
 }
 
+/// `std::fs::create_dir_all`, its error naming the directory. Windows reports a directory
+/// this process may not inspect, as in an agent's sandbox, as one that already exists.
+pub fn create_dir_all(dir: &Path) -> crate::error::Result<()> {
+    std::fs::create_dir_all(dir).map_err(|error| match error.kind() {
+        std::io::ErrorKind::AlreadyExists => crate::error::anyhow!(
+            "{} exists but is not a directory this process can open ({error}).",
+            dir.display()
+        ),
+        _ => crate::error::anyhow!("Could not create {}: {error}", dir.display()),
+    })
+}
+
 /// `std::env::current_exe`, as a path to spawn. Linux reports a binary replaced
 /// under a live process as `<path> (deleted)`; its replacement, if any, is at `<path>`.
 pub fn spawnable_exe() -> std::io::Result<PathBuf> {

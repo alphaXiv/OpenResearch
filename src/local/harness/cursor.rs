@@ -763,7 +763,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         cmd.env("CURSOR_DATA_DIR", &cursor_home);
     }
     cmd.env("NO_COLOR", "1");
-    set_chat_session_env(&mut cmd, &ctx.session_id, "cursor", ctx.host.up_port());
+    set_chat_session_env(&mut cmd, &ctx.session_id, "cursor", ctx.host.up_port())?;
 
     ctx.persist_delivery(DeliveryState::Unknown)?;
     let mut child = match cmd.spawn() {

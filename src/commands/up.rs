@@ -3093,49 +3093,149 @@ impl CreateRunReq {
             chat_session_id: self.chat_session_id,
             agent_origin: self.agent_origin,
             forwarded: true,
-            caller_config_dir: None,
+            caller_config_dir: self.caller_config_dir,
             caller_python_overrides: Default::default(),
+            caller_compute_settings: None,
         }
     }
 }
 
-/// Launching with orx up's settings after the caller checked its own would
-/// submit to a different cluster or namespace than the one the caller tested.
 /// A relative `XDG_CONFIG_HOME` names a different dir in each process's working directory.
 pub(crate) fn absolute_config_dir() -> std::path::PathBuf {
     let dir = crate::config::config_dir();
     std::path::absolute(&dir).unwrap_or(dir)
 }
 
-pub(crate) fn require_caller_config_dir(
-    caller: Option<&std::path::Path>,
-    own: &std::path::Path,
+/// The settings in a config dir that pick where a run goes or which account it uses.
+pub(crate) type LaunchSettings = std::collections::BTreeMap<String, Option<String>>;
+
+/// The [`LaunchSettings`] a run of `args` would use from this process's config dir, and whether
+/// that dir sets any of them; `None` for a backend that reads none from it.
+pub(crate) async fn launch_settings(
+    args: &crate::ExpRunArgs,
+) -> Result<Option<(LaunchSettings, bool)>> {
+    use crate::jobs::{kubernetes, ray, slurm};
+
+    Ok(Some(match args.backend.as_deref().unwrap_or("local") {
+        "k8s" => {
+            let file = kubernetes::load_settings()?;
+            let set = file.is_some();
+            let file = file.unwrap_or_default();
+            let settings = LaunchSettings::from([
+                ("context".into(), file.context),
+                ("namespace".into(), Some(file.namespace)),
+            ]);
+            (settings, set)
+        }
+        "slurm" => {
+            let file = slurm::load_settings()?;
+            let set = file.is_some();
+            let file = file.unwrap_or_default();
+            let sbatch_args: Vec<_> = file.sbatch_args.iter().chain(&args.sbatch_args).collect();
+            let sbatch_args = serde_json::to_string(&sbatch_args)?;
+            let settings = LaunchSettings::from([
+                ("host".into(), args.host.clone().or(file.host)),
+                (
+                    "partition".into(),
+                    args.partition.clone().or(file.partition),
+                ),
+                ("account".into(), file.account),
+                ("remoteRoot".into(), file.remote_root),
+                ("timeLimit".into(), args.timeout.clone().or(file.time_limit)),
+                (
+                    "cpusPerTask".into(),
+                    args.cpus.or(file.cpus_per_task).map(|n| n.to_string()),
+                ),
+                ("mem".into(), args.mem.clone().or(file.mem)),
+                ("qos".into(), args.qos.clone().or(file.qos)),
+                ("sbatchArgs".into(), Some(sbatch_args)),
+                (
+                    "requestOneTask".into(),
+                    Some((file.request_one_task != Some(false)).to_string()),
+                ),
+            ]);
+            (settings, set)
+        }
+        "ray" => {
+            let set = ray::load_settings()?
+                .and_then(|file| file.address)
+                .is_some_and(|address| !address.trim().is_empty());
+            let address = Some(ray::resolve_address(None));
+            (LaunchSettings::from([("address".into(), address)]), set)
+        }
+        "openresearch" => {
+            let credentials = crate::config::load_credentials().await?;
+            let set = credentials.is_some();
+            let (url, token) = credentials
+                .map(|credentials| {
+                    let digest = format!("{:x}", Sha256::digest(credentials.token.as_bytes()));
+                    (credentials.api_url, format!("sha256:{}", &digest[..12]))
+                })
+                .unzip();
+            let settings = LaunchSettings::from([("apiUrl".into(), url), ("token".into(), token)]);
+            (settings, set)
+        }
+        _ => return Ok(None),
+    }))
+}
+
+/// Refuses a forwarded run that orx up would launch with other settings than the caller's,
+/// such as another cluster or namespace than the one the caller tested.
+pub(crate) async fn require_caller_settings(
+    args: &crate::ExpRunArgs,
+    own_dir: &std::path::Path,
 ) -> Result<()> {
-    let Some(caller) = caller else {
+    let Some(caller_dir) = args.caller_config_dir.as_deref() else {
         return Ok(());
     };
-    let same = caller == own
-        || crate::paths::canonicalize(caller)
+    let same_dir = caller_dir == own_dir
+        || crate::paths::canonicalize(caller_dir)
             .ok()
-            .zip(crate::paths::canonicalize(own).ok())
+            .zip(crate::paths::canonicalize(own_dir).ok())
             .is_some_and(|(a, b)| a == b);
-    if same {
+    if same_dir {
         return Ok(());
     }
-    let base = own.parent().unwrap_or(own);
-    Err(anyhow!(
-        "This command uses the compute settings in {}, but orx up launches runs with \
-         the settings in {}. Set XDG_CONFIG_HOME to {} and re-run, or restart orx up \
-         from this environment.",
-        caller.display(),
-        own.display(),
+    let Some((own, _)) = launch_settings(args).await? else {
+        return Ok(());
+    };
+
+    let base = own_dir.parent().unwrap_or(own_dir);
+    let fix = format!(
+        "Set XDG_CONFIG_HOME to {} and re-run, or restart orx up from this environment.",
         base.display()
+    );
+    // An orx older than this check sends only its config dir, which orx up may not be able to read.
+    let Some(caller) = &args.caller_compute_settings else {
+        return Err(anyhow!(
+            "This command uses the compute settings in {}, but orx up launches runs with \
+             the settings in {}. {fix}",
+            caller_dir.display(),
+            own_dir.display(),
+        ));
+    };
+    let shown = |value: &Option<String>| value.as_deref().unwrap_or("unset").to_string();
+    let differences: Vec<String> = caller
+        .iter()
+        .filter_map(|(name, value)| {
+            let theirs = own.get(name).filter(|theirs| *theirs != value)?;
+            Some(format!("{name} {} vs {}", shown(value), shown(theirs)))
+        })
+        .collect();
+    if differences.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "This command's {} settings in {} differ from those orx up launches runs with, in {}: \
+         {}. {fix}",
+        args.backend.as_deref().unwrap_or("local"),
+        caller_dir.display(),
+        own_dir.display(),
+        differences.join("; "),
     ))
 }
 
 async fn create_run(Json(req): Json<CreateRunReq>) -> ApiResult {
-    require_caller_config_dir(req.caller_config_dir.as_deref(), &absolute_config_dir())
-        .map_err(bad_request)?;
     let store = Store::open()?;
     store
         .get_local_experiment(&req.experiment_id)?
@@ -12089,25 +12189,62 @@ mod tests {
         assert!(ids.iter().position(|id| *id == "ray").unwrap() < vercel);
     }
 
-    #[test]
-    fn require_caller_config_dir_rejects_a_different_dir() {
-        let root = std::env::temp_dir().join(format!("orx-caller-config-{}", uuid::Uuid::new_v4()));
-        let own = root.join("up/openresearch");
+    #[tokio::test]
+    async fn a_caller_launches_only_with_the_settings_orx_up_would_use() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let root = crate::config::test_home();
+        let own = absolute_config_dir();
         let caller = root.join("agent/openresearch");
-        std::fs::create_dir_all(&own).unwrap();
         std::fs::create_dir_all(&caller).unwrap();
+        let mut namespace = crate::jobs::kubernetes::K8sSettings::default();
+        namespace.namespace = "lab".into();
+        crate::jobs::kubernetes::save_settings(&namespace).unwrap();
+        let k8s = |dir: Option<&std::path::Path>, sent: Option<&[(&str, Option<&str>)]>| {
+            let mut args = crate::compute::tests::tinker_args();
+            args.backend = Some("k8s".into());
+            args.caller_config_dir = dir.map(std::path::Path::to_path_buf);
+            args.caller_compute_settings = sent.map(|sent| {
+                sent.iter()
+                    .map(|(name, value)| (name.to_string(), value.map(str::to_string)))
+                    .collect()
+            });
+            args
+        };
+        let lab: &[_] = &[("context", None), ("namespace", Some("lab"))];
+        let elsewhere: &[_] = &[("context", None), ("namespace", Some("default"))];
 
-        assert!(require_caller_config_dir(None, &own).is_ok());
-        assert!(require_caller_config_dir(Some(&own), &own).is_ok());
-        let fresh = root.join("fresh/openresearch");
-        assert!(require_caller_config_dir(Some(&fresh), &fresh).is_ok());
-        assert!(require_caller_config_dir(Some(&own.join("../openresearch")), &own).is_ok());
-        let error = require_caller_config_dir(Some(&caller), &own)
+        let own = own.as_path();
+        let ok = |args: crate::ExpRunArgs| async move { require_caller_settings(&args, own).await };
+        assert!(ok(k8s(None, None)).await.is_ok());
+        assert!(ok(k8s(Some(own), None)).await.is_ok());
+        assert!(ok(k8s(Some(&own.join("../openresearch")), None))
+            .await
+            .is_ok());
+        assert!(ok(k8s(Some(&caller), Some(&[]))).await.is_ok());
+        assert!(ok(k8s(Some(&caller), Some(lab))).await.is_ok());
+        assert!(ok(k8s(Some(&caller), Some(&[("newerSetting", Some("x"))])))
+            .await
+            .is_ok());
+        let mut ssh = k8s(Some(&caller), None);
+        ssh.backend = Some("ssh".into());
+        assert!(ok(ssh).await.is_ok());
+
+        for args in [
+            k8s(Some(&caller), Some(elsewhere)),
+            k8s(Some(&caller), None),
+        ] {
+            let error = ok(args).await.unwrap_err().to_string();
+            assert!(error.contains(&caller.display().to_string()), "{error}");
+            assert!(error.contains(&own.display().to_string()), "{error}");
+        }
+        let error = ok(k8s(Some(&caller), Some(elsewhere)))
+            .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains(&caller.display().to_string()));
-        assert!(error.contains(&own.display().to_string()));
-        std::fs::remove_dir_all(root).unwrap();
+        assert!(error.contains("namespace"), "{error}");
+        assert!(!error.contains("context"), "{error}");
     }
 
     #[test]

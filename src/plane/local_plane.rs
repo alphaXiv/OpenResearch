@@ -351,9 +351,11 @@ impl LocalPlane {
         let parent_exp = match &parent {
             Some(parent_id) => Some(store.get_local_experiment(parent_id)?.ok_or_else(|| {
                 anyhow!(
-                    "Parent experiment {} not found in the local store. \
+                    "Parent experiment {} was not found in the orx store at {}. \
                      Choose an existing local experiment from `orx project view {}`, or omit --parent to branch off the project root.",
-                    parent_id, project.id
+                    parent_id,
+                    store.data_dir().display(),
+                    project.id
                 )
             })?),
             None if baseline => None,
@@ -629,6 +631,13 @@ impl ApiClient {
         args.agent_origin = crate::agent_origin();
         args.caller_config_dir = Some(crate::commands::up::absolute_config_dir());
         args.caller_python_overrides = crate::jobs::caller_python_overrides();
+        args.caller_compute_settings = Some(
+            crate::commands::up::launch_settings(&args)
+                .await?
+                .filter(|(_, set)| *set)
+                .map(|(settings, _)| settings)
+                .unwrap_or_default(),
+        );
         args.invocation_context = args
             .invocation_identity()?
             .map(|identity| serde_json::to_string(&identity))
@@ -885,7 +894,17 @@ impl ApiClient {
     }
 
     pub async fn logs(&self, id: &str, follow: bool) -> Result<()> {
-        self.logs_to(id, follow, &mut std::io::stdout()).await
+        let result = self.logs_to(id, follow, &mut std::io::stdout()).await;
+        // Of this call's I/O, only writing stdout can break a pipe.
+        if let Err(error) = &result {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+            {
+                crate::output::stdout_closed();
+            }
+        }
+        result
     }
 
     pub(crate) async fn logs_to(

@@ -35,6 +35,7 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("ORX_DATA_DIR", self.data())
             .env("ORX_NO_UPDATE_CHECK", "1")
+            .env("PATH", orx_test_support::agentless_path(&self.root))
             .env("ORX_SSH_CONFIG", self.server.config_path())
             .env("ORX_HOST_BIN_DIR", orx_test_support::host_binaries())
             .env("ORX_CHAT_SESSION_ID", "chat")
@@ -801,4 +802,111 @@ fn an_engine_run_finishing_while_up_is_down_keeps_the_receipt_finish_time() {
         .unwrap();
     assert_eq!(ended_at, finished_at);
     assert!(started_at <= ended_at);
+}
+
+/// An agent whose config dir is not orx up's, as in a sandbox with its own home, launches
+/// unless that dir sets compute settings orx up would not use.
+#[test]
+fn a_caller_with_its_own_config_dir_launches_only_with_the_settings_orx_up_uses() {
+    let sandbox = Sandbox::new();
+    sandbox.project("echo done\n");
+    let started = sandbox.run(&["exp", "run", "exp", "--force", "--backend", "local"]);
+    assert!(started.status.success(), "{}", diagnostics(&started));
+    let agent_config = sandbox.root.join("agent-config");
+    let slurm = |partition: &str| format!(r#"{{"partition":"{partition}"}}"#);
+    let launch_with = |flags: &[&str]| {
+        let output = sandbox
+            .command()
+            .env("XDG_CONFIG_HOME", &agent_config)
+            .args(["exp", "run", "exp", "--force", "--backend", "slurm"])
+            .args(["--host", sandbox.server.alias()])
+            .args(flags)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let launch = || launch_with(&[]);
+    let refused = |stderr: &str| stderr.contains(agent_config.to_str().unwrap());
+
+    let empty = launch();
+    assert!(!refused(&empty), "{empty}");
+
+    std::fs::create_dir_all(agent_config.join("openresearch")).unwrap();
+    std::fs::write(agent_config.join("openresearch/slurm.json"), slurm("gpu")).unwrap();
+    let different = launch();
+    assert!(refused(&different), "{different}");
+    assert!(different.contains("partition"), "{different}");
+    assert!(
+        different.contains(sandbox.root.join("config").to_str().unwrap()),
+        "{different}"
+    );
+
+    std::fs::create_dir_all(sandbox.root.join("config/openresearch")).unwrap();
+    std::fs::write(
+        sandbox.root.join("config/openresearch/slurm.json"),
+        slurm("gpu"),
+    )
+    .unwrap();
+    let equal = launch();
+    assert!(!refused(&equal), "{equal}");
+
+    let limits = |mem: &str| format!(r#"{{"partition":"gpu","mem":"{mem}"}}"#);
+    std::fs::write(agent_config.join("openresearch/slurm.json"), limits("32G")).unwrap();
+    std::fs::write(
+        sandbox.root.join("config/openresearch/slurm.json"),
+        limits("64G"),
+    )
+    .unwrap();
+    let saved_limit = launch();
+    assert!(refused(&saved_limit), "{saved_limit}");
+    assert!(saved_limit.contains("mem"), "{saved_limit}");
+    let flagged = launch_with(&["--mem", "16G"]);
+    assert!(!refused(&flagged), "{flagged}");
+
+    let save = |caller: &str, own: &str| {
+        let saved = |field: &str| format!(r#"{{"partition":"gpu",{field}}}"#);
+        std::fs::write(agent_config.join("openresearch/slurm.json"), saved(caller)).unwrap();
+        std::fs::write(
+            sandbox.root.join("config/openresearch/slurm.json"),
+            saved(own),
+        )
+        .unwrap();
+    };
+    for (name, caller, own) in [
+        ("qos", r#""qos":"acc_debug""#, r#""qos":"acc_ehpc""#),
+        (
+            "sbatchArgs",
+            r#""sbatchArgs":["--rsc g=1"]"#,
+            r#""sbatchArgs":[]"#,
+        ),
+        (
+            "requestOneTask",
+            r#""requestOneTask":false"#,
+            r#""requestOneTask":true"#,
+        ),
+    ] {
+        save(caller, own);
+        let stderr = launch();
+        assert!(
+            refused(&stderr) && stderr.contains(name),
+            "{name}: {stderr}"
+        );
+    }
+    save(r#""qos":"acc_debug""#, r#""qos":"acc_ehpc""#);
+    let qos_flag = launch_with(&["--qos", "acc_debug"]);
+    assert!(!refused(&qos_flag), "{qos_flag}");
+
+    // Without the setting, orx writes --ntasks=1 just as `true` asks.
+    std::fs::write(
+        agent_config.join("openresearch/slurm.json"),
+        r#"{"partition":"gpu","requestOneTask":true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        sandbox.root.join("config/openresearch/slurm.json"),
+        r#"{"partition":"gpu"}"#,
+    )
+    .unwrap();
+    let one_task = launch();
+    assert!(!refused(&one_task), "{one_task}");
 }

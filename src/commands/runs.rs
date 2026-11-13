@@ -7,7 +7,7 @@ use crate::store::Store;
 
 /// Lists a project's runs as a table, newest first.
 pub async fn run(args: crate::RunsArgs) -> Result<()> {
-    let store = Store::open()?;
+    let store = Store::open_for_reading()?;
     let plane = resolve_project(store, &args.project_id)?;
     let listing = plane.list_runs().await?;
 

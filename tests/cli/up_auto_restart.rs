@@ -45,7 +45,7 @@ fn idle_orx_up_relaunches_into_an_installed_update() {
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("share"))
         .env("ORX_DATA_DIR", root.join("data"))
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", orx_test_support::agentless_path(&root))
         .env("GITHUB_TOKEN", "")
         // Keep the startup release check off the network.
         .env("HTTPS_PROXY", "http://127.0.0.1:9")

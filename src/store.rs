@@ -92,13 +92,14 @@ pub(crate) fn open_lifecycle_lock_at(
     path: &std::path::Path,
 ) -> Result<fd_lock::RwLock<std::fs::File>> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::paths::create_dir_all(parent)?;
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(path)?;
+        .open(path)
+        .with_context(|| format!("Could not open {}", path.display()))?;
     Ok(fd_lock::RwLock::new(file))
 }
 
@@ -902,6 +903,27 @@ const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
 /// Just past the source cache's idle window, so tars a pass had to skip are removable.
 const SOURCE_SWEEP_DELAY_MS: i64 = (crate::jobs::ssh::cleanup::SOURCE_IDLE_MINUTES + 1) * 60 * 1000;
 
+fn check_reader_floor(conn: &Connection) -> Result<()> {
+    let has_floor: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_floor {
+        let floor: Option<i64> = conn
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = 'min_reader_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(floor) = floor.filter(|floor| *floor > 1) {
+            return Err(anyhow!("This database requires a newer OpenResearch reader (min_reader_version {}). Update orx before opening it.", floor));
+        }
+    }
+    Ok(())
+}
+
 pub struct Store {
     conn: Connection,
     data_dir: PathBuf,
@@ -909,6 +931,10 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     pub(crate) fn relocate_project_paths(&self, paths: &[(String, String)]) -> Result<()> {
         let tx = self.begin()?;
         for (old, new) in paths {
@@ -927,12 +953,6 @@ impl Store {
         Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path(), BUSY_TIMEOUT)
     }
 
-    /// Open like `open`, but cap SQLite's lock wait — `orx exp wait` shrinks
-    /// this to its deadline so one blocked open can't overshoot it.
-    pub fn open_with_busy_timeout(busy_timeout: Duration) -> Result<Self> {
-        Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path(), busy_timeout)
-    }
-
     /// Open a store rooted at an explicit directory, bypassing `data_dir()`
     /// resolution.
     pub fn open_at(dir: PathBuf) -> Result<Self> {
@@ -940,39 +960,58 @@ impl Store {
         Self::open_at_with_move_lock(dir, move_lock_path, BUSY_TIMEOUT)
     }
 
+    /// Opens the store for a command that only reads it. Where the store cannot be
+    /// written, as in a sandboxed agent, it opens read-only and applies no schema;
+    /// elsewhere it opens as `open` does, so a newer reader still finds its columns.
+    pub fn open_for_reading() -> Result<Self> {
+        Self::open_for_reading_within(BUSY_TIMEOUT)
+    }
+
+    /// Open like `open_for_reading`, but cap SQLite's lock wait — `orx exp wait`
+    /// shrinks this to its deadline so one blocked open can't overshoot it.
+    pub fn open_for_reading_within(busy_timeout: Duration) -> Result<Self> {
+        let dir = data_dir();
+        let db = dir.join("orx.db");
+        let exists = db
+            .try_exists()
+            .with_context(|| format!("Could not read {}", db.display()))?;
+        let writable =
+            || Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path(), busy_timeout);
+        if !exists {
+            return writable();
+        }
+        // SQLite opens a file it may not write read-only.
+        let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .with_context(|| format!("Could not open {}", db.display()))?;
+        if !conn.is_readonly(rusqlite::DatabaseName::Main)? {
+            drop(conn);
+            return writable();
+        }
+        check_reader_floor(&conn)?;
+        conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
+        Ok(Self {
+            conn,
+            data_dir: dir,
+            data_dir_move_lock_path: data_dir_move_lock_path(),
+        })
+    }
+
     fn open_at_with_move_lock(
         dir: PathBuf,
         data_dir_move_lock_path: PathBuf,
         busy_timeout: Duration,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&dir)?;
+        crate::paths::create_dir_all(&dir)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             // SQLite and its sidecars contain scoped rental capabilities.
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         }
-        std::fs::create_dir_all(dir.join("run-logs"))
-            .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
+        crate::paths::create_dir_all(&dir.join("run-logs"))?;
         let conn = Connection::open(dir.join("orx.db"))?;
         conn.busy_timeout(busy_timeout)?;
-        let has_floor: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata')",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_floor {
-            let floor: Option<i64> = conn
-                .query_row(
-                    "SELECT value FROM store_metadata WHERE key = 'min_reader_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(floor) = floor.filter(|floor| *floor > 1) {
-                return Err(anyhow!("This database requires a newer OpenResearch reader (min_reader_version {}). Update orx before opening it.", floor));
-            }
-        }
+        check_reader_floor(&conn)?;
         // WAL conversion can return SQLITE_BUSY without invoking SQLite's busy handler.
         let wal_start = std::time::Instant::now();
         let mut delay = Duration::from_millis(1);
@@ -6358,7 +6397,7 @@ mod tests {
             .unwrap();
 
         let start = std::time::Instant::now();
-        let error = Store::open_with_busy_timeout(Duration::ZERO)
+        let error = Store::open_for_reading_within(Duration::ZERO)
             .err()
             .expect("the other connection holds the database exclusively");
         let elapsed = start.elapsed();
@@ -6391,7 +6430,7 @@ mod tests {
 
         for timeout in [Duration::ZERO, Duration::from_millis(50)] {
             let start = std::time::Instant::now();
-            let error = Store::open_with_busy_timeout(timeout)
+            let error = Store::open_for_reading_within(timeout)
                 .err()
                 .expect("the reader blocks the journal mode change");
             let elapsed = start.elapsed();
