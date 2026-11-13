@@ -12,7 +12,7 @@ export type Outside = Awaited<ReturnType<typeof startOutside>>
 
 /** Traffic arc/storage.md's "What leaves the machine" lists for what the specs do: the release check and the onboarding's OpenCode install. */
 export function listedEgress({ method, target }: Request) {
-  return method === 'CONNECT' && ['github.com:443', 'api.github.com:443'].includes(target)
+  return method === 'CONNECT' && ['github.com:443', 'registry.npmjs.org:443'].includes(target)
 }
 
 export async function startOutside() {
