@@ -1244,11 +1244,13 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let child = crate::process::tokio_command("sleep")
-                .arg("60")
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
+            let child = ServerChild::new(
+                crate::process::tokio_command("sleep")
+                    .arg("60")
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap(),
+            );
             let pid = child.id();
             let project = sample_project();
             let host = AgentHost::new(None);

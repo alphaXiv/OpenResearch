@@ -17,7 +17,7 @@ const ATTEMPT_LIMIT: usize = 8;
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(600);
 
 struct Server {
-    child: tokio::process::Child,
+    child: opencode::ServerChild,
     endpoint: AgentEndpoint,
     database: DatabaseLease,
 }
@@ -77,9 +77,9 @@ impl Server {
     }
 
     async fn stop(&mut self) {
-        crate::local::chat::kill_shell_group(self.child.id());
-        let _ = self.child.kill().await;
-        let _ = self.child.wait().await;
+        if let Err(error) = self.child.kill().await {
+            eprintln!("orx up: failed to stop the OpenCode sign-in server: {error}");
+        }
     }
 }
 
@@ -584,7 +584,7 @@ mod tests {
         let child = cmd.spawn().unwrap();
         let lease = DatabaseLease::acquire(&root.join("opencode.db"), 2).unwrap();
         let server = Server {
-            child,
+            child: opencode::ServerChild::new(child),
             endpoint: AgentEndpoint {
                 base_url: format!("http://{address}"),
                 client: crate::net::loopback_client().build().unwrap(),

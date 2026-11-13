@@ -324,7 +324,7 @@ impl ServerChild {
     pub(crate) async fn kill(&mut self) -> std::io::Result<()> {
         if self.try_wait()?.is_none() {
             // Not yet reaped, so the PID still belongs to our server.
-            crate::local::chat::kill_agent_tree(self.id.take());
+            crate::local::chat::kill_agent_tree(self.id.take()).await;
             if let Err(error) = self.child.start_kill() {
                 if self.child.try_wait()?.is_none() {
                     return Err(error);
