@@ -1039,6 +1039,48 @@ impl AgentHost {
     }
 }
 
+#[cfg(all(test, unix))]
+impl AgentHost {
+    /// Routes `session_id` to an OpenCode API on `port`, with `sleep` standing in for the server.
+    pub(crate) async fn serve_for_test(&self, session_id: &str, port: u16, root: &std::path::Path) {
+        let path = root.join("opencode");
+        orx_test_support::write_executable(&path, "#!/bin/sh\necho 1.19.0\n", 0o700).unwrap();
+        let binary = runtime::resolve_binary_at(path).await.unwrap();
+        let database =
+            native_store::opencode_database::DatabaseLease::acquire(&root.join("opencode.db"), 1)
+                .unwrap();
+        let child = ServerChild::new(
+            crate::process::tokio_command("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap(),
+        );
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://127.0.0.1:{port}"),
+            client: crate::net::loopback_client().build().unwrap(),
+            protocol: Protocol::V1,
+            legacy_v2_api: false,
+        };
+        self.inner.lock().await.insert(
+            session_id.into(),
+            AgentChild {
+                child,
+                port,
+                project_id: "p1".into(),
+                session_id: session_id.into(),
+                model: None,
+                config: None,
+                native_store: NativeStore::Isolated,
+                alphaxiv_signed_in: false,
+                binary,
+                endpoint,
+                database,
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

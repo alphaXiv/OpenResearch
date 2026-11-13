@@ -4207,7 +4207,7 @@ impl ChatHost {
     pub async fn stop_for_shutdown(self: &Arc<Self>) {
         let sessions = self.busy_sessions().await;
         let stops = sessions.iter().map(|session_id| async move {
-            if let Err(error) = self.stop_turn(session_id, false).await {
+            if let Err(error) = self.stop_turn(session_id, StopMode::Shutdown).await {
                 eprintln!("orx up: failed to stop turn {session_id} for shutdown: {error}");
             }
         });
@@ -6857,12 +6857,11 @@ impl ChatHost {
     /// stops generating. Returns whether a turn (or a reservation) was
     /// actually aborted — `false` means the session was already idle.
     pub async fn interrupt(self: &Arc<Self>, session_id: &str) -> Result<bool> {
-        self.stop_turn(session_id, true).await
+        self.stop_turn(session_id, StopMode::Cancel).await
     }
 
-    /// `cancel` records the turn as stopped on purpose; without it the stored
-    /// turn is left for lease reconciliation, which offers a way to continue.
-    async fn stop_turn(self: &Arc<Self>, session_id: &str, cancel: bool) -> Result<bool> {
+    async fn stop_turn(self: &Arc<Self>, session_id: &str, mode: StopMode) -> Result<bool> {
+        let cancel = mode == StopMode::Cancel;
         let active = {
             let mut turns = self.turns.lock().await;
             let Some(state) = turns.get_mut(session_id) else {
@@ -6936,10 +6935,14 @@ impl ChatHost {
                 }
                 None
             };
-            let interrupted_items = tokio::time::timeout(Duration::from_secs(10), native_shutdown)
-                .await
-                .ok()
-                .flatten();
+            let interrupted_items = if mode == StopMode::Shutdown {
+                None
+            } else {
+                tokio::time::timeout(Duration::from_secs(10), native_shutdown)
+                    .await
+                    .ok()
+                    .flatten()
+            };
             if let Some(active) = active {
                 let _ = active.handle.await;
                 let _ = Store::open().and_then(|store| {
@@ -9729,12 +9732,23 @@ pub async fn keep_turn_leases(
     }
 }
 
+/// How [`ChatHost::stop_turn`] leaves a turn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopMode {
+    /// Stopped on purpose: the stored turn is recorded as interrupted.
+    Cancel,
+    /// Cut short: the stored turn is left for lease reconciliation, which offers Continue.
+    LeaseLost,
+    /// Cut short like `LeaseLost`, without waiting on the agent: shutdown kills it next.
+    Shutdown,
+}
+
 /// A turn whose lease another claim reaped stops here and is recorded as cut
 /// short, with a way to continue.
 async fn stop_turns_whose_lease_was_lost(chat: &Arc<ChatHost>) {
     let lost = chat.renew_turn_leases();
     for session_id in &lost {
-        let _ = chat.stop_turn(session_id, false).await;
+        let _ = chat.stop_turn(session_id, StopMode::LeaseLost).await;
     }
     if lost.is_empty() {
         return;
@@ -14452,6 +14466,57 @@ done
             let wire = stored_to_wire(&message);
             assert!(!wire.parts.iter().any(|part| part.id == "turn-retry"));
             assert!(wire.parts.iter().any(|part| part.id == "turn-recovery"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_stops_leave_the_agent_to_host_shutdown_but_lost_leases_interrupt_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let aborts = Arc::new(AtomicUsize::new(0));
+            let counted = aborts.clone();
+            let app = axum::Router::new().route(
+                "/session/native/abort",
+                axum::routing::post(move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    async { axum::Json(json!(true)) }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+            let fixture = crate::local::git::TemporaryDirectory::new("orx-shutdown-stop").unwrap();
+            let opencode = crate::local::opencode::AgentHost::new(None);
+            opencode.serve_for_test("chat", port, fixture.path()).await;
+            let host = Arc::new(ChatHost::new(
+                Arc::new(opencode),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let store = Store::open().unwrap();
+            session_on(&store, "chat", "opencode");
+            store
+                .set_chat_session_native_id("chat", Some("native"))
+                .unwrap();
+
+            for (mode, expected) in [(StopMode::Shutdown, 0), (StopMode::LeaseLost, 1)] {
+                host.turns.lock().await.insert(
+                    "chat".into(),
+                    TurnState::Active(ActiveTurn {
+                        handle: tokio::spawn(std::future::pending()),
+                        message_id: "answer".into(),
+                        turn_id: "turn".into(),
+                    }),
+                );
+                assert!(host.stop_turn("chat", mode).await.unwrap());
+                assert_eq!(aborts.load(Ordering::SeqCst), expected);
+            }
+            server.abort();
         });
     }
 
