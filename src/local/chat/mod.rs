@@ -8513,9 +8513,6 @@ impl TurnCtx {
     }
 
     pub fn schedule_orx_retry(&mut self, explicit: Option<Duration>) -> Option<(u32, Duration)> {
-        if self.host.exiting.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
-        }
         let started = *self.orx_retry_started.get_or_insert_with(Instant::now);
         let retry_number = self.orx_retry_count + 1;
         let Some(delay) =
