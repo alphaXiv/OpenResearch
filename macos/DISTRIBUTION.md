@@ -34,8 +34,8 @@ committed bundle. The artifact must still be available for manual re-attachments
 ## The app updater's contract
 
 The desktop app offers stable and canary update channels. A push to `main` runs
-`.github/workflows/release-canary.yml`: alongside CI, it builds the macOS app,
-Windows installer and Linux AppImages; once CI succeeds, it publishes versioned
+`.github/workflows/release-canary.yml`: alongside the release checks, it builds the macOS app,
+Windows installer and Linux AppImages; once they succeed, it publishes versioned
 assets and `desktop-canary-v2.json` on the `canary` prerelease. The manifest
 records the build identity, source commit, and ancestry. A running build always
 finishes; only the newest pending push waits behind it, so intermediate commits
