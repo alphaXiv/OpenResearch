@@ -309,13 +309,22 @@ impl ServerChild {
         self.id
     }
 
+    /// Polls the server. Once its exit is observed, the surviving process group
+    /// is killed immediately and the saved PID is forgotten: after reaping, the
+    /// kernel may hand that PID to an unrelated process, so it must never be
+    /// signalled later.
     pub(crate) fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.child.try_wait()
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            crate::local::chat::kill_shell_group(self.id.take());
+        }
+        Ok(status)
     }
 
     pub(crate) async fn kill(&mut self) -> std::io::Result<()> {
-        crate::local::chat::kill_agent_tree(self.id.take());
-        if self.child.try_wait()?.is_none() {
+        if self.try_wait()?.is_none() {
+            // Not yet reaped, so the PID still belongs to our server.
+            crate::local::chat::kill_agent_tree(self.id.take());
             if let Err(error) = self.child.start_kill() {
                 if self.child.try_wait()?.is_none() {
                     return Err(error);
@@ -535,7 +544,7 @@ async fn prepare_database_waiting(
     .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1");
     let result = async {
         let (mut child, endpoint) = start_server(binary, cmd).await?;
-        let migrated = wait_migration(&mut child.child, &endpoint, &mut progress).await;
+        let migrated = wait_migration(&mut child, &endpoint, &mut progress).await;
         let stopped = child.kill().await;
         migrated?;
         stopped?;
@@ -557,7 +566,7 @@ async fn prepare_database_waiting(
 }
 
 async fn wait_migration(
-    child: &mut Child,
+    child: &mut ServerChild,
     endpoint: &AgentEndpoint,
     progress: &mut (impl FnMut(&str) + Send),
 ) -> Result<()> {

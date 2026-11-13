@@ -1461,7 +1461,7 @@ mod tests {
                         tokio::time::sleep(crate::config::paced(Duration::from_millis(10))).await;
                     }
                     assert!(reaped, "leader did not exit before drop");
-                    assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+                    assert_eq!(child.id(), None, "reaped PID must not be kept for later");
                     drop(child);
                 }
                 _ => unreachable!(),
