@@ -327,6 +327,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 30_000,
   });
 
+  const getModelFeedQuery = () => queryOptions({
+    queryKey: workspaceKey("getModelFeed"),
+    queryFn: ({ signal }) => api.getModelFeed(signal),
+    staleTime: 300_000,
+  });
+
   const reportLocaleQuery = (locale: string) => queryOptions({
     queryKey: workspaceKey("reportLocale", locale),
     queryFn: ({ signal }) => api.reportLocale(locale, signal),
@@ -385,6 +391,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     readHarnesses,
     getLocalModelsQuery,
     getOpenCodeProvidersQuery,
+    getModelFeedQuery,
     reportLocaleQuery,
   };
 }

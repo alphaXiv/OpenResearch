@@ -9,7 +9,7 @@ import { BRAND_ICON, type Logo } from "./AgentIcon";
 import { profileTile, providerRank, providerTile, sortHarnesses, TileMark } from "./AddAgentDialog";
 import { HarnessLogo } from "./HarnessLogo";
 import { EndpointMark, endpointServer } from "./LocalModelSetup";
-import { lineName, offerOn } from "./ModelList";
+import { FREE, lineName, offerOn, SectionMark } from "./ModelList";
 
 /** A row of Settings → Agents, as the model picker offers it: one place a model can run. */
 export interface PickerAgent {
@@ -46,7 +46,7 @@ export function endpointMark(connection: LocalModelConnection): AgentMark {
   return { icon: connection.icon ?? BRAND_ICON, brand: (size) => <EndpointMark server={server} size={size} /> };
 }
 
-export const FREE_MODELS_MARK: AgentMark = { icon: BRAND_ICON, brand: (size) => <HarnessLogo harness="opencode" size={size} /> };
+export const FREE_MODELS_MARK: AgentMark = { icon: BRAND_ICON, brand: (size) => <SectionMark id={FREE} size={size} /> };
 
 /** A provider OpenCode signed in to itself, which no record of OpenResearch's names. */
 function signInAgent(opencode: Harness, provider: string): PickerAgent {
