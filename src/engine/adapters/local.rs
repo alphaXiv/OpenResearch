@@ -18,6 +18,45 @@ use crate::jobs::localbox;
 #[path = "../../../crates/orx-host/src/log.rs"]
 pub(super) mod log;
 
+/// Keeps this machine from idle sleep until dropped. Windows runs have no `orx-host wrap` to
+/// hold it, so the engine holds one while any local run is unfinished.
+#[cfg(windows)]
+pub(crate) fn keep_awake() -> std::io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Power::{
+        PowerCreateRequest, PowerRequestSystemRequired, PowerSetRequest,
+    };
+    use windows_sys::Win32::System::SystemServices::POWER_REQUEST_CONTEXT_VERSION;
+    use windows_sys::Win32::System::Threading::{
+        POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0,
+    };
+
+    let mut reason: Vec<u16> = "OpenResearch is running an experiment on this machine"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let context = REASON_CONTEXT {
+        Version: POWER_REQUEST_CONTEXT_VERSION,
+        Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+        Reason: REASON_CONTEXT_0 {
+            SimpleReasonString: reason.as_mut_ptr(),
+        },
+    };
+    // SAFETY: the context and its string outlive the call, which copies them.
+    let request = unsafe { PowerCreateRequest(&context) };
+    if request == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a fresh handle owned by nothing else; dropping it clears the request.
+    let request = unsafe { OwnedHandle::from_raw_handle(request) };
+    // SAFETY: `request` is a live power request handle.
+    if unsafe { PowerSetRequest(request.as_raw_handle(), PowerRequestSystemRequired) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(request)
+}
+
 pub struct Local {
     root: PathBuf,
 }
@@ -207,7 +246,7 @@ impl Local {
             let status = crate::process::command(crate::local::bash::program())
                 .args(["-c", "\"$@\" &", "orx-local"])
                 .arg(binary)
-                .arg("wrap")
+                .args(["wrap", "--keep-awake"])
                 .arg(crate::paths::canonicalize(&dir)?)
                 .envs(&env)
                 .stdin(Stdio::null())

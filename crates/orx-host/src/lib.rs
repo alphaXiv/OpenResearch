@@ -2,6 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
+mod awake;
 pub mod exec;
 pub mod legacy;
 pub mod log;

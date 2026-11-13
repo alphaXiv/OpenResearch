@@ -11,7 +11,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub fn wrap(dir: &Path) -> io::Result<()> {
+/// `keep_awake` holds a sleep prevention from before the payload starts until its receipt.
+pub fn wrap(dir: &Path, keep_awake: bool) -> io::Result<()> {
     let Some(_ownership) = lock(&dir.join("wrapper.lock"))? else {
         return Ok(());
     };
@@ -34,8 +35,11 @@ pub fn wrap(dir: &Path) -> io::Result<()> {
     let identity = platform::identity(std::process::id())?;
     publish(&dir.join("wrapper.json"), &identity)?;
     crash_point("wrapper_identity");
-    let subreaper = platform::subreaper()?;
     let intent: LaunchIntent = read_json(&dir.join("launch.json"))?;
+    let mut awake = keep_awake
+        .then(|| crate::awake::hold(&intent.run))
+        .flatten();
+    let subreaper = platform::subreaper()?;
     let _rental = crate::rental::Duty::start(dir)?;
     let tag = format!("{}:{}", intent.run, nonce()?);
     let gate = start_gate(dir)?;
@@ -139,6 +143,7 @@ pub fn wrap(dir: &Path) -> io::Result<()> {
                         ),
                     )
                 })?;
+                drop(awake.take());
                 if std::env::var_os("SLURM_JOB_ID").is_some()
                     || (processes.is_empty() && no_children)
                 {
@@ -235,6 +240,7 @@ pub fn wrap(dir: &Path) -> io::Result<()> {
                 )
             })?;
             crash_point("wrapper_receipt");
+            drop(awake.take());
             if std::env::var_os("SLURM_JOB_ID").is_some() || (processes.is_empty() && no_children) {
                 return Ok(());
             }
