@@ -4683,48 +4683,18 @@ function SessionFilterMenu({
   );
 }
 
-/** Per-character stagger, and the ceiling on the whole run — a long title
- * shouldn't take a second and a half to finish arriving. */
-const TITLE_CHAR_STAGGER_MS = 14;
-const TITLE_STAGGER_CAP_MS = 500;
-/** How long the reveal flag stays set: the capped stagger plus one character's
- * 240ms animation, plus slack. After this the title renders as plain text. */
-const TITLE_REVEAL_CLEAR_MS = 1200;
+/** How long the reveal flag stays set: the 700ms sweep plus slack. After this
+ * a remount (scrolling the rail, switching sessions) shows a static title. */
+const TITLE_REVEAL_CLEAR_MS = 1000;
 
-/** A session title that materializes character by character when a
+/** A session title that fades in behind a left-to-right mask when a
  * harness-generated one replaces the first-line placeholder. `animate` is false
  * everywhere else (initial load, renames, re-renders), and then this renders the
- * bare string — the animated form is deliberately the exception.
- *
- * The characters are `aria-hidden` and the whole title rides an `aria-label`:
- * a screen reader must hear one title, not forty single-letter spans. */
+ * bare string — the animated form is deliberately the exception. The text stays
+ * one run so kerning and antialiasing match the static title it settles into. */
 function TitleReveal({ title, animate }: { title: string; animate: boolean }) {
   if (!animate) return <>{title}</>;
-  return (
-    <span className="title-reveal" aria-label={title}>
-      {Array.from(title).map((ch, i) =>
-        // Spaces stay plain inline boxes: the animated characters must be
-        // inline-block (transform doesn't apply to inline boxes), but an
-        // inline-block space collapses to zero width and eats the word gap.
-        ch === " " ? (
-          <span key={i} aria-hidden>
-            {ch}
-          </span>
-        ) : (
-          <span
-            key={i}
-            aria-hidden
-            className="title-reveal-char inline-block animate-[title-char-in_240ms_ease-out_both] [@media((prefers-reduced-motion:_reduce))]:animate-none"
-            style={{
-              animationDelay: `${Math.min(i * TITLE_CHAR_STAGGER_MS, TITLE_STAGGER_CAP_MS)}ms`,
-            }}
-          >
-            {ch}
-          </span>
-        ),
-      )}
-    </span>
-  );
+  return <span className="title-reveal">{title}</span>;
 }
 
 /** One Recents row. Hover swaps the timestamp for a three-dot menu with
@@ -6206,8 +6176,7 @@ export function ChatPanel({
               next.set(ev.session.id, (cur.get(ev.session.id) ?? 0) + 1);
               return next;
             });
-            // Drop the flag once the run is over (longest stagger + one char
-            // duration, plus slack) so later re-renders show a static title.
+            // Drop the flag once the sweep is over so later remounts don't replay it.
             window.setTimeout(() => {
               setTitleReveals((cur) => {
                 if (!cur.has(ev.session.id)) return cur;
