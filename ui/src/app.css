@@ -425,13 +425,13 @@
 
 @keyframes title-reveal {
   from {
-    mask-image: linear-gradient(to right, #000 33.3%, transparent 66.7%);
+    mask-image: linear-gradient(to right, black 33.3%, transparent 66.7%);
     mask-size: 300% 100%;
     mask-repeat: no-repeat;
     mask-position: 100% 0;
   }
   to {
-    mask-image: linear-gradient(to right, #000 33.3%, transparent 66.7%);
+    mask-image: linear-gradient(to right, black 33.3%, transparent 66.7%);
     mask-size: 300% 100%;
     mask-repeat: no-repeat;
     mask-position: 0 0;
