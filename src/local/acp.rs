@@ -417,12 +417,17 @@ impl Directory {
     }
 
     /// Removes the directory once its child has exited. Windows can hold the
-    /// child's working directory for a moment after the exit, so this retries once.
+    /// child's working directory for a moment after the exit, so this retries for
+    /// about three seconds.
     async fn remove(self) {
-        if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
-            return;
+        let mut delay = std::time::Duration::from_millis(100);
+        for _ in 0..5 {
+            if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+                return;
+            }
+            tokio::time::sleep(delay).await;
+            delay *= 2;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         if let Err(error) = std::fs::remove_dir_all(&self.0) {
             if self.0.exists() {
                 eprintln!(
