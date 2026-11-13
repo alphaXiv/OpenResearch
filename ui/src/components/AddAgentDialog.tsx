@@ -861,9 +861,9 @@ export function useDatacenterWarning(host: string | undefined) {
     const warned = warnedHosts.get(queryClient) ?? new Set<string>();
     warnedHosts.set(queryClient, warned);
     if (!host || warned.has(host)) return proceed();
-    warned.add(host);
     const network = await queryClient.fetchQuery(queries.getPublicNetworkQuery()).catch(() => null);
     if (!mounted.current) return;
+    warned.add(host);
     if (!network?.isDatacenter) return proceed();
     dialogs.showCustomDialog({ component: ClaudeDatacenterWarning, props: { host, ip: network.ip }, onConfirm: async () => { await proceed(); }, onCancel: back });
   };

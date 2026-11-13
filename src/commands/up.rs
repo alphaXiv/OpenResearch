@@ -7955,8 +7955,8 @@ async fn local_runtime() -> Json<Value> {
 
 enum OpenCodeError {
     V1,
-    /// A model server that takes an API key, asked without one.
-    NeedsKey(String),
+    /// Why a model server listed no models, by a code the dashboard tells apart.
+    Unlisted(&'static str, String),
     Api(ApiError),
 }
 
@@ -7964,7 +7964,7 @@ impl IntoResponse for OpenCodeError {
     fn into_response(self) -> Response {
         match self {
             Self::V1 => (StatusCode::CONFLICT, Json(json!({"error":"Update OpenCode to add or change providers, or use OpenResearch's copy.","code":"opencode1"}))).into_response(),
-            Self::NeedsKey(message) => (StatusCode::BAD_REQUEST, Json(json!({"error":message,"code":"needsKey"}))).into_response(),
+            Self::Unlisted(code, message) => (StatusCode::BAD_REQUEST, Json(json!({"error":message,"code":code}))).into_response(),
             Self::Api(error) => error.into_response(),
         }
     }
@@ -8018,8 +8018,10 @@ async fn discover_local_models(Json(req): Json<local::local_models::Probe>) -> O
         local::local_models::discover(&req)
             .await
             .map_err(
-                |e| match e.downcast_ref::<local::local_models::NeedsKey>() {
-                    Some(needs) => OpenCodeError::NeedsKey(needs.to_string()),
+                |e| match e.downcast_ref::<local::local_models::Unlisted>() {
+                    Some(unlisted) => {
+                        OpenCodeError::Unlisted(unlisted.code(), unlisted.to_string())
+                    }
                     None => bad_request(e.to_string()).into(),
                 },
             )?;

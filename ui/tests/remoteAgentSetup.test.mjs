@@ -147,6 +147,37 @@ test("a second Codex account is named after the agent, not its tile", async () =
   assert.equal(setup.requests("POST /api/agent-profiles")[0].body.name, "Codex 2");
 });
 
+test("removing the provider added in the wizard starts the first chat elsewhere", async () => {
+  const providers = [];
+  const setup = await remoteSetup({
+    harnesses: [codex, opencode(["opencode/big-pickle"])],
+    providers,
+    routes: {
+      "POST /api/opencode/providers": () => {
+        providers.push({ id: "deepseek", kind: "key", name: "DeepSeek" });
+        setup.harnesses[1] = opencode(["opencode/big-pickle", "deepseek/deepseek-v4"]);
+        return { id: "deepseek" };
+      },
+      "DELETE /api/opencode/providers/deepseek": () => {
+        providers.length = 0;
+        setup.harnesses[1] = opencode(["opencode/big-pickle"]);
+        return { ok: true };
+      },
+    },
+  });
+  await click(button(m.add_agent_other_providers()));
+  await click(wizardButton("DeepSeek"));
+  await type(find('[role="dialog"] input[type="password"]'), "sk-test");
+  await click(wizardButton(m.onboarding_continue()));
+  await click(wizardButton(m.add_agent_finish({ name: "DeepSeek" })));
+
+  await click(document.querySelector(`button[aria-label="${m.settings_remove_agent({ name: ltr("DeepSeek") })}"]`));
+  await click(find('[role="dialog"] button', m.chat_panel_remove()));
+  await click(button(m.onboarding_continue()));
+  const [write] = preferredAgentWrites(setup);
+  assert.notEqual(write.preferredAgent.model, "deepseek/deepseek-v4", "a removed provider's model isn't the first chat's");
+});
+
 test("signing a Claude Code account in again from its row warns about a datacenter first", async () => {
   await remoteSetup({ harnesses: [codex, claude(), { ...claude(), installed: true, authState: "needsLogin", profile: { id: "claude-work", name: "Claude Code 2" } }] });
   await click(button(m.harness_setup_login()));

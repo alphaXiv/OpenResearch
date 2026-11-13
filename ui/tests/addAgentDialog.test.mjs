@@ -57,10 +57,10 @@ const opencode = {
 };
 
 const LM_STUDIO = "http://127.0.0.1:1234/v1";
-const unreachable = () => Response.json({ error: "Cannot reach the local server." }, { status: 400 });
+const unreachable = () => Response.json({ error: "Cannot reach the local server.", code: "unreachable" }, { status: 400 });
 
-/** Opens the wizard on Custom endpoint over model servers `discover` answers for; returns what each probe asked. */
-async function customEndpoint({ discover, connected = { model: "orx-local-lm/qwen", created: true }, removed = [] }) {
+/** Opens the wizard on `tile` over model servers `discover` answers for; returns what each probe asked. */
+async function customEndpoint({ discover, connected = { model: "orx-local-lm/qwen", created: true }, removed = [], tile = m.local_models_custom_endpoint() }) {
   const probes = [];
   serveApp({
     "GET /api/harnesses": () => ({ harnesses: [opencode] }),
@@ -85,7 +85,7 @@ async function customEndpoint({ discover, connected = { model: "orx-local-lm/qwe
     onCancel: "disable",
   }));
   await settle();
-  await click(find('[role="dialog"] button', m.local_models_custom_endpoint()));
+  await click(find('[role="dialog"] button', tile));
   return probes;
 }
 const field = (label) => find('[role="dialog"] label', label).querySelector("input");
@@ -138,4 +138,14 @@ test("cancelling after connecting a model the endpoint already had keeps it", as
 
 test("cancelling after connecting a new model removes it", async () => {
   assert.deepEqual(await connectThenCancel(true), ["/api/local-models/orx-local-lm?model=qwen"]);
+});
+
+test("the local model guide says a server is running without models, and that it couldn't check rather than that none runs", async () => {
+  const empty = () => Response.json({ error: "The server is running but has no models.", code: "noModels" }, { status: 400 });
+  await customEndpoint({ tile: m.local_models_guide_name(), discover: ({ baseUrl }) => baseUrl === LM_STUDIO ? empty() : unreachable() });
+  assert.ok(find('[role="dialog"]', m.local_models_guide_no_models({ name: "LM Studio" })));
+
+  await customEndpoint({ tile: m.local_models_guide_name(), discover: () => Response.json({ error: "OpenResearch is restarting." }, { status: 503 }) });
+  assert.ok(find('[role="dialog"] [role="alert"]', "OpenResearch is restarting."));
+  assert.ok(!find('[role="dialog"]', m.local_models_guide_none()), "an unknown check doesn't say nothing runs");
 });

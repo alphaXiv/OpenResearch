@@ -570,8 +570,10 @@ export function AgentList({ remote, onboarding }: {
     const hiddenAgents = on ? uiState.hiddenAgents.filter((id) => id !== key) : [...uiState.hiddenAgents, key];
 
     // Something always runs a chat: turning off the last other agent turns the free models back on.
-    if (on || othersOn(key) || uiState.opencodeFreeModels) mutUpdateUiState.run(workspace, { hiddenAgents });
-    else mutUpdateUiState.runWithOptions(workspace, { hiddenAgents, opencodeFreeModels: true }, { onSuccessData: () => load(true) });
+    const freeModelsBack = !on && !othersOn(key) && !uiState.opencodeFreeModels;
+    // The agents say which are off, and the free models' list depends on their switch, so both reload.
+    const reload = freeModelsBack ? () => load(true) : () => void queryClient.invalidateQueries({ queryKey: getHarnessesQuery().queryKey });
+    mutUpdateUiState.runWithOptions(workspace, { hiddenAgents, ...(freeModelsBack ? { opencodeFreeModels: true } : {}) }, { onSuccessData: reload });
   };
   const freeModelsLocked = !othersOn();
 
@@ -908,7 +910,7 @@ function ModelCount({ harness, models }: { harness: string; models: HarnessModel
 
 /** An agent OpenResearch keeps: its icon and name, which its details edit in place. */
 function RecordRow({ expandable, expanded, controls, onToggle, icon, brand, name, detail, warn, action, onRemove, onSave, children }: {
-  /** Whether the row opens its details, or shows only its name and action. */
+  /** Whether the row opens its details, or shows only its name and action unless it needs attention. */
   expandable: boolean;
   expanded: boolean;
   controls: string;
@@ -936,7 +938,7 @@ function RecordRow({ expandable, expanded, controls, onToggle, icon, brand, name
     void save({ name: next }).finally(() => setDraft(null));
   };
 
-  if (!expandable) {
+  if (!expandable && !warn) {
     return (
       <div className={AGENT_CARD_CLASS_NAME}>
         <div className={AGENT_ROW_CLASS_NAME}>

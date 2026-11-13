@@ -2,7 +2,7 @@ import { useWorkspace } from "../workspace";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ExternalLink, Link2, RefreshCw } from "lucide-react";
-import { NeedsKeyError, type LocalModelConnection } from "../api";
+import { UnlistedError, type LocalModelConnection } from "../api";
 import { fmtBytes, ltr } from "../i18n";
 
 import { m } from "../paraglide/messages.js";
@@ -39,7 +39,17 @@ const CUSTOM = SERVERS[SERVERS.length - 1];
 /** A model server found answering where orx runs: the models it lists, or that it wants a key first. */
 export type LocalServer = { server: Server; models: string[]; needsKey: boolean };
 
-/** Asks each model server's usual address where orx runs; nothing answering reads as not running. */
+/** Why a server listed no models; an orx from before the codes says so only in these messages. */
+function unlisted(error: unknown) {
+  if (error instanceof UnlistedError) return error.code;
+  const message = error instanceof Error ? error.message : "";
+  if (message.startsWith("The server requires an API key.")) return "needsKey";
+  if (message.startsWith("The server is running but has no models.")) return "noModels";
+  if (message.startsWith("Cannot reach the local server.")) return "unreachable";
+  return null;
+}
+
+/** Asks each model server's usual address where orx runs; a failure other than nothing answering fails the check. */
 export function useLocalServers() {
   const { api, workspaceKey } = useWorkspace();
   return useQuery({
@@ -49,12 +59,16 @@ export function useLocalServers() {
         try {
           return { server, models: (await api.discoverLocalModels({ baseUrl: server.url, apiKey: "" })).models, needsKey: false };
         } catch (error) {
-          return error instanceof NeedsKeyError ? { server, models: [], needsKey: true } : null;
+          const code = unlisted(error);
+          if (code === "unreachable") return null;
+          if (!code) throw error;
+          return { server, models: [], needsKey: code === "needsKey" };
         }
       }));
       return answers.filter((answer) => answer !== null);
     },
     staleTime: 0,
+    retry: false,
   });
 }
 
@@ -116,11 +130,8 @@ export function useLocalModelForm(disabled: boolean) {
       if (!cancelled.current) list(result.models);
     } catch (e) {
       if (cancelled.current) return;
-      const message = e instanceof Error ? e.message : String(e);
-      // An orx from before the needsKey code says so only in this message.
-      const needsKey = e instanceof NeedsKeyError || message.startsWith("The server requires an API key.");
-      if (needsKey && !askKey) setAskKey(true);
-      else setError(message);
+      if (unlisted(e) === "needsKey" && !askKey) setAskKey(true);
+      else setError(e instanceof Error ? e.message : String(e));
     }
   };
   /** Back from the key to the address; false when there's nowhere to go back to here. */
@@ -203,10 +214,10 @@ export function LocalModelGuide({ disabled, onFound }: { disabled: boolean; onFo
     if (ready) onFound(ready);
   }, [ready]);
 
-  if (!detect.data || ready) {
+  if (detect.isPending || ready) {
     return <p role="status" className="m-0 flex items-center gap-2 text-sm text-subtext"><Spinner />{m.local_models_guide_looking()}</p>;
   }
-  const empty = detect.data[0];
+  const empty = detect.data?.[0];
   const recommended = machine.data?.os === "macos" ? "lmstudio" : "ollama";
   const runtime = [picked, empty?.server.id, recommended].map((id) => RUNTIMES.find((server) => server.id === id)).find(Boolean) ?? LM_STUDIO;
   const lmStudio = runtime.id === "lmstudio";
@@ -233,7 +244,8 @@ export function LocalModelGuide({ disabled, onFound }: { disabled: boolean; onFo
 
   return (
     <div className="grid gap-4">
-      <p className="m-0 text-sm">{empty ? m.local_models_guide_no_models({ name: empty.server.label }) : m.local_models_guide_none()}</p>
+      {detect.error ? <p role="alert" className="m-0 text-sm text-accent-red">{detect.error.message}</p>
+        : <p className="m-0 text-sm">{empty ? m.local_models_guide_no_models({ name: empty.server.label }) : m.local_models_guide_none()}</p>}
       <OptionPicker
         choices={RUNTIMES.map((server) => ({ id: server.id, label: server.label }))}
         value={runtime.id}

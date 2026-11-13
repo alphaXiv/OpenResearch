@@ -103,8 +103,8 @@ export function Onboarding(props: OnboardingProps) {
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
   const [finishErrorDetails, setFinishErrorDetails] = useState("");
-  /** The model picked for the first chat, or the one an agent added here starts on. */
-  const [picked, setPicked] = useState<AgentSelection | null>(null);
+  /** The `PickerAgent.key` of the agent added here that the first chat starts on. */
+  const [pickedKey, setPickedKey] = useState<string | null>(null);
   /** The `PickerAgent.key` of an agent just added, which the first chat starts on once it can. */
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -120,9 +120,8 @@ export function Onboarding(props: OnboardingProps) {
   });
   const savedHarness = preferredAgent && selectionHarness(harnesses ?? [], preferredAgent);
   const savedAgent = savedHarness && agentFor(agents, savedHarness, preferredAgent.model);
-  // The first chat starts on the pick while its agent can run it, else on the saved choice, else on the first agent ready.
-  const start = (picked && selectionHarness(harnesses ?? [], picked)?.agentReady ? picked : null)
-    ?? (ready.find(({ agent }) => agent === savedAgent) ?? ready[0])?.selection;
+  // The first chat starts on the agent picked while it is ready and on, else on the saved choice, else on the first agent ready.
+  const start = (ready.find(({ agent }) => agent.key === pickedKey) ?? ready.find(({ agent }) => agent === savedAgent) ?? ready[0])?.selection;
   const anyAgentReady = ready.length > 0;
   const anyPending = harnesses?.some((h) => h.catalogPending) ?? false;
   const opencode = harnesses?.find((h) => h.id === "opencode" && !h.profile);
@@ -160,9 +159,8 @@ export function Onboarding(props: OnboardingProps) {
   );
   const readyKeys = ready.map(({ agent }) => agent.key).join("\n");
   useEffect(() => {
-    const added = ready.find(({ agent }) => agent.key === pendingKey);
-    if (!added) return;
-    setPicked(added.selection);
+    if (!pendingKey || !ready.some(({ agent }) => agent.key === pendingKey)) return;
+    setPickedKey(pendingKey);
     setPendingKey(null);
   }, [readyKeys, pendingKey]);
   useEffect(() => setGitError(!remote && pathQuery.isError), [remote, pathQuery.isError, pathQuery.dataUpdatedAt]);

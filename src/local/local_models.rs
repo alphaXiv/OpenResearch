@@ -407,17 +407,40 @@ pub fn is_loopback_url(value: &str) -> bool {
         })
 }
 
-/// The server answered that it takes an API key, and none was sent.
+/// Why a model server listed no models, where the caller acts on which: start the server, ask for its
+/// key, or load a model in it.
 #[derive(Debug)]
-pub struct NeedsKey;
+pub enum Unlisted {
+    /// Nothing answered at the address.
+    Unreachable { local: bool },
+    /// The server takes an API key, and none was sent.
+    NeedsKey,
+    /// The server answered with no models.
+    NoModels,
+}
 
-impl std::fmt::Display for NeedsKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("The server requires an API key. Enter its key and try again.")
+impl Unlisted {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unreachable { .. } => "unreachable",
+            Self::NeedsKey => "needsKey",
+            Self::NoModels => "noModels",
+        }
     }
 }
 
-impl std::error::Error for NeedsKey {}
+impl std::fmt::Display for Unlisted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unreachable { local: true } => "Cannot reach the local server. Start it in your model app, then check the address and try again.",
+            Self::Unreachable { local: false } => "Cannot reach the server. Check the address and try again.",
+            Self::NeedsKey => "The server requires an API key. Enter its key and try again.",
+            Self::NoModels => "The server is running but has no models. Download and load a model in your model app, then check again.",
+        })
+    }
+}
+
+impl std::error::Error for Unlisted {}
 
 pub async fn discover(req: &Probe) -> Result<Vec<String>> {
     let local = is_loopback_url(&req.base_url);
@@ -438,19 +461,16 @@ pub async fn discover(req: &Probe) -> Result<Vec<String>> {
     if !req.api_key.is_empty() {
         request = request.bearer_auth(&req.api_key);
     }
-    let response = request.send().await.map_err(|_| {
-        if local {
-            anyhow!("Cannot reach the local server. Start it in your model app, then check the address and try again.")
-        } else {
-            anyhow!("Cannot reach the server. Check the address and try again.")
-        }
-    })?;
+    let response = request
+        .send()
+        .await
+        .map_err(|_| Unlisted::Unreachable { local })?;
     if matches!(
         response.status(),
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
     ) {
         return Err(if req.api_key.is_empty() {
-            NeedsKey.into()
+            Unlisted::NeedsKey.into()
         } else {
             anyhow!("The server didn't accept this key. Check the key and try again.")
         });
@@ -476,7 +496,7 @@ pub async fn discover(req: &Probe) -> Result<Vec<String>> {
         .map(str::to_owned)
         .collect();
     if ids.is_empty() {
-        return Err(anyhow!("The server is running but has no models. Download and load a model in your model app, then check again."));
+        return Err(Unlisted::NoModels.into());
     }
     Ok(ids)
 }
@@ -814,6 +834,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_tells_a_stopped_server_from_an_empty_one() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/v1/models",
+                    axum::routing::get(|| async { axum::Json(json!({"data":[]})) }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let unlisted = |base: String| async move {
+            let error = discover(&Probe {
+                base_url: base,
+                api_key: String::new(),
+            })
+            .await
+            .unwrap_err();
+            error.downcast_ref::<Unlisted>().map(Unlisted::code)
+        };
+        assert_eq!(unlisted(base).await, Some("noModels"));
+        server.abort();
+
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = closed.local_addr().unwrap();
+        drop(closed);
+        assert_eq!(
+            unlisted(format!("http://{address}/v1")).await,
+            Some("unreachable")
+        );
+    }
+
+    #[tokio::test]
     async fn a_server_that_takes_a_key_asks_for_one_then_judges_it() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -833,9 +889,12 @@ mod tests {
             api_key: api_key.into(),
         };
         let error = discover(&probe("")).await.unwrap_err();
-        assert!(error.downcast_ref::<NeedsKey>().is_some(), "{error}");
+        assert!(
+            matches!(error.downcast_ref::<Unlisted>(), Some(Unlisted::NeedsKey)),
+            "{error}"
+        );
         let error = discover(&probe("wrong")).await.unwrap_err();
-        assert!(error.downcast_ref::<NeedsKey>().is_none());
+        assert!(error.downcast_ref::<Unlisted>().is_none());
         assert!(
             error.to_string().contains("didn't accept this key"),
             "{error}"
