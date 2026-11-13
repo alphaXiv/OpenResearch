@@ -1,6 +1,6 @@
 name: Release checks
 
-# Checks of what only a release build embeds. The test suite gates pull requests, not releases.
+# Checks of what only a release build embeds. Canaries gate on these alone; releases also run ci.yml.
 on:
   workflow_call:
     inputs:

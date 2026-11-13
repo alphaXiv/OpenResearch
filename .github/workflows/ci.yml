@@ -5,6 +5,16 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      # Required by cargo-dist's custom-ci calling convention.
+      plan:
+        required: true
+        type: string
+      source-sha:
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
@@ -33,13 +43,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
           fetch-depth: 2
       - name: Select checks for changed files
         id: changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
-          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' }}
+          HEAD_SHA: ${{ inputs.source-sha || github.sha }}
+          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' || inputs.plan != '' }}
         run: node scripts/ci-changes.mjs
 
   workflow-lint:
@@ -49,6 +60,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -77,6 +89,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -115,6 +128,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -152,6 +166,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       - name: Install Rust toolchain
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -177,6 +192,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       # Installs alongside the toolchain and cache restores; the test step waits for it.
       - name: Start installing OpenSSH server and zsh
         run: |
@@ -202,7 +218,7 @@ jobs:
           INCREMENTAL_KEY: incremental-linux-test-v1-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
         with: &linux-incremental-cache
           path: target/debug/incremental
-          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || github.sha }}
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
           restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Restore incremental compilation
         if: github.ref != 'refs/heads/main'
@@ -251,6 +267,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -270,7 +287,7 @@ jobs:
           INCREMENTAL_KEY: incremental-linux-e2e-v1-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
         with: &e2e-incremental-cache
           path: target/debug/incremental
-          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || github.sha }}
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
           restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Restore incremental compilation
         if: github.ref != 'refs/heads/main'
@@ -327,6 +344,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       - name: Install Rust toolchain
         run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -340,7 +358,7 @@ jobs:
           INCREMENTAL_KEY: incremental-linux-desktop-dev-v1-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
         with: &desktop-incremental-cache
           path: target/debug/incremental
-          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || github.sha }}
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
           restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Restore incremental compilation
         if: matrix.mode != 'lint' && github.ref != 'refs/heads/main'
@@ -380,6 +398,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       # Installs while the Dev Drive is set up; "Finish installing Rust" waits for it.
       - name: Start installing Rust
         env:
@@ -433,7 +452,7 @@ jobs:
           INCREMENTAL_KEY: incremental-windows-test-debug0-${{ env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER }}-v1-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.cargo/config.toml') }}
         with:
           path: &windows-incremental-path ${{ env.DEV_DRIVE_WORKSPACE }}/target/debug/incremental
-          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || github.sha }}
+          key: ${{ env.INCREMENTAL_KEY }}-${{ github.event.pull_request.base.sha || inputs.source-sha || github.sha }}
           restore-keys: ${{ env.INCREMENTAL_KEY }}-
       - name: Clippy
         if: matrix.mode == 'lint'
@@ -540,6 +559,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.source-sha || github.sha }}
       - name: Verify all selected checks passed
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
