@@ -55,6 +55,7 @@ The desktop app renders in the system's webview: WKWebView on macOS, WebView2 on
 
 - **UI glyphs are `lucide-react`** at the size of the text beside them, in `text-subtext` until hovered or active.
 - **Brand marks are the brand's own** (`HarnessLogo`, `BackendLogos`, `LitSourceLogo`): never boxed, tiled or recoloured, except muted to grey where the mark is secondary. A provider gets its own mark; never invent one for a model.
+- **Every agent, provider and backend we offer ships with its mark.** Look in the vendor's repo, its site icon and the [ACP registry](https://github.com/agentclientprotocol/registry) before shipping one; the generic plug or box is for agents the user adds, never one orx lists. Note each mark's source in `ui/src/assets/harnesses/README.md`.
 - **References are pills:** an icon and the first words of what they point at, never a raw hash.
 - **A choice that changes how the agent works shows its state in the composer,** with an icon and a tooltip, wherever it is set.
 

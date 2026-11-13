@@ -4,6 +4,8 @@
 - Pi, Devin, Grok, Qwen and Z.ai: https://github.com/agentclientprotocol/registry (each agent’s `icon.svg`; Qwen from `qwen-code`, Z.ai from `glm-acp-agent`), Qwen filled with the blue of qwen.ai’s icon
 - DeepSeek, MiniMax, Gemini and OpenRouter, and Kimi (inline in `HarnessLogo.tsx`): `@lobehub/icons-static-svg` 1.95.1, checked against each vendor’s own icon
 - GitHub Copilot, Hugging Face, Amazon Bedrock, Cerebras, Together AI, Fireworks AI, Mistral, NVIDIA, Vercel, Ollama, DeepInfra and Baseten: `@lobehub/icons-static-svg` 1.95.1, checked against each vendor’s own icon; Bedrock, Cerebras, Fireworks and DeepInfra in their monochrome variants, since their colour ones fade on a dark background
+- oh-my-pi (inline in `HarnessLogo.tsx`): https://github.com/can1357/oh-my-pi/blob/main/assets/icon.svg, the π redrawn as one shape in the text colour
+- fx: the glyph from https://fx.sh/icon.svg, without its black tile
 - Groq: the bolt from https://groq.com/favicon.svg
 - Model labs (Tencent Hunyuan, Meituan LongCat, StepFun, Meta, Cohere, Amazon Nova, ByteDance, Doubao, Baidu ERNIE, inclusionAI Ling, Microsoft, IBM, AI21, Perplexity, Liquid AI, Inception and Reka): `@lobehub/icons-static-svg` 1.102.0, colour variants where one exists
 - Xiaomi (for MiMo): simple-icons 16.37.0 (CC0), in Xiaomi orange
