@@ -769,8 +769,12 @@ pub(super) async fn keep_current(
         return Ok(false);
     }
     // Not even the user's own updater may swap OpenCode under a running turn.
-    if harness == "opencode" && managed::OPENCODE_IN_USE.try_write().is_err() {
-        return Ok(false);
+    let mut swap = None;
+    if harness == "opencode" {
+        match managed::OPENCODE_IN_USE.try_write() {
+            Ok(guard) => swap = Some(guard),
+            Err(_) => return Ok(false),
+        }
     }
     let major = (harness == "opencode").then(|| {
         following_major(
@@ -822,6 +826,8 @@ pub(super) async fn keep_current(
             return Ok(false);
         }
     }
+    // `install` takes its own guard.
+    drop(swap);
     managed::install(
         harness,
         &release,

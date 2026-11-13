@@ -1030,6 +1030,10 @@ mod tests {
     async fn opencode_install_waits_for_active_turns() {
         use axum::{routing::get, Router};
 
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
         let version = semver::Version::new(2, 2, 7);
         let bytes = b"#!/bin/sh\necho opencode v2.2.7\n";
         let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
