@@ -348,6 +348,8 @@ pub struct EngineRunState {
     pub started_at: Option<i64>,
     pub contact: Contact,
     pub cancel_unconfirmed: Option<Vec<u32>>,
+    /// What the backend last said the run is waiting for; only while submitting or starting.
+    pub waiting_reason: Option<String>,
     pub spec_digest: Option<String>,
     pub submission_attempt: u32,
     pub submission_fence: Option<SubmissionFence>,
@@ -1367,6 +1369,7 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN model_section_order TEXT",
             "ALTER TABLE ui_state ADD COLUMN collapsed_model_sections TEXT",
             "ALTER TABLE ui_state ADD COLUMN model_sightings TEXT",
+            "ALTER TABLE runs ADD COLUMN waiting_reason TEXT",
         ] {
             let _ = schema.execute(ddl, []);
         }
@@ -5581,7 +5584,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT contact, spec_digest, submission_attempt, submission_fence,
-                        cancel_accepted_at, launch_spec, notify_cursor, cancel_unconfirmed, started_at
+                        cancel_accepted_at, launch_spec, notify_cursor, cancel_unconfirmed, started_at,
+                        CASE WHEN status IN ('submitting', 'starting') THEN waiting_reason END
                  FROM runs WHERE id = ?1",
                 [run_id],
                 |row| {
@@ -5595,6 +5599,7 @@ impl Store {
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<i64>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
                     ))
                 },
             )
@@ -5609,6 +5614,7 @@ impl Store {
             notify,
             cancel_unconfirmed,
             started_at,
+            waiting_reason,
         )) = row
         else {
             return Ok(None);
@@ -5617,6 +5623,7 @@ impl Store {
             started_at,
             contact: json(contact)?.unwrap_or(Contact::Live),
             cancel_unconfirmed: json(cancel_unconfirmed)?,
+            waiting_reason,
             spec_digest,
             submission_attempt,
             submission_fence: json(fence)?,
@@ -7013,6 +7020,7 @@ mod tests {
                     started_at: None,
                     contact: Contact::Live,
                     cancel_unconfirmed: None,
+                    waiting_reason: None,
                     spec_digest: None,
                     submission_attempt: 1,
                     submission_fence: None,
@@ -7219,6 +7227,41 @@ mod tests {
             .any(|(id, _)| id == &run.id));
         drop(shared_guard);
         drop(supervisor_guard);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A run 0.2.26 wrote has no waiting reason, and a reason 0.2.26 left behind on a run it
+    /// moved past starting never shows.
+    #[test]
+    fn runs_from_0_2_26_read_without_a_waiting_reason() {
+        let dir = std::env::temp_dir().join(format!("orx-store-0226-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = Connection::open(dir.join("orx.db")).unwrap();
+        old.execute_batch(include_str!("../tests/contracts/store-0.2.26-runs.sql"))
+            .unwrap();
+        drop(old);
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        let state = store.engine_run_state("starting").unwrap().unwrap();
+        assert_eq!(state.waiting_reason, None);
+        assert_eq!(state.contact, Contact::Live);
+        assert_eq!(state.launch.unwrap().kind, "k8s_job");
+        let run = store.get_run("starting").unwrap().unwrap();
+        let view = crate::plane::Run::from_store(&store, &run).unwrap();
+        assert_eq!(view.display_status(), "starting");
+        assert_eq!(view.waiting_detail(), None);
+
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET waiting_reason = 'Pulling image' WHERE id = 'running'",
+                [],
+            )
+            .unwrap();
+        let state = store.engine_run_state("running").unwrap().unwrap();
+        assert_eq!(state.waiting_reason, None);
+        assert_eq!(state.started_at, Some(250));
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -57,6 +57,8 @@ A run has two independent fields.
 - **Phase** is the lifecycle: submitting, starting, running, done, failed, cancelled or lost.
 - **Contact** is how fresh that knowledge is: live, unreachable, needs auth (SSH Connect or provider credentials), unreconciled (an outcome the engine cannot establish) or stopping (a cancelled run with processes left).
 
+A run that has not started also keeps the backend's latest word on why it waits, such as a Slurm pending reason or a pod no node can fit. It is provider text, shown beside the status, written only when it changes and dropped once the run runs or ends.
+
 The invariants:
 
 - **Phases move forward only**, and submitting leaves only by recording a handle or ending. Contact never moves the phase.

@@ -86,8 +86,9 @@ pub enum Observation {
     Gone {
         reason: String,
     },
+    /// Not running yet; `detail` is the backend's own word on why, if it gave one.
     Queued {
-        detail: String,
+        detail: Option<String>,
     },
     Running {
         started_at: Option<i64>,

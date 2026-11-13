@@ -230,14 +230,14 @@ fn crash_windows_never_reexecute_after_started() {
     let mut run = Run::new("printf once >> count\n");
     assert_eq!(
         wrapper::state(&run.directory.0).unwrap(),
-        RunState::Starting
+        RunState::Starting { reason: None }
     );
     let mut forged = platform::identity(std::process::id()).unwrap();
     forged.starttime += 1;
     publish(&run.directory.0.join("wrapper.json"), &forged).unwrap();
     assert_eq!(
         wrapper::state(&run.directory.0).unwrap(),
-        RunState::Starting
+        RunState::Starting { reason: None }
     );
     run.spawn();
     run.wait();
@@ -509,7 +509,7 @@ fn reboot_only_loses_a_run_after_the_exactly_once_marker() {
     publish(&run.directory.0.join("wrapper.json"), &identity).unwrap();
     assert_eq!(
         wrapper::state(&run.directory.0).unwrap(),
-        RunState::Starting
+        RunState::Starting { reason: None }
     );
     fs::write(run.directory.0.join("started"), "test:old-tag").unwrap();
     assert_eq!(
@@ -1117,7 +1117,10 @@ fn rentals_release_after_receipts_with_or_without_a_collector_and_retry_release(
                     .to_owned();
                 if operation == "activate" {
                     assert!(!dir.join("started").exists());
-                    assert!(matches!(wrapper::state(&dir).unwrap(), RunState::Starting));
+                    assert!(matches!(
+                        wrapper::state(&dir).unwrap(),
+                        RunState::Starting { .. }
+                    ));
                 }
                 if operation == "release" {
                     assert!(dir.join("exit.json").exists());

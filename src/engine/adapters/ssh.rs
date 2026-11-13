@@ -441,8 +441,9 @@ pub(super) fn missing() -> Summary {
 pub(super) fn observations(run: String, summary: &Summary) -> Vec<(String, Observation)> {
     let observation = match &summary.state {
         RunState::Missing => Observation::NotFound,
-        RunState::Staging | RunState::Starting => Observation::Queued {
-            detail: "starting".into(),
+        RunState::Staging => Observation::Queued { detail: None },
+        RunState::Starting { reason } => Observation::Queued {
+            detail: reason.clone(),
         },
         RunState::Running => Observation::Running {
             started_at: summary.started_at,

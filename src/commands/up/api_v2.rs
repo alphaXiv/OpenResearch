@@ -124,6 +124,9 @@ impl Api {
         value["cancelUnconfirmed"] = json!(state
             .as_ref()
             .and_then(|state| state.cancel_unconfirmed.as_ref()));
+        value["waitingReason"] = json!(state
+            .as_ref()
+            .and_then(|state| state.waiting_reason.as_ref()));
         value["contact"] =
             serde_json::to_value(state.map_or(Contact::Live, |state| state.contact))?;
         if let Some((failed, error)) = self.store().log_collection(&run.id)? {

@@ -648,9 +648,7 @@ pub fn stage(
             detail: "Provider no longer knows the job".into(),
         },
         "RUNNING" => Observation::Running { started_at },
-        _ => Observation::Queued {
-            detail: message.unwrap_or_else(|| stage.into()),
-        },
+        _ => Observation::Queued { detail: message },
     }
 }
 

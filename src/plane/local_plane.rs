@@ -178,7 +178,10 @@ impl LocalPlane {
                     crate::output::format_duration(run.duration_secs),
                     run.updated_display
                 );
-                if let Some(detail) = run.contact_detail() {
+                for detail in [run.waiting_detail(), run.contact_detail()]
+                    .into_iter()
+                    .flatten()
+                {
                     println!("  {detail}");
                 }
                 let launch = state.and_then(|state| state.launch);
@@ -233,8 +236,13 @@ impl LocalPlane {
                 || run.cancel_unconfirmed.is_some()
             {
                 println!("  run {}: {}", run.id, run.display_status());
-            } else if let Some(detail) = run.contact_detail() {
-                println!("  run {}: {detail}", run.id);
+            } else {
+                for detail in [run.waiting_detail(), run.contact_detail()]
+                    .into_iter()
+                    .flatten()
+                {
+                    println!("  run {}: {detail}", run.id);
+                }
             }
             if !matches!(older.status.as_str(), "starting" | "running") {
                 continue;

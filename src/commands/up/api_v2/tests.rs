@@ -2803,3 +2803,57 @@ async fn cancellation_proof_reaches_both_api_projections_without_contact_prose()
         );
     }
 }
+
+#[tokio::test]
+async fn a_waiting_reason_reaches_both_views_and_the_event_stream() {
+    let f = Fixture::new().await;
+    f.insert("run", "exp", "project", "starting");
+    let mut events = f
+        .client
+        .events(&Filter {
+            run: Some("run".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    async fn next(events: &mut (impl Stream<Item = Result<Value>> + Unpin)) -> Value {
+        tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    }
+    assert!(next(&mut events).await["waitingReason"].is_null());
+
+    f.api
+        .engine
+        .observe(
+            "run",
+            Observation::Queued {
+                detail: Some("Provisioning box".into()),
+            },
+        )
+        .unwrap();
+    let event = next(&mut events).await;
+    assert_eq!(event["event"], "changed");
+    assert_eq!(event["waitingReason"], "Provisioning box");
+    let cli: crate::plane::Run = serde_json::from_value(event).unwrap();
+    assert_eq!(
+        cli.waiting_detail().as_deref(),
+        Some("waiting: Provisioning box")
+    );
+    let dashboard = {
+        let store = f.api.store();
+        let run = store.get_run("run").unwrap().unwrap();
+        serde_json::to_value(crate::commands::up::ApiRun::new(&store, &run).unwrap()).unwrap()
+    };
+    assert_eq!(dashboard["waitingReason"], "Provisioning box");
+
+    f.api
+        .engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
+    let event = next(&mut events).await;
+    assert_eq!(event["status"], "running");
+    assert!(event["waitingReason"].is_null());
+}

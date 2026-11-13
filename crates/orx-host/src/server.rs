@@ -364,7 +364,7 @@ impl Host {
             {
                 RunState::Staging
             } else {
-                RunState::Starting
+                RunState::Starting { reason: None }
             };
             let mut summary = slurm_summary(&dir, None, fallback);
             if follow {
@@ -373,7 +373,7 @@ impl Host {
             return Ok(summary);
         }
         let mut state = wrapper::state(&dir)?;
-        if matches!(state, RunState::Starting) {
+        if matches!(state, RunState::Starting { .. }) {
             let intent: LaunchIntent = read_json(&dir.join("launch.json"))?;
             if !repair || (intent.source.is_some() && !dir.join("source.tar").try_exists()?) {
                 return Ok(Summary {
@@ -396,7 +396,7 @@ impl Host {
                 Err(error) => return Err(error),
             }
         }
-        if !matches!(state, RunState::Starting) {
+        if !matches!(state, RunState::Starting { .. }) {
             self.recovery
                 .lock()
                 .map_err(|_| io::Error::other("recovery lock poisoned"))?
@@ -815,7 +815,7 @@ impl Host {
                 .unwrap_or_default()
                 .trim_end_matches('+');
             match scheduler_state(state, Duration::MAX) {
-                RunState::Starting | RunState::Running => {
+                RunState::Starting { .. } | RunState::Running => {
                     match fs::remove_file(&path) {
                         Ok(()) => File::open(&dir)?.sync_all()?,
                         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -861,7 +861,7 @@ impl Host {
                     Command::new("squeue").args([
                         "--noheader",
                         "--states=all",
-                        "--format=%i|%j|%T",
+                        "--format=%i|%j|%T|%r",
                         filter,
                     ]),
                     &[],
@@ -886,15 +886,24 @@ impl Host {
                 }
             };
             for line in String::from_utf8_lossy(&result.stdout).lines() {
-                let fields: Vec<_> = line.trim().split('|').collect();
-                if fields.len() != 3 {
+                let fields: Vec<_> = line.trim().splitn(4, '|').collect();
+                if fields.len() < 3 {
                     unanswered = Some(line.to_owned());
                     continue;
                 }
                 let Some(run) = find_run(fields[0], fields[1]) else {
                     continue;
                 };
-                let state = scheduler_state(fields[2], elapsed(&run, fields[0], fields[2])?);
+                let state = match scheduler_state(fields[2], elapsed(&run, fields[0], fields[2])?) {
+                    RunState::Starting { .. } => RunState::Starting {
+                        reason: fields
+                            .get(3)
+                            .map(|reason| reason.trim())
+                            .filter(|reason| !reason.is_empty() && *reason != "None")
+                            .map(str::to_owned),
+                    },
+                    state => state,
+                };
                 jobs.insert(
                     run.clone(),
                     SlurmJob {
@@ -1213,7 +1222,7 @@ fn scheduler_state(state: &str, elapsed: Duration) -> RunState {
         .unwrap_or_default()
         .trim_end_matches('+');
     if matches!(state, "PENDING" | "CONFIGURING") {
-        return RunState::Starting;
+        return RunState::Starting { reason: None };
     }
     if matches!(state, "RUNNING" | "COMPLETING" | "SUSPENDED") {
         return RunState::Running;
@@ -1599,7 +1608,7 @@ mod tests {
         );
         assert_eq!(
             scheduler_state("PENDING", Duration::from_secs(500)),
-            RunState::Starting
+            RunState::Starting { reason: None }
         );
     }
 }

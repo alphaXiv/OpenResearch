@@ -261,7 +261,7 @@ async fn phase_moves_only_forward_and_one_terminal_notice_survives_a_crash() {
         .observe(
             "run",
             Observation::Queued {
-                detail: "late".into(),
+                detail: Some("late".into()),
             },
         )
         .unwrap();
@@ -1224,7 +1224,7 @@ async fn reordered_feed_reports_never_move_a_phase_backwards() {
         (
             "run".to_string(),
             Observation::Queued {
-                detail: "stale".into(),
+                detail: Some("stale".into()),
             },
         ),
     ]);
@@ -2302,4 +2302,105 @@ async fn tombstone_finish_time_does_not_stage_terminal_effects_again() {
         assert_eq!(run.updated_at, updated_at);
         assert!(f.store().pending_telemetry().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn a_starting_run_shows_the_backends_latest_waiting_reason_until_it_runs() {
+    let mut f = Fixture::new();
+    f.backend.then_launch(Ok(handle()));
+    f.submit("run").await.unwrap();
+    f.events();
+    let waiting = |f: &Fixture| {
+        f.store()
+            .engine_run_state("run")
+            .unwrap()
+            .unwrap()
+            .waiting_reason
+    };
+    let queued = |detail: &str| Observation::Queued {
+        detail: Some(detail.into()),
+    };
+    let unscheduled = "0/4 nodes are available: 4 Insufficient nvidia.com/gpu.";
+
+    f.engine
+        .observe(
+            "run",
+            queued("0/4 nodes are available:\n  4 Insufficient nvidia.com/gpu."),
+        )
+        .unwrap();
+    assert_eq!(waiting(&f).as_deref(), Some(unscheduled));
+    assert_eq!(f.phases(), [Phase::Starting]);
+
+    // Each poll repeats the reason; only a new one is written and published.
+    let observer = rusqlite::Connection::open(f.dir.join("orx.db")).unwrap();
+    let version = || -> i64 {
+        observer
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .unwrap()
+    };
+    let before = version();
+    f.engine.observe("run", queued(unscheduled)).unwrap();
+    assert_eq!(version(), before);
+    assert!(f.events().is_empty());
+
+    f.engine
+        .observe(
+            "run",
+            Observation::Unreachable {
+                cause: "eof".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(waiting(&f).as_deref(), Some(unscheduled));
+
+    f.engine
+        .observe("run", Observation::Queued { detail: None })
+        .unwrap();
+    assert_eq!(waiting(&f), None);
+
+    f.engine.observe("run", queued(&"x".repeat(2000))).unwrap();
+    let long = waiting(&f).unwrap();
+    assert!(long.chars().count() <= 500 && long.ends_with('…'));
+
+    f.engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
+    assert_eq!(waiting(&f), None);
+    f.engine.observe("run", queued("late")).unwrap();
+    assert_eq!(waiting(&f), None);
+    assert_eq!(f.status("run"), "running");
+}
+
+#[tokio::test]
+async fn an_ended_run_drops_its_waiting_reason() {
+    let f = Fixture::new();
+    f.backend.then_launch(Ok(handle()));
+    f.submit("run").await.unwrap();
+    f.engine
+        .observe(
+            "run",
+            Observation::Queued {
+                detail: Some("Provisioning box".into()),
+            },
+        )
+        .unwrap();
+    f.engine
+        .observe(
+            "run",
+            Observation::Failed {
+                finished_at: None,
+                reason: "Box provisioning failed".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(f.status("run"), "failed");
+    let stored: Option<String> = rusqlite::Connection::open(f.dir.join("orx.db"))
+        .unwrap()
+        .query_row(
+            "SELECT waiting_reason FROM runs WHERE id = 'run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, None);
 }

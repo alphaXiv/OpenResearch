@@ -631,7 +631,7 @@ pub fn state(dir: &Path) -> io::Result<RunState> {
         return Ok(if dir.join("started").try_exists()? {
             RunState::Running
         } else {
-            RunState::Starting
+            RunState::Starting { reason: None }
         });
     }
     if dir.join("started").try_exists()? {
@@ -662,7 +662,7 @@ pub fn state(dir: &Path) -> io::Result<RunState> {
         });
     }
     if dir.join("launch.json").try_exists()? {
-        return Ok(RunState::Starting);
+        return Ok(RunState::Starting { reason: None });
     }
     Ok(RunState::Missing)
 }

@@ -123,6 +123,8 @@ export interface Run {
   contact: RunContact | null;
   cancelling: boolean;
   cancelUnconfirmed?: number[] | null;
+  /** The backend's own word on why a submitting or starting run hasn't started. */
+  waitingReason?: string | null;
   lostReason: string | null;
   /** The SSH alias or Slurm login node the run's job lives on. */
   host: string | null;

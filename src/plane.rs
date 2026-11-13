@@ -20,6 +20,8 @@ pub struct Run {
     pub cancelling: bool,
     #[serde(default)]
     pub cancel_unconfirmed: Option<Vec<u32>>,
+    #[serde(default)]
+    pub waiting_reason: Option<String>,
     pub host: Option<String>,
     pub commit_sha: Option<String>,
     pub duration_secs: i64,
@@ -39,6 +41,7 @@ impl From<&StoredRun> for Run {
                 && !crate::engine::Phase::parse(&run.status)
                     .is_some_and(crate::engine::Phase::is_terminal),
             cancel_unconfirmed: None,
+            waiting_reason: None,
             host: None,
             commit_sha: run.commit_sha.clone(),
             duration_secs: crate::local::run_duration_secs(run),
@@ -58,6 +61,7 @@ impl Run {
                     .is_some_and(crate::engine::Phase::is_terminal);
             run.contact = state.contact;
             run.cancel_unconfirmed = state.cancel_unconfirmed;
+            run.waiting_reason = state.waiting_reason;
         }
         run.host = crate::commands::up::run_host(store, stored)?;
         Ok(run)
@@ -75,6 +79,11 @@ impl Run {
             "contact: {contact}, since {}: {cause}",
             crate::telemetry::iso8601_utc(*since)
         ))
+    }
+
+    pub fn waiting_detail(&self) -> Option<String> {
+        let reason = self.waiting_reason.as_deref()?;
+        Some(format!("waiting: {reason}"))
     }
 
     pub fn display_status(&self) -> std::borrow::Cow<'_, str> {
