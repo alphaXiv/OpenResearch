@@ -1761,12 +1761,9 @@ fn check_rules(
     let stop = stop.map(|trip| {
         let (_, stopped) = super::rules::words(&run.id, &run.experiment_id, trip);
         let context = crate::store::StopContext {
-            by: crate::store::StopBy::Rule,
-            at: 0,
             reason: Some(trip.evidence.clone()),
-            chat_session_id: None,
             rule: Some(trip.rule.json()),
-            extra: Default::default(),
+            ..crate::store::StopContext::by(crate::store::StopBy::Rule)
         };
         (stopped, context)
     });
@@ -6037,12 +6034,9 @@ mod tests {
         let stopped = |id: &str, by: StopBy, reason: Option<&str>, rule: Option<Value>| {
             f.run_named(id, "running", local());
             let stop = StopContext {
-                by,
-                at: 0,
                 reason: reason.map(str::to_owned),
-                chat_session_id: None,
                 rule,
-                extra: Default::default(),
+                ..StopContext::by(by)
             };
             f.store
                 .accept_run_stop(id, Some("words"), Some(&stop))

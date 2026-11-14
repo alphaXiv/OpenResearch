@@ -3379,14 +3379,7 @@ async fn cancel_run(
         .map_err(bad_request)?,
         None => (
             "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
-            crate::store::StopContext {
-                by: crate::store::StopBy::User,
-                at: 0,
-                reason: None,
-                chat_session_id: None,
-                rule: None,
-                extra: Default::default(),
-            },
+            crate::store::StopContext::by(crate::store::StopBy::User),
         ),
     };
     api_v2::cancel_run(&run, &reason, Some(&stop)).await?;

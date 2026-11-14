@@ -604,17 +604,14 @@ pub(crate) fn exp_cancel_stop(
         Some(reason) => format!("{asked}: {reason}"),
         None => format!("{asked}."),
     };
+    let by = match chat_session_id {
+        Some(_) => crate::store::StopBy::Agent,
+        None => crate::store::StopBy::User,
+    };
     let stop = crate::store::StopContext {
-        by: if chat_session_id.is_some() {
-            crate::store::StopBy::Agent
-        } else {
-            crate::store::StopBy::User
-        },
-        at: 0,
         reason: reason.map(str::to_owned),
         chat_session_id: chat_session_id.map(str::to_owned),
-        rule: None,
-        extra: Default::default(),
+        ..crate::store::StopContext::by(by)
     };
     Ok((words, stop))
 }

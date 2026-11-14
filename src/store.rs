@@ -369,6 +369,20 @@ pub struct StopContext {
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+impl StopContext {
+    /// A stop by `by`, with nothing more said.
+    pub fn by(by: StopBy) -> Self {
+        Self {
+            by,
+            at: 0,
+            reason: None,
+            chat_session_id: None,
+            rule: None,
+            extra: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Contact {
@@ -8874,12 +8888,8 @@ mod tests {
     fn the_first_accepted_stop_says_who_stopped_the_run() {
         let (dir, store) = engine_fixture();
         let stop = |by: StopBy, reason: &str| StopContext {
-            by,
-            at: 0,
             reason: Some(reason.into()),
-            chat_session_id: None,
-            rule: None,
-            extra: Default::default(),
+            ..StopContext::by(by)
         };
         let insert = |id: &str| {
             let run = run_fixture(id, "running", None);
