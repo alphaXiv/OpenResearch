@@ -122,7 +122,8 @@ try {
   if (await tick.count()) {
     await tick.hover({ timeout: 5000 })
     await wait(600)
-    await page.screenshot({ path: path.join(out, `${id}-tick.png`), clip: await banner.boundingBox().then((box) => box && { x: box.x, y: Math.max(0, box.y - 80), width: box.width, height: box.height + 80 }) ?? undefined })
+    // A tooltip may reach past the banner's sides and above it.
+    await page.screenshot({ path: path.join(out, `${id}-tick.png`), clip: await banner.boundingBox().then((box) => box && { x: Math.max(0, box.x - 160), y: Math.max(0, box.y - 80), width: box.width + 320, height: box.height + 80 }) ?? undefined })
   }
   while ((await shown()).some((item) => !['done', 'failed', 'cancelled'].includes(item.run.status))) await wait(1000)
   // Each run's last look waits for its log, then for siblings ending with it.
@@ -139,6 +140,8 @@ try {
   await shoot(page, watch, `${id}-journal`)
   const latest = page.locator('section', { has: page.getByRole('heading', { name: 'Latest run', exact: true }) })
   await shoot(page, latest, `${id}-page`)
+  const { watch: said } = (await (await fetch(`${orx.url}/api/runs/${first?.run.id}/monitor`)).json()) as { watch: { looks: { at: number; kind: string; said: string; text: string; why: string }[] } }
+  for (const look of said.looks) console.log(`${new Date(look.at).toISOString().slice(11, 19)} ${look.kind} ${look.said} ${look.text} [${look.why}]`)
   console.log(`${id}: shots of run ${first?.run.id} in ${out}`)
   release()
 } finally {
