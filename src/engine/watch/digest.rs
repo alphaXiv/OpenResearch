@@ -4,14 +4,35 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
 
-/// The serialized digest's ceiling; UTF-8 bytes bound its tokens from above.
+/// The serialized digest's ceiling.
 pub(super) const MAX_BYTES: usize = 16 * 1024;
+/// Tokens one request of a look may hold: its system prompt and the digest.
+pub(super) const MAX_TOKENS: usize = 4096;
+/// UTF-8 bytes a token of JSON holds at least, as the watching models count it.
+const BYTES_PER_TOKEN: usize = 3;
+/// How far a digest is cut to fit: each step keeps fewer points and sentences.
+const TRIMS: [Trim; 3] = [
+    Trim {
+        points: 14,
+        previous: 3,
+        logged: true,
+    },
+    Trim {
+        points: 6,
+        previous: 1,
+        logged: true,
+    },
+    Trim {
+        points: 3,
+        previous: 1,
+        logged: false,
+    },
+];
 /// One run's share of log lines, whatever is left over.
 const MAX_LOG_BYTES: usize = 6 * 1024;
 const MAX_LOG_LINES: usize = 60;
 const MAX_LINE: usize = 240;
 const HEAD_LINES: usize = 8;
-const POINTS: usize = 14;
 pub(super) const BOUND_SIGNALS: usize = 3;
 
 pub(super) const SYSTEM: &str = r#"You watch the runs of one research chat. You have no tools and no chat history.
@@ -47,6 +68,22 @@ pub(super) struct Line {
     pub from: u64,
     pub to: u64,
     pub text: String,
+}
+
+/// How much of each run a digest keeps.
+struct Trim {
+    points: usize,
+    previous: usize,
+    /// Whether values no signal names are sent.
+    logged: bool,
+}
+
+/// The bytes a digest may take beside `fixed` bytes of the same request, the system prompt and
+/// what frames the digest.
+pub(super) fn room(fixed: usize) -> usize {
+    (MAX_TOKENS * BYTES_PER_TOKEN)
+        .saturating_sub(fixed)
+        .min(MAX_BYTES)
 }
 
 /// What a look read of one run's log since the last look.
@@ -103,6 +140,8 @@ pub(super) struct Digest {
     /// What the digest left out for holding what looks like a credential, by run key; a place
     /// with no key is in what the digest says of every run.
     pub withheld: Vec<Withheld>,
+    /// What each run's part left out to fit the request's budget, in words, by run key.
+    pub omitted: BTreeMap<String, Vec<String>>,
 }
 
 pub(super) struct Withheld {
@@ -334,11 +373,11 @@ fn log_excerpts(log: &LogRead, budget: usize) -> (Vec<Value>, Vec<(u64, u64)>, u
 }
 
 /// The points of a signal the sentence reads, newest last, rounded to what the eye uses.
-fn points(body: &Value, name: &str) -> Value {
+fn points(body: &Value, name: &str, keep: usize) -> Value {
     let series = body["series"][name]
         .as_array()
         .map_or(&[][..], Vec::as_slice);
-    let recent = &series[series.len().saturating_sub(POINTS)..];
+    let recent = &series[series.len().saturating_sub(keep)..];
     recent
         .iter()
         .map(|point| {
@@ -367,6 +406,7 @@ fn run_json(
     run: &Run,
     briefs: &[(&Map<String, Value>, String)],
     parents: &[(&Value, String)],
+    trim: &Trim,
 ) -> Value {
     let signals = &run.body["view"]["signals"];
     let bound = bound(run);
@@ -393,7 +433,7 @@ fn run_json(
             entry["vsParentAtThisStep"] = json!(super::versus_text(Some(vs), spec));
         }
         if bound.contains(name) {
-            entry["points"] = points(run.body, name);
+            entry["points"] = points(run.body, name, trim.points);
         }
         values.insert(name.clone(), entry);
     }
@@ -425,7 +465,7 @@ fn run_json(
         "state": run.state,
         "signals": values,
     });
-    if !logged.is_empty() {
+    if !logged.is_empty() && trim.logged {
         entry["alsoLogged"] = json!(logged);
     }
     if let Some(elapsed) = &run.elapsed {
@@ -467,8 +507,7 @@ fn run_json(
         }
     }
     if !run.previous.is_empty() {
-        entry["previous"] = run
-            .previous
+        entry["previous"] = run.previous[run.previous.len().saturating_sub(trim.previous)..]
             .iter()
             .map(|(template, text)| json!({"line": template, "read": text}))
             .collect();
@@ -482,9 +521,10 @@ fn run_json(
     entry
 }
 
-/// The digest for `runs`, fitted to [`MAX_BYTES`]: every run keeps its header, sentences and
-/// points; the log lines left room for go first to the runs this look is about.
-pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
+/// The digest for `runs`, fitted to `room` bytes: every run keeps its header and its last
+/// sentence; older points and sentences go first, and the log lines left room for go first to the
+/// runs this look is about.
+pub(super) fn build(shared: &Shared, runs: &[Run], room: usize) -> Digest {
     let mut briefs: Vec<(&Map<String, Value>, String)> = Vec::new();
     let mut parents: Vec<(&Value, String)> = Vec::new();
     for run in runs {
@@ -522,13 +562,23 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
             .map(|(parent, id)| json!({"id": id, "run": parent}))
             .collect();
     }
-    let mut entries: Vec<Value> = runs
-        .iter()
-        .map(|run| run_json(run, &briefs, &parents))
-        .collect();
-    digest["runs"] = json!(entries);
-    let base = serde_json::to_string(&digest).map_or(0, |text| text.len());
-    let mut room = MAX_BYTES.saturating_sub(base + 512);
+    // Cut until a quarter of the room is left for log lines, or nothing more can go.
+    let mut trim = 0;
+    let (mut entries, base) = loop {
+        let entries: Vec<Value> = runs
+            .iter()
+            .map(|run| run_json(run, &briefs, &parents, &TRIMS[trim]))
+            .collect();
+        digest["runs"] = json!(entries);
+        let base = serde_json::to_string(&digest).map_or(0, |text| text.len());
+        if base + room / 4 <= room || trim + 1 == TRIMS.len() {
+            break (entries, base);
+        }
+        trim += 1;
+    };
+    let trim = &TRIMS[trim];
+    let mut room = room.saturating_sub(base + 512);
+    let mut omitted = BTreeMap::new();
     let mut excerpts = BTreeMap::new();
     let mut order: Vec<usize> = (0..runs.len()).collect();
     order.sort_by_key(|index| {
@@ -585,7 +635,7 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
             .collect();
         let head_used = serde_json::to_string(&head).map_or(0, |text| text.len());
         room = room.saturating_sub(head_used);
-        let (lines, mut shown, omitted) = log_excerpts(&clean, share.min(room));
+        let (lines, mut shown, omitted_lines) = log_excerpts(&clean, share.min(room));
         let used = serde_json::to_string(&lines).map_or(0, |text| text.len());
         room = room.saturating_sub(used);
         shown.extend(
@@ -605,8 +655,8 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
         }
         log["sinceLastLook"] = json!(lines);
         let mut left_out = Vec::new();
-        if omitted > 0 {
-            left_out.push(format!("{omitted} more lines"));
+        if omitted_lines > 0 {
+            left_out.push(format!("{omitted_lines} more lines"));
         }
         if held > 0 {
             left_out.push(format!(
@@ -626,6 +676,35 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
             log["leftOut"] = json!(left_out.join("; "));
         }
         entries[index]["log"] = log;
+        let mut cut = Vec::new();
+        if omitted_lines > 0 {
+            cut.push(format!("{omitted_lines} new log lines"));
+        }
+        let bound = bound(run);
+        if trim.points < TRIMS[0].points
+            && bound.iter().any(|name| {
+                run.body["series"][name]
+                    .as_array()
+                    .is_some_and(|points| points.len() > trim.points)
+            })
+        {
+            cut.push(format!(
+                "each number's points before its last {}",
+                trim.points
+            ));
+        }
+        if run.previous.len() > trim.previous {
+            cut.push("its earlier sentences".into());
+        }
+        if !trim.logged
+            && entries[index]["signals"].as_object().map_or(0, Map::len)
+                < run.body["latest"].as_object().map_or(0, Map::len)
+        {
+            cut.push("values no signal names".into());
+        }
+        if !cut.is_empty() {
+            omitted.insert(run.key.to_owned(), cut);
+        }
     }
     for (entry, run) in entries.iter_mut().zip(runs) {
         for (field, value) in entry.as_object_mut().into_iter().flatten() {
@@ -665,6 +744,7 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
         text: serde_json::to_string(&digest).unwrap_or_default(),
         excerpts,
         withheld,
+        omitted,
     }
 }
 
@@ -730,8 +810,26 @@ mod tests {
     }
 
     #[test]
-    fn the_digest_stays_under_its_ceiling_with_six_noisy_runs() {
-        let body = json!({"view": {"signals": {}, "headline": []}, "latest": {}, "series": {}});
+    fn a_look_with_six_noisy_runs_stays_within_its_token_budget_and_says_what_it_cut() {
+        let series: Vec<Value> = (0..400)
+            .map(|i| json!([i * 10, 2.0 + f64::from(i) / 1000.0]))
+            .collect();
+        let latest: Map<String, Value> = (0..20)
+            .map(|i| (format!("tokens_per_second_on_shard_{i}"), json!(i)))
+            .chain([("loss".to_owned(), json!(2.4))])
+            .collect();
+        let body = json!({"view": {"signals": {"loss": {"label": "Train loss", "better": "lower"}}, "headline": ["loss"]},
+            "latest": latest, "series": {"loss": series}});
+        let previous: Vec<(String, String)> = (0..3)
+            .map(|i| {
+                (
+                    format!(
+                        "Train loss **{{loss}}**, falling steadily as it has for {i} looks now."
+                    ),
+                    "Train loss 2.4, falling steadily as it has for every look so far, level with the parent.".into(),
+                )
+            })
+            .collect();
         let summary = json!({});
         let log = LogRead {
             lines: (0..5000)
@@ -756,7 +854,7 @@ mod tests {
                 elapsed: None,
                 summary: &summary,
                 body: &body,
-                previous: &[],
+                previous: &previous,
                 brief: None,
                 parent: None,
                 why: &[],
@@ -765,6 +863,7 @@ mod tests {
                 kept: &[],
             })
             .collect();
+        let room = room(SYSTEM.len());
         let digest = build(
             &Shared {
                 locale: "en",
@@ -772,9 +871,35 @@ mod tests {
                 summary: Some(&[]),
             },
             &runs,
+            room,
         );
-        assert!(digest.text.len() <= MAX_BYTES, "{}", digest.text.len());
-        assert!(digest.excerpts.values().all(|shown| !shown.is_empty()));
+        let request = SYSTEM.len() + digest.text.len();
+        assert!(
+            request <= MAX_TOKENS * BYTES_PER_TOKEN,
+            "{request} bytes is past {MAX_TOKENS} tokens"
+        );
+        let cut = &digest.omitted["r1"];
+        assert!(
+            cut.iter().any(|said| said.ends_with("new log lines")),
+            "{cut:?}"
+        );
+        assert!(cut.contains(&"its earlier sentences".to_owned()), "{cut:?}");
+
+        let one = build(
+            &Shared {
+                locale: "en",
+                notes: None,
+                summary: None,
+            },
+            &runs[..1],
+            room,
+        );
+        assert!(
+            one.text
+                .contains("Train loss **{loss}**, falling steadily as it has for 0 looks now."),
+            "one run keeps its three sentences"
+        );
+        assert!(one.excerpts["r1"].len() > 10, "and room for its log");
     }
 
     #[test]
@@ -810,6 +935,7 @@ mod tests {
                 counts: &counts,
                 kept: &kept,
             }],
+            MAX_BYTES,
         );
         assert!(!digest.text.contains("hf_"), "{}", digest.text);
         let places: Vec<&Place> = digest.withheld.iter().map(|w| &w.place).collect();

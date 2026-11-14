@@ -374,9 +374,12 @@ that brought it. A run gets one last look when it ends, shared with siblings
 ending within a minute; one that fails or is interrupted is taken once more, and
 a second failure stands in the journal as the run's last look.
 
-The digest is bounded at 16 KiB: the brief, each run's progress, signals and
-last three sentences, the log's head and its new lines, new kinds of warning
-first, repeats said once with their count. Each field and log line passes
+A look's request, system prompt and digest together, is held to 4,096 tokens,
+counted as three bytes a token, and never past 16 KiB: the brief, each run's
+progress, signals and last three sentences, the log's head and its new lines,
+new kinds of warning first, repeats said once with their count. Older points and
+sentences go first when it is too long, and the journal says what each look
+left out. Each field and log line passes
 sharing's credential scan as written, before it is clipped or encoded; one that
 matches is left out, saying so, and the journal tells the user once where it is.
 A retry's reply is scanned before it goes back. A reply is strict JSON: each number that can

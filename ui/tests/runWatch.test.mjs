@@ -118,3 +118,10 @@ test("a look that flagged while a flag was open says it was noted under that fla
   assert.match(text(container), /Noted while the flag from .+ was open\./);
   assert.doesNotMatch(text(container), new RegExp(m.run_watch_flagged()));
 });
+
+test("a look says what it left out to keep within its budget", async () => {
+  const cut = "To keep this look within 4096 tokens it left out 140 new log lines; its earlier sentences.";
+  const looks = [look("1", now - 20_000, "Loss **{loss}**, falling.", { omitted: cut })];
+  const { container } = await watched({ looks });
+  assert.ok(text(container).includes(cut), text(container));
+});

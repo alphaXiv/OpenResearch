@@ -128,6 +128,8 @@ export interface Look {
   stage?: string | null;
   /** Where this look first left out what looks like a credential, in English; absent from an older server. */
   withheld?: string[];
+  /** What this look left out to keep within its token budget, in English; absent when it left nothing out. */
+  omitted?: string | null;
   /** When the flag was raised that was open as this look flagged, which noted it instead; absent when none was. */
   notedUnder?: number | null;
 }
