@@ -68,12 +68,23 @@
     }
   },
   "versus": {
-    "val_loss": {
-      "d": -0.097837,
-      "good": true,
-      "flat": false,
-      "mag": 0.1,
-      "parent": 2.061111
+    "step": {
+      "val_loss": {
+        "d": -0.097837,
+        "good": true,
+        "flat": false,
+        "mag": 0.1,
+        "parent": 2.061111
+      }
+    },
+    "final": {
+      "val_loss": {
+        "d": -0.097837,
+        "good": true,
+        "flat": false,
+        "mag": 0.1,
+        "parent": 2.061111
+      }
     }
   },
   "counts": {},

@@ -87,13 +87,25 @@
     }
   },
   "versus": {
-    "elo": {
-      "d": 227.612699,
-      "good": true,
-      "flat": false,
-      "mag": 228,
-      "parent": 668.375115,
-      "step": 14
+    "step": {
+      "elo": {
+        "d": 227.612699,
+        "good": true,
+        "flat": false,
+        "mag": 228,
+        "parent": 668.375115,
+        "step": 14
+      }
+    },
+    "final": {
+      "elo": {
+        "d": 227.612699,
+        "good": true,
+        "flat": false,
+        "mag": 228,
+        "parent": 668.375115,
+        "step": 14
+      }
     }
   },
   "counts": {},

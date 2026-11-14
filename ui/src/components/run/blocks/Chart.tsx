@@ -3,6 +3,7 @@ import { fmtDuration } from "../../../api";
 import { m } from "../../../paraglide/messages.js";
 import { getLocale } from "../../../paraglide/runtime.js";
 import { fmtMagnitude, fmtMeasure, fmtSignal } from "../../../runMonitor/format";
+import { versusOf } from "../../../runMonitor/model";
 import type { ChartBlock, Point, RunMonitor, SignalSpec } from "../../../runMonitor/types";
 import { useBoxSize } from "../useBoxSize";
 import { chartOf, type ChartData, type Series } from "./series";
@@ -26,11 +27,11 @@ function withUnit(spec: SignalSpec | undefined, value: number | null): string {
 }
 
 /** The latest value of each line and how it compares with the parent, for a screen reader. */
-function describe(monitor: RunMonitor, series: Series[]): string {
+function describe(monitor: RunMonitor, series: Series[], live: boolean): string {
   return series.filter((line) => !line.ghost).map((line) => {
     const spec = monitor.view.signals[line.name];
     const value = `${line.label} ${fmtSignal(spec, monitor.latest[line.name])}`;
-    const vs = monitor.versus[line.name];
+    const vs = versusOf(monitor, line.name, live);
     if (!vs) return value;
     if (vs.flat) return `${value}, ${m.run_level_with_parent()}`;
     const delta = fmtMagnitude(spec, vs.mag);
@@ -206,7 +207,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const y = (value: number) => margin.top + (1 - along(value, y0, y1, yLog)) * innerHeight;
   const base = y(yLog ? y0 : Math.max(y0, Math.min(0, y1)));
   const last = lead && [...lead.points].reverse().find((point) => point[1] !== null);
-  const label = table || categories ? describeRows(monitor, data) : [describe(monitor, series), ...notes].filter(Boolean).join(". ");
+  const label = table || categories ? describeRows(monitor, data) : [describe(monitor, series, live), ...notes].filter(Boolean).join(". ");
 
   const owned = series.filter((line) => !line.ghost);
   const slot = innerWidth / Math.max(1, categories?.length ?? 1);

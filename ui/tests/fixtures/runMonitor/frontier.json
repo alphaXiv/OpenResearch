@@ -260,12 +260,23 @@
     }
   },
   "versus": {
-    "front_gain": {
-      "d": 0.011245,
-      "good": true,
-      "flat": false,
-      "mag": 0.011245,
-      "parent": 0.400793
+    "step": {
+      "front_gain": {
+        "d": 0.011245,
+        "good": true,
+        "flat": false,
+        "mag": 0.011245,
+        "parent": 0.400793
+      }
+    },
+    "final": {
+      "front_gain": {
+        "d": 0.011245,
+        "good": true,
+        "flat": false,
+        "mag": 0.011245,
+        "parent": 0.400793
+      }
     }
   },
   "counts": {},

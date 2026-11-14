@@ -156,7 +156,10 @@
   "cells": {},
   "media": {},
   "parent": null,
-  "versus": {},
+  "versus": {
+    "step": {},
+    "final": {}
+  },
   "counts": {},
   "estimate": null,
   "limit": null,

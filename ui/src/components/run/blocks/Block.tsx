@@ -75,8 +75,8 @@ function Body({ monitor, block, size, projectId, tone, live, title }: BlockProps
   if ("bars" in block) return <Bars monitor={monitor} block={block} size={size} live={live} />;
   if ("cells" in block) return <Cells cells={monitor.cells[block.cells]} size={size} live={live} />;
   if ("media" in block) return <Media items={monitor.media[block.media] ?? []} block={block} projectId={projectId} size={size} live={live} />;
-  if ("stats" in block) return <Stats monitor={monitor} names={block.stats} vs={block.vs} />;
-  return <Text monitor={monitor} template={block.text} tone={tone} />;
+  if ("stats" in block) return <Stats monitor={monitor} names={block.stats} vs={block.vs} live={live} />;
+  return <Text monitor={monitor} template={block.text} tone={tone} live={live} />;
 }
 
 /**

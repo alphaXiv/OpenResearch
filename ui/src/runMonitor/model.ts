@@ -6,7 +6,7 @@ import { autoDir, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { runActive, runApiProvider, runConnectHost, runDisplay, runNotice, runStoppable, type RunNotice } from "../runDisplay";
 import { fillSentence, fmtMagnitude, fmtSignal, plainSentence, tokensOf } from "./format";
-import type { Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, ShownRun, SignalSpec, SignalValue, Signals, Versus } from "./types";
+import type { Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords, quoteWords, stageWords } from "./words";
 
 /** How the headline compares with the parent: the arrow follows the number, the colour whether that is better. */
@@ -149,10 +149,20 @@ function where(run: Run): string {
   return [kind ? backendName(kind) : null, detail].filter(Boolean).map((part) => autoDir(String(part))).join(" · ");
 }
 
+/**
+ * How a signal compares with the parent: the way a block names, else the signal's own, else at the same step while
+ * the run goes and with where the parent ended once it ended.
+ */
+export const versusOf = (monitor: RunMonitor, name: string, live: boolean, by?: VersusBy): Versus | null =>
+  monitor.versus[by ?? monitor.view.signals[name]?.vs ?? (live ? "step" : "final")][name] ?? null;
+
 /** What a sentence's tokens read from a full monitor: each signal, `signal.vs` as the raw difference, and counts. */
-export function bindingsOf(monitor: RunMonitor): Record<string, SignalValue> {
+export function bindingsOf(monitor: RunMonitor, live: boolean): Record<string, SignalValue> {
   const bindings: Record<string, SignalValue> = { ...monitor.latest };
-  for (const [name, vs] of Object.entries(monitor.versus)) bindings[`${name}.vs`] = vs.d;
+  for (const name of Object.keys(monitor.view.signals)) {
+    const vs = versusOf(monitor, name, live);
+    if (vs) bindings[`${name}.vs`] = vs.d;
+  }
   for (const [pattern, count] of Object.entries(monitor.counts)) bindings[`count:${JSON.stringify(pattern)}`] = count;
   return bindings;
 }
@@ -233,7 +243,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     : lead ?? (tone === "flag" ? m.status_flagged() : tone === "done" ? m.status_done() : tone === "starting" ? m.status_starting() : m.status_running());
 
   const signals: Signals = monitor?.view.signals ?? summary?.signals ?? {};
-  const bindings = monitor ? bindingsOf(monitor) : summary?.bindings ?? {};
+  const bindings = monitor ? bindingsOf(monitor, live) : summary?.bindings ?? {};
   const phases = monitor?.phases ?? [];
   const progress = monitor?.progress ?? null;
   const startedAt = run.startedAt ?? run.createdAt;
@@ -338,7 +348,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     eta = "";
   }
 
-  const headline = headlineOf(monitor, summary?.headline ?? null, signals, sentence.key);
+  const headline = headlineOf(monitor, summary?.headline ?? null, signals, sentence.key, live);
 
   const segments = progress?.segments.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
     ?? summary?.segments?.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
@@ -406,7 +416,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   };
 }
 
-function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monitor"]>["headline"], signals: Signals, sentenceKey: string): RunModel["headline"] {
+function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monitor"]>["headline"], signals: Signals, sentenceKey: string, live: boolean): RunModel["headline"] {
   let name: string;
   let label: string;
   let value: SignalValue;
@@ -415,7 +425,7 @@ function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monito
     name = monitor.view.headline.find((candidate) => typeof monitor.latest[candidate] === "number") ?? monitor.view.headline[0];
     label = signals[name]?.label ?? name;
     value = monitor.latest[name] ?? null;
-    vs = monitor.versus[name] ?? null;
+    vs = versusOf(monitor, name, live);
   } else if (summary) {
     ({ name, label, value, vs } = summary);
   } else return null;

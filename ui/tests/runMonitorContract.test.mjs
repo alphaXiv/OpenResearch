@@ -374,7 +374,7 @@ test("beside the headline, better or worse is said in words on the line and the 
     [{ d: -0.1123, good: true, flat: false, mag: 0.1123, parent: 1 }, m.run_vs_better({ delta: "0.112" })],
     [{ d: 0.00004, good: false, flat: false, mag: 0.00004, parent: 1 }, m.run_vs_worse({ delta: "4e-5" })],
   ]) {
-    const compared = { ...state, monitor: { ...state.monitor, versus: { [name]: vs } }, summary: { ...state.summary, headline: { ...state.summary.headline, vs } } };
+    const compared = { ...state, monitor: { ...state.monitor, versus: { step: { [name]: vs }, final: { [name]: vs } } }, summary: { ...state.summary, headline: { ...state.summary.headline, vs } } };
     for (const level of ["line", "strip"]) {
       const { container } = await banner("running", level, compared);
       for (const hidden of container.querySelectorAll(".sr-only")) hidden.remove();

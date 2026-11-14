@@ -76,12 +76,23 @@
     }
   },
   "versus": {
-    "fid": {
-      "d": 0.848197,
-      "good": false,
-      "flat": false,
-      "mag": 0.8,
-      "parent": 16.107974
+    "step": {
+      "fid": {
+        "d": 0.848197,
+        "good": false,
+        "flat": false,
+        "mag": 0.8,
+        "parent": 16.107974
+      }
+    },
+    "final": {
+      "fid": {
+        "d": 0.848197,
+        "good": false,
+        "flat": false,
+        "mag": 0.8,
+        "parent": 16.107974
+      }
     }
   },
   "counts": {},

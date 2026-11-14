@@ -85,7 +85,10 @@
       ]
     }
   },
-  "versus": {},
+  "versus": {
+    "step": {},
+    "final": {}
+  },
   "counts": {},
   "estimate": {
     "loMs": 1849480,

@@ -192,7 +192,10 @@
   "cells": {},
   "media": {},
   "parent": null,
-  "versus": {},
+  "versus": {
+    "step": {},
+    "final": {}
+  },
   "counts": {},
   "estimate": {
     "loMs": 3787949,

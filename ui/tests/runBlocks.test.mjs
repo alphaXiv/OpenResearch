@@ -69,7 +69,7 @@ test("a chart of a few points marks each one, and ends each line with its latest
 test("a chart of a very small signal labels its ticks by their size, never as a row of zeros", async () => {
   const base = fixture("finetune");
   const points = Array.from({ length: 12 }, (_, i) => [i * 100, 5e-5 - i * 3e-6]);
-  const monitor = { ...base, view: { ...base.view, signals: { lr: { label: "lr" } }, headline: ["lr"], blocks: [{ chart: ["lr"], x: "step" }] }, series: { lr: points }, latest: { lr: points.at(-1)[1] }, parent: null, versus: {} };
+  const monitor = { ...base, view: { ...base.view, signals: { lr: { label: "lr" } }, headline: ["lr"], blocks: [{ chart: ["lr"], x: "step" }] }, series: { lr: points }, latest: { lr: points.at(-1)[1] }, parent: null, versus: { step: {}, final: {} } };
   const page = await draw(monitor, monitor.view.blocks[0], "page");
   const labels = [...page.querySelectorAll('svg[role="img"] text')].map((label) => text(label));
   const ticks = labels.filter((label) => /e-\d/.test(label));
@@ -92,20 +92,20 @@ test("stats show each latest value with its course, and say in words whether it 
   const block = blockOf(monitor, "stats");
   const page = await draw(monitor, block, "page");
   assert.deepEqual([...page.querySelectorAll("dt")].map((term) => term.textContent), ["Elo gained", "Win vs previous", "Round time"]);
-  const compared = block.stats.filter((name) => monitor.versus[name]);
+  const compared = block.stats.filter((name) => monitor.versus.step[name]);
   assert.equal(page.querySelectorAll("dd").length, block.stats.length + compared.length, "a stat with no parent to compare with says nothing more");
   const elo = page.querySelector("dl > div");
   assert.match(text(elo), /Elo gained\+\d+.*\d+ better than the parent at step 14/);
-  assert.equal(pointsDown(elo), monitor.versus.elo.d < 0);
+  assert.equal(pointsDown(elo), monitor.versus.step.elo.d < 0);
   assert.match(text(page), /Win vs previous[\d.]+%/);
 
-  const worse = { ...monitor, versus: { ...monitor.versus, elo: { d: -40, good: false, flat: false, mag: 40, parent: 936 } } };
+  const worse = { ...monitor, versus: { ...monitor.versus, step: { ...monitor.versus.step, elo: { d: -40, good: false, flat: false, mag: 40, parent: 936 } } } };
   const behind = (await draw(worse, block, "page")).querySelector("dl > div");
   assert.match(text(behind), /40 worse than where the parent ended/, "a comparison at no step is with the parent's final value");
   assert.ok(pointsDown(behind));
 
-  const versusBy = { step: monitor.versus, final: { elo: { d: -12, good: false, flat: false, mag: 12, parent: 908 } } };
-  const asked = (await draw({ ...monitor, versusBy }, { ...block, vs: "final" }, "page")).querySelector("dl > div");
+  const versus = { step: monitor.versus.step, final: { elo: { d: -12, good: false, flat: false, mag: 12, parent: 908 } } };
+  const asked = (await draw({ ...monitor, versus }, { ...block, vs: "final" }, "page")).querySelector("dl > div");
   assert.match(text(asked), /12 worse than where the parent ended/, "the block's own way wins over the signal's");
 
   assert.equal((await draw(monitor, block, "strip")).textContent, "");

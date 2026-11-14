@@ -77,8 +77,7 @@
           "loss": 0.14285714285714285
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -329,8 +328,7 @@
           "loss": "NaN"
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -521,8 +519,7 @@
           "loss": 0.2727272727272727
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -735,8 +732,7 @@
           "loss": 2
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -895,8 +891,7 @@
           "loss": 1.9
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -1057,8 +1052,7 @@
           "loss": 0.2727272727272727
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -1193,8 +1187,7 @@
         },
         "latest": {},
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -1333,8 +1326,7 @@
           "loss": 0.2727272727272727
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -1554,8 +1546,7 @@
         },
         "latest": {},
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -1672,8 +1663,7 @@
           "loss": 2.5
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -1884,8 +1874,7 @@
           "win_rate": 0.507
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -2310,8 +2299,7 @@
         },
         "latest": {},
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -2416,8 +2404,7 @@
         },
         "latest": {},
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -2544,8 +2531,7 @@
         },
         "latest": {},
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -2728,7 +2714,10 @@
           "loss": 0.5
         },
         "parent": null,
-        "versus": {},
+        "versus": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -2922,8 +2911,7 @@
         },
         "latest": {},
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -3072,8 +3060,7 @@
           "loss": 0.14285714285714285
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -3283,8 +3270,7 @@
         },
         "latest": {},
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -3419,8 +3405,7 @@
           "loss": 0.14285714285714285
         },
         "parent": null,
-        "versus": {},
-        "versusBy": {
+        "versus": {
           "step": {},
           "final": {}
         },
@@ -3772,16 +3757,6 @@
           "rows": {}
         },
         "versus": {
-          "loss": {
-            "d": -0.045454545454545414,
-            "good": true,
-            "flat": false,
-            "mag": 0.045,
-            "parent": 0.2727272727272727,
-            "step": 100.0
-          }
-        },
-        "versusBy": {
           "step": {
             "loss": {
               "d": -0.045454545454545414,

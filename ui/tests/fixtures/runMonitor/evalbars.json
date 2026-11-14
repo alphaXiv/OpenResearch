@@ -161,12 +161,23 @@
     }
   },
   "versus": {
-    "accuracy": {
-      "d": 0.0267,
-      "good": true,
-      "flat": false,
-      "mag": 2.7,
-      "parent": 0.701
+    "step": {
+      "accuracy": {
+        "d": 0.0267,
+        "good": true,
+        "flat": false,
+        "mag": 2.7,
+        "parent": 0.701
+      }
+    },
+    "final": {
+      "accuracy": {
+        "d": 0.0267,
+        "good": true,
+        "flat": false,
+        "mag": 2.7,
+        "parent": 0.701
+      }
     }
   },
   "counts": {},

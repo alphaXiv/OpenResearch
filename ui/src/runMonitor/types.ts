@@ -308,10 +308,8 @@ export interface RunMonitor {
   media: Record<string, MediaItem[]>;
   /** `rows` holds the parent's tables a table with `vs` compares with, matched by their first column. */
   parent: { runId: string; phase: string | null; series: Record<string, Point[]>; rows?: Record<string, Record<string, SignalValue>[]> } | null;
-  /** Each signal compared its own way. */
-  versus: Record<string, Versus>;
-  /** Each signal compared both ways, for a block that names its own; absent from an older server. */
-  versusBy?: Record<VersusBy, Record<string, Versus>>;
+  /** Each signal compared both ways; `versusOf` picks the way a block or the signal asks for. */
+  versus: Record<VersusBy, Record<string, Versus>>;
   counts: Record<string, number>;
   estimate: Estimate | null;
   limit: { endsAt: number } | null;

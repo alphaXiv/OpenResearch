@@ -79,7 +79,10 @@
   },
   "media": {},
   "parent": null,
-  "versus": {},
+  "versus": {
+    "step": {},
+    "final": {}
+  },
   "counts": {},
   "estimate": {
     "loMs": 377765,

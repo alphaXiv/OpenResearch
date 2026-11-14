@@ -1021,8 +1021,7 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
         "x": {"name": x_name, "max": x_max},
         "latest": latest,
         "parent": parent_body,
-        "versus": versus,
-        "versusBy": {"step": at_step, "final": at_end},
+        "versus": {"step": at_step, "final": at_end},
         "rows": rows,
         "groups": {},
         "cells": {},
@@ -1790,7 +1789,6 @@ fn project(
                     "source": body["source"],
                     "statusText": body["statusText"],
                     "versus": body["versus"],
-                    "versusBy": body["versusBy"],
                 },
             });
             if let Some(best) = body.get("best") {
@@ -4998,7 +4996,7 @@ mod tests {
             "a child keeps the view its parent had"
         );
         let (mine, theirs) = (2.5 / 11.0, 3.0 / 11.0);
-        let vs = &monitor["versus"]["loss"];
+        let vs = &monitor["versus"]["step"]["loss"];
         assert!(
             (vs["d"].as_f64().unwrap() - (mine - theirs)).abs() < 1e-12,
             "{vs}"
@@ -5026,14 +5024,17 @@ mod tests {
             .unwrap()
             .summary()
             .clone();
-        assert_eq!(summary["headline"]["vs"], monitor["versus"]["loss"]);
+        assert_eq!(
+            summary["headline"]["vs"], *vs,
+            "a running child meets the same step"
+        );
         assert_eq!(summary["bindings"]["loss.vs"], vs["d"]);
         assert_eq!(summary["bindings"]["val_loss.vs"], Value::Null);
 
         // Past the parent's last step there is nothing to compare with: no comparison, not level.
         let child = loss_run(&f, "c2", "child", "running", 30, 2.5 / 3.0);
         let (monitor, _) = monitor_at(&f, &child, T0 + 30_500);
-        assert_eq!(monitor["versus"], json!({}));
+        assert_eq!(monitor["versus"]["step"], json!({}));
         assert!(!monitor["statusText"].as_str().unwrap().contains("parent"));
     }
 
@@ -5086,20 +5087,19 @@ mod tests {
 
         // The child's last train step is 30, at 0.675 against the parent's 0.75 there; the parent
         // ended its 5,000 steps at 0.006.
-        let vs = &monitor["versus"]["loss"];
+        let vs = &monitor["versus"]["step"]["loss"];
         assert_eq!(
             (&vs["good"], &vs["step"], &vs["mag"]),
             (&json!(true), &json!(30.0), &json!(0.075)),
             "{vs}"
         );
-        assert_eq!(monitor["versusBy"]["step"]["loss"], *vs);
-        let last = &monitor["versusBy"]["final"]["loss"];
+        let last = &monitor["versus"]["final"]["loss"];
         assert_eq!(
             (&last["good"], &last["mag"], last.get("step")),
             (&json!(false), &json!(0.669), None),
             "{last}"
         );
-        assert_eq!(event.unwrap()["patch"]["versusBy"], monitor["versusBy"]);
+        assert_eq!(event.unwrap()["patch"]["versus"], monitor["versus"]);
         let text = monitor["statusText"].as_str().unwrap();
         assert!(
             text.contains("Loss 0.675 (0.075 better than parent at step 30)"),
@@ -5110,7 +5110,7 @@ mod tests {
         let child = staged_run(&f, "c2", "child", "running", 3, 0.9, Some(0.5));
         let (monitor, _) = monitor_at(&f, &child, T0 + 5_000);
         assert_eq!(
-            monitor["versus"]["loss"].get("step"),
+            monitor["versus"]["step"]["loss"].get("step"),
             None,
             "{}",
             monitor["versus"]
@@ -5118,10 +5118,6 @@ mod tests {
 
         let ended = staged_run(&f, "c3", "child", "done", 3, 0.9, None);
         let (monitor, _) = monitor_at(&f, &ended, T0 + 700_000);
-        assert_eq!(
-            monitor["versus"]["loss"], monitor["versusBy"]["final"]["loss"],
-            "an ended run meets where its parent ended"
-        );
         let text = monitor["statusText"].as_str().unwrap();
         assert!(
             text.contains("Loss 0.675 (0.669 worse than parent's final value)"),
@@ -5136,10 +5132,10 @@ mod tests {
             ),
         );
         let (monitor, _) = monitor_at(&f, &ended, T0 + 701_000);
-        assert_eq!(
-            monitor["versus"]["loss"]["step"], 30.0,
-            "the signal's own way wins: {}",
-            monitor["versus"]
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(
+            text.contains("Loss 0.675 (0.075 better than parent at step 30)"),
+            "the signal's own way wins: {text}"
         );
     }
 
@@ -5185,7 +5181,7 @@ mod tests {
             &log.replace("METRIC front_gain 0.0213", "METRIC front_gain 0.412"),
         ));
         let (monitor, _) = monitor_at(&f, &child, T0 + 40_000);
-        let vs = &monitor["versus"]["front_gain"];
+        let vs = &monitor["versus"]["step"]["front_gain"];
         assert_eq!(
             (&vs["good"], &vs["parent"]),
             (&json!(true), &json!(0.0213)),
@@ -5207,7 +5203,7 @@ mod tests {
         f.child("child", "exp");
         let child = loss_run(&f, "c1", "child", "running", 10, 1.0);
         let (monitor, _) = monitor_at(&f, &child, T0 + 10_500);
-        assert_eq!(monitor["versus"], json!({}));
+        assert_eq!(monitor["versus"], json!({"step": {}, "final": {}}));
         assert_eq!(monitor["parent"]["runId"], "p1");
     }
 
