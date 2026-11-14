@@ -761,12 +761,15 @@ impl Snapshot {
                             "observed"
                         }
                         .into();
+                        // The first report of a stage is placed in time too, so a stage that
+                        // never reports again still has a silence to measure.
+                        let first = phase.last_point.is_none();
                         phase.last_point = Some((t, step));
                         self.timing
                             .progress_points
                             .push((phase.occurrence, t, step));
                         retain_timing(&mut self.timing.progress_points, phase.occurrence, phase.of);
-                        if (step > old || origin) && time.is_some() {
+                        if (step > old || origin || first) && time.is_some() {
                             self.timing.last_advance = Some((phase.occurrence, t));
                         }
                     }

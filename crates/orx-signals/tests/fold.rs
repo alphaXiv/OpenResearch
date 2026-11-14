@@ -1132,3 +1132,20 @@ fn a_series_on_the_step_axis_holds_one_stages_points() {
         "a run that never counts steps plots across its stages in time"
     );
 }
+
+#[test]
+fn a_stages_first_report_is_placed_so_its_silence_can_be_measured() {
+    let mut s = fresh();
+    feed(
+        &mut s,
+        concat!(
+            "::orx:: {\"phase\":\"setup\",\"step\":0,\"of\":4,\"t\":0}\n",
+            "::orx:: {\"step\":4,\"t\":2.8}\n",
+            "::orx:: {\"phase\":\"train\",\"step\":0,\"of\":600,\"t\":2.81}\n",
+            "compiling model ...\n",
+        ),
+    );
+    s.reached_end(5_000);
+    let train = s.phases.last().unwrap().occurrence;
+    assert_eq!(s.timing.anchor, Some((train, 2.81, 5_000)));
+}
