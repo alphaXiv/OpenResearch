@@ -35,6 +35,9 @@ test("an agent's model count counts the picker's lines, older versions last", ()
     named("claude-opus-5-5-thinking-high", "Claude Opus 5.5", "claude opus", [5, 5], 5),
   ];
   assert.deepEqual(agentModelLines("cursor", models).map((line) => line.label), ["Codex 5.3", "Claude Opus 5.5", "Codex 5.2"]);
+
+  const alias = model("codex-latest", undefined, { key: "codex", family: "codex", series: "codex", label: "Codex", superseded: true });
+  assert.equal(agentModelLines("cursor", [...models, alias]).length, 3);
 });
 
 test("only a ready agent's listed models are offered", () => {
