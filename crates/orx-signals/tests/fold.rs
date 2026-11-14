@@ -1096,3 +1096,39 @@ fn a_plan_an_agent_writes_is_read_strictly() {
     assert!(refused(json!("train")).contains("a plan is a list"));
     assert_eq!(orx_signals::plan(&json!([]), true).unwrap(), vec![]);
 }
+
+#[test]
+fn a_series_on_the_step_axis_holds_one_stages_points() {
+    let mut s = fresh();
+    feed(
+        &mut s,
+        concat!(
+            "::orx:: {\"phase\":\"download\",\"step\":1,\"of\":3,\"t\":1,\"m\":{\"loss\":9}}\n",
+            "::orx:: {\"phase\":\"train\",\"step\":0,\"of\":600,\"t\":2}\n",
+            "::orx:: {\"step\":5,\"t\":3,\"m\":{\"loss\":3}}\n",
+            "::orx:: {\"step\":10,\"t\":4,\"m\":{\"loss\":2}}\n",
+            "::orx:: {\"phase\":\"eval\",\"t\":70,\"m\":{\"loss\":1.9}}\n",
+        ),
+    );
+    assert_eq!(
+        s.series["loss"],
+        [(5.0, Some(3.0)), (10.0, Some(2.0))],
+        "download's step 1 is not train's, and eval has no step to plot at"
+    );
+    assert_eq!(s.series_stages["loss"], s.phases[1].occurrence);
+    assert_eq!(
+        s.latest["loss"], 1.9,
+        "the value without a step is still the latest"
+    );
+
+    let mut timed = fresh();
+    feed(
+        &mut timed,
+        "::orx:: {\"phase\":\"warmup\",\"t\":1,\"m\":{\"loss\":4}}\n::orx:: {\"phase\":\"run\",\"t\":2,\"m\":{\"loss\":3}}\n",
+    );
+    assert_eq!(
+        timed.series["loss"],
+        [(1.0, Some(4.0)), (2.0, Some(3.0))],
+        "a run that never counts steps plots across its stages in time"
+    );
+}

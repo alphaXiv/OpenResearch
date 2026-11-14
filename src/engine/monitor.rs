@@ -942,10 +942,31 @@ fn evaluate(
             .flat_map(|block| block["chart"].as_array().into_iter().flatten())
             .filter_map(Value::as_str)
             .collect();
+        // On the step axis a line is one stage's: the parent's goes under the child's of the same
+        // stage, or before the child has one, under the stage the child counts steps in now.
+        let stage_of = |run: &Snapshot, name: &str| {
+            let occurrence = run.series_stages.get(name)?;
+            run.phases
+                .iter()
+                .find(|phase| phase.occurrence == *occurrence)
+                .map(|phase| phase.name.clone())
+        };
+        let counting = snapshot
+            .and_then(|s| s.phases.iter().rev().find(|p| p.done.is_some()))
+            .map(|phase| phase.name.clone());
+        let same_stage = |name: &str| {
+            let mine = snapshot
+                .and_then(|s| stage_of(s, name))
+                .or_else(|| counting.clone());
+            x_name != "step"
+                || mine
+                    .zip(stage_of(parent, name))
+                    .is_none_or(|(mine, theirs)| mine == theirs)
+        };
         let series: serde_json::Map<String, Value> = parent
             .series
             .iter()
-            .filter(|(name, _)| ghosts.contains(&name.as_str()))
+            .filter(|(name, _)| ghosts.contains(&name.as_str()) && same_stage(name))
             .map(|(name, points)| (name.clone(), json!(points)))
             .collect();
         let rows = tables(Some(parent), &|block| {
@@ -4998,6 +5019,63 @@ mod tests {
         assert!(
             text.contains("\neta      No progress for 1m (was due about"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn the_parents_line_goes_under_the_stage_the_child_counts_steps_in() {
+        let f = Fixture::new("orx-monitor-ghost-stage");
+        f.view("exp", VIEW);
+        let run = |id: &str, experiment: &str, status: &str, lines: &[&str]| {
+            let run = f.run_in(id, experiment, status, local());
+            f.collect(&Snapshot {
+                run_id: id.into(),
+                ..folded(
+                    &lines
+                        .iter()
+                        .enumerate()
+                        .map(|(i, line)| (T0 + 1000 * i as i64, (*line).to_owned()))
+                        .collect::<Vec<_>>(),
+                )
+            });
+            run
+        };
+        let download = "::orx:: {\"phase\":\"download\",\"step\":1,\"of\":3}";
+        let train = [
+            "::orx:: {\"phase\":\"train\",\"step\":0,\"of\":600}",
+            "::orx:: {\"step\":300,\"m\":{\"loss\":2}}",
+            "::orx:: {\"step\":600,\"m\":{\"loss\":1}}",
+        ];
+        let mut whole = vec![download];
+        whole.extend(train);
+        whole.push("::orx:: {\"phase\":\"eval\",\"m\":{\"loss\":0.9}}");
+        let parent = run("p1", "exp", "done", &whole);
+        monitor_at(&f, &parent, T0 + 700_000);
+        f.child("child", "exp");
+
+        let child = run("c1", "child", "running", &[download]);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 1_500);
+        assert_eq!(
+            monitor["parent"]["series"],
+            json!({}),
+            "train's line has no place on download's three steps"
+        );
+        let child = run("c2", "child", "running", &[download, train[0], train[1]]);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 3_500);
+        assert_eq!(
+            monitor["parent"]["series"]["loss"],
+            json!([[300.0, 2.0], [600.0, 1.0]]),
+            "the parent's eval value has no step to sit at"
+        );
+        let mut ended = vec![download];
+        ended.extend(train);
+        ended.push("::orx:: {\"phase\":\"eval\",\"step\":1,\"of\":6,\"m\":{\"score\":0.5}}");
+        let child = run("c3", "child", "done", &ended);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 700_000);
+        assert_eq!(
+            monitor["parent"]["series"]["loss"],
+            json!([[300.0, 2.0], [600.0, 1.0]]),
+            "in eval the child's loss is still train's, and so is the parent's under it"
         );
     }
 

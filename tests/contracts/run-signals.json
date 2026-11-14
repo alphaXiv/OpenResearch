@@ -141,6 +141,10 @@
   "omitted": {},
   "seriesRev": 0,
   "seriesWidths": {},
+  "seriesStages": {
+    "bad": 0,
+    "loss": 0
+  },
   "spend": null,
   "coordinateReport": {
     "loss": 2

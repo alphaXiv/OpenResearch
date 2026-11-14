@@ -281,7 +281,12 @@ fn populated_disk_contract_is_written_and_read() {
         .as_object_mut()
         .unwrap()
         .remove("lastAdvance");
+    older.as_object_mut().unwrap().remove("seriesStages");
     let older: Snapshot = serde_json::from_value(older).unwrap();
+    assert!(
+        older.series_stages.is_empty(),
+        "a checkpoint before it reads, its stages unknown"
+    );
     assert_eq!(
         older.timing.last_advance, None,
         "a checkpoint before it reads"

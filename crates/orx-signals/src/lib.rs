@@ -146,6 +146,10 @@ pub struct Snapshot {
     pub series_rev: u64,
     #[serde(default)]
     pub series_widths: BTreeMap<String, f64>,
+    /// The phase occurrence each series on the step axis was plotted in: a series holds one
+    /// stage's points, since each stage counts its steps from its own start.
+    #[serde(default)]
+    pub series_stages: BTreeMap<String, usize>,
     #[serde(default)]
     pub spend: Option<f64>,
     #[serde(default)]
@@ -299,6 +303,7 @@ impl Snapshot {
             omitted: BTreeMap::new(),
             series_rev: 0,
             series_widths: BTreeMap::new(),
+            series_stages: BTreeMap::new(),
             spend: None,
             coordinate_report: BTreeMap::new(),
             last_canonical: None,
@@ -789,11 +794,16 @@ impl Snapshot {
         if observed && self.timing.origin_ms.is_none() {
             self.timing.origin_ms = Some(now);
         }
-        let x = self.progress().and_then(|p| p.done).or(time).or_else(|| {
+        let stage = self
+            .progress()
+            .and_then(|phase| Some((phase.done?, phase.occurrence)));
+        let x = stage.map(|(step, _)| step).or(time).or_else(|| {
             observed.then(|| (now - self.timing.origin_ms.unwrap_or(now)) as f64 / 1000.0)
         });
-        // An out-of-order report has no step to plot at: its values are only the latest.
-        let x = x.filter(|_| !out_of_order);
+        // An out-of-order report has no step to plot at, and once the run counts steps a value
+        // from a stage without them has no place on that axis: either is only the latest.
+        let counts_steps = self.phases.iter().any(|phase| phase.done.is_some());
+        let x = x.filter(|_| !out_of_order && (stage.is_some() || !counts_steps));
         let coordinated = record.contains_key("step") && !out_of_order;
         // In the order printed, so a new table's columns read as the run wrote them.
         let mut cells = Map::new();
@@ -843,6 +853,14 @@ impl Snapshot {
                     let Some(x) = x else {
                         continue;
                     };
+                    if let Some((_, occurrence)) = stage {
+                        let was = self.series_stages.insert(name.clone(), occurrence);
+                        if was.is_some_and(|was| was != occurrence) {
+                            self.series.remove(name);
+                            self.series_widths.remove(name);
+                            self.series_rev += 1;
+                        }
+                    }
                     let series = self.series.entry(name.clone()).or_default();
                     let point = (x, value.as_f64());
                     // A relaunch redoes the step it resumes at: its value replaces the old one.
