@@ -550,6 +550,9 @@ pub enum ExpCommand {
         /// Cancel only this run. With an experiment id, the run must belong to it.
         #[arg(long)]
         run: Option<String>,
+        /// Why the run is being stopped, kept on the run and shown with it.
+        #[arg(long)]
+        reason: Option<String>,
     },
 
     /// Abandon a run whose outcome cannot be recovered; keep its cancel pending.

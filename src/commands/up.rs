@@ -1273,6 +1273,7 @@ struct ApiRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     log_collection_error: Option<String>,
     monitor: Option<Value>,
+    outcome: Option<Value>,
 }
 
 pub(crate) fn run_host(store: &Store, run: &StoredRun) -> Result<Option<String>> {
@@ -1344,8 +1345,31 @@ impl ApiRun {
                 .map(|(failed, _)| if *failed { "failed" } else { "pending" }),
             log_collection_error: collection.and_then(|(_, error)| error),
             monitor: run_monitor_summary(store, run),
+            outcome: run_outcome(store, run),
         })
     }
+}
+
+/// Who stopped a cancelled run, when its stop was recorded: `{by, at, reason?, rule?}`.
+pub(crate) fn run_outcome(store: &Store, run: &StoredRun) -> Option<Value> {
+    if run.status != "cancelled" {
+        return None;
+    }
+    let stop = match store.run_stop(&run.id) {
+        Ok(stop) => stop?,
+        Err(error) => {
+            eprintln!("orx up: run {}: {error:#}", run.id);
+            return None;
+        }
+    };
+    let mut outcome = json!({"by": stop.by, "at": stop.at, "reason": stop.reason});
+    if let Some(rule) = stop.rule {
+        outcome["rule"] = match crate::engine::rules::parse(&json!([rule])) {
+            Ok(rules) => rules[0].shown(),
+            Err(_) => rule,
+        };
+    }
+    Some(outcome)
 }
 
 /// A run's monitor summary; a run whose monitor cannot be projected shows its lifecycle alone.
@@ -2910,6 +2934,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
             if let Err(err) = api_v2::cancel_run(
                 run,
                 "Cancel requested because the project is being deleted.",
+                None,
             )
             .await
             {
@@ -3331,6 +3356,7 @@ async fn list_instances() -> ApiResult {
 #[serde(rename_all = "camelCase")]
 struct CancelRunReq {
     chat_session_id: Option<String>,
+    reason: Option<String>,
 }
 
 async fn cancel_run(
@@ -3345,11 +3371,25 @@ async fn cancel_run(
     if is_terminal(&run.status) {
         return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
-    let reason = match req {
-        Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
-        None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+    let (reason, stop) = match req {
+        Some(Json(req)) => crate::commands::exp::exp_cancel_stop(
+            req.chat_session_id.as_deref(),
+            req.reason.as_deref(),
+        )
+        .map_err(bad_request)?,
+        None => (
+            "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+            crate::store::StopContext {
+                by: crate::store::StopBy::User,
+                at: 0,
+                reason: None,
+                chat_session_id: None,
+                rule: None,
+                extra: Default::default(),
+            },
+        ),
     };
-    api_v2::cancel_run(&run, &reason).await?;
+    api_v2::cancel_run(&run, &reason, Some(&stop)).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

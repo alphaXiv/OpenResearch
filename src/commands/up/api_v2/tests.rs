@@ -136,8 +136,13 @@ impl Commands for Services {
     fn backend(&self, _: &StoredRun) -> Result<Arc<dyn Backend>> {
         Ok(self.0.clone())
     }
-    async fn cancel(&self, run: &StoredRun, reason: &str) -> Result<()> {
-        self.1.cancel(self.0.as_ref(), &run.id, reason).await?;
+    async fn cancel(
+        &self,
+        run: &StoredRun,
+        reason: &str,
+        stop: Option<&crate::store::StopContext>,
+    ) -> Result<()> {
+        self.1.stop(self.0.as_ref(), &run.id, reason, stop).await?;
         Ok(())
     }
     fn host_target(&self, _: &str, _: bool) -> Result<crate::jobs::ssh::SshTarget> {
@@ -863,7 +868,7 @@ async fn cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundarie
     };
     f.client.launch(*args).await.unwrap();
     assert_eq!(f.api.run("run").unwrap().status, "starting");
-    f.client.cancel(Some("exp"), None).await.unwrap();
+    f.client.cancel(Some("exp"), None, None).await.unwrap();
     assert!(f
         .api
         .store()
@@ -2659,7 +2664,8 @@ async fn cli_cancel_selects_one_run_and_checks_its_experiment() {
         Some(crate::Command::Exp(crate::ExpArgs {
             command: crate::ExpCommand::Cancel {
                 exp_id: None,
-                run: Some(_)
+                run: Some(_),
+                reason: None,
             }
         }))
     ));
@@ -2667,9 +2673,13 @@ async fn cli_cancel_selects_one_run_and_checks_its_experiment() {
     f.insert("first", "exp", "project", "running");
     f.insert("second", "exp", "project", "running");
     f.insert("done", "exp", "project", "done");
-    assert!(f.client.cancel(Some("other"), Some("first")).await.is_err());
-    assert!(f.client.cancel(None, Some("done")).await.is_err());
-    f.client.cancel(None, Some("first")).await.unwrap();
+    assert!(f
+        .client
+        .cancel(Some("other"), Some("first"), None)
+        .await
+        .is_err());
+    assert!(f.client.cancel(None, Some("done"), None).await.is_err());
+    f.client.cancel(None, Some("first"), None).await.unwrap();
     let accepted = |id| {
         f.api
             .store()
@@ -2682,8 +2692,70 @@ async fn cli_cancel_selects_one_run_and_checks_its_experiment() {
     assert!(accepted("first"));
     assert!(!accepted("second"));
     assert!(!accepted("done"));
-    f.client.cancel(Some("exp"), None).await.unwrap();
+    f.client.cancel(Some("exp"), None, None).await.unwrap();
     assert!(accepted("second"));
+}
+
+/// A stop keeps who asked for it and why: an agent's chat and words, the user otherwise, and
+/// the run shows it once the cancel lands.
+#[tokio::test]
+async fn a_stop_keeps_who_asked_and_why() {
+    let f = Fixture::new().await;
+    for id in ["agent", "user", "long"] {
+        f.insert(id, "exp", "project", "running");
+    }
+    let cancel = |id: &str, body: Value| {
+        let client = f.client.clone();
+        let path = format!("runs/{id}/cancel");
+        async move { client.json(reqwest::Method::POST, &path, Some(&body)).await }
+    };
+    cancel(
+        "agent",
+        json!({"chatSessionId": "chat-1", "reason": "Loss went NaN at step 410."}),
+    )
+    .await
+    .unwrap();
+    cancel("user", json!({})).await.unwrap();
+    let refused = cancel("long", json!({"reason": "x".repeat(2049)}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("--reason must be 1 to 2048 bytes of text (got 2049 bytes)."),
+        "{refused}"
+    );
+
+    let store = || f.api.store();
+    let agent = store().run_stop("agent").unwrap().unwrap();
+    assert_eq!(agent.by, crate::store::StopBy::Agent);
+    assert_eq!(agent.reason.as_deref(), Some("Loss went NaN at step 410."));
+    assert_eq!(agent.chat_session_id.as_deref(), Some("chat-1"));
+    assert_eq!(
+        store().get_run("agent").unwrap().unwrap().cancel_reason.as_deref(),
+        Some("Cancel requested by agent session chat-1 with `orx exp cancel`: Loss went NaN at step 410.")
+    );
+    assert_eq!(
+        store().run_stop("user").unwrap().unwrap().by,
+        crate::store::StopBy::User
+    );
+    assert_eq!(store().run_stop("long").unwrap(), None);
+
+    let view = |id: &str| f.api.view(&f.api.run(id).unwrap()).unwrap();
+    assert_eq!(view("agent")["outcome"], Value::Null, "not stopped yet");
+    f.api
+        .engine
+        .observe(
+            "agent",
+            Observation::Gone {
+                reason: "stopped".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(f.api.run("agent").unwrap().status, "cancelled");
+    assert_eq!(
+        view("agent")["outcome"],
+        json!({"by": "agent", "at": agent.at, "reason": "Loss went NaN at step 410."})
+    );
 }
 
 #[tokio::test]

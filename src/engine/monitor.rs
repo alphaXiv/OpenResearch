@@ -178,6 +178,8 @@ struct Lifecycle {
     log_error: Option<String>,
     /// The rules the run was launched with, or why they cannot be read.
     rules: std::result::Result<Vec<super::rules::Rule>, String>,
+    /// Who stopped the run, once a cancel was accepted, or why that cannot be read.
+    stop: std::result::Result<Option<crate::store::StopContext>, String>,
 }
 
 impl Lifecycle {
@@ -221,6 +223,9 @@ impl Lifecycle {
             log_error: run.log_error,
             rules: super::rules::frozen(&row.id, store.run_monitor_config(&row.id)?.as_deref())
                 .map_err(|error| format!("{error:#}")),
+            stop: store
+                .run_stop(&row.id)
+                .map_err(|error| format!("{error:#}")),
             run: row.clone(),
         })
     }
@@ -257,7 +262,7 @@ impl Lifecycle {
     /// Changes whenever anything the projection reads from the store does.
     fn key(&self) -> String {
         format!(
-            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}",
+            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}",
             self.run.updated_at,
             self.state,
             self.contact,
@@ -268,6 +273,7 @@ impl Lifecycle {
             self.parent.as_ref().map(|p| (&p.id, p.updated_at)),
             self.earlier.as_ref().map(|p| (&p.id, p.updated_at)),
             self.log_error,
+            self.stop,
         )
     }
 }
@@ -2118,6 +2124,9 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
         )),
         Err(error) => lines.push(format!("rules    {error}")),
     }
+    if let Some(stop) = stop_text(life) {
+        lines.push(format!("stop     {stop}"));
+    }
     if let Some(snapshot) = snapshot.filter(|s| !s.latest.is_empty()) {
         let values = snapshot
             .signal_order
@@ -2180,6 +2189,39 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// Who stopped the run and why, in the lead the page gives it, once a stop was accepted.
+fn stop_text(life: &Lifecycle) -> Option<String> {
+    use crate::store::StopBy;
+    let stop = match &life.stop {
+        Ok(stop) => stop.as_ref()?,
+        Err(error) => return Some(error.clone()),
+    };
+    let ended = life.phase == Some(Phase::Cancelled);
+    let because = |words: &str| match &stop.reason {
+        Some(reason) if reason.ends_with(['.', '!', '?']) => format!("{words}: {reason}"),
+        Some(reason) => format!("{words}: {reason}."),
+        None => format!("{words}."),
+    };
+    Some(match (stop.by, ended) {
+        (StopBy::User, true) => because("Stopped by the user"),
+        (StopBy::User, false) => because("The user asked to stop it"),
+        (StopBy::Agent, true) => because("Auto-stopped by the agent"),
+        (StopBy::Agent, false) => because("The agent asked to stop it"),
+        (StopBy::Rule, _) => {
+            let name = stop.rule.as_ref().and_then(|rule| rule["name"].as_str());
+            let lead = if ended {
+                "Auto-stopped by rule"
+            } else {
+                "Stopping by rule"
+            };
+            format!(
+                "{} No model was involved.",
+                because(&format!("{lead} {}", name.unwrap_or("?")))
+            )
+        }
+    })
 }
 
 /// A plan's stages on one line: `✓ download 2m · ● train · ○ eval about 11m · – export skipped`.
@@ -5433,6 +5475,73 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("rules    Run r3's rules: rules[0] (r): unknown condition \"lossAbove\""));
+    }
+
+    /// `orx exp status` says who stopped a run and why, in the lead the page gives it.
+    #[test]
+    fn status_says_who_stopped_a_run() {
+        use crate::store::{StopBy, StopContext};
+        let f = Fixture::new("orx-monitor-stop-words");
+        let stopped = |id: &str, by: StopBy, reason: Option<&str>, rule: Option<Value>| {
+            f.run_named(id, "running", local());
+            let stop = StopContext {
+                by,
+                at: 0,
+                reason: reason.map(str::to_owned),
+                chat_session_id: None,
+                rule,
+                extra: Default::default(),
+            };
+            f.store
+                .accept_run_stop(id, Some("words"), Some(&stop))
+                .unwrap()
+                .unwrap();
+            let live = super::monitor(&f.store, &f.store.get_run(id).unwrap().unwrap())
+                .unwrap()
+                .1;
+            let line = |monitor: &Value| {
+                monitor["statusText"]
+                    .as_str()
+                    .unwrap()
+                    .lines()
+                    .find_map(|line| line.strip_prefix("stop     "))
+                    .map(str::to_owned)
+            };
+            let asked = line(&live);
+            f.store.set_run_status(id, "cancelled");
+            let ended = super::monitor(&f.store, &f.store.get_run(id).unwrap().unwrap())
+                .unwrap()
+                .1;
+            (asked, line(&ended))
+        };
+        assert_eq!(
+            stopped("u", StopBy::User, None, None),
+            (
+                Some("The user asked to stop it.".into()),
+                Some("Stopped by the user.".into())
+            )
+        );
+        assert_eq!(
+            stopped("a", StopBy::Agent, Some("Loss went NaN"), None)
+                .1
+                .as_deref(),
+            Some("Auto-stopped by the agent: Loss went NaN.")
+        );
+        assert_eq!(
+            stopped("r", StopBy::Rule, Some("loss was NaN on 3 reports in a row"), Some(json!({"name": "nan-loss"}))),
+            (
+                Some("Stopping by rule nan-loss: loss was NaN on 3 reports in a row. No model was involved.".into()),
+                Some("Auto-stopped by rule nan-loss: loss was NaN on 3 reports in a row. No model was involved.".into()),
+            )
+        );
+        f.run_named("n", "cancelled", local());
+        let never = super::monitor(&f.store, &f.store.get_run("n").unwrap().unwrap())
+            .unwrap()
+            .1;
+        assert!(
+            !never["statusText"].as_str().unwrap().contains("stop "),
+            "no one is named for an old stop"
+        );
     }
 
     /// Experiment settings as orx stored them before plans, and with one beside a key a newer

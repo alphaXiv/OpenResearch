@@ -1441,7 +1441,12 @@ impl Commands for Runtime {
 
     /// Accepts a cancel for a run the engine owns, or records it for the 0.2.x supervisor
     /// that does.
-    async fn cancel(&self, run: &StoredRun, reason: &str) -> Result<()> {
+    async fn cancel(
+        &self,
+        run: &StoredRun,
+        reason: &str,
+        stop: Option<&crate::store::StopContext>,
+    ) -> Result<()> {
         if !is_engine_row(run)
             && !self.engine.holds(&run.id)
             && !crate::local::is_terminal(&run.status)
@@ -1455,12 +1460,14 @@ impl Commands for Runtime {
         match self.key(run).and_then(|key| self.backend_for(&key)) {
             Ok(backend) => {
                 self.engine
-                    .cancel(backend.as_ref(), &run.id, reason)
+                    .stop(backend.as_ref(), &run.id, reason, stop)
                     .await?;
             }
             // The tick shows the run unreconciled with this error; delivery waits for an adapter.
             Err(_) => {
-                self.engine.accept_cancel(&run.id, reason)?;
+                self.engine.accept_stop(&run.id, |store| {
+                    store.accept_run_stop(&run.id, Some(reason), stop)
+                })?;
             }
         }
         self.changed.notify_one();
@@ -3008,7 +3015,7 @@ mod tests {
         assert_eq!(notices[0].kind, crate::store::ATTENTION);
         // Nothing launched, so the cancel needs no adapter.
         let run = store.get_run("run").unwrap().unwrap();
-        runtime.cancel(&run, "user").await.unwrap();
+        runtime.cancel(&run, "user", None).await.unwrap();
         assert_eq!(store.get_run("run").unwrap().unwrap().status, "cancelled");
         drop(runtime);
         drop(store);
@@ -3656,7 +3663,7 @@ mod tests {
             };
 
             let run = runtime.store().unwrap().get_run("run").unwrap().unwrap();
-            runtime.cancel(&run, "user").await.unwrap();
+            runtime.cancel(&run, "user", None).await.unwrap();
             assert_eq!(
                 runtime.engine.cancel_error("run").as_deref(),
                 Some("connection refused")

@@ -90,16 +90,20 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
                 .launch(run_args)
                 .await
         }
-        ExpCommand::Cancel { exp_id, run } => match exp_id {
+        ExpCommand::Cancel {
+            exp_id,
+            run,
+            reason,
+        } => match exp_id {
             Some(exp_id) => {
                 resolve_experiment(store, &exp_id)?
-                    .cancel(run.as_deref())
+                    .cancel(run.as_deref(), reason.as_deref())
                     .await
             }
             None => {
                 crate::plane::local_plane::ApiClient::discover()
                     .await?
-                    .cancel(None, run.as_deref())
+                    .cancel(None, run.as_deref(), reason.as_deref())
                     .await
             }
         },
@@ -572,12 +576,44 @@ pub(crate) fn default_hf_image(flavor: &str) -> String {
     }
 }
 
-/// Who asked `orx exp cancel` to stop a run, recorded on the run.
-pub(crate) fn exp_cancel_reason(chat_session_id: Option<&str>) -> String {
-    match chat_session_id {
-        Some(id) => format!("Cancel requested by agent session {id} with `orx exp cancel`."),
-        None => "Cancel requested with `orx exp cancel`.".into(),
+/// The longest `--reason` a stop keeps.
+const MAX_REASON: usize = 2048;
+
+/// Who asked `orx exp cancel` to stop a run, and why if they said: the words recorded on the
+/// run and who stopped it. An agent's chat makes it the agent's stop. Refuses a reason that is
+/// empty or too long.
+pub(crate) fn exp_cancel_stop(
+    chat_session_id: Option<&str>,
+    reason: Option<&str>,
+) -> std::result::Result<(String, crate::store::StopContext), String> {
+    let reason = reason.map(str::trim);
+    if let Some(reason) = reason.filter(|r| r.is_empty() || r.len() > MAX_REASON) {
+        return Err(format!(
+            "--reason must be 1 to {MAX_REASON} bytes of text (got {} bytes).",
+            reason.len()
+        ));
     }
+    let asked = match chat_session_id {
+        Some(id) => format!("Cancel requested by agent session {id} with `orx exp cancel`"),
+        None => "Cancel requested with `orx exp cancel`".into(),
+    };
+    let words = match reason {
+        Some(reason) => format!("{asked}: {reason}"),
+        None => format!("{asked}."),
+    };
+    let stop = crate::store::StopContext {
+        by: if chat_session_id.is_some() {
+            crate::store::StopBy::Agent
+        } else {
+            crate::store::StopBy::User
+        },
+        at: 0,
+        reason: reason.map(str::to_owned),
+        chat_session_id: chat_session_id.map(str::to_owned),
+        rule: None,
+        extra: Default::default(),
+    };
+    Ok((words, stop))
 }
 
 /// Records cancel intent for a run a 0.2.x supervisor owns, under the `cancel.lock` it reads

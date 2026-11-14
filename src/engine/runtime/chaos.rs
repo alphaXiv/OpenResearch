@@ -196,7 +196,7 @@ async fn apply_requests(directory: &Path, runtime: &Runtime, engine: &Engine) {
         let marker = requests.join(format!("{id}.{action}.applied"));
         fs::write(&marker, b"").unwrap();
         let applied = if action == "cancel" {
-            runtime.cancel(&run, "chaos").await.is_ok()
+            runtime.cancel(&run, "chaos", None).await.is_ok()
         } else {
             engine.abandon(&id).unwrap_or(false)
         };

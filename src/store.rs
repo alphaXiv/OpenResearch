@@ -340,6 +340,35 @@ pub struct NotifyCursor {
     pub generation: u64,
 }
 
+/// Who stopped a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StopBy {
+    User,
+    Agent,
+    Rule,
+}
+
+/// Who stopped a run and why, kept once with the first cancel accepted for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopContext {
+    pub by: StopBy,
+    /// When the cancel was accepted; set by the store.
+    #[serde(default)]
+    pub at: i64,
+    /// The agent's `--reason`, or what a rule saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_session_id: Option<String>,
+    /// The rule as the run froze it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Contact {
@@ -1456,6 +1485,7 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN waiting_reason TEXT",
             "ALTER TABLE runs ADD COLUMN price_json TEXT",
             "ALTER TABLE runs ADD COLUMN monitor_config_json TEXT",
+            "ALTER TABLE runs ADD COLUMN stop_context_json TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_micros INTEGER",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_currency TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
@@ -6285,22 +6315,73 @@ impl Store {
 
     /// `None` accepts legacy intent; a reason accepts an API cancel, including during submission.
     pub fn accept_run_cancel(&self, run_id: &str, reason: Option<&str>) -> Result<Option<i64>> {
+        self.accept_run_stop(run_id, reason, None)
+    }
+
+    /// [`Self::accept_run_cancel`], recording who stopped the run when this cancel is the first
+    /// accepted: a later or legacy one never replaces it.
+    pub fn accept_run_stop(
+        &self,
+        run_id: &str,
+        reason: Option<&str>,
+        stop: Option<&StopContext>,
+    ) -> Result<Option<i64>> {
         let path = self.run_lock_path(CANCEL_LOCK, run_id)?;
         let mut lock = open_lifecycle_lock_at(&path)?;
         let _guard = lock.write()?;
+        self.accept_run_stop_locked(run_id, reason, stop)
+    }
+
+    /// [`Self::accept_run_stop`] for a caller already holding the run's cancel lock.
+    fn accept_run_stop_locked(
+        &self,
+        run_id: &str,
+        reason: Option<&str>,
+        stop: Option<&StopContext>,
+    ) -> Result<Option<i64>> {
+        let now = now_ms();
+        let stop = stop
+            .map(|stop| {
+                serde_json::to_string(&StopContext {
+                    at: now,
+                    ..stop.clone()
+                })
+            })
+            .transpose()?;
         Ok(self.conn.query_row(
             "UPDATE runs SET cancel_accepted_at = COALESCE(cancel_accepted_at, ?2),
                              updated_at = CASE WHEN cancel_accepted_at IS NULL THEN ?2
                                                ELSE updated_at END,
                              cancel_reason = CASE WHEN cancel_requested = 0 AND cancel_accepted_at IS NULL
                                                   THEN COALESCE(?3, cancel_reason)
-                                                  ELSE cancel_reason END
+                                                  ELSE cancel_reason END,
+                             stop_context_json = CASE WHEN cancel_requested = 0 AND cancel_accepted_at IS NULL
+                                                      THEN ?4 ELSE stop_context_json END
              WHERE id = ?1 AND status IN ('submitting', 'starting', 'running')
                AND (cancel_requested = 1 OR cancel_accepted_at IS NOT NULL OR ?3 IS NOT NULL)
              RETURNING cancel_accepted_at",
-            params![run_id, now_ms(), reason],
+            params![run_id, now, reason, stop],
             |row| row.get(0),
         ).optional()?)
+    }
+
+    /// Who stopped the run, when the cancel that stopped it said; `None` for a run no one
+    /// stopped, or one stopped before orx kept this.
+    pub(crate) fn run_stop(&self, run_id: &str) -> Result<Option<StopContext>> {
+        let text: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT stop_context_json FROM runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        text.map(|text| {
+            serde_json::from_str(&text)
+                .map_err(|e| anyhow!("Run {run_id}'s record of who stopped it is unreadable: {e}"))
+        })
+        .transpose()
     }
 
     pub fn subscribe_run(
@@ -8664,6 +8745,106 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Concurrent user, agent and rule stops all accept the cancel; the first keeps who stopped
+    /// the run, and a legacy cancel records no one.
+    #[test]
+    fn the_first_accepted_stop_says_who_stopped_the_run() {
+        let (dir, store) = engine_fixture();
+        let stop = |by: StopBy, reason: &str| StopContext {
+            by,
+            at: 0,
+            reason: Some(reason.into()),
+            chat_session_id: None,
+            rule: None,
+            extra: Default::default(),
+        };
+        let insert = |id: &str| {
+            let run = run_fixture(id, "running", None);
+            store.upsert_run(&run).unwrap();
+        };
+        insert("raced");
+        let first = store
+            .accept_run_stop(
+                "raced",
+                Some("agent words"),
+                Some(&stop(StopBy::Agent, "NaN")),
+            )
+            .unwrap()
+            .unwrap();
+        for later in [stop(StopBy::User, "mine"), stop(StopBy::Rule, "rule")] {
+            assert_eq!(
+                store
+                    .accept_run_stop("raced", Some("later"), Some(&later))
+                    .unwrap(),
+                Some(first),
+                "a later stop is accepted as the same cancel"
+            );
+        }
+        let kept = store.run_stop("raced").unwrap().unwrap();
+        assert_eq!(
+            (kept.by, kept.at, kept.reason.as_deref()),
+            (StopBy::Agent, first, Some("NaN"))
+        );
+        assert_eq!(
+            store
+                .get_run("raced")
+                .unwrap()
+                .unwrap()
+                .cancel_reason
+                .as_deref(),
+            Some("agent words")
+        );
+
+        insert("legacy");
+        assert!(store.request_cancel("legacy", "old CLI").unwrap());
+        store
+            .accept_run_stop("legacy", Some("new"), Some(&stop(StopBy::User, "u")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.run_stop("legacy").unwrap(),
+            None,
+            "the old CLI asked first"
+        );
+
+        insert("ended");
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'done' WHERE id = 'ended'", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .accept_run_stop("ended", Some("late"), Some(&stop(StopBy::Rule, "r")))
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.run_stop("ended").unwrap(), None);
+
+        // A newer orx's field is kept; one this orx cannot read is said to be unreadable.
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET stop_context_json = '{\"by\":\"user\",\"at\":5,\"later\":1}' WHERE id = 'ended'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.run_stop("ended").unwrap().unwrap().extra["later"], 1);
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET stop_context_json = '{\"by\":\"watcher\"}' WHERE id = 'ended'",
+                [],
+            )
+            .unwrap();
+        assert!(store
+            .run_stop("ended")
+            .unwrap_err()
+            .to_string()
+            .contains("unreadable"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn engine_cancel_acceptance_waits_for_legacy_writer_to_commit_or_withdraw() {
         let (dir, store) = engine_fixture();
@@ -11009,6 +11190,16 @@ mod tests {
     }
 
     impl Store {
+        /// Moves a run to `status` as its lifecycle would, without the rest of a commit.
+        pub(crate) fn set_run_status(&self, run_id: &str, status: &str) {
+            self.conn
+                .execute(
+                    "UPDATE runs SET status = ?2, updated_at = updated_at + 1 WHERE id = ?1",
+                    params![run_id, status],
+                )
+                .unwrap();
+        }
+
         /// The rules a run was launched with, as `orx exp run` freezes them.
         pub(crate) fn set_run_monitor_config(&self, run_id: &str, config: Option<&str>) {
             self.conn

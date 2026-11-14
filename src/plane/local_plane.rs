@@ -364,10 +364,10 @@ impl LocalPlane {
         Ok(())
     }
 
-    pub async fn cancel(&self, run: Option<&str>) -> Result<()> {
+    pub async fn cancel(&self, run: Option<&str>, reason: Option<&str>) -> Result<()> {
         ApiClient::discover()
             .await?
-            .cancel(Some(&self.id), run)
+            .cancel(Some(&self.id), run, reason)
             .await
     }
 
@@ -764,7 +764,12 @@ impl ApiClient {
         Ok(())
     }
 
-    pub async fn cancel(&self, experiment: Option<&str>, selected: Option<&str>) -> Result<()> {
+    pub async fn cancel(
+        &self,
+        experiment: Option<&str>,
+        selected: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<()> {
         let path = match (experiment, selected) {
             (_, Some(run)) => format!("runs/{}", urlencoding::encode(run)),
             (Some(experiment), None) => {
@@ -811,6 +816,7 @@ impl ApiClient {
         for id in in_flight {
             let request = serde_json::json!({
                 "chatSessionId": crate::local::chat::launching_chat_session(),
+                "reason": reason,
             });
             let run: Run = serde_json::from_value(
                 self.json(

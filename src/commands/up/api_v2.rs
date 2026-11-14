@@ -31,7 +31,12 @@ pub(crate) trait Commands: Send + Sync {
     /// Holds `admission` until the run is durable.
     async fn run(&self, args: crate::ExpRunArgs, admission: Box<dyn Send>) -> Result<String>;
     fn backend(&self, run: &StoredRun) -> Result<Arc<dyn Backend>>;
-    async fn cancel(&self, run: &StoredRun, reason: &str) -> Result<()>;
+    async fn cancel(
+        &self,
+        run: &StoredRun,
+        reason: &str,
+        stop: Option<&crate::store::StopContext>,
+    ) -> Result<()>;
     async fn cleanup(&self, run: &WatchedRun) -> Result<Value>;
     async fn compute(
         &self,
@@ -149,6 +154,7 @@ impl Api {
         value["durationSecs"] = json!(crate::local::run_duration_secs(run));
         value["updatedDisplay"] = json!(crate::local::fmt_ago(run.updated_at));
         value["monitor"] = json!(super::run_monitor_summary(&self.store(), run));
+        value["outcome"] = json!(super::run_outcome(&self.store(), run));
         Ok(value)
     }
 
@@ -195,7 +201,7 @@ impl Api {
                     stops.push(async move {
                         if let Err(error) = self
                             .commands
-                            .cancel(&stored, "Stopped when OpenResearch was force quit.")
+                            .cancel(&stored, "Stopped when OpenResearch was force quit.", None)
                             .await
                         {
                             eprintln!(
@@ -311,8 +317,12 @@ pub(crate) async fn launch(args: crate::ExpRunArgs) -> Result<StoredRun> {
     api.run(&id)
 }
 
-pub(crate) async fn cancel_run(run: &StoredRun, reason: &str) -> Result<()> {
-    installed()?.commands.cancel(run, reason).await
+pub(crate) async fn cancel_run(
+    run: &StoredRun,
+    reason: &str,
+    stop: Option<&crate::store::StopContext>,
+) -> Result<()> {
+    installed()?.commands.cancel(run, reason, stop).await
 }
 
 pub(crate) fn host_target(host: &str, slurm: bool) -> Result<crate::jobs::ssh::SshTarget> {
@@ -498,6 +508,7 @@ async fn run(
 #[serde(rename_all = "camelCase")]
 struct CancelRequest {
     chat_session_id: Option<String>,
+    reason: Option<String>,
 }
 
 async fn cancel(
@@ -506,13 +517,13 @@ async fn cancel(
     request: Option<Json<CancelRequest>>,
 ) -> ApiResult<Json<Value>> {
     let run = api.run(&id)?;
-    let chat = request.and_then(|Json(request)| request.chat_session_id);
-    api.commands
-        .cancel(
-            &run,
-            &crate::commands::exp::exp_cancel_reason(chat.as_deref()),
-        )
-        .await?;
+    let Json(request) = request.unwrap_or_default();
+    let (reason, stop) = crate::commands::exp::exp_cancel_stop(
+        request.chat_session_id.as_deref(),
+        request.reason.as_deref(),
+    )
+    .map_err(|why| Failure::Message(StatusCode::BAD_REQUEST, why))?;
+    api.commands.cancel(&run, &reason, Some(&stop)).await?;
     Ok(Json(api.view(&api.run(&id)?)?))
 }
 async fn abandon(State(api): State<Arc<Api>>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
