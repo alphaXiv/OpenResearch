@@ -335,6 +335,8 @@ struct Slot {
     usage: Option<PlanUsage>,
     attempted_at: Option<Instant>,
     reading: bool,
+    /// A re-read waits for the snapshot to turn stale; the next claim takes it.
+    deferred: bool,
 }
 
 impl Slot {
@@ -344,6 +346,16 @@ impl Slot {
                 || self
                     .attempted_at
                     .is_none_or(|at| now.duration_since(at) >= STALE_AFTER))
+    }
+
+    /// How long until the snapshot turns stale; a whole interval while a read is
+    /// in flight, since that read may have asked before the limits moved.
+    fn until_stale(&self, now: Instant) -> Duration {
+        let since = match self.attempted_at {
+            Some(at) if !self.reading => now.duration_since(at),
+            _ => Duration::ZERO,
+        };
+        STALE_AFTER.saturating_sub(since)
     }
 }
 
@@ -409,13 +421,14 @@ impl Plans {
                         reader,
                         usage: None,
                         attempted_at: None,
-                        reading: slot.reading,
+                        ..slot
                     },
                     None => Slot {
                         reader,
                         usage: None,
                         attempted_at: None,
                         reading: false,
+                        deferred: false,
                     },
                 }
             })
@@ -441,9 +454,41 @@ impl Plans {
             })
             .map(|slot| {
                 slot.reading = true;
+                slot.deferred = false;
                 slot.reader.clone()
             })
             .collect()
+    }
+
+    /// Defers one re-read of the account to when its snapshot turns stale and
+    /// returns how long that is; None when one is already deferred.
+    pub fn defer(&self, harness: &str, profile: Option<&str>, now: Instant) -> Option<Duration> {
+        let mut state = self.0.lock().unwrap();
+        let slot = state
+            .slots
+            .iter_mut()
+            .find(|slot| slot.reader.is(harness, profile))?;
+        if slot.deferred {
+            return None;
+        }
+        slot.deferred = true;
+        Some(slot.until_stale(now))
+    }
+
+    /// How long a deferred read still has to wait: a read that finished while
+    /// it waited freshened the snapshot again. None once it was claimed.
+    pub fn still_deferred(
+        &self,
+        harness: &str,
+        profile: Option<&str>,
+        now: Instant,
+    ) -> Option<Duration> {
+        let state = self.0.lock().unwrap();
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.reader.is(harness, profile) && slot.deferred)?;
+        Some(slot.until_stale(now))
     }
 
     /// The account's reader, whether or not a read of it is due.
@@ -573,14 +618,42 @@ impl Drop for Claim<'_> {
 }
 
 /// A running session saw its account's limits move: re-read that account's
-/// plan unless its snapshot is fresh, then tell the dashboard.
+/// plan now, or once a fresh snapshot turns stale, then tell the dashboard.
 pub fn observed(host: &Arc<ChatHost>, harness: &str, profile: Option<&str>) {
-    let claimed = PLANS.claim(Some((harness, profile)), Instant::now(), false);
-    if claimed.is_empty() {
-        return;
-    }
-    let host = host.clone();
+    let now = Instant::now();
+    let claimed = PLANS.claim(Some((harness, profile)), now, false);
+    let deferred = if claimed.is_empty() {
+        match PLANS.defer(harness, profile, now) {
+            Some(wait) => Some(wait),
+            None => return,
+        }
+    } else {
+        None
+    };
+    let (host, harness, profile) = (
+        host.clone(),
+        harness.to_string(),
+        profile.map(str::to_string),
+    );
     tokio::spawn(async move {
+        let claimed = match deferred {
+            None => claimed,
+            Some(mut wait) => loop {
+                tokio::time::sleep(crate::config::paced(wait)).await;
+                let now = Instant::now();
+                let claimed = PLANS.claim(Some((&harness, profile.as_deref())), now, false);
+                if !claimed.is_empty() {
+                    break claimed;
+                }
+                match PLANS.still_deferred(&harness, profile.as_deref(), now) {
+                    Some(left) => wait = left,
+                    None => return,
+                }
+            },
+        };
+        if claimed.is_empty() {
+            return;
+        }
         PLANS.read(claimed, &host.codex).await;
         host.emit_event("usage.changed", json!({}));
     });
@@ -810,6 +883,59 @@ mod tests {
             1,
             "a refresh forces it"
         );
+    }
+
+    /// A turn's last limits, seen while the snapshot is fresh, are read once it turns stale.
+    #[test]
+    fn limits_seen_while_fresh_defer_one_read_to_staleness() {
+        let plans = Plans::default();
+        let now = Instant::now();
+        plans.sync(vec![reader("codex", None)]);
+        let claimed = plans.claim(None, now, false);
+        plans.finish(&claimed[0], plan(90.0), now, "t1".into());
+
+        let seen = now + STALE_AFTER / 4;
+        assert!(plans.claim(Some(("codex", None)), seen, false).is_empty());
+        assert_eq!(plans.defer("codex", None, seen), Some(STALE_AFTER * 3 / 4));
+        assert_eq!(
+            plans.defer("codex", None, seen),
+            None,
+            "one pending at a time"
+        );
+
+        let stale = now + STALE_AFTER;
+        assert_eq!(plans.claim(Some(("codex", None)), stale, false).len(), 1);
+        assert_eq!(
+            plans.defer("codex", None, stale),
+            Some(STALE_AFTER),
+            "the claim took the deferred read, and the one in flight may predate the limits"
+        );
+        assert_eq!(plans.defer("claude-code", None, now), None);
+    }
+
+    /// Limits seen while a read is in flight wait past the snapshot that read
+    /// leaves, rather than waking early and giving up.
+    #[test]
+    fn a_deferred_read_outlasts_a_read_that_finishes_while_it_waits() {
+        let plans = Plans::default();
+        let now = Instant::now();
+        plans.sync(vec![reader("codex", None)]);
+        let claimed = plans.claim(None, now, false);
+
+        let seen = now + STALE_AFTER / 6;
+        assert_eq!(plans.defer("codex", None, seen), Some(STALE_AFTER));
+        let finished = now + STALE_AFTER / 3;
+        plans.finish(&claimed[0], plan(90.0), finished, "t1".into());
+
+        let woke = seen + STALE_AFTER;
+        assert!(plans.claim(Some(("codex", None)), woke, false).is_empty());
+        let left = plans.still_deferred("codex", None, woke).unwrap();
+        assert_eq!(woke + left, finished + STALE_AFTER);
+        assert_eq!(
+            plans.claim(Some(("codex", None)), woke + left, false).len(),
+            1
+        );
+        assert_eq!(plans.still_deferred("codex", None, woke + left), None);
     }
 
     #[test]

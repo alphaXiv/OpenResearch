@@ -67,13 +67,14 @@ pub fn seven_days(store: &Store, now: i64) -> Result<UsageReport> {
     let mut backends: BTreeMap<(String, String), [u64; 7]> = BTreeMap::new();
     let mut unpriced: BTreeMap<String, u32> = BTreeMap::new();
     for run in store.billed_runs(&BILLED, from, None)? {
-        let Some((start, end)) = running_time(&run, now) else {
+        let running = running_time(&run, now);
+        let Some((start, end)) = running.or(run.ended_at.map(|end| (end, end))) else {
             continue;
         };
         if start >= to || end <= from {
             continue;
         }
-        let Some(quote) = &run.quote else {
+        let (Some(_), Some(quote)) = (running, &run.quote) else {
             *unpriced.entry(run.backend).or_default() += 1;
             continue;
         };
@@ -124,14 +125,12 @@ pub fn chat_compute(store: &Store, chat_id: &str, now: i64) -> Result<Option<Cha
     let mut spent: BTreeMap<String, u64> = BTreeMap::new();
     let mut unpriced = 0;
     for run in &runs {
-        let Some((start, end)) = running_time(run, now) else {
-            continue;
-        };
-        match &run.quote {
-            Some(quote) => {
+        match (running_time(run, now), &run.quote) {
+            (Some((start, end)), Some(quote)) => {
                 *spent.entry(quote.currency.clone()).or_default() += cost(quote, end - start)
             }
-            None => unpriced += 1,
+            (None, _) if !run.finished => {}
+            _ => unpriced += 1,
         }
     }
     // The contract carries one currency; runs priced in another are left out of the sum.
@@ -145,7 +144,8 @@ pub fn chat_compute(store: &Store, chat_id: &str, now: i64) -> Result<Option<Cha
     }))
 }
 
-/// From the payload's start to its end, or to now while it runs; None before it starts.
+/// From the payload's start to its end, or to now while it runs; None before it starts, and for
+/// a run first seen after it finished, whose running time is unknown.
 fn running_time(run: &BilledRun, now: i64) -> Option<(i64, i64)> {
     let start = run.started_at?;
     let end = if run.finished { run.ended_at? } else { now };
@@ -216,6 +216,8 @@ mod tests {
         Queued,
         Running(i64),
         Done(i64, i64),
+        /// Finished when orx first saw it, at this time.
+        DoneUnseen(i64),
     }
     use Span::*;
 
@@ -231,6 +233,7 @@ mod tests {
                 Queued => ("starting", None, None),
                 Running(started) => ("running", Some(started), None),
                 Done(started, ended) => ("done", Some(started), Some(ended)),
+                DoneUnseen(ended) => ("done", None, Some(ended)),
             };
             let quote = price.map(|(micros, per)| {
                 serde_json::json!({"amountMicros": micros, "per": per, "currency": "USD",
@@ -374,6 +377,38 @@ mod tests {
             }
         );
         assert_eq!(chat_compute(&store, "quiet", NOW).unwrap(), None);
+        drop((store, conn));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A run first seen after it finished ran for a time orx never saw: never free, never dropped.
+    #[test]
+    fn a_billed_run_first_seen_finished_is_unpriced() {
+        let Some((dir, store, conn)) = store_west_of_utc("unseen") else {
+            return;
+        };
+        runs(
+            &conn,
+            &[
+                ("hf_job", "chat", Done(NOW - 2 * HOUR, NOW - HOUR), HOURLY),
+                ("hf_job", "chat", DoneUnseen(NOW - HOUR), HOURLY),
+                ("modal_job", "chat", DoneUnseen(NOW - HOUR), MINUTELY),
+                ("modal_job", "chat", DoneUnseen(TODAY - 8 * DAY), MINUTELY),
+            ],
+        );
+
+        let week = seven_days(&store, NOW).unwrap();
+        let backend = |name: &str| {
+            let row = week.compute.iter().find(|row| row.backend == name).unwrap();
+            (row.day_micros.iter().sum::<u64>(), row.unpriced)
+        };
+        assert_eq!(backend("hf_job"), (1_000_000, 1));
+        assert_eq!(backend("modal_job"), (0, 1));
+        let compute = chat_compute(&store, "chat", NOW).unwrap().unwrap();
+        assert_eq!(
+            (compute.runs, compute.cost_micros, compute.unpriced),
+            (4, 1_000_000, 3)
+        );
         drop((store, conn));
         std::fs::remove_dir_all(dir).unwrap();
     }

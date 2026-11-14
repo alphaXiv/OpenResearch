@@ -1,4 +1,4 @@
-import { useContext, useLayoutEffect, useRef, useState } from "react";
+import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useMutate } from "@clo/react-mutation";
 import { useQuery } from "@tanstack/react-query";
 import { Popover } from "@base-ui/react/popover";
@@ -13,7 +13,7 @@ import { useWorkspace } from "../workspace";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { AccountChip } from "./AccountChip";
 import { BackendLogo, backendName } from "./BackendLogos";
-import { IconButton, LoadingRow, SEGMENTED_CLASS_NAME, Spinner, Tooltip } from "./ui";
+import { Button, IconButton, LoadingRow, SEGMENTED_CLASS_NAME, Spinner, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 import { fmtEstimate, fmtMoney, leftTone, lowestWindow, LOW_PERCENT, PLAN_GRID, PlanMark, PlanRows, planSummary, Ring, UsageGauge, usePlanAgent, useUpdateAgent } from "./Usage";
 import { useMachineState, WorkspaceConnection } from "./WorkspaceConnection";
@@ -24,6 +24,8 @@ export function StatusStrip({ runtime, onDetails }: { runtime: RuntimeInfo; onDe
   const usage = useQuery(useWorkspace().queries.getUsageQuery());
   const report = usage.data;
   const hasUsage = report ? report.plans === null || report.plans.length > 0 || spendSeries(report, String).length > 0 || spendSeries(report).length > 0 : false;
+  // Failing to read usage is not having none, so the segment stays to say so; an older `orx up` has no route.
+  const shown = usage.error != null || hasUsage;
   const machineFilled = current !== null && live && current.state !== "disconnected";
 
   const stripRef = useRef<HTMLDivElement>(null);
@@ -53,14 +55,15 @@ export function StatusStrip({ runtime, onDetails }: { runtime: RuntimeInfo; onDe
     observer.observe(strip);
     observer.observe(machine);
     return () => observer.disconnect();
-  }, [showName, hasUsage]);
+  }, [showName, !!shown]);
 
   return <div ref={stripRef} className="@container relative flex shrink-0 items-center gap-0.5 overflow-hidden border-t border-border p-1">
     <AccountChip showName={showName} onDetails={onDetails} />
-    {report && hasUsage && <>
+    {shown && <>
       <Separator />
       <UsageSegment
-        report={report}
+        report={report ?? undefined}
+        error={usage.error}
         onOpen={() => void usage.refetch()}
         machine={runtime.kind === "ssh" ? autoDir(runtime.session.host) : m.projects_local()}
         remote={runtime.kind === "ssh"}
@@ -77,8 +80,11 @@ function Separator() {
   return <span className="mx-0.5 h-3.5 w-px shrink-0 bg-border @max-[230px]:hidden" aria-hidden="true" />;
 }
 
-function UsageSegment({ report, onOpen, machine, remote, stale, fetchedAt }: {
-  report: UsageReport;
+function UsageSegment({ report, error, onOpen, machine, remote, stale, fetchedAt }: {
+  /** The last report read, if any. */
+  report: UsageReport | undefined;
+  /** Why the latest read failed; the panel then shows `report` as of its time. */
+  error: Error | null;
   onOpen: () => void;
   machine: string;
   remote: boolean;
@@ -87,7 +93,8 @@ function UsageSegment({ report, onOpen, machine, remote, stale, fetchedAt }: {
 }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
   const planAgent = usePlanAgent();
-  const plans = report.plans ?? [];
+  const failed = error != null;
+  const plans = report?.plans ?? [];
   const summaries = plans.map((plan) => planSummary(plan, planAgent(plan)));
   const label = summaries.length
     ? m.usage_trigger_plans({ machine, plans: new Intl.ListFormat(getLocale(), { type: "unit" }).format(summaries) })
@@ -97,7 +104,7 @@ function UsageSegment({ report, onOpen, machine, remote, stale, fetchedAt }: {
     <Tooltip interactive content={m.usage_title()} className="shrink-0">
       <Popover.Trigger
         aria-label={label}
-        className={cn("flex h-7 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-sm text-subtext hover:bg-surface hover:text-text data-popup-open:bg-surface data-popup-open:text-text focus-visible:outline-2 focus-visible:outline-focus", stale && "opacity-50")}
+        className={cn("flex h-7 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-sm text-subtext hover:bg-surface hover:text-text data-popup-open:bg-surface data-popup-open:text-text focus-visible:outline-2 focus-visible:outline-focus", (stale || failed) && "opacity-50")}
       >
         {plans.length > 0 ? <PlanRings plans={plans} planAgent={planAgent} /> : <>
           <UsageGauge />
@@ -108,7 +115,12 @@ function UsageSegment({ report, onOpen, machine, remote, stale, fetchedAt }: {
     <Popover.Portal container={portalContainer}>
       <Popover.Positioner side="top" align="start" sideOffset={6} collisionPadding={8} className="z-50">
         <Popover.Popup aria-label={m.usage_on({ machine })} className="outline-none w-80 max-w-[calc(100vw-1rem)] max-h-(--available-height) overflow-y-auto rounded-lg border border-border bg-background px-3 text-sm shadow-menu">
-          <UsagePanel report={report} machine={machine} remote={remote} stale={stale} fetchedAt={fetchedAt} />
+          {report
+            ? <UsagePanel report={report} machine={machine} remote={remote} stale={stale || failed} fetchedAt={fetchedAt} failure={failed && <ReadFailed error={error} onRetry={onOpen} />} />
+            : <div className="py-2.5">
+              <span dir="auto" className="block truncate text-xs font-medium text-subtext">{m.usage_on({ machine })}</span>
+              {failed && <ReadFailed error={error} onRetry={onOpen} />}
+            </div>}
         </Popover.Popup>
       </Popover.Positioner>
     </Popover.Portal>
@@ -143,12 +155,14 @@ function PlanRing({ plan, agent }: { plan: PlanUsage; agent: Harness | undefined
 }
 
 /** "Usage on <machine>": every plan in one grid, compute by backend, then the last seven days as a graph. */
-function UsagePanel({ report, machine, remote, stale, fetchedAt }: {
+function UsagePanel({ report, machine, remote, stale, fetchedAt, failure }: {
   report: UsageReport;
   machine: string;
   remote: boolean;
   stale: boolean;
   fetchedAt: number;
+  /** Why the latest read failed, above the values it left showing. */
+  failure: ReactNode;
 }) {
   const workspace = useWorkspace();
   const { data: harnesses = [] } = useQuery(workspace.queries.getHarnessesQuery());
@@ -180,8 +194,17 @@ function UsagePanel({ report, machine, remote, stale, fetchedAt }: {
         </Tooltip>
       </span>
     </div>
+    {failure}
     {refresh.error != null && <p role="alert" dir="auto" className="mt-1 mb-0 text-xs text-accent-red">{refresh.error instanceof Error ? refresh.error.message : String(refresh.error)}</p>}
     {sections.map((section, index) => <div key={index} className={cn("py-2.5", index > 0 && "border-t border-border-variant")}>{section}</div>)}
+  </div>;
+}
+
+function ReadFailed({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  return <div className="pt-2">
+    <div role="alert" className="text-text">{m.usage_plan_failed()}</div>
+    <p dir="auto" className="mt-0.5 mb-0 text-xs text-subtext">{error.message}</p>
+    <Button size="small" className="mt-2" onClick={onRetry}>{m.usage_try_again()}</Button>
   </div>;
 }
 
@@ -236,8 +259,13 @@ function amount(series: Series[], micros: number) {
   return (series[0]?.backend ? fmtEstimate : fmtMoney)(micros, series[0]?.currency ?? "USD");
 }
 
+/** A backend's amount counts its unpriced runs, so a partial total reads as partial. */
 function seriesAmount(series: Series) {
-  return series.total > 0 ? amount([series], series.total) : m.usage_cost_unavailable();
+  if (series.total === 0) return m.usage_cost_unavailable();
+  const spent = amount([series], series.total);
+  if (!series.backend || series.unpriced === 0) return spent;
+  const unpriced = new Intl.PluralRules(getLocale()).select(series.unpriced) === "one" ? m.usage_runs_unpriced_one : m.usage_runs_unpriced_other;
+  return `${spent} · ${unpriced({ count: series.unpriced })}`;
 }
 
 function ComputeList({ series }: { series: Series[] }) {

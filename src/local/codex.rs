@@ -1047,6 +1047,8 @@ impl CodexHost {
     /// own, which every native store shares. Reading through it doesn't count
     /// as the chat's activity.
     pub async fn live_client(&self, profile: Option<&str>) -> Option<Arc<CodexClient>> {
+        // Under spawn_lock, so a child is never asked before its handshake.
+        let _spawning = self.spawn_lock.lock().await;
         let clients: Vec<_> = self.inner.lock().await.values().cloned().collect();
         for client in clients {
             if client.profile.as_deref() == profile
@@ -1602,6 +1604,26 @@ pub(crate) mod tests {
             matches!(&other, Read::Failed(message) if message.contains("/nonexistent/codex")),
             "another account's child is never asked: {other:?}"
         );
+        host.kill_session("chat").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_mid_handshake_is_never_asked_about_the_account() {
+        use futures::FutureExt;
+
+        let host = CodexHost::new();
+        let spawning = host.spawn_lock.lock().await;
+        host.inner
+            .lock()
+            .await
+            .insert("chat".into(), rpc_test_client("sleep 600"));
+        assert!(
+            host.live_client(None).now_or_never().is_none(),
+            "waits for the handshake"
+        );
+        drop(spawning);
+        assert!(host.live_client(None).await.is_some());
         host.kill_session("chat").await;
     }
 

@@ -171,6 +171,49 @@ test("the graph's switch appears only when both AI and compute have data; estima
   assert.doesNotMatch(text(panel()), /\$0\.00/);
 });
 
+test("a backend with priced and unpriced runs says so beside its partial amount", async () => {
+  await strip(report({ compute: [{ ...modalSpend, unpriced: 1 }] }));
+  await click(usageTrigger());
+  const partial = `~$9.75 · ${m.usage_runs_unpriced_one({ count: 1 })}`;
+  assert.equal(text(panel()).split(partial).length - 1, 2, "in the compute row and the graph's legend");
+});
+
+test("usage that can't be read keeps the segment, dimmed, and its panel says why with Try again", async () => {
+  let failing = true;
+  await strip(() => failing ? Response.json({ error: "Couldn't open the usage store." }, { status: 500 }) : report({ plans: [claudeMax] }));
+  assert.match(usageTrigger().className, /opacity-50/);
+  await click(usageTrigger());
+  assert.match(text(panel()), /Couldn't open the usage store\./);
+
+  failing = false;
+  await click(find('[role="dialog"] button', m.usage_try_again()));
+  assert.equal(rings().length, 1);
+  assert.doesNotMatch(usageTrigger().className, /opacity-50/);
+
+  // A read that fails after one that worked keeps the last values, dimmed, with the error and Try again.
+  failing = true;
+  await click(usageTrigger());
+  await click(usageTrigger());
+  assert.match(usageTrigger().className, /opacity-50/);
+  assert.equal(rings().length, 1, "the last plan stays");
+  assert.match(text(panel()), /Couldn't open the usage store\./);
+  assert.ok(find('[role="dialog"] button', m.usage_try_again()));
+  assert.doesNotMatch(text(panel()), new RegExp(m.usage_updated_now()));
+});
+
+test("an idle strip reads usage again every five minutes", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const { requests } = await strip(report({ plans: [claudeMax] }));
+  const reads = () => requests.filter((request) => request === "GET /api/usage").length;
+  const before = reads();
+  await act(async () => t.mock.timers.tick(4 * 60_000));
+  await settle();
+  assert.equal(reads(), before);
+  await act(async () => t.mock.timers.tick(60_000));
+  await settle();
+  assert.equal(reads(), before + 1);
+});
+
 test("nothing to show leaves no usage segment, and an older orx up without the route the same", async () => {
   const { container } = await strip(report());
   assert.equal(usageTrigger(), undefined);

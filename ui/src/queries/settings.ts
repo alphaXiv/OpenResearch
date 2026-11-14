@@ -207,6 +207,8 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     queryKey: workspaceKey("getUsage", chat),
     queryFn: ({ signal }) => api.getUsage(chat, signal),
     staleTime: 60_000,
+    // Paused while the window is hidden; the server re-reads plans only past a minute old.
+    refetchInterval: 5 * 60_000,
   });
 
   const getPendingWorkQuery = () => queryOptions({
