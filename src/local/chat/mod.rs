@@ -1760,27 +1760,34 @@ fn tree_child(line: &str, parent: libc::pid_t) -> Option<u32> {
 #[cfg(windows)]
 fn stop_process_tree(pid: u32) {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-    use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, FILETIME, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_TERMINATE,
+        GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
     };
 
     /// An open handle, which also keeps the PID from being reused, and its start time.
     fn open(pid: u32) -> Option<(OwnedHandle, u64)> {
-        // SAFETY: a plain open; a null result means the process is gone or out of reach.
+        // SAFETY: a plain open; the handle is owned below.
         let handle = unsafe {
             OpenProcess(
-                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
                 0,
                 pid,
             )
         };
         if handle.is_null() {
+            let error = std::io::Error::last_os_error();
+            // Invalid parameter is how Windows reports a process that already exited.
+            if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {
+                eprintln!("orx up: could not open process {pid} to stop it: {error}");
+            }
             return None;
         }
         // SAFETY: the valid process handle is transferred exactly once.
@@ -1789,6 +1796,10 @@ fn stop_process_tree(pid: u32) {
         let [created, exited, kernel, user] = &mut times;
         // SAFETY: the handle has query access and each FILETIME is writable.
         if unsafe { GetProcessTimes(handle.as_raw_handle(), created, exited, kernel, user) } == 0 {
+            eprintln!(
+                "orx up: could not read when process {pid} started, so not stopping it: {}",
+                std::io::Error::last_os_error()
+            );
             return None;
         }
         let created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
@@ -1817,6 +1828,12 @@ fn stop_process_tree(pid: u32) {
             // SAFETY: the same initialized entry and live snapshot are reused.
             found = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
         }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+            eprintln!(
+                "orx up: could not list every agent descendant of {pid} while stopping it: {error}"
+            );
+        }
     }
 
     let Some(root) = open(pid) else {
@@ -1831,8 +1848,15 @@ fn stop_process_tree(pid: u32) {
             .filter(|(_, (_, child_created))| *child_created >= created);
         pending.extend(children);
 
-        // SAFETY: the handle has terminate access; a process that already exited ignores it.
-        unsafe { TerminateProcess(handle.as_raw_handle(), 1) };
+        // SAFETY: the handle has terminate access.
+        if unsafe { TerminateProcess(handle.as_raw_handle(), 1) } == 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: the handle has synchronize access; a zero wait only polls.
+            let exited = unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } == WAIT_OBJECT_0;
+            if !exited {
+                eprintln!("orx up: could not stop process {pid}: {error}");
+            }
+        }
     }
 }
 
@@ -1888,19 +1912,21 @@ mod windows_agent_tree_tests {
             .args([
                 "-NoProfile",
                 "-Command",
-                "$p = Start-Process ping -ArgumentList '-n','60','127.0.0.1' -PassThru -NoNewWindow; $p.Id; Wait-Process -Id $p.Id",
+                "$p = Start-Process ping -ArgumentList '-n','60','127.0.0.1' -PassThru -NoNewWindow -RedirectStandardOutput NUL; $p.Id; Wait-Process -Id $p.Id",
             ])
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
         let mut lines = tokio::io::BufReader::new(agent.stdout.take().unwrap()).lines();
-        let mut command = None;
-        while command.is_none() {
-            let line = lines.next_line().await.unwrap().expect("no PID printed");
-            command = line.trim().parse::<u32>().ok();
-        }
-        let command = command.unwrap();
+        let command: u32 = lines
+            .next_line()
+            .await
+            .unwrap()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         // SAFETY: a plain open of the command just started; the handle is owned below.
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, command) };
         assert!(!handle.is_null(), "command {command} is not running");
