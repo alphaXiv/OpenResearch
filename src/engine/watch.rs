@@ -1220,7 +1220,7 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
     if !run.noted.is_empty() {
         why.push((
             "noted".into(),
-            "what a look flagged under a flag since kept going is weighed again".into(),
+            "a finding noted under a flag someone kept going after".into(),
         ));
     }
     let signals = &run.body["view"]["signals"];
