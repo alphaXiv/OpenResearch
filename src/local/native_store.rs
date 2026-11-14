@@ -754,6 +754,24 @@ pub fn prepare_claude_one_shot(home: &Path, name: &str) -> Result<PathBuf> {
     let sources = ["settings.json", "settings.local.json"].map(|file| home.join(file));
     prepare_links(&root, home, &sources)?;
 
+    // An earlier orx linked the account's files here; a link would share them, and a write
+    // through one is refused, so each goes before the copy is made.
+    for file in [".claude.json", ".credentials.json"] {
+        let (theirs, here) = (home.join(file), root.join(file));
+        let marker = root.join(format!("{file}.orx-managed-link"));
+        let linked = std::fs::symlink_metadata(&here).is_ok_and(|m| {
+            m.file_type().is_symlink()
+                || marker.is_file()
+                || same_file::is_same_file(&here, &theirs).unwrap_or(false)
+        });
+        if linked {
+            remove_link(&here)?;
+        }
+        if marker.is_file() {
+            std::fs::remove_file(&marker)?;
+        }
+    }
+
     let (account, copy) = (home.join(".claude.json"), root.join(".claude.json"));
     match std::fs::read(&account) {
         Ok(bytes) if std::fs::read(&copy).ok().as_ref() != Some(&bytes) => {
