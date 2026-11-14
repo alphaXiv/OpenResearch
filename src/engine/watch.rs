@@ -29,6 +29,7 @@ const TERMINAL_GATE_S: u64 = 60;
 /// How long a run's last look waits for its log to be collected.
 const TERMINAL_WAIT_S: u64 = 300;
 const LOOK_TIMEOUT: Duration = Duration::from_secs(60);
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// New log a look reads at most, as its first and last parts.
 const READ_HEAD: u64 = 64 * 1024;
 const READ_TAIL: u64 = 192 * 1024;
@@ -195,6 +196,8 @@ struct Now {
     settings: Value,
     /// The run's looks, oldest first.
     looks: Vec<(WatchLook, WatchLookRun)>,
+    /// How far the fold has read the run's log, by its identity, where it has a checkpoint.
+    folded: Option<(String, u64)>,
 }
 
 impl Now {
@@ -217,6 +220,9 @@ impl Now {
                 .map_or_else(|| run.experiment_id.clone(), |e| e.slug.clone()),
             settings,
             looks: store.run_watch_looks(&run.id, JOURNAL)?,
+            folded: projection
+                .snapshot()
+                .map(|snapshot| (snapshot.cursor.ident.clone(), snapshot.cursor.offset)),
             run: run.clone(),
         })
     }
@@ -545,54 +551,107 @@ async fn scan(state: &mut State, run: &Now) {
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect();
-    let read = read_lines(&run.run.id, entry.ident.as_deref(), entry.offset, SCAN).await;
-    if let Ok((ident, lines, to, len)) = read {
-        let replaced = entry.ident.as_deref() != Some(ident.as_str());
-        if replaced {
-            entry.lines = 0;
-            entry.novel.clear();
-            entry.firsts.clear();
-        }
-        // Growth is the log's length moving, not this scan catching up after a look.
-        let grew = match len {
-            Some(len) => entry.len != Some(len),
-            None => to != entry.offset || replaced,
-        };
-        if grew {
-            entry.grew_at = crate::store::now_ms();
-        }
-        entry.len = len.or(entry.len);
-        entry.ident = Some(ident);
-        entry.offset = to;
-        for line in lines {
-            if line.text.trim_start().starts_with("::orx::") {
-                continue;
+    // The fold reads the log on the run's machine and its checkpoint says how far: a pass reads
+    // only bytes it has passed, so an idle run costs no read, and a remote one no extra trip.
+    let folded = run.folded.as_ref();
+    let from = (entry.ident.clone(), entry.offset);
+    let mut read_now = Vec::new();
+    if unfolded(folded, entry.ident.as_deref(), entry.offset) {
+        let read = bounded(read_lines(
+            &run.run.id,
+            entry.ident.as_deref(),
+            entry.offset,
+            SCAN,
+        ))
+        .await;
+        if let Ok((ident, lines, to, len)) = read {
+            let replaced = entry.ident.as_deref() != Some(ident.as_str());
+            if replaced {
+                entry.lines = 0;
+                entry.novel.clear();
+                entry.firsts.clear();
             }
-            entry.lines += 1;
-            if let Some(kind) = digest::family(&line.text).filter(|kind| !families.contains(kind)) {
-                entry.novel.insert(kind.clone());
-                if entry.firsts.len() < FAMILIES {
-                    entry.firsts.entry(kind).or_insert(line);
+            // Growth is the log's length moving, not this scan catching up after a look.
+            let grew = match len {
+                Some(len) => entry.len != Some(len),
+                None => to != entry.offset || replaced,
+            };
+            if grew {
+                entry.grew_at = crate::store::now_ms();
+            }
+            entry.len = len.or(entry.len);
+            entry.ident = Some(ident.clone());
+            entry.offset = to;
+            for line in &lines {
+                if line.text.trim_start().starts_with("::orx::") {
+                    continue;
                 }
+                entry.lines += 1;
+                if let Some(kind) =
+                    digest::family(&line.text).filter(|kind| !families.contains(kind))
+                {
+                    entry.novel.insert(kind.clone());
+                    if entry.firsts.len() < FAMILIES {
+                        entry.firsts.entry(kind).or_insert(line.clone());
+                    }
+                }
+            }
+            if !replaced {
+                read_now.push((from, (ident, lines, to)));
             }
         }
     }
-    count(run).await;
+    count(run, &read_now, folded).await;
 }
 
-/// Brings each pattern the run's sentences count up to the end of its log, [`SCAN`] at a time.
-async fn count(run: &Now) {
-    let Ok(store) = Store::open() else { return };
-    let counted = store.watch_counts(&run.run.id).unwrap_or_default();
-    drop(store);
+/// Whether the log from `offset` may hold bytes the fold has read past, which a pass reads.
+fn unfolded(folded: Option<&(String, u64)>, ident: Option<&str>, offset: u64) -> bool {
+    folded.is_none_or(|(folded, to)| ident != Some(folded.as_str()) || offset < *to)
+}
+
+/// A read of a run's log a pass makes, given up on when the run's machine is slow to answer.
+async fn bounded<T>(read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(READ_TIMEOUT, read)
+        .await
+        .map_err(|_| anyhow!("the log took over {}s to read", READ_TIMEOUT.as_secs()))?
+}
+
+/// The lines a pass read, by where the read started, with their identity and where it ended.
+type Read = ((Option<String>, u64), (String, Vec<digest::Line>, u64));
+
+/// Brings each pattern the run's sentences count on through its log, [`SCAN`] at a time: one
+/// caught up with the scan counts the lines the scan just read, and one behind reads only
+/// what the fold has passed.
+async fn count(run: &Now, scanned: &[Read], folded: Option<&(String, u64)>) {
+    let counted = match Store::open().and_then(|store| store.watch_counts(&run.run.id)) {
+        Ok(counted) => counted,
+        Err(error) => {
+            eprintln!(
+                "orx up: watcher: reading run {}'s counts: {error:#}",
+                run.run.id
+            );
+            return;
+        }
+    };
     for (pattern, lines, offset, ident) in counted {
         let Ok(regex) = reply::pattern(&pattern) else {
             continue;
         };
         let expected = Some(ident.as_str()).filter(|ident| !ident.is_empty());
-        let Ok((read_ident, read, to, _)) = read_lines(&run.run.id, expected, offset, SCAN).await
-        else {
-            continue;
+        let shared = scanned
+            .iter()
+            .find(|((from_ident, from), _)| from_ident.as_deref() == expected && *from == offset);
+        let own;
+        let (read_ident, read, to) = match shared {
+            Some((_, (ident, lines, to))) => (ident, lines, *to),
+            None if !unfolded(folded, expected, offset) => continue,
+            None => match bounded(read_lines(&run.run.id, expected, offset, SCAN)).await {
+                Ok((ident, lines, to, _)) => {
+                    own = (ident, lines);
+                    (&own.0, &own.1, to)
+                }
+                Err(_) => continue,
+            },
         };
         let (base, offset_from) = if expected == Some(read_ident.as_str()) {
             (lines, offset)
@@ -601,8 +660,13 @@ async fn count(run: &Now) {
         };
         if offset_from == 0 && expected.is_some() && expected != Some(read_ident.as_str()) {
             // The log was replaced: count it again from its start on the next pass.
-            if let Ok(store) = Store::open() {
-                let _ = store.set_watch_count(&run.run.id, &pattern, 0, 0, &read_ident);
+            if let Err(error) = Store::open()
+                .and_then(|store| store.set_watch_count(&run.run.id, &pattern, 0, 0, read_ident))
+            {
+                eprintln!(
+                    "orx up: watcher: recounting {pattern} in run {}: {error:#}",
+                    run.run.id
+                );
             }
             continue;
         }
@@ -612,7 +676,7 @@ async fn count(run: &Now) {
             .count() as u64;
         if let Ok(store) = Store::open() {
             if let Err(error) =
-                store.set_watch_count(&run.run.id, &pattern, base + matched, to, &read_ident)
+                store.set_watch_count(&run.run.id, &pattern, base + matched, to, read_ident)
             {
                 eprintln!(
                     "orx up: watcher: counting {pattern} in run {}: {error:#}",

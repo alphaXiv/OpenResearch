@@ -1311,6 +1311,11 @@ impl Projection {
         &self.summary
     }
 
+    /// The checkpoint the projection read.
+    pub(crate) fn snapshot(&self) -> Option<&Snapshot> {
+        self.snapshot.as_deref()
+    }
+
     pub(crate) fn etag(&self) -> String {
         format!("\"{}:{}\"", self.published.generation, self.published.rev)
     }

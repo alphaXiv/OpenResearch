@@ -353,8 +353,12 @@ no tools: Claude Code's are switched off by flag, Codex's by its feature switche
 with a turn that starts one anyway stopped and its answer refused. A harness that
 cannot promise that is not used.
 
-A run's owner is the chat that last looked at it, else the first chat following
-it that has a watching model. One look covers every live run the chat owns, at
+Every few seconds a pass reads each live run's new log lines for these checks
+and the tripwires, only up to where the run's fold has read, as its checkpoint
+says: an idle run costs no read, a remote one reads its host only for bytes
+collection has seen it print, and each read is bounded in time. Counted patterns caught up with the pass count the lines
+it read. A run's owner is the chat that last looked at it, else the first chat
+following it that has a watching model. One look covers every live run the chat owns, at
 most six a call and four calls a slot. It is due when something changes: a
 number the sentence binds leaves its trend, a comparison with the parent changes
 sign, a counted pattern moves, a stage starts or ends, the stage runs at least

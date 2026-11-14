@@ -740,3 +740,44 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
     assert_eq!(facts["looks"][0]["notedUnder"], 5);
     assert_eq!(facts["looks"][0]["said"], "new");
 }
+
+#[tokio::test]
+async fn a_pass_reads_only_the_log_the_fold_has_read() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let a = run(&store, "a", "Depth 6", "chat", LOG);
+    let folded_to = |offset: usize| {
+        let mut now = Now::read(&store, &a).unwrap();
+        now.folded = Some(("1-7".into(), offset as u64));
+        now
+    };
+    let mut state = State::default();
+    scan(&mut state, &folded_to(LOG.len())).await;
+    assert_eq!(state.scans["a"].offset, LOG.len() as u64);
+    store
+        .set_watch_count("a", "ERROR", 0, LOG.len() as u64, "1-7")
+        .unwrap();
+
+    let longer = format!("{LOG}ERROR train: checkpoint write failed\n");
+    keep_log(&store, "a", &longer);
+    scan(&mut state, &folded_to(LOG.len())).await;
+    assert_eq!(
+        state.scans["a"].offset,
+        LOG.len() as u64,
+        "nothing past where the fold read is read"
+    );
+    scan(&mut state, &folded_to(longer.len())).await;
+    assert_eq!(state.scans["a"].offset, longer.len() as u64);
+    assert!(state.scans["a"]
+        .firsts
+        .keys()
+        .any(|kind| kind.contains("error")));
+    assert_eq!(
+        store.watch_counts("a").unwrap()[0].1,
+        1,
+        "a caught-up count counts what the scan read"
+    );
+}
