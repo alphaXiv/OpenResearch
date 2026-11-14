@@ -699,6 +699,27 @@ fn a_last_look_that_failed_is_taken_once_more_and_then_its_failure_stands() {
         !store.run_watch_terminal_done("a").unwrap(),
         "an interrupted last look is taken again"
     );
+    let mut ended = store.get_run("a").unwrap().unwrap();
+    ended.status = "done".into();
+    ended.ended_at = Some(1);
+    store.upsert_run(&ended).unwrap();
+    let owned = Owned {
+        chat: store.get_chat_session("chat").unwrap().unwrap(),
+        model: "Claude Haiku".into(),
+        runs: vec![(Now::read(&store, &ended).unwrap(), Vec::new())],
+    };
+    let planned = |now: i64| {
+        due(&State::default(), &owned, now, &mut HashMap::new())
+            .unwrap()
+            .len()
+    };
+    let (gap, _) = gaps(&Value::Null);
+    assert_eq!(
+        planned(2 + gap - 1),
+        0,
+        "an outage is not asked again at once"
+    );
+    assert_eq!(planned(2 + gap), 1, "but once the least gap has passed");
     fail("error");
     assert!(
         store.run_watch_terminal_done("a").unwrap(),

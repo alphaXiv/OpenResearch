@@ -1296,23 +1296,31 @@ fn due(
             .collect()
     };
 
-    // A run's last look waits for its siblings to end within the gate, and for its log.
+    // When the run's last look last failed.
+    let failed_at = |run: &Now| {
+        run.looks
+            .iter()
+            .filter(|(look, row)| {
+                look.kind == "terminal"
+                    && row.role == "subject"
+                    && matches!(row.result.as_deref(), Some("error" | "interrupted"))
+            })
+            .map(|(look, _)| look.done_at.unwrap_or(look.created_at))
+            .max()
+    };
+    // A run's last look waits for its siblings to end within the gate, and for its log; one
+    // that failed is taken again only after the least gap, past an outage's first minute.
     let gate = paced_ms(TERMINAL_GATE_S);
     let waited = |run: &Now| {
         let ended_at = run.run.ended_at.unwrap_or(run.run.updated_at);
         let collected = !store.log_collection_pending(&run.run.id).unwrap_or(false)
             || now - ended_at >= paced_ms(TERMINAL_WAIT_S);
-        collected && (now - ended_at >= gate || live.is_empty())
+        let rested = failed_at(run).is_none_or(|at| now - at >= gaps(&run.settings).0);
+        collected && rested && (now - ended_at >= gate || live.is_empty())
     };
     if !ended.is_empty() && ended.iter().all(|run| waited(run)) {
         let names: Vec<&str> = ended.iter().map(|run| run.label.as_str()).collect();
-        let again = ended.iter().any(|run| {
-            run.looks.iter().any(|(look, row)| {
-                look.kind == "terminal"
-                    && row.role == "subject"
-                    && matches!(row.result.as_deref(), Some("error" | "interrupted"))
-            })
-        });
+        let again = ended.iter().any(|run| failed_at(run).is_some());
         let runs = ended
             .iter()
             .map(|run| (run.run.id.clone(), "subject"))
