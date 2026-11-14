@@ -342,7 +342,8 @@ fn answer_of(
 }
 
 /// The shown excerpts a citation points at: each cited range stands for the lines it overlaps,
-/// so evidence only ever names bytes the look was shown. A range that overlaps none is wrong.
+/// so evidence only ever names bytes the look was shown, at most 12 lines and 3 KiB of them. A
+/// range that overlaps none is wrong.
 fn check_evidence(
     evidence: &[(u64, u64)],
     excerpts: &[(u64, u64)],
@@ -363,15 +364,13 @@ fn check_evidence(
     }
     cited.sort_unstable();
     cited.dedup();
-    if cited.len() > MAX_EVIDENCE {
-        return Err(format!("cite at most {MAX_EVIDENCE} lines of evidence"));
-    }
-    let bytes: u64 = cited.iter().map(|(from, to)| to - from).sum();
-    if bytes > MAX_EVIDENCE_BYTES {
-        return Err(format!(
-            "cite at most {MAX_EVIDENCE_BYTES} bytes of evidence"
-        ));
-    }
+    // Past the cap a flood of cited lines keeps its first ones: they say where it began.
+    let mut bytes = 0;
+    cited.retain(|(from, to)| {
+        bytes += to - from;
+        bytes <= MAX_EVIDENCE_BYTES
+    });
+    cited.truncate(MAX_EVIDENCE);
     Ok(cited)
 }
 
@@ -707,6 +706,12 @@ mod tests {
             "{:?}",
             gap.errors
         );
+    }
+
+    #[test]
+    fn a_flood_of_cited_lines_keeps_its_first_twelve() {
+        let lines: Vec<(u64, u64)> = (0..40).map(|i| (i * 50, i * 50 + 50)).collect();
+        assert_eq!(check_evidence(&[(0, 2000)], &lines).unwrap(), lines[..12]);
     }
 
     #[test]
