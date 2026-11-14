@@ -1450,8 +1450,12 @@ fn render(run: &Now, token: &reply::Token) -> String {
     }
 }
 
-/// The numbers no sentence may write as they read now: every signal, count and step.
+/// The numbers no sentence may write as they read now: every signal, count and step. An ended
+/// run's numbers, and a finished stage's total, can no longer move, so they may be written.
 fn moving(run: &Now) -> Vec<f64> {
+    if !run.live() {
+        return Vec::new();
+    }
     let mut values: Vec<f64> = run.body["latest"]
         .as_object()
         .into_iter()
@@ -1466,10 +1470,11 @@ fn moving(run: &Now) -> Vec<f64> {
             .filter_map(|(_, n)| n.as_f64()),
     );
     // A step count under ten is as often a fact the run states, a depth or a shard, as its progress.
+    let stage = &run.summary["stage"];
     values.extend(
-        run.summary["stage"]["done"]
+        stage["done"]
             .as_f64()
-            .filter(|done| *done >= 10.0),
+            .filter(|done| *done >= 10.0 && stage["of"].as_f64().is_none_or(|of| *done < of)),
     );
     values
 }
@@ -1756,7 +1761,7 @@ async fn take(id: i64) -> Result<()> {
             versus: versus.get(key.as_str()).unwrap_or(&empty_set),
             counts: counted.get(key.as_str()).unwrap_or(&empty_set),
             moving: &movings[key.as_str()],
-            step: run.summary["stage"]["done"].as_f64(),
+            step: run.summary["stage"]["done"].as_f64().filter(|_| run.live()),
             excerpts: digest.excerpts.get(key).unwrap_or(&no_excerpts),
             has_sentence: has[key.as_str()],
         })

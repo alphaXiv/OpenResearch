@@ -854,3 +854,27 @@ fn keep_going_settles_one_runs_flag_and_a_later_run_with_the_same_cause_is_flagg
     assert_eq!(kept_after(&store, "a").unwrap()[0]["why"], "Compiling.");
     assert_eq!(kept_after(&store, "b").unwrap(), Vec::<Value>::new());
 }
+
+#[test]
+fn an_ended_run_may_write_any_number_and_a_finished_stage_its_total() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let row = run(&store, "a", "Seed 1", "chat", LOG);
+    let mut now = Now::read(&store, &row).unwrap();
+    now.body["latest"] = json!({"test_acc": 0.887});
+    now.summary = json!({"stage": {"name": "train", "done": 77.0, "of": 150.0}});
+    assert_eq!(moving(&now), vec![0.887, 77.0]);
+
+    now.summary["stage"]["done"] = json!(150.0);
+    assert_eq!(moving(&now), vec![0.887], "a finished stage's total stays");
+
+    now.run.status = "done".into();
+    assert_eq!(
+        moving(&now),
+        Vec::<f64>::new(),
+        "nothing of an ended run moves"
+    );
+}
