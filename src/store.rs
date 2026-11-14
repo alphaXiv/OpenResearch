@@ -6630,7 +6630,15 @@ impl Store {
 
     pub fn terminal_notice_body(&self, run: &StoredRun) -> Result<String> {
         let log = self.recent_log(&run.id, TERMINAL_LOG_SCAN)?;
-        let lines: Vec<&str> = log.lines().collect();
+        // Progress records are for orx; the agent reads the log a person would.
+        let records = log
+            .lines()
+            .filter(|line| line.trim_start().starts_with("::orx::"))
+            .count();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("::orx::"))
+            .collect();
         let lines = &lines[lines.len().saturating_sub(TERMINAL_LOG_LINES)..];
         let mut tail = lines.join("\n");
         let mut start = tail
@@ -6640,6 +6648,12 @@ impl Store {
             start += 1;
         }
         tail.drain(..start);
+        if records > 0 {
+            tail.push_str(&format!(
+                "\n({records} `::orx::` records left out; `orx logs {}` shows the whole log.)",
+                run.id
+            ));
+        }
         let code = run
             .exit_code
             .map(|code| code.to_string())
@@ -7236,6 +7250,15 @@ mod tests {
                 "\nReason: Last error in the log: `torch.OutOfMemoryError: CUDA out of memory.`\n"
             ),
             "{body}"
+        );
+        let tail = body.split("Recent log:\n").nth(1).unwrap();
+        assert!(!tail.contains("::orx:: {"), "{tail}");
+        assert!(tail.starts_with("step 340 | loss 1.2\nTraceback"), "{tail}");
+        assert!(
+            tail.ends_with(
+                "(200 `::orx::` records left out; `orx logs failed` shows the whole log.)"
+            ),
+            "{tail}"
         );
         assert_eq!(
             crate::plane::Run::from_store(&store, &run).unwrap().failure_detail().as_deref(),
