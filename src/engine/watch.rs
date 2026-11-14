@@ -544,7 +544,11 @@ async fn pass(state: &mut State) -> Result<()> {
     // Each run is read on its own, so one slow machine holds up no other run's reads.
     let live: Vec<&Now> = unwatched
         .iter()
-        .chain(owned.values().flat_map(|owned| owned.runs.iter().map(|(run, _)| run)))
+        .chain(
+            owned
+                .values()
+                .flat_map(|owned| owned.runs.iter().map(|(run, _)| run)),
+        )
         .filter(|run| run.live())
         .collect();
     let mut reads = Vec::new();
@@ -961,18 +965,29 @@ fn median(values: &mut [f64]) -> f64 {
 /// parabola through them follows a curve that bends as a loss does, so only a turn or a jump
 /// leaves it, against how much those points scatter about it. None before the eighth finite point.
 fn departure(before: &[(f64, f64)], next: (f64, f64)) -> Option<f64> {
-    let finite: Vec<(f64, f64)> = before
+    let (at, scatter, last_x) = trend(before)?;
+    if next.0 <= last_x {
+        return None;
+    }
+    // A step past the points is less sure than the points: half again their scatter.
+    Some((next.1 - at(next.0)).abs() / (1.5 * scatter))
+}
+
+/// The parabola least squares fits through the last 14 finite points, how far they scatter about
+/// it, and the last point's x. None before the eighth finite point.
+fn trend(points: &[(f64, f64)]) -> Option<(impl Fn(f64) -> f64, f64, f64)> {
+    let finite: Vec<(f64, f64)> = points
         .iter()
         .copied()
         .filter(|(x, y)| x.is_finite() && y.is_finite())
         .collect();
     let window = &finite[finite.len().saturating_sub(14)..];
     let (last_x, _) = *window.last()?;
-    if window.len() < 8 || next.0 <= last_x {
+    if window.len() < 8 {
         return None;
     }
     let width = (last_x - window[0].0).max(f64::EPSILON);
-    let u = |x: f64| (x - last_x) / width;
+    let u = move |x: f64| (x - last_x) / width;
     // Least squares for y = a + b·u + c·u², by Cramer's rule on the normal equations.
     let mut sums = [0.0f64; 5];
     let mut moments = [0.0f64; 3];
@@ -1007,15 +1022,14 @@ fn departure(before: &[(f64, f64)], next: (f64, f64)) -> Option<f64> {
         det3(m) / det
     };
     let (a, b, c) = (solve(0), solve(1), solve(2));
-    let at = |x: f64| a + b * u(x) + c * u(x).powi(2);
+    let at = move |x: f64| a + b * u(x) + c * u(x).powi(2);
     let mut residuals: Vec<f64> = window.iter().map(|&(x, y)| (y - at(x)).abs()).collect();
     let n = window.len() as f64;
     let level = window.iter().map(|(_, y)| y.abs()).fold(0.0, f64::max);
-    // A step past the points is less sure than the points: half again their scatter.
-    let spread = (1.5 * 1.4826 * median(&mut residuals) * (n / (n - 3.0)).sqrt())
+    let scatter = (1.4826 * median(&mut residuals) * (n / (n - 3.0)).sqrt())
         .max(level * 1e-4)
         .max(1e-12);
-    Some((next.1 - at(next.0)).abs() / spread)
+    Some((at, scatter, last_x))
 }
 
 /// Whether the point at `index` and the one before it both leave the trend of the points before

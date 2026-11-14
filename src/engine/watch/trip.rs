@@ -20,12 +20,52 @@ const ERROR_WORDS: [&str; 9] = [
 const SILENT_S: u64 = 600;
 const TAIL: u64 = 16 * 1024;
 const TAIL_LINES: usize = 6;
-/// Comparisons in a row a signal is far worse than the parent's before it is flagged.
-const WORSE_IN_A_ROW: u32 = 3;
+/// The comparisons with the parent a verdict takes the median of, so one odd point decides nothing.
+const SMOOTHED: usize = 5;
+/// Comparisons kept to judge the parent's own scatter by.
+const KEPT: usize = 14;
+/// How far into a stage a run is before it is judged against its parent: a healthy run may
+/// start slower.
+const JUDGED_FROM: f64 = 0.1;
+/// How many times the parent's own scatter a gap must pass to be more than noise.
+const SPREADS: f64 = 3.0;
 
-/// A signal's comparisons with the parent: the step last compared, and at how many steps in a
-/// row it was far worse.
-pub(super) type Compared = (f64, u32);
+/// A signal's comparisons with the parent in one stage, oldest first: step, the run's value,
+/// the parent's.
+#[derive(Default)]
+pub(super) struct Compared {
+    stage: (String, usize),
+    points: Vec<(f64, f64, f64)>,
+}
+
+impl Compared {
+    /// Whether the run is far worse than its parent: over its last few comparisons, at least
+    /// 1.5 times worse, unless the better value is within noise of zero, and by a gap past the
+    /// parent's own scatter; never in the stage's first tenth.
+    fn far_worse(&self, lower_is_better: bool, of: Option<f64>) -> bool {
+        let recent = &self.points[self.points.len().saturating_sub(SMOOTHED)..];
+        let Some(&(step, ..)) = recent.last().filter(|_| recent.len() == SMOOTHED) else {
+            return false;
+        };
+        if of.is_some_and(|of| step < JUDGED_FROM * of) {
+            return false;
+        }
+        let theirs: Vec<(f64, f64)> = self.points.iter().map(|(x, _, y)| (*x, *y)).collect();
+        let Some((_, scatter, _)) = trend(&theirs) else {
+            return false;
+        };
+        let middle = |mut values: Vec<f64>| median(&mut values);
+        let mine = middle(recent.iter().map(|point| point.1).collect());
+        let parent = middle(recent.iter().map(|point| point.2).collect());
+        let (worse, better) = if lower_is_better {
+            (mine, parent)
+        } else {
+            (parent, mine)
+        };
+        let noise = SPREADS * scatter;
+        worse - better > noise && (better <= noise || worse >= 1.5 * better)
+    }
+}
 
 /// One condition a run meets now.
 struct Tripped {
@@ -82,13 +122,15 @@ fn conditions(
             evidence: Evidence::NonFinite,
         });
     }
+    let of = run.summary["stage"]["of"].as_f64();
     for (name, vs) in run.body["versus"]["step"].as_object().into_iter().flatten() {
-        let held = seen.compared.get(name).map_or(0, |(_, held)| *held);
         let spec = &signals[name];
-        if covered.contains(&("parent", name.clone()))
-            || held < WORSE_IN_A_ROW
-            || !far_worse(vs, spec)
-        {
+        let far = seen
+            .compared
+            .get(name)
+            .is_some_and(|compared| compared.far_worse(spec["better"] == "lower", of));
+        // The latest comparison is the one the sentence shows, so it must read worse too.
+        if covered.contains(&("parent", name.clone())) || vs["good"] != false || !far {
             continue;
         }
         let mine = super::super::monitor::value_text(&run.body["latest"][name], spec);
@@ -105,7 +147,7 @@ fn conditions(
                 versus_text(Some(vs), spec)
             ),
             text: format!(
-                "{} is {mine} against the parent's {theirs}{at}, far worse on {held} comparisons in a row.",
+                "{} is {mine} against the parent's {theirs}{at}, far worse over its last {SMOOTHED} comparisons.",
                 label(name)
             ),
             evidence: Evidence::Tail,
@@ -187,25 +229,28 @@ fn conditions(
     tripped
 }
 
-/// Counts, for each signal compared with the parent, the comparisons in a row at a new step that
-/// were far worse.
-fn count_worse(seen: &mut Seen, run: &Now) {
-    let signals = &run.body["view"]["signals"];
+/// Keeps each comparison with the parent at a new step, afresh in each stage and whenever the
+/// steps go back, as a relaunch from a checkpoint does.
+fn compare(seen: &mut Seen, run: &Now) {
+    let stage = run.stage();
     for (name, vs) in run.body["versus"]["step"].as_object().into_iter().flatten() {
-        let Some(step) = vs["step"].as_f64() else {
+        let (Some(step), Some(d), Some(theirs)) =
+            (vs["step"].as_f64(), vs["d"].as_f64(), vs["parent"].as_f64())
+        else {
             continue;
         };
-        let (last, held) = seen
-            .compared
-            .entry(name.clone())
-            .or_insert((f64::NEG_INFINITY, 0));
-        if step > *last {
-            *last = step;
-            *held = if far_worse(vs, &signals[name]) {
-                *held + 1
-            } else {
-                0
+        let compared = seen.compared.entry(name.clone()).or_default();
+        let last = compared.points.last().map(|(x, ..)| *x);
+        if compared.stage != stage || last.is_some_and(|last| step < last) {
+            *compared = Compared {
+                stage: stage.clone(),
+                points: Vec::new(),
             };
+        }
+        if last.is_none_or(|last| step > last) || compared.points.is_empty() {
+            compared.points.push((step, theirs + d, theirs));
+            let extra = compared.points.len().saturating_sub(KEPT);
+            compared.points.drain(..extra);
         }
     }
 }
@@ -250,7 +295,7 @@ pub(super) async fn check(seen: &mut Seen, run: &Now, now: i64) {
     if !run.live() || run.body["availability"]["state"] != "live" {
         return;
     }
-    count_worse(seen, run);
+    compare(seen, run);
     if run.summary["flag"]["state"] == "raised" {
         if let Err(error) = Store::open().and_then(|store| route(&store, &run.run)) {
             eprintln!(
@@ -343,5 +388,172 @@ pub(super) async fn check(seen: &mut Seen, run: &Now, now: i64) {
                 tripped.fingerprint, run.run.id
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run in `stage` (its name, and how many stages ended before it) of `of` steps, compared
+    /// with its parent at `step`.
+    fn at(stage: (&str, usize), of: f64, step: f64, mine: f64, theirs: f64) -> Now {
+        let phases: Vec<Value> = (0..=stage.1)
+            .map(|index| {
+                let ended = (index < stage.1).then_some(1);
+                json!({"name": stage.0, "startedAt": 1, "endedAt": ended})
+            })
+            .collect();
+        Now {
+            run: StoredRun {
+                id: "r".into(),
+                experiment_id: "e".into(),
+                project_id: "p".into(),
+                status: "running".into(),
+                backend_json: "{}".into(),
+                command: "train".into(),
+                created_at: 0,
+                updated_at: 0,
+                ended_at: None,
+                exit_code: None,
+                commit_sha: None,
+                result_markdown: None,
+                cancel_requested: false,
+                cancel_reason: None,
+                chat_session_id: None,
+            },
+            summary: json!({"stage": {"name": stage.0, "done": step, "of": of}}),
+            body: json!({"phases": phases, "versus": {"step": {"loss": {
+                "step": step, "d": mine - theirs, "parent": theirs, "good": mine < theirs}}}}),
+            label: "r".into(),
+            slug: "e".into(),
+            settings: Value::Null,
+            looks: Vec::new(),
+            folded: None,
+        }
+    }
+
+    /// A parent's loss, falling with a little noise.
+    fn parent(step: f64) -> f64 {
+        2.0 / (1.0 + step / 50.0) + 0.01 * (step * 1.7).sin()
+    }
+
+    fn far(seen: &Seen, of: f64) -> bool {
+        seen.compared["loss"].far_worse(true, Some(of))
+    }
+
+    #[test]
+    fn a_collapse_is_far_worse_once_a_tenth_of_its_stage_is_in() {
+        let mut seen = Seen::default();
+        let mut first = None;
+        for step in 1..=40 {
+            let step = f64::from(step);
+            compare(
+                &mut seen,
+                &at(("train", 0), 200.0, step, 3.0 * parent(step), parent(step)),
+            );
+            if far(&seen, 200.0) {
+                first.get_or_insert(step);
+            }
+        }
+        assert_eq!(first, Some(20.0), "judged from step 20 of 200");
+    }
+
+    #[test]
+    fn a_new_stage_or_a_relaunch_starts_its_comparisons_over() {
+        let mut seen = Seen::default();
+        for step in 1..=100 {
+            let step = f64::from(step);
+            compare(
+                &mut seen,
+                &at(
+                    ("pretrain", 0),
+                    100.0,
+                    step,
+                    3.0 * parent(step),
+                    parent(step),
+                ),
+            );
+        }
+        assert!(far(&seen, 100.0));
+
+        compare(
+            &mut seen,
+            &at(("finetune", 1), 100.0, 1.0, 3.0 * parent(1.0), parent(1.0)),
+        );
+        assert!(!far(&seen, 100.0), "nothing carries into the next stage");
+        for step in 2..=20 {
+            let step = f64::from(step);
+            compare(
+                &mut seen,
+                &at(
+                    ("finetune", 1),
+                    100.0,
+                    step,
+                    3.0 * parent(step),
+                    parent(step),
+                ),
+            );
+        }
+        assert!(
+            far(&seen, 100.0),
+            "a collapse in the second stage, whose steps start at 0, counts"
+        );
+
+        compare(
+            &mut seen,
+            &at(
+                ("finetune", 1),
+                100.0,
+                12.0,
+                3.0 * parent(12.0),
+                parent(12.0),
+            ),
+        );
+        assert_eq!(
+            seen.compared["loss"].points.len(),
+            1,
+            "a relaunch starts over"
+        );
+    }
+
+    #[test]
+    fn a_slower_start_or_a_gap_within_noise_of_zero_is_not_far_worse() {
+        let mut slower = Seen::default();
+        for step in 1..=60 {
+            let step = f64::from(step);
+            // Twice the parent's loss early on, closing to level by step 40.
+            let lag = 1.0 + (1.0 - step / 40.0).max(0.0);
+            compare(
+                &mut slower,
+                &at(("train", 0), 400.0, step, lag * parent(step), parent(step)),
+            );
+            assert!(!far(&slower, 400.0), "step {step}");
+        }
+
+        let noisy = |step: f64| 0.002 + 0.001 * (step * 2.3).sin();
+        let mut near_zero = Seen::default();
+        for step in 1..=60 {
+            let step = f64::from(step);
+            compare(
+                &mut near_zero,
+                &at(("train", 0), 100.0, step, noisy(step) + 0.002, noisy(step)),
+            );
+        }
+        assert!(
+            !far(&near_zero, 100.0),
+            "twice a loss near zero, within its noise"
+        );
+        for step in 61..=70 {
+            let step = f64::from(step);
+            compare(
+                &mut near_zero,
+                &at(("train", 0), 100.0, step, 0.05, noisy(step)),
+            );
+        }
+        assert!(
+            far(&near_zero, 100.0),
+            "a jump far past its noise is, ratio or not"
+        );
     }
 }

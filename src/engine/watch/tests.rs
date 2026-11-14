@@ -1039,37 +1039,40 @@ async fn a_run_far_worse_than_its_parent_at_the_same_step_is_flagged() {
     }
     let store = Store::open().unwrap();
     chat(&store, "chat", "opencode");
+    let longer = |epochs: &[(f64, f64)]| -> Vec<(f64, f64)> {
+        epochs.iter().copied().cycle().take(24).collect()
+    };
     let parent = classifier_run(&store, "seed-2", None, "done", "chat");
-    epochs(&store, &parent, &HEALTHY);
+    epochs(&store, &parent, &longer(&HEALTHY));
     let child = classifier_run(&store, "flipped", Some("seed-2"), "running", "chat");
+    let flipped = longer(&FLIPPED);
     let mut seen = Seen::default();
-    for reported in 1..=FLIPPED.len() {
-        epochs(&store, &child, &FLIPPED[..reported]);
+    for reported in 1..=flipped.len() {
+        epochs(&store, &child, &flipped[..reported]);
         let now = Now::read(&store, &child).unwrap();
         trip::check(&mut seen, &now, crate::store::now_ms()).await;
         let flags = super::super::flags::read(&store, &child).unwrap();
-        if reported < 3 {
-            assert!(
-                flags.is_empty(),
-                "one or two reports flag nothing: {flags:?}"
-            );
-        }
+        assert_eq!(
+            flags.len(),
+            usize::from(reported >= 15),
+            "judged from epoch 15 of 150, its first tenth: {reported}"
+        );
     }
     let flags = super::super::flags::read(&store, &child).unwrap();
-    assert_eq!(flags.len(), 1, "{flags:?}");
     assert_eq!(flags[0]["source"], "tripwire");
     assert_eq!(flags[0]["kind"], "parent");
     let detail = flags[0]["detail"].as_str().unwrap();
     assert!(
-        detail.starts_with("Test accuracy **0.102**, 0.794 worse than the parent at step 3."),
+        detail.starts_with("Test accuracy **0.096**, 0.800 worse than the parent at step 15."),
         "{detail}"
     );
 
     // A sibling that trains as its parent did is never flagged.
     let healthy = classifier_run(&store, "seed-5", Some("seed-2"), "running", "chat");
     let mut seen = Seen::default();
-    for reported in 1..=HEALTHY.len() {
-        epochs(&store, &healthy, &HEALTHY[..reported]);
+    let trained = longer(&HEALTHY);
+    for reported in 1..=trained.len() {
+        epochs(&store, &healthy, &trained[..reported]);
         let now = Now::read(&store, &healthy).unwrap();
         trip::check(&mut seen, &now, crate::store::now_ms()).await;
     }
