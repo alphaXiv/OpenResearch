@@ -466,8 +466,22 @@ export function ModelPicker({
     },
   ];
   const autonomyLabel = autonomyChoices.find((choice) => choice.id === autonomy)?.label;
+  const permissionSummary = [
+    permissionLabel && `${m.model_picker_permissions()}: ${permissionLabel}`,
+    autonomyLabel && `${m.model_picker_autonomy()}: ${autonomyLabel}`,
+  ].filter(Boolean).join(" · ") || m.model_picker_permissions();
   const moveFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+
+    // Typing anywhere in the picker continues the search.
+    const typed = event.key.length === 1 && event.key !== " " ? filter + event.key : event.key === "Backspace" ? filter.slice(0, -1) : undefined;
+    if (typed !== undefined && event.target !== searchRef.current && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      setFilter(typed);
+      searchRef.current?.focus();
+      return;
+    }
+
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     const items = Array.from(
       event.currentTarget.querySelectorAll<HTMLElement>("input, .model-menu-list [data-nav]:not([disabled])"),
@@ -542,7 +556,7 @@ export function ModelPicker({
                 initialFocus={searchRef}
                 onKeyDown={moveFocus}
                 aria-label={m.model_picker_model()}
-                className="model-menu flex flex-col overflow-hidden rounded-lg border border-border bg-background shadow-dropdown outline-none"
+                className="model-menu group/picker flex flex-col overflow-hidden rounded-lg border border-border bg-background shadow-dropdown outline-none"
                 style={{
                   width: "min(440px, calc(100vw - 16px))",
                   maxHeight: "min(280px, var(--available-height))",
@@ -556,6 +570,11 @@ export function ModelPicker({
                     placeholder={m.model_picker_search_models()}
                     value={filter}
                     onChange={(event) => setFilter(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229 || !filter.trim()) return;
+                      event.preventDefault();
+                      event.currentTarget.closest(".model-menu")?.querySelector<HTMLElement>("[data-row] [data-nav]")?.click();
+                    }}
                     className="min-w-0 flex-1 border-0 bg-transparent px-3 py-2 text-sm outline-none"
                   />
                   <IconButton
@@ -600,28 +619,30 @@ export function ModelPicker({
             modal={false}
             onOpenChange={(open) => setMenu((current) => (open ? "effort" : current === "effort" ? null : current))}
           >
-            <Menu.Trigger
-              disabled={disabled}
-              className={PILL}
-              aria-label={[
-                effortLabel ? `${m.model_picker_effort()}: ${effortLabel}` : m.model_picker_effort(),
-                fastOn ? m.model_picker_fast_mode() : null,
-              ].filter(Boolean).join(" · ")}
-            >
-              {fastOn && <Zap size={14} fill="currentColor" aria-hidden="true" className="shrink-0 text-accent-amber" />}
-              {effortLabel ? (
-                <>
-                  <EffortIcon id={variantEfforts.length ? variant?.effort : effectiveReasoningId} />
-                  <span>{effortLabel}</span>
-                </>
-              ) : (
-                <Settings size={14} aria-hidden="true" />
-              )}
-              <ChevronDown size={14} className="shrink-0 text-muted" />
-            </Menu.Trigger>
+            <Tooltip interactive content={m.model_picker_effort_options()} className="rounded-md">
+              <Menu.Trigger
+                disabled={disabled}
+                className={PILL}
+                aria-label={[
+                  effortLabel ? `${m.model_picker_effort()}: ${effortLabel}` : m.model_picker_effort(),
+                  fastOn ? m.model_picker_fast_mode() : null,
+                ].filter(Boolean).join(" · ")}
+              >
+                {fastOn && <Zap size={14} fill="currentColor" aria-hidden="true" className="shrink-0 text-accent-amber" />}
+                {effortLabel ? (
+                  <>
+                    <EffortIcon id={variantEfforts.length ? variant?.effort : effectiveReasoningId} />
+                    <span>{effortLabel}</span>
+                  </>
+                ) : (
+                  <Settings size={14} aria-hidden="true" />
+                )}
+                <ChevronDown size={14} className="shrink-0 text-muted" />
+              </Menu.Trigger>
+            </Tooltip>
             <Menu.Portal container={portalContainer}>
               <Menu.Positioner className="z-50" side="top" align="end" sideOffset={8} collisionPadding={8} positionMethod="fixed">
-                <Menu.Popup aria-label={m.model_picker_effort()} className={MENU_POPUP} style={{ width: "min(240px, calc(100vw - 16px))", maxHeight: "min(400px, var(--available-height))" }}>
+                <Menu.Popup aria-label={m.model_picker_effort_options()} className={MENU_POPUP} style={{ width: "min(240px, calc(100vw - 16px))", maxHeight: "min(400px, var(--available-height))" }}>
                   {effortChoices.length > 0 && (
                     <Menu.Group>
                       <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_effort()}</Menu.GroupLabel>
@@ -750,12 +771,8 @@ export function ModelPicker({
             modal={false}
             onOpenChange={(open) => setMenu((current) => (open ? "permissions" : current === "permissions" ? null : current))}
           >
-            <Tooltip interactive content={[permissionLabel, autonomyLabel].filter(Boolean).join(" · ")} className="rounded-md">
-              <Menu.Trigger
-                disabled={disabled}
-                className={PILL}
-                aria-label={`${m.model_picker_permissions()}: ${[permissionLabel, autonomyLabel].filter(Boolean).join(", ")}`}
-              >
+            <Tooltip interactive content={permissionSummary} className="rounded-md">
+              <Menu.Trigger disabled={disabled} className={PILL} aria-label={permissionSummary}>
                 <PermissionIcon id={effectivePermissionId} />
                 <ChevronDown size={14} className="shrink-0 text-muted" />
               </Menu.Trigger>
