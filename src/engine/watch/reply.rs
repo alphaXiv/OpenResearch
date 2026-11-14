@@ -26,6 +26,8 @@ pub(super) struct Bindable<'a> {
     pub counts: &'a BTreeSet<String>,
     /// Numbers that move: no sentence may write one of these as it reads now.
     pub moving: &'a [f64],
+    /// The step it is at, which is all a number written as a step can collide with.
+    pub step: Option<f64>,
     /// Byte ranges of the log excerpts the digest showed.
     pub excerpts: &'a [(u64, u64)],
     /// Whether the run has a sentence a `same` can keep.
@@ -469,7 +471,8 @@ fn check_line(
         .iter()
         .flat_map(|run| run.moving.iter().copied())
         .collect();
-    if let Some(number) = literal_moving(&literal, &moving) {
+    let steps: Vec<f64> = runs.iter().filter_map(|run| run.step).collect();
+    if let Some(number) = literal_moving(&literal, &moving, &steps) {
         return Err(format!(
             "\"{number}\" is a number that still moves; write it as its token so it stays current"
         ));
@@ -477,8 +480,9 @@ fn check_line(
     Ok(patterns)
 }
 
-/// The first number written in `text` that reads as one of `moving` does now.
-fn literal_moving<'a>(text: &'a str, moving: &[f64]) -> Option<&'a str> {
+/// The first number written in `text` that reads as one of `moving` does now. A number written
+/// as a step ("since step 20") is a place in the run, which moves only when it is the step now.
+fn literal_moving<'a>(text: &'a str, moving: &[f64], steps: &[f64]) -> Option<&'a str> {
     let mut start = None;
     let ends = text
         .char_indices()
@@ -492,7 +496,11 @@ fn literal_moving<'a>(text: &'a str, moving: &[f64]) -> Option<&'a str> {
             (None, true) => start = Some(at),
             (Some(from), false) => {
                 let lexeme = text[from..at].trim_end_matches(['.', ',', '٫', '٬']);
-                if matches_moving(lexeme, moving) {
+                let before = text[..from].trim_end().to_lowercase();
+                let place = ["step", "steps", "epoch", "round"]
+                    .iter()
+                    .any(|word| before.ends_with(word));
+                if matches_moving(lexeme, if place { steps } else { moving }) {
                     return Some(lexeme);
                 }
                 start = None;
@@ -571,6 +579,7 @@ mod tests {
             versus: &run.versus,
             counts: &run.counts,
             moving: &run.moving,
+            step: run.moving.last().copied(),
             excerpts: &run.excerpts,
             has_sentence,
         }
@@ -676,6 +685,19 @@ mod tests {
     }
 
     #[test]
+    fn a_step_written_as_a_place_in_the_run_is_refused_only_when_it_is_the_step_now() {
+        let mut run = run();
+        run.moving = vec![2.3104, 20.0, 340.0];
+        let line = |text: &str| {
+            let reply = json!({"runs": {"r1": {"status": "ok", "line": text}}}).to_string();
+            read(&reply, &[bind("r1", &run, false)], None, &render).errors
+        };
+        assert!(line("Loss **{loss}**, climbing since step 20.").is_empty());
+        assert!(line("Loss **{loss}** with 20 warnings.")[0].contains("\"20\""));
+        assert!(line("Loss **{loss}** at step 340.")[0].contains("\"340\""));
+    }
+
+    #[test]
     fn evidence_names_the_lines_it_overlaps_and_a_run_may_name_itself() {
         let mut run = run();
         run.excerpts = vec![(100, 140), (140, 200), (300, 340)];
@@ -717,7 +739,7 @@ mod tests {
     #[test]
     fn localized_digits_and_separators_still_read_as_the_number() {
         assert!(matches_moving("٢٫٣١", &[2.31]));
-        assert_eq!(literal_moving("خسارة ٢٫٣١ الآن", &[2.31]), Some("٢٫٣١"));
+        assert_eq!(literal_moving("خسارة ٢٫٣١ الآن", &[2.31], &[]), Some("٢٫٣١"));
         assert!(matches_moving("2,31", &[2.31]));
         assert!(matches_moving("1,140", &[1140.0]));
         assert!(!matches_moving("600", &[340.0]));

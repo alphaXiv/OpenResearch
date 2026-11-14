@@ -33,6 +33,8 @@ sentences: keep their wording while their meaning holds. A run you leave out is 
 Flag a run when it may be going wrong: it does something the brief says is worth a flag, it is
 worse than its parent where it should not be, it prints a new kind of warning or error, its
 numbers stop making sense, or it stalls. Give the byte ranges of the log lines that show it.
+Matching its parent is what a healthy run does: numbers equal to the parent's are trouble only
+when the brief says this run should differ. A run that ended as its parent did is not a flag.
 "keptGoingAfter" lists flags someone looked at and chose to keep going after: do not flag the
 same thing again unless it got clearly worse.
 Write "summary" only when the digest has "summary": one sentence for all the runs, naming each

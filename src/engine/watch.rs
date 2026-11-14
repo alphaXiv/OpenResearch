@@ -1633,6 +1633,7 @@ async fn take(id: i64) -> Result<()> {
             versus: versus.get(key.as_str()).unwrap_or(&empty_set),
             counts: counted.get(key.as_str()).unwrap_or(&empty_set),
             moving: &movings[key.as_str()],
+            step: run.summary["stage"]["done"].as_f64(),
             excerpts: digest.excerpts.get(key).unwrap_or(&no_excerpts),
             has_sentence: has[key.as_str()],
         })
