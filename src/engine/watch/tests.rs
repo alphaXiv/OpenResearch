@@ -545,3 +545,47 @@ fn a_number_leaves_its_trend_when_it_turns_but_not_as_a_healthy_curve_bends() {
         "no trend before the eighth point"
     );
 }
+
+/// One flag open at a time: an error printed while another flag is open is raised once that one
+/// is settled, citing its line.
+#[tokio::test]
+async fn an_error_seen_while_a_flag_was_open_is_raised_once_that_flag_settles() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "opencode");
+    let log = "step 1 loss 2.0\nValueError: shard 3 is corrupt (bad header)\n";
+    let row = run(&store, "a", "Depth 6", "chat", log);
+    let open = json!({"id": "f0", "source": "look", "at": 1, "template": "Loss **2.0**.", "detail": "Loss **2.0**.",
+        "text": "Loss 2.0.", "evidence": null, "whole": null});
+    let flag = super::super::flags::new_flag(&store, &row, open, true).unwrap();
+    store.raise_flags(&[flag], 1).unwrap();
+    super::super::monitor::advance(&store, &row, crate::store::now_ms()).unwrap();
+    let state = Arc::new(tokio::sync::Mutex::new(State::default()));
+    pass(&state).await.unwrap();
+    assert_eq!(
+        super::super::flags::read(&store, &row).unwrap().len(),
+        1,
+        "it waits"
+    );
+
+    let keep = crate::store::FlagChoice {
+        run_id: "a".into(),
+        body: json!({"flagId": "f0", "c": "keep", "by": "user"}),
+        wakes: Vec::new(),
+    };
+    store.record_flag_choices(&[keep], 2).unwrap();
+    super::super::monitor::advance(&store, &row, crate::store::now_ms()).unwrap();
+    pass(&state).await.unwrap();
+    let flags = super::super::flags::read(&store, &row).unwrap();
+    assert_eq!(flags.len(), 2, "{flags:?}");
+    assert_eq!(
+        flags[1]["detail"],
+        "A new kind of error in the log: **ValueError**."
+    );
+    assert_eq!(
+        flags[1]["evidence"]["lines"],
+        json!(["ValueError: shard 3 is corrupt (bad header)"])
+    );
+}

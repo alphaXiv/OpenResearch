@@ -78,7 +78,8 @@ fn conditions(state: &State, run: &Now, covered: &BTreeSet<String>, now: i64) ->
         .as_i64()
         .filter(|ms| *ms > 0)
     {
-        let log = if silent_for.is_some_and(|silent| silent >= stall) {
+        // The last progress and the last line land moments apart: half the stall is silence.
+        let log = if silent_for.is_some_and(|silent| silent >= stall / 2) {
             "its log is silent too"
         } else {
             "its log keeps printing"

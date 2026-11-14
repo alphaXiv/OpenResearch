@@ -265,9 +265,10 @@ struct Scan {
     offset: u64,
     lines: u64,
     novel: BTreeSet<String>,
-    /// The first line of each novel kind, which a tripwire cites.
+    /// The first line of each kind the scans found new, which a tripwire cites.
     firsts: BTreeMap<String, digest::Line>,
-    /// When the log last grew, as this orx saw it.
+    /// The log's length when last read, and when this orx last saw it grow.
+    len: Option<u64>,
     grew_at: i64,
 }
 
@@ -531,7 +532,9 @@ async fn scan(state: &mut State, run: &Now) {
             offset: cursor["to"].as_u64().unwrap_or(0),
             lines: 0,
             novel: BTreeSet::new(),
-            firsts: BTreeMap::new(),
+            // Kept across looks: a tripwire raises a kind of error once its run's open flag settles.
+            firsts: std::mem::take(&mut entry.firsts),
+            len: entry.len,
             grew_at: entry.grew_at.max(run.run.created_at),
         };
     }
@@ -543,15 +546,22 @@ async fn scan(state: &mut State, run: &Now) {
         .map(str::to_owned)
         .collect();
     let read = read_lines(&run.run.id, entry.ident.as_deref(), entry.offset, SCAN).await;
-    if let Ok((ident, lines, to, _)) = read {
-        if entry.ident.as_deref() != Some(ident.as_str()) {
+    if let Ok((ident, lines, to, len)) = read {
+        let replaced = entry.ident.as_deref() != Some(ident.as_str());
+        if replaced {
             entry.lines = 0;
             entry.novel.clear();
             entry.firsts.clear();
         }
-        if to != entry.offset || entry.ident.as_deref() != Some(ident.as_str()) {
+        // Growth is the log's length moving, not this scan catching up after a look.
+        let grew = match len {
+            Some(len) => entry.len != Some(len),
+            None => to != entry.offset || replaced,
+        };
+        if grew {
             entry.grew_at = crate::store::now_ms();
         }
+        entry.len = len.or(entry.len);
         entry.ident = Some(ident);
         entry.offset = to;
         for line in lines {
@@ -561,7 +571,9 @@ async fn scan(state: &mut State, run: &Now) {
             entry.lines += 1;
             if let Some(kind) = digest::family(&line.text).filter(|kind| !families.contains(kind)) {
                 entry.novel.insert(kind.clone());
-                entry.firsts.entry(kind).or_insert(line);
+                if entry.firsts.len() < FAMILIES {
+                    entry.firsts.entry(kind).or_insert(line);
+                }
             }
         }
     }
