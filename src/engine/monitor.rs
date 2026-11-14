@@ -539,6 +539,55 @@ fn versus(
     versus
 }
 
+/// The signal a run leads with. A value that went wrong is never hidden by the view's order: the
+/// first non-finite one, else the first that fell to exactly zero where the parent's did not, among
+/// the view's headline and then its other signals. Otherwise the first headline with a number,
+/// else the first.
+fn headline<'a>(
+    view: &'a Value,
+    latest: &BTreeMap<String, Value>,
+    versus: &serde_json::Map<String, Value>,
+) -> Option<&'a str> {
+    let named: Vec<&str> = view["headline"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let others = view["signals"]
+        .as_object()
+        .into_iter()
+        .flat_map(|signals| signals.keys())
+        .map(String::as_str)
+        .filter(|name| !named.contains(name));
+    let candidates: Vec<&str> = named.iter().copied().chain(others).collect();
+    let non_finite = |name: &&str| {
+        latest
+            .get(*name)
+            .and_then(Value::as_str)
+            .is_some_and(|value| SENTINELS.contains(&value))
+    };
+    let collapsed = |name: &&str| {
+        latest.get(*name).and_then(Value::as_f64) == Some(0.0)
+            && versus
+                .get(*name)
+                .and_then(|vs| vs["parent"].as_f64())
+                .is_some_and(|parent| parent != 0.0)
+    };
+    candidates
+        .iter()
+        .copied()
+        .find(non_finite)
+        .or_else(|| candidates.iter().copied().find(collapsed))
+        .or_else(|| {
+            named
+                .iter()
+                .copied()
+                .find(|name| latest.get(*name).is_some_and(Value::is_number))
+        })
+        .or(named.first().copied())
+}
+
 /// The estimator's inputs for this run, and the offset that maps its host times to the laptop.
 fn estimate_input(
     fold: &Fold,
@@ -933,20 +982,15 @@ fn evaluate(
             },
         );
 
-    let named = view["headline"].as_array().map_or(&[][..], Vec::as_slice);
-    let headline = named
-        .iter()
-        .filter_map(Value::as_str)
-        .find(|name| latest.get(*name).is_some_and(Value::is_number))
-        .or_else(|| named.first().and_then(Value::as_str))
-        .map(|name| {
-            json!({
-                "name": name,
-                "label": view["signals"][name]["label"].as_str().unwrap_or(name),
-                "value": latest.get(name),
-                "vs": versus.get(name),
-            })
-        });
+    let headline_name = headline(&view, &latest, &versus);
+    let headline = headline_name.map(|name| {
+        json!({
+            "name": name,
+            "label": view["signals"][name]["label"].as_str().unwrap_or(name),
+            "value": latest.get(name),
+            "vs": versus.get(name),
+        })
+    });
     let mut referenced: serde_json::Map<String, Value> = view["signals"]
         .as_object()
         .into_iter()
@@ -1035,6 +1079,7 @@ fn evaluate(
         "x": {"name": x_name, "max": x_max},
         "latest": latest,
         "parent": parent_body,
+        "headline": headline_name,
         "versus": {"step": at_step, "final": at_end},
         "rows": rows,
         "groups": {},
@@ -1805,6 +1850,7 @@ fn project(
                     "source": body["source"],
                     "statusText": body["statusText"],
                     "versus": body["versus"],
+                    "headline": body["headline"],
                 },
             });
             if let Some(best) = body.get("best") {
@@ -4516,6 +4562,40 @@ mod tests {
             ..folded(&lines)
         });
         run
+    }
+
+    #[test]
+    fn a_value_that_went_wrong_leads_the_run_whatever_the_views_order() {
+        let f = Fixture::new("orx-monitor-wrong-headline");
+        f.view(
+            "exp",
+            "<signal name=\"val_loss\" label=\"Val loss\" better=\"lower\" />\n<signal name=\"eval_score\" label=\"Eval score\" better=\"higher\" />\n<view headline=\"val_loss eval_score\"><stats of=\"val_loss eval_score\" /></view>",
+        );
+        let ended = |id: &str, experiment: &str, val_loss: &str, score: &str| {
+            let run = f.run_in(id, experiment, "done", local());
+            f.collect(&Snapshot {
+                run_id: id.into(),
+                ..folded(&[
+                    (T0, format!("::orx:: {{\"phase\":\"train\",\"step\":1,\"of\":1,\"m\":{{\"val_loss\":{val_loss}}}}}")),
+                    (T0 + 1000, format!("::orx:: {{\"phase\":\"eval\",\"step\":1,\"of\":1,\"m\":{{\"eval_score\":{score}}}}}")),
+                ])
+            });
+            run
+        };
+        let parent = ended("p1", "exp", "1.0", "0.68");
+        monitor_at(&f, &parent, T0 + 700_000);
+        f.child("child", "exp");
+        for (id, val_loss, score, leads) in [
+            ("healthy", "1.0", "0.6", "val_loss"),
+            ("nan", "NaN", "0.25", "val_loss"),
+            ("zeros", "1.0", "0", "eval_score"),
+        ] {
+            let run = ended(id, "child", val_loss, score);
+            let (monitor, _) = monitor_at(&f, &run, T0 + 700_000);
+            assert_eq!(monitor["headline"], leads, "{id}");
+            let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+            assert_eq!(summary["headline"]["name"], leads, "{id}");
+        }
     }
 
     #[test]

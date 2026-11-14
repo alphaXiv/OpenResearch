@@ -154,6 +154,7 @@
   "brief": [],
   "rules": [],
   "statusText": "e1  running  25%  train \u00b7 step 1,250 of 5,000\neta      1h 29m left (1h 19m to 1h 39m)\nsignals  loss NaN\nwatch    Loss is NaN.\nflag     A non-finite loss was reported. [log line 91]",
+  "headline": "loss",
   "versus": {
     "step": {},
     "final": {}

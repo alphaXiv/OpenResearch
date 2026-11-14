@@ -308,6 +308,8 @@ export interface RunMonitor {
   media: Record<string, MediaItem[]>;
   /** `rows` holds the parent's tables a table with `vs` compares with, matched by their first column. */
   parent: { runId: string; phase: string | null; series: Record<string, Point[]>; rows?: Record<string, Record<string, SignalValue>[]> } | null;
+  /** The signal the run leads with: one that went wrong (non-finite, or zero where the parent's isn't), else the view's first headline with a number. */
+  headline: string | null;
   /** Each signal compared both ways; `versusOf` picks the way a block or the signal asks for. */
   versus: Record<VersusBy, Record<string, Versus>>;
   counts: Record<string, number>;

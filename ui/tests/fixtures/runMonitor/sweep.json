@@ -192,6 +192,7 @@
   "cells": {},
   "media": {},
   "parent": null,
+  "headline": "val_loss",
   "versus": {
     "step": {},
     "final": {}

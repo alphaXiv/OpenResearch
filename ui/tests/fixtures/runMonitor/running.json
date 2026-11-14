@@ -123,6 +123,7 @@
   "brief": [],
   "rules": [],
   "statusText": "e1  running  25%  train \u00b7 step 1,240 of 5,000\neta      1h 30m left (1h 20m to 1h 40m)\nsignals  loss 2.31\nwatch    Loss 2.31, falling steadily. (10m ago)",
+  "headline": "loss",
   "versus": {
     "step": {},
     "final": {}

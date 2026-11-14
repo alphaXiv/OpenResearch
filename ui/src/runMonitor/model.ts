@@ -421,8 +421,9 @@ function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monito
   let label: string;
   let value: SignalValue;
   let vs: Versus | null;
-  if (monitor && monitor.view.headline.length > 0) {
-    name = monitor.view.headline.find((candidate) => typeof monitor.latest[candidate] === "number") ?? monitor.view.headline[0];
+  if (monitor) {
+    if (monitor.headline === null) return null;
+    name = monitor.headline;
     label = signals[name]?.label ?? name;
     value = monitor.latest[name] ?? null;
     vs = versusOf(monitor, name, live);

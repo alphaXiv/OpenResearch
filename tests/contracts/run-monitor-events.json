@@ -67,7 +67,8 @@
       "versus": {
         "step": {},
         "final": {}
-      }
+      },
+      "headline": "loss"
     },
     "reset": true
   },
@@ -150,7 +151,8 @@
       "versus": {
         "step": {},
         "final": {}
-      }
+      },
+      "headline": "loss"
     }
   }
 ]

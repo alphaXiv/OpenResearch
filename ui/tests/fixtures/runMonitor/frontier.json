@@ -259,6 +259,7 @@
       ]
     }
   },
+  "headline": "front_gain",
   "versus": {
     "step": {
       "front_gain": {

@@ -186,7 +186,7 @@ test("a signal's labels name its raw value in stats, table cells and the headlin
   const table = await draw({ ...monitor, rows: { levels: rows } }, { table: "levels", columns: ["level", "valid"], last: 9 });
   assert.deepEqual([...table.querySelectorAll("tbody tr")].map((row) => text(row.cells[1])), ["valid", "valid", "valid", "valid", "valid", "invalid", "valid", "valid", "valid"]);
 
-  const headline = { ...monitor, view: { ...monitor.view, headline: ["valid"] } };
+  const headline = { ...monitor, view: { ...monitor.view, headline: ["valid"] }, headline: "valid" };
   const run = { id: "r-codec", experimentId: "e1", projectId: "p", status: "done", createdAt: monitor.asOf - 1_210_000, startedAt: monitor.asOf - 1_210_000, endedAt: monitor.asOf, updatedAt: monitor.asOf, contact: null, cancelling: false, lostReason: null, host: null, backend: { kind: "local" } };
   const model = runModel({ item: { sessionId: "s", run, experimentName: "Wider match window", experimentSlug: "wider-match-window" }, monitor: headline, shown: true, agent: "Claude", now: monitor.asOf, nextRetryMs: null });
   assert.equal(text({ textContent: model.headline.value }), "valid");
