@@ -371,15 +371,20 @@ printing; with nothing new there is no look. Looks a change brings keep the
 chat's `minGapS` between them and never outnumber the ladder's points since the
 oldest run started. A look answered `same` doubles the threshold of the check
 that brought it. A run gets one last look when it ends, shared with siblings
-ending within a minute; one that fails or is interrupted is taken once more, and
-a second failure stands in the journal as the run's last look.
+ending within a minute; one that fails or is interrupted is taken once more,
+after the chat's `minGapS`, and a second failure stands in the journal as the
+run's last look.
 
 A look's request, system prompt and digest together, is held to 4,096 tokens,
-counted as two bytes a token, and never past 16 KiB: the brief, each run's
-progress, signals and last three sentences, the log's head and its new lines,
-new kinds of warning first, repeats said once with their count. Older points and
-sentences go first when it is too long, and the journal says what each look
-left out. Each field and log line passes
+counted as two bytes a token, and never past 16 KiB; so is its retry, with the
+reply it answers. It holds the brief, each run's progress, signals and last
+three sentences, and its new log lines, new kinds of warning first, repeats said
+once with their count. A run's first lines go to the first look that has room
+for them once every run's new lines are in, and to no later one. When it is too
+long, older points go first, then earlier sentences, values no signal names, the
+watcher's notes past 512 bytes, each brief past 1 KiB (its least needed labels
+first), the signals no sentence reads, and then notes and briefs again; the
+journal says what each look left out, and by how much it was still over. Each field and log line passes
 sharing's credential scan as written, before it is clipped or encoded; one that
 matches is left out, saying so, and the journal tells the user once where it is.
 A retry's reply is scanned before it goes back. A reply is strict JSON: each number that can

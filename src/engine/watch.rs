@@ -1818,15 +1818,13 @@ async fn take(id: i64) -> Result<()> {
         .unwrap_or_else(PoisonError::into_inner)
         .get(&chat.id)
         .cloned();
-    let digest = digest::build(
-        &digest::Shared {
-            locale: &locale,
-            notes: kept_notes.as_deref(),
-            summary: summary_wanted.then_some(&summary_previous[..]),
-        },
-        &digest_runs,
-        digest::room(digest::SYSTEM.len() + DIGEST_PREAMBLE.len()),
-    );
+    let shared = digest::Shared {
+        locale: &locale,
+        notes: kept_notes.as_deref(),
+        summary: summary_wanted.then_some(&summary_previous[..]),
+    };
+    let room = digest::room(digest::SYSTEM.len() + DIGEST_PREAMBLE.len());
+    let digest = digest::build(&shared, &digest_runs, room);
     let prompt = format!("{DIGEST_PREAMBLE}{}", digest.text);
     let mut told: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for run in &runs {
@@ -1958,11 +1956,14 @@ async fn take(id: i64) -> Result<()> {
     let echoed =
         crate::local::share::find_secret(&format!("{}\n{}", first.text, read.errors.join("\n")));
     if !read.errors.is_empty() && echoed.is_none() {
-        let again = format!(
-            "{prompt}\n\nYour last reply was:\n{}\nIt was not accepted: {}.\nReply again with the whole JSON.",
+        let asked = format!(
+            "\n\nYour last reply was:\n{}\nIt was not accepted: {}.\nReply again with the whole JSON.",
             first.text,
             read.errors.join("; ")
         );
+        // The retry holds to the same budget as the first request, with the reply in it.
+        let refit = digest::build(&shared, &digest_runs, room.saturating_sub(asked.len()));
+        let again = format!("{DIGEST_PREAMBLE}{}{asked}", refit.text);
         if let Ok(second) = agent
             .one_shot_without_tools(request(&again, profile.as_deref(), model.as_deref()))
             .await
@@ -2039,7 +2040,8 @@ async fn take(id: i64) -> Result<()> {
                         }
                     }
                 }
-                json!({"ident": read.ident, "to": read.to, "families": families})
+                let head_shown = read.head_shown || digest.heads.contains(&row.key);
+                json!({"ident": read.ident, "to": read.to, "families": families, "headShown": head_shown})
             }
         };
         let mut cursor = cursor;
@@ -2050,11 +2052,18 @@ async fn take(id: i64) -> Result<()> {
         if let Some(notes) = told.get(&run.run.id).filter(|notes| !notes.is_empty()) {
             cursor["withheld"] = json!(notes);
         }
+        let over = (digest.over > 0).then(|| {
+            format!(
+                " It still went about {} tokens over.",
+                digest.over.div_ceil(digest::BYTES_PER_TOKEN)
+            )
+        });
         if let Some(cut) = digest.omitted.get(&row.key) {
             cursor["omitted"] = json!(format!(
-                "To keep this look within {} tokens it left out {}.",
+                "To keep this look within {} tokens it left out {}.{}",
                 digest::MAX_TOKENS,
-                cut.join("; ")
+                cut.join("; "),
+                over.unwrap_or_default()
             ));
         }
         // A new count is counted from the log's start before its sentence is kept, so the
@@ -2339,6 +2348,7 @@ async fn log_since(run: &str, cursor: &Value) -> Result<digest::LogRead> {
         .collect();
     let same = ident == Some(head_ident.as_str());
     let from = if same { from } else { 0 };
+    let head_shown = same && cursor["headShown"] == true;
     let (_, mut lines, mut to, len) =
         read_lines(run, Some(&head_ident), from, READ_HEAD + READ_TAIL).await?;
     let mut unread = 0;
@@ -2374,7 +2384,12 @@ async fn log_since(run: &str, cursor: &Value) -> Result<digest::LogRead> {
         .filter(|_| same)
         .collect();
     Ok(digest::LogRead {
-        head: if from == 0 { Vec::new() } else { head },
+        head: if from == 0 || head_shown {
+            Vec::new()
+        } else {
+            head
+        },
+        head_shown,
         lines,
         from,
         to,
