@@ -539,6 +539,10 @@ fn matches_moving(lexeme: &str, moving: &[f64]) -> bool {
         let Ok(value) = reading.parse::<f64>() else {
             return false;
         };
+        // Zero is where a count or a failed check rests, and a sentence says so in words.
+        if value == 0.0 {
+            return false;
+        }
         let places = reading
             .split_once('.')
             .map_or(0, |(_, fraction)| fraction.len());
@@ -743,6 +747,10 @@ mod tests {
         assert!(matches_moving("2,31", &[2.31]));
         assert!(matches_moving("1,140", &[1140.0]));
         assert!(!matches_moving("600", &[340.0]));
+        assert!(
+            !matches_moving("0", &[0.0]),
+            "zero is a resting point, said in words"
+        );
     }
 
     #[test]

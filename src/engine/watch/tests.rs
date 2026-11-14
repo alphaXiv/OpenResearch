@@ -1214,3 +1214,113 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
         "the view's main number is watched"
     );
 }
+
+/// The walkthrough's sorting benchmark: one table row a case, no step, `correct` 0 once the
+/// variant under test stops merging. `(dist, n, slowdown, correct)`.
+const CASES: [(&str, u64, f64, u8); 4] = [
+    ("random", 1000, 31.2, 1),
+    ("random", 10000, 412.0, 0),
+    ("random", 100000, 461.5, 0),
+    ("sorted", 1000, 12.4, 1),
+];
+
+/// A run of an experiment whose view shows only the benchmark's table, folded after `cases`.
+fn bench_run(store: &Store, id: &str, cases: &[(&str, u64, f64, u8)]) -> StoredRun {
+    let row = run(store, id, "Stop at 4096", "chat", "");
+    let source = crate::engine::view::Source {
+        file: Some("view.xml"),
+        patterns: None,
+        config: None,
+    };
+    crate::engine::view::set(
+        store,
+        &row.experiment_id,
+        &crate::engine::view::etag(None),
+        Some(r#"<view><table name="cases" columns="dist n slowdown correct" /></view>"#),
+        None,
+        None,
+        &source,
+    )
+    .unwrap();
+    let projected_at = crate::store::now_ms() + 60_000;
+    let mut snapshot = orx_signals::Snapshot::new(&row.id, "1-7", "g1");
+    let mut log = String::new();
+    for (index, (dist, n, slowdown, correct)) in cases.iter().enumerate() {
+        let line = format!(
+            "::orx:: {{\"row\":\"cases\",\"m\":{{\"dist\":\"{dist}\",\"n\":{n},\"slowdown\":{slowdown},\"correct\":{correct}}}}}\n"
+        );
+        let at = projected_at - (cases.len() - index) as i64 * 1000;
+        snapshot.feed(line.as_bytes(), false, at, true).unwrap();
+        snapshot.reached_end(at);
+        log.push_str(&format!("{dist} {n} {slowdown} {correct}\n{line}"));
+    }
+    keep_log(store, &row.id, &log);
+    let path = store
+        .data_dir()
+        .join("run-signals")
+        .join(format!("{}.json", row.id));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::engine::adapters::signals::publish(&path, &snapshot).unwrap();
+    super::super::monitor::advance(store, &row, projected_at).unwrap();
+    row
+}
+
+#[test]
+fn a_row_that_falls_to_zero_asks_for_a_look_and_its_sentence_may_say_so() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let healthy = bench_run(&store, "baseline", &[CASES[0], CASES[3]]);
+    let now = Now::read(&store, &healthy).unwrap();
+    assert_eq!(changes(&mut Seen::default(), &now, 0), Vec::new());
+    assert!(material(None, &now), "rows are new output");
+
+    let broken = bench_run(&store, "broken", &CASES[..3]);
+    let now = Now::read(&store, &broken).unwrap();
+    assert_eq!(
+        changes(&mut Seen::default(), &now, 0),
+        vec![(
+            "row".to_owned(),
+            "correct in cases fell to 0 at row 2".to_owned()
+        )],
+    );
+
+    let moving = moving(&now);
+    assert!(
+        moving.contains(&461.5) && !moving.contains(&0.0),
+        "{moving:?}"
+    );
+    let signals = json!({});
+    let (versus, counts) = (BTreeSet::new(), BTreeSet::new());
+    let bindable = || reply::Bindable {
+        key: "r1",
+        signals: &signals,
+        versus: &versus,
+        counts: &counts,
+        moving: &moving,
+        step: None,
+        excerpts: &[],
+        has_sentence: false,
+    };
+    let render = |_: Option<&str>, _: &reply::Token| String::new();
+    let read = reply::read(
+        r#"{"runs": {"r1": {"status": "flag", "line": "Cases from 10000 up report correct 0; random 10000 is **412x** slower.", "evidence": []}}}"#,
+        &[bindable()],
+        None,
+        &render,
+    );
+    assert!(read.errors.is_empty(), "{:?}", read.errors);
+    let read = reply::read(
+        r#"{"runs": {"r1": {"status": "ok", "line": "Random 100000 is **461.5x** slower."}}}"#,
+        &[bindable()],
+        None,
+        &render,
+    );
+    assert!(
+        read.errors.iter().any(|e| e.contains("still moves")),
+        "a slowdown still moves: {:?}",
+        read.errors
+    );
+}

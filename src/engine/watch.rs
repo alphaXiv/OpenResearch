@@ -313,14 +313,24 @@ impl Now {
         (name, ended)
     }
 
+    /// The points of its series and the rows of its tables: what it has reported.
     fn points(&self) -> usize {
-        self.body["series"].as_object().map_or(0, |series| {
-            series
-                .values()
-                .filter_map(Value::as_array)
-                .map(Vec::len)
-                .sum()
-        })
+        ["series", "rows"]
+            .iter()
+            .filter_map(|key| self.body[key].as_object())
+            .flat_map(|reported| reported.values())
+            .filter_map(Value::as_array)
+            .map(Vec::len)
+            .sum()
+    }
+
+    /// Each table's rows, by name.
+    fn rows(&self) -> impl Iterator<Item = (&String, &Vec<Value>)> {
+        self.body["rows"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, rows)| Some((name, rows.as_array()?)))
     }
 }
 
@@ -1172,6 +1182,10 @@ fn basis_of(run: &Now, template: Option<&str>, mult: &Map<String, Value>) -> Val
         "ended": ended,
         "pace": if first { Value::Null } else { run.body["pace"]["times"].clone() },
         "points": if first { 0 } else { run.points() },
+        "rows": run
+            .rows()
+            .map(|(name, rows)| (name.clone(), json!(if first { 0 } else { rows.len() })))
+            .collect::<Map<String, Value>>(),
         "mult": mult,
         "bindings": bindings(run),
     })
@@ -1275,6 +1289,36 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
                 "count".into(),
                 format!("lines matching \"{pattern}\" went from {was} to {now}"),
             ));
+        }
+    }
+    // A row whose value falls to zero, or stops being a number, in a column that began above it.
+    for (table, rows) in run.rows() {
+        let from = basis["rows"][table].as_u64().unwrap_or(0) as usize;
+        let collapsed: Vec<(usize, &str)> = rows
+            .iter()
+            .enumerate()
+            .skip(from)
+            .filter_map(|(index, row)| {
+                let column = row.as_object()?.iter().find_map(|(column, value)| {
+                    let fell = value.as_f64() == Some(0.0)
+                        || matches!(value.as_str(), Some("NaN" | "Infinity" | "-Infinity"));
+                    let began = rows[0][column].as_f64().is_some_and(|v| v != 0.0);
+                    (fell && began).then_some(column.as_str())
+                })?;
+                Some((index + 1, column))
+            })
+            .collect();
+        if let Some((row, column)) = collapsed.first() {
+            if collapsed.len() as f64 >= mult(basis, "row") {
+                let value = &rows[row - 1][*column];
+                let value = value
+                    .as_str()
+                    .map_or_else(|| value.to_string(), str::to_owned);
+                why.push((
+                    "row".into(),
+                    format!("{} in {table} fell to {value} at row {row}", label(column)),
+                ));
+            }
         }
     }
     let (name, ended) = stage;
@@ -1640,11 +1684,36 @@ fn moving(run: &Now) -> Vec<f64> {
     if !run.live() {
         return Vec::new();
     }
+    let specs = &run.body["view"]["signals"];
     let mut values: Vec<f64> = run.body["latest"]
         .as_object()
         .into_iter()
         .flatten()
-        .filter_map(|(_, value)| value.as_f64())
+        .filter(|(name, _)| {
+            specs[name.as_str()]["values"].is_null() && specs[name.as_str()]["labels"].is_null()
+        })
+        .filter_map(|(name, value)| Some((name, value.as_f64()?)))
+        .filter(|(name, value)| {
+            // An outcome column (only ever 0 or 1) or a value unchanged since the run first
+            // reported it is a fact a sentence may state, as "correct 0" on every case.
+            let reported: Vec<f64> = series(&run.body, name)
+                .into_iter()
+                .map(|(_, y)| y)
+                .chain(
+                    run.body["rows"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|(_, rows)| rows.as_array().into_iter().flatten())
+                        .filter_map(|row| row[name.as_str()].as_f64()),
+                )
+                .chain([*value])
+                .collect();
+            let outcome = reported.iter().all(|y| *y == 0.0 || *y == 1.0);
+            let unchanged = reported.len() > 2 && reported.iter().all(|y| y == value);
+            !(outcome || unchanged)
+        })
+        .map(|(_, value)| value)
         .collect();
     values.extend(
         run.body["counts"]

@@ -101,7 +101,8 @@ Write every number that can still change as a token: {signal}, {signal.vs} (it r
 than the parent", "0.12 worse than the parent" or "level with the parent"), or {count:"regex"}, the number of log
 lines from the start of the run that match the regex, which orx keeps counting. A token names
 one of the run's "signals"; values under "alsoLogged" have none. A number that
-cannot change again, such as the step where something happened, may be written.
+cannot change again, such as the step where something happened, may be written, and so may
+zero, a check's 0 or 1, or a value unchanged since the run first reported it: "correct 0".
 Mark exactly one figure **bold**: the one that matters most. Put {signal.vs} beside the
 number it compares.
 Say only what the digest shows: a signal's label, unit and "better" say what it measures and
