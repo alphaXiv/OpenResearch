@@ -1083,6 +1083,13 @@ fn due(
     };
     if !ended.is_empty() && ended.iter().all(|run| waited(run)) {
         let names: Vec<&str> = ended.iter().map(|run| run.label.as_str()).collect();
+        let again = ended.iter().any(|run| {
+            run.looks.iter().any(|(look, row)| {
+                look.kind == "terminal"
+                    && row.role == "subject"
+                    && matches!(row.result.as_deref(), Some("error" | "interrupted"))
+            })
+        });
         let runs = ended
             .iter()
             .map(|run| (run.run.id.clone(), "subject"))
@@ -1091,7 +1098,14 @@ fn due(
             .collect();
         return Ok(vec![Planned {
             kind: "terminal",
-            reason: format!("{} ended", names.join(", ")),
+            reason: if again {
+                format!(
+                    "{} ended; its last look failed, so it is taken again",
+                    names.join(", ")
+                )
+            } else {
+                format!("{} ended", names.join(", "))
+            },
             runs: keyed(runs),
         }]);
     }

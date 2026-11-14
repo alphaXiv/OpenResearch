@@ -365,7 +365,8 @@ printing; with nothing new there is no look. Looks a change brings keep the
 chat's `minGapS` between them and never outnumber the ladder's points since the
 oldest run started. A look answered `same` doubles the threshold of the check
 that brought it. A run gets one last look when it ends, shared with siblings
-ending within a minute.
+ending within a minute; one that fails or is interrupted is taken once more, and
+a second failure stands in the journal as the run's last look.
 
 The digest is bounded at 16 KiB: the brief, each run's progress, signals and
 last three sentences, the log's head and its new lines, new kinds of warning

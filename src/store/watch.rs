@@ -58,6 +58,9 @@ pub(crate) struct LookResult {
     pub evidence: Value,
 }
 
+/// How many times a run's last look is taken before its failure stands.
+const TERMINAL_TRIES: i64 = 2;
+
 const SELECT_LOOK: &str =
     "SELECT id, chat_session_id, kind, state, model, reason, created_at, sent_at, done_at,
         summary_template, summary_text, usage_json, error FROM watch_looks";
@@ -395,12 +398,15 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Whether the run has had its one look after it ended.
+    /// Whether the run needs no more looks after it ended: one answered, or is still to answer,
+    /// or [`TERMINAL_TRIES`] of them failed.
     pub(crate) fn run_watch_terminal_done(&self, run_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM watch_look_runs r JOIN watch_looks l ON l.id = r.look_id
-                           WHERE r.run_id = ?1 AND l.kind = 'terminal' AND r.role = 'subject')",
-            [run_id],
+            "SELECT COUNT(CASE WHEN r.result IS NULL OR r.result IN ('line', 'same', 'flag') THEN 1 END) > 0
+                    OR COUNT(*) >= ?2
+             FROM watch_look_runs r JOIN watch_looks l ON l.id = r.look_id
+             WHERE r.run_id = ?1 AND l.kind = 'terminal' AND r.role = 'subject'",
+            params![run_id, TERMINAL_TRIES],
             |row| row.get(0),
         )?)
     }

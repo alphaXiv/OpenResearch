@@ -647,3 +647,51 @@ async fn an_error_seen_while_a_flag_was_open_is_raised_once_that_flag_settles() 
         json!(["ValueError: shard 3 is corrupt (bad header)"])
     );
 }
+
+#[test]
+fn a_last_look_that_failed_is_taken_once_more_and_then_its_failure_stands() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    run(&store, "a", "Depth 6", "chat", LOG);
+    let fail = |result: &str| {
+        let id = look(&store, "chat", "terminal", &[("a", "r1")]);
+        assert!(
+            store.run_watch_terminal_done("a").unwrap(),
+            "one is under way"
+        );
+        store.watch_look_sent(id, 1).unwrap();
+        let results = unanswered(&store.watch_look_runs(id).unwrap(), result);
+        store
+            .finish_watch_look(id, "error", 2, None, Some("timed out"), None, &results, &[])
+            .unwrap();
+    };
+    assert!(!store.run_watch_terminal_done("a").unwrap());
+    fail("interrupted");
+    assert!(
+        !store.run_watch_terminal_done("a").unwrap(),
+        "an interrupted last look is taken again"
+    );
+    fail("error");
+    assert!(
+        store.run_watch_terminal_done("a").unwrap(),
+        "the second failure stands"
+    );
+    let facts = run_facts(&store, &store.get_run("a").unwrap().unwrap()).unwrap();
+    assert_eq!(
+        facts["error"]["message"], "timed out",
+        "the run says its last look failed"
+    );
+
+    run(&store, "b", "Depth 8", "chat", LOG);
+    let id = look(&store, "chat", "terminal", &[("b", "r1")]);
+    store.watch_look_sent(id, 1).unwrap();
+    let mut results = unanswered(&store.watch_look_runs(id).unwrap(), "same");
+    results[0].template = Some("Done.".into());
+    store
+        .finish_watch_look(id, "done", 2, None, None, None, &results, &[])
+        .unwrap();
+    assert!(store.run_watch_terminal_done("b").unwrap());
+}
