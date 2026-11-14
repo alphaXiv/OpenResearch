@@ -1895,14 +1895,12 @@ mod windows_agent_tree_tests {
             .spawn()
             .unwrap();
         let mut lines = tokio::io::BufReader::new(agent.stdout.take().unwrap()).lines();
-        let command: u32 = lines
-            .next_line()
-            .await
-            .unwrap()
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let mut command = None;
+        while command.is_none() {
+            let line = lines.next_line().await.unwrap().expect("no PID printed");
+            command = line.trim().parse::<u32>().ok();
+        }
+        let command = command.unwrap();
         // SAFETY: a plain open of the command just started; the handle is owned below.
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, command) };
         assert!(!handle.is_null(), "command {command} is not running");
