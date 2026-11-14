@@ -234,8 +234,8 @@ async function runScenario(scenario: Scenario) {
 
     // The experiment page, which its name opens, shows the whole run, a moment after the run ends.
     await wait(3000)
-    const slug = scenario.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-$/, '')
-    await banner.getByRole('button', { name: new RegExp(`^\\W?${slug}\\W?$`) }).click()
+    const title = scenario.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    await banner.getByRole('button', { name: new RegExp(`^\\W?${title}\\W?$`) }).click()
     const section = page.locator('section', { has: page.getByRole('heading', { name: 'Latest run', exact: true }) })
     await section.waitFor()
     const rules = section.locator('details', { has: page.locator('summary', { hasText: /checked with no model/ }) })

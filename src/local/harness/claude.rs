@@ -1104,19 +1104,32 @@ async fn claude_one_shot_output(
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
-    if let Some(profile) = request.profile {
+    let (home, name) = if let Some(profile) = request.profile {
         crate::local::agent_profiles::home(profile, "claude-code")?;
-        cmd.envs(crate::local::agent_profiles::login_env(profile)?);
+        let env = crate::local::agent_profiles::login_env(profile)?;
+        let home = env
+            .iter()
+            .find(|(key, _)| *key == "CLAUDE_CONFIG_DIR")
+            .map(|(_, home)| PathBuf::from(home))
+            .ok_or_else(|| anyhow!("agent account {profile} has no Claude Code home"))?;
+        cmd.envs(env);
+        (home, profile)
     } else {
-        cmd.env(
-            "CLAUDE_CONFIG_DIR",
-            native_store::prepare_claude(NativeStore::Isolated)?,
-        );
         cmd.env(
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
             native_store::claude_secure_storage_config_dir(),
         );
-    }
+        (
+            native_store::prepare_claude(NativeStore::Isolated)?,
+            "claude",
+        )
+    };
+    // A one-shot brings its own context: the user's memory, skills and plugins would add
+    // thousands of tokens to every request.
+    cmd.env(
+        "CLAUDE_CONFIG_DIR",
+        native_store::prepare_claude_one_shot(&home, name)?,
+    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");

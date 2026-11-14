@@ -745,6 +745,21 @@ pub(crate) fn claude_config_file() -> PathBuf {
     }
 }
 
+/// A Claude Code home for one-shots, `name` among them: `home`'s sign-in and settings, without
+/// its memory, skills or plugins.
+pub fn prepare_claude_one_shot(home: &Path, name: &str) -> Result<PathBuf> {
+    let root = crate::store::data_dir().join("agents/one-shot").join(name);
+    let sources = [
+        "settings.json",
+        "settings.local.json",
+        ".claude.json",
+        ".credentials.json",
+    ]
+    .map(|file| home.join(file));
+    prepare_links(&root, home, &sources)?;
+    Ok(root)
+}
+
 pub(crate) fn prepare_claude_links(
     root: &Path,
     legacy: &Path,

@@ -20,6 +20,7 @@ dir='{}'
 n=$(cat "$dir/calls" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$dir/calls"
 printf '%s\n' "$@" > "$dir/args-$n"
 printf '%s' "$2" > "$dir/prompt-$n"
+ls -A "$CLAUDE_CONFIG_DIR" > "$dir/home-$n"
 reply=$(cat "$dir/reply-$n")
 printf '{{"type":"result","is_error":false,"result":%s,"total_cost_usd":0.002,"usage":{{"input_tokens":3000,"output_tokens":60}}}}' "$reply"
 "#,
@@ -130,6 +131,11 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
         ],
     );
     let store = Store::open().unwrap();
+    let claude =
+        crate::local::native_store::claude_home(crate::local::native_store::NativeStore::Legacy);
+    std::fs::create_dir_all(claude.join("skills/review")).unwrap();
+    std::fs::write(claude.join("CLAUDE.md"), "Always answer in haiku.").unwrap();
+    std::fs::write(claude.join("settings.json"), "{}").unwrap();
     chat(&store, "chat", "claude-code");
     run(&store, "a", "Depth 6", "chat", LOG);
     run(&store, "b", "Depth 8", "chat", LOG);
@@ -138,6 +144,12 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
     take(id).await.unwrap();
 
     assert_eq!(calls(&calls_dir), 1, "one call for both runs");
+    let home = std::fs::read_to_string(calls_dir.join("home-1")).unwrap();
+    assert!(home.contains("settings.json"), "{home}");
+    assert!(
+        !home.contains("CLAUDE.md") && !home.contains("skills"),
+        "a look never pays for the user's memory or skills: {home}"
+    );
     let args = std::fs::read_to_string(calls_dir.join("args-1")).unwrap();
     for flag in [
         "--tools\n\n",
