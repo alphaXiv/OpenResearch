@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "Neden sohbette.",
   "run_rules_summary_one": "{count} kural, model olmadan denetlenir",
   "run_rules_summary_other": "{count} kural, model olmadan denetlenir",
-  "run_rules_checked": "OpenResearch, çalıştırmanın her raporunda her kuralı model olmadan denetler.",
+  "run_rules_checked": "OpenResearch, çalıştırmanın her raporunda her kuralı denetler.",
   "run_rule_stops": "Çalıştırmayı durdurur",
   "run_rule_asks": "Ajanı uyandırır",
   "run_rule_budget": "Maliyeti {budget} tutarını geçecekse çalıştırmayı durdur.",

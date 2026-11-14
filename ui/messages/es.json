@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "El motivo está en el chat.",
   "run_rules_summary_one": "{count} regla, comprobada sin ningún modelo",
   "run_rules_summary_other": "{count} reglas, comprobadas sin ningún modelo",
-  "run_rules_checked": "OpenResearch comprueba cada regla en cada informe de la ejecución, sin ningún modelo.",
+  "run_rules_checked": "OpenResearch comprueba cada regla en cada informe de la ejecución.",
   "run_rule_stops": "Detiene la ejecución",
   "run_rule_asks": "Despierta al agente",
   "run_rule_budget": "Detener la ejecución cuando su coste vaya a superar {budget}.",

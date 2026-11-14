@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "دلیل در گفتگو آمده است.",
   "run_rules_summary_one": "{count} قانون، بدون مدل بررسی می‌شود",
   "run_rules_summary_other": "{count} قانون، بدون مدل بررسی می‌شوند",
-  "run_rules_checked": "OpenResearch هر قانون را با هر گزارش اجرا، بدون مدل، بررسی می‌کند.",
+  "run_rules_checked": "OpenResearch هر قانون را با هر گزارش اجرا بررسی می‌کند.",
   "run_rule_stops": "اجرا را متوقف می‌کند",
   "run_rule_asks": "عامل را بیدار می‌کند",
   "run_rule_budget": "وقتی هزینهٔ اجرا از {budget} بگذرد، متوقفش کن.",

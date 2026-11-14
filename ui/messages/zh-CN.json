@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "原因在对话中。",
   "run_rules_summary_one": "{count} 条规则，无需模型检查",
   "run_rules_summary_other": "{count} 条规则，无需模型检查",
-  "run_rules_checked": "OpenResearch 会在运行每次报告时检查每条规则，不使用模型。",
+  "run_rules_checked": "OpenResearch 会在运行每次报告时检查每条规则。",
   "run_rule_stops": "停止运行",
   "run_rule_asks": "唤醒代理",
   "run_rule_budget": "当运行费用将超过 {budget} 时停止运行。",

@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "The reason is in the chat.",
   "run_rules_summary_one": "{count} rule, checked with no model",
   "run_rules_summary_other": "{count} rules, checked with no model",
-  "run_rules_checked": "OpenResearch checks each rule on every report the run makes, with no model.",
+  "run_rules_checked": "OpenResearch checks each rule on every report the run makes.",
   "run_rule_stops": "Stops the run",
   "run_rule_asks": "Wakes the agent",
   "run_rule_budget": "Stop the run once its cost would pass {budget}.",

@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "Причина в чате.",
   "run_rules_summary_one": "Правил: {count}, проверяются без модели",
   "run_rules_summary_other": "Правил: {count}, проверяются без модели",
-  "run_rules_checked": "OpenResearch проверяет каждое правило при каждом отчёте запуска, без модели.",
+  "run_rules_checked": "OpenResearch проверяет каждое правило при каждом отчёте запуска.",
   "run_rule_stops": "Останавливает запуск",
   "run_rule_asks": "Будит агента",
   "run_rule_budget": "Остановить запуск, когда его стоимость превысит {budget}.",

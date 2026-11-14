@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "Powód jest w czacie.",
   "run_rules_summary_one": "Reguły: {count}, sprawdzane bez modelu",
   "run_rules_summary_other": "Reguły: {count}, sprawdzane bez modelu",
-  "run_rules_checked": "OpenResearch sprawdza każdą regułę przy każdym raporcie uruchomienia, bez udziału modelu.",
+  "run_rules_checked": "OpenResearch sprawdza każdą regułę przy każdym raporcie uruchomienia.",
   "run_rule_stops": "Zatrzymuje uruchomienie",
   "run_rule_asks": "Budzi agenta",
   "run_rule_budget": "Zatrzymaj uruchomienie, gdy jego koszt miałby przekroczyć {budget}.",

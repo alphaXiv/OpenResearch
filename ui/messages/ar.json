@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "السبب في المحادثة.",
   "run_rules_summary_one": "القواعد: {count}، تُفحص دون نموذج",
   "run_rules_summary_other": "القواعد: {count}، تُفحص دون نموذج",
-  "run_rules_checked": "يفحص OpenResearch كل قاعدة عند كل تقرير يرسله التشغيل، دون نموذج.",
+  "run_rules_checked": "يفحص OpenResearch كل قاعدة عند كل تقرير يرسله التشغيل.",
   "run_rule_stops": "توقف التشغيل",
   "run_rule_asks": "توقظ الوكيل",
   "run_rule_budget": "أوقف التشغيل حين تتجاوز تكلفته {budget}.",

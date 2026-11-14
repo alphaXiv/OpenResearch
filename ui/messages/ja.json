@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "理由はチャットにあります。",
   "run_rules_summary_one": "ルール {count} 件（モデルなしで確認）",
   "run_rules_summary_other": "ルール {count} 件（モデルなしで確認）",
-  "run_rules_checked": "OpenResearch は実行の報告ごとに、モデルを使わず各ルールを確認します。",
+  "run_rules_checked": "OpenResearch は実行の報告ごとに各ルールを確認します。",
   "run_rule_stops": "実行を停止",
   "run_rule_asks": "エージェントを起こす",
   "run_rule_budget": "コストが {budget} を超えそうになったら実行を停止します。",

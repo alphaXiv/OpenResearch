@@ -2046,7 +2046,7 @@
   "run_rule_reason_in_chat": "कारण चैट में है।",
   "run_rules_summary_one": "{count} नियम, बिना किसी मॉडल के जाँचा जाता है",
   "run_rules_summary_other": "{count} नियम, बिना किसी मॉडल के जाँचे जाते हैं",
-  "run_rules_checked": "OpenResearch रन की हर रिपोर्ट पर हर नियम को बिना किसी मॉडल के जाँचता है।",
+  "run_rules_checked": "OpenResearch रन की हर रिपोर्ट पर हर नियम जाँचता है।",
   "run_rule_stops": "रन रोकता है",
   "run_rule_asks": "एजेंट को जगाता है",
   "run_rule_budget": "जब रन की लागत {budget} से ऊपर जाने वाली हो, उसे रोकें।",
