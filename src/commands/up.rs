@@ -377,6 +377,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.chat.stop_admitting();
     if explicit_stop {
         state.chat.interrupt_all().await;
+    } else {
+        state.chat.stop_for_shutdown().await;
     }
     state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;

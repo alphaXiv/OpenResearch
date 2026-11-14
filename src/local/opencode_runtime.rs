@@ -293,10 +293,74 @@ impl AgentEndpoint {
     }
 }
 
+const TERMINATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Owns a spawned `opencode serve` process and its process group. Stopping or
+/// dropping it kills the process group and any MCP/tool children it started.
+pub(crate) struct ServerChild {
+    child: Child,
+    id: Option<u32>,
+}
+
+impl ServerChild {
+    pub(crate) fn new(child: Child) -> Self {
+        let id = child.id();
+        Self { child, id }
+    }
+
+    pub(crate) fn id(&self) -> Option<u32> {
+        self.id
+    }
+
+    /// Polls the server. Once its exit is observed, the surviving process group
+    /// is killed immediately and the saved PID is forgotten: after reaping, the
+    /// kernel may hand that PID to an unrelated process, so it must never be
+    /// signalled later.
+    pub(crate) fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            crate::local::chat::kill_shell_group(self.id.take());
+        }
+        Ok(status)
+    }
+
+    pub(crate) async fn kill(&mut self) -> std::io::Result<()> {
+        if self.try_wait()?.is_none() {
+            // Not yet reaped, so the PID still belongs to our server.
+            crate::local::chat::kill_agent_tree(self.id.take()).await;
+            if let Err(error) = self.child.start_kill() {
+                if self.child.try_wait()?.is_none() {
+                    return Err(error);
+                }
+            }
+            match tokio::time::timeout(TERMINATION_TIMEOUT, self.child.wait()).await {
+                Ok(result) => {
+                    result?;
+                }
+                Err(_) => {
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timed out reaping OpenCode server",
+                    );
+                    eprintln!("orx up: {error}");
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ServerChild {
+    fn drop(&mut self) {
+        crate::local::chat::kill_shell_group(self.id.take());
+    }
+}
+
 pub(crate) async fn start_server(
     binary: &ResolvedBinary,
     mut cmd: Command,
-) -> Result<(Child, AgentEndpoint)> {
+) -> Result<(ServerChild, AgentEndpoint)> {
     if let Some(parent) = super::agent_log_path().parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -337,8 +401,24 @@ pub(crate) async fn start_server(
     }
     #[cfg(unix)]
     cmd.process_group(0);
+    #[cfg(target_os = "linux")]
+    {
+        let parent_pid = unsafe { libc::getpid() };
+        // SAFETY: async-signal-safe syscalls after fork; terminates the server if orx dies abruptly.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent_pid {
+                    libc::raise(libc::SIGTERM);
+                }
+                Ok(())
+            });
+        }
+    }
     binary.check_unchanged()?;
-    let mut child = crate::local::harness::spawn_retrying_busy(|| cmd.spawn())?;
+    let mut child = ServerChild::new(crate::local::harness::spawn_retrying_busy(|| cmd.spawn())?);
     let client = crate::net::loopback_client()
         .default_headers(headers)
         .build()?;
@@ -347,6 +427,7 @@ pub(crate) async fn start_server(
             format!("http://127.0.0.1:{port}")
         } else {
             let stdout = child
+                .child
                 .stdout
                 .take()
                 .ok_or_else(|| anyhow!("OpenCode readiness pipe missing"))?;
@@ -395,7 +476,9 @@ pub(crate) async fn start_server(
     match ready {
         Ok(endpoint) => Ok((child, endpoint)),
         Err(error) => {
-            let _ = child.kill().await;
+            if let Err(kill_error) = child.kill().await {
+                eprintln!("orx up: failed to stop OpenCode after startup error: {kill_error}");
+            }
             Err(error)
         }
     }
@@ -486,7 +569,7 @@ async fn prepare_database_waiting(
 }
 
 async fn wait_migration(
-    child: &mut Child,
+    child: &mut ServerChild,
     endpoint: &AgentEndpoint,
     progress: &mut (impl FnMut(&str) + Send),
 ) -> Result<()> {

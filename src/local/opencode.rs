@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use crate::error::{anyhow, Context, Result};
@@ -27,7 +26,7 @@ use crate::store;
 mod runtime;
 pub(crate) use runtime::{
     prepare_database, resolve_binary, resolve_binary_at, start_server, user_binary, AgentEndpoint,
-    Protocol, ResolvedBinary,
+    Protocol, ResolvedBinary, ServerChild,
 };
 
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
@@ -439,7 +438,7 @@ pub struct AgentStatus {
 }
 
 struct AgentChild {
-    child: Child,
+    child: ServerChild,
     port: u16,
     project_id: String,
     session_id: String,
@@ -762,6 +761,7 @@ impl AgentHost {
         endpoint
             .client
             .post(format!("{}{path}", endpoint.base_url))
+            .timeout(Duration::from_secs(2))
             .json(&json!({}))
             .send()
             .await?
@@ -971,7 +971,9 @@ impl AgentHost {
                 }
             }
             if let Some(mut old) = guard.remove(session_id) {
-                let _ = old.child.kill().await; // kill() also reaps
+                if let Err(error) = old.child.kill().await {
+                    eprintln!("orx up: failed to stop stale OpenCode for {session_id}: {error}");
+                }
             }
         }
         // A binary replacement invalidates every owned child using this database.
@@ -1009,7 +1011,9 @@ impl AgentHost {
         .await?;
         let mut inner = self.inner.lock().await;
         if *cancelled.borrow() || self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
-            let _ = agent.child.kill().await;
+            if let Err(error) = agent.child.kill().await {
+                eprintln!("orx up: failed to stop cancelled OpenCode for {session_id}: {error}");
+            }
             return Err(anyhow!("OpenCode startup was cancelled"));
         }
         let status = agent.status();
@@ -1026,7 +1030,9 @@ impl AgentHost {
             }
         }
         if let Some(mut agent) = self.inner.lock().await.remove(session_id) {
-            let _ = agent.child.kill().await;
+            if let Err(error) = agent.child.kill().await {
+                eprintln!("orx up: failed to stop OpenCode for {session_id}: {error}");
+            }
         }
     }
 
@@ -1039,9 +1045,53 @@ impl AgentHost {
                 let _ = cancel.send(true);
             }
         }
-        for (_, mut agent) in self.inner.lock().await.drain() {
-            let _ = agent.child.kill().await;
+        for (session_id, mut agent) in self.inner.lock().await.drain() {
+            if let Err(error) = agent.child.kill().await {
+                eprintln!("orx up: failed to stop OpenCode for {session_id}: {error}");
+            }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl AgentHost {
+    /// Routes `session_id` to an OpenCode API on `port`, with `sleep` standing in for the server.
+    pub(crate) async fn serve_for_test(&self, session_id: &str, port: u16, root: &std::path::Path) {
+        let path = root.join("opencode");
+        orx_test_support::write_executable(&path, "#!/bin/sh\necho 1.19.0\n", 0o700).unwrap();
+        let binary = runtime::resolve_binary_at(path).await.unwrap();
+        let database =
+            native_store::opencode_database::DatabaseLease::acquire(&root.join("opencode.db"), 1)
+                .unwrap();
+        let child = ServerChild::new(
+            crate::process::tokio_command("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap(),
+        );
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://127.0.0.1:{port}"),
+            client: crate::net::loopback_client().build().unwrap(),
+            protocol: Protocol::V1,
+            legacy_v2_api: false,
+        };
+        self.inner.lock().await.insert(
+            session_id.into(),
+            AgentChild {
+                child,
+                port,
+                project_id: "p1".into(),
+                session_id: session_id.into(),
+                model: None,
+                config: None,
+                native_store: NativeStore::Isolated,
+                alphaxiv_signed_in: false,
+                binary,
+                endpoint,
+                database,
+            },
+        );
     }
 }
 
@@ -1145,11 +1195,13 @@ mod tests {
             legacy_v2_api: false,
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let child = crate::process::tokio_command("sleep")
-            .arg("60")
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let child = ServerChild::new(
+            crate::process::tokio_command("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap(),
+        );
         let pid = child.id();
         let project = sample_project();
         let mut host = AgentHost::new(Some("host/default".into()));
@@ -1248,11 +1300,13 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let child = crate::process::tokio_command("sleep")
-                .arg("60")
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
+            let child = ServerChild::new(
+                crate::process::tokio_command("sleep")
+                    .arg("60")
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap(),
+            );
             let pid = child.id();
             let project = sample_project();
             let host = AgentHost::new(None);
@@ -1544,6 +1598,63 @@ mod tests {
             .await
             .unwrap();
         assert!(host.stopping.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_and_drop_kill_descendants_in_the_server_process_group() {
+        use tokio::io::AsyncBufReadExt as _;
+
+        for mode in ["kill", "drop", "reaped_then_drop"] {
+            let script = if mode == "reaped_then_drop" {
+                "sleep 60 & echo $!"
+            } else {
+                "sleep 60 & echo $!; wait"
+            };
+            let mut cmd = crate::process::tokio_command("sh");
+            cmd.args(["-c", script])
+                .stdout(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .process_group(0);
+            let mut spawned = cmd.spawn().unwrap();
+            let mut lines = tokio::io::BufReader::new(spawned.stdout.take().unwrap()).lines();
+            let descendant_pid: libc::pid_t =
+                lines.next_line().await.unwrap().unwrap().parse().unwrap();
+            assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+
+            let mut child = ServerChild::new(spawned);
+            match mode {
+                "kill" => child.kill().await.unwrap(),
+                "drop" => drop(child),
+                "reaped_then_drop" => {
+                    let mut reaped = false;
+                    for _ in 0..100 {
+                        if child.try_wait().unwrap().is_some() {
+                            reaped = true;
+                            break;
+                        }
+                        tokio::time::sleep(crate::config::paced(Duration::from_millis(10))).await;
+                    }
+                    assert!(reaped, "leader did not exit before drop");
+                    assert_eq!(child.id(), None, "reaped PID must not be kept for later");
+                    drop(child);
+                }
+                _ => unreachable!(),
+            }
+
+            let mut exited = false;
+            for _ in 0..100 {
+                if unsafe { libc::kill(descendant_pid, 0) } != 0 {
+                    exited = true;
+                    break;
+                }
+                tokio::time::sleep(crate::config::paced(Duration::from_millis(10))).await;
+            }
+            assert!(
+                exited,
+                "descendant {descendant_pid} survived server cleanup (mode={mode})"
+            );
+        }
     }
 
     #[test]

@@ -822,7 +822,6 @@ pub(super) async fn detect(
         let (mut child, endpoint) = crate::local::opencode::start_server(&binary, cmd).await?;
         let result = discover_models(&endpoint).await;
         let _ = child.kill().await;
-        let _ = child.wait().await;
         result
     })
     .await;
@@ -1043,7 +1042,6 @@ pub(super) async fn generate(
         .map_err(|_| anyhow!("timed out after {}s", timeout.as_secs()))
         .and_then(|result| result);
         let _ = child.kill().await;
-        let _ = child.wait().await;
         result
     })
     .await?
