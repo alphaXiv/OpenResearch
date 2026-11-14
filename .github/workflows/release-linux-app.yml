@@ -96,6 +96,16 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.check.outputs.source-sha }}
 
+      - name: Take AppImage tools from the workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+          path: packaging-workflow
+          sparse-checkout: |
+            linux
+            scripts
+
       - name: Remove checked-in UI
         if: needs.check.outputs.release-run-id != ''
         run: rm -rf ui/dist
@@ -135,16 +145,16 @@ jobs:
 
       - name: Package the AppImage
         run: |
-          scripts/build-linux-appimage.sh target/release/orx app-dist
+          packaging-workflow/scripts/build-linux-appimage.sh target/release/orx app-dist
           # shellcheck disable=SC2046 # pkg-config emits compiler arguments.
-          cc -Wall -Wextra scripts/appimage-media-probe.c -o app-dist/appimage-media-probe $(pkg-config --cflags --libs webkit2gtk-4.1)
+          cc -Wall -Wextra packaging-workflow/scripts/appimage-media-probe.c -o app-dist/appimage-media-probe $(pkg-config --cflags --libs webkit2gtk-4.1)
 
       # Otherwise the host's WebKit would stand in for a broken bundled one.
       - name: Remove WebKitGTK and media plugins from the runner
         run: sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
 
       - name: Smoke-test the AppImage
-        run: scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe
+        run: packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
