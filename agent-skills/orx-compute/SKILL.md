@@ -13,7 +13,7 @@ orx compute                            # browse GPU offers across all providers
 orx compute --gpu H100_SXM --count 1   # filter GPU offers
 orx compute --cpu                      # browse CPU-only offers
 orx exp run <expId>                    # launch on the configured default
-orx exp cancel <expId>                 # cancel the in-flight run
+orx exp cancel <expId> --reason '…'    # cancel the in-flight run, saying why
 ```
 
 ## Follow a run
