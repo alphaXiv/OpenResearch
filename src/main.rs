@@ -521,6 +521,12 @@ pub enum ExpCommand {
         /// Query live Slurm accounting in addition to locally stored status.
         #[arg(long)]
         scheduler: bool,
+        /// Inspect a particular run belonging to this experiment.
+        #[arg(long)]
+        run: Option<String>,
+        /// Print stored experiment, run and signal checkpoint as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// View the experiment's description/notes, or overwrite it with `--set` / `--stdin`.
@@ -552,6 +558,12 @@ pub enum ExpCommand {
     /// Send this chat the result of the experiment's latest run when it finishes.
     Wake { exp_id: String },
 
+    /// Set, read or check the view an experiment's runs are drawn with.
+    View {
+        #[command(subcommand)]
+        command: ViewCommand,
+    },
+
     /// Wait for a run to finish: one experiment (`<expId>`) or the next completion in a project (`--project`).
     Wait {
         /// Experiment to watch until its latest run reaches a terminal state.
@@ -570,6 +582,48 @@ pub enum ExpCommand {
         /// Seconds between retries while the local database is busy (default 5).
         #[arg(long, hide = true)]
         interval: Option<u64>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ViewCommand {
+    /// Save the view this experiment's runs are drawn with, its patterns, or both; experiments
+    /// created under it later start with a copy.
+    #[command(group(clap::ArgGroup::new("view_input").multiple(false)))]
+    #[command(group(clap::ArgGroup::new("view_change").required(true).multiple(true).args(["file", "stdin", "pattern"])))]
+    Set {
+        exp_id: String,
+        /// Read the view's markup from this file.
+        #[arg(long, group = "view_input")]
+        file: Option<std::path::PathBuf>,
+        /// Read the view's markup from standard input.
+        #[arg(long, group = "view_input")]
+        stdin: bool,
+        /// Read signals from the run's log with the JSON list of patterns in this file:
+        /// `[{"regex": "…", "phase": "…", "unit": "…", "row": "…"}]`. Its runs' logs are read again.
+        #[arg(long)]
+        pattern: Option<std::path::PathBuf>,
+    },
+    /// Print the experiment's saved view, or the one orx draws when none is saved.
+    Get {
+        exp_id: String,
+        /// Print the markup, its tree and where it comes from as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a view against what a run reported: the experiment's saved view, or the one in --file;
+    /// with patterns, saved or in --pattern, what each matches in the run's log now.
+    Check {
+        run_id: String,
+        /// Check this file's markup instead of the saved view.
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Check this file's patterns instead of the saved ones.
+        #[arg(long)]
+        pattern: Option<std::path::PathBuf>,
+        /// Print what the run reported and what the view draws as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 

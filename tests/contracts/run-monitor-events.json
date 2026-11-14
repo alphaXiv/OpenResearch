@@ -1,0 +1,150 @@
+[
+  {
+    "runId": "r1",
+    "rev": 1,
+    "generation": "g1",
+    "asOf": 1794444320000,
+    "seriesRev": 1,
+    "appendFrom": 0,
+    "append": {},
+    "appendRows": {},
+    "dropRows": {},
+    "latest": {
+      "loss": 0.14285714285714285
+    },
+    "counts": {},
+    "progress": {
+      "phase": 0,
+      "done": 200.0,
+      "segments": [
+        {
+          "name": "",
+          "weight": 1.0,
+          "fill": 0.5
+        }
+      ],
+      "whole": 0.5,
+      "lastAt": 1794444320000,
+      "stallMs": 0
+    },
+    "estimate": {
+      "loMs": 18997,
+      "midMs": 20000,
+      "hiMs": 21003,
+      "at": 1794444320000,
+      "pending": false,
+      "pastLimitMs": null,
+      "floor": false,
+      "reasons": []
+    },
+    "cost": null,
+    "sentence": null,
+    "patch": {
+      "availability": {
+        "state": "live",
+        "reason": null,
+        "omitted": {}
+      },
+      "phases": [
+        {
+          "name": "",
+          "of": 400.0,
+          "unit": null,
+          "priorMs": null,
+          "startedAt": 1794444300000,
+          "endedAt": null
+        }
+      ],
+      "x": {
+        "name": "step",
+        "max": 400.0
+      },
+      "limit": null,
+      "before": null,
+      "setup": null,
+      "source": "declared",
+      "statusText": "baseline  running  50%  step 200 of 400  [run r1]\neta      19s left (18s to 20s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+      "versus": {}
+    },
+    "reset": true
+  },
+  {
+    "runId": "r1",
+    "rev": 2,
+    "generation": "g1",
+    "asOf": 1794444322000,
+    "seriesRev": 2,
+    "appendFrom": 1,
+    "append": {
+      "loss": [
+        [
+          210.0,
+          0.13636363636363635
+        ],
+        [
+          220.0,
+          0.13043478260869565
+        ]
+      ]
+    },
+    "appendRows": {},
+    "dropRows": {},
+    "latest": {
+      "loss": 0.13043478260869565
+    },
+    "counts": {},
+    "progress": {
+      "phase": 0,
+      "done": 220.0,
+      "segments": [
+        {
+          "name": "",
+          "weight": 1.0,
+          "fill": 0.55
+        }
+      ],
+      "whole": 0.55,
+      "lastAt": 1794444322000,
+      "stallMs": 0
+    },
+    "estimate": {
+      "loMs": 17124,
+      "midMs": 18000,
+      "hiMs": 18876,
+      "at": 1794444322000,
+      "pending": false,
+      "pastLimitMs": null,
+      "floor": false,
+      "reasons": []
+    },
+    "cost": null,
+    "sentence": null,
+    "patch": {
+      "availability": {
+        "state": "live",
+        "reason": null,
+        "omitted": {}
+      },
+      "phases": [
+        {
+          "name": "",
+          "of": 400.0,
+          "unit": null,
+          "priorMs": null,
+          "startedAt": 1794444300000,
+          "endedAt": null
+        }
+      ],
+      "x": {
+        "name": "step",
+        "max": 400.0
+      },
+      "limit": null,
+      "before": null,
+      "setup": null,
+      "source": "declared",
+      "statusText": "baseline  running  55%  step 220 of 400  [run r1]\neta      17s left (16s to 18s)\nsignals  loss 0.13\nsignals  Last collected at 2026-11-12T00:45:22.000Z.\nsignals  Data as of 2026-11-12T00:45:22.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+      "versus": {}
+    }
+  }
+]

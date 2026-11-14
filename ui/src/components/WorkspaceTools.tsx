@@ -1,7 +1,9 @@
 import { useWorkspace } from "../workspace";
 import { EscapeScope } from "./EscapeScope";
 import { type ChatSession, type Experiment, type Run, fmtNumber, timeAgo } from "../api";
-import { runDisplay } from "../runDisplay";
+import { runActive, runDisplay } from "../runDisplay";
+import { runTone } from "../runMonitor/model";
+import { Mark } from "./run/Mark";
 import { activeWorkspaceRuns } from "../workspaceRuns";
 import { statusLabel } from "./StatusBadge";
 
@@ -129,7 +131,10 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
                   const display = runDisplay(row.run);
                   return (
                     <MenuItem key={row.run.id} data-keyboard-item className="min-h-7 py-1" onClick={() => onOpenExperiment(row.experiment.id, row.run.id)}>
-                      <span className="min-w-0 truncate ps-8 text-menu text-subtext" title={`${row.experiment.title || row.experiment.slug} · ${statusLabel(display.status, display.stopping)}`}>{row.experiment.title || row.experiment.slug}</span>
+                      <span className="flex min-w-0 items-center gap-4">
+                        <span className="flex w-[15px] shrink-0 justify-center"><Mark tone={runTone(row.run)} live={runActive(row.run.status)} label={statusLabel(display.status, display.stopping)} /></span>
+                        <span className="min-w-0 truncate text-menu text-subtext" title={`${row.experiment.title || row.experiment.slug} · ${statusLabel(display.status, display.stopping)}`}>{row.experiment.title || row.experiment.slug}</span>
+                      </span>
                     </MenuItem>
                   );
                 })}

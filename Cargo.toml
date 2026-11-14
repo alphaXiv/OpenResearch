@@ -7,9 +7,9 @@ repository = "https://github.com/alphaXiv/OpenResearch"
 license = "MIT"
 
 [workspace]
-members = ["tests/support", "crates/orx-host-proto", "crates/orx-host"]
+members = ["tests/support", "crates/orx-host-proto", "crates/orx-host", "crates/orx-signals"]
 exclude = ["windows/launcher"]
-default-members = [".", "tests/support", "crates/orx-host-proto", "crates/orx-host"]
+default-members = [".", "tests/support", "crates/orx-host-proto", "crates/orx-host", "crates/orx-signals"]
 
 [target.'cfg(unix)'.dev-dependencies]
 orx-test-support = { path = "tests/support" }
@@ -77,6 +77,7 @@ portable-pty = "0.9"
 # async fns in the Harness trait (object-safe `dyn Harness` in the registry).
 async-trait = "0.1"
 orx-host-proto = { path = "crates/orx-host-proto" }
+orx-signals = { path = "crates/orx-signals" }
 sha2 = "0.10"
 hmac = "0.12"
 # Import the Overleaf editor session cookie from a local browser store, so the

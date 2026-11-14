@@ -409,7 +409,8 @@ export const mutUpdateUiState = mutations.define({
     }));
     onSuccess((saved) => ws.setScopedQueryData(options.queryKey, (state) => {
       if (!state || fields.some((field) => state[field] !== shown?.[field])) return state;
-      return { ...state, ...Object.fromEntries(fields.map((field) => [field, saved[field]])) };
+      // An older server drops a field it doesn't know; the choice still holds for this session.
+      return { ...state, ...Object.fromEntries(fields.filter((field) => field in saved).map((field) => [field, saved[field]])) };
     }));
   },
   key: ({ args: [ws] }) => [ws.identity, "ui-state"],

@@ -44,6 +44,12 @@ When asked to run and summarize an experiment, load `orx-compute` and
 `orx-results` before launching: execution and interpretation are separate skill
 areas. Use `orx-logs` when retrieving supporting output.
 
+Before a baseline's first launch, instrument it so the user can follow every
+run without asking you: each stage reports its progress, the measures that
+answer the question report as they are made, and a view shows them
+(`orx-experiment-tree`). Children inherit these. Use `orx exp status <expId>`
+for a run's live stage and numbers.
+
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.

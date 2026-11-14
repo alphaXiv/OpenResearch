@@ -1,0 +1,273 @@
+::orx:: {"phase":"download","step":0,"of":3.2,"unit":"GB","t":0,"m":{}}
+::orx:: {"phase":"download","step":0.2,"of":3.2,"unit":"GB","t":7.744352933661802,"m":{}}
+::orx:: {"phase":"download","step":0.4,"of":3.2,"unit":"GB","t":14.184254277016535,"m":{}}
+::orx:: {"phase":"download","step":0.6000000000000001,"of":3.2,"unit":"GB","t":22.462226735986448,"m":{}}
+::orx:: {"phase":"download","step":0.8,"of":3.2,"unit":"GB","t":28.882989395832713,"m":{}}
+::orx:: {"phase":"download","step":1,"of":3.2,"unit":"GB","t":37.3447533904783,"m":{}}
+::orx:: {"phase":"download","step":1.2000000000000002,"of":3.2,"unit":"GB","t":47.47246029955598,"m":{}}
+::orx:: {"phase":"download","step":1.4000000000000001,"of":3.2,"unit":"GB","t":55.15609189910262,"m":{}}
+::orx:: {"phase":"download","step":1.6,"of":3.2,"unit":"GB","t":60.54137705434339,"m":{}}
+::orx:: {"phase":"download","step":1.8,"of":3.2,"unit":"GB","t":68.95762207942725,"m":{}}
+::orx:: {"phase":"download","step":2,"of":3.2,"unit":"GB","t":78.06169777340295,"m":{}}
+::orx:: {"phase":"download","step":2.2,"of":3.2,"unit":"GB","t":84.23889778373017,"m":{}}
+::orx:: {"phase":"download","step":2.4000000000000004,"of":3.2,"unit":"GB","t":88.59225581324557,"m":{}}
+::orx:: {"phase":"download","step":2.6,"of":3.2,"unit":"GB","t":98.82850907624827,"m":{}}
+::orx:: {"phase":"download","step":2.8000000000000003,"of":3.2,"unit":"GB","t":105.90266992178854,"m":{}}
+::orx:: {"phase":"download","step":3,"of":3.2,"unit":"GB","t":114.77816802144464,"m":{}}
+::orx:: {"phase":"download","step":3.2,"of":3.2,"unit":"GB","t":123.89880058011185,"m":{}}
+::orx:: {"phase":"tokenize","step":0,"of":1800,"unit":"k examples","t":123.89880058011185,"m":{}}
+::orx:: {"phase":"tokenize","step":50,"of":1800,"unit":"k examples","t":134.8713849204005,"m":{}}
+::orx:: {"phase":"tokenize","step":100,"of":1800,"unit":"k examples","t":145.37617618747046,"m":{}}
+::orx:: {"phase":"tokenize","step":150,"of":1800,"unit":"k examples","t":155.71324929056087,"m":{}}
+::orx:: {"phase":"tokenize","step":200,"of":1800,"unit":"k examples","t":166.45755018401533,"m":{}}
+::orx:: {"phase":"tokenize","step":250,"of":1800,"unit":"k examples","t":176.25857467884182,"m":{}}
+::orx:: {"phase":"tokenize","step":300,"of":1800,"unit":"k examples","t":186.61054209845554,"m":{}}
+::orx:: {"phase":"tokenize","step":350,"of":1800,"unit":"k examples","t":196.97252600075504,"m":{}}
+::orx:: {"phase":"tokenize","step":400,"of":1800,"unit":"k examples","t":207.22360728149766,"m":{}}
+::orx:: {"phase":"tokenize","step":450,"of":1800,"unit":"k examples","t":217.2947263699737,"m":{}}
+::orx:: {"phase":"tokenize","step":500,"of":1800,"unit":"k examples","t":226.95751097080003,"m":{}}
+::orx:: {"phase":"tokenize","step":550,"of":1800,"unit":"k examples","t":236.49662219403874,"m":{}}
+::orx:: {"phase":"tokenize","step":600,"of":1800,"unit":"k examples","t":246.69375870469602,"m":{}}
+::orx:: {"phase":"tokenize","step":650,"of":1800,"unit":"k examples","t":257.3967778723282,"m":{}}
+::orx:: {"phase":"tokenize","step":700,"of":1800,"unit":"k examples","t":268.0152855167059,"m":{}}
+::orx:: {"phase":"tokenize","step":750,"of":1800,"unit":"k examples","t":278.5802042669862,"m":{}}
+::orx:: {"phase":"tokenize","step":800,"of":1800,"unit":"k examples","t":288.2864650359603,"m":{}}
+::orx:: {"phase":"tokenize","step":850,"of":1800,"unit":"k examples","t":297.9005626778662,"m":{}}
+::orx:: {"phase":"tokenize","step":900,"of":1800,"unit":"k examples","t":308.57244873840955,"m":{}}
+::orx:: {"phase":"tokenize","step":950,"of":1800,"unit":"k examples","t":317.31877129725274,"m":{}}
+::orx:: {"phase":"tokenize","step":1000,"of":1800,"unit":"k examples","t":328.34286955636617,"m":{}}
+::orx:: {"phase":"tokenize","step":1050,"of":1800,"unit":"k examples","t":338.8816841476236,"m":{}}
+::orx:: {"phase":"tokenize","step":1100,"of":1800,"unit":"k examples","t":348.86615561427965,"m":{}}
+::orx:: {"phase":"tokenize","step":1150,"of":1800,"unit":"k examples","t":359.0386390514818,"m":{}}
+::orx:: {"phase":"tokenize","step":1200,"of":1800,"unit":"k examples","t":369.29142383734626,"m":{}}
+::orx:: {"phase":"tokenize","step":1250,"of":1800,"unit":"k examples","t":380.0943413834456,"m":{}}
+::orx:: {"phase":"tokenize","step":1300,"of":1800,"unit":"k examples","t":388.9116434005025,"m":{}}
+::orx:: {"phase":"tokenize","step":1350,"of":1800,"unit":"k examples","t":399.27579897569956,"m":{}}
+::orx:: {"phase":"tokenize","step":1400,"of":1800,"unit":"k examples","t":409.57755298971955,"m":{}}
+::orx:: {"phase":"tokenize","step":1450,"of":1800,"unit":"k examples","t":419.2543424791924,"m":{}}
+::orx:: {"phase":"tokenize","step":1500,"of":1800,"unit":"k examples","t":428.56015052043864,"m":{}}
+::orx:: {"phase":"tokenize","step":1550,"of":1800,"unit":"k examples","t":439.0869580646596,"m":{}}
+::orx:: {"phase":"tokenize","step":1600,"of":1800,"unit":"k examples","t":448.9771969276921,"m":{}}
+::orx:: {"phase":"tokenize","step":1650,"of":1800,"unit":"k examples","t":458.7899916336901,"m":{}}
+::orx:: {"phase":"tokenize","step":1700,"of":1800,"unit":"k examples","t":469.1647841202031,"m":{}}
+::orx:: {"phase":"tokenize","step":1750,"of":1800,"unit":"k examples","t":479.100198758775,"m":{}}
+::orx:: {"phase":"tokenize","step":1800,"of":1800,"unit":"k examples","t":489.21340941269005,"m":{}}
+::orx:: {"phase":"train","step":0,"of":4200,"unit":"steps","t":489.21340941269005,"m":{"loss":1.535169591408875}}
+::orx:: {"phase":"train","step":20,"of":4200,"unit":"steps","t":501.85636962320484,"m":{"loss":1.4614867529844573}}
+::orx:: {"phase":"train","step":40,"of":4200,"unit":"steps","t":515.1449447122378,"m":{"loss":1.4937687770103794}}
+::orx:: {"phase":"train","step":60,"of":4200,"unit":"steps","t":529.3378526857177,"m":{"loss":1.3893823103404261}}
+::orx:: {"phase":"train","step":80,"of":4200,"unit":"steps","t":542.1395746265453,"m":{"loss":1.419179650333901}}
+::orx:: {"phase":"train","step":100,"of":4200,"unit":"steps","t":554.7692237550422,"m":{"loss":1.3050696109569133}}
+::orx:: {"phase":"train","step":120,"of":4200,"unit":"steps","t":568.2483633137161,"m":{"loss":1.3501758710861096}}
+::orx:: {"phase":"train","step":140,"of":4200,"unit":"steps","t":581.0408854934166,"m":{"loss":1.3271303083178523}}
+::orx:: {"phase":"train","step":160,"of":4200,"unit":"steps","t":593.8934514324188,"m":{"loss":1.2663008016450454}}
+::orx:: {"phase":"train","step":180,"of":4200,"unit":"steps","t":607.2851409417303,"m":{"loss":1.236991278975182}}
+::orx:: {"phase":"train","step":200,"of":4200,"unit":"steps","t":621.2799161646595,"m":{"loss":1.1827602774850932}}
+::orx:: {"phase":"train","step":220,"of":4200,"unit":"steps","t":634.837450920148,"m":{"loss":1.1516631453208428}}
+::orx:: {"phase":"train","step":240,"of":4200,"unit":"steps","t":647.8857670099266,"m":{"loss":1.1432969667088917}}
+::orx:: {"phase":"train","step":260,"of":4200,"unit":"steps","t":660.7617354408474,"m":{"loss":1.1261096423968693}}
+::orx:: {"phase":"train","step":280,"of":4200,"unit":"steps","t":674.2295146471256,"m":{"loss":1.1323384042176312}}
+::orx:: {"phase":"train","step":300,"of":4200,"unit":"steps","t":687.9205038310687,"m":{"loss":1.0705888105738277}}
+::orx:: {"phase":"train","step":320,"of":4200,"unit":"steps","t":701.2283386480975,"m":{"loss":1.0458460197586266}}
+::orx:: {"phase":"train","step":340,"of":4200,"unit":"steps","t":714.1389424239082,"m":{"loss":1.0608562504604888}}
+::orx:: {"phase":"train","step":360,"of":4200,"unit":"steps","t":728.3213204118853,"m":{"loss":1.0381984121034522}}
+::orx:: {"phase":"train","step":380,"of":4200,"unit":"steps","t":742.1718646473462,"m":{"loss":0.989237324331392}}
+::orx:: {"phase":"train","step":400,"of":4200,"unit":"steps","t":755.3988396988742,"m":{"loss":0.9982363235477065}}
+::orx:: {"phase":"train","step":420,"of":4200,"unit":"steps","t":768.4221993897236,"m":{"loss":0.9208673509139819}}
+::orx:: {"phase":"train","step":440,"of":4200,"unit":"steps","t":781.5012090330856,"m":{"loss":0.9360306358014483}}
+::orx:: {"phase":"train","step":460,"of":4200,"unit":"steps","t":794.4670265216994,"m":{"loss":0.9443127265916875}}
+::orx:: {"phase":"train","step":480,"of":4200,"unit":"steps","t":807.8462563652852,"m":{"loss":0.9140138625062644}}
+::orx:: {"phase":"train","step":500,"of":4200,"unit":"steps","t":822.2565894818933,"m":{"loss":0.9082600758649453}}
+::orx:: {"phase":"train","step":520,"of":4200,"unit":"steps","t":836.1746590347204,"m":{"loss":0.8958411260369327}}
+::orx:: {"phase":"train","step":540,"of":4200,"unit":"steps","t":849.4563413640261,"m":{"loss":0.8279883764691639}}
+::orx:: {"phase":"train","step":560,"of":4200,"unit":"steps","t":862.5906671076806,"m":{"loss":0.8263095368529231}}
+::orx:: {"phase":"train","step":580,"of":4200,"unit":"steps","t":875.5218660118697,"m":{"loss":0.8648739144461112}}
+::orx:: {"phase":"train","step":600,"of":4200,"unit":"steps","t":889.0295548677641,"m":{"loss":0.7906716824355315}}
+::orx:: {"phase":"train","step":620,"of":4200,"unit":"steps","t":902.7881329519829,"m":{"loss":0.8277203499601232}}
+::orx:: {"phase":"train","step":640,"of":4200,"unit":"steps","t":916.7492940713718,"m":{"loss":0.7653389155043467}}
+::orx:: {"phase":"train","step":660,"of":4200,"unit":"steps","t":930.5448613981924,"m":{"loss":0.7746619856185654}}
+::orx:: {"phase":"train","step":680,"of":4200,"unit":"steps","t":943.6776988559863,"m":{"loss":0.775221362209534}}
+::orx:: {"phase":"train","step":700,"of":4200,"unit":"steps","t":957.0973980307982,"m":{"loss":0.7679585329484288}}
+::orx:: {"phase":"train","step":720,"of":4200,"unit":"steps","t":969.872078870264,"m":{"loss":0.7366838379172588}}
+::orx:: {"phase":"train","step":740,"of":4200,"unit":"steps","t":983.07682698591,"m":{"loss":0.7869757002358667}}
+::orx:: {"phase":"train","step":760,"of":4200,"unit":"steps","t":997.0756656992784,"m":{"loss":0.7046756868801658}}
+::orx:: {"phase":"train","step":780,"of":4200,"unit":"steps","t":1011.3458522664974,"m":{"loss":0.7637648599095682}}
+::orx:: {"phase":"train","step":800,"of":4200,"unit":"steps","t":1023.694710458452,"m":{"loss":0.7524289045443916}}
+::orx:: {"phase":"train","step":820,"of":4200,"unit":"steps","t":1038.0322329760158,"m":{"loss":0.6956777240508696}}
+::orx:: {"phase":"train","step":840,"of":4200,"unit":"steps","t":1050.7371955176911,"m":{"loss":0.7037424343945771}}
+::orx:: {"phase":"train","step":860,"of":4200,"unit":"steps","t":1064.8780745763931,"m":{"loss":0.7029790531083799}}
+::orx:: {"phase":"train","step":880,"of":4200,"unit":"steps","t":1078.189633783727,"m":{"loss":0.6362311648521501}}
+::orx:: {"phase":"train","step":900,"of":4200,"unit":"steps","t":1091.8341451491249,"m":{"loss":0.6958074127849787}}
+::orx:: {"phase":"train","step":920,"of":4200,"unit":"steps","t":1105.8769773784177,"m":{"loss":0.6772565496241886}}
+::orx:: {"phase":"train","step":940,"of":4200,"unit":"steps","t":1119.4710065995914,"m":{"loss":0.6519627222978858}}
+::orx:: {"phase":"train","step":960,"of":4200,"unit":"steps","t":1132.0745935914706,"m":{"loss":0.6663189025742502}}
+::orx:: {"phase":"train","step":980,"of":4200,"unit":"steps","t":1145.174628172679,"m":{"loss":0.6361965549131257}}
+::orx:: {"phase":"train","step":1000,"of":4200,"unit":"steps","t":1158.5016083973328,"m":{"loss":0.5982435469010554}}
+::orx:: {"phase":"train","step":1020,"of":4200,"unit":"steps","t":1172.7632602300869,"m":{"loss":0.6016805405068828}}
+::orx:: {"phase":"train","step":1040,"of":4200,"unit":"steps","t":1186.9579115377396,"m":{"loss":0.6454559754233856}}
+::orx:: {"phase":"train","step":1060,"of":4200,"unit":"steps","t":1200.4112919265913,"m":{"loss":0.6028427257456618}}
+::orx:: {"phase":"train","step":1080,"of":4200,"unit":"steps","t":1214.2704819278986,"m":{"loss":0.6035557419673645}}
+::orx:: {"phase":"train","step":1100,"of":4200,"unit":"steps","t":1227.695243704314,"m":{"loss":0.5959902636520191}}
+::orx:: {"phase":"train","step":1120,"of":4200,"unit":"steps","t":1241.3066200956584,"m":{"loss":0.6189994540171758}}
+::orx:: {"phase":"train","step":1140,"of":4200,"unit":"steps","t":1255.9168601214028,"m":{"loss":0.559588852152105}}
+::orx:: {"phase":"train","step":1160,"of":4200,"unit":"steps","t":1268.5960810780384,"m":{"loss":0.5888168671072015}}
+::orx:: {"phase":"train","step":1180,"of":4200,"unit":"steps","t":1282.5173724488661,"m":{"loss":0.596695434581578}}
+::orx:: {"phase":"train","step":1200,"of":4200,"unit":"steps","t":1296.1833579235567,"m":{"loss":0.5416108514182454}}
+::orx:: {"phase":"train","step":1220,"of":4200,"unit":"steps","t":1309.834919899675,"m":{"loss":0.5829670966205744}}
+::orx:: {"phase":"train","step":1240,"of":4200,"unit":"steps","t":1324.889063381379,"m":{"loss":0.5799673356414153}}
+::orx:: {"phase":"train","step":1260,"of":4200,"unit":"steps","t":1337.4500049602218,"m":{"loss":0.6030015156747198}}
+::orx:: {"phase":"train","step":1280,"of":4200,"unit":"steps","t":1350.8215698757772,"m":{"loss":0.5259235896176933}}
+::orx:: {"phase":"train","step":1300,"of":4200,"unit":"steps","t":1364.2608098821229,"m":{"loss":0.5954454215511302}}
+::orx:: {"phase":"train","step":1320,"of":4200,"unit":"steps","t":1378.272651689852,"m":{"loss":0.5278605699367819}}
+::orx:: {"phase":"train","step":1340,"of":4200,"unit":"steps","t":1390.9544381139676,"m":{"loss":0.5844502845403158}}
+::orx:: {"phase":"train","step":1360,"of":4200,"unit":"steps","t":1405.3859951317786,"m":{"loss":0.560174375663576}}
+::orx:: {"phase":"train","step":1380,"of":4200,"unit":"steps","t":1418.2285275461293,"m":{"loss":0.5484626579483524}}
+::orx:: {"phase":"train","step":1400,"of":4200,"unit":"steps","t":1451.4802435834908,"m":{"loss":0.5294055852466477}}
+::orx:: {"phase":"train","step":1420,"of":4200,"unit":"steps","t":1465.0079659385597,"m":{"loss":0.49921386259176315}}
+::orx:: {"phase":"train","step":1440,"of":4200,"unit":"steps","t":1478.8318359912691,"m":{"loss":0.5024619743942838}}
+::orx:: {"phase":"train","step":1460,"of":4200,"unit":"steps","t":1492.5192985705119,"m":{"loss":0.5759705670592987}}
+::orx:: {"phase":"train","step":1480,"of":4200,"unit":"steps","t":1505.1929683064936,"m":{"loss":0.5079222333329648}}
+::orx:: {"phase":"train","step":1500,"of":4200,"unit":"steps","t":1519.1702101021053,"m":{"loss":0.5615426540608557}}
+::orx:: {"phase":"train","step":1520,"of":4200,"unit":"steps","t":1533.5891071317892,"m":{"loss":0.49017665505047114}}
+::orx:: {"phase":"train","step":1540,"of":4200,"unit":"steps","t":1547.012735461426,"m":{"loss":0.4712290115461829}}
+::orx:: {"phase":"train","step":1560,"of":4200,"unit":"steps","t":1561.1075978168053,"m":{"loss":0.5698257469215666}}
+::orx:: {"phase":"train","step":1580,"of":4200,"unit":"steps","t":1574.726106256105,"m":{"loss":0.47934063719971387}}
+::orx:: {"phase":"train","step":1600,"of":4200,"unit":"steps","t":1588.137135764008,"m":{"loss":0.48198805041646375}}
+::orx:: {"phase":"train","step":1620,"of":4200,"unit":"steps","t":1601.9091892528804,"m":{"loss":0.5195120749866827}}
+::orx:: {"phase":"train","step":1640,"of":4200,"unit":"steps","t":1615.4414143555832,"m":{"loss":0.508273432291739}}
+::orx:: {"phase":"train","step":1660,"of":4200,"unit":"steps","t":1628.8912913345814,"m":{"loss":0.505714975452158}}
+::orx:: {"phase":"train","step":1680,"of":4200,"unit":"steps","t":1642.924491879645,"m":{"loss":0.46602433355620637}}
+::orx:: {"phase":"train","step":1700,"of":4200,"unit":"steps","t":1656.239471095879,"m":{"loss":0.49959888850204776}}
+::orx:: {"phase":"train","step":1720,"of":4200,"unit":"steps","t":1669.8591752914565,"m":{"loss":0.48495359819785666}}
+::orx:: {"phase":"train","step":1740,"of":4200,"unit":"steps","t":1682.4733651578397,"m":{"loss":0.4801069755299119}}
+::orx:: {"phase":"train","step":1760,"of":4200,"unit":"steps","t":1695.878188977664,"m":{"loss":0.4771227115223293}}
+::orx:: {"phase":"train","step":1780,"of":4200,"unit":"steps","t":1709.899421584838,"m":{"loss":0.441120281350042}}
+::orx:: {"phase":"train","step":1800,"of":4200,"unit":"steps","t":1723.7673428794355,"m":{"loss":0.4705366950144236}}
+::orx:: {"phase":"train","step":1820,"of":4200,"unit":"steps","t":1736.830273607646,"m":{"loss":0.4800869540611098}}
+::orx:: {"phase":"train","step":1840,"of":4200,"unit":"steps","t":1750.7138556932737,"m":{"loss":0.46347832508032244}}
+::orx:: {"phase":"train","step":1860,"of":4200,"unit":"steps","t":1763.5421353107229,"m":{"loss":0.502240671197897}}
+::orx:: {"phase":"train","step":1880,"of":4200,"unit":"steps","t":1776.475797123197,"m":{"loss":0.4662653453039132}}
+::orx:: {"phase":"train","step":1900,"of":4200,"unit":"steps","t":1789.246750579713,"m":{"loss":0.44324381407294344}}
+::orx:: {"phase":"train","step":1920,"of":4200,"unit":"steps","t":1802.9765090006529,"m":{"loss":0.4551402236441981}}
+::orx:: {"phase":"train","step":1940,"of":4200,"unit":"steps","t":1816.876610770856,"m":{"loss":0.4780825902738976}}
+::orx:: {"phase":"train","step":1960,"of":4200,"unit":"steps","t":1830.6013308965494,"m":{"loss":0.4333701835876328}}
+::orx:: {"phase":"train","step":1980,"of":4200,"unit":"steps","t":1844.0297685638639,"m":{"loss":0.42408487569137454}}
+::orx:: {"phase":"train","step":2000,"of":4200,"unit":"steps","t":1857.6744058266822,"m":{"loss":0.4474784450445577}}
+::orx:: {"phase":"train","step":2020,"of":4200,"unit":"steps","t":1871.5723266543703,"m":{"loss":0.44861225245014447}}
+::orx:: {"phase":"train","step":2040,"of":4200,"unit":"steps","t":1885.7025912663125,"m":{"loss":0.47064288812368366}}
+::orx:: {"phase":"train","step":2060,"of":4200,"unit":"steps","t":1899.5617208913332,"m":{"loss":0.47102312731542906}}
+::orx:: {"phase":"train","step":2080,"of":4200,"unit":"steps","t":1912.2378059546443,"m":{"loss":0.45001450707280033}}
+::orx:: {"phase":"train","step":2100,"of":4200,"unit":"steps","t":1926.751340178641,"m":{"loss":0.40807113924726246}}
+::orx:: {"phase":"train","step":2120,"of":4200,"unit":"steps","t":1940.3991327553772,"m":{"loss":0.4011734665717377}}
+::orx:: {"phase":"train","step":2140,"of":4200,"unit":"steps","t":1953.7898397248523,"m":{"loss":0.4858537195493786}}
+::orx:: {"phase":"train","step":2160,"of":4200,"unit":"steps","t":1967.808524659167,"m":{"loss":0.43141977398891573}}
+::orx:: {"phase":"train","step":2180,"of":4200,"unit":"steps","t":1980.5957051107366,"m":{"loss":0.5126276997232894}}
+::orx:: {"phase":"train","step":2200,"of":4200,"unit":"steps","t":1993.402139272546,"m":{"loss":0.42173310090298155}}
+::orx:: {"phase":"train","step":2220,"of":4200,"unit":"steps","t":2006.3141144164738,"m":{"loss":0.43810506605009164}}
+::orx:: {"phase":"train","step":2240,"of":4200,"unit":"steps","t":2019.796621090462,"m":{"loss":0.4362472854818646}}
+::orx:: {"phase":"train","step":2260,"of":4200,"unit":"steps","t":2033.951229841657,"m":{"loss":0.4213115798789864}}
+::orx:: {"phase":"train","step":2280,"of":4200,"unit":"steps","t":2047.325562814348,"m":{"loss":0.4682733620070221}}
+::orx:: {"phase":"train","step":2300,"of":4200,"unit":"steps","t":2060.4912280911353,"m":{"loss":0.4272534501153561}}
+::orx:: {"phase":"train","step":2320,"of":4200,"unit":"steps","t":2073.802901067334,"m":{"loss":0.5052151530862327}}
+::orx:: {"phase":"train","step":2340,"of":4200,"unit":"steps","t":2087.554885933226,"m":{"loss":0.4502915597488823}}
+::orx:: {"phase":"train","step":2360,"of":4200,"unit":"steps","t":2100.609915330398,"m":{"loss":0.45334428355392825}}
+::orx:: {"phase":"train","step":2380,"of":4200,"unit":"steps","t":2113.7794306428004,"m":{"loss":0.4461115457820169}}
+::orx:: {"phase":"train","step":2400,"of":4200,"unit":"steps","t":2127.001858254227,"m":{"loss":0.42757544579055473}}
+::orx:: {"phase":"train","step":2420,"of":4200,"unit":"steps","t":2140.9981785380633,"m":{"loss":0.47184598183618986}}
+::orx:: {"phase":"train","step":2440,"of":4200,"unit":"steps","t":2154.424541552949,"m":{"loss":0.4040808670108079}}
+::orx:: {"phase":"train","step":2460,"of":4200,"unit":"steps","t":2167.6200087500174,"m":{"loss":0.4463995527345647}}
+::orx:: {"phase":"train","step":2480,"of":4200,"unit":"steps","t":2181.7109120500572,"m":{"loss":0.4445364022697277}}
+::orx:: {"phase":"train","step":2500,"of":4200,"unit":"steps","t":2196.6467307823054,"m":{"loss":0.3915146872045976}}
+::orx:: {"phase":"train","step":2520,"of":4200,"unit":"steps","t":2209.815257569582,"m":{"loss":0.4141753457033062}}
+::orx:: {"phase":"train","step":2540,"of":4200,"unit":"steps","t":2223.4733198157664,"m":{"loss":0.4527394191134705}}
+::orx:: {"phase":"train","step":2560,"of":4200,"unit":"steps","t":2236.257439177486,"m":{"loss":0.5067042031478384}}
+::orx:: {"phase":"train","step":2580,"of":4200,"unit":"steps","t":2250.4622298357485,"m":{"loss":0.41820027290721556}}
+::orx:: {"phase":"train","step":2600,"of":4200,"unit":"steps","t":2264.2813361344606,"m":{"loss":0.42567824479329686}}
+::orx:: {"phase":"train","step":2620,"of":4200,"unit":"steps","t":2277.642417916374,"m":{"loss":0.4839435516862398}}
+::orx:: {"phase":"train","step":2640,"of":4200,"unit":"steps","t":2289.9099013573896,"m":{"loss":0.459583999133818}}
+::orx:: {"phase":"train","step":2660,"of":4200,"unit":"steps","t":2303.7497511968977,"m":{"loss":0.3772129825591624}}
+::orx:: {"phase":"train","step":2680,"of":4200,"unit":"steps","t":2318.38970065879,"m":{"loss":0.4041775482389924}}
+::orx:: {"phase":"train","step":2700,"of":4200,"unit":"steps","t":2332.0640645289636,"m":{"loss":0.4380553408270373}}
+::orx:: {"phase":"train","step":2720,"of":4200,"unit":"steps","t":2346.0402070526466,"m":{"loss":0.4355278212490142}}
+::orx:: {"phase":"train","step":2740,"of":4200,"unit":"steps","t":2359.6419169015767,"m":{"loss":0.4041477990612649}}
+::orx:: {"phase":"train","step":2760,"of":4200,"unit":"steps","t":2373.072769190877,"m":{"loss":0.42083467536275876}}
+::orx:: {"phase":"train","step":2780,"of":4200,"unit":"steps","t":2387.1289012036145,"m":{"loss":0.40415601979316174}}
+::orx:: {"phase":"train","step":2800,"of":4200,"unit":"steps","t":2420.5895262324057,"m":{"loss":0.423540264690126}}
+::orx:: {"phase":"train","step":2820,"of":4200,"unit":"steps","t":2433.8481527249705,"m":{"loss":0.4397196454859248}}
+::orx:: {"phase":"train","step":2840,"of":4200,"unit":"steps","t":2448.629234182444,"m":{"loss":0.4374362207611261}}
+::orx:: {"phase":"train","step":2860,"of":4200,"unit":"steps","t":2462.6273773526314,"m":{"loss":0.3771763782105309}}
+::orx:: {"phase":"train","step":2880,"of":4200,"unit":"steps","t":2476.539031287748,"m":{"loss":0.4402578996759498}}
+::orx:: {"phase":"train","step":2900,"of":4200,"unit":"steps","t":2490.1565253515228,"m":{"loss":0.4548664022610675}}
+::orx:: {"phase":"train","step":2920,"of":4200,"unit":"steps","t":2503.4850827787045,"m":{"loss":0.46570013582353026}}
+::orx:: {"phase":"train","step":2940,"of":4200,"unit":"steps","t":2516.876856729008,"m":{"loss":0.43001272621762826}}
+::orx:: {"phase":"train","step":2960,"of":4200,"unit":"steps","t":2530.9247251163797,"m":{"loss":0.4079196481605816}}
+::orx:: {"phase":"train","step":2980,"of":4200,"unit":"steps","t":2543.9420053266426,"m":{"loss":0.475611975179903}}
+::orx:: {"phase":"train","step":3000,"of":4200,"unit":"steps","t":2556.824468507122,"m":{"loss":0.3787906341355207}}
+::orx:: {"phase":"train","step":3020,"of":4200,"unit":"steps","t":2571.107056793588,"m":{"loss":0.4263953320707314}}
+::orx:: {"phase":"train","step":3040,"of":4200,"unit":"steps","t":2584.578326025404,"m":{"loss":0.4307153318838517}}
+::orx:: {"phase":"train","step":3060,"of":4200,"unit":"steps","t":2597.7219165551596,"m":{"loss":0.4426269838828246}}
+::orx:: {"phase":"train","step":3080,"of":4200,"unit":"steps","t":2611.3206262276503,"m":{"loss":0.4272719679683202}}
+::orx:: {"phase":"train","step":3100,"of":4200,"unit":"steps","t":2625.3148708588947,"m":{"loss":0.4003313118861758}}
+::orx:: {"phase":"train","step":3120,"of":4200,"unit":"steps","t":2638.329782834905,"m":{"loss":0.44899308612956146}}
+::orx:: {"phase":"train","step":3140,"of":4200,"unit":"steps","t":2651.8995227776168,"m":{"loss":0.45649139170746006}}
+::orx:: {"phase":"train","step":3160,"of":4200,"unit":"steps","t":2665.576941377781,"m":{"loss":0.43945433521424593}}
+::orx:: {"phase":"train","step":3180,"of":4200,"unit":"steps","t":2679.129863142618,"m":{"loss":0.4133210038264279}}
+::orx:: {"phase":"train","step":3200,"of":4200,"unit":"steps","t":2691.935544727334,"m":{"loss":0.4035828031516948}}
+::orx:: {"phase":"train","step":3220,"of":4200,"unit":"steps","t":2705.213308796183,"m":{"loss":0.4303777587934519}}
+::orx:: {"phase":"train","step":3240,"of":4200,"unit":"steps","t":2719.7853341983946,"m":{"loss":0.44568442105444045}}
+::orx:: {"phase":"train","step":3260,"of":4200,"unit":"steps","t":2733.364601995781,"m":{"loss":0.4506479792591035}}
+::orx:: {"phase":"train","step":3280,"of":4200,"unit":"steps","t":2746.876081553221,"m":{"loss":0.4246007022503289}}
+::orx:: {"phase":"train","step":3300,"of":4200,"unit":"steps","t":2761.094036634746,"m":{"loss":0.4408712625593124}}
+::orx:: {"phase":"train","step":3320,"of":4200,"unit":"steps","t":2775.4177614112555,"m":{"loss":0.4106059991095051}}
+::orx:: {"phase":"train","step":3340,"of":4200,"unit":"steps","t":2788.9579758096565,"m":{"loss":0.45844649245028457}}
+::orx:: {"phase":"train","step":3360,"of":4200,"unit":"steps","t":2803.03288146465,"m":{"loss":0.3745091314892388}}
+::orx:: {"phase":"train","step":3380,"of":4200,"unit":"steps","t":2816.7012277346907,"m":{"loss":0.40979400473647776}}
+::orx:: {"phase":"train","step":3400,"of":4200,"unit":"steps","t":2830.7571004997394,"m":{"loss":0.43923144010937865}}
+::orx:: {"phase":"train","step":3420,"of":4200,"unit":"steps","t":2844.9912267524073,"m":{"loss":0.3481777524956817}}
+::orx:: {"phase":"train","step":3440,"of":4200,"unit":"steps","t":2857.769612554176,"m":{"loss":0.44839231363610305}}
+::orx:: {"phase":"train","step":3460,"of":4200,"unit":"steps","t":2870.563278851021,"m":{"loss":0.44253330260509344}}
+::orx:: {"phase":"train","step":3480,"of":4200,"unit":"steps","t":2883.4482504912166,"m":{"loss":0.44923058370447705}}
+::orx:: {"phase":"train","step":3500,"of":4200,"unit":"steps","t":2896.840666701074,"m":{"loss":0.35867043842283375}}
+::orx:: {"phase":"train","step":3520,"of":4200,"unit":"steps","t":2910.2277661796843,"m":{"loss":0.4463558737942401}}
+::orx:: {"phase":"train","step":3540,"of":4200,"unit":"steps","t":2924.3216357390897,"m":{"loss":0.3908940426463992}}
+::orx:: {"phase":"train","step":3560,"of":4200,"unit":"steps","t":2937.0430893493485,"m":{"loss":0.41241477677527094}}
+::orx:: {"phase":"train","step":3580,"of":4200,"unit":"steps","t":2951.2305583620787,"m":{"loss":0.4424677213961634}}
+::orx:: {"phase":"train","step":3600,"of":4200,"unit":"steps","t":2965.1058250773076,"m":{"loss":0.44876889833251604}}
+::orx:: {"phase":"train","step":3620,"of":4200,"unit":"steps","t":2978.915844810679,"m":{"loss":0.44077428975753924}}
+::orx:: {"phase":"train","step":3640,"of":4200,"unit":"steps","t":2992.136098849201,"m":{"loss":0.4374431935669332}}
+::orx:: {"phase":"train","step":3660,"of":4200,"unit":"steps","t":3006.24603148,"m":{"loss":0.4151731823910433}}
+::orx:: {"phase":"train","step":3680,"of":4200,"unit":"steps","t":3019.6388611190964,"m":{"loss":0.4488812451890788}}
+::orx:: {"phase":"train","step":3700,"of":4200,"unit":"steps","t":3033.425950653192,"m":{"loss":0.4163178650991982}}
+::orx:: {"phase":"train","step":3720,"of":4200,"unit":"steps","t":3047.104455596599,"m":{"loss":0.4541182302994319}}
+::orx:: {"phase":"train","step":3740,"of":4200,"unit":"steps","t":3060.481859231942,"m":{"loss":0.46239232755994686}}
+::orx:: {"phase":"train","step":3760,"of":4200,"unit":"steps","t":3073.6216425483112,"m":{"loss":0.46533150379613164}}
+::orx:: {"phase":"train","step":3780,"of":4200,"unit":"steps","t":3087.557479526061,"m":{"loss":0.47281696085196157}}
+::orx:: {"phase":"train","step":3800,"of":4200,"unit":"steps","t":3102.199924138965,"m":{"loss":0.38369772476761665}}
+::orx:: {"phase":"train","step":3820,"of":4200,"unit":"steps","t":3115.1052278829816,"m":{"loss":0.4628926284380241}}
+::orx:: {"phase":"train","step":3840,"of":4200,"unit":"steps","t":3128.737335554955,"m":{"loss":0.3941445567420889}}
+::orx:: {"phase":"train","step":3860,"of":4200,"unit":"steps","t":3143.772233725173,"m":{"loss":0.4754249229441021}}
+::orx:: {"phase":"train","step":3880,"of":4200,"unit":"steps","t":3156.979682439686,"m":{"loss":0.44976213563482936}}
+::orx:: {"phase":"train","step":3900,"of":4200,"unit":"steps","t":3169.8458231256727,"m":{"loss":0.4198712958156097}}
+::orx:: {"phase":"train","step":3920,"of":4200,"unit":"steps","t":3183.3958951854297,"m":{"loss":0.3826230164569684}}
+::orx:: {"phase":"train","step":3940,"of":4200,"unit":"steps","t":3196.65429524611,"m":{"loss":0.41462862390762256}}
+::orx:: {"phase":"train","step":3960,"of":4200,"unit":"steps","t":3211.43096355312,"m":{"loss":0.39731265003694416}}
+::orx:: {"phase":"train","step":3980,"of":4200,"unit":"steps","t":3224.7159373431464,"m":{"loss":0.4108605171469972}}
+::orx:: {"phase":"train","step":4000,"of":4200,"unit":"steps","t":3237.544384566337,"m":{"loss":0.4491132548509349}}
+::orx:: {"phase":"train","step":4020,"of":4200,"unit":"steps","t":3250.2690871523987,"m":{"loss":0.4357753555034135}}
+::orx:: {"phase":"train","step":4040,"of":4200,"unit":"steps","t":3263.2262719740324,"m":{"loss":0.4004059639662732}}
+::orx:: {"phase":"train","step":4060,"of":4200,"unit":"steps","t":3277.2720155583197,"m":{"loss":0.41021567391189395}}
+::orx:: {"phase":"train","step":4080,"of":4200,"unit":"steps","t":3289.595916197998,"m":{"loss":0.4234224346713204}}
+::orx:: {"phase":"train","step":4100,"of":4200,"unit":"steps","t":3304.234870316661,"m":{"loss":0.39125346367766267}}
+::orx:: {"phase":"train","step":4120,"of":4200,"unit":"steps","t":3316.724448096257,"m":{"loss":0.4400682069602711}}
+::orx:: {"phase":"train","step":4140,"of":4200,"unit":"steps","t":3329.966924598473,"m":{"loss":0.42835550374161047}}
+::orx:: {"phase":"train","step":4160,"of":4200,"unit":"steps","t":3343.8340740553226,"m":{"loss":0.4147280536219314}}
+::orx:: {"phase":"train","step":4180,"of":4200,"unit":"steps","t":3357.35712048443,"m":{"loss":0.375351035897727}}
+::orx:: {"phase":"train","step":4200,"of":4200,"unit":"steps","t":3391.275945561454,"m":{"loss":0.40013604348559734}}
+::orx:: {"phase":"eval","step":0,"of":5,"unit":"tasks","t":3391.275945561454,"m":{}}
+::orx:: {"phase":"eval","step":1,"of":5,"unit":"tasks","t":3476.3727050261946,"m":{}}
+::orx:: {"phase":"eval","step":2,"of":5,"unit":"tasks","t":3647.4025197837836,"m":{}}
+::orx:: {"phase":"eval","step":3,"of":5,"unit":"tasks","t":3738.2902657309314,"m":{}}
+::orx:: {"phase":"eval","step":4,"of":5,"unit":"tasks","t":3949.499300525022,"m":{}}
+::orx:: {"phase":"eval","step":5,"of":5,"unit":"tasks","t":4068.1838193357776,"m":{}}
+::orx:: {"phase":"export","step":0,"of":1,"unit":"","t":4068.1838193357776,"m":{}}
+::orx:: {"phase":"export","step":1,"of":1,"unit":"","t":4118.183819335778,"m":{}}

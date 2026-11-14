@@ -132,9 +132,53 @@ impl LocalPlane {
 
     // --- experiment -------------------------------------------------------
 
-    pub async fn experiment_status(&self, scheduler: bool) -> Result<()> {
+    pub async fn experiment_status(
+        &self,
+        scheduler: bool,
+        run_id: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
         let store = &self.store;
         let exp = self.experiment()?;
+        let runs = store.list_runs_by_experiment(&exp.id)?;
+        let selected = match run_id {
+            Some(id) => Some(
+                runs.iter()
+                    .find(|run| run.id == id)
+                    .ok_or_else(|| anyhow!("Run {id} does not belong to experiment {}", exp.id))?,
+            ),
+            None => runs
+                .iter()
+                .find(|run| matches!(run.status.as_str(), "submitting" | "starting" | "running"))
+                .or_else(|| runs.first()),
+        };
+        let monitor = match selected {
+            Some(row) => Some(run_monitor(store, row).await?),
+            None => None,
+        };
+        if json {
+            let state = selected
+                .map(|row| -> Result<_> {
+                    let run = Run::from_store(store, row)?;
+                    Ok(serde_json::json!({
+                        "contact":run.contact,
+                        "cancelling":run.cancelling,
+                        "cancelUnconfirmed":run.cancel_unconfirmed,
+                        "displayStatus":run.display_status(),
+                    }))
+                })
+                .transpose()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "experiment":exp,
+                    "run":selected,
+                    "state":state,
+                    "monitor":monitor,
+                }))?
+            );
+            return Ok(());
+        }
         println!("{}  ({})  [local]", exp.display_name(), exp.agent_status);
         println!("  id:       {}", exp.id);
         println!("  branch:   {}", exp.branch_name);
@@ -161,19 +205,24 @@ impl LocalPlane {
             ),
         }
 
-        match store.latest_run_for_experiment(&exp.id)? {
+        match runs.first() {
             Some(r) => {
                 let state = store.engine_run_state(&r.id)?;
-                let run = Run::from_store(store, &r)?;
+                let run = Run::from_store(store, r)?;
                 let commit = run
                     .commit_sha
                     .as_deref()
                     .map(|s| s.chars().take(7).collect::<String>())
                     .unwrap_or_else(|| "—".to_string());
+                let state_prefix = if selected.is_some_and(|selected| selected.id == run.id) {
+                    String::new()
+                } else {
+                    format!("{}, ", run.display_status())
+                };
                 println!(
-                    "  last run: {} ({}, commit {}, ran {}, updated {})",
+                    "  last run: {} ({}commit {}, ran {}, updated {})",
                     run.id,
-                    run.display_status(),
+                    state_prefix,
                     commit,
                     crate::output::format_duration(run.duration_secs),
                     run.updated_display
@@ -256,6 +305,9 @@ impl LocalPlane {
             if let Some(error) = error {
                 println!("  older live run {}: {error}", older.id);
             }
+        }
+        if let Some(text) = monitor.as_ref().and_then(|m| m["statusText"].as_str()) {
+            println!("{text}");
         }
         Ok(())
     }
@@ -424,6 +476,42 @@ impl LocalPlane {
         super::checkout_hint::print(&project.repo_path, &experiment.branch_name);
         Ok(())
     }
+}
+
+/// The status line's progress: `[<percent>%  ][<phase> · ]step <done>[ of <of>]`. A run with
+/// several detected bars has no whole-run percentage.
+/// The run's monitor as `orx up` serves it, at the `rev` the page shows; read from the store
+/// and the run's signals when no server is running, which publishes nothing.
+async fn run_monitor(store: &Store, run: &crate::store::StoredRun) -> Result<serde_json::Value> {
+    use crate::commands::remote_host::{canonical_data_dir, ServerDescriptor};
+    let server = match ServerDescriptor::agent_session(
+        std::env::var("ORX_UP_PORT").ok(),
+        std::env::var("ORX_UP_AUTH_TOKEN").ok(),
+    )? {
+        Some(server) => Some(server),
+        None => ServerDescriptor::live(&canonical_data_dir()?).await?,
+    };
+    if let Some(server) = server {
+        let response = ApiClient::new(server)?
+            .request(reqwest::Method::GET, &format!("runs/{}/monitor", run.id))
+            .send()
+            .await;
+        match response {
+            Ok(response) if response.status().is_success() => return Ok(response.json().await?),
+            // An older server has no monitors to serve.
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {}
+            Ok(response) => eprintln!(
+                "orx up could not serve run {}'s monitor ({}); reading it from disk.",
+                run.id,
+                response.status()
+            ),
+            Err(error) => eprintln!(
+                "orx up could not serve run {}'s monitor ({error}); reading it from disk.",
+                run.id
+            ),
+        }
+    }
+    crate::engine::monitor::offline(store, run, crate::store::now_ms())
 }
 
 fn experiment_wait_progress(run: Option<(&str, &str)>, last_status: &mut Option<String>) {

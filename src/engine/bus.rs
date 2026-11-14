@@ -28,6 +28,11 @@ pub enum RunEvent {
         file: super::LogFile,
         len: u64,
     },
+    /// A run's monitor published a new `rev`: the `run.monitor` event as the page reads it.
+    Monitor {
+        run_id: String,
+        event: std::sync::Arc<serde_json::Value>,
+    },
 }
 
 /// Events published after their transaction commits. A lagged subscriber resyncs from the store.

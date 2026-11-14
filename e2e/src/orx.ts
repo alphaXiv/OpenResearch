@@ -129,9 +129,10 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
       return { id: project.id, open: async (page) => void (await page.goto(`${url}/projects/${project.id}`)) }
     },
     stop,
-    /** Stops `orx up` and starts it again on the same port and data. */
-    async restart(signal: NodeJS.Signals = 'SIGTERM') {
+    /** Stops `orx up` and starts it again on the same port and data, doing `meanwhile` while it is down. */
+    async restart(signal: NodeJS.Signals = 'SIGTERM', meanwhile?: () => Promise<void>) {
       await stop(signal)
+      await meanwhile?.()
       await start()
     },
   }

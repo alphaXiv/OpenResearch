@@ -489,6 +489,7 @@ impl Engine {
                     .filter(|_| phase == Phase::Running && super::is_engine_row(&run));
                 if phase.is_terminal() && super::handle_of(&run).is_some() {
                     store.queue_log_collection(run_id)?;
+                    store.queue_signal_collection(run_id)?;
                 }
                 store.set_engine_phase(
                     run_id,

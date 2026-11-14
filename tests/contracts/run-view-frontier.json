@@ -1,0 +1,70 @@
+{
+  "markup": "<signal name=\"front_gain\" label=\"Frontier gain\" better=\"higher\" sign=\"true\" />\n<signal name=\"valid\" label=\"Bit-exact\" labels='{\"1\":\"valid\",\"0\":\"invalid\"}' />\n<signal name=\"cand_kb\" label=\"Size\" unit=\"KB\" better=\"lower\" />\n<signal name=\"cand_ms\" label=\"Compress time\" unit=\"ms\" better=\"lower\" />\n\n<view headline=\"front_gain\">\n  <chart from=\"levels\" x-scale=\"log\" title=\"Size against compress time\">\n    <series x=\"ref_ms\" y=\"ref_kb\" label=\"Reference build\" />\n    <series x=\"cand_ms\" y=\"cand_kb\" label=\"Candidate\" />\n  </chart>\n  <stats of=\"front_gain speedup_mean size_gain_mean valid\" />\n  <table name=\"levels\" columns=\"level speedup size_ratio cand_ms cand_kb\" />\n</view>\n",
+  "tree": {
+    "signals": {
+      "front_gain": {
+        "label": "Frontier gain",
+        "better": "higher",
+        "sign": true
+      },
+      "valid": {
+        "label": "Bit-exact",
+        "labels": {
+          "1": "valid",
+          "0": "invalid"
+        }
+      },
+      "cand_kb": {
+        "label": "Size",
+        "unit": "KB",
+        "better": "lower"
+      },
+      "cand_ms": {
+        "label": "Compress time",
+        "unit": "ms",
+        "better": "lower"
+      }
+    },
+    "headline": [
+      "front_gain"
+    ],
+    "blocks": [
+      {
+        "chart": [],
+        "from": "levels",
+        "series": [
+          {
+            "x": "ref_ms",
+            "y": "ref_kb",
+            "label": "Reference build"
+          },
+          {
+            "x": "cand_ms",
+            "y": "cand_kb",
+            "label": "Candidate"
+          }
+        ],
+        "xScale": "log",
+        "title": "Size against compress time"
+      },
+      {
+        "stats": [
+          "front_gain",
+          "speedup_mean",
+          "size_gain_mean",
+          "valid"
+        ]
+      },
+      {
+        "table": "levels",
+        "columns": [
+          "level",
+          "speedup",
+          "size_ratio",
+          "cand_ms",
+          "cand_kb"
+        ]
+      }
+    ]
+  }
+}

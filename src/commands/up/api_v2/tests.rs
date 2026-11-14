@@ -489,6 +489,11 @@ async fn wait_is_one_sse_request_completed_by_first_matching_bus_event() {
     };
     let mut events = f.client.events(&filter).await.unwrap();
     assert_eq!(f.api.sse_clients(), 1);
+    // A monitor event is the dashboard's, and never ends a wait.
+    f.api.engine.bus.publish(RunEvent::Monitor {
+        run_id: "run".into(),
+        event: Arc::new(json!({"runId": "run", "rev": 1})),
+    });
     f.api
         .engine
         .observe(
@@ -2931,4 +2936,126 @@ async fn abandon_refusals_name_their_cause_and_the_way_forward() {
     let (status, message) = refusal("live").await;
     assert_eq!(status, StatusCode::OK, "{message}");
     assert_eq!(f.api.run("live").unwrap().status, "lost");
+}
+
+/// The monitor route: the whole monitor with its ETag, a 304 for it, one series' history, a
+/// cursor from another basis refused, and an unknown run a 404 in the app's error shape.
+#[tokio::test]
+async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
+    let f = Fixture::new().await;
+    f.insert("run", "exp", "project", "running");
+    let signals = f.api.data_dir.join("run-signals");
+    std::fs::create_dir_all(&signals).unwrap();
+    let mut snapshot = orx_signals::Snapshot::new("run", "1-1", "g1");
+    let now = crate::store::now_ms();
+    for step in 0..=30 {
+        let line = format!(
+            "::orx:: {{\"step\":{step},\"of\":100,\"t\":{step},\"m\":{{\"loss\":{}}}}}\n",
+            1.0 / f64::from(step + 1)
+        );
+        snapshot
+            .feed(
+                line.as_bytes(),
+                false,
+                now - 30_000 + i64::from(step) * 1000,
+                true,
+            )
+            .unwrap();
+    }
+    crate::engine::adapters::local::signals::publish(&signals.join("run.json"), &snapshot).unwrap();
+    std::fs::write(
+        signals.join("run.status.json"),
+        json!({"state": "cached", "reason": null, "lastCollectedAt": now}).to_string(),
+    )
+    .unwrap();
+
+    let response = f
+        .client
+        .request(reqwest::Method::GET, "runs/run/monitor")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    let monitor: Value = response.json().await.unwrap();
+    assert_eq!(etag, format!("\"g1:{}\"", monitor["rev"]));
+    assert_eq!(monitor["series"]["loss"].as_array().unwrap().len(), 31);
+    assert_eq!(monitor["progress"]["done"], 30.0);
+    assert!(monitor["statusText"]
+        .as_str()
+        .unwrap()
+        .starts_with("exp  running  30%  step 30 of 100"));
+    let run = f
+        .client
+        .json(reqwest::Method::GET, "runs/run", None)
+        .await
+        .unwrap();
+    assert_eq!(run["monitor"]["rev"], monitor["rev"]);
+
+    let unchanged = f
+        .client
+        .request(reqwest::Method::GET, "runs/run/monitor")
+        .header("if-none-match", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+
+    let page = f
+        .client
+        .json(
+            reqwest::Method::GET,
+            "runs/run/monitor?series=loss&after=20&limit=4",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page["points"].as_array().unwrap().len(), 4);
+    assert_eq!(page["points"][0][0], 21.0);
+    assert_eq!(page["next"], 24.0);
+
+    let stale = f
+        .client
+        .request(reqwest::Method::GET, "runs/run/monitor?cursor=g0.1.1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(stale.json::<Value>().await.unwrap()["reset"], true);
+
+    for path in ["runs/missing/monitor", "runs/run/monitor?series=lr"] {
+        let missing = f
+            .client
+            .request(reqwest::Method::GET, path)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND, "{path}");
+        assert!(
+            missing.json::<Value>().await.unwrap()["error"].is_string(),
+            "{path}"
+        );
+    }
+    let anonymous = crate::net::loopback_client()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://127.0.0.1:{}/api/v2/runs/run/monitor",
+            f.descriptor.port
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let dashboard = crate::net::loopback_client()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://127.0.0.1:{}/api/runs/run/monitor",
+            f.descriptor.port
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dashboard.status(), StatusCode::OK);
 }

@@ -47,7 +47,11 @@ orx create-experiment <localProjectId> --title "Alternative baseline" --baseline
   the oldest root unless `--baseline` explicitly requests another root.
 - A child branches from its parent's Git branch and inherits its run
   command. Vary code or configuration on the child; keep the command fixed.
+- `--title` is what the user reads beside the node's progress among its
+  siblings: short, the setting that varies first ("Depth 4 at 2e15 FLOPs").
 - `--description` should state the concrete change and measurement the node
   owes.
+- Before a baseline's first run, instrument it: its stages, measures and view
+  (`orx-experiment-tree`, "Before the first launch").
 - Commit the node's branch before launching. Runs use an immutable archive of
   that local commit.

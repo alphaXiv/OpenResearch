@@ -1,0 +1,3619 @@
+{
+  "states": {
+    "running": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444320500,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": 400.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 200.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.5
+            }
+          ],
+          "whole": 0.5,
+          "lastAt": 1794444320000,
+          "stallMs": 0
+        },
+        "x": {
+          "name": "step",
+          "max": 400.0
+        },
+        "latest": {
+          "loss": 0.14285714285714285
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 18997,
+          "midMs": 20000,
+          "hiMs": 21003,
+          "at": 1794444320000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  50%  step 200 of 400  [run r1]\neta      19s left (18s to 20s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              3.0
+            ],
+            [
+              10.0,
+              1.5
+            ],
+            [
+              20.0,
+              1.0
+            ],
+            [
+              30.0,
+              0.75
+            ],
+            [
+              40.0,
+              0.6
+            ],
+            [
+              50.0,
+              null
+            ],
+            [
+              60.0,
+              0.42857142857142855
+            ],
+            [
+              70.0,
+              0.375
+            ],
+            [
+              80.0,
+              0.3333333333333333
+            ],
+            [
+              90.0,
+              0.3
+            ],
+            [
+              100.0,
+              0.2727272727272727
+            ],
+            [
+              110.0,
+              0.25
+            ],
+            [
+              120.0,
+              0.2307692307692308
+            ],
+            [
+              130.0,
+              0.21428571428571427
+            ],
+            [
+              140.0,
+              0.2
+            ],
+            [
+              150.0,
+              0.1875
+            ],
+            [
+              160.0,
+              0.17647058823529413
+            ],
+            [
+              170.0,
+              0.16666666666666666
+            ],
+            [
+              180.0,
+              0.15789473684210523
+            ],
+            [
+              190.0,
+              0.15
+            ],
+            [
+              200.0,
+              0.14285714285714285
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.5,
+        "stage": {
+          "name": "",
+          "done": 200.0,
+          "of": 400.0,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 0.14285714285714285,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 0.14285714285714285
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": {
+          "lo": 18997,
+          "mid": 20000,
+          "hi": 21003,
+          "at": 1794444320000
+        },
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": "19s left",
+        "range": "18s to 20s",
+        "cli": "19s left (18s to 20s)"
+      }
+    },
+    "nan": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444305000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444305000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": 400.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 50.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.125
+            }
+          ],
+          "whole": 0.125,
+          "lastAt": 1794444305000,
+          "stallMs": 0
+        },
+        "x": {
+          "name": "step",
+          "max": 400.0
+        },
+        "latest": {
+          "loss": "NaN"
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 31681,
+          "midMs": 35000,
+          "hiMs": 38319,
+          "at": 1794444305000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  12%  step 50 of 400  [run r1]\neta      35s left (31s to 38s)\nsignals  loss NaN\nsignals  Last collected at 2026-11-12T00:45:05.000Z.\nsignals  Data as of 2026-11-12T00:45:05.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              3.0
+            ],
+            [
+              10.0,
+              1.5
+            ],
+            [
+              20.0,
+              1.0
+            ],
+            [
+              30.0,
+              0.75
+            ],
+            [
+              40.0,
+              0.6
+            ],
+            [
+              50.0,
+              null
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.125,
+        "stage": {
+          "name": "",
+          "done": 50.0,
+          "of": 400.0,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": "NaN",
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": "NaN"
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": {
+          "lo": 31681,
+          "mid": 35000,
+          "hi": 38319,
+          "at": 1794444305000
+        },
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444305000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": "35s left",
+        "range": "31s to 38s",
+        "cli": "35s left (31s to 38s)"
+      }
+    },
+    "stall": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794447901000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794447901000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": 400.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 100.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.25
+            }
+          ],
+          "whole": 0.25,
+          "lastAt": 1794444310000,
+          "stallMs": 3591000
+        },
+        "x": {
+          "name": "step",
+          "max": 400.0
+        },
+        "latest": {
+          "loss": 0.2727272727272727
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 28015,
+          "midMs": 30000,
+          "hiMs": 31985,
+          "at": 1794444310000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  25%  step 100 of 400  [run r1]\neta      0s left (no progress for at least 59m; assumes it resumes)\nsignals  loss 0.273\nsignals  Last collected at 2026-11-12T01:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:10.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              3.0
+            ],
+            [
+              10.0,
+              1.5
+            ],
+            [
+              20.0,
+              1.0
+            ],
+            [
+              30.0,
+              0.75
+            ],
+            [
+              40.0,
+              0.6
+            ],
+            [
+              50.0,
+              null
+            ],
+            [
+              60.0,
+              0.42857142857142855
+            ],
+            [
+              70.0,
+              0.375
+            ],
+            [
+              80.0,
+              0.3333333333333333
+            ],
+            [
+              90.0,
+              0.3
+            ],
+            [
+              100.0,
+              0.2727272727272727
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.25,
+        "stage": {
+          "name": "",
+          "done": 100.0,
+          "of": 400.0,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 0.2727272727272727,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 0.2727272727272727
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": {
+          "lo": 28015,
+          "mid": 30000,
+          "hi": 31985,
+          "at": 1794444310000
+        },
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794447901000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": "0s left",
+        "range": null,
+        "stall": "59m",
+        "cli": "0s left (no progress for at least 59m; assumes it resumes)"
+      }
+    },
+    "limit": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "slurm_job",
+          "timeoutSecs": 3600
+        }
+      },
+      "now": 1794445200000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794445200000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": null,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444301000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 5.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.25
+            }
+          ],
+          "whole": 0.25,
+          "lastAt": 1794444301000,
+          "stallMs": null
+        },
+        "x": {
+          "name": "step",
+          "max": null
+        },
+        "latest": {
+          "loss": 2
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": null,
+        "limit": {
+          "endsAt": 1794447900000
+        },
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  25%  step 5  [run r1]\neta      45m to the limit (ends by 01:45 UTC)\nsignals  loss 2\nsignals  Last collected at 2026-11-12T01:00:00.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              5.0,
+              2.0
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.25,
+        "stage": {
+          "name": "",
+          "done": 5.0,
+          "of": null,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 2,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 2
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": 1794447900000,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794445200000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": "45m to the limit",
+        "range": null,
+        "cli": "45m to the limit (ends by 01:45 UTC)"
+      }
+    },
+    "open": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444320000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444302000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": null,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444301000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 24.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": null
+            }
+          ],
+          "whole": null,
+          "lastAt": 1794444302000,
+          "stallMs": null
+        },
+        "x": {
+          "name": "step",
+          "max": null
+        },
+        "latest": {
+          "loss": 1.9
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": null,
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  step 24  [run r1]\neta      No estimate (no total or time limit)\nsignals  loss 1.9\nsignals  Last collected at 2026-11-12T00:45:02.000Z.\nsignals  Data as of 2026-11-12T00:45:02.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              23.0,
+              2.0
+            ],
+            [
+              24.0,
+              1.9
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": null,
+        "stage": {
+          "name": "",
+          "done": 24.0,
+          "of": null,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 1.9,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 1.9
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444302000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": "No estimate (no total or time limit)"
+      }
+    },
+    "ended": {
+      "run": {
+        "status": "done",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": 1794444900000,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794445000000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444900000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": 100.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 100.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 1.0
+            }
+          ],
+          "whole": 1.0,
+          "lastAt": 1794444310000,
+          "stallMs": 0
+        },
+        "x": {
+          "name": "step",
+          "max": 100.0
+        },
+        "latest": {
+          "loss": 0.2727272727272727
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": null,
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  done  100%  step 100 of 100  [run r1]\neta      Done in 10m\nsignals  loss 0.273\nsignals  Last collected at 2026-11-12T00:45:10.000Z.\nsignals  Data as of 2026-11-12T00:45:10.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {}
+      },
+      "summary": {
+        "tone": "done",
+        "whole": 1.0,
+        "stage": {
+          "name": "",
+          "done": 100.0,
+          "of": 100.0,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 0.2727272727272727,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 0.2727272727272727
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444900000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": "Done in 10m",
+        "range": null,
+        "cli": "Done in 10m"
+      }
+    },
+    "full": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444425000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444425000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {},
+          "headline": [],
+          "blocks": []
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<view />\n",
+          "isDefault": true
+        },
+        "source": "detected",
+        "phases": [
+          {
+            "name": "",
+            "of": 4.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444302000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 4.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": null
+            }
+          ],
+          "whole": null,
+          "lastAt": 1794444305000,
+          "stallMs": 120000
+        },
+        "x": {
+          "name": "step",
+          "max": 4.0
+        },
+        "latest": {},
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": null,
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  step 4 of 4  [run r1]\neta      No estimate (how much is left is unknown)\nsignals  Last collected at 2026-11-12T00:47:05.000Z.\nsignals  Data as of 2026-11-12T00:45:05.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {}
+      },
+      "summary": {
+        "tone": "running",
+        "whole": null,
+        "stage": {
+          "name": "",
+          "done": 4.0,
+          "of": 4.0,
+          "unit": null
+        },
+        "headline": null,
+        "sentence": null,
+        "bindings": {},
+        "signals": {},
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444425000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": "No estimate (how much is left is unknown)"
+      }
+    },
+    "long": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444310000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444310000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": 1000000.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 100.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.0001
+            }
+          ],
+          "whole": 0.0001,
+          "lastAt": 1794444310000,
+          "stallMs": 0
+        },
+        "x": {
+          "name": "step",
+          "max": 1000000.0
+        },
+        "latest": {
+          "loss": 0.2727272727272727
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 49995000,
+          "midMs": 99990000,
+          "hiMs": 159984000,
+          "at": 1794444310000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  0%  step 100 of 1,000,000  [run r1]\neta      1d 3h left (13h 53m to 1d 20h)\nsignals  loss 0.273\nsignals  Last collected at 2026-11-12T00:45:10.000Z.\nsignals  Data as of 2026-11-12T00:45:10.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              3.0
+            ],
+            [
+              10.0,
+              1.5
+            ],
+            [
+              20.0,
+              1.0
+            ],
+            [
+              30.0,
+              0.75
+            ],
+            [
+              40.0,
+              0.6
+            ],
+            [
+              50.0,
+              null
+            ],
+            [
+              60.0,
+              0.42857142857142855
+            ],
+            [
+              70.0,
+              0.375
+            ],
+            [
+              80.0,
+              0.3333333333333333
+            ],
+            [
+              90.0,
+              0.3
+            ],
+            [
+              100.0,
+              0.2727272727272727
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.0001,
+        "stage": {
+          "name": "",
+          "done": 100.0,
+          "of": 1000000.0,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 0.2727272727272727,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 0.2727272727272727
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": {
+          "lo": 49995000,
+          "mid": 99990000,
+          "hi": 159984000,
+          "at": 1794444310000
+        },
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444310000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": "1d 3h left",
+        "range": "13h 53m to 1d 20h",
+        "cli": "1d 3h left (13h 53m to 1d 20h)"
+      }
+    },
+    "epochs": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444320000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {},
+          "headline": [],
+          "blocks": []
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<view />\n",
+          "isDefault": true
+        },
+        "source": "detected",
+        "phases": [
+          {
+            "name": "",
+            "of": 4.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444302000,
+            "endedAt": 1794444307000
+          },
+          {
+            "name": "",
+            "of": 4.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444307000,
+            "endedAt": 1794444312000
+          },
+          {
+            "name": "",
+            "of": 4.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444312000,
+            "endedAt": 1794444317000
+          },
+          {
+            "name": "",
+            "of": 4.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444317000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 3,
+          "done": 1.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": null
+            }
+          ],
+          "whole": null,
+          "lastAt": 1794444317000,
+          "stallMs": null
+        },
+        "x": {
+          "name": "step",
+          "max": 4.0
+        },
+        "latest": {},
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": null,
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  step 1 of 4  [run r1]\neta      No estimate (how much is left is unknown)\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:17.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {}
+      },
+      "summary": {
+        "tone": "running",
+        "whole": null,
+        "stage": {
+          "name": "",
+          "done": 1.0,
+          "of": 4.0,
+          "unit": null
+        },
+        "headline": null,
+        "sentence": null,
+        "bindings": {},
+        "signals": {},
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": "No estimate (how much is left is unknown)"
+      }
+    },
+    "first": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444310000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444301000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "elapsed"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"elapsed\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [],
+        "progress": null,
+        "x": {
+          "name": "elapsed",
+          "max": null
+        },
+        "latest": {
+          "loss": 2.5
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": null,
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  [run r1]\neta      No estimate (no progress found in the log)\nsignals  loss 2.5\nsignals  Last collected at 2026-11-12T00:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              2.5
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": null,
+        "stage": null,
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 2.5,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 2.5
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444301000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": "No estimate (no progress found in the log)"
+      }
+    },
+    "measures": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444305000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444301000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "round": {
+              "label": "round"
+            },
+            "win_rate": {
+              "label": "win_rate"
+            },
+            "elo": {
+              "label": "elo"
+            },
+            "game_len": {
+              "label": "game_len"
+            },
+            "lr": {
+              "label": "lr"
+            },
+            "lr_min": {
+              "label": "lr_min"
+            },
+            "loss": {
+              "label": "loss"
+            },
+            "ratio": {
+              "label": "ratio"
+            },
+            "drift": {
+              "label": "drift"
+            },
+            "tokens": {
+              "label": "tokens"
+            },
+            "flops": {
+              "label": "flops"
+            }
+          },
+          "headline": [
+            "lr"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "lr"
+              ],
+              "x": "step"
+            },
+            {
+              "table": "rounds",
+              "columns": [
+                "round",
+                "win_rate",
+                "elo",
+                "game_len"
+              ]
+            },
+            {
+              "stats": [
+                "lr_min",
+                "loss",
+                "ratio",
+                "drift",
+                "tokens",
+                "flops"
+              ]
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"round\" />\n<signal name=\"win_rate\" />\n<signal name=\"elo\" />\n<signal name=\"game_len\" />\n<signal name=\"lr\" />\n<signal name=\"lr_min\" />\n<signal name=\"loss\" />\n<signal name=\"ratio\" />\n<signal name=\"drift\" />\n<signal name=\"tokens\" />\n<signal name=\"flops\" />\n<view headline=\"lr\">\n  <chart y=\"lr\" x=\"step\" />\n  <table name=\"rounds\" columns=\"round win_rate elo game_len\" />\n  <stats of=\"lr_min loss ratio drift tokens flops\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "round",
+            "of": 24.0,
+            "unit": "rounds",
+            "priorMs": null,
+            "startedAt": 1794444301000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 14.0,
+          "segments": [
+            {
+              "name": "round",
+              "weight": 1.0,
+              "fill": 0.5833333333333334
+            }
+          ],
+          "whole": 0.5833333333333334,
+          "lastAt": 1794444301000,
+          "stallMs": null
+        },
+        "x": {
+          "name": "step",
+          "max": 24.0
+        },
+        "latest": {
+          "drift": -0.0,
+          "elo": 1290.5,
+          "flops": 1000000000000000.0,
+          "game_len": 79.94,
+          "loss": 0.48213,
+          "lr": 0.0003,
+          "lr_min": 0.000132,
+          "ratio": 1.125,
+          "round": 14,
+          "tokens": 123456789,
+          "win_rate": 0.507
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {
+          "rounds": [
+            {
+              "elo": 1290.5,
+              "game_len": 79.94,
+              "round": 14,
+              "win_rate": 0.507
+            }
+          ]
+        },
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": null,
+          "midMs": null,
+          "hiMs": null,
+          "at": 1794444301000,
+          "pending": true,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  58%  round 14 of 24  [run r1]\neta      Estimating… (needs timed progress)\nsignals  round 14 · win_rate 0.507 · elo 1,291 · game_len 79.9 · lr 3e-4 · lr_min 1.32e-4 · loss 0.482 · ratio 1.13 · drift 0 · tokens 123,456,789 · flops 1e15\nsignals  Last collected at 2026-11-12T00:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "drift": [
+            [
+              14.0,
+              -0.0
+            ]
+          ],
+          "elo": [
+            [
+              0.0,
+              1290.5
+            ]
+          ],
+          "flops": [
+            [
+              14.0,
+              1000000000000000.0
+            ]
+          ],
+          "game_len": [
+            [
+              0.0,
+              79.94
+            ]
+          ],
+          "loss": [
+            [
+              14.0,
+              0.48213
+            ]
+          ],
+          "lr": [
+            [
+              14.0,
+              0.0003
+            ]
+          ],
+          "lr_min": [
+            [
+              14.0,
+              0.000132
+            ]
+          ],
+          "ratio": [
+            [
+              14.0,
+              1.125
+            ]
+          ],
+          "round": [
+            [
+              0.0,
+              14.0
+            ]
+          ],
+          "tokens": [
+            [
+              14.0,
+              123456789.0
+            ]
+          ],
+          "win_rate": [
+            [
+              0.0,
+              0.507
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.5833333333333334,
+        "stage": {
+          "name": "round",
+          "done": 14.0,
+          "of": 24.0,
+          "unit": "rounds"
+        },
+        "headline": {
+          "name": "lr",
+          "label": "lr",
+          "value": 0.0003,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "round": 14,
+          "win_rate": 0.507,
+          "elo": 1290.5,
+          "game_len": 79.94,
+          "lr": 0.0003,
+          "lr_min": 0.000132,
+          "loss": 0.48213,
+          "ratio": 1.125,
+          "drift": -0.0,
+          "tokens": 123456789,
+          "flops": 1000000000000000.0
+        },
+        "signals": {
+          "round": {
+            "label": "round"
+          },
+          "win_rate": {
+            "label": "win_rate"
+          },
+          "elo": {
+            "label": "elo"
+          },
+          "game_len": {
+            "label": "game_len"
+          },
+          "lr": {
+            "label": "lr"
+          },
+          "lr_min": {
+            "label": "lr_min"
+          },
+          "loss": {
+            "label": "loss"
+          },
+          "ratio": {
+            "label": "ratio"
+          },
+          "drift": {
+            "label": "drift"
+          },
+          "tokens": {
+            "label": "tokens"
+          },
+          "flops": {
+            "label": "flops"
+          }
+        },
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": true,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444301000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": "Estimating…",
+        "range": null,
+        "cli": "Estimating… (needs timed progress)",
+        "stage": "round 14 of 24",
+        "columns": [
+          "round",
+          "win_rate",
+          "elo",
+          "game_len"
+        ],
+        "headline": "lr",
+        "measures": {
+          "round": "14",
+          "win_rate": "0.507",
+          "elo": "1,291",
+          "game_len": "79.9",
+          "lr": "3e-4",
+          "lr_min": "1.32e-4",
+          "loss": "0.482",
+          "ratio": "1.13",
+          "drift": "0",
+          "tokens": "123,456,789",
+          "flops": "1e15"
+        },
+        "declared": [
+          {
+            "value": 0.0003,
+            "spec": {
+              "label": "lr",
+              "sign": true,
+              "unit": "%"
+            },
+            "words": "+3e-4%"
+          },
+          {
+            "value": -0.000132,
+            "spec": {
+              "label": "lr",
+              "sign": true
+            },
+            "words": "-1.32e-4"
+          },
+          {
+            "value": 1125000000000000.0,
+            "spec": {
+              "label": "flops",
+              "unit": "%"
+            },
+            "words": "1.13e15%"
+          },
+          {
+            "value": 2.675,
+            "spec": {
+              "label": "gain",
+              "sign": true,
+              "unit": "%"
+            },
+            "words": "+2.68%"
+          },
+          {
+            "value": -0.0,
+            "spec": {
+              "label": "drift",
+              "sign": true
+            },
+            "words": "0"
+          },
+          {
+            "value": 0.48213,
+            "spec": {
+              "label": "Loss",
+              "digits": 2
+            },
+            "words": "0.48"
+          },
+          {
+            "value": 1234.567,
+            "spec": {
+              "label": "elo",
+              "digits": 2
+            },
+            "words": "1,235"
+          },
+          {
+            "value": 2.675,
+            "spec": {
+              "label": "gain",
+              "digits": 1,
+              "sign": true,
+              "unit": "%"
+            },
+            "words": "+2.7%"
+          },
+          {
+            "value": -0.004,
+            "spec": {
+              "label": "drift",
+              "digits": 2,
+              "sign": true
+            },
+            "words": "0.00"
+          },
+          {
+            "value": 0.123,
+            "spec": {
+              "label": "accuracy",
+              "digits": 1,
+              "scale": 100,
+              "unit": "%"
+            },
+            "words": "12.3%"
+          },
+          {
+            "value": 123456789,
+            "spec": {
+              "label": "tokens",
+              "as": "compact"
+            },
+            "words": "123M"
+          },
+          {
+            "value": 1234,
+            "spec": {
+              "label": "tokens",
+              "as": "compact"
+            },
+            "words": "1.2K"
+          },
+          {
+            "value": 3725,
+            "spec": {
+              "label": "wall",
+              "as": "duration"
+            },
+            "words": "1h 2m"
+          },
+          {
+            "value": 1,
+            "spec": {
+              "label": "Bit-exact",
+              "labels": {
+                "1": "valid",
+                "0": "invalid"
+              }
+            },
+            "words": "valid"
+          },
+          {
+            "value": 0.0,
+            "spec": {
+              "label": "Bit-exact",
+              "labels": {
+                "1": "valid",
+                "0": "invalid"
+              }
+            },
+            "words": "invalid"
+          },
+          {
+            "value": "1",
+            "spec": {
+              "label": "Bit-exact",
+              "labels": {
+                "1": "valid",
+                "0": "invalid"
+              }
+            },
+            "words": "valid"
+          },
+          {
+            "value": 2,
+            "spec": {
+              "label": "Bit-exact",
+              "labels": {
+                "1": "valid",
+                "0": "invalid"
+              }
+            },
+            "words": "2"
+          }
+        ]
+      }
+    },
+    "announced": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444305000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444301000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {},
+          "headline": [],
+          "blocks": []
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<view />\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "train",
+            "of": null,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444301000,
+            "endedAt": null
+          }
+        ],
+        "progress": null,
+        "x": {
+          "name": "elapsed",
+          "max": null
+        },
+        "latest": {},
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": null,
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": {
+          "line": null,
+          "stage": "train",
+          "until": null
+        },
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  [run r1]\neta      train started\nsignals  Last collected at 2026-11-12T00:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {}
+      },
+      "summary": {
+        "tone": "running",
+        "whole": null,
+        "stage": null,
+        "headline": null,
+        "sentence": null,
+        "bindings": {},
+        "signals": {},
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": {
+          "line": null,
+          "stage": "train",
+          "until": null
+        },
+        "generation": "g1",
+        "asOf": 1794444301000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": "train started"
+      }
+    },
+    "setup": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444310000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444302000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {},
+          "headline": [],
+          "blocks": []
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<view />\n",
+          "isDefault": true
+        },
+        "source": null,
+        "phases": [],
+        "progress": null,
+        "x": {
+          "name": "elapsed",
+          "max": null
+        },
+        "latest": {},
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": null,
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": {
+          "line": "Successfully downloaded shard_00001.parquet",
+          "stage": null,
+          "until": 1794445200000
+        },
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  [run r1]\neta      Setting up · Successfully downloaded shard_00001.parquet\nsignals  No metrics found in the log yet.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {}
+      },
+      "summary": {
+        "tone": "running",
+        "whole": null,
+        "stage": null,
+        "headline": null,
+        "sentence": null,
+        "bindings": {},
+        "signals": {},
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": {
+          "line": "Successfully downloaded shard_00001.parquet",
+          "stage": null,
+          "until": 1794445200000
+        },
+        "generation": "g1",
+        "asOf": 1794444302000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": "Setting up · Successfully downloaded shard_00001.parquet"
+      }
+    },
+    "detected": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444318000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444318000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {},
+          "headline": [],
+          "blocks": []
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<view />\n",
+          "isDefault": true
+        },
+        "source": "detected",
+        "phases": [
+          {
+            "name": "",
+            "of": 10.0,
+            "unit": "chunks",
+            "priorMs": null,
+            "startedAt": 1794444312000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 3.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.3
+            }
+          ],
+          "whole": 0.3,
+          "lastAt": 1794444318000,
+          "stallMs": null
+        },
+        "x": {
+          "name": "step",
+          "max": 10.0
+        },
+        "latest": {},
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 21000,
+          "midMs": 42000,
+          "hiMs": 67200,
+          "at": 1794444318000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": true,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  30%  3 of 10 chunks  [run r1]\neta      At least 21s left (timed from progress in the log; more work may follow it)\nsignals  Last collected at 2026-11-12T00:45:18.000Z.\nsignals  Data as of 2026-11-12T00:45:18.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {}
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.3,
+        "stage": {
+          "name": "",
+          "done": 3.0,
+          "of": 10.0,
+          "unit": "chunks"
+        },
+        "headline": null,
+        "sentence": null,
+        "bindings": {},
+        "signals": {},
+        "etaMs": {
+          "lo": 21000,
+          "mid": 42000,
+          "hi": 67200,
+          "at": 1794444318000
+        },
+        "etaFloor": true,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444318000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": "At least 21s left",
+        "range": null,
+        "cli": "At least 21s left (timed from progress in the log; more work may follow it)",
+        "stage": "3 of 10 chunks"
+      }
+    },
+    "named": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444305000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444301000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {},
+          "headline": [],
+          "blocks": []
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<view />\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "train",
+            "of": 4200.0,
+            "unit": "steps",
+            "priorMs": null,
+            "startedAt": 1794444301000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 2280.0,
+          "segments": [
+            {
+              "name": "train",
+              "weight": 1.0,
+              "fill": 0.5428571428571428
+            }
+          ],
+          "whole": 0.5428571428571428,
+          "lastAt": 1794444301000,
+          "stallMs": null
+        },
+        "x": {
+          "name": "step",
+          "max": 4200.0
+        },
+        "latest": {},
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": null,
+          "midMs": null,
+          "hiMs": null,
+          "at": 1794444301000,
+          "pending": true,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  54%  train · step 2,280 of 4,200  [run r1]\neta      Estimating… (needs timed progress)\nsignals  Last collected at 2026-11-12T00:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {}
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.5428571428571428,
+        "stage": {
+          "name": "train",
+          "done": 2280.0,
+          "of": 4200.0,
+          "unit": "steps"
+        },
+        "headline": null,
+        "sentence": null,
+        "bindings": {},
+        "signals": {},
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": true,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444301000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": "Estimating…",
+        "range": null,
+        "cli": "Estimating… (needs timed progress)",
+        "stage": "train · step 2,280 of 4,200"
+      }
+    },
+    "failing": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444322000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": 400.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 200.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.5
+            }
+          ],
+          "whole": 0.5,
+          "lastAt": 1794444320000,
+          "stallMs": 0
+        },
+        "x": {
+          "name": "step",
+          "max": 400.0
+        },
+        "latest": {
+          "loss": 0.14285714285714285
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 18997,
+          "midMs": 20000,
+          "hiMs": 21003,
+          "at": 1794444320000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  50%  step 200 of 400  [run r1]\neta      20s left (18s to 21s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              3.0
+            ],
+            [
+              10.0,
+              1.5
+            ],
+            [
+              20.0,
+              1.0
+            ],
+            [
+              30.0,
+              0.75
+            ],
+            [
+              40.0,
+              0.6
+            ],
+            [
+              50.0,
+              null
+            ],
+            [
+              60.0,
+              0.42857142857142855
+            ],
+            [
+              70.0,
+              0.375
+            ],
+            [
+              80.0,
+              0.3333333333333333
+            ],
+            [
+              90.0,
+              0.3
+            ],
+            [
+              100.0,
+              0.2727272727272727
+            ],
+            [
+              110.0,
+              0.25
+            ],
+            [
+              120.0,
+              0.2307692307692308
+            ],
+            [
+              130.0,
+              0.21428571428571427
+            ],
+            [
+              140.0,
+              0.2
+            ],
+            [
+              150.0,
+              0.1875
+            ],
+            [
+              160.0,
+              0.17647058823529413
+            ],
+            [
+              170.0,
+              0.16666666666666666
+            ],
+            [
+              180.0,
+              0.15789473684210523
+            ],
+            [
+              190.0,
+              0.15
+            ],
+            [
+              200.0,
+              0.14285714285714285
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.5,
+        "stage": {
+          "name": "",
+          "done": 200.0,
+          "of": 400.0,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 0.14285714285714285,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 0.14285714285714285
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "rev": 1,
+        "unavailable": "Couldn't update this run's progress. OpenResearch is trying again."
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": null
+      }
+    },
+    "unreadable": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444322000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "",
+        "asOf": 1794444320000,
+        "availability": {
+          "state": "unavailable",
+          "reason": "Read /data/run-signals/r1.json: parse signals /data/run-signals/r1.json: key must be a string at line 1 column 2",
+          "omitted": {}
+        },
+        "view": {
+          "signals": {},
+          "headline": [],
+          "blocks": []
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<view />\n",
+          "isDefault": true
+        },
+        "source": null,
+        "phases": [],
+        "progress": null,
+        "x": {
+          "name": "elapsed",
+          "max": null
+        },
+        "latest": {},
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": null,
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  [run r1]\nsignals  Signal data could not be read. Read any saved output with `orx logs r1`.\nsignals  Error details: Read /data/run-signals/r1.json: parse signals /data/run-signals/r1.json: key must be a string at line 1 column 2",
+        "rev": 2,
+        "seriesRev": 2,
+        "series": {}
+      },
+      "summary": {
+        "tone": "running",
+        "whole": null,
+        "stage": null,
+        "headline": null,
+        "sentence": null,
+        "bindings": {},
+        "signals": {},
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "",
+        "asOf": 1794444320000,
+        "unavailable": "Couldn't read the progress saved for this run. Its log shows what it printed.",
+        "rev": 2
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": null
+      }
+    },
+    "failing_done": {
+      "run": {
+        "status": "done",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444322000,
+        "endedAt": 1794444322000,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444322000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": 400.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 200.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.5
+            }
+          ],
+          "whole": 0.5,
+          "lastAt": 1794444320000,
+          "stallMs": 0
+        },
+        "x": {
+          "name": "step",
+          "max": 400.0
+        },
+        "latest": {
+          "loss": 0.14285714285714285
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 18997,
+          "midMs": 20000,
+          "hiMs": 21003,
+          "at": 1794444320000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  50%  step 200 of 400  [run r1]\neta      20s left (18s to 21s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              3.0
+            ],
+            [
+              10.0,
+              1.5
+            ],
+            [
+              20.0,
+              1.0
+            ],
+            [
+              30.0,
+              0.75
+            ],
+            [
+              40.0,
+              0.6
+            ],
+            [
+              50.0,
+              null
+            ],
+            [
+              60.0,
+              0.42857142857142855
+            ],
+            [
+              70.0,
+              0.375
+            ],
+            [
+              80.0,
+              0.3333333333333333
+            ],
+            [
+              90.0,
+              0.3
+            ],
+            [
+              100.0,
+              0.2727272727272727
+            ],
+            [
+              110.0,
+              0.25
+            ],
+            [
+              120.0,
+              0.2307692307692308
+            ],
+            [
+              130.0,
+              0.21428571428571427
+            ],
+            [
+              140.0,
+              0.2
+            ],
+            [
+              150.0,
+              0.1875
+            ],
+            [
+              160.0,
+              0.17647058823529413
+            ],
+            [
+              170.0,
+              0.16666666666666666
+            ],
+            [
+              180.0,
+              0.15789473684210523
+            ],
+            [
+              190.0,
+              0.15
+            ],
+            [
+              200.0,
+              0.14285714285714285
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "done",
+        "whole": 0.5,
+        "stage": {
+          "name": "",
+          "done": 200.0,
+          "of": 400.0,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 0.14285714285714285,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 0.14285714285714285
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": null,
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "rev": 1,
+        "unavailable": "Couldn't update this run's progress. OpenResearch is trying again."
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": null
+      }
+    },
+    "compared": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444310000,
+      "monitor": {
+        "runId": "c1",
+        "generation": "g1",
+        "asOf": 1794444300000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "Loss",
+              "digits": 3,
+              "better": "lower"
+            },
+            "val_loss": {
+              "label": "Validation loss",
+              "better": "lower"
+            }
+          },
+          "headline": [
+            "val_loss",
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "ghost": "parent"
+            },
+            {
+              "stats": [
+                "loss"
+              ]
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "child",
+          "markup": "<signal name=\"loss\" label=\"Loss\" digits=\"3\" better=\"lower\" />\n<signal name=\"val_loss\" label=\"Validation loss\" better=\"lower\" />\n<view headline=\"val_loss loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n  <stats of=\"loss\" />\n</view>\n",
+          "isDefault": false
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": 400.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 100.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.25
+            }
+          ],
+          "whole": 0.25,
+          "lastAt": 1794444310000,
+          "stallMs": 0
+        },
+        "x": {
+          "name": "step",
+          "max": 400.0
+        },
+        "latest": {
+          "loss": 0.2272727272727273
+        },
+        "parent": {
+          "runId": "p1",
+          "phase": null,
+          "series": {
+            "loss": [
+              [
+                0.0,
+                3.0
+              ],
+              [
+                10.0,
+                1.5
+              ],
+              [
+                20.0,
+                1.0
+              ],
+              [
+                30.0,
+                0.75
+              ],
+              [
+                40.0,
+                0.6
+              ],
+              [
+                50.0,
+                0.5
+              ],
+              [
+                60.0,
+                0.42857142857142855
+              ],
+              [
+                70.0,
+                0.375
+              ],
+              [
+                80.0,
+                0.3333333333333333
+              ],
+              [
+                90.0,
+                0.3
+              ],
+              [
+                100.0,
+                0.2727272727272727
+              ],
+              [
+                110.0,
+                0.25
+              ],
+              [
+                120.0,
+                0.2307692307692308
+              ],
+              [
+                130.0,
+                0.21428571428571427
+              ],
+              [
+                140.0,
+                0.2
+              ],
+              [
+                150.0,
+                0.1875
+              ],
+              [
+                160.0,
+                0.17647058823529413
+              ],
+              [
+                170.0,
+                0.16666666666666666
+              ],
+              [
+                180.0,
+                0.15789473684210523
+              ],
+              [
+                190.0,
+                0.15
+              ],
+              [
+                200.0,
+                0.14285714285714285
+              ]
+            ]
+          },
+          "rows": {}
+        },
+        "versus": {
+          "loss": {
+            "d": -0.045454545454545414,
+            "good": true,
+            "flat": false,
+            "mag": 0.045,
+            "parent": 0.2727272727272727
+          }
+        },
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 28015,
+          "midMs": 30000,
+          "hiMs": 31985,
+          "at": 1794444310000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "child  running  25%  step 100 of 400  [run c1]\neta      30s left (28s to 31s)\nsignals  Loss 0.227 (0.045 better than parent)\nsignals  Data as of 2026-11-12T00:45:10.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              2.5
+            ],
+            [
+              10.0,
+              1.25
+            ],
+            [
+              20.0,
+              0.8333333333333334
+            ],
+            [
+              30.0,
+              0.625
+            ],
+            [
+              40.0,
+              0.5
+            ],
+            [
+              50.0,
+              0.4166666666666667
+            ],
+            [
+              60.0,
+              0.35714285714285715
+            ],
+            [
+              70.0,
+              0.3125
+            ],
+            [
+              80.0,
+              0.2777777777777778
+            ],
+            [
+              90.0,
+              0.25
+            ],
+            [
+              100.0,
+              0.2272727272727273
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": 0.25,
+        "stage": {
+          "name": "",
+          "done": 100.0,
+          "of": 400.0,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "Loss",
+          "value": 0.2272727272727273,
+          "vs": {
+            "d": -0.045454545454545414,
+            "good": true,
+            "flat": false,
+            "mag": 0.045,
+            "parent": 0.2727272727272727
+          }
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 0.2272727272727273,
+          "loss.vs": -0.045454545454545414,
+          "val_loss.vs": null
+        },
+        "signals": {
+          "loss": {
+            "label": "Loss",
+            "digits": 3,
+            "better": "lower"
+          },
+          "val_loss": {
+            "label": "Validation loss",
+            "better": "lower"
+          }
+        },
+        "etaMs": {
+          "lo": 28015,
+          "mid": 30000,
+          "hi": 31985,
+          "at": 1794444310000
+        },
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444300000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": null,
+        "said": "Loss 0.227 (0.045 better than parent)"
+      }
+    }
+  }
+}

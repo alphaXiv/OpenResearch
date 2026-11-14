@@ -9,7 +9,7 @@ import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 
 /** Outcome of an experiment's latest attempt; "none" when it has never run, "stale" when it is last-seen or a cancel awaits. */
-export type HistoryStatus = "done" | "failed" | "cancelled" | "lost" | "running" | "stale" | "none";
+export type HistoryStatus = "done" | "failed" | "cancelled" | "lost" | "running" | "stale" | "flagged" | "auto_stopped" | "revising" | "none";
 
 export interface HistoryNode {
   id: string;
@@ -51,6 +51,7 @@ export const NO_TASK = "__no_task";
 export function historyStatus(run: Run): HistoryStatus {
   const { status, stale } = runDisplay(run);
   if (stale || status === "cancellation_pending") return "stale";
+  if (status === "flagged" || status === "auto_stopped" || status === "revising") return status;
   return runActive(run.status) ? "running" : run.status;
 }
 

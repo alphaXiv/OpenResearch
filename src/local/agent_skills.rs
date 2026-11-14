@@ -57,6 +57,10 @@ pub enum SkillSet {
 const COMPUTE: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
 const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
     AgentSkillResource {
+        path: "assets/orx_run.py",
+        content: include_str!("../../agent-skills/orx-compute/assets/orx_run.py"),
+    },
+    AgentSkillResource {
         path: "references/configuration.md",
         content: include_str!("../../agent-skills/orx-compute/references/configuration.md"),
     },
@@ -164,7 +168,7 @@ const FIGURES_RESOURCES: &[AgentSkillResource] = &[
 // the whole set.
 
 const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, vercel, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and result messages. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
-const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/reconcile/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
+const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, instrumenting a baseline (stages, measures, view), fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/reconcile/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
 
 const S_COMPUTE: AgentSkill = AgentSkill {
     name: "orx-compute",
@@ -176,7 +180,10 @@ const S_EXPERIMENT_TREE: AgentSkill = AgentSkill {
     name: "orx-experiment-tree",
     description: D_EXPERIMENT_TREE,
     content: EXPERIMENT_TREE,
-    resources: &[],
+    resources: &[AgentSkillResource {
+        path: "references/instrument.md",
+        content: include_str!("../../agent-skills/orx-experiment-tree/references/instrument.md"),
+    }],
 };
 const S_GIT: AgentSkill = AgentSkill {
     name: "orx-git",
@@ -483,6 +490,271 @@ mod tests {
                 assert!(!body.trim().is_empty(), "{} has an empty body", s.name);
             }
         }
+    }
+
+    #[test]
+    fn python_interval_merges_sparse_metrics_and_resumed_rank_and_errors() {
+        use crate::process::command;
+        if command("python3").arg("--version").output().is_err() {
+            crate::config::skip_without_tool("python3 is unavailable");
+            return;
+        }
+        let dir = crate::local::git::TemporaryDirectory::new("orx-python-interval").unwrap();
+        let (_, resource) = find_resource("compute/assets/orx_run.py", SkillSet::Local).unwrap();
+        std::fs::write(dir.path().join("orx_run.py"), resource.content).unwrap();
+        let code = r#"import orx_run,json
+clock=[0.0]
+orx_run.time.monotonic=lambda:clock[0]
+r=orx_run.progress(total=5000,start=3000,interval=.001)
+for i in range(1000):
+    r.step(3000+i, loss=i, val_loss=i if i%100==0 else None)
+    clock[0]+=.0001
+try:
+    r.step(4000, bad=object())
+    raise AssertionError('serialization error was delayed')
+except TypeError:
+    pass
+class Scalar:
+    def item(self): return float('nan')
+try:
+    import numpy
+    nonfinite=numpy.float32(float('nan'))
+except ImportError:
+    nonfinite=Scalar()
+r.step(4000, bad=nonfinite)
+r.flush()
+"#;
+        let output = command("python3")
+            .args(["-c", code])
+            .current_dir(dir.path())
+            .env("RANK", "")
+            .env("SLURM_PROCID", "0")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines: Vec<serde_json::Value> = String::from_utf8(output.stdout.clone())
+            .unwrap()
+            .lines()
+            .filter(|line| !line.contains(":NaN"))
+            .map(|line| serde_json::from_str(line.strip_prefix("::orx:: ").unwrap()).unwrap())
+            .collect();
+        assert_eq!(lines[0]["step"], 3000);
+        let values: std::collections::BTreeSet<_> = lines
+            .iter()
+            .filter_map(|v| v["m"]["val_loss"].as_u64())
+            .collect();
+        assert_eq!(values, (0..10).map(|i| i * 100).collect());
+        let mut folded = orx_signals::Snapshot::new("r1", "1-100", "g1");
+        folded.feed(&output.stdout, true, 1, false).unwrap();
+        assert_eq!(folded.latest["bad"], "NaN");
+        let muted = command("python3")
+            .args([
+                "-c",
+                "import orx_run; orx_run.progress(start=3).step(4,x=1)",
+            ])
+            .current_dir(dir.path())
+            .env_remove("RANK")
+            .env("SLURM_PROCID", "1")
+            .output()
+            .unwrap();
+        assert!(muted.status.success());
+        assert!(muted.stdout.is_empty());
+    }
+
+    /// The documented resume, from a checkpoint older than the last report, and a second
+    /// `progress()` with its own total, as the helper writes them.
+    #[test]
+    fn python_relaunch_from_an_older_checkpoint_folds_from_where_it_resumed() {
+        use crate::process::command;
+        if command("python3").arg("--version").output().is_err() {
+            crate::config::skip_without_tool("python3 is unavailable");
+            return;
+        }
+        let dir = crate::local::git::TemporaryDirectory::new("orx-python-relaunch").unwrap();
+        let (_, resource) = find_resource("compute/assets/orx_run.py", SkillSet::Local).unwrap();
+        std::fs::write(dir.path().join("orx_run.py"), resource.content).unwrap();
+        let process = |start: u32, end: u32, offset: f64, then: &str| {
+            let code = format!(
+                r#"import orx_run
+clock=[0.0]
+orx_run.time.monotonic=lambda:clock[0]
+r=orx_run.progress(total=2000,start={start},interval=0)
+for step in range({start}+1,{end}+1):
+    clock[0]+=0.5
+    r.step(step, loss=step+{offset})
+{then}"#
+            );
+            let output = command("python3")
+                .args(["-c", &code])
+                .current_dir(dir.path())
+                .env("RANK", "0")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        let mut log = process(0, 1200, 0.0, "");
+        let second = log.len();
+        log.extend(process(
+            1000,
+            1400,
+            0.5,
+            "e=orx_run.progress(total=50,interval=0)\nfor step in range(1,8):\n    clock[0]+=0.5\n    e.step(step, score=step)",
+        ));
+        let mut fold = orx_signals::Snapshot::new("r1", "1-1", "g1");
+        fold.feed(&log[..second], false, 1000, true).unwrap();
+        let first_report = log[second..].iter().position(|&b| b == b'\n').unwrap() + 1;
+        fold.feed(&log[second..second + first_report], false, 2000, true)
+            .unwrap();
+        assert_eq!(fold.progress().unwrap().done, Some(1000.));
+        fold.feed(&log[second + first_report..], false, 3000, true)
+            .unwrap();
+
+        let progress = fold.progress().unwrap();
+        assert_eq!((progress.done, progress.of), (Some(7.), Some(50.)));
+        let loss = &fold.series["loss"];
+        assert_eq!(loss.len(), 1400);
+        assert!(loss.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert_eq!(loss[1099], (1100., Some(1100.5)));
+        assert!(
+            fold.diagnostics.counts.is_empty(),
+            "a relaunch and a second loop are normal: {:?}",
+            fold.diagnostics.counts
+        );
+    }
+
+    /// Each stage's script is its own process; one that does not restate a total keeps the one
+    /// its phase has, whether the shell declared it or an earlier script did.
+    #[test]
+    fn python_in_a_later_process_keeps_its_phase_total() {
+        use crate::process::command;
+        if command("python3").arg("--version").output().is_err() {
+            crate::config::skip_without_tool("python3 is unavailable");
+            return;
+        }
+        let dir = crate::local::git::TemporaryDirectory::new("orx-python-stages").unwrap();
+        let (_, resource) = find_resource("compute/assets/orx_run.py", SkillSet::Local).unwrap();
+        std::fs::write(dir.path().join("orx_run.py"), resource.content).unwrap();
+        let python = |code: &str| {
+            let code = format!(
+                "import orx_run\nclock=[0.0]\norx_run.time.monotonic=lambda:clock[0]\n{code}"
+            );
+            let output = command("python3")
+                .args(["-c", &code])
+                .current_dir(dir.path())
+                .env("RANK", "0")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        let steps = |total: &str, start: u32, end: u32| {
+            format!("r=orx_run.progress({total}start={start},interval=0)\nfor step in range({start}+1,{end}+1):\n    clock[0]+=0.5\n    r.step(step, loss=step)")
+        };
+        let mut log = b"::orx:: {\"phase\":\"train\"}\n".to_vec();
+        log.extend(python(&steps("total=100,", 0, 50)));
+        log.extend(python(&steps("", 50, 60)));
+        log.extend(b"::orx:: {\"phase\":\"eval\",\"step\":0,\"of\":22,\"unit\":\"tasks\"}\n");
+        log.extend(python(
+            "r=orx_run.progress(interval=0)\nclock[0]+=1\nr.step(3, score=1)",
+        ));
+
+        let mut fold = orx_signals::Snapshot::new("r1", "1-1", "g1");
+        fold.feed(&log, true, 1000, false).unwrap();
+        let [train, eval] = &fold.phases[..] else {
+            panic!("{:?}", fold.phases);
+        };
+        assert_eq!((train.done, train.of), (Some(60.), Some(100.)));
+        assert_eq!(
+            (eval.done, eval.of, eval.unit.as_deref()),
+            (Some(3.), Some(22.), Some("tasks"))
+        );
+        assert_eq!(fold.series["loss"].len(), 60);
+        assert!(
+            fold.diagnostics.counts.is_empty(),
+            "{:?}",
+            fold.diagnostics.counts
+        );
+    }
+
+    #[test]
+    fn python_progress_is_vendored_rank_filtered_and_foldable() {
+        use crate::process::command;
+        if command("python3").arg("--version").output().is_err() {
+            crate::config::skip_without_tool("python3 is unavailable");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("orx-progress-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, resource) = find_resource("compute/assets/orx_run.py", SkillSet::Local).unwrap();
+        std::fs::write(dir.join("orx_run.py"), resource.content).unwrap();
+        let code = r#"import orx_run as orx
+r = orx.progress(total=10, interval=100000)
+r.step(1, loss=3)
+r.step(2, loss=float('nan'))
+r.step(3, loss=2)
+with r.phase('eval', total=2, unit='tasks') as p:
+    p.step(1, score=0.5)
+r.row('eval', task='sst2', score=0.9)
+r.spend(1.25)
+r.step(2, score=1)
+"#;
+        for (rank, enabled) in [("0", true), ("1", false)] {
+            let output = command("python3")
+                .args(["-c", code])
+                .current_dir(&dir)
+                .env("RANK", rank)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut fold = orx_signals::Snapshot::new("test", "1-2", "g1");
+            fold.feed(&output.stdout, true, 1000, false).unwrap();
+            if enabled {
+                assert_eq!(fold.latest["score"], 1);
+                assert_eq!(fold.spend, Some(1.25));
+                assert_eq!(fold.rows["eval"].len(), 1);
+                assert_eq!(fold.diagnostics.counts["non_finite"], 1);
+                assert_eq!(fold.progress().unwrap().done, Some(2.0));
+            } else {
+                assert!(output.stdout.is_empty());
+            }
+        }
+        let failed = command("python3")
+            .args([
+                "-c",
+                r#"import sys
+import orx_run as orx
+class Broken:
+    def write(self, text):
+        raise OSError('full output device')
+    def flush(self):
+        pass
+sys.stdout=Broken()
+orx.progress(rank=0)
+"#,
+            ])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(!failed.status.success());
+        assert!(String::from_utf8_lossy(&failed.stderr).contains("full output device"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

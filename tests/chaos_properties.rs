@@ -153,6 +153,7 @@ fn response(rng: &mut Rng) -> Message<Response> {
         },
         5 => Response::Launch {
             summary: Summary {
+                signals: None,
                 started_at: None,
                 state: RunState::Unreconciled {
                     detail: "missing receipt".into(),

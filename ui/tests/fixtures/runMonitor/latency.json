@@ -1,0 +1,180 @@
+{
+  "runId": "r-lat",
+  "rev": 12,
+  "generation": "g1",
+  "asOf": 1794391832944.406,
+  "availability": {
+    "state": "live",
+    "reason": null,
+    "omitted": {}
+  },
+  "view": {
+    "signals": {
+      "rps": {
+        "label": "Load",
+        "unit": "req/s"
+      },
+      "p50": {
+        "label": "p50",
+        "unit": "ms",
+        "better": "lower"
+      },
+      "p95": {
+        "label": "p95",
+        "unit": "ms",
+        "better": "lower"
+      },
+      "p99": {
+        "label": "p99",
+        "unit": "ms",
+        "better": "lower"
+      }
+    },
+    "headline": [
+      "p99"
+    ],
+    "blocks": [
+      {
+        "chart": [
+          "p50",
+          "p95",
+          "p99"
+        ],
+        "from": "load",
+        "x": "rps",
+        "xScale": "log",
+        "yScale": "log",
+        "mark": "points",
+        "title": "Latency against load"
+      },
+      {
+        "table": "load",
+        "columns": [
+          "rps",
+          "p50",
+          "p95",
+          "p99"
+        ]
+      }
+    ]
+  },
+  "viewFrom": {
+    "experimentId": "e-r-lat",
+    "markup": "<signal name=\"rps\" label=\"Load\" unit=\"req/s\" />\n<signal name=\"p50\" label=\"p50\" unit=\"ms\" better=\"lower\" />\n<signal name=\"p95\" label=\"p95\" unit=\"ms\" better=\"lower\" />\n<signal name=\"p99\" label=\"p99\" unit=\"ms\" better=\"lower\" />\n\n<view headline=\"p99\">\n  <chart from=\"load\" x=\"rps\" y=\"p50 p95 p99\" x-scale=\"log\" y-scale=\"log\" mark=\"points\" title=\"Latency against load\" />\n  <table name=\"load\" columns=\"rps p50 p95 p99\" />\n</view>",
+    "isDefault": false
+  },
+  "source": "declared",
+  "phases": [
+    {
+      "name": "load",
+      "of": 8,
+      "unit": "levels",
+      "priorMs": null,
+      "startedAt": 1794390932944.406,
+      "endedAt": 1794391832944.406
+    }
+  ],
+  "progress": {
+    "phase": 0,
+    "done": 8,
+    "segments": [
+      {
+        "name": "load",
+        "weight": 1,
+        "fill": 1
+      }
+    ],
+    "whole": 1,
+    "lastAt": 1794391832944.406,
+    "stallMs": null
+  },
+  "x": {
+    "name": "step",
+    "max": null
+  },
+  "latest": {
+    "rps": 3200,
+    "p50": 12.0,
+    "p95": 49.9,
+    "p99": 230.2
+  },
+  "series": {},
+  "seriesRev": 3,
+  "rows": {
+    "load": [
+      {
+        "rps": 0,
+        "p50": 4.2,
+        "p95": 9.8,
+        "p99": 21.5
+      },
+      {
+        "rps": 50,
+        "p50": 4.2,
+        "p95": 9.8,
+        "p99": 21.5
+      },
+      {
+        "rps": 100,
+        "p50": 4.2,
+        "p95": 9.8,
+        "p99": 21.5
+      },
+      {
+        "rps": 200,
+        "p50": 4.2,
+        "p95": 9.8,
+        "p99": 21.6
+      },
+      {
+        "rps": 400,
+        "p50": 4.2,
+        "p95": 9.9,
+        "p99": 21.9
+      },
+      {
+        "rps": 800,
+        "p50": 4.3,
+        "p95": 10.4,
+        "p99": 24.8
+      },
+      {
+        "rps": 1600,
+        "p50": 5.2,
+        "p95": 14.8,
+        "p99": 47.6
+      },
+      {
+        "rps": 3200,
+        "p50": 12.0,
+        "p95": 49.9,
+        "p99": 230.2
+      }
+    ]
+  },
+  "groups": {},
+  "cells": {},
+  "media": {},
+  "parent": null,
+  "versus": {},
+  "counts": {},
+  "estimate": null,
+  "limit": null,
+  "cost": null,
+  "quote": null,
+  "before": null,
+  "watch": {
+    "state": "off",
+    "model": null,
+    "looks": [],
+    "spentUsd": null,
+    "nextAt": null,
+    "error": null
+  },
+  "sentence": null,
+  "flag": null,
+  "revising": false,
+  "rules": [],
+  "statusText": "loadtest-v3  done  100%",
+  "newestLine": "::orx:: {\"step\":2220,\"of\":5000,\"t\":3027.4,\"m\":{\"loss\":1.7126,\"val_loss\":1.9633,\"steps_per_s\":0.73}}"
+}

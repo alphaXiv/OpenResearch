@@ -98,9 +98,10 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx compute instructions show --json` | Read the machine-wide custom recipe and its revision before configuring or launching. |
 | `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
 | `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
-| `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |
+| `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect (with the latest run's stage, estimate and measures), run, cancel, wait on, or register a wake-up for a local experiment node. |
 | `orx exp move/archive/unarchive/delete <localExpId>` | Re-parent, hide, restore, or permanently delete experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
+| `orx exp view set <expId> --file <view.xml> [--pattern <patterns.json>]` / `view get <expId>` / `view check <runId>` | Set what an experiment's runs show (inherited by children), print it, or check it against a run's real log; see `orx-experiment-tree`. |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.
@@ -133,7 +134,7 @@ Use before any web search for academic/research queries (paper, author, blog, mo
 The detail lives in focused modules — load one with `orx skill <name>` (the bundled
 list, with one-line descriptions, is printed at the end of `orx skill` output):
 
-- **orx-experiment-tree** — the experiment-tree model, the auto-research loop, and `orx exp desc`.
+- **orx-experiment-tree** — the experiment-tree model, instrumenting a baseline, the auto-research loop, and `orx exp desc`.
 - **orx-create** — initialize a local project and add local experiment nodes.
 - **orx-compute** — launch and monitor runs; after resolving the backend, read its bundled reference.
 - **orx-instances** — create persistent standalone machines for manual work.

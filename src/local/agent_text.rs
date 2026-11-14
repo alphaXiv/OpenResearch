@@ -164,6 +164,44 @@ fn every_orx_command_in_agent_text_parses() {
     assert!(checked > 100, "only {checked} commands found");
 }
 
+/// An agent copies the worked views and patterns as they are, so each must save as written.
+#[test]
+fn every_view_and_pattern_in_agent_text_compiles() {
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for (label, text) in all_text() {
+        for block in text.split("```").skip(1).step_by(2) {
+            let (language, body) = block.split_once('\n').unwrap_or((block, ""));
+            let problem = match language.trim() {
+                "html" if body.contains("<view") => crate::engine::view::compile(body)
+                    .err()
+                    .map(|problem| problem.text("view.xml", "")),
+                "json" if body.contains("\"regex\"") => {
+                    let source = crate::engine::view::Source {
+                        file: None,
+                        patterns: Some("patterns.json"),
+                    };
+                    match serde_json::from_str(body) {
+                        Ok(given) => match crate::engine::view::patterns(&given, &source, "") {
+                            Ok(_) => None,
+                            Err(crate::engine::view::Refusal::Invalid(why)) => Some(why),
+                            Err(_) => Some("refused".to_owned()),
+                        },
+                        Err(error) => Some(error.to_string()),
+                    }
+                }
+                _ => continue,
+            };
+            checked += 1;
+            if let Some(problem) = problem {
+                failures.push(format!("{label}: {problem}\n{body}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    assert!(checked >= 4, "only {checked} views and patterns found");
+}
+
 const PLACEHOLDER: &str = "PLACEHOLDER";
 
 /// Expands a documented command line into concrete argument vectors: `<placeholder>`

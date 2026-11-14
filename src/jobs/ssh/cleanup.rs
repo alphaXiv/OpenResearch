@@ -165,6 +165,11 @@ fn host_script(
         } else {
             "rm -rf -- \"$d\""
         };
+        let remove = if run.engine {
+            format!("{remove}; r=${{d%/runs/*}}/run-signals; for f in \"$r/{id}.json\" \"$r/{id}.config.json\" \"$r/{id}.lock\" \"$r/{id}.corrupt-\"*.json \"$r/{id}.tmp-\"*; do [ ! -e \"$f\" ] && [ ! -L \"$f\" ] || rm -f -- \"$f\" || exit 1; done",id=run.run_id)
+        } else {
+            remove.into()
+        };
         // `v` is `busy`, or why the run cannot be shown to have ended.
         let liveness = if run.engine {
             match &run.slurm_job {
@@ -532,6 +537,18 @@ mod tests {
             slurm_run("finished", "42"),
             slurm_run("unknown", "43"),
         ];
+
+        let signals = root.join("run-signals");
+        std::fs::create_dir_all(&signals).unwrap();
+        for id in ["busy", "done", "finished"] {
+            for suffix in [".json", ".lock", ".corrupt-1.json", ".tmp-1"] {
+                std::fs::write(
+                    signals.join(format!("{id}{suffix}")),
+                    b"private measurements",
+                )
+                .unwrap();
+            }
+        }
         let out = crate::process::command("bash")
             .args([
                 "-c",
@@ -579,6 +596,16 @@ mod tests {
         );
         for (id, kept) in [("elsewhere", true), ("queued", true), ("finished", false)] {
             assert_eq!(root.join("runs").join(id).exists(), kept, "{id}");
+        }
+
+        for id in ["busy", "done", "finished"] {
+            for suffix in [".json", ".lock", ".corrupt-1.json", ".tmp-1"] {
+                assert_eq!(
+                    signals.join(format!("{id}{suffix}")).exists(),
+                    id == "busy",
+                    "{id}{suffix}"
+                );
+            }
         }
         let mut left: Vec<_> = std::fs::read_dir(&sources)
             .unwrap()

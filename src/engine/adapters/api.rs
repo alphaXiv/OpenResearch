@@ -124,13 +124,7 @@ pub const STREAM_IDLE: Duration = Duration::from_secs(120);
 
 /// Where a provider run's log is spooled as it arrives; pages and final collection read it.
 pub fn spool_path(directory: &Path, run: &str) -> Result<PathBuf> {
-    if run.is_empty()
-        || !run
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
-    {
-        return Err(anyhow!("Invalid run id {run}"));
-    }
+    super::local::signals::validate_run(run)?;
     Ok(directory.join(format!("{run}.spool.log")))
 }
 
@@ -367,31 +361,30 @@ impl<A: Api + 'static> Backend for Adapter<A> {
                         cause: "Provider observation timed out".into(),
                     },
                 };
+                let reachable = !matches!(
+                    observation,
+                    Observation::Unreachable { .. }
+                        | Observation::Unreconciled { .. }
+                        | Observation::NeedsAuth { .. }
+                );
                 let settled = observation.ends_run();
-                // A running log streams whether or not anyone reads it, since a provider's
-                // replay at the end may keep only its newest part.
-                let log = match observation {
-                    Observation::Running { .. } => self.log(run).ok(),
-                    _ => lock(&self.logs).get(&run.id).cloned(),
-                };
                 let mut observations = vec![(run.id.clone(), observation)];
                 if settled {
                     observations
                         .push((run.id.clone(), Observation::Lingering { pids: Vec::new() }));
                 }
-                if let Some(log) = log {
+                // Every reachable run's log streams whether or not anyone reads it, since a
+                // provider's replay at the end may keep only its newest part, and a run first
+                // seen ended still has its last signals folded.
+                if let Some(Ok(log)) = reachable.then(|| self.log(run)) {
                     {
                         let mut spool = lock(&log.spool);
                         spool.generation += 1;
                         spool.complete = false;
                     }
                     let _ = tokio::time::timeout(PAGE_STREAM_WAIT, self.drain_log(run)).await;
-                    observations.push((
-                        run.id.clone(),
-                        Observation::Log {
-                            len: lock(&log.spool).len,
-                        },
-                    ));
+                    let len = lock(&log.spool).len;
+                    observations.push((run.id.clone(), Observation::Log { len }));
                 }
                 observations
             })
@@ -526,6 +519,93 @@ impl<A: Api + 'static> Backend for Adapter<A> {
                 detail: error.to_string(),
             },
         }
+    }
+
+    async fn signals(
+        &self,
+        run: &WatchedRun,
+        terminal: bool,
+        previous: Option<&orx_signals::Snapshot>,
+    ) -> Result<Option<(orx_signals::Snapshot, Option<(i64, i64)>)>> {
+        // Opening one here would reopen a spool forgotten for collection or deletion.
+        let Some(log) = lock(&self.logs).get(&run.id).cloned() else {
+            return Err(anyhow!("Run {}'s provider log is not being read", run.id));
+        };
+        let spools = self.spools.clone();
+        let now = self.clock.wall_ms();
+        let run_id = run.id.clone();
+        let held = previous.cloned();
+        let scanned = tokio::task::spawn_blocking(move || -> Result<orx_signals::Snapshot> {
+            use super::local::signals::{configured, load, note_replaced, resumes, scan};
+            // Appends and cuts wait, so the scan reads one state of the spool.
+            let spool = lock(&log.spool);
+            if let Some(error) = &spool.error {
+                return Err(anyhow!("Run {run_id} provider log: {error}"));
+            }
+            let data = spools
+                .parent()
+                .ok_or_else(|| anyhow!("Spool root has no data directory"))?;
+            let path = data.join("run-signals").join(format!("{run_id}.json"));
+            let info = match super::local::log::read(
+                &spool.path,
+                None,
+                &ByteRange { start: 0, end: 0 },
+                None,
+            )? {
+                LogPage::Data { ident, len, .. } => len.map(|len| (ident, len)),
+                LogPage::Reset { info } => info.map(|info| (info.ident, info.len)),
+            };
+            let hash = configured(&path)?.0.hash();
+            let reconfigured = held.as_ref().is_some_and(|held| held.config_hash != hash);
+            let mut rebuild = false;
+            if let (Some((ident, len)), Some(held)) = (&info, &held) {
+                rebuild =
+                    held.has_signals() && !resumes(held, &run_id, &spool.path, ident, *len, &hash)?;
+                // The checkpoint the scan continues: a rebuild under way resumes its own.
+                let staged = match rebuild.then(|| load(&path.with_extension("replay"))) {
+                    Some(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => None,
+                    staged => staged.transpose()?.flatten(),
+                };
+                let continued = staged.as_ref().unwrap_or(held);
+                let identity = String::from(ident.clone());
+                // A spool cut back to the provider's saved position is being fetched again,
+                // and the bytes past it may come back the same: nothing is known until then.
+                let cut = continued.cursor.ident == identity && *len < continued.cursor.offset;
+                if cut && !(terminal && spool.complete) {
+                    return Err(anyhow!(
+                        "Run {run_id}'s provider log is being fetched again: it has {len} of \
+                         the {} bytes already read",
+                        continued.cursor.offset
+                    ));
+                }
+            }
+            let target = if rebuild {
+                path.with_extension("replay")
+            } else {
+                path
+            };
+            let scanned = scan(
+                &spool.path,
+                &target,
+                &run_id,
+                terminal && spool.complete,
+                now,
+                None,
+            )?;
+            let Some(mut snapshot) = scanned else {
+                return Err(anyhow!(
+                    "Run {run_id}'s provider log spool {} is missing",
+                    spool.path.display()
+                ));
+            };
+            if rebuild && !reconfigured {
+                let read = snapshot.cursor.offset;
+                note_replaced(&mut snapshot, read);
+            }
+            Ok(snapshot)
+        })
+        .await??;
+        Ok(Some((scanned, None)))
     }
 
     async fn read_log(
@@ -753,6 +833,9 @@ mod tests {
         rotated: AtomicUsize,
         /// Hands the sink the position past each send, as a provider whose cursor is saved does.
         positions: AtomicBool,
+        /// With positions, the last bytes of each send come with none, as a line still open
+        /// does: a later engine cuts the spool back before them.
+        withheld: AtomicUsize,
     }
 
     struct Open(Arc<AtomicUsize>);
@@ -809,8 +892,14 @@ mod tests {
                                       + Send)| {
                 let text = self.text.lock().unwrap().clone();
                 let next = text.len();
-                let position = self.positions.load(Ordering::SeqCst).then_some(&next);
-                sink(&text[*cursor..], position);
+                let saved = next
+                    .saturating_sub(self.withheld.load(Ordering::SeqCst))
+                    .max(*cursor);
+                let position = self.positions.load(Ordering::SeqCst).then_some(&saved);
+                sink(&text[*cursor..saved], position);
+                if saved < next {
+                    sink(&text[saved..], None);
+                }
                 *cursor = next;
             };
             send(sink);
@@ -1199,5 +1288,370 @@ mod tests {
             .unwrap();
         assert!(matches!(page, LogPage::Data { bytes, .. } if bytes == b"second\n"));
         std::fs::remove_dir_all(spools).unwrap();
+    }
+    /// A provider that cannot say where to continue has each `orx up` start its spool over under
+    /// a new identity. Past a scan's reach that is a rebuild: staged beside the checkpoint it may
+    /// replace, restarted when the spool starts over again, and promoted once it covers what was
+    /// read before.
+    #[tokio::test]
+    async fn a_spool_rewritten_twice_in_a_row_catches_up() {
+        let root = std::env::temp_dir().join(format!("orx-rebuild-api-{}", uuid::Uuid::new_v4()));
+        let spools = root.join("run-logs");
+        let checkpoint = root.join("run-signals/run.json");
+        let account = Arc::new(Fake::default());
+        let lines = |steps: std::ops::Range<u32>| -> Vec<u8> {
+            let pad = "x".repeat(400);
+            steps
+                .map(|step| format!("::orx:: {{\"step\":{step},\"m\":{{\"pad\":\"{pad}\"}}}}\n"))
+                .collect::<String>()
+                .into_bytes()
+        };
+        *account.text.lock().unwrap() = lines(0..12_000);
+        let run = provider_run();
+        let clock = Arc::new(TestClock::new());
+        let restart = || {
+            let backend = Adapter::new(account.clone(), clock.clone(), spools.clone());
+            let run = run.clone();
+            async move {
+                backend
+                    .observe(std::slice::from_ref(&run), Duration::from_secs(1))
+                    .await;
+                backend
+            }
+        };
+        let backend = restart().await;
+        while !crate::engine::adapters::signals::collect(&root, &backend, &run, true, 1)
+            .await
+            .unwrap()
+        {}
+        let held = crate::engine::adapters::local::signals::load(&checkpoint)
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.progress().unwrap().done, Some(11_999.));
+        assert!(held.cursor.offset > 5_000_000);
+
+        drop(backend);
+        let mut published = Vec::new();
+        for more in [12_000..12_100, 12_100..12_200] {
+            account.text.lock().unwrap().extend(lines(more));
+            let backend = restart().await;
+            crate::engine::adapters::signals::collect(&root, &backend, &run, false, 2)
+                .await
+                .unwrap();
+            published.push(
+                crate::engine::adapters::local::signals::load(&checkpoint)
+                    .unwrap()
+                    .unwrap(),
+            );
+            drop(backend);
+        }
+        for stood in &published {
+            assert_eq!(stood.generation, held.generation);
+            assert_eq!(stood.coverage.reasons, ["rebuilding"]);
+        }
+        let backend = restart().await;
+        for _ in 0..4 {
+            crate::engine::adapters::signals::collect(&root, &backend, &run, false, 3)
+                .await
+                .unwrap();
+        }
+        let caught_up = crate::engine::adapters::local::signals::load(&checkpoint)
+            .unwrap()
+            .unwrap();
+        assert_ne!(caught_up.generation, held.generation);
+        assert_eq!(caught_up.progress().unwrap().done, Some(12_199.));
+        assert_eq!(caught_up.diagnostics.counts["log_replaced"], 1);
+        assert!(!checkpoint.with_extension("replay").exists());
+        drop(backend);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn monitoring_spools_without_viewers_and_replay_does_not_double_rows_or_spend() {
+        let root = std::env::temp_dir().join(format!("orx-monitor-api-{}", uuid::Uuid::new_v4()));
+        let spools = root.join("run-logs");
+        let account = Arc::new(Fake::default());
+        *account.text.lock().unwrap() =
+            b"::orx:: {\"step\":1,\"spend\":2,\"row\":\"eval\",\"m\":{\"score\":1}}\n".to_vec();
+        let run = provider_run();
+        let clock = Arc::new(TestClock::new());
+        let backend = Adapter::new(account.clone(), clock.clone(), spools.clone());
+        backend
+            .observe(std::slice::from_ref(&run), Duration::from_secs(1))
+            .await;
+        let (first, _) = backend.signals(&run, false, None).await.unwrap().unwrap();
+        assert_eq!(first.rows["eval"].len(), 1);
+        assert_eq!(first.spend, Some(2.0));
+        drop(backend);
+        account.text.lock().unwrap().extend_from_slice(
+            b"::orx:: {\"step\":2,\"spend\":3,\"row\":\"eval\",\"m\":{\"score\":2}}\n",
+        );
+        let backend = Adapter::new(account, clock, spools);
+        backend
+            .observe(std::slice::from_ref(&run), Duration::from_secs(1))
+            .await;
+        let (replayed, _) = backend.signals(&run, true, None).await.unwrap().unwrap();
+        assert_ne!(first.generation, replayed.generation);
+        assert_eq!(replayed.rows["eval"].len(), 2);
+        assert_eq!(replayed.spend, Some(3.0));
+        assert_eq!(replayed.diagnostics.counts["log_replaced"], 1);
+        drop(backend);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn reports(steps: std::ops::Range<u32>, tag: &str) -> Vec<u8> {
+        steps
+            .map(|step| {
+                format!("::orx:: {{\"step\":{step},\"row\":\"eval\",\"m\":{{\"{tag}\":{step}}}}}\n")
+            })
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    struct Folding {
+        root: PathBuf,
+        account: Arc<Fake>,
+        clock: Arc<TestClock>,
+        run: WatchedRun,
+    }
+
+    impl Folding {
+        fn new(text: Vec<u8>) -> Self {
+            let account = Arc::new(Fake::default());
+            *account.text.lock().unwrap() = text;
+            account.positions.store(true, Ordering::SeqCst);
+            Self {
+                root: std::env::temp_dir().join(format!("orx-fold-api-{}", uuid::Uuid::new_v4())),
+                account,
+                clock: Arc::new(TestClock::new()),
+                run: provider_run(),
+            }
+        }
+
+        /// A new engine, which has seen the run once.
+        async fn engine(&self) -> Arc<Adapter<Arc<Fake>>> {
+            let backend = Arc::new(Adapter::new(
+                self.account.clone(),
+                self.clock.clone(),
+                self.root.join("run-logs"),
+            ));
+            backend
+                .observe(std::slice::from_ref(&self.run), Duration::from_secs(1))
+                .await;
+            backend
+        }
+
+        async fn collect(&self, backend: &Adapter<Arc<Fake>>, terminal: bool) -> Result<bool> {
+            crate::engine::adapters::signals::collect(&self.root, backend, &self.run, terminal, 1)
+                .await
+        }
+
+        fn held(&self) -> orx_signals::Snapshot {
+            crate::engine::adapters::local::signals::load(&self.root.join("run-signals/run.json"))
+                .unwrap()
+                .unwrap()
+        }
+
+        fn spool(&self) -> PathBuf {
+            spool_path(&self.root.join("run-logs"), &self.run.id).unwrap()
+        }
+    }
+
+    impl Drop for Folding {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A spool a new engine continues is the log the checkpoint read, so the fold goes on from
+    /// its cursor; one it starts over is folded again from its start, each report counted once.
+    #[tokio::test]
+    async fn a_continued_spool_folds_on_and_a_started_over_one_is_rebuilt() {
+        let fold = Folding::new(reports(0..10, "a"));
+        let backend = fold.engine().await;
+        backend.drain_log(&fold.run).await.unwrap();
+        fold.collect(&backend, false).await.unwrap();
+        let held = fold.held();
+        drop(backend);
+
+        fold.account
+            .text
+            .lock()
+            .unwrap()
+            .extend(reports(10..20, "a"));
+        let backend = fold.engine().await;
+        backend.drain_log(&fold.run).await.unwrap();
+        fold.collect(&backend, false).await.unwrap();
+        let continued = fold.held();
+        assert_eq!(continued.generation, held.generation);
+        assert_eq!(continued.progress().unwrap().done, Some(19.));
+        assert_eq!(continued.rows["eval"].len(), 20);
+        assert!(!continued.diagnostics.counts.contains_key("log_replaced"));
+        drop(backend);
+
+        std::fs::write(fold.spool().with_extension("json"), b"{").unwrap();
+        let backend = fold.engine().await;
+        backend.drain_log(&fold.run).await.unwrap();
+        fold.collect(&backend, false).await.unwrap();
+        let rebuilt = fold.held();
+        assert_ne!(rebuilt.generation, held.generation);
+        assert_eq!(rebuilt.rows["eval"].len(), 20);
+        assert_eq!(rebuilt.diagnostics.counts["log_replaced"], 1);
+    }
+
+    /// A new engine cuts the spool back to the provider's saved position, below the bytes the
+    /// fold read. The checkpoint stands while they are fetched again, and the fold goes on as
+    /// if never cut when they come back the same.
+    #[tokio::test]
+    async fn a_spool_cut_back_below_the_fold_stands_until_the_same_bytes_return() {
+        let text = reports(0..10, "a");
+        let fold = Folding::new(text.clone());
+        let last = reports(9..10, "a").len();
+        fold.account.withheld.store(last, Ordering::SeqCst);
+        let backend = fold.engine().await;
+        backend.drain_log(&fold.run).await.unwrap();
+        fold.collect(&backend, false).await.unwrap();
+        let held = fold.held();
+        assert_eq!(held.cursor.offset, text.len() as u64);
+        drop(backend);
+
+        fold.account.block_logs.store(true, Ordering::SeqCst);
+        let backend = fold.engine().await;
+        let cut = std::fs::metadata(fold.spool()).unwrap().len();
+        assert_eq!(cut, (text.len() - last) as u64);
+        let error = fold.collect(&backend, false).await.unwrap_err();
+        assert!(error.to_string().contains("fetched again"), "{error:#}");
+        assert_eq!(fold.held(), held);
+
+        fold.account.block_logs.store(false, Ordering::SeqCst);
+        fold.account.drain_resumed.notify_one();
+        backend.drain_log(&fold.run).await.unwrap();
+        fold.collect(&backend, false).await.unwrap();
+        let resumed = fold.held();
+        assert_eq!(resumed.generation, held.generation);
+        assert_eq!(resumed.rows, held.rows);
+        assert_eq!(resumed.diagnostics.counts, held.diagnostics.counts);
+        assert_eq!(resumed.cursor.offset, held.cursor.offset);
+    }
+
+    /// Bytes fetched again that differ from those the fold read are another log: it is rebuilt
+    /// beside the checkpoint, which it replaces once it covers as much. A run that ends shorter
+    /// leaves the checkpoint standing, marked as read from a log that changed.
+    #[tokio::test]
+    async fn a_spool_cut_back_and_refetched_differently_is_rebuilt_or_set_aside() {
+        for longer in [true, false] {
+            let fold = Folding::new(reports(0..10, "a"));
+            let last = reports(9..10, "a").len();
+            fold.account.withheld.store(last, Ordering::SeqCst);
+            let backend = fold.engine().await;
+            backend.drain_log(&fold.run).await.unwrap();
+            fold.collect(&backend, false).await.unwrap();
+            let held = fold.held();
+            drop(backend);
+
+            let mut text = reports(0..9, "a");
+            if longer {
+                text.extend(reports(9..12, "changed"));
+            }
+            *fold.account.text.lock().unwrap() = text;
+            let backend = fold.engine().await;
+            backend.drain_log(&fold.run).await.unwrap();
+            let ended = fold.collect(&backend, !longer).await.unwrap();
+            let after = fold.held();
+            if longer {
+                assert_ne!(after.generation, held.generation);
+                assert_eq!(after.progress().unwrap().done, Some(11.));
+                assert_eq!(after.rows["eval"].len(), 12);
+                assert!(after.latest.contains_key("changed"));
+                assert_eq!(after.diagnostics.counts["log_replaced"], 1);
+            } else {
+                assert!(ended);
+                assert_eq!(after.generation, held.generation);
+                assert_eq!(after.rows, held.rows);
+                assert!(after.coverage.reasons.contains(&"log_replaced".into()));
+                assert!(!fold.root.join("run-signals/run.replay").exists());
+            }
+        }
+    }
+
+    /// A drain that fails mid-way cuts the spool back to its last saved position under the fold
+    /// that read past it. The checkpoint stands while the provider is behind, and the fold goes
+    /// on once the rest is fetched again.
+    #[tokio::test]
+    async fn a_failed_drain_cuts_the_spool_under_the_fold_without_losing_or_doubling() {
+        let text = reports(0..10, "a");
+        let fold = Folding::new(text.clone());
+        fold.account
+            .withheld
+            .store(reports(9..10, "a").len(), Ordering::SeqCst);
+        fold.account.pause_drains.store(true, Ordering::SeqCst);
+        let backend = fold.engine().await;
+        let draining = {
+            let (backend, run) = (backend.clone(), fold.run.clone());
+            tokio::spawn(async move { backend.drain_log(&run).await })
+        };
+        fold.account.drain_paused.notified().await;
+        fold.collect(&backend, false).await.unwrap();
+        let held = fold.held();
+        assert_eq!(held.cursor.offset, text.len() as u64);
+
+        lock(&backend.log(&fold.run).unwrap().spool).fail_after = Some(0);
+        fold.account
+            .text
+            .lock()
+            .unwrap()
+            .extend(reports(10..12, "a"));
+        fold.account.drain_resumed.notify_one();
+        assert!(draining.await.unwrap().is_err());
+        assert!(fold.collect(&backend, false).await.is_err());
+        assert_eq!(fold.held(), held);
+
+        // The next drain finds the provider behind what it sent before.
+        *fold.account.text.lock().unwrap() = reports(0..9, "a");
+        fold.account.pause_drains.store(false, Ordering::SeqCst);
+        backend.drain_log(&fold.run).await.unwrap();
+        let error = fold.collect(&backend, false).await.unwrap_err();
+        assert!(error.to_string().contains("fetched again"), "{error:#}");
+        assert_eq!(fold.held(), held);
+
+        *fold.account.text.lock().unwrap() = [text, reports(10..12, "a")].concat();
+        fold.clock.advance(Duration::from_secs(10));
+        backend
+            .observe(std::slice::from_ref(&fold.run), Duration::from_secs(1))
+            .await;
+        backend.drain_log(&fold.run).await.unwrap();
+        fold.collect(&backend, false).await.unwrap();
+        let resumed = fold.held();
+        assert_eq!(resumed.generation, held.generation);
+        assert_eq!(resumed.progress().unwrap().done, Some(11.));
+        assert_eq!(resumed.rows["eval"].len(), 12);
+    }
+
+    /// The fold reads only a log this engine streams: it never opens a spool itself, so one
+    /// forgotten for collection or deletion is left as it was.
+    #[tokio::test]
+    async fn the_fold_opens_no_spool_of_its_own() {
+        let fold = Folding::new(reports(0..10, "a"));
+        fold.account
+            .withheld
+            .store(reports(9..10, "a").len(), Ordering::SeqCst);
+        let backend = Arc::new(Adapter::new(
+            fold.account.clone(),
+            fold.clock.clone(),
+            fold.root.join("run-logs"),
+        ));
+        let error = fold.collect(&backend, false).await.unwrap_err();
+        assert!(error.to_string().contains("not being read"), "{error:#}");
+        assert!(!fold.spool().exists());
+
+        backend
+            .observe(std::slice::from_ref(&fold.run), Duration::from_secs(1))
+            .await;
+        backend.drain_log(&fold.run).await.unwrap();
+        fold.collect(&backend, false).await.unwrap();
+        backend.forget_logs(&|_| true);
+        let kept = std::fs::read(fold.spool()).unwrap();
+        assert!(fold.collect(&backend, false).await.is_err());
+        assert_eq!(std::fs::read(fold.spool()).unwrap(), kept);
     }
 }

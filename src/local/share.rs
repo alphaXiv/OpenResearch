@@ -84,6 +84,8 @@ pub struct SharedRun {
     pub chat_id: Option<String>,
     #[serde(default)]
     pub log: bool,
+    #[serde(default)]
+    pub signals: bool,
     pub created_at: i64,
     pub ended_at: Option<i64>,
 }
@@ -260,6 +262,30 @@ fn stage(
                     &format!("logs/{}.log", run.id),
                     &mut skipped,
                 )?;
+            let signals = if options.logs {
+                let source = data_root
+                    .join("run-signals")
+                    .join(format!("{}.json", run.id));
+                crate::engine::adapters::local::signals::validate_run(&run.id)?;
+                match crate::engine::adapters::local::signals::load(&source) {
+                    Ok(Some(_)) => copy_capped(
+                        &source,
+                        out,
+                        &format!("signals/{}.json", run.id),
+                        &mut skipped,
+                    )?,
+                    Ok(None) => false,
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                        skipped.push(format!("signals/{}.json: {error}", run.id));
+                        false
+                    }
+                    Err(error) => {
+                        return Err(anyhow!("Read share source {}: {error}", source.display()))
+                    }
+                }
+            } else {
+                false
+            };
             let backend = crate::jobs::BackendDescriptor::parse(&run.backend_json).ok();
             Ok(SharedRun {
                 backend: backend.as_ref().map(|b| b.kind.clone()),
@@ -273,6 +299,7 @@ fn stage(
                 result_markdown: run.result_markdown,
                 exit_code: run.exit_code,
                 log,
+                signals,
                 created_at: run.created_at,
                 ended_at: run.ended_at,
             })
@@ -408,8 +435,15 @@ fn write(out: &Path, relative: &str, bytes: &[u8]) -> Result<()> {
 /// Copy `from` to `relative` under `out` unless it is over the size cap, which
 /// records it in `skipped`. False when there is nothing to copy.
 fn copy_capped(from: &Path, out: &Path, relative: &str, skipped: &mut Vec<String>) -> Result<bool> {
-    let Ok(metadata) = std::fs::metadata(from) else {
-        return Ok(false);
+    let metadata = match std::fs::metadata(from) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(anyhow!(
+                "Could not inspect share source {}: {error}",
+                from.display()
+            ))
+        }
     };
     if metadata.len() > MAX_FILE_BYTES {
         skipped.push(relative.to_string());
@@ -485,7 +519,7 @@ fn is_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
 }
 
-fn find_secret(text: &str) -> Option<&'static str> {
+pub(crate) fn find_secret(text: &str) -> Option<&'static str> {
     if text.contains("-----BEGIN") && text.contains("PRIVATE KEY-----") {
         return Some("private key");
     }
@@ -508,10 +542,37 @@ fn scan_secrets(root: &Path) -> Result<Vec<String>> {
     let mut findings = Vec::new();
     for relative in files_under(root)? {
         let bytes = std::fs::read(root.join(&relative))?;
+        if relative.starts_with("signals/") {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            if let Ok(snapshot) = serde_json::from_slice::<orx_signals::Snapshot>(&bytes) {
+                let encoded = std::iter::once(snapshot.cursor.pending_base64.as_str())
+                    .chain(
+                        snapshot
+                            .extra
+                            .get("anchorBase64")
+                            .and_then(serde_json::Value::as_str),
+                    )
+                    .chain(snapshot.diagnostics.examples.iter().flat_map(|e| {
+                        ["headBase64", "tailBase64"]
+                            .into_iter()
+                            .filter_map(move |key| {
+                                e.extra.get(key).and_then(serde_json::Value::as_str)
+                            })
+                    }));
+                for value in encoded {
+                    let decoded = STANDARD.decode(value)?;
+                    if let Some(label) = find_secret(&String::from_utf8_lossy(&decoded)) {
+                        findings.push(format!("  {relative}: {label}"));
+                    }
+                }
+            }
+        }
         if let Some(label) = find_secret(&String::from_utf8_lossy(&bytes)) {
             findings.push(format!("  {relative}: {label}"));
         }
     }
+    findings.sort();
+    findings.dedup();
     Ok(findings)
 }
 
@@ -990,6 +1051,28 @@ fn move_shared_files(
             placed.push(to);
         }
     }
+    for run in manifest.runs.iter().filter(|run| run.signals) {
+        let (Some(id), Some(name)) = (run_ids.get(run.id.as_str()), safe_name(&run.id)) else {
+            continue;
+        };
+        let from = staging.join(format!("signals/{name}.json"));
+        if from.is_file() {
+            let loaded = crate::engine::adapters::local::signals::load(&from);
+            if let Err(error) = &loaded {
+                eprintln!(
+                    "Imported run {id}: signal checkpoint {} is unavailable: {error}",
+                    from.display()
+                );
+            }
+            if let Ok(Some(mut snapshot)) = loaded {
+                snapshot.run_id = id.clone();
+                let to = data_root.join("run-signals").join(format!("{id}.json"));
+                std::fs::create_dir_all(to.parent().unwrap())?;
+                crate::engine::adapters::local::signals::publish(&to, &snapshot)?;
+                placed.push(to);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1091,6 +1174,20 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn signal_manifest_extends_old_archives_without_requiring_it() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/contracts/shared-run-signals.json"
+        ))
+        .unwrap();
+        let old: SharedRun = serde_json::from_value(fixture["old"].clone()).unwrap();
+        let new: SharedRun = serde_json::from_value(fixture["new"].clone()).unwrap();
+        assert!(!old.signals);
+        assert!(old.log);
+        assert!(new.signals);
+        assert_eq!(serde_json::to_value(new).unwrap()["signals"], true);
     }
 
     #[test]
@@ -1296,6 +1393,14 @@ mod tests {
         let log = log_path(&sharer_data, "done-run");
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, "step 1 loss 0.9\n").unwrap();
+        let signals = sharer_data.join("run-signals/done-run.json");
+        std::fs::create_dir_all(signals.parent().unwrap()).unwrap();
+        let mut snapshot = orx_signals::Snapshot::new("done-run", "1-2", "g1");
+        snapshot
+            .latest
+            .insert("loss".into(), serde_json::json!(0.9));
+        crate::engine::adapters::local::signals::publish(&signals, &snapshot).unwrap();
+
         let artifacts = sharer_data.join("files").join(&project.slug);
         std::fs::create_dir_all(artifacts.join("figures")).unwrap();
         std::fs::write(artifacts.join("figures/loss.svg"), "<svg/>").unwrap();
@@ -1338,9 +1443,31 @@ mod tests {
         assert!(!file.exists());
         std::fs::remove_file(artifacts.join("keys.txt")).unwrap();
 
+        snapshot.latest.insert(
+            "note".into(),
+            serde_json::json!("hf_abcdefghijklmnopqrstuvwxyz0123456"),
+        );
+        crate::engine::adapters::local::signals::publish(&signals, &snapshot).unwrap();
+        let refused =
+            export_from(&store, &sharer_data, &artifacts, &project, &options, &file).unwrap_err();
+        assert!(refused.to_string().contains("signals/done-run.json"));
+        snapshot.latest.remove("note");
+        {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            snapshot.cursor.pending_base64 =
+                STANDARD.encode(b"hf_abcdefghijklmnopqrstuvwxyz0123456");
+            crate::engine::adapters::local::signals::publish(&signals, &snapshot).unwrap();
+            let refused = export_from(&store, &sharer_data, &artifacts, &project, &options, &file)
+                .unwrap_err();
+            assert!(refused.to_string().contains("signals/done-run.json"));
+            snapshot.cursor.pending_base64.clear();
+        }
+
+        crate::engine::adapters::local::signals::publish(&signals, &snapshot).unwrap();
         let manifest =
             export_from(&store, &sharer_data, &artifacts, &project, &options, &file).unwrap();
         assert_eq!(manifest.runs.len(), 1, "a live run is not shared");
+        assert!(manifest.runs[0].signals);
         assert_eq!(manifest.chats.len(), 1, "unselected chats stay private");
         assert!(file.is_file());
         assert!(
@@ -1414,6 +1541,34 @@ mod tests {
             .find(|e| e.branch_name == "orx/lower-lr")
             .unwrap();
         assert_ne!(child.id, "child");
+        let imported_runs = recipient.list_runs_by_experiment(&child.id).unwrap();
+        let imported_run = &imported_runs[0];
+        let imported_signals = crate::engine::adapters::local::signals::load(
+            &recipient_data
+                .join("run-signals")
+                .join(format!("{}.json", imported_run.id)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(imported_signals.run_id, imported_run.id);
+        assert_eq!(imported_signals.latest["loss"], serde_json::json!(0.9));
+
+        let unpacked = root.join("unpacked");
+        std::fs::write(unpacked.join("signals/done-run.json"), b"{damaged").unwrap();
+        assert!(scan_secrets(&unpacked).is_ok());
+        let partial = root.join("partial-import");
+        let mut placed = Vec::new();
+        move_shared_files(
+            &unpacked,
+            &partial.join("artifacts"),
+            &partial,
+            &manifest,
+            &HashMap::from([("done-run", "partial-run".into())]),
+            &mut placed,
+        )
+        .unwrap();
+        assert!(log_path(&partial, "partial-run").exists());
+        assert!(!partial.join("run-signals/partial-run.json").exists());
         assert_eq!(
             child.parent_experiment_id.as_deref(),
             Some(base.id.as_str())

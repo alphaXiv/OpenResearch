@@ -18,6 +18,9 @@ use crate::jobs::localbox;
 #[path = "../../../crates/orx-host/src/log.rs"]
 pub(super) mod log;
 
+#[path = "../../../crates/orx-host/src/signals.rs"]
+pub(crate) mod signals;
+
 /// Keeps this machine from idle sleep until dropped. Windows runs have no `orx-host wrap` to
 /// hold it, so the engine holds one while any local run is unfinished.
 #[cfg(windows)]
@@ -67,15 +70,7 @@ impl Local {
     }
 
     fn directory(&self, intent: &RunIntent) -> Result<PathBuf> {
-        if intent.run.id.is_empty()
-            || !intent
-                .run
-                .id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-        {
-            bail!("Invalid local run id");
-        }
+        signals::validate_run(&intent.run.id)?;
         Ok(self.root.join(&intent.run.id))
     }
 
@@ -458,6 +453,7 @@ impl Backend for Local {
                         state = orx_host::wrapper::state(dir)?;
                     }
                     Ok(orx_host_proto::Summary {
+                        signals: None,
                         started_at: orx_host::wrapper::started_at(dir),
                         state,
                         log_len: Some(len("log")?),
@@ -620,6 +616,36 @@ impl Backend for Local {
                 detail: error.to_string(),
             },
         }
+    }
+
+    async fn signals(
+        &self,
+        run: &WatchedRun,
+        terminal: bool,
+        _previous: Option<&orx_signals::Snapshot>,
+    ) -> Result<Option<(orx_signals::Snapshot, Option<(i64, i64)>)>> {
+        let dir = self.dir(run)?.to_path_buf();
+        let data = self
+            .root
+            .parent()
+            .ok_or_else(|| anyhow!("Local run root has no data directory"))?
+            .to_path_buf();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as i64;
+        let run_id = run.id.clone();
+        let scanned = tokio::task::spawn_blocking(move || -> Result<_> {
+            Ok(signals::scan(
+                &dir.join("log"),
+                &data.join("run-signals").join(format!("{run_id}.json")),
+                &run_id,
+                terminal,
+                now,
+                orx_host::wrapper::started_at(&dir),
+            )?)
+        })
+        .await??;
+        Ok(scanned.map(|snapshot| (snapshot, None)))
     }
 
     async fn read_log(

@@ -1,0 +1,4 @@
+{
+  "defaults": {"runBanner": "strip", "experimentsGrid": false},
+  "saved": {"runBanner": "line", "experimentsGrid": true}
+}

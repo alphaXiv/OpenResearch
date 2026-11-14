@@ -115,3 +115,22 @@ Workspace tunnels and probes take a separate path (`src/jobs/ssh.rs`): batch mod
 **On Windows the SSH service holds the login,** because Win32-OpenSSH cannot multiplex. Connect starts each root's `ssh` inside the detached `orx ssh-service` (`src/jobs/ssh/service/hold.rs`), reached on loopback with the token in its owner-only directory, and `orx up` talks to orx-host through it. A restarted or updated server reattaches with no prompt while the control protocol matches; the older orx-host then serves, and wraps new runs, until the login ends. It ends when the user signs out of Windows, Connect replaces it, its route changes, or no server has attached for 24 hours. Plain `ssh` does not share it, and Connect still logs in the transports existing 0.2.x runs need, so a second MFA prompt may be required.
 
 A seeded chaos tier (`src/engine/runtime/chaos.rs`) holds the engine, transport and `orx-host` to these rules under faults over real SSH; its module comment says how to run and replay it.
+
+## Advisory run signals
+
+Native `serve` scans declared `::orx::` records and detected progress from each
+watched run's log, including Slurm jobs on the shared filesystem. Local runs
+use that scanner directly without a local serve process. The checkpoint lives
+in the host root's `run-signals/` and uses a nonblocking per-run lock: a competing scanner gets WouldBlock.
+A summary with a `signals` field advertises snapshot support; the workspace
+fetches changed revisions in pages of at most 1 MiB under one generation and revision, then publishes
+the complete verified checkpoint locally. Every answer that carries signals
+also carries the host's clock (`answered_at`), changed or not, so the
+workspace knows what the data is current as of and how far apart the two
+clocks are. An older serve without that field uses the frozen byte-page log
+API with a bounded replay budget, folding on the workspace's clock, as before
+the host's clock travelled. Missing support
+never means that the run has no measurements. No watcher or stop rule runs on
+the host.
+
+A terminal checkpoint remains readable after its raw log is gone. Native support with no log and no checkpoint reports unavailable; absent support remains the older-peer fallback. Host cleanup removes the run's signal checkpoint, lock and abandoned generations along with the run directory.

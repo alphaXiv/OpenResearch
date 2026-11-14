@@ -14,6 +14,7 @@ import type {
   Run,
   UpdateStatus,
 } from "./api";
+import type { RunMonitorEvent } from "./runMonitor/types";
 
 export interface RunLogEvent {
   generation?: string;
@@ -81,6 +82,7 @@ type ConnectionListener = () => void;
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
   onRunLog?: (event: RunLogEvent) => void;
+  onRunMonitor?: (event: RunMonitorEvent) => void;
   onExperiment?: (experiment: Experiment) => void;
   onProject?: (project: Project) => void;
   onReconnect?: () => void;
@@ -351,6 +353,10 @@ export function createEvents(client: WorkspaceClient) {
             emitProjectActivityEvent();
             ref.current.onRun(d.run);
           }
+        });
+        es.addEventListener("run.monitor", (e) => {
+          const d = parse<RunMonitorEvent>(e as MessageEvent);
+          if (d?.runId) ref.current.onRunMonitor?.(d);
         });
         es.addEventListener("experiment.updated", (e) => {
           const d = parse<{ experiment: Experiment }>(e as MessageEvent);

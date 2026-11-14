@@ -1,0 +1,158 @@
+{
+  "runId": "r1",
+  "rev": 43,
+  "generation": "g1",
+  "asOf": 1794446160000,
+  "availability": {
+    "state": "live",
+    "reason": null,
+    "omitted": {}
+  },
+  "view": {
+    "signals": {
+      "loss": {
+        "label": "Loss",
+        "digits": 2,
+        "better": "lower"
+      }
+    },
+    "headline": [
+      "loss"
+    ],
+    "blocks": [
+      {
+        "chart": [
+          "loss"
+        ],
+        "x": "step"
+      }
+    ]
+  },
+  "viewFrom": {
+    "experimentId": "e1",
+    "markup": "",
+    "isDefault": true
+  },
+  "source": "declared",
+  "phases": [
+    {
+      "name": "train",
+      "of": 5000,
+      "unit": "steps",
+      "priorMs": null,
+      "startedAt": 1794444300000,
+      "endedAt": null
+    }
+  ],
+  "progress": {
+    "phase": 0,
+    "done": 1250,
+    "segments": [
+      {
+        "name": "train",
+        "weight": 1,
+        "fill": 0.25
+      }
+    ],
+    "whole": 0.25,
+    "lastAt": 1794446160000,
+    "stallMs": 0
+  },
+  "x": {
+    "name": "step",
+    "max": 5000
+  },
+  "latest": {
+    "loss": "NaN"
+  },
+  "series": {
+    "loss": [
+      [
+        1230,
+        2.33
+      ],
+      [
+        1240,
+        2.31
+      ],
+      [
+        1250,
+        null
+      ]
+    ]
+  },
+  "seriesRev": 43,
+  "parent": null,
+  "rows": {},
+  "groups": {},
+  "cells": {},
+  "media": {},
+  "counts": {},
+  "estimate": {
+    "loMs": 4800000,
+    "midMs": 5400000,
+    "hiMs": 6000000,
+    "at": 1794446100000,
+    "pending": false,
+    "pastLimitMs": null
+  },
+  "limit": null,
+  "cost": null,
+  "quote": null,
+  "before": null,
+  "watch": {
+    "state": "on",
+    "model": "haiku",
+    "looks": [
+      {
+        "id": "l1",
+        "at": 1794445500000,
+        "whole": 0.16,
+        "said": "new",
+        "text": "Loss **2.60**, falling steadily.",
+        "template": "Loss **{loss}**, falling steadily.",
+        "locale": "en"
+      },
+      {
+        "id": "l2",
+        "at": 1794446160000,
+        "whole": 0.25,
+        "said": "flag",
+        "text": "Loss is **NaN**.",
+        "template": "Loss is **{loss}**.",
+        "locale": "en"
+      }
+    ],
+    "spentUsd": null,
+    "nextAt": 1794447300000,
+    "error": null
+  },
+  "sentence": {
+    "template": "Loss is **{loss}**.",
+    "t": 1794446160000
+  },
+  "flag": {
+    "id": "f1",
+    "at": 1794446160000,
+    "whole": 0.25,
+    "template": "Loss is **{loss}**.",
+    "detail": "A non-finite loss was reported.",
+    "evidence": {
+      "lines": [
+        "::orx:: {\"step\":1250,\"m\":{\"loss\":NaN}}"
+      ],
+      "from": 91,
+      "to": 91,
+      "ident": "1-100",
+      "byteFrom": 7800,
+      "byteTo": 7839
+    },
+    "state": "waiting",
+    "mode": "copilot"
+  },
+  "revising": false,
+  "brief": [],
+  "rules": [],
+  "statusText": "e1  running  25%  train \u00b7 step 1,250 of 5,000\neta      1h 29m left (1h 19m to 1h 39m)\nsignals  loss NaN\nwatch    Loss is NaN.\nflag     A non-finite loss was reported. [log line 91]",
+  "versus": {}
+}

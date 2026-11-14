@@ -8,13 +8,63 @@ Remote backends receive that snapshot; Tinker extracts it for a local controller
 whose SDK sends model operations remotely.
 
 ```sh
-orx exp status <expId>                 # branch, parent, run command, latest run + commit
+orx exp status <expId>                 # branch, parent, run command, latest run: stage, estimate, measures
 orx compute                            # browse GPU offers across all providers
 orx compute --gpu H100_SXM --count 1   # filter GPU offers
 orx compute --cpu                      # browse CPU-only offers
 orx exp run <expId>                    # launch on the configured default
 orx exp cancel <expId>                 # cancel the in-flight run
 ```
+
+## Report progress and measurements
+
+A baseline reports its stages and measures before its first launch
+(`orx-experiment-tree`, "Before the first launch"); children inherit that. A
+run reports with lines that start with `::orx::` on its output:
+
+```text
+::orx:: {"phase":"download","step":3,"of":9,"unit":"shards"}
+::orx:: {"step":1240,"of":5000,"t":1824.5,"m":{"loss":2.31,"val_bpb":1.17}}
+::orx:: {"row":"tasks","m":{"task":"arc_easy","accuracy":0.62}}
+```
+
+`phase` starts a stage and omitted fields keep their last value. `step` is
+absolute completed work of `of`; `t` is seconds on any monotonic clock the
+payload keeps (only differences count, so a relaunch may restart it from zero);
+measurements go in `m`; `row` adds a row to that table; `spend` is cumulative
+paid-service USD. Shell scripts echo the lines. Python vendors the stdlib-only
+helper into the experiment before committing:
+
+```sh
+orx skill compute/assets/orx_run.py > orx_run.py
+```
+
+```python
+import orx_run as orx
+run = orx.progress(total=5000, unit="steps")
+run.step(step, loss=loss, val_loss=val_loss)
+with run.phase("eval", total=5, unit="tasks") as p:
+    p.step(done, score=score)
+run.row("eval", task=name, score=score)
+run.spend(cumulative_usd)
+run.flush()
+```
+
+- `progress()` writes step 0 of its total into the current phase: create it
+  right after its phase starts. When a script names the phases, the Python it
+  starts only calls `progress(total=…)`; without a total it keeps the phase's.
+- A measure's name is one series for the whole run; a later stage measuring
+  the same thing names it apart (`sft_loss`).
+- The helper emits from global rank zero, coalesces steps to one report per
+  second keeping each name's latest value, flushes non-finite measurements at
+  once, and never marks a run finished. Resume with
+  `progress(total=5000, start=3000)`; the steps after `start` are redrawn. A
+  restarted tqdm bar the run did not declare has an unknown whole-run total.
+
+`orx exp status <expId>` shows a run's stage, estimate and measures; `--run
+<runId> --json` gives the stored checkpoint with its coverage and diagnostics.
+Signals are advisory: confirm trouble in the raw log before changing the
+experiment.
 
 ## Inspect configuration and custom instructions first
 
@@ -164,3 +214,4 @@ session waiting for results.
 - Escalate after a real OOM or hopelessly slow run instead of starting with the
   largest accelerator.
 - Raise the timeout only for genuinely long runs.
+

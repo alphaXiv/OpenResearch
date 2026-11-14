@@ -5,9 +5,14 @@ use serde_json::Value;
 fn fixtures() -> Vec<Value> {
     std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"))
         .unwrap()
-        .map(|entry| {
-            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("disk-")
         })
+        .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
         .collect()
 }
 

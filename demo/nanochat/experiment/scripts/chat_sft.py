@@ -24,6 +24,7 @@ import torch.distributed as dist
 from nanochat.flash_attention import HAS_FA3
 from nanochat.engine import Engine
 from scripts.chat_eval import run_chat_eval
+import orx_run
 
 from tasks.common import TaskMixture
 from tasks.gsm8k import GSM8K
@@ -332,6 +333,8 @@ smooth_train_loss = 0 # EMA of training loss
 ema_beta = 0.9 # EMA decay factor
 total_training_time = 0 # total wall-clock time of training
 step = 0
+# The prefetched first batch counts toward num_iterations, so the loop takes one step fewer.
+report = orx_run.progress(total=args.num_iterations - 1 if args.num_iterations > 0 else None, unit="steps")
 while True:
     flops_so_far = num_flops_per_token * args.total_batch_size * step
 
@@ -348,6 +351,7 @@ while True:
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
         val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+        report.step(step, sft_val_bpb=val_bpb)
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
         wandb_run.log({
@@ -472,6 +476,7 @@ while True:
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
+    report.step(step, sft_loss=debiased_smooth_loss)
     if step % 10 == 0:
         wandb_run.log({
             "step": step,

@@ -169,7 +169,7 @@ impl Backend for Slurm {
             })
             .await
         {
-            Ok(Response::Inspect { summary })
+            Ok(Response::Inspect { summary, .. })
                 if matches!(summary.state, RunState::Missing | RunState::Staging) =>
             {
                 return Recovery::Absent
@@ -351,6 +351,23 @@ impl Backend for Slurm {
     async fn unwatch(&self, run: &WatchedRun) {
         self.queue.lock().await.jobs.remove(&run.id);
         self.ssh.unwatch(run).await;
+    }
+
+    async fn configure_signals(
+        &self,
+        run: &WatchedRun,
+        config: &orx_signals::Config,
+    ) -> Result<()> {
+        self.ssh.configure_signals(run, config).await
+    }
+
+    async fn signals(
+        &self,
+        run: &WatchedRun,
+        terminal: bool,
+        previous: Option<&orx_signals::Snapshot>,
+    ) -> Result<Option<(orx_signals::Snapshot, Option<(i64, i64)>)>> {
+        self.ssh.signals(run, terminal, previous).await
     }
 
     async fn read_log(

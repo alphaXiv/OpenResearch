@@ -109,6 +109,7 @@ import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
 import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { TabStrip } from "./components/TabStrip";
+import type { LogSeek } from "./logWindow";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { confirmFileDiscard, FileBufferSession } from "./fileSync";
@@ -304,9 +305,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [lineJump, setLineJump] = useState(0);
   // The href and the jump bump can both land before the pane carrying the new
   // line, so keying on them alone spends the request on the previous line.
-  const visitKey = `${location.href}\n${JSON.stringify(pane ?? null)}\n${lineJump}`;
+  const paneKey = JSON.stringify(pane ?? null);
+  const visitKey = `${location.href}\n${paneKey}\n${lineJump}`;
   const lineVisit = useRef({ key: "", value: 0 });
   if (lineVisit.current.key !== visitKey) lineVisit.current = { key: visitKey, value: lineVisit.current.value + 1 };
+  // Counts changes of pane alone: the href can land a render before the pane it carries.
+  const paneVisit = useRef({ key: paneKey, value: 0 });
+  if (paneVisit.current.key !== paneKey) paneVisit.current = { key: paneKey, value: paneVisit.current.value + 1 };
   const rightTab = useMemo<RightTab>(() => {
     const tab = pane ? paneTab(pane) : "experiments";
     return typeof tab === "object" && "path" in tab && tab.line && consumedLine !== lineVisit.current.value
@@ -430,6 +435,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // Right-panel tab strip: closable home and working tabs. The same experiment
   // can keep both its overview and terminal open.
   const [tabHistory, setTabHistory] = useState<RightTab[]>([]);
+  // Taken by the opened run's log viewer, and only on the pane its open lands on: any other navigation or open drops it.
+  const [logSeek, setLogSeek] = useState<(LogSeek & { runId: string; visit: number }) | null>(null);
+  const openLogSeek = logSeek?.visit === paneVisit.current.value ? logSeek : null;
+  const takeLogSeek = useCallback((taken: LogSeek) => setLogSeek((current) => current === taken ? null : current), []);
   const [experimentsTabOpen, setExperimentsTabOpen] = useState(false);
   const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [artifactsTabOpen, setArtifactsTabOpen] = useState(false);
@@ -585,6 +594,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const openRightTab = useCallback((tab: ContentTab, intent: TabOpenIntent, runId?: string, focus = true) => {
     const key = rightTabKey(tab);
+    setLogSeek(null);
     if (focus) {
       pendingViewFocus.current = null;
       pendingTabFocus.current = key;
@@ -1056,11 +1066,16 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // channel for a metric. Run ids are globally unique, so resolve the run to its
   // experiment and open the terminal view focused on it.
   const openRunLogs = useCallback(
-    (runId: string, intent: TabOpenIntent = "preview") => {
+    (runId: string, intent: TabOpenIntent = "preview", seek?: LogSeek) => {
       const matches = runsRef.current.filter((run) => run.id === runId || run.id.startsWith(runId));
       const run = matches.length === 1 ? matches[0] : null;
       if (!run) return;
+
+      const from = navigationRef.current.pane;
+      const here = from?.kind === "experiment" && from.experimentId === run.experimentId && from.view === "terminal" && from.runId === run.id;
+      const opens = experimentsRef.current.some((experiment) => experiment.id === run.experimentId);
       openExperimentTab(run.experimentId, "terminal", intent, run.id);
+      if (seek && opens) setLogSeek({ ...seek, runId: run.id, visit: paneVisit.current.value + (here ? 0 : 1) });
     },
     [openExperimentTab],
   );
@@ -2535,7 +2550,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       onOpenFile={(path, sessionId, line, exp, ref, intent) =>
                         openFromRightTab(sideTab, () => openChatFile(path, sessionId, line, exp, ref, intent))
                       }
-                      onOpenRun={(runId, intent) => openFromRightTab(sideTab, () => openRunLogs(runId, intent))}
+                      onOpenRun={(runId, intent, seek) => openFromRightTab(sideTab, () => openRunLogs(runId, intent, seek))}
                       runExperimentName={runExperimentName}
                       chatInfo={chatInfo}
                       onOpenMessage={openMessage}
@@ -2664,6 +2679,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     runs={runs}
                     selectedRunId={selectedRunId}
                     onSelectRun={setSelectedRunId}
+                    logSeek={openLogSeek}
+                    onLogSeekTaken={takeLogSeek}
                     parentExperiment={
                       experiments.find(
                         (experiment) => experiment.id === tabExperiment.parentExperimentId,

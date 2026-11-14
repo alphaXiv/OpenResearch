@@ -1,0 +1,8 @@
+::orx:: {"phase":"train","step":0,"of":10,"unit":"steps","t":0,"m":{"step":999,"loss":3,"note":"NaN inside a string"}}
+::orx:: {"step":1,"t":1,"m":{"loss":NaN,"positive":Infinity,"negative":-Infinity}}
+::orx:: {"step":2,"t":2,"m":{"loss":"waiting"}}
+::orx:: {"step":3,"t":3,"spend":0.25,"m":{"loss":2,"note":null}}
+::orx:: {"phase":"eval","step":0,"of":2,"unit":"tasks","t":4}
+::orx:: {"row":"eval","step":1,"t":5,"m":{"task":"sst2","score":0.9}}
+::orx:: {"row":"eval","step":2,"t":6,"m":{"task":"mnli","score":0.85}}
+::orx:: {"phase":"train","step":0,"of":null,"t":7,"m":{"loss":1.5},"future":{"ignored":true}}

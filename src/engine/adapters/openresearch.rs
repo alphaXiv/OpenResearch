@@ -1,4 +1,3 @@
-use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -134,6 +133,8 @@ fn box_failure(sandbox: &crate::client::Sandbox) -> Option<String> {
     }
 }
 
+/// The rental is gone: what the laptop kept is the whole log. Partial ranges become kept files
+/// and the last range ends the log.
 fn kept_page(
     directory: &Path,
     run: &str,
@@ -143,60 +144,18 @@ fn kept_page(
     let data_dir = directory
         .parent()
         .ok_or_else(|| anyhow!("Missing log parent"))?;
-    let mut kept = crate::commands::up::api_v2::kept_ranges(data_dir, run)?;
-    let mut partials = Vec::new();
-    for suffix in ["log", "tail.log"] {
-        let marker = directory.join(format!("{run}.{suffix}.part.json"));
-        let bytes = match std::fs::read(&marker) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+    let mut kept = crate::commands::up::api_v2::kept_log(data_dir, run)?;
+    for range in &mut kept {
+        let Some(name) = range.file.to_str().and_then(|f| f.strip_suffix(".part")) else {
+            continue;
         };
-        let (ident, offset, synced): (FileIdent, u64, u64) = serde_json::from_slice(&bytes)?;
-        let part = directory.join(format!("{run}.{suffix}.part"));
-        let metadata = match std::fs::metadata(&part) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let len = synced.min(metadata.len());
-        if len != 0 {
-            partials.push((
-                std::fs::metadata(marker)?.modified()?,
-                ident,
-                offset,
-                len,
-                suffix,
-            ));
-        }
-    }
-    if let Some((_, generation, ..)) = partials.iter().max_by_key(|part| part.0) {
-        kept.retain(|range| range.ident == *generation);
-        for (_, ident, offset, len, suffix) in partials.iter().filter(|part| part.1 == *generation)
-        {
-            let path = directory.join(format!("{run}.{suffix}"));
-            if kept
-                .iter()
-                .any(|range| range.file == path && range.offset == *offset && range.len >= *len)
-            {
-                continue;
-            }
-            let part = directory.join(format!("{run}.{suffix}.part"));
-            let file = std::fs::OpenOptions::new().write(true).open(&part)?;
-            file.set_len(*len)?;
-            file.sync_all()?;
-            std::fs::rename(part, &path)?;
-            kept.retain(|range| range.file != path);
-            kept.push(crate::commands::up::api_v2::KeptRange {
-                offset: *offset,
-                len: *len,
-                file: path,
-                ident: ident.clone(),
-                eof: false,
-            });
-            std::fs::remove_file(directory.join(format!("{run}.{suffix}.part.json")))?;
-        }
-        kept.sort_by_key(|range| range.offset);
+        let whole = PathBuf::from(name);
+        let file = std::fs::OpenOptions::new().write(true).open(&range.file)?;
+        file.set_len(range.len)?;
+        file.sync_all()?;
+        std::fs::rename(&range.file, &whole)?;
+        std::fs::remove_file(format!("{name}.part.json"))?;
+        range.file = whole;
     }
     if kept.is_empty() {
         std::fs::create_dir_all(directory)?;
@@ -216,35 +175,15 @@ fn kept_page(
     let ident = last.ident.clone();
     crate::commands::up::api_v2::keep_ranges(data_dir, run, kept)?;
     let kept = crate::commands::up::api_v2::kept_ranges(data_dir, run)?;
-    if range.start > len || expected.is_some_and(|expected| *expected != ident) {
+    if range.start > len {
         return Ok(LogPage::Reset {
             info: Some(orx_host_proto::LogInfo { ident, len }),
         });
     }
-    let mut cursor = range.start;
-    let mut bytes = Vec::new();
-    for kept in kept {
-        if kept.offset <= cursor && cursor <= kept.offset + kept.len {
-            let end = range.end.min(kept.offset + kept.len);
-            let mut file = std::fs::File::open(kept.file)?;
-            file.seek(std::io::SeekFrom::Start(cursor - kept.offset))?;
-            file.take(end - cursor).read_to_end(&mut bytes)?;
-            cursor = end;
-            if cursor == range.end || cursor == len {
-                break;
-            }
-        }
+    match crate::commands::up::api_v2::kept_page(&kept, &range, expected)? {
+        Some(page) => Ok(page),
+        None => Err(anyhow!("Page not on this computer")),
     }
-    if bytes.is_empty() && cursor < len && range.start != range.end {
-        return Err(anyhow!("Page not on this computer"));
-    }
-    Ok(LogPage::Data {
-        ident,
-        len: Some(len),
-        start: range.start,
-        bytes,
-        eof: cursor == len,
-    })
 }
 
 pub struct OpenResearch {
@@ -663,8 +602,9 @@ impl OpenResearch {
     }
 
     /// Ends a run whose box can't be inspected once OpenResearch has deleted the box or reports
-    /// it failed or dead. `None` while the box may still be alive.
-    async fn ended(&self, watched: &WatchedRun) -> Result<Option<Observation>> {
+    /// it failed or dead, with why its signals stop there. `None` while the box may still be
+    /// alive.
+    async fn ended(&self, watched: &WatchedRun) -> Result<Option<(Observation, String)>> {
         let descriptor = descriptor(&watched.handle)?;
         let (run, _) = self.engine.load(&watched.id)?;
         let unreached_host = descriptor
@@ -688,18 +628,23 @@ impl OpenResearch {
             self.release(descriptor).await?;
         }
 
+        let gone = match &failure {
+            Some(failure) => format!("OpenResearch reports {failure}"),
+            None => "The rental was deleted before final signal collection finished".to_owned(),
+        };
         if let Some(host) = unreached_host {
-            return Ok(Some(Observation::Failed {
+            let reason = self.unreached_reason(descriptor, &host, failure).await?;
+            let failed = Observation::Failed {
                 finished_at: None,
-                reason: self.unreached_reason(descriptor, &host, failure).await?,
-            }));
+                reason,
+            };
+            return Ok(Some((failed, gone)));
         }
-        Ok(Some(Observation::Gone {
-            reason: failure.map_or_else(
-                || crate::plane::LABELS["run_notice_rental_outcome_unavailable"].clone(),
-                |failure| format!("Outcome unavailable: {failure}"),
-            ),
-        }))
+        let reason = failure.map_or_else(
+            || crate::plane::LABELS["run_notice_rental_outcome_unavailable"].clone(),
+            |failure| format!("Outcome unavailable: {failure}"),
+        );
+        Ok(Some((Observation::Gone { reason }, gone)))
     }
 }
 
@@ -829,7 +774,17 @@ impl Backend for OpenResearch {
                 Err(error) => {
                     self.bootstrap.lock().await.take();
                     match self.ended(watched).await {
-                        Ok(Some(observation)) => {
+                        Ok(Some((observation, gone))) => {
+                            let data = descriptor(&watched.handle)
+                                .ok()
+                                .and_then(BackendDescriptor::openresearch_ssh_target)
+                                .and_then(|target| (self.transport)(&target).ok())
+                                .and_then(|t| t.log_dir.parent().map(Path::to_path_buf))
+                                .unwrap_or_else(crate::store::data_dir);
+                            if let Err(error) = super::signals::host_gone(&data, &watched.id, &gone)
+                            {
+                                eprintln!("run {} signals: {error}", watched.id);
+                            }
                             observations.push((watched.id.clone(), observation));
                             continue;
                         }
@@ -883,6 +838,21 @@ impl Backend for OpenResearch {
                         }),
                     )
                     .await;
+                }
+                let data = transport.log_dir.parent().unwrap();
+                let signals =
+                    super::signals::collect(data, self, run, false, self.engine.clock.wall_ms());
+                match tokio::time::timeout(Duration::from_secs(3), signals).await {
+                    Ok(Ok(_)) => {}
+                    outcome => {
+                        let detail = format!(
+                            "Signal collection before rental release did not finish: {outcome:?}"
+                        );
+                        eprintln!("run {}: {detail}", run.id);
+                        if let Err(error) = super::signals::delayed(data, &run.id, &detail) {
+                            eprintln!("run {} signals: {error}", run.id);
+                        }
+                    }
                 }
                 let mut progressed = false;
                 let collected = crate::engine::runtime::Runtime::collect_log(
@@ -938,6 +908,63 @@ impl Backend for OpenResearch {
             }
         }
         Ok(())
+    }
+
+    async fn configure_signals(
+        &self,
+        run: &WatchedRun,
+        config: &orx_signals::Config,
+    ) -> Result<()> {
+        if !matches!(run.handle, Handle::OpenResearch { .. }) {
+            return Ok(());
+        }
+        let Some(target) = descriptor(&run.handle)?.openresearch_ssh_target() else {
+            return Ok(());
+        };
+        let transport = (self.transport)(&target)?;
+        let native = WatchedRun {
+            id: run.id.clone(),
+            handle: transport.ssh.handle(),
+        };
+        transport.ssh.configure_signals(&native, config).await
+    }
+
+    async fn signals(
+        &self,
+        run: &WatchedRun,
+        terminal: bool,
+        previous: Option<&orx_signals::Snapshot>,
+    ) -> Result<Option<(orx_signals::Snapshot, Option<(i64, i64)>)>> {
+        if !matches!(run.handle, Handle::OpenResearch { .. }) {
+            return Ok(None);
+        }
+        let descriptor = descriptor(&run.handle)?;
+        let Some(target) = descriptor.openresearch_ssh_target() else {
+            return Ok(None);
+        };
+        let (stored, state) = self.engine.load(&run.id)?;
+        let released = phase_of(&stored)?.is_terminal()
+            && state.cancel_accepted_at.is_some()
+            && state.contact == crate::store::Contact::Live;
+        if released {
+            let gone = "The rental was released before final signal collection finished";
+            return Err(super::signals::HostGone(gone.into()).into());
+        }
+        let transport = (self.transport)(&target)?;
+        let native = WatchedRun {
+            id: run.id.clone(),
+            handle: transport.ssh.handle(),
+        };
+        match transport.ssh.signals(&native, terminal, previous).await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                if rental_deleted(descriptor).await {
+                    let gone = "The rental was deleted before final signal collection finished";
+                    return Err(super::signals::HostGone(gone.into()).into());
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn read_log(
@@ -1100,6 +1127,61 @@ mod tests {
             "priced from the launch"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn released_rental_signals_refuse_without_ssh() {
+        let directory = crate::local::git::TemporaryDirectory::new("orx-released-signals").unwrap();
+        let descriptor=BackendDescriptor::parse(r#"{"kind":"openresearch_job","jobId":"box","sshHost":"host","sshPort":22,"sshUser":"root"}"#).unwrap();
+        let handle = Handle::OpenResearch {
+            descriptor: Box::new(descriptor.clone()),
+        };
+        let backend_json =
+            crate::engine::handle::backend_json("run", Some(&handle), &descriptor).unwrap();
+        let store = crate::store::Store::open_at(directory.path().to_owned()).unwrap();
+        let stored = crate::store::StoredRun {
+            id: "run".into(),
+            experiment_id: "exp".into(),
+            project_id: "project".into(),
+            status: "running".into(),
+            backend_json,
+            command: "true".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        };
+        store.upsert_run(&stored).unwrap();
+        store.accept_run_cancel("run", Some("user")).unwrap();
+        let engine = Arc::new(Engine::new(
+            store,
+            Arc::new(crate::engine::clock::TestClock::new()),
+        ));
+        engine
+            .observe(
+                "run",
+                Observation::Exited {
+                    finished_at: None,
+                    code: Some(0),
+                    signal: None,
+                },
+            )
+            .unwrap();
+        let adapter = OpenResearch::new(engine, Arc::new(|_| panic!("released rental opened SSH")));
+        let snapshot = orx_signals::Snapshot::new("run", "1-100", "g1");
+        let run = WatchedRun {
+            id: "run".into(),
+            handle,
+        };
+        for previous in [Some(&snapshot), None] {
+            let error = adapter.signals(&run, true, previous).await.unwrap_err();
+            assert!(error.to_string().contains("released"));
+        }
     }
 
     #[tokio::test]

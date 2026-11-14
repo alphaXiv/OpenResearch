@@ -148,3 +148,42 @@ Detection repeats on every start, so an interrupted rename or reference repair r
   and cache; no user npm configuration or global prefix is used.
 - **Installers the user starts.** Git for Windows comes from GitHub (`src/local/portable_git.rs`).
 - **Integrations the user turns on.** Creating a project from a GitHub URL, which also asks GitHub's public API for its size; publishing to GitHub; syncing a paper with Overleaf, through its Git bridge or its live editor channel with the user's browser session cookie; Trackio metrics; and the agents' own model providers, which the agent talks to directly. Adding a custom endpoint also asks it, with its key, for its model list.
+
+## Signal checkpoints
+
+The owner-only file `run-signals/<run>.json` commits raw carry, cursor and
+aggregates together by syncing a temporary file, renaming it and syncing its
+directory. Its nonblocking per-run lock returns WouldBlock on contention.
+A failed publication leaves the previous committed cursor available for replay.
+
+Signal debt is independent of log debt and gates host cleanup until it
+settles. While the host has the run, its checkpoint is the answer. Once the
+host cannot be asked, the laptop continues that checkpoint over the log it
+kept where that reaches its cursor, and settles as incomplete only for
+reported signals the kept log lacks or that nothing kept. Another generation
+replaces a checkpoint with signals only when it covers at least the same
+bytes; until then it is kept in `<run>.replay`, which resumes across passes
+and restarts, and the held one stands, marked `rebuilding`, or `log_replaced`
+once the other ended short. A promoted rebuild carries a `log_replaced`
+diagnostic; a host gone mid-rebuild leaves it to go on over the kept log where
+that reaches as far. The staging file goes with the first publication of a
+checkpoint not rebuilding. `hostGone` keeps how the host went, which a
+settlement names over any earlier failure.
+A run that never reported a signal settles quietly.
+The owner-only `<run>.status.json` keeps the specific cause and the laptop's
+last successful collection time. The checkpoint's `updatedAt` is the host
+data time; status labels both. `clock` is `[host, laptop]`: the host's clock
+in the last answer a successful collection accepted and the laptop's time of
+receipt. It carries the checkpoint's host times onto the laptop's clock and
+moves at most once a minute while nothing changes; a run folded on the laptop
+has none.
+
+Sharing includes `signals/<run>.json` with `SharedRun.signals` when logs are
+selected, after the credential scan. Import rewrites the local run ID.
+No folded research data is sent to a service or model provider.
+
+Component bounds keep current snapshots below the 16 MiB publication cap.
+The worst-case serialization test reserves the 2 MiB row budget and 2 MiB
+for cursor, retained timing, phases, diagnostics and bounded error metadata.
+New reducers and cell stores must preserve that guarantee or reduce
+deterministically before publication.

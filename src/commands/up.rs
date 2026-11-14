@@ -242,6 +242,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_gate.clone(),
     ));
     runtime.start();
+    tokio::spawn(crate::engine::monitor::keep_current(engine.clone()));
     tokio::spawn(reclaim_orphaned_run_artifacts(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
@@ -1040,6 +1041,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(compact_chat_session),
         )
         .route("/api/chat/active-runs", get(chat_active_runs))
+        .route("/api/chat/shown-runs", get(chat_shown_runs))
+        .route(
+            "/api/chat/sessions/{id}/shown-runs/{run_id}/dismiss",
+            post(dismiss_shown_run),
+        )
         .route("/api/chat/native-sessions", get(list_native_chats))
         .route("/api/chat/native-sessions/import", post(import_native_chat))
         .route(
@@ -1266,6 +1272,7 @@ struct ApiRun {
     log_collection: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     log_collection_error: Option<String>,
+    monitor: Option<Value>,
 }
 
 pub(crate) fn run_host(store: &Store, run: &StoredRun) -> Result<Option<String>> {
@@ -1336,7 +1343,19 @@ impl ApiRun {
                 .as_ref()
                 .map(|(failed, _)| if *failed { "failed" } else { "pending" }),
             log_collection_error: collection.and_then(|(_, error)| error),
+            monitor: run_monitor_summary(store, run),
         })
+    }
+}
+
+/// A run's monitor summary; a run whose monitor cannot be projected shows its lifecycle alone.
+pub(crate) fn run_monitor_summary(store: &Store, run: &StoredRun) -> Option<Value> {
+    match crate::engine::monitor::current(store, run) {
+        Ok(projection) => projection.map(|projection| projection.summary().clone()),
+        Err(error) => {
+            eprintln!("orx up: run {} monitor: {error:#}", run.id);
+            None
+        }
     }
 }
 
@@ -6772,6 +6791,8 @@ struct SetUiStateReq {
     model_section_order: Option<Vec<String>>,
     collapsed_model_sections: Option<Vec<String>>,
     model_sightings: Option<Value>,
+    run_banner: Option<String>,
+    experiments_grid: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -6789,6 +6810,14 @@ async fn set_ui_state(
     State(state): State<AppState>,
     Json(mut req): Json<SetUiStateReq>,
 ) -> ApiResult {
+    let run_banner = req
+        .run_banner
+        .as_deref()
+        .map(|level| {
+            crate::store::RunBannerLevel::parse(level)
+                .ok_or_else(|| bad_request("Choose line or strip for the run banner."))
+        })
+        .transpose()?;
     if let Some(selection) = req.preferred_agent.as_mut() {
         selection.model = selected_chat_model(
             &state,
@@ -6920,6 +6949,12 @@ async fn set_ui_state(
         }
         if let Some(workspace) = req.workspace {
             store.set_global_workspace_state(&workspace)?;
+        }
+        if let Some(level) = run_banner {
+            store.set_run_banner(level)?;
+        }
+        if let Some(grid) = req.experiments_grid {
+            store.set_experiments_grid(grid)?;
         }
         Ok(Json(json!(store.ui_state()?)))
     })
@@ -9343,6 +9378,56 @@ async fn chat_active_runs() -> ApiResult {
     Ok(Json(chat_active_runs_json(&Store::open()?)?))
 }
 
+fn chat_shown_runs_json(store: &Store) -> Result<Value> {
+    let rows = store
+        .chat_shown_runs()?
+        .into_iter()
+        .filter_map(|item| {
+            let run = match ApiRun::new(store, &item.run) {
+                Ok(run) => run,
+                Err(error) => {
+                    eprintln!(
+                        "orx up: could not show run {} above the composer: {error}",
+                        item.run.id
+                    );
+                    return None;
+                }
+            };
+            Some(json!({
+                "sessionId": item.session_id,
+                "run": run,
+                "experimentName": item.experiment_name,
+                "experimentSlug": item.experiment_slug,
+                "runNo": item.run_no,
+                "runCount": item.run_count,
+            }))
+        })
+        .collect::<Vec<_>>();
+    Ok(json!(rows))
+}
+
+async fn chat_shown_runs() -> ApiResult {
+    Ok(Json(chat_shown_runs_json(&Store::open()?)?))
+}
+
+async fn dismiss_shown_run(Path((session_id, run_id)): Path<(String, String)>) -> ApiResult {
+    let mut store = Store::open()?;
+    if store.get_chat_session(&session_id)?.is_none() {
+        return Err(not_found("chat"));
+    }
+    if store.get_run(&run_id)?.is_none() {
+        return Err(not_found("run"));
+    }
+    match store.dismiss_chat_run(&session_id, &run_id)? {
+        crate::store::RunDismissal::Dismissed => {}
+        crate::store::RunDismissal::NotAssociated => return Err(not_found("run in this chat")),
+        crate::store::RunDismissal::Refused(reason) => {
+            return Err(ApiError(StatusCode::CONFLICT, reason.into()))
+        }
+    }
+    Ok(Json(json!({ "dismissed": true })))
+}
+
 async fn list_chat_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionsQuery>,
@@ -10663,7 +10748,7 @@ struct EventCursor {
     followed: HashMap<String, Box<dyn Send>>,
     log_offsets: HashMap<String, u64>,
     log_generations: HashMap<String, String>,
-    chat_active_runs: Option<Value>,
+    chat_shown_runs: Option<Value>,
     /// Last update status sent. Unlike the rest of the cursor this isn't store
     /// state — the updater is a separate process, so its progress reaches the UI
     /// through the same diff the store changes do.
@@ -10807,11 +10892,25 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
             cursor.tailed.remove(&run_id);
         }
     }
+    push_chat_run_events(&store, cursor, &mut out)?;
     // Committed only now that the batch is certain to be returned.
     if let Some(update) = sampled_update {
         cursor.update = Some(update);
     }
     Ok(out)
+}
+
+fn push_chat_run_events(
+    store: &Store,
+    cursor: &mut EventCursor,
+    out: &mut Vec<Event>,
+) -> Result<()> {
+    let shown_runs = chat_shown_runs_json(store)?;
+    if cursor.chat_shown_runs.as_ref() != Some(&shown_runs) {
+        out.push(json_event("chat.runs", &json!({})));
+        cursor.chat_shown_runs = Some(shown_runs);
+    }
+    Ok(())
 }
 
 /// Run events for one Bus event, or for every recent run when `event` is `None` (the first
@@ -10822,7 +10921,7 @@ fn run_events(
     event: Option<crate::engine::bus::RunEvent>,
 ) -> Result<Vec<Event>> {
     use crate::engine::bus::RunEvent;
-    let first = cursor.chat_active_runs.is_none();
+    let first = event.is_none() && cursor.runs.is_empty();
     let runs = match &event {
         None => store.list_runs(200)?,
         Some(RunEvent::Changed { run_id, .. } | RunEvent::LogCollection { run_id }) => {
@@ -10842,6 +10941,17 @@ fn run_events(
             )])
         }
         Some(RunEvent::Notices { .. }) => return Ok(Vec::new()),
+        Some(RunEvent::Monitor { run_id, event }) => {
+            // Before the summary at the same `rev`, so the strip never trails the line.
+            let mut out = vec![json_event("run.monitor", event)];
+            if let Some(run) = store.get_run(run_id)? {
+                out.push(json_event(
+                    "run.updated",
+                    &json!({ "run": ApiRun::new(store, &run)? }),
+                ));
+            }
+            return Ok(out);
+        }
     };
     let mut out = Vec::new();
     if event.is_none() {
@@ -10879,11 +10989,7 @@ fn run_events(
             &json!({ "run": ApiRun::new(store, &run)? }),
         ));
     }
-    let active_runs = chat_active_runs_json(store)?;
-    if cursor.chat_active_runs.as_ref() != Some(&active_runs) {
-        out.push(json_event("chat.runs", &json!({})));
-        cursor.chat_active_runs = Some(active_runs);
-    }
+    push_chat_run_events(store, cursor, &mut out)?;
     Ok(out)
 }
 
@@ -11074,6 +11180,62 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// The monitor's event goes first, then the summary at the same `rev`.
+    #[tokio::test]
+    async fn a_monitor_event_precedes_the_summary_at_its_rev() {
+        use crate::engine::bus::RunEvent;
+        let directory =
+            std::env::temp_dir().join(format!("orx-monitor-sse-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(directory.clone()).unwrap();
+        let run = StoredRun {
+            id: "r".into(),
+            experiment_id: "e".into(),
+            project_id: "p".into(),
+            status: "running".into(),
+            backend_json: r#"{"kind":"local_job"}"#.into(),
+            command: "true".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        };
+        store.upsert_run(&run).unwrap();
+        let rev = crate::engine::monitor::advance(&store, &run, 5)
+            .unwrap()
+            .summary()["rev"]
+            .clone();
+        let event = std::sync::Arc::new(json!({"runId": "r", "rev": rev}));
+        let mut cursor = EventCursor::default();
+        let events = run_events(
+            &store,
+            &mut cursor,
+            Some(RunEvent::Monitor {
+                run_id: "r".into(),
+                event,
+            }),
+        )
+        .unwrap();
+        let text = event_text(events).await;
+        let monitor = text.find("event: run.monitor").unwrap();
+        let updated = text.find("event: run.updated").unwrap();
+        assert!(monitor < updated, "{text}");
+        let summary: Value = serde_json::from_str(
+            text.lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .nth(1)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["run"]["monitor"]["rev"], rev);
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test]
     async fn run_bus_events_emit_contact_and_cancel_without_a_timestamp_change() {
         use crate::engine::bus::RunEvent;
@@ -11220,6 +11382,129 @@ mod tests {
     }
 
     #[test]
+    fn one_unreadable_run_does_not_hide_the_others_above_the_composer() {
+        let dir = std::env::temp_dir().join(format!("orx-shown-bad-row-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["readable", "quarantined"] {
+            store
+                .upsert_run(&StoredRun {
+                    id: id.into(),
+                    experiment_id: format!("experiment_{id}"),
+                    project_id: "project".into(),
+                    status: "running".into(),
+                    backend_json: "{}".into(),
+                    command: String::new(),
+                    created_at: 1,
+                    updated_at: 1,
+                    ended_at: None,
+                    exit_code: None,
+                    commit_sha: None,
+                    result_markdown: None,
+                    cancel_requested: false,
+                    cancel_reason: None,
+                    chat_session_id: Some("chat".into()),
+                })
+                .unwrap();
+        }
+        rusqlite::Connection::open(dir.join("orx.db"))
+            .unwrap()
+            .execute(
+                "UPDATE runs SET contact = '{\"type\":\"quarantined\"}' WHERE id = 'quarantined'",
+                [],
+            )
+            .unwrap();
+        let shown = chat_shown_runs_json(&store).unwrap();
+        let ids: Vec<_> = shown
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["run"]["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["readable"]);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shown_run_events_reach_each_client_without_an_engine_event() {
+        let dir = std::env::temp_dir().join(format!("orx-shown-events-{}", uuid::Uuid::new_v4()));
+        let mut store = Store::open_at(dir.clone()).unwrap();
+        let session = StoredChatSession {
+            profile_id: None,
+            id: "chat".into(),
+            project_id: "project".into(),
+            harness: "claude-code".into(),
+            native_session_id: None,
+            native_fork_at: None,
+            title: None,
+            title_source: None,
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            plan_mode: false,
+            plan_reset_pending: false,
+            reasoning_level: None,
+            archived: false,
+            context_usage_json: None,
+            bootstrap_context: None,
+            goal: None,
+            autonomy: None,
+            active_leaf_id: None,
+            side_parent_session_id: None,
+            side_parent_leaf_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_chat_session(&session).unwrap();
+        let run = StoredRun {
+            id: "ended".into(),
+            experiment_id: "experiment".into(),
+            project_id: "project".into(),
+            status: "done".into(),
+            backend_json: "{}".into(),
+            command: String::new(),
+            created_at: 1,
+            updated_at: 2,
+            ended_at: Some(2),
+            exit_code: Some(0),
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: Some(session.id.clone()),
+        };
+        store.upsert_run(&run).unwrap();
+        store
+            .insert_run_notice(
+                &run.id,
+                &session.id,
+                crate::store::TERMINAL,
+                crate::store::TERMINAL,
+                "finished",
+                2,
+            )
+            .unwrap();
+        let mut clients = [EventCursor::default(), EventCursor::default()];
+        for cursor in &mut clients {
+            let mut events = Vec::new();
+            push_chat_run_events(&store, cursor, &mut events).unwrap();
+            assert_eq!(events.len(), 1);
+        }
+        store.dismiss_chat_run(&session.id, &run.id).unwrap();
+        for cursor in &mut clients {
+            let mut events = Vec::new();
+            push_chat_run_events(&store, cursor, &mut events).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(cursor.chat_shown_runs, Some(json!([])));
+            events.clear();
+            push_chat_run_events(&store, cursor, &mut events).unwrap();
+            assert!(events.is_empty());
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn new_chat_uses_saved_preferences_and_normalizes_model_settings() {
         let preferences = crate::store::StoredUiState {
             onboarding_completed: true,
@@ -11234,6 +11519,8 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            run_banner: crate::store::RunBannerLevel::Strip,
+            experiments_grid: false,
             preferred_agent: Some(StoredAgentSelection {
                 profile: None,
                 harness: "codex".into(),
@@ -11273,6 +11560,8 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            run_banner: crate::store::RunBannerLevel::Strip,
+            experiments_grid: false,
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -11328,6 +11617,8 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            run_banner: crate::store::RunBannerLevel::Strip,
+            experiments_grid: false,
         };
         let catalog = json!({"harnesses":[
             {"id":"codex", "agentReady":true, "models":[], "options":{}},
@@ -11594,6 +11885,8 @@ mod tests {
                 model_section_order: None,
                 collapsed_model_sections: None,
                 model_sightings: None,
+                run_banner: None,
+                experiments_grid: None,
             }),
         )
         .await;
