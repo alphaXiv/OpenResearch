@@ -324,7 +324,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     ({ eta, detail: etaDetail, strong: etaStrong, left } = estimateWords(monitor.estimate, now, limit, progress?.stallMs ?? 0));
   } else if (summary?.etaMs) {
     const { lo, mid, hi, at } = summary.etaMs;
-    ({ eta, detail: etaDetail, strong: etaStrong, left } = estimateWords({ loMs: lo, midMs: mid, hiMs: hi, at, pending: false, pastLimitMs: null, floor: summary.etaFloor ?? false }, now, null, 0));
+    ({ eta, detail: etaDetail, strong: etaStrong, left } = estimateWords({ loMs: lo, midMs: mid, hiMs: hi, at, pending: false, pastLimitMs: null, floor: summary.etaFloor ?? false, untimed: summary.etaUntimed }, now, null, 0));
   } else if (summary?.pending) {
     eta = m.run_eta_estimating();
     etaDetail = m.run_eta_needs_steps();
@@ -341,6 +341,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const headline = headlineOf(monitor, summary?.headline ?? null, signals, sentence.key);
 
   const segments = progress?.segments.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
+    ?? summary?.segments?.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
     ?? [{ weight: 1, fill: pre ? 0 : summary?.whole ?? (tone === "done" ? 1 : null) }];
   const whole = progress?.whole ?? summary?.whole ?? null;
   // With no watcher the sentence is the stage and how far, so the caption says only what is new.

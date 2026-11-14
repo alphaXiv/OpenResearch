@@ -393,3 +393,25 @@ test("a run compared with its parent says by how much, as `orx exp status` says 
     assert.ok(expect.said.includes(`${bare(headline.delta.magnitude)} better than parent`), `full: ${full}`);
   }
 });
+
+test("a declared plan spans the bar from its first stage, and an untimed stage to come makes time left a floor that names it", async () => {
+  const { expect, monitor } = states.planned;
+  const untimed = bare(m.run_eta_untimed({ stages: "eval" }));
+  for (const full of [true, false]) {
+    const view = model("planned", full);
+    assert.equal(bare(view.eta), expect.eta, `full: ${full}`);
+    assert.equal(bare(view.etaDetail), untimed, `full: ${full}`);
+    // Every stage is a segment, the line's too; whole-run progress is unknown, so the bar says no share.
+    assert.equal(view.bar.segments.length, 3, `full: ${full}`);
+    assert.equal(view.bar.whole, null, `full: ${full}`);
+  }
+  const strip = bare((await banner("planned")).container.textContent);
+  assert.ok(strip.includes("download4s") && strip.includes("train") && strip.includes("eval"), strip);
+  assert.ok(strip.includes(untimed), strip);
+
+  const phases = [{ ...monitor.phases[0], skipped: true, startedAt: null, endedAt: null }, { ...monitor.phases[1] }, { ...monitor.phases[1], name: "export", planned: false }, monitor.phases[2]];
+  const odd = { ...states.planned, monitor: { ...monitor, phases, progress: { ...monitor.progress, phase: 1 } } };
+  const text = bare((await banner("planned", "strip", odd)).container.textContent);
+  assert.ok(text.includes(`download${bare(m.run_stage_skipped())}`), text);
+  assert.ok(text.includes(`export${bare(m.run_stage_unplanned())}`), text);
+});

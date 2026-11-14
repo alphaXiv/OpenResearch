@@ -2709,7 +2709,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  train · step 5 of 10  [run r1]\neta      At least 4s left (no parent time for eval)\nstages   ✓ download 4s · ● train · ○ eval\nsignals  loss 0.5\nsignals  Last collected at 2026-11-12T00:45:09.000Z.\nsignals  Data as of 2026-11-12T00:45:09.000Z.",
+        "statusText": "baseline  running  train · step 5 of 10  [run r1]\neta      At least 4s left (no earlier run timed eval)\nstages   ✓ download 4s · ● train · ○ eval\nsignals  loss 0.5\nsignals  Last collected at 2026-11-12T00:45:09.000Z.\nsignals  Data as of 2026-11-12T00:45:09.000Z.",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -2778,6 +2778,9 @@
         "setup": null,
         "generation": "g1",
         "asOf": 1794444309000,
+        "etaUntimed": [
+          "eval"
+        ],
         "segments": [
           {
             "weight": 0.3333333333333333,
@@ -2797,7 +2800,7 @@
       "expect": {
         "eta": "At least 4s left",
         "range": null,
-        "cli": "At least 4s left (no parent time for eval)",
+        "cli": "At least 4s left (no earlier run timed eval)",
         "stage": "train · step 5 of 10"
       }
     },

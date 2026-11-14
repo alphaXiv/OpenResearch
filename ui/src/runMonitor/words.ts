@@ -40,7 +40,8 @@ export const capitalized = (text: string) =>
  * bar, or, given the run's time limit when how much of it remains is unknown, how much of the limit it has used.
  */
 export function captionProgress(progress: Progress, phases: Phase[], openLimitMs: number | null, elapsedMs: number, said: boolean): string {
-  const where = said ? null : stageWords(phases[progress.phase], progress.done);
+  const phase = phases[progress.phase];
+  const where = said ? null : progress.done === null ? (phase?.name ? autoDir(phase.name) : null) : stageWords(phase, progress.done);
   const share = openLimitMs !== null
     ? m.run_progress_limit({ elapsed: durationText(elapsedMs), limit: durationText(openLimitMs) })
     : progress.whole === null ? null : fmtPercent(progress.whole);
@@ -79,6 +80,7 @@ export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: 
   if (estimate.pastLimitMs !== null && limit) {
     return { eta, detail: m.run_eta_past_limit({ duration: durationText(estimate.pastLimitMs), limit: durationText(limit.ms) }), strong: true, left };
   }
+  if (estimate.untimed?.length) return { eta, detail: m.run_eta_untimed({ stages: new Intl.ListFormat(getLocale()).format(estimate.untimed.map(autoDir)) }), strong: true, left };
   if (estimate.floor) return { eta, detail: m.run_eta_floor(), strong: true, left };
   const done = m.run_eta_done_about({ clock: clockText(now + mid) });
   const [lo, hi] = [estimate.loMs, estimate.hiMs].map((ms) => ms === null ? null : durationText(remaining(ms)));

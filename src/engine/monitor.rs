@@ -919,6 +919,9 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
     if fold.error.is_some() {
         summary["unavailable"] = json!(SIGNALS_UNREADABLE);
     }
+    if let Some(untimed) = estimate.as_ref().and_then(|e| e.get("untimed")) {
+        summary["etaUntimed"] = untimed.clone();
+    }
     // A plan's stages, so a line's underline is segmented without the full monitor.
     if stages.len() > 1 && started {
         summary["segments"] = segments
@@ -2056,7 +2059,7 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                 .filter_map(Value::as_str)
                 .collect();
             let mut detail: Vec<String> = if !untimed.is_empty() {
-                vec![format!("no parent time for {}", untimed.join(", "))]
+                vec![format!("no earlier run timed {}", untimed.join(", "))]
             } else if floor {
                 vec!["timed from progress in the log; more work may follow it".to_owned()]
             } else {
@@ -4708,7 +4711,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("\neta      At least 0s left (no parent time for eval, sft)"),
+            text.contains("\neta      At least 0s left (no earlier run timed eval, sft)"),
             "{text}"
         );
 
@@ -5420,7 +5423,7 @@ mod tests {
                 T0 + 9_000,
                 json!({
                     "eta": "At least 4s left", "range": null,
-                    "cli": "At least 4s left (no parent time for eval)",
+                    "cli": "At least 4s left (no earlier run timed eval)",
                     "stage": "train · step 5 of 10",
                 }),
             ),

@@ -29,15 +29,14 @@ type OpenRun = (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
 /** The run's state as the strip reads it: absent against an older server, which can't serve it. A failed refresh keeps what it last had. */
 export type StripMonitor = { status: "loading" } | { status: "error"; retry: () => void; data: RunMonitor | null } | { status: "ready"; data: RunMonitor } | null;
 
-/** The headline and the first block of the view that applies now, or the stages when none does. */
+/** The headline and the first block of the view that applies now. */
 function Hero({ model, monitor }: { model: RunModel; monitor: RunMonitor }) {
   const phase = monitor.progress ? monitor.phases[monitor.progress.phase]?.name : undefined;
   const block = monitor.view.blocks.find((candidate) => (!candidate.phase || candidate.phase === phase) && drawsAt(candidate, "strip"));
   const chart = block && "chart" in block ? block : null;
   const series = chart ? seriesOf(monitor, chart) : [];
   const headline = model.headline;
-  const stages = namedStages(monitor);
-  if (!block && !stages && !headline?.known) return null;
+  if (!block && !headline?.known) return null;
   return (
     <div className="mt-3 flex h-16 items-stretch gap-5">
       {headline?.known && (
@@ -48,7 +47,7 @@ function Hero({ model, monitor }: { model: RunModel; monitor: RunMonitor }) {
         </div>
       )}
       <div className="min-w-0 flex-1 overflow-hidden">
-        {block ? <Block monitor={monitor} block={block} size="strip" projectId={model.run.projectId} tone={model.tone} live={model.live} /> : stages && <Phases model={model} monitor={monitor} />}
+        {block && <Block monitor={monitor} block={block} size="strip" projectId={model.run.projectId} tone={model.tone} live={model.live} />}
       </div>
       {series.length > 1 && <div className="hidden w-24 shrink-0 flex-col justify-center @2xl:flex"><Legend series={series} /></div>}
     </div>
@@ -108,6 +107,7 @@ export function RunStrip({ model, monitor, runNo, runCount, agent, label, onTogg
           </div>
         )}
         {!model.pre && !flag && data && <Hero model={model} monitor={data} />}
+        {!model.pre && !flag && data && namedStages(data) && <div className="mt-3"><Phases model={model} monitor={data} /></div>}
         <div className="mt-3"><Captions model={model} /></div>
       </div>
       <Rail model={model} kind="thick" hover />

@@ -148,6 +148,10 @@ export interface RunMonitorSummary {
   etaMs: { lo: number; mid: number; hi: number; at: number } | null;
   /** `etaMs` times a bar or counter read from the log, so more of the run may follow it; absent from an older server. */
   etaFloor?: boolean;
+  /** The plan's stages `etaMs` leaves out, being untimed, which make it a floor; absent from an older server. */
+  etaUntimed?: string[];
+  /** One per stage of a declared plan, so a line's underline is segmented; absent without a plan or from an older server. */
+  segments?: { weight: number; fill: number | null }[];
   /** The estimate waits on more progress; with no `etaMs` and not pending, how much is left is unknown. */
   pending: boolean;
   /** Why this summary stopped updating, while the run's projection fails. */
@@ -176,11 +180,16 @@ export interface Phase {
   priorMs: number | null;
   startedAt: number | null;
   endedAt: number | null;
+  /** Whether the stage is in the run's declared plan; absent when the run has no plan, false for a stage the plan didn't name. */
+  planned?: boolean;
+  /** A planned stage the run went past, or finished without. */
+  skipped?: boolean;
 }
 
 export interface Progress {
   phase: number;
-  done: number;
+  /** Null while a planned stage has reported no step, or before the run's first stage began. */
+  done: number | null;
   /** `fill` is null when the phase has no total and no limit: an empty track, never a zero. */
   segments: { name: string; weight: number; fill: number | null }[];
   whole: number | null;
@@ -197,8 +206,10 @@ export interface Estimate {
   at: number;
   pending: boolean;
   pastLimitMs: number | null;
-  /** Times a bar or counter read from the log, so more of the run may follow it. */
+  /** Times a bar or counter read from the log, or leaves out `untimed` stages, so more of the run may follow it. */
   floor: boolean;
+  /** Stages of the plan, this one or to come, that no earlier run timed: time left is at least the rest. */
+  untimed?: string[];
   /** Why parts of the estimate could not be computed. */
   reasons?: string[];
 }
