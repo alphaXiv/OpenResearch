@@ -149,12 +149,20 @@ jobs:
           # shellcheck disable=SC2046 # pkg-config emits compiler arguments.
           cc -Wall -Wextra packaging-workflow/scripts/appimage-media-probe.c -o app-dist/appimage-media-probe $(pkg-config --cflags --libs webkit2gtk-4.1)
 
-      # Otherwise the host's WebKit would stand in for a broken bundled one.
-      - name: Remove WebKitGTK and media plugins from the runner
-        run: sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+      - name: Smoke-test the system runtime
+        run: packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe system
 
-      - name: Smoke-test the AppImage
-        run: packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe
+      - name: Remove the system WebKit
+        run: sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0
+
+      - name: Smoke-test the bundled fallback
+        run: packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe bundled
+
+      - name: Remove the system media plugins
+        run: sudo apt-get remove -y gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+
+      - name: Check the missing-dependency instructions
+        run: packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe missing
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

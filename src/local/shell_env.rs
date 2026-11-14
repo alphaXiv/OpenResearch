@@ -330,9 +330,10 @@ pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
     }
 }
 
-/// What the Linux AppImage's AppRun and GTK hook point at the image (keep in step
+/// What the Linux AppImage's AppRun overrides for its runtime (keep in step
 /// with linux/AppRun, which saves the session's values as `ORX_HOST_<name>`).
-const APPIMAGE_GTK_VARS: [&str; 12] = [
+const APPIMAGE_RUNTIME_VARS: [&str; 13] = [
+    "LD_LIBRARY_PATH",
     "GDK_BACKEND",
     "GDK_PIXBUF_MODULE_FILE",
     "GI_TYPELIB_PATH",
@@ -347,10 +348,10 @@ const APPIMAGE_GTK_VARS: [&str; 12] = [
     "XDG_DATA_DIRS",
 ];
 
-/// The session's own values (`None`: unset) of what AppRun set for the bundled GTK,
+/// The session's own values (`None`: unset) of what AppRun set for its runtime,
 /// for host programs, which fail on the image's schemas. Empty outside the AppImage.
 pub fn host_gui_env() -> Vec<(&'static str, Option<OsString>)> {
-    APPIMAGE_GTK_VARS
+    APPIMAGE_RUNTIME_VARS
         .iter()
         .filter_map(|var| {
             let saved = std::env::var_os(format!("ORX_HOST_{var}"))?;
@@ -409,6 +410,23 @@ pub fn parse_probe(stdout: &str, marker: &str) -> Option<HashMap<&'static str, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_programs_receive_the_sessions_library_path() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        std::env::set_var("LD_LIBRARY_PATH", "/appimage/lib");
+        for saved in ["-", "=", "=/host/lib:/drivers"] {
+            std::env::set_var("ORX_HOST_LD_LIBRARY_PATH", saved);
+            let command = crate::process::command("host-program");
+            let setting = command
+                .get_envs()
+                .find(|(key, _)| *key == "LD_LIBRARY_PATH")
+                .expect("library path is restored");
+            assert_eq!(setting.1, saved.strip_prefix('=').map(std::ffi::OsStr::new));
+        }
+    }
 
     #[test]
     fn an_agent_on_path_outside_the_test_root_is_never_resolved() {

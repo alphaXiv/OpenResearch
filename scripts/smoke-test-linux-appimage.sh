@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
-# Launch a built AppImage under a virtual display and prove its bundled WebKit
-# loads the dashboard: the server answers, WebKit's network process has connected
-# to it, the window appears once the page has loaded, the desktop entry points at
-# this AppImage, and every WebKit helper runs from inside the image on the image's
-# libwebkit2gtk and no host GIO modules. A sandboxed HTML preview also creates
-# an AudioContext and decodes an H.264/AAC video into a canvas. Run it where
-# WebKitGTK and GStreamer plugins are not installed,
-# or a fallback to the host's copy would pass. Needs xvfb-run, curl, ss, setsid,
-# and xdotool.
+# Test automatic system-WebKit selection, the bundled-WebKit fallback, or the
+# missing-media dependency dialog. The probe uses the selected desktop runtime.
 #
-#   scripts/smoke-test-linux-appimage.sh <OpenResearch-<arch>.AppImage> <media probe>
+# scripts/smoke-test-linux-appimage.sh <AppImage> <media probe> [system|bundled|missing]
 set -euo pipefail
 
 APPIMAGE="$(realpath "$1")"
 MEDIA_PROBE="$(realpath "$2")"
+MODE="${3:-system}"
+case "$MODE" in system|bundled|missing) ;; *) echo "Unknown runtime test mode: $MODE" >&2; exit 1 ;; esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SANDBOX="$(mktemp -d)"
 LOG="$SANDBOX/app.log"
@@ -31,7 +26,7 @@ export TMPDIR="$SANDBOX"
 
 # The hook changes the theme and data directories and forces X11. AppRun must
 # save their original values before sourcing it, and leave backend choice to GTK.
-unset GDK_BACKEND
+unset GDK_BACKEND LD_LIBRARY_PATH
 export GTK_THEME=Adwaita:dark APPIMAGE_GTK_THEME=Adwaita:light
 export XDG_DATA_DIRS=/usr/local/share:/usr/share
 
@@ -40,6 +35,12 @@ setsid xvfb-run -a "$APPIMAGE" >"$LOG" 2>&1 &
 APP=$!
 cleanup() {
   kill -- -"$APP" 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    kill -0 -- -"$APP" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL -- -"$APP" 2>/dev/null || true
+  wait "$APP" 2>/dev/null || true
   # orx may still be shutting down and writing into it.
   rm -rf "$SANDBOX" || true
 }
@@ -51,6 +52,36 @@ fail() {
   cat "$LOG"
   exit 1
 }
+
+if [ "$MODE" = missing ]; then
+  dialog=
+  for _ in $(seq 1 45); do
+    for pid in $(pgrep -f 'usr/bin/orx-runtime error' || true); do
+      grep -zqxF "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "/proc/$pid/environ" 2>/dev/null || continue
+      X_ENV="$(tr '\0' '\n' <"/proc/$pid/environ" | grep -E '^(DISPLAY|XAUTHORITY)=')"
+      # shellcheck disable=SC2086
+      dialog="$(env $X_ENV xdotool search --onlyvisible --name '^OpenResearch needs multimedia libraries$' || true)"
+      [ -n "$dialog" ] && break
+    done
+    [ -n "$dialog" ] && break
+    kill -0 "$APP" 2>/dev/null || fail "No dependency dialog appeared."
+    sleep 1
+  done
+  [ -n "$dialog" ] || fail "No dependency dialog appeared."
+  grep -q 'sudo apt install libwebkit2gtk-4.1-0' "$LOG" || fail "No install instructions were printed."
+  # shellcheck disable=SC2086
+  env $X_ENV xdotool windowfocus "$dialog" key Escape || true # Xvfb can exit before key release.
+  for _ in $(seq 1 10); do
+    kill -0 "$APP" 2>/dev/null || break
+    sleep 1
+  done
+  kill -0 "$APP" 2>/dev/null && fail "Escape did not close the dependency dialog."
+  status=0
+  wait "$APP" || status=$?
+  [ "$status" -eq 1 ] || fail "The missing-runtime launch returned $status, expected 1."
+  echo "Missing media dependencies produce an actionable dialog and a failed launch."
+  exit 0
+fi
 
 for _ in $(seq 1 120); do
   curl -fsS -o /dev/null http://127.0.0.1:4792/api/health && break
@@ -72,13 +103,21 @@ done
 pgrep -f WebKitWebProcess >/dev/null || fail "No WebKit web process is running."
 
 # The app shows its window when the page finishes loading, or says it gave up.
-ORX_PID="$(pgrep -o -f 'usr/bin/orx app' || true)"
+ORX_PID=
+for pid in $(pgrep -f 'usr/bin/orx app' || true); do
+  if grep -zqxF "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "/proc/$pid/environ" 2>/dev/null; then ORX_PID="$pid"; break; fi
+done
 [ -n "$ORX_PID" ] || fail "orx app is not running."
 APP_ENV="$(tr '\0' '\n' <"/proc/$ORX_PID/environ")"
 for entry in 'ORX_HOST_GDK_BACKEND=-' 'ORX_HOST_GTK_THEME==Adwaita:dark' \
-  'ORX_HOST_XDG_DATA_DIRS==/usr/local/share:/usr/share' 'GTK_THEME=Adwaita:light'; do
+  'ORX_HOST_XDG_DATA_DIRS==/usr/local/share:/usr/share' 'ORX_HOST_LD_LIBRARY_PATH=-' "ORX_APPIMAGE_RUNTIME=$MODE"; do
   grep -qxF "$entry" <<<"$APP_ENV" || fail "AppRun did not preserve the host environment: $entry"
 done
+if [ "$MODE" = system ]; then
+  grep -qxF 'GTK_THEME=Adwaita:dark' <<<"$APP_ENV" || fail "The system runtime changed the host theme."
+else
+  grep -qxF 'GTK_THEME=Adwaita:light' <<<"$APP_ENV" || fail "The bundled GTK hook did not run."
+fi
 if grep -q '^GDK_BACKEND=' <<<"$APP_ENV"; then
   fail "AppRun forced a display backend instead of letting GTK select it."
 fi
@@ -99,16 +138,18 @@ grep -qxF "TryExec=$APPIMAGE" "$XDG_DATA_HOME/applications/openresearch.desktop"
   || fail "The app did not install its desktop entry."
 
 mapfile -d '' -t media_env <"/proc/$ORX_PID/environ"
-image_exe="$(readlink "/proc/$ORX_PID/exe")"
-image_lib="$(dirname "$(dirname "$image_exe")")/lib"
+if [ "$MODE" = bundled ]; then
+  image_exe="$(readlink "/proc/$ORX_PID/exe")"
+  media_env+=("LD_LIBRARY_PATH=$(dirname "$(dirname "$image_exe")")/lib")
+fi
 if ! (
   ulimit -c 0
   cd "/proc/$ORX_PID/cwd"
-  timeout 35 env -i "${media_env[@]}" LD_LIBRARY_PATH="$image_lib" \
+  timeout 35 env -i "${media_env[@]}" \
     "$MEDIA_PROBE" "$ROOT/scripts/fixtures/appimage-media.html"
 ) >"$SANDBOX/media.log" 2>&1; then
   cat "$SANDBOX/media.log"
-  fail "The AppImage's WebKit could not render sandboxed HTML audio/video."
+  fail "The selected WebKit could not render sandboxed HTML audio/video."
 fi
 cat "$SANDBOX/media.log"
 
@@ -119,16 +160,19 @@ for pid in $(pgrep -f 'WebKit(Web|Network)Process'); do
   exe="$(readlink "/proc/$pid/exe")" || continue
   maps="$(cat "/proc/$pid/maps" 2>/dev/null)" || continue
   helpers=$((helpers + 1))
-  case "$exe" in
-    *appimage_extracted_*) ;;
-    *) fail "WebKit helper $pid runs $exe, not the AppImage's." ;;
-  esac
-  grep -q 'appimage_extracted_.*/libwebkit2gtk' <<<"$maps" \
-    || fail "WebKit helper $pid did not load the AppImage's libwebkit2gtk."
-  if grep -q ' /usr/lib/[^ ]*/gio/modules/' <<<"$maps"; then
-    fail "WebKit helper $pid loaded the host's GIO modules."
+  if [ "$MODE" = system ]; then
+    case "$exe" in *appimage_extracted_*) fail "The system runtime started a bundled helper." ;; esac
+    if grep -Eq 'appimage_extracted_.*/lib(webkit|glib|gst)' <<<"$maps"; then
+      fail "A system WebKit helper loaded the bundled runtime."
+    fi
+  else
+    case "$exe" in *appimage_extracted_*) ;; *) fail "A bundled helper runs $exe." ;; esac
+    grep -q 'appimage_extracted_.*/libwebkit2gtk' <<<"$maps" || fail "Bundled WebKit was not loaded."
+    if grep -q ' /usr/lib/[^ ]*/gio/modules/' <<<"$maps"; then
+      fail "The bundled helper loaded the host's GIO modules."
+    fi
   fi
 done
-[ "$helpers" -gt 0 ] || fail "No bundled WebKit helper could be inspected."
-echo "The AppImage's WebKit loaded the dashboard:"
+[ "$helpers" -gt 0 ] || fail "No WebKit helper could be inspected."
+echo "The $MODE WebKit loaded the dashboard and media:"
 pgrep -af 'WebKit(Web|Network)Process'

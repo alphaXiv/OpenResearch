@@ -300,8 +300,11 @@ jobs:
           scripts/build-linux-appimage.sh target/release/orx app-dist
           # shellcheck disable=SC2046 # pkg-config emits compiler arguments.
           cc -Wall -Wextra scripts/appimage-media-probe.c -o app-dist/appimage-media-probe $(pkg-config --cflags --libs webkit2gtk-4.1)
-          sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
-          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe
+          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe system
+          sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0
+          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe bundled
+          sudo apt-get remove -y gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe missing
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: canary-linux-${{ matrix.arch }}
