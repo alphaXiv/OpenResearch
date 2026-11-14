@@ -69,7 +69,8 @@
         "final": {}
       },
       "headline": "loss",
-      "pace": null
+      "pace": null,
+      "logError": null
     },
     "reset": true
   },
@@ -154,7 +155,8 @@
         "final": {}
       },
       "headline": "loss",
-      "pace": null
+      "pace": null,
+      "logError": null
     }
   }
 ]

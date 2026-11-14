@@ -1901,6 +1901,7 @@ fn project(
                     "versus": body["versus"],
                     "headline": body["headline"],
                     "pace": body["pace"],
+                    "logError": body["logError"],
                 },
             });
             if let Some(best) = body.get("best") {
