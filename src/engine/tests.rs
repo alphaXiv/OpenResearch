@@ -99,6 +99,7 @@ impl Fixture {
                     commit_sha: None,
                     chat_session_id: Some(CHAT),
                     spec_digest: "spec",
+                    monitor_config: None,
                     launch: &ssh_launch(),
                 },
             )
@@ -448,6 +449,7 @@ async fn cancel_before_any_side_effect_is_immediate() {
                 commit_sha: None,
                 chat_session_id: Some(CHAT),
                 spec_digest: "spec",
+                monitor_config: None,
                 launch: &ssh_launch(),
             })
             .unwrap();
@@ -509,6 +511,7 @@ async fn a_launch_that_lost_its_gate_to_recovery_leaves_the_fenced_attempt_to_it
             commit_sha: None,
             chat_session_id: Some(CHAT),
             spec_digest: "spec",
+            monitor_config: None,
             launch: &ssh_launch(),
         })
         .unwrap();
@@ -1492,6 +1495,7 @@ async fn a_restart_between_fence_and_launch_recovers_from_the_persisted_intent()
             commit_sha: None,
             chat_session_id: Some(CHAT),
             spec_digest: "spec",
+            monitor_config: None,
             launch: &ssh_launch(),
         })
         .unwrap();
@@ -2081,6 +2085,7 @@ async fn a_submitter_without_a_readable_identity_cannot_cross_the_fence() {
             commit_sha: None,
             chat_session_id: None,
             spec_digest: "spec",
+            monitor_config: None,
             launch: &ssh_launch(),
         })
         .unwrap();

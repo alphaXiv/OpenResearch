@@ -1055,28 +1055,43 @@ pub(crate) fn stored_plan(
 }
 
 /// The keys `--config` takes; this orx reads no other.
-const CONFIG_KEYS: &str = "plan";
+const CONFIG_KEYS: &str = "plan and rules";
 
-/// A configuration as an agent gave it: its stage plan, or why it cannot be used.
-pub(crate) fn plan_of(
-    given: &Value,
-    source: &Source,
-    fix: &str,
-) -> Result<Vec<orx_signals::Stage>, Refusal> {
+/// What a configuration an agent gave sets: its stage plan, its rules, or both.
+#[derive(Debug, Default)]
+pub(crate) struct Config {
+    pub plan: Option<Vec<orx_signals::Stage>>,
+    pub rules: Option<Vec<super::rules::Rule>>,
+}
+
+/// A configuration as an agent gave it, or why it cannot be used.
+pub(crate) fn config_of(given: &Value, source: &Source, fix: &str) -> Result<Config, Refusal> {
     let file = source.config.unwrap_or("<config>");
     let refuse = |why: String| Refusal::Invalid(format!("Config {file}: {why}. {fix}"));
     let fields = given
         .as_object()
+        .filter(|fields| !fields.is_empty())
         .ok_or_else(|| refuse(format!("give a JSON object with {CONFIG_KEYS}")))?;
-    if let Some(key) = fields.keys().find(|key| key.as_str() != "plan") {
+    if let Some(key) = fields
+        .keys()
+        .find(|key| !["plan", "rules"].contains(&key.as_str()))
+    {
         return Err(refuse(format!(
             "\"{key}\" is not something this orx reads; a config takes {CONFIG_KEYS}"
         )));
     }
-    match fields.get("plan") {
-        Some(plan) => orx_signals::plan(plan, true).map_err(refuse),
-        None => Err(refuse(format!("give a JSON object with {CONFIG_KEYS}"))),
-    }
+    Ok(Config {
+        plan: fields
+            .get("plan")
+            .map(|plan| orx_signals::plan(plan, true))
+            .transpose()
+            .map_err(refuse)?,
+        rules: fields
+            .get("rules")
+            .map(super::rules::parse)
+            .transpose()
+            .map_err(refuse)?,
+    })
 }
 
 /// Patterns as an agent gave them, compiled, or why they cannot be used.
@@ -1225,6 +1240,11 @@ pub(crate) fn described(store: &crate::store::Store, id: &str) -> Result<Value, 
     let raw = store.run_monitor_json(id)?;
     described["patterns"] = json!(stored_patterns(id, raw.as_deref())?.patterns);
     described["plan"] = json!(stored_plan(id, raw.as_deref())?);
+    let rules = super::rules::stored(id, raw.as_deref())?;
+    described["rules"] = json!(rules
+        .iter()
+        .map(super::rules::Rule::json)
+        .collect::<Vec<_>>());
     Ok(described)
 }
 
@@ -1294,16 +1314,16 @@ pub(crate) fn set(
         }
         None => None,
     };
-    let plan = match configured {
+    let configured = match configured {
         Some(given) => {
             let file = source.config.unwrap_or("PATH");
-            Some(plan_of(
+            config_of(
                 given,
                 source,
                 &format!("Run `orx exp view set {id} --config {file}`."),
-            )?)
+            )?
         }
-        None => None,
+        None => Config::default(),
     };
     let saved = store.patch_run_monitor_json(id, expected, |raw| {
         let mut settings = match raw.map(serde_json::from_str::<Value>).transpose() {
@@ -1321,12 +1341,22 @@ pub(crate) fn set(
         if let Some(config) = &config {
             settings.insert("patterns".into(), json!(config.patterns));
         }
-        match &plan {
+        match &configured.plan {
             Some(plan) if plan.is_empty() => {
                 settings.remove("plan");
             }
             Some(plan) => {
                 settings.insert("plan".into(), json!(plan));
+            }
+            None => {}
+        }
+        match &configured.rules {
+            Some(rules) if rules.is_empty() => {
+                settings.remove("rules");
+            }
+            Some(rules) => {
+                let rules: Vec<Value> = rules.iter().map(super::rules::Rule::json).collect();
+                settings.insert("rules".into(), json!(rules));
             }
             None => {}
         }

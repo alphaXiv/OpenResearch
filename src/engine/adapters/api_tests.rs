@@ -55,6 +55,7 @@ fn pending<'a>(
         commit_sha: Some("snapshot"),
         chat_session_id: None,
         spec_digest: "digest",
+        monitor_config: None,
         launch,
     }
 }

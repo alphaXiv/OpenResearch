@@ -1106,6 +1106,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &launch,
             })
             .unwrap();

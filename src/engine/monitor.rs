@@ -176,6 +176,8 @@ struct Lifecycle {
     earlier: Option<StoredRun>,
     /// Why a failed run that recorded no message failed, as its log's last error says.
     log_error: Option<String>,
+    /// The rules the run was launched with, or why they cannot be read.
+    rules: std::result::Result<Vec<super::rules::Rule>, String>,
 }
 
 impl Lifecycle {
@@ -217,6 +219,8 @@ impl Lifecycle {
             parent,
             earlier,
             log_error: run.log_error,
+            rules: super::rules::frozen(&row.id, store.run_monitor_config(&row.id)?.as_deref())
+                .map_err(|error| format!("{error:#}")),
             run: row.clone(),
         })
     }
@@ -825,6 +829,11 @@ fn evaluate(
         None => Some(estimating()),
     };
     let estimate = estimate.filter(|_| started && life.live());
+    let rules = life.rules.as_deref().unwrap_or_default();
+    let budget = rules.iter().find_map(|rule| match rule.when {
+        super::rules::When::CostAbove { usd } => Some(usd),
+        _ => None,
+    });
     let cost = output.as_ref().map(|o| &o.cost).and_then(|cost| {
         let nothing = cost.so_far.is_none() && cost.spend.is_none() && cost.gpu_hours.is_none();
         (!(nothing && matches!(input.machine, estimate::Machine::Unpriced))).then(|| {
@@ -833,7 +842,7 @@ fn evaluate(
                 "projected": cost.projected,
                 "atLimit": cost.at_limit,
                 "spend": cost.spend,
-                "budget": null,
+                "budget": budget,
                 "gpuHours": cost.gpu_hours,
                 "at": laptop(cost.at),
                 "rate": null,
@@ -1146,7 +1155,7 @@ fn evaluate(
         "setup": setup,
         "revising": false,
         "brief": [],
-        "rules": [],
+        "rules": rules.iter().map(super::rules::Rule::shown).collect::<Vec<_>>(),
         "statusText": text,
     });
     if !best.is_empty() {
@@ -2085,6 +2094,29 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
     }
     if let Some((stages, current)) = facts.stages {
         lines.push(format!("stages   {}", stages_text(life, stages, current)));
+    }
+    match &life.rules {
+        Ok(rules) if rules.is_empty() => {}
+        Ok(rules) => lines.push(format!(
+            "rules    {}",
+            rules
+                .iter()
+                .map(|rule| {
+                    let does = match rule.does {
+                        super::rules::Does::Stop => "stops the run",
+                        super::rules::Does::Ask => "wakes the agent",
+                    };
+                    match rule.when {
+                        super::rules::When::CostAbove { usd } => {
+                            format!("{} {does} past ${usd:.2}", rule.name)
+                        }
+                        _ => format!("{} {does}", rule.name),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ")
+        )),
+        Err(error) => lines.push(format!("rules    {error}")),
     }
     if let Some(snapshot) = snapshot.filter(|s| !s.latest.is_empty()) {
         let values = snapshot
@@ -5292,8 +5324,16 @@ mod tests {
             )
         };
         assert_eq!(
-            invalid(raw(json!({"plan": [], "rules": []}))),
-            "Config config.json: \"rules\" is not something this orx reads; a config takes plan. Run `orx exp view set exp --config config.json`."
+            invalid(raw(json!({"plan": [], "brief": []}))),
+            "Config config.json: \"brief\" is not something this orx reads; a config takes plan and rules. Run `orx exp view set exp --config config.json`."
+        );
+        assert_eq!(
+            invalid(raw(json!({}))),
+            "Config config.json: give a JSON object with plan and rules. Run `orx exp view set exp --config config.json`."
+        );
+        assert_eq!(
+            invalid(raw(json!({"rules": [{"name": "nan", "text": "Stop at NaN.", "does": "halt", "when": {"nonFinite": "loss"}}]}))),
+            "Config config.json: rules[0] (nan): \"does\" must be \"stop\" or \"ask\". Run `orx exp view set exp --config config.json`."
         );
         assert_eq!(
             invalid(plan(&f, "exp", json!([{"phase": "train"}, {"phase": "train"}]))),
@@ -5317,6 +5357,82 @@ mod tests {
             .unwrap()
             .unwrap()
             .contains("plan"));
+    }
+
+    /// Rules saved on an experiment reach its children, and each run checks the ones it was
+    /// launched with whatever the experiment says later.
+    #[test]
+    fn a_run_keeps_the_rules_it_was_launched_with_and_status_lists_them() {
+        let f = Fixture::new("orx-monitor-rules-frozen");
+        let source = crate::engine::view::Source {
+            file: None,
+            patterns: None,
+            config: Some("config.json"),
+        };
+        let configure = |experiment: &str, config: Value| {
+            let raw = f.store.run_monitor_json(experiment).unwrap();
+            crate::engine::view::set(
+                &f.store,
+                experiment,
+                &crate::engine::view::etag(raw.as_deref()),
+                None,
+                None,
+                Some(&config),
+                &source,
+            )
+            .unwrap()
+        };
+        let nan = json!({"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
+            "does": "stop", "when": {"nonFinite": "loss", "reports": 3}});
+        let plateau = json!({"name": "plateau", "text": "Ask when val loss stops improving.", "does": "ask",
+            "when": {"noImprovement": {"signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}}});
+        let saved = configure("exp", json!({"rules": [nan, plateau]}));
+        assert_eq!(saved["rules"], json!([nan, plateau]));
+        assert_eq!(saved["plan"], json!([]));
+        f.child("child", "exp");
+        let launched = |run: &str, experiment: &str, budget: Option<f64>| {
+            let settings = f.store.run_monitor_json(experiment).unwrap();
+            let config =
+                crate::engine::rules::freeze(experiment, settings.as_deref(), budget).unwrap();
+            f.run_in(run, experiment, "running", local());
+            f.store.set_run_monitor_config(run, config.as_deref());
+        };
+        launched("r1", "child", Some(5.0));
+        configure("child", json!({"rules": []}));
+        launched("r2", "child", None);
+
+        let (_, monitor) =
+            super::monitor(&f.store, &f.store.get_run("r1").unwrap().unwrap()).unwrap();
+        assert_eq!(
+            monitor["rules"],
+            json!([
+                {"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.", "does": "stop"},
+                {"name": "plateau", "text": "Ask when val loss stops improving.", "does": "ask"},
+                {"name": "budget", "text": null, "does": "stop", "budgetUsd": 5.0},
+            ])
+        );
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(
+            text.contains("rules    nan-loss stops the run \u{b7} plateau wakes the agent \u{b7} budget stops the run past $5.00"),
+            "{text}"
+        );
+        let (_, later) =
+            super::monitor(&f.store, &f.store.get_run("r2").unwrap().unwrap()).unwrap();
+        assert_eq!(later["rules"], json!([]));
+        assert!(!later["statusText"].as_str().unwrap().contains("rules"));
+
+        // A run's rules written by a newer orx are said to be unreadable, not dropped.
+        f.run_in("r3", "child", "running", local());
+        f.store.set_run_monitor_config(
+            "r3",
+            Some(&json!({"rules": [{"name": "r", "text": "t", "does": "stop", "when": {"lossAbove": 1}}]}).to_string()),
+        );
+        let (_, newer) =
+            super::monitor(&f.store, &f.store.get_run("r3").unwrap().unwrap()).unwrap();
+        assert!(newer["statusText"]
+            .as_str()
+            .unwrap()
+            .contains("rules    Run r3's rules: rules[0] (r): unknown condition \"lossAbove\""));
     }
 
     /// Experiment settings as orx stored them before plans, and with one beside a key a newer
@@ -5368,6 +5484,24 @@ mod tests {
             4,
             "a new view keeps the plan"
         );
+        assert_eq!(saved["later"], json!({"kept": true}));
+
+        let ruled = fixture["ruled"].as_str().unwrap();
+        let names: Vec<_> = crate::engine::rules::stored("exp", Some(ruled))
+            .unwrap()
+            .into_iter()
+            .map(|rule| rule.name)
+            .collect();
+        assert_eq!(names, ["nan-loss", "diverging"]);
+        assert!(crate::engine::rules::stored("exp", Some(planned))
+            .unwrap()
+            .is_empty());
+        keep(ruled);
+        plan(&f, "exp", json!([{"phase": "eval"}])).unwrap();
+        let saved: Value =
+            serde_json::from_str(&f.store.run_monitor_json("exp").unwrap().unwrap()).unwrap();
+        let stored: Value = serde_json::from_str(ruled).unwrap();
+        assert_eq!(saved["rules"], stored["rules"], "a plan keeps the rules");
         assert_eq!(saved["later"], json!({"kept": true}));
 
         keep(before);

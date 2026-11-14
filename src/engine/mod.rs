@@ -9,6 +9,7 @@ pub(crate) mod monitor;
 pub mod notify;
 pub mod process;
 pub mod reconcile;
+pub(crate) mod rules;
 pub mod runtime;
 pub mod ssh_config_cleanup;
 pub mod submit;

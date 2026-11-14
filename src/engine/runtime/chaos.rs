@@ -299,6 +299,7 @@ fn submission<'a>(
         commit_sha: None,
         chat_session_id: Some("chaos"),
         spec_digest: digest,
+        monitor_config: None,
         launch,
     }
 }

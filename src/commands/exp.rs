@@ -168,10 +168,12 @@ async fn view(command: ViewCommand) -> Result<()> {
                 "configFile": shown(&config),
             });
             let saved = set_view(&exp_id, body).await?;
+            let given = |key: &str| configured.as_ref().is_some_and(|c| c.get(key).is_some());
             let what: Vec<&str> = [
                 (markup.is_some(), "view"),
                 (list.is_some(), "patterns"),
-                (configured.is_some(), "plan"),
+                (given("plan"), "plan"),
+                (given("rules"), "rules"),
             ]
             .into_iter()
             .filter_map(|(given, name)| given.then_some(name))
@@ -186,6 +188,9 @@ async fn view(command: ViewCommand) -> Result<()> {
                 "\u{2713} {first}{} saved on experiment {exp_id}; its runs are drawn with them now.",
                 &what[1..],
             );
+            if given("rules") {
+                println!("Runs launched from now on check these rules; a run already going keeps the rules it was launched with.");
+            }
             if list.is_some() {
                 println!("Its runs' logs are read again with the patterns; check one with `orx exp view check RUN`.");
             }
@@ -234,11 +239,17 @@ async fn view(command: ViewCommand) -> Result<()> {
                     serde_json::to_string_pretty(&described["patterns"])?
                 );
             }
-            if described["plan"].as_array().is_some_and(|p| !p.is_empty()) {
-                println!(
-                    "\nConfig:\n{}",
-                    serde_json::to_string_pretty(&serde_json::json!({"plan": described["plan"]}))?
-                );
+            let mut config = serde_json::Map::new();
+            for key in ["plan", "rules"] {
+                if described[key]
+                    .as_array()
+                    .is_some_and(|list| !list.is_empty())
+                {
+                    config.insert(key.into(), described[key].clone());
+                }
+            }
+            if !config.is_empty() {
+                println!("\nConfig:\n{}", serde_json::to_string_pretty(&config)?);
             }
             Ok(())
         }

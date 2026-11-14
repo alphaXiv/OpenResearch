@@ -1383,6 +1383,9 @@ impl Commands for Runtime {
                 }
             }
             let backend = self.backend_for(&Key::of_launch(&submission.launch)?)?;
+            let experiment = &submission.experiment.id;
+            let settings = self.store()?.run_monitor_json(experiment)?;
+            let rules = super::rules::freeze(experiment, settings.as_deref(), args.budget)?;
             let mut metadata = crate::jobs::BackendDescriptor::parse(r#"{"kind":"engine"}"#)?;
             submission.source.apply_to_descriptor(&mut metadata);
             let digest = hex(&Sha256::digest(
@@ -1403,6 +1406,7 @@ impl Commands for Runtime {
                 commit_sha: Some(&submission.source.revision),
                 chat_session_id: chat_session.as_deref(),
                 spec_digest: &digest,
+                monitor_config: rules.as_deref(),
                 launch: &submission.launch,
             })?;
             drop(admission);
@@ -1990,6 +1994,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "hf_job".into(),
                     target: Some("lab".into()),
@@ -2271,6 +2276,7 @@ mod tests {
                     commit_sha: None,
                     chat_session_id: None,
                     spec_digest: "digest",
+                    monitor_config: None,
                     launch: &LaunchSpec {
                         kind: "openresearch_job".into(),
                         target: Some("org".into()),
@@ -2690,6 +2696,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "local_job".into(),
                     target: None,
@@ -2851,6 +2858,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: Some("chat"),
                 spec_digest: "spec",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "local_job".into(),
                     target: None,
@@ -2976,6 +2984,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "retired_job".into(),
                     target: None,
@@ -3543,6 +3552,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: Some("chat"),
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "local_job".into(),
                     target: None,
@@ -4348,6 +4358,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "local_job".into(),
                     target: None,

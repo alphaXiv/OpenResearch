@@ -3094,6 +3094,7 @@ struct CreateRunReq {
     disk: Option<i64>,
     #[serde(default)]
     force: bool,
+    budget: Option<f64>,
     chat_session_id: Option<String>,
     agent_origin: Option<String>,
     /// Absent from dashboard callers; checked against orx up's own config dir.
@@ -3129,6 +3130,7 @@ impl CreateRunReq {
             exclude: self.exclude,
             sbatch_args: self.sbatch_args,
             force: self.force,
+            budget: self.budget,
             chat_session_id: self.chat_session_id,
             agent_origin: self.agent_origin,
             forwarded: true,
@@ -12385,6 +12387,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &launch,
             })
             .unwrap();

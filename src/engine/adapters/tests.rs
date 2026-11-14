@@ -178,6 +178,7 @@ fn submitting(intent: &RunIntent) -> SubmittingRun<'_> {
         commit_sha: None,
         chat_session_id: Some("chat"),
         spec_digest: &intent.spec_digest,
+        monitor_config: None,
         launch: &intent.launch,
     }
 }
@@ -1211,6 +1212,7 @@ async fn submission_child() {
         commit_sha: None,
         chat_session_id: Some("chat"),
         spec_digest: &digest,
+        monitor_config: None,
         launch: &launch,
     };
     if point == "intent" {

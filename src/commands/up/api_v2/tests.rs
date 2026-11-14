@@ -122,6 +122,7 @@ impl Commands for Services {
             commit_sha: None,
             chat_session_id: None,
             spec_digest: "digest",
+            monitor_config: None,
             launch: &LaunchSpec {
                 kind: "local_job".into(),
                 target: None,
@@ -1800,6 +1801,7 @@ async fn dashboard_host_routes_report_states_and_retry_only_key_hosts() {
             commit_sha: None,
             chat_session_id: None,
             spec_digest: "digest",
+            monitor_config: None,
             launch: &LaunchSpec {
                 kind: "ssh_job".into(),
                 target: Some("lab".into()),
@@ -2276,6 +2278,7 @@ async fn dashboard_host_lifecycle_child() {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: &orx_host::sha(b"printf resumed"),
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "ssh_job".into(),
                     target: Some("orx-test".into()),

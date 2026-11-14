@@ -313,6 +313,8 @@ pub struct SubmittingRun<'a> {
     pub chat_session_id: Option<&'a str>,
     pub spec_digest: &'a str,
     pub launch: &'a LaunchSpec,
+    /// The rules the run checks, frozen at launch.
+    pub monitor_config: Option<&'a str>,
 }
 
 /// Where and how a run launches, durable from its first transaction so recovery after a
@@ -1453,6 +1455,7 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN model_sightings TEXT",
             "ALTER TABLE runs ADD COLUMN waiting_reason TEXT",
             "ALTER TABLE runs ADD COLUMN price_json TEXT",
+            "ALTER TABLE runs ADD COLUMN monitor_config_json TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_micros INTEGER",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_currency TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
@@ -5975,8 +5978,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
                                created_at, updated_at, commit_sha, chat_session_id, spec_digest,
-                               launch_spec)
-             VALUES (?1, ?2, ?3, 'submitting', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                               launch_spec, monitor_config_json)
+             VALUES (?1, ?2, ?3, 'submitting', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 run.id,
                 run.experiment_id,
@@ -5989,9 +5992,23 @@ impl Store {
                 run.chat_session_id,
                 run.spec_digest,
                 serde_json::to_string(run.launch)?,
+                run.monitor_config,
             ],
         )?;
         Ok(())
+    }
+
+    /// The rules the run was launched with, as frozen then.
+    pub(crate) fn run_monitor_config(&self, run_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT monitor_config_json FROM runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     pub fn engine_run_state(&self, run_id: &str) -> Result<Option<EngineRunState>> {
@@ -7485,6 +7502,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .unwrap();
@@ -7712,6 +7730,7 @@ mod tests {
                 commit_sha: run.commit_sha.as_deref(),
                 chat_session_id: run.chat_session_id.as_deref(),
                 spec_digest: "spec-sha",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .unwrap();
@@ -7726,6 +7745,7 @@ mod tests {
                 commit_sha: run.commit_sha.as_deref(),
                 chat_session_id: run.chat_session_id.as_deref(),
                 spec_digest: "spec-sha",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .is_err());
@@ -7889,6 +7909,7 @@ mod tests {
                 commit_sha: run.commit_sha.as_deref(),
                 chat_session_id: run.chat_session_id.as_deref(),
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .unwrap();
@@ -8610,6 +8631,7 @@ mod tests {
                 commit_sha: run.commit_sha.as_deref(),
                 chat_session_id: run.chat_session_id.as_deref(),
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .unwrap();
@@ -10987,6 +11009,16 @@ mod tests {
     }
 
     impl Store {
+        /// The rules a run was launched with, as `orx exp run` freezes them.
+        pub(crate) fn set_run_monitor_config(&self, run_id: &str, config: Option<&str>) {
+            self.conn
+                .execute(
+                    "UPDATE runs SET monitor_config_json = ?2 WHERE id = ?1",
+                    params![run_id, config],
+                )
+                .unwrap();
+        }
+
         /// As a newer orx might have stored it.
         pub(crate) fn put_run_monitor_state(&self, run_id: &str, state: &serde_json::Value) {
             self.conn

@@ -603,8 +603,10 @@ pub enum ViewCommand {
         /// `[{"regex": "…", "phase": "…", "unit": "…", "row": "…"}]`. Its runs' logs are read again.
         #[arg(long)]
         pattern: Option<std::path::PathBuf>,
-        /// Read the stages every run goes through, in order, from this JSON file:
-        /// `{"plan": [{"phase": "…", "of": N, "unit": "…"}]}`. An empty plan clears it.
+        /// Read the stages every run goes through, in order, and the rules orx stops or asks by,
+        /// from this JSON file: `{"plan": [{"phase": "…", "of": N, "unit": "…"}], "rules":
+        /// [{"name": "…", "text": "…", "does": "stop|ask", "when": {…}}]}`. An empty list clears
+        /// it; a key left out keeps what is saved.
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
@@ -747,6 +749,11 @@ pub struct ExpRunArgs {
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
+    /// Stop the run once what it has cost, or would cost by its end, passes this many US
+    /// dollars: a rule named `budget`, checked with the experiment's other rules.
+    #[arg(long, value_name = "USD", value_parser = parse_budget)]
+    #[serde(default)]
+    pub budget: Option<f64>,
     /// Internal attribution forwarded through the local orx up API.
     #[arg(skip)]
     pub chat_session_id: Option<String>,
@@ -773,6 +780,13 @@ pub struct ExpRunArgs {
     #[arg(skip)]
     #[serde(default)]
     pub caller_compute_settings: Option<crate::commands::up::LaunchSettings>,
+}
+
+fn parse_budget(given: &str) -> std::result::Result<f64, String> {
+    let usd: f64 = given.trim().trim_start_matches('$').parse().map_err(|_| {
+        format!("--budget must be a finite USD amount greater than zero (got {given})")
+    })?;
+    engine::rules::budget(usd).map(|_| usd)
 }
 
 /// Markers the native agent CLIs export to their shells; nested agents are `unknown`.
