@@ -195,7 +195,7 @@ for (let step = 1; step <= total; step++) {
     await expect(banner).toContainText('Done in')
     await themes(page, banner, info, 'line-done')
     // Its name opens the run's page, which draws the whole curve with axes.
-    await banner.getByRole('button', { name: /^\W?declared\W?$/ }).click()
+    await banner.getByRole('button', { name: /^\W?Declared\W?$/ }).click()
     const latest = latestRun(page)
     await expect(latest).toContainText('Done in')
     await expect(latest.getByRole('img', { name: /^loss / })).toHaveAccessibleName(said('loss 0.05'))
@@ -351,7 +351,7 @@ for (let round = 1; round <= total; round++) {
 
   const latest = latestRun(page)
   await test.step('its name opens the page, with its chart and its rows together, and the bar', async () => {
-    await banner.getByRole('button', { name: /^\W?rounds\W?$/ }).click()
+    await banner.getByRole('button', { name: /^\W?Rounds\W?$/ }).click()
     await expect(latest.getByRole('heading', { name: /Latest rounds/ })).toBeVisible()
     const table = latest.getByRole('table')
     expect((await table.getByRole('columnheader').allTextContents()).sort()).toEqual(['elo', 'name', 'round', 'win'])
@@ -392,7 +392,7 @@ for (let i = 2001; i <= 2060; i++) {
   agent.script('finished with status **done**', [{ say: 'The items finished.' }])
   const banner = await launch(page, agent, project, 'Items', run.command)
   await expect.poll(() => column(banner.getByRole('table'), 'name')).toEqual(['item 2000', 'item 1999'])
-  await banner.getByRole('button', { name: /^\W?items\W?$/ }).click()
+  await banner.getByRole('button', { name: /^\W?Items\W?$/ }).click()
   const latest = latestRun(page)
 
   const box = latest.getByRole('region', { name: /every row/ })
@@ -747,7 +747,7 @@ test('an error flags the run and wakes its Agentic agent once, which confirms it
     await keep(page, page, 'agentic-wake-turn')
     await run.open('end')
     await expect(banner).toContainText('Done', { timeout: 60_000 })
-    await banner.getByRole('button', { name: /^\W?flagged\W?$/ }).click()
+    await banner.getByRole('button', { name: /^\W?Flagged\W?$/ }).click()
     const watch = page.locator('section', { has: page.getByRole('heading', { name: 'Watch', exact: true }) })
     await expect.poll(async () => (await watch.innerText()).replace(/[⁦-⁩]/g, ''))
       .toMatch(/Flagged by OpenResearch itself, with no model\. A new kind of error in the log: RuntimeError\.\s+The agent chose to keep going\. One bad batch on a warm GPU; the loss kept falling\./)
