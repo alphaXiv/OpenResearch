@@ -878,3 +878,168 @@ fn an_ended_run_may_write_any_number_and_a_finished_stage_its_total() {
         "nothing of an ended run moves"
     );
 }
+
+/// The walkthrough's sentiment classifier: a healthy run's first epochs, and a child that trains
+/// on flipped labels, `(loss, test accuracy)` an epoch.
+const HEALTHY: [(f64, f64); 8] = [
+    (0.3424, 0.887),
+    (0.2914, 0.896),
+    (0.2893, 0.896),
+    (0.2869, 0.889),
+    (0.2893, 0.895),
+    (0.2881, 0.893),
+    (0.2902, 0.897),
+    (0.2879, 0.894),
+];
+const FLIPPED: [(f64, f64); 8] = [
+    (0.3559, 0.104),
+    (0.3030, 0.101),
+    (0.2998, 0.102),
+    (0.3001, 0.096),
+    (0.3001, 0.095),
+    (0.3009, 0.101),
+    (0.3014, 0.096),
+    (0.2988, 0.100),
+];
+const CLASSIFIER_VIEW: &str = r#"<signal name="loss" label="Train loss" digits="4" better="lower" />
+<signal name="test_acc" label="Test accuracy" digits="3" better="higher" />
+<view headline="test_acc loss"><chart y="loss" /></view>"#;
+
+/// An experiment with the classifier's view, under `parent` when given, and its run in `chat`.
+fn classifier_run(
+    store: &Store,
+    id: &str,
+    parent: Option<&str>,
+    status: &str,
+    chat: &str,
+) -> StoredRun {
+    store
+        .create_local_experiment(&LocalExperiment {
+            id: format!("exp-{id}"),
+            project_id: "project".into(),
+            parent_experiment_id: parent.map(|p| format!("exp-{p}")),
+            slug: format!("exp-{id}"),
+            branch_name: format!("orx/exp-{id}"),
+            title: Some(format!("Classifier {id}")),
+            description: None,
+            run_command: "train".into(),
+            agent_status: "idle".into(),
+            created_at: 1,
+            updated_at: 1,
+            chat_session_id: Some(chat.into()),
+            archived: false,
+        })
+        .unwrap();
+    if parent.is_none() {
+        let source = crate::engine::view::Source {
+            file: Some("view.xml"),
+            patterns: None,
+            config: None,
+        };
+        crate::engine::view::set(
+            store,
+            &format!("exp-{id}"),
+            &crate::engine::view::etag(None),
+            Some(CLASSIFIER_VIEW),
+            None,
+            None,
+            &source,
+        )
+        .unwrap();
+    }
+    let now = crate::store::now_ms();
+    let row = StoredRun {
+        id: id.into(),
+        experiment_id: format!("exp-{id}"),
+        project_id: "project".into(),
+        status: status.into(),
+        backend_json: r#"{"kind":"local"}"#.into(),
+        command: "train".into(),
+        created_at: now - 60_000,
+        updated_at: now,
+        ended_at: (status == "done").then_some(now - 1_000),
+        exit_code: None,
+        commit_sha: None,
+        result_markdown: None,
+        cancel_requested: false,
+        cancel_reason: None,
+        chat_session_id: Some(chat.into()),
+    };
+    store.upsert_run(&row).unwrap();
+    row
+}
+
+/// The run's log and its fold after `epochs`, as the classifier prints them, of 150.
+fn epochs(store: &Store, run: &StoredRun, epochs: &[(f64, f64)]) {
+    // A live run is projected at most once a second: each report is projected a minute on.
+    let projected_at = crate::store::now_ms() + 60_000 * epochs.len() as i64;
+    let mut snapshot = orx_signals::Snapshot::new(&run.id, "1-7", "g1");
+    let mut log = String::new();
+    for (index, (loss, acc)) in epochs.iter().enumerate() {
+        let line = format!(
+            "::orx:: {{\"step\":{},\"of\":150,\"phase\":\"train\",\"unit\":\"epochs\",\"m\":{{\"loss\":{loss},\"test_acc\":{acc}}}}}\n",
+            index + 1
+        );
+        let at = projected_at - (epochs.len() - index) as i64 * 1000;
+        snapshot.feed(line.as_bytes(), false, at, true).unwrap();
+        snapshot.reached_end(at);
+        log.push_str(&line);
+        log.push_str(&format!(
+            "epoch {}/150 loss {loss} test_acc {acc}\n",
+            index + 1
+        ));
+    }
+    keep_log(store, &run.id, &log);
+    let path = store
+        .data_dir()
+        .join("run-signals")
+        .join(format!("{}.json", run.id));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::engine::adapters::signals::publish(&path, &snapshot).unwrap();
+    super::super::monitor::advance(store, run, projected_at).unwrap();
+}
+
+#[tokio::test]
+async fn a_run_far_worse_than_its_parent_at_the_same_step_is_flagged() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "opencode");
+    let parent = classifier_run(&store, "seed-2", None, "done", "chat");
+    epochs(&store, &parent, &HEALTHY);
+    let child = classifier_run(&store, "flipped", Some("seed-2"), "running", "chat");
+    let mut state = State::default();
+    for seen in 1..=FLIPPED.len() {
+        epochs(&store, &child, &FLIPPED[..seen]);
+        let now = Now::read(&store, &child).unwrap();
+        trip::check(&mut state, &now, crate::store::now_ms()).await;
+        let flags = super::super::flags::read(&store, &child).unwrap();
+        if seen < 3 {
+            assert!(
+                flags.is_empty(),
+                "one or two reports flag nothing: {flags:?}"
+            );
+        }
+    }
+    let flags = super::super::flags::read(&store, &child).unwrap();
+    assert_eq!(flags.len(), 1, "{flags:?}");
+    assert_eq!(flags[0]["source"], "tripwire");
+    assert_eq!(flags[0]["kind"], "parent");
+    let detail = flags[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("Test accuracy **0.102**, 0.794 worse than the parent at step 3."),
+        "{detail}"
+    );
+
+    // A sibling that trains as its parent did is never flagged.
+    let healthy = classifier_run(&store, "seed-5", Some("seed-2"), "running", "chat");
+    for seen in 1..=HEALTHY.len() {
+        epochs(&store, &healthy, &HEALTHY[..seen]);
+        let now = Now::read(&store, &healthy).unwrap();
+        trip::check(&mut state, &now, crate::store::now_ms()).await;
+    }
+    assert!(super::super::flags::read(&store, &healthy)
+        .unwrap()
+        .is_empty());
+}

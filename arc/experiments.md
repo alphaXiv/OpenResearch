@@ -394,7 +394,9 @@ A flag says a run may be going wrong and never stops it (`src/engine/flags.rs`).
 Three things raise one: a look, a rule that asks, and orx's own tripwires, which
 watch every live run whether or not a model does (`src/engine/watch/trip.rs`): a
 value that is not a number, unless a rule the run was launched with checks that
-signal for it; no progress past the estimator's stall threshold, saying whether
+signal for it; a signal at least half again worse than the parent's at the same
+step on three comparisons in a row, unless a rule compares it with the parent;
+no progress past the estimator's stall threshold, saying whether
 the log went silent too; a run that reports no progress and prints nothing for
 ten minutes; a kind of error line the run has not printed before. A flag keeps
 the log lines it cites, by bytes, line numbers and the log's identity, and the

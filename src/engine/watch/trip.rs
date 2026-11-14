@@ -20,6 +20,8 @@ const ERROR_WORDS: [&str; 9] = [
 const SILENT_S: u64 = 600;
 const TAIL: u64 = 16 * 1024;
 const TAIL_LINES: usize = 6;
+/// Comparisons in a row a signal is far worse than the parent's before it is flagged.
+const WORSE_IN_A_ROW: u32 = 3;
 
 /// One condition a run meets now.
 struct Tripped {
@@ -44,9 +46,14 @@ fn plain(text: &str) -> String {
     text.replace(['{', '}'], "").replace("**", "")
 }
 
-/// `covered` names the signals a rule the run was launched with already checks for a value that
-/// is not a number: that rule decides, and the tripwire stays out of its way.
-fn conditions(state: &State, run: &Now, covered: &BTreeSet<String>, now: i64) -> Vec<Tripped> {
+/// `covered` names the tripwires and signals a rule the run was launched with already checks: that
+/// rule decides, and the tripwire stays out of its way.
+fn conditions(
+    state: &State,
+    run: &Now,
+    covered: &BTreeSet<(&str, String)>,
+    now: i64,
+) -> Vec<Tripped> {
     let mut tripped = Vec::new();
     let signals = &run.body["view"]["signals"];
     let label = |name: &str| signals[name]["label"].as_str().unwrap_or(name).to_owned();
@@ -54,7 +61,7 @@ fn conditions(state: &State, run: &Now, covered: &BTreeSet<String>, now: i64) ->
     let done = run.summary["stage"]["done"].as_f64();
     let at_step = done.map_or_else(String::new, |done| format!(" at step {done}"));
     for (name, value) in run.body["latest"].as_object().into_iter().flatten() {
-        if covered.contains(name) {
+        if covered.contains(&("nonFinite", name.clone())) {
             continue;
         }
         let Some(spelled) = value
@@ -69,6 +76,38 @@ fn conditions(state: &State, run: &Now, covered: &BTreeSet<String>, now: i64) ->
             template: format!("{} became **{spelled}**{at_step}.", plain(&label(name))),
             text: format!("{} reported {spelled}{at_step}.", label(name)),
             evidence: Evidence::NonFinite,
+        });
+    }
+    for (name, vs) in run.body["versus"]["step"].as_object().into_iter().flatten() {
+        let held = state
+            .worse
+            .get(&(run.run.id.clone(), name.clone()))
+            .map_or(0, |(_, held)| *held);
+        let spec = &signals[name];
+        if covered.contains(&("parent", name.clone()))
+            || held < WORSE_IN_A_ROW
+            || !far_worse(vs, spec)
+        {
+            continue;
+        }
+        let mine = super::super::monitor::value_text(&run.body["latest"][name], spec);
+        let theirs = super::super::monitor::value_text(&vs["parent"], spec);
+        let at = vs["step"]
+            .as_f64()
+            .map_or_else(String::new, |step| format!(" at step {step}"));
+        tripped.push(Tripped {
+            kind: "parent",
+            fingerprint: format!("parent:{name}:{stage}"),
+            template: format!(
+                "{} **{mine}**, {}{at}.",
+                plain(&label(name)),
+                versus_text(Some(vs), spec)
+            ),
+            text: format!(
+                "{} is {mine} against the parent's {theirs}{at}, far worse on {held} comparisons in a row.",
+                label(name)
+            ),
+            evidence: Evidence::Tail,
         });
     }
     let scan = state.scans.get(&run.run.id);
@@ -147,6 +186,29 @@ fn conditions(state: &State, run: &Now, covered: &BTreeSet<String>, now: i64) ->
     tripped
 }
 
+/// Counts, for each signal compared with the parent, the comparisons in a row at a new step that
+/// were far worse.
+fn count_worse(state: &mut State, run: &Now) {
+    let signals = &run.body["view"]["signals"];
+    for (name, vs) in run.body["versus"]["step"].as_object().into_iter().flatten() {
+        let Some(step) = vs["step"].as_f64() else {
+            continue;
+        };
+        let (last, held) = state
+            .worse
+            .entry((run.run.id.clone(), name.clone()))
+            .or_insert((f64::NEG_INFINITY, 0));
+        if step > *last {
+            *last = step;
+            *held = if far_worse(vs, &signals[name]) {
+                *held + 1
+            } else {
+                0
+            };
+        }
+    }
+}
+
 /// Wakes the run's Agentic chats with its open flag, when none was woken with it yet: the chat
 /// was Copilot when it was raised.
 fn route(store: &Store, run: &StoredRun) -> Result<()> {
@@ -185,6 +247,7 @@ pub(super) async fn check(state: &mut State, run: &Now, now: i64) {
     if !run.live() || run.body["availability"]["state"] != "live" {
         return;
     }
+    count_worse(state, run);
     if run.summary["flag"]["state"] == "raised" {
         if let Err(error) = Store::open().and_then(|store| route(&store, &run.run)) {
             eprintln!(
@@ -196,7 +259,7 @@ pub(super) async fn check(state: &mut State, run: &Now, now: i64) {
     if !run.summary["flag"].is_null() {
         return;
     }
-    let covered: BTreeSet<String> = Store::open()
+    let covered: BTreeSet<(&str, String)> = Store::open()
         .and_then(|store| {
             super::super::rules::frozen(
                 &run.run.id,
@@ -206,7 +269,8 @@ pub(super) async fn check(state: &mut State, run: &Now, now: i64) {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|rule| match rule.when {
-            super::super::rules::When::NonFinite { signal, .. } => Some(signal),
+            super::super::rules::When::NonFinite { signal, .. } => Some(("nonFinite", signal)),
+            super::super::rules::When::WorseThanParent { signal, .. } => Some(("parent", signal)),
             _ => None,
         })
         .collect();

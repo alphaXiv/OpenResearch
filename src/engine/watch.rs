@@ -324,6 +324,9 @@ struct State {
     tripped: HashSet<(String, String)>,
     /// When each run's current stage was first seen, which starts its ceiling ladder.
     stages: HashMap<String, ((String, usize), i64)>,
+    /// Each run's signals far worse than the parent: the step last compared, and at how many
+    /// steps in a row.
+    worse: HashMap<(String, String), (f64, u32)>,
     looking: BTreeSet<String>,
 }
 
@@ -2510,6 +2513,29 @@ fn versus_text(vs: Option<&Value>, spec: &Value) -> String {
             "worse"
         }
     )
+}
+
+/// Whether a comparison with the parent at the same step is far worse: the worse of the two at
+/// least half again the better, or, where the better is not above zero, apart by half the
+/// parent's size.
+fn far_worse(vs: &Value, spec: &Value) -> bool {
+    let (Some(d), Some(theirs)) = (vs["d"].as_f64(), vs["parent"].as_f64()) else {
+        return false;
+    };
+    if vs["good"] != false || vs["flat"] == true {
+        return false;
+    }
+    let mine = theirs + d;
+    let (worse, better) = if spec["better"] == "lower" {
+        (mine, theirs)
+    } else {
+        (theirs, mine)
+    };
+    if better > 0.0 {
+        worse >= 1.5 * better
+    } else {
+        d.abs() >= 0.5 * theirs.abs()
+    }
 }
 
 /// A chat's newest summary sentence, for the summary above its composer: the look, its runs by
