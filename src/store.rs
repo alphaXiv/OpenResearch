@@ -6409,7 +6409,7 @@ impl Store {
     }
 
     /// [`Self::accept_run_stop`] for a caller already holding the run's cancel lock.
-    fn accept_run_stop_locked(
+    pub(super) fn accept_run_stop_locked(
         &self,
         run_id: &str,
         reason: Option<&str>,

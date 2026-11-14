@@ -633,7 +633,7 @@ async fn an_error_seen_while_a_flag_was_open_is_raised_once_that_flag_settles() 
         body: json!({"flagId": "f0", "c": "keep", "by": "user"}),
         wakes: Vec::new(),
     };
-    store.record_flag_choices(&[keep], 2).unwrap();
+    store.record_flag_choices(&[keep], None, 2).unwrap();
     super::super::monitor::advance(&store, &row, crate::store::now_ms()).unwrap();
     pass(&state).await.unwrap();
     let flags = super::super::flags::read(&store, &row).unwrap();

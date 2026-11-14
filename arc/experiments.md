@@ -411,7 +411,10 @@ settling it, an agent's `--ask` and a Copilot flag wait for the user, who sees
 Stop run, Keep going and Ask in the strip and an amber mark on the chat's row.
 `orx exp flag RUN --flag ID --keep|--ask|--stop` and the strip send one choice;
 a repeated request id answers as the first did, and a settled flag, or one on a
-run that ended, is refused. Keep going settles it and the run's next looks read
-what was kept and why. Stop cancels the run as `orx exp cancel` does. Ask sends
+run that ended or whose stop was accepted, is refused. Keep going settles it and
+the run's next looks read what was kept and why. Stop records its choice and
+accepts the run's stop, with whose words it is, in one transaction under the
+run's cancel lock, then delivers it as `orx exp cancel` does, so of a Stop, a
+Keep and the agent's own cancel exactly one wins. Ask sends
 the flag, and every open flag its look raised beside it, to the chat's agent as
 one turn.

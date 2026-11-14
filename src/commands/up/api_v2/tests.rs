@@ -3332,3 +3332,84 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
             .contains("A flag's choice is keep, stop or ask (got \"maybe\").")
     );
 }
+
+/// A Stop and a Keep on one flag, or a flag's choice after the agent stopped the run itself:
+/// one wins, every surface says its words, and the other is refused as settled.
+#[tokio::test]
+async fn a_stop_and_a_keep_that_race_leave_one_winner() {
+    let f = Fixture::new().await;
+    let store = || f.api.store();
+    store().put_chat_session("chat-1", "claude-code", Some("copilot"));
+    for (id, flag) in [("race", "f1"), ("cancelled", "f2")] {
+        f.insert(id, "exp", "project", "running");
+        store().subscribe_run(id, "chat-1", 1).unwrap();
+        let run = f.api.run(id).unwrap();
+        let body = json!({"id": flag, "source": "tripwire", "at": 1, "template": "t", "detail": "t",
+            "text": "t", "evidence": null, "whole": 0.5});
+        let flag = crate::engine::flags::new_flag(&store(), &run, body, true).unwrap();
+        store().raise_flags(&[flag], 1).unwrap();
+    }
+    let choose = |run: &str, body: Value| {
+        let client = f.client.clone();
+        let path = format!("runs/{run}/flag");
+        async move { client.json(reqwest::Method::POST, &path, Some(&body)).await }
+    };
+    let settled = |run: &str, flag: &str| {
+        format!("Run {run}: flag {flag} is already settled; run `orx exp status exp --run {run}`.")
+    };
+    let state = |run: &str| {
+        let run = f.api.run(run).unwrap();
+        crate::engine::flags::read(&store(), &run).unwrap()[0]["state"].clone()
+    };
+
+    let (stop, keep) = tokio::join!(
+        choose(
+            "race",
+            json!({"flagId": "f1", "choice": "stop", "requestId": "s"})
+        ),
+        choose(
+            "race",
+            json!({"flagId": "f1", "choice": "keep", "chatSessionId": "chat-1", "reason": "Fine."})
+        ),
+    );
+    match (stop, keep) {
+        (Ok(_), Err(lost)) => {
+            assert_eq!(lost.to_string(), settled("race", "f1"));
+            assert_eq!(state("race"), "stopped");
+            assert_eq!(
+                store().run_stop("race").unwrap().unwrap().by,
+                crate::store::StopBy::User
+            );
+        }
+        (Err(lost), Ok(_)) => {
+            assert_eq!(lost.to_string(), settled("race", "f1"));
+            assert_eq!(state("race"), "kept");
+            assert_eq!(
+                store().run_stop("race").unwrap(),
+                None,
+                "a kept run is not stopping"
+            );
+        }
+        other => panic!("exactly one choice wins: {other:?}"),
+    }
+
+    f.client
+        .json(
+            reqwest::Method::POST,
+            "runs/cancelled/cancel",
+            Some(&json!({"chatSessionId": "chat-1", "reason": "Diverged."})),
+        )
+        .await
+        .unwrap();
+    for choice in ["keep", "stop"] {
+        let lost = choose("cancelled", json!({"flagId": "f2", "choice": choice}))
+            .await
+            .unwrap_err();
+        assert_eq!(lost.to_string(), settled("cancelled", "f2"), "{choice}");
+    }
+    assert_eq!(
+        store().run_stop("cancelled").unwrap().unwrap().by,
+        crate::store::StopBy::Agent,
+        "the agent's stop keeps its words"
+    );
+}

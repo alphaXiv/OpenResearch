@@ -241,8 +241,22 @@ impl Store {
     /// Keeps a choice on a run's flag, and on the other flags of its look an Ask takes along,
     /// with the notices each wakes chats with, in one transaction, so they wake as one turn.
     /// The first choice is the one asked for: nothing is kept when another choice settled its
-    /// flag first, or this request was kept already; a flag taken along that is settled is left.
-    pub(crate) fn record_flag_choices(&self, choices: &[FlagChoice], now: i64) -> Result<Chosen> {
+    /// flag first, the run's stop was accepted first, or this request was kept already; a flag
+    /// taken along that is settled is left. A Stop's `stop` accepts the run's cancel with who
+    /// asked in the same transaction, so the choice and the stop's words are one winner's.
+    pub(crate) fn record_flag_choices(
+        &self,
+        choices: &[FlagChoice],
+        stop: Option<(&str, &StopContext)>,
+        now: i64,
+    ) -> Result<Chosen> {
+        let mut lock = match (stop, choices.first()) {
+            (Some(_), Some(first)) => Some(open_lifecycle_lock_at(
+                &self.run_lock_path(CANCEL_LOCK, &first.run_id)?,
+            )?),
+            _ => None,
+        };
+        let _guard = lock.as_mut().map(|lock| lock.write()).transpose()?;
         let tx = self.begin_immediate()?;
         for (index, choice) in choices.iter().enumerate() {
             let flag = choice.body["flagId"].as_str().unwrap_or_default();
@@ -260,6 +274,22 @@ impl Store {
                 }
                 if events.iter().filter(mine).any(settles) {
                     return Ok(Chosen::Settled);
+                }
+                let stopping: bool = self.conn.query_row(
+                    "SELECT cancel_requested = 1 OR cancel_accepted_at IS NOT NULL FROM runs WHERE id = ?1",
+                    [&choice.run_id],
+                    |row| row.get(0),
+                )?;
+                if stopping && matches!(choice.body["c"].as_str(), Some("keep" | "stop")) {
+                    return Ok(Chosen::Settled);
+                }
+                if let Some((reason, stop)) = stop {
+                    if self
+                        .accept_run_stop_locked(&choice.run_id, Some(reason), Some(stop))?
+                        .is_none()
+                    {
+                        return Ok(Chosen::Settled);
+                    }
                 }
             } else if events.iter().filter(mine).any(settles) {
                 continue;

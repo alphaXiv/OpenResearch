@@ -759,17 +759,23 @@ async fn choose(
     let Some((choices, touched)) = planned else {
         return Ok((reread(&api.store(), &run)?, run));
     };
-    if choice == "stop" {
-        api.commands
-            .cancel(&run, &stop_words, Some(&stop))
-            .await
-            .map_err(|error| (StatusCode::CONFLICT, format!("{error:#}")))?;
+    let stopping = (choice == "stop").then_some((stop_words.as_str(), &stop));
+    let chosen = api
+        .store()
+        .record_flag_choices(&choices, stopping, now)
+        .map_err(failed)?;
+    match chosen {
+        crate::store::Chosen::Settled => return Err((StatusCode::CONFLICT, settled)),
+        crate::store::Chosen::Repeated => {}
+        // The stop is accepted with its words; the engine keeps delivering it if this fails.
+        crate::store::Chosen::Recorded if choice == "stop" => {
+            if let Err(error) = api.commands.cancel(&run, &stop_words, Some(&stop)).await {
+                eprintln!("orx up: stopping run {id} at flag {flag_id}: {error:#}");
+            }
+        }
+        crate::store::Chosen::Recorded => {}
     }
     let store = api.store();
-    match store.record_flag_choices(&choices, now).map_err(failed)? {
-        crate::store::Chosen::Settled => return Err((StatusCode::CONFLICT, settled)),
-        crate::store::Chosen::Recorded | crate::store::Chosen::Repeated => {}
-    }
     notices_queued(
         choices
             .iter()
