@@ -539,6 +539,7 @@ fn versus(
                     parent
                         .series
                         .get(name)
+                        .filter(|_| same_stage(snapshot, parent, name))
                         .and_then(|theirs| parent_at(theirs, x)),
                 )
                 .map(|(value, at)| (value, at, Some(x))),
@@ -571,6 +572,27 @@ fn versus(
 
 /// The parent's value at step `x` of its `points`, interpolated only between two steps it
 /// reported; never extrapolated.
+/// The stage a run's series on the step axis belongs to: its name, and how many stages of that
+/// name came before it. A series with none yet counts in the stage the run reports steps in now.
+pub(super) fn series_stage(run: &Snapshot, name: &str) -> Option<(String, usize)> {
+    let at = match run.series_stages.get(name) {
+        Some(occurrence) => run
+            .phases
+            .iter()
+            .position(|p| p.occurrence == *occurrence)?,
+        None => run.phases.iter().rposition(|p| p.done.is_some())?,
+    };
+    let stage = &run.phases[at].name;
+    let before = run.phases[..at].iter().filter(|p| p.name == *stage).count();
+    Some((stage.clone(), before))
+}
+
+/// Whether the parent's series `name` is of the same stage as the run's, so their steps can be
+/// compared: the fold restarts a series at each stage, so a finished parent holds its last.
+pub(super) fn same_stage(run: &Snapshot, parent: &Snapshot, name: &str) -> bool {
+    series_stage(run, name) == series_stage(parent, name)
+}
+
 pub(super) fn parent_at(points: &[orx_signals::Point], x: f64) -> Option<f64> {
     let after = points.iter().position(|point| point.0 >= x)?;
     let (x1, y1) = points[after];
@@ -987,30 +1009,18 @@ fn evaluate(
             .filter_map(Value::as_str)
             .collect();
         // On the step axis a line is one stage's: the parent's goes under the child's of the same
-        // stage, or before the child has one, under the stage the child counts steps in now.
-        let stage_of = |run: &Snapshot, name: &str| {
-            let occurrence = run.series_stages.get(name)?;
-            run.phases
-                .iter()
-                .find(|phase| phase.occurrence == *occurrence)
-                .map(|phase| phase.name.clone())
-        };
-        let counting = snapshot
-            .and_then(|s| s.phases.iter().rev().find(|p| p.done.is_some()))
-            .map(|phase| phase.name.clone());
-        let same_stage = |name: &str| {
-            let mine = snapshot
-                .and_then(|s| stage_of(s, name))
-                .or_else(|| counting.clone());
+        // stage, and under any while either has none to say.
+        let shown = |name: &str| {
             x_name != "step"
-                || mine
-                    .zip(stage_of(parent, name))
+                || snapshot
+                    .and_then(|s| series_stage(s, name))
+                    .zip(series_stage(parent, name))
                     .is_none_or(|(mine, theirs)| mine == theirs)
         };
         let series: serde_json::Map<String, Value> = parent
             .series
             .iter()
-            .filter(|(name, _)| ghosts.contains(&name.as_str()) && same_stage(name))
+            .filter(|(name, _)| ghosts.contains(&name.as_str()) && shown(name))
             .map(|(name, points)| (name.clone(), json!(points)))
             .collect();
         let rows = tables(Some(parent), &|block| {
@@ -5400,6 +5410,71 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_is_compared_only_in_the_stage_the_child_is_in() {
+        let f = Fixture::new("orx-monitor-versus-stage");
+        f.view("exp", VIEW);
+        let run = |id: &str, experiment: &str, status: &str, lines: &[&str]| {
+            let run = f.run_in(id, experiment, status, local());
+            f.collect(&Snapshot {
+                run_id: id.into(),
+                ..folded(
+                    &lines
+                        .iter()
+                        .enumerate()
+                        .map(|(i, line)| (T0 + 1000 * i as i64, (*line).to_owned()))
+                        .collect::<Vec<_>>(),
+                )
+            });
+            run
+        };
+        let stage = |name: &str, loss: f64| {
+            [
+                format!("::orx:: {{\"phase\":\"{name}\",\"step\":0,\"of\":600}}"),
+                format!("::orx:: {{\"step\":300,\"m\":{{\"loss\":{loss}}}}}"),
+                format!("::orx:: {{\"step\":600,\"m\":{{\"loss\":{loss}}}}}"),
+            ]
+        };
+        let lines = |stages: &[[String; 3]]| -> Vec<String> { stages.concat() };
+        fn refs(lines: &[String]) -> Vec<&str> {
+            lines.iter().map(String::as_str).collect()
+        }
+        // Pretrain, then a finetune whose loss restarts at step 0: a finished parent's loss is finetune's.
+        let parent = lines(&[stage("pretrain", 2.0), stage("finetune", 1.2)]);
+        monitor_at(&f, &run("p1", "exp", "done", &refs(&parent)), T0 + 700_000);
+        f.child("child", "exp");
+        let child = lines(&[stage("pretrain", 6.0)]);
+        let (monitor, _) = monitor_at(
+            &f,
+            &run("c1", "child", "running", &refs(&child)),
+            T0 + 3_500,
+        );
+        assert_eq!(
+            monitor["versus"]["step"].get("loss"),
+            None,
+            "the parent's loss now is finetune's, not pretrain's: {}",
+            monitor["versus"]
+        );
+
+        // The same stage name again later is another stage: train, eval, then train once more.
+        let parent = lines(&[stage("train", 2.0), stage("eval", 0.5), stage("train", 1.2)]);
+        monitor_at(&f, &run("p2", "exp", "done", &refs(&parent)), T0 + 700_000);
+        f.child("child2", "exp");
+        let first_train = lines(&[stage("train", 6.0)]);
+        let (monitor, _) = monitor_at(
+            &f,
+            &run("c2", "child2", "running", &refs(&first_train)),
+            T0 + 3_500,
+        );
+        assert_eq!(
+            monitor["versus"]["step"].get("loss"),
+            None,
+            "{}",
+            monitor["versus"]
+        );
+        assert_eq!(monitor["parent"]["series"], json!({}));
+    }
+
+    #[test]
     fn a_stage_going_far_slower_than_the_parents_says_by_how_much() {
         let f = Fixture::new("orx-monitor-pace");
         let parent = staged(&f, "p1", "exp", "done", &[("train", 60, Some(60))], 100);
@@ -6008,6 +6083,54 @@ mod tests {
         assert_eq!(
             stop.reason.as_deref(),
             Some("loss was 1.2 worse than the parent's at the same step (1.7 against 0.5) on 3 reports in a row, step 30 to 50")
+        );
+    }
+
+    #[test]
+    fn a_parent_whose_later_stage_reuses_the_signal_stops_no_run_in_an_earlier_stage() {
+        let f = Fixture::new("orx-rules-parent-stage");
+        let staged = |stages: &[(&str, f64)]| -> Vec<(i64, String)> {
+            let mut lines = Vec::new();
+            for (stage, loss) in stages {
+                lines.push(format!(
+                    "::orx:: {{\"phase\":\"{stage}\",\"step\":0,\"of\":100}}"
+                ));
+                for step in (10..=60).step_by(10) {
+                    lines.push(format!(
+                        "::orx:: {{\"step\":{step},\"m\":{{\"loss\":{loss}}}}}"
+                    ));
+                }
+            }
+            lines
+                .into_iter()
+                .enumerate()
+                .map(|(i, line)| (T0 + 1000 * i as i64, line))
+                .collect()
+        };
+        f.run_in("parent", "exp", "done", local());
+        f.collect(&Snapshot {
+            run_id: "parent".into(),
+            ..folded(&staged(&[("pretrain", 2.0), ("finetune", 1.2)]))
+        });
+        rules_at(&f, "parent", T0 + 61_000);
+        f.child("child", "exp");
+        ruled(
+            &f,
+            "r1",
+            "child",
+            local(),
+            json!([{"name": "diverging", "text": "Stop when the loss is 1 worse than the parent's.",
+                "does": "stop", "when": {"worseThanParent": {"signal": "loss", "by": 1, "better": "lower"}, "reports": 3}}]),
+        );
+        f.collect(&Snapshot {
+            run_id: "r1".into(),
+            ..folded(&staged(&[("pretrain", 6.0)]))
+        });
+        rules_at(&f, "r1", T0 + 10_000);
+        assert_eq!(
+            stopped_by(&f, "r1"),
+            None,
+            "pretrain's 6.0 is never held against finetune's 1.2"
         );
     }
 

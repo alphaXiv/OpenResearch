@@ -595,7 +595,10 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
             better,
             reports,
         } => {
-            let theirs = facts.parent.and_then(|parent| parent.series.get(signal));
+            let theirs = facts
+                .parent
+                .filter(|parent| super::monitor::same_stage(facts.snapshot, parent, signal))
+                .and_then(|parent| parent.series.get(signal));
             let fresh = fresh(facts, signal, count);
             let last = fresh.last()?.0;
             let mut seen = None;
