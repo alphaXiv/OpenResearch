@@ -6,6 +6,7 @@
  *   node e2e/faults/run.ts lr-x100 nan-400   # these scenarios; none runs them all, one after another
  *   node e2e/faults/run.ts --list
  *   node e2e/faults/run.ts hang --keep       # leave the server up on a port printed at the end
+ *   node e2e/faults/run.ts nan-400 --shots=.shots/w9-rules   # also screenshot the end, both themes
  *
  * Needs a built `orx` (cargo build) and dashboard (pnpm exec vite build in ui/); ORX_E2E_BINARY names
  * another binary. The timeline goes to stdout and to `.shots/faults/<id>.txt` in the checkout. @module
@@ -25,6 +26,7 @@ process.env.ORX_E2E_BINARY = BINARY
 const { startOrx } = await import('../src/orx.ts')
 const PAYLOAD = path.join(import.meta.dirname, 'payload.mjs')
 const VIEW = path.join(import.meta.dirname, 'view.xml')
+const RULES = path.join(import.meta.dirname, 'rules.json')
 const OUT = path.join(ROOT, '.shots', 'faults')
 
 const args = process.argv.slice(2)
@@ -33,6 +35,7 @@ if (args.includes('--list')) {
   process.exit(0)
 }
 const keep = args.includes('--keep')
+const shots = args.find((arg) => arg.startsWith('--shots='))?.slice('--shots='.length)
 const wanted = args.filter((arg) => !arg.startsWith('--'))
 const unknown = wanted.filter((id) => !scenarios.some((scenario) => scenario.id === id))
 if (unknown.length) throw new Error(`No scenario ${unknown.join(', ')}; node e2e/faults/run.ts --list names them`)
@@ -43,16 +46,16 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, Math.m
 /** Direction marks the page puts around numbers and names; text compares without them. */
 const plain = (text: string) => text.replace(/[⁦-⁩]/g, '').replace(/\s*\n\s*/g, ' | ').replace(/\s+/g, ' ').trim()
 
-/** The newest message the agent was sent that says a run finished: what wakes a chat when its run ends. */
-function wakeText(agentLog: string): string | null {
-  const wakes = readFileSync(agentLog, 'utf8').split('\n').filter((line) => line.includes('finished with status'))
+/** The newest message the agent was sent that says `words`: a run finished, or met a rule that asks. */
+function wakeText(agentLog: string, words = 'finished with status'): string | null {
+  const wakes = readFileSync(agentLog, 'utf8').split('\n').filter((line) => line.includes(words))
   const line = wakes.at(-1)
   if (!line) return null
   const message = JSON.parse(line.slice(line.indexOf('{')))
   return message.params.prompt.map((part: { text?: string }) => part.text ?? '').join('')
 }
 
-type Shown = { run: { id: string; experimentId: string; projectId: string; status: string; startedAt: number | null; monitor?: { tone: string } } }
+type Shown = { sessionId: string; run: { id: string; experimentId: string; projectId: string; status: string; startedAt: number | null; monitor?: { tone: string }; outcome?: unknown } }
 
 async function runScenario(scenario: Scenario) {
   const lines: string[] = []
@@ -89,14 +92,14 @@ async function runScenario(scenario: Scenario) {
         { run: [
           'set -e',
           `id=$(orx create-experiment ${project.id} --title '${title}' ${parent ? `--parent ${parent} ` : ''}--run-command '${command}' | sed -n 's/^ *id: *//p')`,
-          ...(parent ? [] : [`orx exp view set "$id" --file ${VIEW}`]),
+          ...(parent ? [] : [`orx exp view set "$id" --file ${VIEW} --config ${RULES}`]),
           'orx exp run "$id" --backend local',
           'orx exp wake "$id"',
         ].join('\n') },
         { say: `Launched ${title}.` },
       ])
       const hold = `result-${title}`
-      agent.script('finished with status', [{ hold }, { say: `${title} is over.` }])
+      if (!parent) agent.script('finished with status', [{ hold }, { say: `${title} is over.` }])
       await page.getByRole('textbox', { name: /^Message/ }).fill(`Launch ${title}.`)
       await page.keyboard.press('Enter')
       await banner.getByRole('button', { name: 'Stop the run', exact: true }).waitFor({ timeout: 60_000 })
@@ -130,6 +133,10 @@ async function runScenario(scenario: Scenario) {
     }
     const origin = child.run.startedAt
     say(`child (${scenario.id}) started ${((origin - launched) / 1000).toFixed(1)} s after its chat message`)
+    // Woken by the run's end, the agent marks the run it will repair, then waits to be read.
+    const repair = scenario.revise ? [{ run: `orx exp revise ${child.run.experimentId} --run ${child.run.id}` }] : []
+    agent.script('finished with status', [...repair, { hold }, { say: `${scenario.title} is over.` }])
+    agent.script('met rule', [{ say: 'Looking at the run before deciding.' }])
 
     /** The banner at the level it is at now, then at the other one, ending where it began. */
     const levels = async () => {
@@ -155,7 +162,7 @@ async function runScenario(scenario: Scenario) {
       say(`strip  ${strip}`)
       if (charts.length) say(`charts ${charts.map(plain).join(' · ')}`)
       say(`status ${plain(String(monitor.statusText).replace(/^signals +(Last collected|Data as of).*$/gm, ''))}`)
-      say(`state  run=${run?.run.status ?? 'gone'} tone=${run?.run.monitor?.tone ?? '-'} flag=${JSON.stringify(monitor.flag)} sentence=${JSON.stringify(monitor.sentence)} watch=${monitor.watch?.state}/${monitor.watch?.looks?.length ?? 0} looks rules=${monitor.rules?.length ?? 0} setup=${JSON.stringify(monitor.setup)} parent=${monitor.parent ? 'yes' : 'no'} versus=${JSON.stringify(monitor.versus)}`)
+      say(`state  run=${run?.run.status ?? 'gone'} tone=${run?.run.monitor?.tone ?? '-'} outcome=${JSON.stringify(run?.run.outcome ?? null)} flag=${JSON.stringify(monitor.flag)} sentence=${JSON.stringify(monitor.sentence)} watch=${monitor.watch?.state}/${monitor.watch?.looks?.length ?? 0} looks rules=${monitor.rules?.length ?? 0} setup=${JSON.stringify(monitor.setup)} parent=${monitor.parent ? 'yes' : 'no'} versus=${JSON.stringify(monitor.versus)}`)
     }
 
     const ended = async () => !(await banner.getByRole('button', { name: 'Stop the run', exact: true }).count())
@@ -169,11 +176,27 @@ async function runScenario(scenario: Scenario) {
     while (!(await ended()) && Date.now() < origin + scenario.stopAt * 1000) await wait(1000)
     if (!(await ended())) {
       say()
-      say(`still running at +${scenario.stopAt}s: stopped as its agent would (orx exp cancel)`)
-      cli('exp', 'cancel', child.run.experimentId)
+      const reason = `Still running at +${scenario.stopAt}s with nothing left to learn from it.`
+      say(`still running at +${scenario.stopAt}s: stopped by its agent (orx exp cancel --reason)`)
+      const stop = spawnSync(BINARY, ['exp', 'cancel', child.run.experimentId, '--reason', reason], { env: { ...env, ORX_CHAT_SESSION_ID: child.sessionId }, encoding: 'utf8' })
+      if (stop.status !== 0) say(`cancel failed: ${stop.stderr}`)
     }
     await agent.reached(hold)
     await sample('ended')
+    const ask = wakeText(orx.agentLog, 'met rule')
+    if (ask) say(`ask    ${plain(ask)}`)
+    const shoot = async (target: typeof banner, name: string) => {
+      if (!shots) return
+      mkdirSync(shots, { recursive: true })
+      for (const scheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme: scheme })
+        // Colors ease between themes; shoot where they settle.
+        await wait(700)
+        await target.screenshot({ path: path.join(shots, `${scenario.id}-${name}-${scheme}.png`) })
+      }
+      await page.emulateMedia({ colorScheme: 'light' })
+    }
+    await shoot(banner, 'strip')
 
     // The experiment page, which its name opens, shows the whole run, a moment after the run ends.
     await wait(3000)
@@ -181,7 +204,12 @@ async function runScenario(scenario: Scenario) {
     await banner.getByRole('button', { name: new RegExp(`^\\W?${slug}\\W?$`) }).click()
     const section = page.locator('section', { has: page.getByRole('heading', { name: 'Latest run', exact: true }) })
     await section.waitFor()
+    const rules = section.locator('details', { has: page.locator('summary', { hasText: /checked with no model/ }) })
+    if (await rules.count()) await rules.locator('summary').click()
     say(`page   ${plain(await section.innerText())}`)
+    // The page is taller than its pane: its lead and its rules, each where it scrolls to.
+    await shoot(section.getByRole('group').first().locator('p').first(), 'page-lead')
+    if (await rules.count()) await shoot(rules, 'page-rules')
     say(`log    ${plain(cli('logs', child.run.id).stdout)}`)
     const wake = wakeText(orx.agentLog)
     if (wake) {

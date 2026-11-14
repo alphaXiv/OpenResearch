@@ -14,6 +14,8 @@ export type Scenario = {
   points: number[]
   /** The child is stopped here if it has not ended, the way its agent would. */
   stopAt: number
+  /** The chat's agent, woken by the run's end, marks it as being repaired before it answers. */
+  revise?: boolean
 }
 
 const STEADY = [4, 10, 20, 30, 40, 48, 56, 64, 72, 80]
@@ -39,6 +41,7 @@ export const scenarios: Scenario[] = [
     fault: 'The loss is NaN from step 400 (about 43 s) on; the process keeps stepping and reporting NaN to the end.',
     points: [4, 20, 30, 40, 44, 48, 56, 64, 72],
     stopAt: 100,
+    revise: true,
   },
   {
     id: 'hang',

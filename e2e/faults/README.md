@@ -7,6 +7,8 @@ it that goes wrong in one way, and records what orx showed while it did.
 payload.mjs    an invented training run: setup (4 shards), train (600 steps), eval (6 tasks), a table, ::orx:: lines
                and plain log lines; `node payload.mjs VARIANT`, one step per 100 ms. The variants are the faults.
 view.xml       the view an agent would set on the baseline: better, a headline, a chart with the parent's ghost
+rules.json     the rules it would declare with it, which every child inherits: stop at NaN or far behind the parent,
+               ask when val loss falls behind or the eval collapses
 scenarios.ts   id, the child's title, the fault in one sentence, the seconds to look at, when to stop it
 run.ts         runs scenarios against the real `orx up` in a sandbox and prints the timeline
 ```
@@ -16,6 +18,7 @@ cargo build && (cd ui && pnpm exec vite build)    # once
 node e2e/faults/run.ts --list
 node e2e/faults/run.ts nan-400                    # one scenario, about 2.5 minutes
 node e2e/faults/run.ts hang --keep                # leave the server up to watch it in a browser
+node e2e/faults/run.ts nan-400 --shots=.shots/x   # also screenshot the strip and the page at the end, both themes
 ```
 
 The timeline prints at fixed seconds after the child starts and goes to `.shots/faults/<id>.txt`. Each sample is
